@@ -14,12 +14,15 @@ import type {
   ToolCall,
   ToolCallId,
   Viewport,
+  RuntimeEventDraft,
 } from "@computer-harness/protocol";
 import {
+  type AssetStore,
   FileAssetStore,
   JsonlRunEventWriter,
   readRuntimeEvents,
   reduceRuntimeEvents,
+  type RunEventWriter,
 } from "@computer-harness/trajectory";
 import {
   DefaultContextCompiler,
@@ -81,7 +84,7 @@ class FakeComputer implements Computer {
     _session: ComputerSession,
     observationId: ObservationId,
     signal: AbortSignal,
-  ) {
+  ): Promise<import("@computer-harness/protocol").ObservationCapture> {
     signal.throwIfAborted();
     this.calls.push(`observe:${observationId}`);
     this.observationCount += 1;
@@ -96,7 +99,7 @@ class FakeComputer implements Computer {
     _session: ComputerSession,
     action: ActionIntent,
     signal: AbortSignal,
-  ) {
+  ): Promise<import("@computer-harness/protocol").ActionReceipt> {
     signal.throwIfAborted();
     this.calls.push(`execute:${action.kind}`);
     return {
@@ -157,6 +160,28 @@ class ApprovalClickPolicy extends DefaultRuntimePolicy {
   }
 }
 
+class FailingWriter implements RunEventWriter {
+  public constructor(
+    private readonly delegate: RunEventWriter,
+    private readonly shouldFail: (draft: RuntimeEventDraft) => boolean,
+  ) {}
+
+  public async append(draft: RuntimeEventDraft) {
+    if (this.shouldFail(draft)) {
+      throw new Error(`injected append failure for ${draft.type}`);
+    }
+    return this.delegate.append(draft);
+  }
+
+  public flush(): Promise<void> {
+    return this.delegate.flush();
+  }
+
+  public close(): Promise<void> {
+    return this.delegate.close();
+  }
+}
+
 function clickCall(callId: string): ToolCall {
   return {
     id: callId as ToolCallId,
@@ -195,12 +220,18 @@ function clickRegistry(): ToolRegistry {
 
 async function makeController(
   provider: ProviderAdapter,
-  computer = new FakeComputer(),
+  computer?: FakeComputer,
   registry = clickRegistry(),
   policy: RuntimePolicy = new DefaultRuntimePolicy(),
+  overrides: {
+    eventWriter?: (path: string) => RunEventWriter;
+    assetStore?: AssetStore;
+  } = {},
 ) {
+  const activeComputer = computer ?? new FakeComputer();
   const directory = await mkdtemp(join(tmpdir(), "computer-harness-runtime-"));
-  const writer = new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), runId, {
+  const eventPath = join(directory, "trajectory.jsonl");
+  const writer = overrides.eventWriter?.(eventPath) ?? new JsonlRunEventWriter(eventPath, runId, {
     next: (() => {
       let count = 0;
       return () => `writer-event-${count++}` as EventId;
@@ -209,16 +240,16 @@ async function makeController(
   const controller = new RunController({
     runId,
     provider,
-    computer,
+    computer: activeComputer,
     contextCompiler: new DefaultContextCompiler(registry),
     toolRegistry: registry,
     policy,
     eventWriter: writer,
-    assetStore: new FileAssetStore(join(directory, "assets")),
+    assetStore: overrides.assetStore ?? new FileAssetStore(join(directory, "assets")),
     idFactory: new TestIds(),
     clock: { now: () => "2026-08-28T00:00:00.000Z" },
   });
-  return { controller, computer, directory };
+  return { controller, computer: activeComputer, directory };
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
@@ -429,6 +460,7 @@ describe("RunController command inbox and control semantics", () => {
       message.content.some((content) => content.type === "text" && content.text.includes("Documents")),
     )).toBe(true);
     const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(controller.getSnapshot()).toEqual(reduceRuntimeEvents(events, runId));
     expect(events.map((event) => event.type)).toContain("user.input.requested");
     expect(events.map((event) => event.type)).toContain("user.input.received");
     await rm(directory, { recursive: true, force: true });
@@ -454,6 +486,7 @@ describe("RunController command inbox and control semantics", () => {
     await expect(correction).resolves.toBeUndefined();
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     expect(controller.getEvents().some((event) => event.type === "user.input.received")).toBe(true);
+    expect(reduceRuntimeEvents(await readRuntimeEvents(join(created.directory, "trajectory.jsonl")), runId)).toEqual(controller.getSnapshot());
     expect(provider.inputs[1]?.messages.some((message) =>
       message.content.some((content) => content.type === "text" && content.text.includes("Do not click")),
     )).toBe(true);
@@ -487,6 +520,7 @@ describe("RunController command inbox and control semantics", () => {
     await expect(controller.resume()).resolves.toBeUndefined();
     await expect(running).resolves.toBe("succeeded");
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
+    expect(reduceRuntimeEvents(await readRuntimeEvents(join(created.directory, "trajectory.jsonl")), runId)).toEqual(controller.getSnapshot());
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -512,6 +546,7 @@ describe("RunController command inbox and control semantics", () => {
     await expect(running).resolves.toBe("succeeded");
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
     expect(created.controller.getEvents().some((event) => event.type === "approval.resolved")).toBe(true);
+    expect(reduceRuntimeEvents(await readRuntimeEvents(join(created.directory, "trajectory.jsonl")), runId)).toEqual(created.controller.getSnapshot());
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -544,5 +579,137 @@ describe("RunController command inbox and control semantics", () => {
     await expect(controller.resume()).rejects.toThrow("already finished");
     await expect(controller.resolveApproval("approval", true)).rejects.toThrow("already finished");
     await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("RunController S2-4 failure boundaries", () => {
+  function jsonlWriter(path: string): RunEventWriter {
+    return new JsonlRunEventWriter(path, runId, {
+      next: (() => {
+        let count = 0;
+        return () => `writer-event-${count++}` as EventId;
+      })(),
+    });
+  }
+
+  it("does not execute when action.execution.started cannot be persisted", async () => {
+    const provider = new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("call-started-write")] }]);
+    const computer = new FakeComputer();
+    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      eventWriter: (path) => new FailingWriter(jsonlWriter(path), (draft) => draft.type === "action.execution.started"),
+    });
+
+    await expect(created.controller.start("started write fails")).resolves.toBe("failed");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "action.execution.started")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not retry a GUI action when its terminal Event cannot be persisted", async () => {
+    const provider = new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("call-terminal-write")] }]);
+    const computer = new FakeComputer();
+    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      eventWriter: (path) => new FailingWriter(jsonlWriter(path), (draft) => draft.type === "action.execution.completed"),
+    });
+
+    await expect(created.controller.start("terminal write fails")).resolves.toBe("outcome_unknown");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "action.execution.started")).toHaveLength(1);
+    expect(events.some((event) => event.type === "action.execution.completed")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "outcome_unknown" });
+    expect(reduceRuntimeEvents(events, runId).unresolvedActionId).toBeDefined();
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not create an observation Event when AssetStore.put fails", async () => {
+    const provider = new ScriptedProvider([{ type: "finish", summary: "not reached" }]);
+    const computer = new FakeComputer();
+    const assetStore: AssetStore = {
+      put: async () => {
+        throw new Error("injected asset failure");
+      },
+    };
+    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { assetStore });
+
+    await expect(created.controller.start("asset failure")).resolves.toBe("failed");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "observation.created")).toBe(false);
+    expect(provider.inputs).toHaveLength(0);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("records Provider failure without attempting another ModelTurn", async () => {
+    const provider: ProviderAdapter = {
+      id: "failing-provider",
+      generate: async () => {
+        throw new Error("injected provider failure");
+      },
+    };
+    const created = await makeController(provider);
+
+    await expect(created.controller.start("provider failure")).resolves.toBe("failed");
+    expect(created.controller.getEvents().filter((event) => event.type === "model.request.started")).toHaveLength(1);
+    expect(created.controller.getEvents().some((event) => event.type === "model.request.failed")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("separates open/observe/close failures from GUI action execution", async () => {
+    class OpenFailComputer extends FakeComputer {
+      public override async open(_options: ComputerOpenOptions, _signal: AbortSignal): Promise<ComputerSession> {
+        throw new Error("injected open failure");
+      }
+    }
+    class ObserveFailComputer extends FakeComputer {
+      public override async observe(_session: ComputerSession, _id: ObservationId, _signal: AbortSignal): Promise<never> {
+        throw new Error("injected observe failure");
+      }
+    }
+    class CloseFailComputer extends FakeComputer {
+      public override async close(_session: ComputerSession): Promise<void> {
+        throw new Error("injected close failure");
+      }
+    }
+
+    const openRun = await makeController(new ScriptedProvider([{ type: "finish", summary: "no" }]), new OpenFailComputer());
+    await expect(openRun.controller.start("open failure")).resolves.toBe("failed");
+    const openEvents = await readRuntimeEvents(join(openRun.directory, "trajectory.jsonl"));
+    expect(openEvents.some((event) => event.type === "observation.created")).toBe(false);
+
+    const observeRun = await makeController(new ScriptedProvider([{ type: "finish", summary: "no" }]), new ObserveFailComputer());
+    await expect(observeRun.controller.start("observe failure")).resolves.toBe("failed");
+    const observeEvents = await readRuntimeEvents(join(observeRun.directory, "trajectory.jsonl"));
+    expect(observeEvents.some((event) => event.type === "observation.created")).toBe(false);
+
+    const closeRun = await makeController(new ScriptedProvider([{ type: "finish", summary: "done" }]), new CloseFailComputer());
+    await expect(closeRun.controller.start("close failure")).resolves.toBe("succeeded");
+
+    await rm(openRun.directory, { recursive: true, force: true });
+    await rm(observeRun.directory, { recursive: true, force: true });
+    await rm(closeRun.directory, { recursive: true, force: true });
+  });
+
+  it("accepts a Driver-proven cancelled receipt without classifying it as unknown", async () => {
+    const computer = new FakeComputer();
+    computer.execute = async (_session, action) => ({
+      actionId: action.actionId,
+      status: "cancelled" as const,
+      startedAt: "2026-08-28T00:00:10.000Z",
+      endedAt: "2026-08-28T00:00:10.010Z",
+      driverCode: "NOT_STARTED",
+      message: "driver proved the click was not sent",
+    });
+    const created = await makeController(new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("call-cancelled-receipt")] },
+      { type: "finish", summary: "done" },
+    ]), computer);
+
+    await expect(created.controller.start("cancelled receipt")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "cancelled")).toBe(true);
+    expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(created.directory, { recursive: true, force: true });
   });
 });

@@ -71,7 +71,7 @@ S2-1.1、S2-2 happy path、S2-2a 和 S2-3 已经实现：Protocol 关联已收�
 
 最新独立审计结果与本轮实施记录以 `stage-2-s0-audit-and-gates.md` 最后一节为准。
 
-## 当前已完成的工作
+## 本轮已完成的工作
 
 ### A. S2-2a Runtime 安全加固（已完成）
 
@@ -129,9 +129,9 @@ CUA Adapter 仍分别属于后续 Stage 4 和 Stage 3。
 
 仍不接入真实 Provider、真实 CUA、后台 Job 或 Dashboard。
 
-## 当前立即执行的工作
+## 当前已完成的工作
 
-### D. S2-4 故障注入与退出审计
+### D. S2-4 故障注入与退出审计（已完成）
 
 只围绕已有协议和 Runtime 验证：
 
@@ -141,7 +141,16 @@ CUA Adapter 仍分别属于后续 Stage 4 和 Stage 3。
 - 从 JSONL 重放恢复 `unresolvedActionId`，并再次核对在线/磁盘 Snapshot；
 - 更新本入口和审计文档的实际测试命令、覆盖范围与剩余限制。
 
-本阶段仍不接入真实 Provider/CUA、后台 Job、Verifier、Dashboard 或新的公共事件/API。
+本阶段仍不接入真实 Provider/CUA、后台 Job、Verifier、Dashboard 或新的公共事件/API；这些
+属于后续 Stage 3/4 的独立施工范围。
+
+## 下一步
+
+进入 Stage 3 CUA Adapter 前，先以本文件和
+[`stage-2-s0-audit-and-gates.md`](./stage-2-s0-audit-and-gates.md) 的实际结果为基线，另立
+Stage 3 施工入口。Stage 3 只负责把一个真实 Computer Backend 接到现有 `Computer` 接口，
+并验证 Observation、Action、Frame 绑定、坐标空间和 Driver 生命周期；不回头把真实 CUA、
+Provider、Dashboard 或验证器混进 Stage 2 Runtime。
 
 ## Event 当前实现决定
 
@@ -158,7 +167,7 @@ AsyncGenerator。S2-3 的命令 Inbox 也不与 Event 输出混为一个队列�
 边界落盘并结束。Event append 和 Asset 原子发布一旦开始就让其完成；GUI Action 已 started 后
 只能依据 Driver 证据判断 `cancelled`，证据不足时必须结束为 `outcome_unknown`。
 
-完整取消竞态在 S2-3，实现故障注入和未知副作用门禁在 S2-4；当前不实现后台 Job Abort。
+完整取消竞态和故障注入门禁已在 S2-3/S2-4 完成；当前不实现后台 Job Abort。
 
 ## 文档冲突优先级
 

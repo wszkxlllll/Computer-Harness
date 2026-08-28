@@ -644,3 +644,31 @@ S2-4 尚未实施：Event/Asset/Provider/Computer 故障注入、terminal Event 
 Driver 对 cancelled 与未知副作用的证据分类、以及更完整的 crash recovery。当前也不接入真实
 Provider、CUA、后台 Job、Verifier 或 Dashboard。完成 S2-4 并记录实际门禁后，才进入 Stage 3
 CUA Adapter。
+
+---
+
+## 2026-08-29 S2-4 故障注入与退出门禁结果
+
+S2-4 已在 Fake Runtime 范围内完成验证，没有新增协议状态、重试器或外部依赖：
+
+- `action.execution.started` 写入失败时，`Computer.execute()` 调用次数为 0；
+- Action 已 started 但 terminal Event 写入失败时，Run 以 `outcome_unknown` 收口，保留
+  `unresolvedActionId`，且没有第二次 GUI execute；
+- AssetStore 写入失败时，不产生 `observation.created`，也不会进入 Provider；
+- Provider 失败只写一次 request failure，不自动重试；Computer open/observe 失败停止当前
+  Run，close 失败不会掩盖已经确定的 Run outcome；
+- Driver 返回 `cancelled` Receipt 时按“可证明未发生副作用”处理，不归类为未知；Driver 抛出
+  无法判断副作用的错误时仍按 `outcome_unknown` 处理；
+- 正常、用户回答、主动纠正、pause/resume 和审批路径均可从 JSONL 重放，在线 Snapshot 与
+  重放 Snapshot 相等。
+
+本轮完整验证命令：
+
+```text
+pnpm run typecheck   通过
+pnpm test            通过（2 个测试文件，48 项）
+git diff --check     通过
+```
+
+Stage 2 当前退出条件已在 Fake 环境覆盖。进入 Stage 3 前仍须由真实 CUA Adapter 单独验证
+Observation/Action 的坐标、Frame 绑定和 Driver 生命周期；本阶段没有声称真实桌面已可用。
