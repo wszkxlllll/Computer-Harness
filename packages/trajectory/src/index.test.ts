@@ -352,6 +352,43 @@ describe("readRuntimeEvents", () => {
   });
 });
 
+describe("Event, Asset and Snapshot integration", () => {
+  it("persists an asset before its observation event and rebuilds the snapshot", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-integration-"));
+    const assetStore = new FileAssetStore(join(directory, "assets"));
+    const asset = await assetStore.put({
+      assetId: "asset-integration" as AssetId,
+      relativePath: "screenshots/one.png",
+      mediaType: "image/png",
+      data: new Uint8Array([137, 80, 78, 71]),
+    });
+    const trajectoryPath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(trajectoryPath, runId);
+    await writer.append({ runId, type: "run.created", goal: "observe" });
+    await writer.append({
+      runId,
+      type: "observation.created",
+      observation: {
+        id: observationId,
+        runId,
+        computerSessionId: "computer-integration" as ComputerSessionId,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport: { width: 1, height: 1, coordinateSpace: "physical" },
+        screenshot: asset,
+      },
+    });
+    await writer.close();
+
+    const events = await readRuntimeEvents(trajectoryPath);
+    const snapshot = reduceRuntimeEvents(events, runId);
+    expect(snapshot.latestObservationId).toBe(observationId);
+    expect(await readFile(join(directory, "assets", "screenshots", "one.png"))).toEqual(
+      Buffer.from([137, 80, 78, 71]),
+    );
+    await rm(directory, { recursive: true, force: true });
+  });
+});
+
 async function writeAndReadUserInputEvents(filePath: string): Promise<RuntimeEvent[]> {
   await writeFile(
     filePath,

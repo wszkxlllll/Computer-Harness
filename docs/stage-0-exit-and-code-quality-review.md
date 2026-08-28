@@ -126,10 +126,11 @@ Observation 并断言 `latestObservationId`，没有产生 started/completed，�
 
 ## 4. 不阻塞 Stage 1、但应在首个提交前处理的问题
 
-### 4.1 仓库还没有初始提交
+### 4.1 仓库还没有初始提交（已处理）
 
-当前 `main` 没有 commit，所有文件均为 untracked。继续多人施工前应先建立可回退的
-Stage 0 基线提交，并确保本地截图、下载的 CUA binary 和 `.stage0` 证据不进入 Git。
+原审查时 `main` 没有 commit，所有文件均为 untracked。现已建立可回退的 Stage 0
+基线提交 `d1596ba`，后续修复提交为 `c83c45f`；本地截图、下载的 CUA binary 和
+`.stage0` 证据均未进入 Git。
 
 ### 4.2 README 有两处失效说明（已修复）
 
@@ -228,7 +229,7 @@ Adapter 执行，获得的结果比继续扩充一次性 spike 更有价值。
 Stage 0 技术可行性       通过
 独立 daemon 路线        通过
 上游嵌入式 DPI Issue    待提交，不阻塞
-Stage 1 当前代码         Trajectory 不变量已修复，资产/集成门槛待完成
+Stage 1 当前代码         Protocol/Trajectory/AssetStore 集成已通过，运行时副作用门槛待 Stage 2
 直接进入 Stage 2         不允许
 整体架构是否需要重做     不需要
 ```
@@ -246,8 +247,11 @@ Stage 1 当前代码         Trajectory 不变量已修复，资产/集成门槛
 - `JsonlRunEventWriter` 对已有轨迹文件使用独占创建，拒绝新 writer 从 sequence 0
   静默追加；恢复写入留待未来单独设计；
 - `readRuntimeEvents` 增加 JSONL 行号、事件类型和必要字段的最小边界校验；
-- `FileAssetStore` 采用临时文件写入后 rename，并拒绝越出资产根目录的相对路径；
-- 测试从原来的 3 项扩展为 13 项，覆盖上述成功和失败路径。
+- `FileAssetStore` 采用临时文件写入后不可覆盖的原子发布，并拒绝越出资产根目录的
+  相对路径；
+- 增加 Event + Asset + Snapshot 集成测试，确认资产先落盘、事件再引用，并能从
+  JSONL 重建最新 Observation；
+- 测试从原来的 3 项扩展为 17 项，覆盖上述成功和失败路径。
 
 验证结果：
 
@@ -256,8 +260,9 @@ pnpm run typecheck  通过
 pnpm test           通过（1 个测试文件，13 项）
 ```
 
-本轮仍未实现 RunController、Provider、正式 CUA Adapter 或 Planning；下一步是补充
-Stage 1 的事件重建/资产引用集成测试，再重新检查进入 Stage 2 的门槛。
+本轮仍未实现 RunController、Provider、正式 CUA Adapter 或 Planning。Stage 1 的
+Protocol、Trajectory、AssetStore 和事件重建/资产引用集成验收已完成；“Event 写入
+失败时不继续模拟副作用”要等 Stage 2 出现真实副作用执行器后再做运行时测试。
 
 ## 10. 上一阶段实现复审（纳入更新后的技术设计）
 
