@@ -616,11 +616,16 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("tool.call.failed"),
     result: z.object({
       callId: nonEmptyString,
-      status: z.enum(["failed", "rejected"]),
+      status: z.literal("failed"),
       error: z.object({ code: nonEmptyString, message: z.string() }),
     }),
   }),
-  z.object({ ...eventBaseSchema, type: z.literal("action.proposed"), action: actionIntentSchema }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("action.proposed"),
+    callId: nonEmptyString,
+    action: actionIntentSchema,
+  }),
   z.object({ ...eventBaseSchema, type: z.literal("action.execution.started"), action: actionIntentSchema }),
   z.object({
     ...eventBaseSchema,

@@ -557,7 +557,11 @@ describe("readRuntimeEvents", () => {
         type: "tool.call.failed",
         result: { callId, status: "failed", error: { code: "FAILED", message: "no" } },
       }),
-      event(0, { type: "action.proposed", action: { actionId, kind: "wait", durationMs: 1 } }),
+      event(0, {
+        type: "action.proposed",
+        callId,
+        action: { actionId, kind: "wait", durationMs: 1 },
+      }),
       event(0, { type: "action.execution.started", action: { actionId, kind: "wait", durationMs: 1 } }),
       event(0, {
         type: "action.execution.completed",
@@ -616,6 +620,20 @@ describe("readRuntimeEvents", () => {
       receipt: { actionId, status: "failed", startedAt: "2026-01-01T00:00:00.000Z" },
     };
     expect(runtimeEventSchema.safeParse(failedAsCompleted).success).toBe(false);
+
+    const rejectedAsFailed = {
+      eventId: "event-0",
+      runId,
+      sequence: 0,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "tool.call.failed" as const,
+      result: {
+        callId,
+        status: "rejected" as const,
+        error: { code: "POLICY", message: "denied" },
+      },
+    };
+    expect(runtimeEventSchema.safeParse(rejectedAsFailed).success).toBe(false);
   });
 
   it("reports malformed JSON and malformed event data with line numbers", async () => {

@@ -188,7 +188,12 @@ type ToolResult =
     }
   | {
       callId: ToolCallId;
-      status: "failed" | "rejected";
+      status: "failed";
+      error: { code: string; message: string };
+    }
+  | {
+      callId: ToolCallId;
+      status: "rejected";
       error: { code: string; message: string };
     };
 ```
@@ -214,6 +219,8 @@ tool.call.received
 → observation.created（若还能观察）
 → tool.call.completed / failed
 ```
+
+其中 `action.proposed` 事件携带原始 `ToolCallId`，而 `ActionIntent` 本身不携带该编排字段。
 
 Planning/Control Tool 不产生 ActionIntent，直接产生对应 ToolResult。这保持“所有 GUI Action
 可以是 Tool，但不是所有 Tool 都是 GUI Action”的两层语义。

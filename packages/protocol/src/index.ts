@@ -67,7 +67,12 @@ export type ToolResult =
     }
   | {
       callId: ToolCallId;
-      status: "failed" | "rejected";
+      status: "failed";
+      error: { code: string; message: string };
+    }
+  | {
+      callId: ToolCallId;
+      status: "rejected";
       error: { code: string; message: string };
     };
 
@@ -155,9 +160,9 @@ export type RuntimeEventData =
   | { type: "tool.call.completed"; result: Extract<ToolResult, { status: "completed" }> }
   | {
       type: "tool.call.failed";
-      result: Extract<ToolResult, { status: "failed" | "rejected" }>;
+      result: Extract<ToolResult, { status: "failed" }>;
     }
-  | { type: "action.proposed"; action: ActionIntent }
+  | { type: "action.proposed"; callId: ToolCallId; action: ActionIntent }
   | { type: "action.execution.started"; action: ActionIntent }
   | { type: "action.execution.completed"; receipt: ActionReceipt }
   | { type: "action.execution.failed"; receipt: ActionReceipt }

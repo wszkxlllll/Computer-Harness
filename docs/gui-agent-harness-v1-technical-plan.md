@@ -226,7 +226,12 @@ type ToolResult =
     }
   | {
       callId: ToolCallId;
-      status: "failed" | "rejected";
+      status: "failed";
+      error: { code: string; message: string };
+    }
+  | {
+      callId: ToolCallId;
+      status: "rejected";
       error: { code: string; message: string };
     };
 
@@ -732,6 +737,9 @@ run.finished
 
 事件类型只有出现明确生产者和消费者时才增加。
 
+`action.proposed` 事件额外携带产生它的 `ToolCallId`；`callId` 属于 Runtime 编排关联，不放入
+`ActionIntent`，以保持 Computer 层只表达 GUI 意图。
+
 ### 12.3 单写入队列
 
 每个 Run 使用一个 `RunEventWriter`：
@@ -762,7 +770,7 @@ append action.execution.completed / failed
   `run.finished(outcome_unknown)` 才把 Run 收口为 `outcome_unknown`；
 - Runtime 不自动重复执行；
 - 恢复时先重新 Observe；
-- 无法通过观察确认时暂停并请求用户处理；
+- V1 无法通过观察确认时直接以 `outcome_unknown` 收口，不新增 reconciliation 状态；
 - 后续 Verifier 可以辅助判断，但不能改写旧事件。
 
 这一恢复原则属于 V1 架构不变量：
