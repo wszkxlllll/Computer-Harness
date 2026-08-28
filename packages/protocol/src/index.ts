@@ -105,30 +105,6 @@ export type RunOutcome =
   | "budget_exhausted"
   | "outcome_unknown";
 
-export type RuntimeEventType =
-  | "run.created"
-  | "run.started"
-  | "computer.open.started"
-  | "computer.open.completed"
-  | "observation.created"
-  | "model.request.started"
-  | "model.response.received"
-  | "model.request.failed"
-  | "tool.call.received"
-  | "tool.call.rejected"
-  | "action.proposed"
-  | "action.execution.started"
-  | "action.execution.completed"
-  | "action.execution.failed"
-  | "run.paused"
-  | "run.resumed"
-  | "approval.requested"
-  | "approval.resolved"
-  | "user.input.requested"
-  | "user.input.received"
-  | "runtime.error"
-  | "run.finished";
-
 export interface RuntimeEventBase {
   eventId: EventId;
   runId: RunId;
@@ -153,7 +129,7 @@ export type RuntimeEventData =
   | { type: "action.execution.failed"; receipt: ActionReceipt }
   | { type: "run.paused"; reason: string }
   | { type: "run.resumed" }
-  | { type: "approval.requested"; requestId: string; reason: string }
+  | { type: "approval.requested"; requestId: string; callId: ToolCallId; reason: string }
   | { type: "approval.resolved"; requestId: string; approved: boolean }
   | { type: "user.input.requested"; question: string }
   | { type: "user.input.received"; text: string }
@@ -161,6 +137,43 @@ export type RuntimeEventData =
   | { type: "run.finished"; outcome: RunOutcome; summary?: string };
 
 export type RuntimeEvent = RuntimeEventBase & RuntimeEventData;
+
+export type RuntimeEventType = RuntimeEventData["type"];
+
+/**
+ * The runtime discriminator list is kept next to the event union so a newly
+ * added event cannot silently be omitted from schema and compatibility tests.
+ */
+export const runtimeEventTypes = [
+  "run.created",
+  "run.started",
+  "computer.open.started",
+  "computer.open.completed",
+  "observation.created",
+  "model.request.started",
+  "model.response.received",
+  "model.request.failed",
+  "tool.call.received",
+  "tool.call.rejected",
+  "action.proposed",
+  "action.execution.started",
+  "action.execution.completed",
+  "action.execution.failed",
+  "run.paused",
+  "run.resumed",
+  "approval.requested",
+  "approval.resolved",
+  "user.input.requested",
+  "user.input.received",
+  "runtime.error",
+  "run.finished",
+] as const satisfies readonly RuntimeEventType[];
+
+type MissingRuntimeEventTypes = Exclude<RuntimeEventType, (typeof runtimeEventTypes)[number]>;
+type UnexpectedRuntimeEventTypes = Exclude<(typeof runtimeEventTypes)[number], RuntimeEventType>;
+type RuntimeEventTypesAreComplete =
+  [MissingRuntimeEventTypes, UnexpectedRuntimeEventTypes] extends [never, never] ? true : false;
+const runtimeEventTypesAreComplete: RuntimeEventTypesAreComplete = true;
 
 export type RuntimeEventDraft = RuntimeEventData & {
   runId: RunId;

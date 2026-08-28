@@ -13,6 +13,7 @@ import type {
   RunStatus,
   RuntimeEvent,
   RuntimeEventDraft,
+  ToolCallId,
 } from "@computer-harness/protocol";
 
 export interface RunSnapshot {
@@ -21,9 +22,10 @@ export interface RunSnapshot {
   outcome?: RunOutcome;
   stepCount: number;
   latestObservationId?: ObservationId;
-  pendingApproval?: { requestId: string; reason: string };
+  pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
   unresolvedActionId?: ActionId;
+  createdAt?: string;
   startedAt?: string;
   endedAt?: string;
 }
@@ -37,15 +39,44 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
     throw new Error(`event ${event.eventId} belongs to another run`);
   }
 
+  if (snapshot.status === "finished") {
+    throw new Error(`run ${snapshot.runId} is finished and cannot accept ${event.type}`);
+  }
+
+  if (event.type !== "run.created" && snapshot.createdAt === undefined) {
+    throw new Error(`event ${event.type} cannot precede run.created`);
+  }
+
   switch (event.type) {
     case "run.created":
-      return { ...snapshot, status: "created" };
+      if (snapshot.createdAt !== undefined || snapshot.status !== "created") {
+        throw new Error(`run ${snapshot.runId} was already created`);
+      }
+      return { ...snapshot, status: "created", createdAt: event.occurredAt };
     case "run.started":
+      if (snapshot.status !== "created") {
+        throw new Error(`run.started requires created status, got ${snapshot.status}`);
+      }
+      return { ...snapshot, status: "starting", startedAt: event.occurredAt };
     case "computer.open.started":
-      return { ...snapshot, status: "starting", startedAt: snapshot.startedAt ?? event.occurredAt };
+      if (snapshot.status !== "starting") {
+        throw new Error(`computer.open.started requires starting status, got ${snapshot.status}`);
+      }
+      return snapshot;
     case "computer.open.completed":
+      if (snapshot.status !== "starting") {
+        throw new Error(`computer.open.completed requires starting status, got ${snapshot.status}`);
+      }
       return snapshot;
     case "observation.created":
+      if (event.observation.runId !== event.runId) {
+        throw new Error(
+          `observation ${event.observation.id} belongs to run ${event.observation.runId}, not ${event.runId}`,
+        );
+      }
+      if (snapshot.status !== "starting" && snapshot.status !== "running") {
+        throw new Error(`observation.created requires an active run, got ${snapshot.status}`);
+      }
       return {
         ...snapshot,
         status: snapshot.status === "starting" ? "running" : snapshot.status,
@@ -60,6 +91,12 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
     case "runtime.error":
       return snapshot;
     case "action.execution.started":
+      if (snapshot.status !== "running") {
+        throw new Error(`action.execution.started requires running status, got ${snapshot.status}`);
+      }
+      if (snapshot.pendingApproval !== undefined || snapshot.pendingUserQuestion !== undefined) {
+        throw new Error("action.execution.started is not allowed while user input or approval is pending");
+      }
       if (snapshot.unresolvedActionId !== undefined) {
         throw new Error(
           `action ${event.action.actionId} started while action ${snapshot.unresolvedActionId} is unresolved`,
@@ -72,6 +109,24 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       };
     case "action.execution.completed":
     case "action.execution.failed":
+      if (snapshot.status !== "running") {
+        throw new Error(`action terminal event requires running status, got ${snapshot.status}`);
+      }
+      if (event.type === "action.execution.completed" && event.receipt.status !== "completed") {
+        throw new Error(
+          `completed action event must carry a completed receipt, got ${event.receipt.status}`,
+        );
+      }
+      if (
+        event.type === "action.execution.failed" &&
+        event.receipt.status !== "refused" &&
+        event.receipt.status !== "failed" &&
+        event.receipt.status !== "cancelled"
+      ) {
+        throw new Error(
+          `failed action event must carry refused, failed, or cancelled receipt, got ${event.receipt.status}`,
+        );
+      }
       if (snapshot.unresolvedActionId === undefined) {
         throw new Error(
           `action ${event.receipt.actionId} has a terminal event without action.execution.started`,
@@ -91,10 +146,25 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         };
       }
     case "run.paused":
+      if (snapshot.status !== "running") {
+        throw new Error(`run.paused requires running status, got ${snapshot.status}`);
+      }
+      if (snapshot.unresolvedActionId !== undefined) {
+        throw new Error("run.paused is not allowed while a GUI action is unresolved");
+      }
       return { ...snapshot, status: "paused" };
     case "run.resumed":
+      if (snapshot.status !== "paused") {
+        throw new Error(`run.resumed requires paused status, got ${snapshot.status}`);
+      }
       return { ...snapshot, status: "running" };
     case "approval.requested":
+      if (snapshot.status !== "running") {
+        throw new Error(`approval.requested requires running status, got ${snapshot.status}`);
+      }
+      if (snapshot.pendingUserQuestion !== undefined || snapshot.unresolvedActionId !== undefined) {
+        throw new Error("approval.requested is not allowed while another interaction is pending");
+      }
       if (snapshot.pendingApproval !== undefined) {
         throw new Error(
           `approval ${event.requestId} requested while approval ${snapshot.pendingApproval.requestId} is pending`,
@@ -103,9 +173,12 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       return {
         ...snapshot,
         status: "waiting_approval",
-        pendingApproval: { requestId: event.requestId, reason: event.reason },
+        pendingApproval: { requestId: event.requestId, callId: event.callId, reason: event.reason },
       };
     case "approval.resolved":
+      if (snapshot.status !== "waiting_approval") {
+        throw new Error(`approval.resolved requires waiting_approval status, got ${snapshot.status}`);
+      }
       if (snapshot.pendingApproval === undefined) {
         throw new Error(`approval ${event.requestId} resolved without approval.requested`);
       }
@@ -116,11 +189,15 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       }
       {
         const { pendingApproval: _pendingApproval, ...withoutPendingApproval } = snapshot;
-        return event.approved
-          ? { ...withoutPendingApproval, status: "running" }
-          : { ...withoutPendingApproval, status: "running" };
+        return { ...withoutPendingApproval, status: "running" };
       }
     case "user.input.requested":
+      if (snapshot.status !== "running") {
+        throw new Error(`user.input.requested requires running status, got ${snapshot.status}`);
+      }
+      if (snapshot.pendingApproval !== undefined || snapshot.unresolvedActionId !== undefined) {
+        throw new Error("user.input.requested is not allowed while another interaction is pending");
+      }
       if (snapshot.pendingUserQuestion !== undefined) {
         throw new Error("user input requested while another question is pending");
       }
@@ -130,17 +207,40 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         pendingUserQuestion: event.question,
       };
     case "user.input.received":
+      if (snapshot.status === "waiting_approval") {
+        throw new Error("user.input.received cannot bypass pending approval");
+      }
+      if (snapshot.status !== "waiting_user" && snapshot.status !== "running" && snapshot.status !== "paused") {
+        throw new Error(`user.input.received requires running, paused, or waiting_user status, got ${snapshot.status}`);
+      }
       {
         const { pendingUserQuestion: _pendingUserQuestion, ...withoutPendingUserQuestion } = snapshot;
-        return { ...withoutPendingUserQuestion, status: "running" };
+        return {
+          ...withoutPendingUserQuestion,
+          status: snapshot.status === "waiting_user" ? "running" : snapshot.status,
+        };
       }
-    case "run.finished":
+    case "run.finished": {
+      if (snapshot.unresolvedActionId !== undefined) {
+        throw new Error("run.finished is not allowed while a GUI action is unresolved");
+      }
+      if (
+        event.outcome === "succeeded" &&
+        (snapshot.status !== "running" ||
+          snapshot.pendingApproval !== undefined ||
+          snapshot.pendingUserQuestion !== undefined)
+      ) {
+        throw new Error("a succeeded run must be running with no pending interaction");
+      }
+      const { pendingApproval: _pendingApproval, pendingUserQuestion: _pendingUserQuestion, ...withoutPending } =
+        snapshot;
       return {
-        ...snapshot,
+        ...withoutPending,
         status: "finished",
         outcome: event.outcome,
         endedAt: event.occurredAt,
       };
+    }
     default:
       return assertNever(event);
   }
@@ -171,7 +271,8 @@ export class JsonlRunEventWriter implements RunEventWriter {
   private fileHandle: Awaited<ReturnType<typeof open>> | undefined;
   private queue: Promise<void> = Promise.resolve();
   private nextSequence = 0;
-  private closed = false;
+  private state: "open" | "closing" | "closed" = "open";
+  private closePromise: Promise<void> | undefined;
 
   public constructor(
     filePath: string,
@@ -184,7 +285,7 @@ export class JsonlRunEventWriter implements RunEventWriter {
   }
 
   public async append(draft: RuntimeEventDraft): Promise<RuntimeEvent> {
-    if (this.closed) {
+    if (this.state !== "open") {
       throw new Error("event writer is closed");
     }
     if (draft.runId !== this.runId) {
@@ -212,13 +313,30 @@ export class JsonlRunEventWriter implements RunEventWriter {
   }
 
   public async close(): Promise<void> {
-    if (this.closed) {
+    if (this.closePromise !== undefined) {
+      return this.closePromise;
+    }
+    if (this.state === "closed") {
       return;
     }
-    await this.flush();
-    this.closed = true;
-    await this.fileHandle?.close();
-    this.fileHandle = undefined;
+
+    // Linearization point: once close is called, no new append may enter the
+    // queue. Appends that already entered remain ahead of the close barrier.
+    this.state = "closing";
+    this.closePromise = (async () => {
+      try {
+        await this.flush();
+      } finally {
+        const handle = this.fileHandle;
+        this.fileHandle = undefined;
+        try {
+          await handle?.close();
+        } finally {
+          this.state = "closed";
+        }
+      }
+    })();
+    return this.closePromise;
   }
 
   private async ensureHandle(): Promise<NonNullable<JsonlRunEventWriter["fileHandle"]>> {
@@ -402,6 +520,10 @@ const actionReceiptSchema = z.object({
   driverCode: nonEmptyString.optional(),
   message: z.string().optional(),
 });
+const completedActionReceiptSchema = actionReceiptSchema.extend({ status: z.literal("completed") });
+const failedActionReceiptSchema = actionReceiptSchema.extend({
+  status: z.enum(["refused", "failed", "cancelled"]),
+});
 const eventBaseSchema = {
   eventId: nonEmptyString,
   runId: nonEmptyString,
@@ -409,7 +531,7 @@ const eventBaseSchema = {
   occurredAt: nonEmptyString,
 };
 
-export const runtimeEventSchema = z.discriminatedUnion("type", [
+const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ ...eventBaseSchema, type: z.literal("run.created"), goal: nonEmptyString }),
   z.object({ ...eventBaseSchema, type: z.literal("run.started") }),
   z.object({ ...eventBaseSchema, type: z.literal("computer.open.started") }),
@@ -439,15 +561,20 @@ export const runtimeEventSchema = z.discriminatedUnion("type", [
   z.object({
     ...eventBaseSchema,
     type: z.literal("action.execution.completed"),
-    receipt: actionReceiptSchema,
+    receipt: completedActionReceiptSchema,
   }),
-  z.object({ ...eventBaseSchema, type: z.literal("action.execution.failed"), receipt: actionReceiptSchema }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("action.execution.failed"),
+    receipt: failedActionReceiptSchema,
+  }),
   z.object({ ...eventBaseSchema, type: z.literal("run.paused"), reason: z.string() }),
   z.object({ ...eventBaseSchema, type: z.literal("run.resumed") }),
   z.object({
     ...eventBaseSchema,
     type: z.literal("approval.requested"),
     requestId: nonEmptyString,
+    callId: nonEmptyString,
     reason: z.string(),
   }),
   z.object({
@@ -466,6 +593,16 @@ export const runtimeEventSchema = z.discriminatedUnion("type", [
     summary: z.string().optional(),
   }),
 ]);
+
+export const runtimeEventSchema = runtimeEventUnionSchema.superRefine((event, context) => {
+  if (event.type === "observation.created" && event.observation.runId !== event.runId) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["observation", "runId"],
+      message: "observation.runId must match event.runId",
+    });
+  }
+});
 
 function parseRuntimeEvent(value: unknown, lineNumber: number): RuntimeEvent {
   const result = runtimeEventSchema.safeParse(value);

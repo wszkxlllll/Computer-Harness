@@ -11,6 +11,7 @@ import type {
   RunId,
   RuntimeEvent,
   RuntimeEventData,
+  ToolCallId,
 } from "@computer-harness/protocol";
 import {
   FileAssetStore,
@@ -19,11 +20,14 @@ import {
   readRuntimeEvents,
   reduceRunEvent,
   reduceRuntimeEvents,
+  runtimeEventSchema,
 } from "./index.js";
+import { runtimeEventTypes } from "@computer-harness/protocol";
 
 const runId = "run-test" as RunId;
 const observationId = "observation-test" as ObservationId;
 const actionId = "action-test" as ActionId;
+const callId = "call-test" as ToolCallId;
 
 function event(sequence: number, data: RuntimeEventData): RuntimeEvent {
   return {
@@ -42,6 +46,39 @@ function waitStarted(sequence = 0): RuntimeEvent {
   });
 }
 
+function runCreated(sequence = 0): RuntimeEvent {
+  return event(sequence, { type: "run.created", goal: "test" });
+}
+
+function runStarted(sequence = 1): RuntimeEvent {
+  return event(sequence, { type: "run.started" });
+}
+
+function runningEvents(): RuntimeEvent[] {
+  return [
+    runCreated(0),
+    runStarted(1),
+    event(2, { type: "computer.open.started" }),
+    event(3, { type: "computer.open.completed", computerSessionId: "computer-test" as ComputerSessionId }),
+    event(4, {
+      type: "observation.created",
+      observation: {
+        id: observationId,
+        runId,
+        computerSessionId: "computer-test" as ComputerSessionId,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport: { width: 100, height: 100, coordinateSpace: "physical" },
+        screenshot: {
+          assetId: "asset-test" as AssetId,
+          relativePath: "assets/one.png",
+          mediaType: "image/png",
+          byteLength: 1,
+        },
+      },
+    }),
+  ];
+}
+
 function waitCompleted(sequence = 1): RuntimeEvent {
   return event(sequence, {
     type: "action.execution.completed",
@@ -58,8 +95,8 @@ function waitCompleted(sequence = 1): RuntimeEvent {
 describe("RunSnapshot reducer", () => {
   it("is deterministic and leaves an unresolved side effect visible", () => {
     const events: RuntimeEvent[] = [
-      event(0, { type: "run.created", goal: "test" }),
-      waitStarted(1),
+      ...runningEvents(),
+      waitStarted(5),
     ];
 
     const first = events.reduce(reduceRunEvent, initialRunSnapshot(runId));
@@ -69,24 +106,9 @@ describe("RunSnapshot reducer", () => {
   });
 
   it("records the latest observation", () => {
-    const observed = reduceRunEvent(
-      initialRunSnapshot(runId),
-      event(0, {
-        type: "observation.created",
-        observation: {
-          id: observationId,
-          runId,
-          computerSessionId: "computer-test" as ComputerSessionId,
-          capturedAt: "2026-01-01T00:00:00.000Z",
-          viewport: { width: 100, height: 100, coordinateSpace: "physical" },
-          screenshot: {
-            assetId: "asset-test" as AssetId,
-            relativePath: "assets/one.png",
-            mediaType: "image/png",
-            byteLength: 1,
-          },
-        },
-      }),
+    const observed = reduceRuntimeEvents(
+      runningEvents(),
+      runId,
     );
     expect(observed.latestObservationId).toBe(observationId);
   });
@@ -107,13 +129,16 @@ describe("RunSnapshot reducer", () => {
       }),
     ],
   ])("clears unresolved action after %s", (_label, terminal) => {
-    const snapshot = reduceRuntimeEvents([waitStarted(0), terminal], runId);
+    const snapshot = reduceRuntimeEvents(
+      [...runningEvents(), waitStarted(5), { ...terminal, sequence: 6 }],
+      runId,
+    );
     expect(snapshot.unresolvedActionId).toBeUndefined();
     expect(snapshot.stepCount).toBe(1);
   });
 
   it("rejects a terminal action without a matching started action", () => {
-    expect(() => reduceRuntimeEvents([waitCompleted(0)], runId)).toThrow(
+    expect(() => reduceRuntimeEvents([...runningEvents(), { ...waitCompleted(0), sequence: 5 }], runId)).toThrow(
       /without action\.execution\.started/,
     );
 
@@ -125,16 +150,25 @@ describe("RunSnapshot reducer", () => {
         startedAt: "2026-01-01T00:00:00.000Z",
       },
     });
-    expect(() => reduceRuntimeEvents([waitStarted(0), otherAction], runId)).toThrow(
-      /does not match unresolved action/,
-    );
+    expect(() =>
+      reduceRuntimeEvents(
+        [...runningEvents(), waitStarted(5), { ...otherAction, sequence: 6 }],
+        runId,
+      ),
+    ).toThrow(/does not match unresolved action/);
   });
 
   it("clears and resolves approval state", () => {
     const approved = reduceRuntimeEvents(
       [
-        event(0, { type: "approval.requested", requestId: "approval-1", reason: "confirm" }),
-        event(1, { type: "approval.resolved", requestId: "approval-1", approved: true }),
+        ...runningEvents(),
+        event(5, {
+          type: "approval.requested",
+          requestId: "approval-1",
+          callId,
+          reason: "confirm",
+        }),
+        event(6, { type: "approval.resolved", requestId: "approval-1", approved: true }),
       ],
       runId,
     );
@@ -143,8 +177,14 @@ describe("RunSnapshot reducer", () => {
 
     const denied = reduceRuntimeEvents(
       [
-        event(0, { type: "approval.requested", requestId: "approval-2", reason: "confirm" }),
-        event(1, { type: "approval.resolved", requestId: "approval-2", approved: false }),
+        ...runningEvents(),
+        event(5, {
+          type: "approval.requested",
+          requestId: "approval-2",
+          callId,
+          reason: "confirm",
+        }),
+        event(6, { type: "approval.resolved", requestId: "approval-2", approved: false }),
       ],
       runId,
     );
@@ -157,8 +197,14 @@ describe("RunSnapshot reducer", () => {
     expect(() =>
       reduceRuntimeEvents(
         [
-          event(0, { type: "approval.requested", requestId: "approval-1", reason: "confirm" }),
-          event(1, { type: "approval.resolved", requestId: "approval-2", approved: true }),
+          ...runningEvents(),
+          event(5, {
+            type: "approval.requested",
+            requestId: "approval-1",
+            callId,
+            reason: "confirm",
+          }),
+          event(6, { type: "approval.resolved", requestId: "approval-2", approved: true }),
         ],
         runId,
       ),
@@ -179,7 +225,7 @@ describe("RunSnapshot reducer", () => {
 
   it("tracks a pending user question and clears it on an answer or correction", () => {
     const waiting = reduceRuntimeEvents(
-      [event(0, { type: "user.input.requested", question: "Where should I save it?" })],
+      [...runningEvents(), event(5, { type: "user.input.requested", question: "Where should I save it?" })],
       runId,
     );
     expect(waiting.status).toBe("waiting_user");
@@ -187,8 +233,9 @@ describe("RunSnapshot reducer", () => {
 
     const resumed = reduceRuntimeEvents(
       [
-        event(0, { type: "user.input.requested", question: "Where should I save it?" }),
-        event(1, { type: "user.input.received", text: "Save it in Documents." }),
+        ...runningEvents(),
+        event(5, { type: "user.input.requested", question: "Where should I save it?" }),
+        event(6, { type: "user.input.received", text: "Save it in Documents." }),
       ],
       runId,
     );
@@ -196,10 +243,70 @@ describe("RunSnapshot reducer", () => {
     expect(resumed.pendingUserQuestion).toBeUndefined();
 
     const corrected = reduceRuntimeEvents(
-      [event(0, { type: "user.input.received", text: "Do not save yet." })],
+      [...runningEvents(), event(5, { type: "user.input.received", text: "Do not save yet." })],
       runId,
     );
     expect(corrected.status).toBe("running");
+  });
+
+  it("rejects lifecycle changes after finish and refuses ambiguous state changes", () => {
+    const finished = reduceRuntimeEvents(
+      [...runningEvents(), event(5, { type: "run.finished", outcome: "succeeded" })],
+      runId,
+    );
+    expect(finished.status).toBe("finished");
+    expect(() => reduceRunEvent(finished, event(6, { type: "run.resumed" }))).toThrow(/is finished/);
+
+    expect(() =>
+      reduceRuntimeEvents(
+        [...runningEvents(), event(5, { type: "approval.requested", requestId: "a", callId, reason: "confirm" }), event(6, {
+          type: "user.input.received",
+          text: "bypass",
+        })],
+        runId,
+      ),
+    ).toThrow(/cannot bypass pending approval/);
+
+    expect(() =>
+      reduceRuntimeEvents(
+        [...runningEvents(), waitStarted(5), event(6, { type: "run.finished", outcome: "succeeded" })],
+        runId,
+      ),
+    ).toThrow(/GUI action is unresolved/);
+  });
+
+  it("requires observation ownership and receipt/event status agreement", () => {
+    const foreignObservation = event(5, {
+      type: "observation.created",
+      observation: {
+        id: "foreign-observation" as ObservationId,
+        runId: "other-run" as RunId,
+        computerSessionId: "computer-test" as ComputerSessionId,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport: { width: 1, height: 1, coordinateSpace: "physical" },
+        screenshot: {
+          assetId: "asset-test" as AssetId,
+          relativePath: "assets/one.png",
+          mediaType: "image/png",
+          byteLength: 1,
+        },
+      },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), foreignObservation], runId)).toThrow(
+      /belongs to run other-run/,
+    );
+
+    const mismatchedReceipt = event(6, {
+      type: "action.execution.completed",
+      receipt: {
+        actionId,
+        status: "failed",
+        startedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    expect(() =>
+      reduceRuntimeEvents([...runningEvents(), waitStarted(5), mismatchedReceipt], runId),
+    ).toThrow(/must carry a completed receipt/);
   });
 });
 
@@ -249,6 +356,34 @@ describe("JsonlRunEventWriter", () => {
       writer.append({ runId: "other-run" as RunId, type: "run.created", goal: "wrong run" }),
     ).rejects.toThrow(/writer is bound to/);
     await writer.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("linearizes close before new appends and preserves already queued writes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+
+    const queued = writer.append({ runId, type: "run.created", goal: "one" });
+    const closing = writer.close();
+    await expect(writer.append({ runId, type: "run.started" })).rejects.toThrow(/writer is closed/);
+    await queued;
+    await closing;
+
+    expect((await readRuntimeEvents(filePath)).map((item) => item.type)).toEqual(["run.created"]);
+    await expect(writer.append({ runId, type: "run.started" })).rejects.toThrow(/writer is closed/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("makes concurrent close calls idempotent", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+    const [first, second] = [writer.close(), writer.close()];
+    await Promise.all([first, second]);
+    await expect(writer.append({ runId, type: "run.created", goal: "late" })).rejects.toThrow(
+      /writer is closed/,
+    );
     await rm(directory, { recursive: true, force: true });
   });
 });
@@ -310,6 +445,53 @@ describe("FileAssetStore", () => {
 });
 
 describe("readRuntimeEvents", () => {
+  it("keeps the Zod discriminator set aligned with the protocol event list", () => {
+    const effectsDefinition = runtimeEventSchema as unknown as {
+      _def: {
+        schema: {
+          options: Array<{ shape: { type: { value: string } } }>;
+        };
+      };
+    };
+    expect(effectsDefinition._def.schema.options.map((option) => option.shape.type.value)).toEqual(
+      runtimeEventTypes,
+    );
+  });
+
+  it("rejects cross-field ownership and receipt mismatches at the schema boundary", () => {
+    const observation = {
+      eventId: "event-0",
+      runId,
+      sequence: 0,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "observation.created" as const,
+      observation: {
+        id: observationId,
+        runId: "other-run" as RunId,
+        computerSessionId: "computer-test" as ComputerSessionId,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport: { width: 1, height: 1, coordinateSpace: "physical" as const },
+        screenshot: {
+          assetId: "asset-test" as AssetId,
+          relativePath: "assets/one.png",
+          mediaType: "image/png",
+          byteLength: 1,
+        },
+      },
+    };
+    expect(runtimeEventSchema.safeParse(observation).success).toBe(false);
+
+    const failedAsCompleted = {
+      eventId: "event-0",
+      runId,
+      sequence: 0,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "action.execution.completed" as const,
+      receipt: { actionId, status: "failed", startedAt: "2026-01-01T00:00:00.000Z" },
+    };
+    expect(runtimeEventSchema.safeParse(failedAsCompleted).success).toBe(false);
+  });
+
   it("reports malformed JSON and malformed event data with line numbers", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-events-"));
     const filePath = join(directory, "trajectory.jsonl");
@@ -365,6 +547,7 @@ describe("Event, Asset and Snapshot integration", () => {
     const trajectoryPath = join(directory, "trajectory.jsonl");
     const writer = new JsonlRunEventWriter(trajectoryPath, runId);
     await writer.append({ runId, type: "run.created", goal: "observe" });
+    await writer.append({ runId, type: "run.started" });
     await writer.append({
       runId,
       type: "observation.created",
