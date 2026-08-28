@@ -9,9 +9,11 @@
 接入真实 Provider 或 CUA；随后完成了 S2-1 协议收口和 S2-2 Fake Runtime 骨架，仍未接入
 真实 Provider 或 CUA。
 
-2026-08-28 复审结论：**S2-0、S2-1.1 和 S2-2 骨架均已通过当前阶段的代码门槛。**
-S2-2 已完成最小 Fake Run 落盘与重放；完整命令 Inbox、用户纠正和取消竞态仍属于 S2-3，
-真实 Provider/CUA 仍不在本阶段范围内。
+2026-08-29 最新复审结论：**S2-0、S2-1.1、S2-2a 和 S2-3a/b 已完成并通过当前代码门槛。**
+Runtime 现在先完成同一 ModelTurn 的整组 ToolCall 预检，再允许 GUI 副作用；Provider 返回后和
+动作 started 前均有 Abort 安全边界；在线 Snapshot 由 Writer 实际返回的 Event 投影；每 Run
+已有单消费者命令 Inbox、用户回答/纠正、审批、pause/resume 和 finished 后命令拒绝。仍未接入
+真实 Provider/CUA、后台 Job 或 Dashboard；S2-4 故障注入和退出审计尚未完成。
 
 ## S2-0/S2-1 已完成的部分
 
@@ -129,9 +131,10 @@ Run 断言均有覆盖。本文件状态为“S2-2 骨架通过，允许进入 S
 
 ## 下一步
 
-下一步进入 S2-3：在现有单一 Runtime 包上加入每 Run Inbox、用户回答/纠正、审批、pause/resume
-和完整 cancel 竞态；继续保持唯一 `commitEvent`，不把真实模型或桌面故障混入 Runtime 契约
-测试。S2-2 已完成的 Fake 骨架和协议提交不要回退或重写。
+S2-2a 与 S2-3 已按入口文件完成：Runtime 先整组预检、再执行副作用；每 Run 通过单消费者
+Inbox 接受用户输入、审批、pause/resume，并在安全边界处理 cancel。下一步进入 S2-4 故障注入
+与退出审计，重点验证 Event/Asset/Provider/Computer 失败、未知副作用和终态恢复；继续不接入
+真实 Provider/CUA、后台 Job 或 Dashboard。
 
 ---
 
@@ -312,3 +315,332 @@ S2-2 退出条件仍然保持简单：FakeProvider/FakeComputer 完成一条完�
 
 另有一个低优先级边界：当前 Viewport 的磁盘 Schema 允许宽高为 0。它不阻塞 S2-2，但在
 Stage 3 坐标换算前应收紧为正整数，并添加 0×N/N×0 拒绝测试，避免除零和无效 Frame。
+
+---
+
+## 2026-08-28 S2-2 新实现独立审计
+
+### 1. 本次实际检查
+
+基线提交：
+
+```text
+ea4206c feat: link tool calls to proposed actions
+1e1bd56 feat: add stage 2 runtime skeleton
+```
+
+检查时工作区干净。实际重新运行：
+
+```text
+pnpm run typecheck   通过
+pnpm test            通过（2 个测试文件，32 项）
+```
+
+已经确认有效的实现包括：
+
+- `packages/runtime` 是单一 Runtime 包，没有提前拆出空的 jobs/context/tools 包；
+- Fake happy path 真实执行了 open、初始 Observe、ModelTurn、Action、动作后 Observe、下一轮
+  ToolResult 和 finish；
+- `action.proposed.callId` 已进入 Protocol、Zod、Trajectory 和 Controller；
+- 执行前拒绝与 Tool 执行失败已经使用不同的权威 Event；
+- `commitEvent` 在 Writer append 成功前不会更新在线 Snapshot；
+- GUI Action 的 started Event 在 `computer.execute()` 之前 await；
+- Driver 抛出未知结果时没有伪造 terminal Receipt，也没有重试动作；
+- Provider in-flight cancel 的现有测试能够结束为 `cancelled`。
+
+因此当前代码不是“只有接口空壳”，S2-2 主链已经可以工作。下面的问题是局部机制缺口，不需要
+重写架构。
+
+### 2. P1：整轮 ToolCall 没有在副作用前完成预检
+
+技术计划要求同一 `ModelTurn` 在任何 GUI 副作用前完成整组校验，包括 Tool 是否存在、参数
+是否合法、Policy 是否允许以及 GUI 副作用数量。当前 `processToolCalls()` 只提前统计了
+Computer Tool 数量，随后在同一个循环中边校验边执行。
+
+因此以下序列会产生部分副作用：
+
+```text
+ModelTurn.calls = [合法 click, 不存在的 tool]
+→ click 被 proposed / started / execute
+→ 才发现第二个 tool 不存在并 rejected
+```
+
+类似问题也会发生在“合法 click + 后一个参数非法/Policy deny/require_approval”的组合中。这不
+是模型效果问题，而是 Runtime 违反自己的副作用边界。
+
+S2-2a 修复要求：
+
+1. 在写任何 `tool.call.received` 前，先检查本 Turn 内 ToolCall ID 是否非空且互不重复；
+2. 对整组完成 Registry lookup、参数校验和 Policy 评估，形成仅存在于内存的 preflight
+   结果；
+3. 确认最多一个 Computer Tool；
+4. 只要整组存在未知 Tool、非法参数、deny、多个 GUI Action，或当前无法表达的多审批/调用
+   依赖，就在任何执行前拒绝整组；
+5. 全组允许后才按顺序执行。V1 不并发执行同一 ComputerSession 的调用。
+
+不要为此新增通用 Workflow/DAG 或 dependency 字段。当前无法证明同一 Turn 内的调用互相独立
+时，整组拒绝并让模型下一轮单步重提即可。
+
+必须增加反例测试：
+
+```text
+[合法 click, unknown tool]       → execute 次数 0
+[合法 click, invalid arguments]  → execute 次数 0
+[合法 click, policy deny]        → execute 次数 0
+重复 ToolCallId                  → 不产生部分 received/terminal 轨迹
+```
+
+### 3. P1：Abort 已公开，但 GUI 副作用前缺少最后安全检查
+
+当前只在 Run 循环开头检查 Abort。若 cancel 在 Provider 返回后、处理 ToolCall 前到达，Controller
+仍可能继续写 `model.response.received`、`action.proposed` 和
+`action.execution.started`，然后把已经 aborted 的 signal 交给 Driver。遵守 signal 的 Fake
+可能拒绝，但真实 Adapter 是否已开始副作用不能依赖这一点。
+
+S2-2a/S2-3 修复边界：
+
+- Context compile 后、Provider 请求前检查一次；
+- Provider 返回后、消费 ModelTurn 前检查一次；
+- 整组 preflight 完成后、开始执行任何 Tool 前检查一次；
+- 每个 GUI Action 在 append `action.execution.started` 之前做最后一次检查；
+- started 已成功 append 后不再假装动作可以无条件取消，只把 signal 交给 Driver，并根据
+  Receipt 或未知副作用规则收口。
+
+第一条必要反例：用 deferred/barrier 让 Provider 已返回但 Turn 尚未执行，在此时 cancel，断言
+`computer.execute()` 为 0，最终为 cancelled。不要使用真实 sleep。
+
+`cancel()` 在 finished 后的行为也要在 S2-3 固定：建议明确抛错，而不是继续改变一个已结束
+Controller 的 signal；这与“finished 后外部命令明确失败”的既有合同一致。
+
+### 4. P1：在线 Snapshot 使用了 candidate，而不是 Writer 返回的 persisted Event
+
+当前 `commitEvent()` 的顺序是：
+
+```text
+reduce(candidate) 得到 nextSnapshot
+→ writer.append(draft)
+→ 只比较 eventId/runId/sequence
+→ 在线状态采用先前的 nextSnapshot
+→ events 保存 writer 返回的 persisted Event
+```
+
+对于当前 `JsonlRunEventWriter`，payload 不会被改写，所以 happy path 没有出错。但
+`RunEventWriter` 是注入接口；若实现规范化时间或错误地改变 payload，在线 Snapshot 与磁盘
+重放可能分叉，而现有测试只检查了磁盘 Snapshot，没有把它与
+`controller.getSnapshot()` 做完整相等比较。
+
+保持“先验证、后持久化、再更新内存”的最小修法：
+
+```text
+reduce(snapshot, candidate)        # 只做写前合法性检查，不提交内存
+→ persisted = writer.append(draft)
+→ 校验 writer 返回的边界
+→ reduce(snapshot, persisted)      # 以实际持久化 Event 产生在线 Snapshot
+→ 更新 events / nextSequence
+```
+
+增加一条集成断言：完整 Run 后，`controller.getSnapshot()` 与
+`reduceRuntimeEvents(readRuntimeEvents(...))` 深度相等。无需为了这一点增加 Hash、第二份日志或
+事务数据库。
+
+### 5. 已知但不阻塞 S2-3 的失败路径
+
+以下问题已经属于计划中的 S2-4，不应混进本轮三个修复：
+
+- Action 已得到确定 Receipt，但动作后 Observe 失败时，原 ToolCall 尚未写 terminal
+  ToolResult；
+- terminal Event append 失败后的 fatal stop 和磁盘恢复；
+- Asset 写入失败、Computer close 失败的诊断；
+- Driver 如何区分“可证明无副作用的 cancelled”和“副作用未知”；
+- Viewport 0 宽高在 Stage 3 前收紧。
+
+`getSnapshot()` 当前直接返回内部对象也暂不作为 S2-3 门禁；在公开 SDK 前应改为只读快照或
+副本，避免调用者篡改 Controller 内部状态。
+
+### 6. 文档一致性问题
+
+`stage-2-s0-audit-and-gates.md` 已更新到“S2-2 骨架完成”，但
+`stage-2-implementation-entry.md` 仍把 S2-1.1 和 S2-2 写成“当前立即执行”。因此实施 Agent
+如果只读入口文档，会重复已经完成的工作。
+
+入口文档应在本次审计后切换为：
+
+```text
+当前：S2-2a 三项加固
+随后：S2-3 Inbox 与控制语义
+暂不：S2-4 故障注入、真实 Provider、真实 CUA
+```
+
+进入 S2-3 后，`run-turn-tool-and-user-correction-semantics.md` 从“暂不阅读”改为必读；其余
+Stage 0 和产品计划仍不作为当前施工合同。
+
+### 7. Runtime 是否应该拆分，以及 Event 当前如何实现
+
+#### 7.1 现在没有拆成 context/tools/providers 包是正确的
+
+当前 `packages/runtime/src/index.ts` 同时定义 Provider/Computer/Context/Policy 的接口和最小默认
+实现，但仓库没有创建独立的 `packages/context`、`packages/tools`、`packages/providers`。
+这符合此前的阶段约束：
+
+- 当前只有一个默认 ContextCompiler，没有第二个独立消费者；
+- 当前只有 ToolRegistry 和测试 Tool，没有可单独发布的 Tool 产品包；
+- 当前只有 ProviderAdapter 合同，没有任何真实 Provider 实现；
+- Stage 3 才有 CUA Adapter，Stage 4 才有第一个真实 Provider。
+
+因此现在按未来目录图提前创建多个空包，只会增加依赖、构建配置和跨包修改，不增加当前能力。
+具体 Provider 将来放到独立 adapter 包；ProviderAdapter 的稳定合同仍由 Runtime 使用，不要现在
+为了目录整齐迁移到一个没有消费者的新包。
+
+#### 7.2 但 Runtime 包内部应在 S2-3 前做一次机械拆文件
+
+“保持单一 Runtime 包”不等于“所有实现永久放在一个文件”。当前 `index.ts` 已经同时包含：
+
+```text
+Computer / Provider / Context / Policy 合同
+ToolDefinition / ToolRegistry
+DefaultContextCompiler / DefaultRuntimePolicy
+RunController
+Clock / IdFactory / 辅助函数
+```
+
+S2-3 还会加入 Inbox、等待态和多组竞态逻辑。继续堆在一个文件会让行为修复、接口修改和并发审查
+互相干扰。建议在 S2-2a 行为修复通过后做一个**纯机械、无行为变化**的包内拆分：
+
+```text
+packages/runtime/src/
+├─ contracts.ts          # Computer、Provider、Context、Policy、Tool 合同
+├─ tool-registry.ts      # ToolRegistry
+├─ defaults.ts           # 当前两个最小默认实现
+├─ run-controller.ts     # RunController、Clock/IdFactory 及其私有辅助逻辑
+└─ index.ts              # 只做稳定 public exports
+```
+
+不必继续拆 `abort.ts`、`events.ts`、`errors.ts`、`jobs.ts` 等没有独立消费者的小文件，也不新建
+更多 package。拆分提交只允许移动代码和调整 import/export，现有 32 项测试必须原样通过。
+
+#### 7.3 Event 当前不是 AsyncGenerator
+
+当前 Event 链路由四部分组成：
+
+```text
+RuntimeEvent union               # Protocol 中定义事实类型
+        ↓
+RunController.commitEvent()      # 唯一生产/提交路径
+        ↓
+RunEventWriter / JSONL           # 权威持久化顺序和 sequence
+        ↓
+reduceRunEvent()                 # 纯函数投影 RunSnapshot
+```
+
+Controller 另外保留一个 `RuntimeEvent[]`，用于当前 Run 的 Context 和测试。Writer 内部使用
+Promise 串行队列保证 append 顺序；这里没有 EventBus，也没有 AsyncGenerator。
+
+这不是 S2-2 缺陷。`AsyncGenerator` 更适合表达“一个消费者按顺序拉取异步结果”，但不能单独
+承担当前 EventStream 的权威语义：
+
+- 一个 generator 实例通常是单消费，不天然支持 CLI、UI、Metrics 多订阅者；
+- 慢消费者可能反向阻塞 Agent 主循环；
+- 晚加入的消费者还需要“历史 JSONL + 实时 tail”，generator 本身不解决重放；
+- 进程崩溃后仍必须以已落盘 Event 为准，不能以某个内存流为准。
+
+因此 S2-3 不要为了 Inbox 或 Abort 把 Event 重写成 AsyncGenerator。命令 Inbox 是“外部命令
+进入 Controller”的单消费者队列；RuntimeEvent 是“Controller 已提交事实”的输出，两者方向和
+职责不同。
+
+当 CLI 或 SDK 首次出现真实的实时进度消费者时，再增加非权威 live notification 接口。可以是
+`subscribe(listener) → unsubscribe`，也可以是为每个订阅者创建独立队列的
+`events(): AsyncIterable<RuntimeEvent>`，但必须满足：
+
+1. 只在 Event append 成功且在线 Snapshot 更新后发布；
+2. 不替代 JSONL 和 Reducer；
+3. 一个慢订阅者不能阻塞 `commitEvent` 和 GUI 执行；
+4. 需要历史时先读 JSONL，再从确定 sequence 接实时事件；
+5. 有第一个 CLI/UI 消费者时再固定背压、缓冲和断线语义。
+
+当前没有该消费者，所以本轮不新增 subscribe/AsyncIterable 公共 API。
+
+### 8. 下一步施工指示
+
+#### 提交 1：S2-2a Runtime 安全加固
+
+只完成：
+
+1. 整轮 preflight 后再执行；
+2. GUI 副作用前 Abort 检查；
+3. persisted Event 驱动在线 Snapshot；
+4. 上述反例和在线/重放相等测试。
+
+退出门槛：typecheck/test 通过，四类非法混合 Turn 均为 execute 0，cancel 在 started 前不会
+产生 GUI 副作用，在线和磁盘 Snapshot 完全一致。
+
+#### 提交 2：Runtime 包内机械拆分
+
+- 按 7.2 拆成少量职责文件；
+- 不创建新 package；
+- 不修改公共行为、事件类型或测试预期；
+- 原有测试全部通过，diff 中没有顺手重构。
+
+#### 提交 3：S2-3a 命令 Inbox 与等待态
+
+- 单 Run、单消费者内存 FIFO；
+- `submitUserInput`、`resolveApproval`、`pause`、`resume`；
+- 命令 Promise 只在对应 Event append 成功后 resolve；
+- waiting_user、waiting_approval、paused 能被 cancel 唤醒；
+- 不允许外部注入 GUI Action。
+
+#### 提交 4：S2-3b 纠正与完整 cancel 竞态
+
+- started 前纠正使旧 ToolCall 不执行并重新请求模型；
+- started 后纠正不撤销、不重复动作，确定 Receipt 后再 Observe 和进入下一 Turn；
+- cancel Provider/Observe/started 前/started 后分别按既定语义收口；
+- finished 后所有外部命令拒绝；
+- 完成 Stage 2 测试矩阵 12.2 的第 7—13 项。
+
+完成这三个提交并复审后，再进入 S2-4。不要同时接入真实 Provider/CUA，也不要新增后台 Job、
+Subagent、Dashboard、Verifier 或复杂重试器。
+
+---
+
+## 2026-08-29 S2-2a/S2-3 实施结果
+
+本轮按 `stage-2-implementation-entry.md` 完成了入口文件指定的 A/B/C 范围，未引入新的
+package 或外部运行时依赖。
+
+### 已完成
+
+- `processToolCalls()` 在写入 `tool.call.received` 前完成 ToolCall ID、Registry、参数、Policy
+  和 Computer Tool 数量的整轮预检；未知 Tool、非法参数、Policy deny、重复 ID 和多个 GUI
+  ToolCall 都不会产生 GUI 副作用。
+- Provider 返回后、ModelTurn 消费前、整组预检后和 `action.execution.started` 前均检查根
+  AbortSignal；started 事件成功落盘前不会调用 Computer.execute。
+- `commitEvent()` 仍先用 Reducer 做写前校验，随后以 Writer 返回的 persisted Event 更新在线
+  Snapshot、事件列表和下一序号；观察结果也采用实际持久化的 Observation。
+- Runtime 单文件已机械拆为 `contracts.ts`、`tool-registry.ts`、`defaults.ts`、
+  `run-controller.ts` 和只负责导出的 `index.ts`，公共导出和行为保持不变。
+- 每个 Run 有单消费者内存 Inbox，提供 `submitUserInput`、`resolveApproval`、`pause` 和
+  `resume`。命令只在相应 Event 成功落盘后完成；GUI Action 不能由外部命令直接注入。
+- `user_input_required` 会进入 `waiting_user`，回答后回到同一 Run；主动纠正作为
+  `user.input.received` 进入下一次上下文。纠正在 GUI Action started 前会跳过旧动作，started
+  后不撤销已发生的副作用。
+- pause 在安全边界生效，必要时暂存尚未执行的 ModelTurn/ToolCall；resume 后继续。cancel 仍
+  立即 abort 根 signal，并能唤醒等待态；finished 后所有命令明确拒绝。
+- `DefaultContextCompiler` 会把最近一次用户回答/纠正作为下一轮用户消息传给 Provider。
+
+### 本轮验证
+
+```text
+pnpm run typecheck   通过
+pnpm test            通过（2 个测试文件，42 项）
+```
+
+Runtime 测试现在覆盖：正常 GUI Run、非 GUI Tool、多个 GUI ToolCall 整组拒绝、未知 Tool、
+非法参数、Policy deny、重复 ToolCall ID、Provider 取消、未知副作用、用户等待与回答、started
+前纠正、pause/resume、审批 allow、Provider 返回后 cancel，以及 finished 后命令拒绝；正常 Run
+还断言在线 Snapshot 与 JSONL read/reduce 结果完全相等。
+
+### 尚未完成与下一阶段
+
+S2-4 尚未实施：Event/Asset/Provider/Computer 故障注入、terminal Event 写失败后的恢复、
+Driver 对 cancelled 与未知副作用的证据分类、以及更完整的 crash recovery。当前也不接入真实
+Provider、CUA、后台 Job、Verifier 或 Dashboard。完成 S2-4 并记录实际门禁后，才进入 Stage 3
+CUA Adapter。

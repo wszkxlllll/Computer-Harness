@@ -52,28 +52,46 @@
 
 它解释长期架构边界，但不能覆盖最新门禁中已经收紧的实现决定。
 
+## 当前阶段新增必读
+
+- [`run-turn-tool-and-user-correction-semantics.md`](./run-turn-tool-and-user-correction-semantics.md)：
+  S2-3 实施时使用，用作用户纠正、等待态和命令 Inbox 的控制语义补充。
+
 ## 当前不要求实施 Agent 阅读的文档
 
 - `multimodal-gui-agent-harness-product-plan.md`：产品定位与长期方向，不作为当前代码施工合同；
-- `run-turn-tool-and-user-correction-semantics.md`：到 S2-3 实现用户纠正和命令 Inbox 时再读；
-- `stage-0-*`：历史调研和底层 CUA 探针依据，当前 S2-1.1/S2-2 不需要；
+- `stage-0-*`：历史调研和底层 CUA 探针依据，当前 S2-2a/S2-3 不需要；
 - LightSpeaker/OpenClaw 旧实验文档：不属于当前 Harness Runtime 施工输入。
 
-## 当前立即执行的工作
+## 当前代码状态
 
-### A. S2-1.1 小型协议收口
+S2-1.1、S2-2 happy path、S2-2a 和 S2-3 已经实现：Protocol 关联已收口，`packages/runtime`
+已拆为少量职责文件，Fake Run 可以完成落盘和重放，命令 Inbox 与控制语义已经接入。不要重复
+实现或回退这些提交。
 
-只做两项：
+最新独立审计结果与本轮实施记录以 `stage-2-s0-audit-and-gates.md` 最后一节为准。
 
-1. `action.proposed` 增加 `callId: ToolCallId`，但不把 `callId` 塞入
-   `ActionIntent`；
-2. 执行前拒绝只走 `tool.call.rejected`，`tool.call.failed` 的磁盘 Event 只允许
-   `status: "failed"`。
+## 当前已完成的工作
 
-同步更新 Protocol、Zod、fixture 和针对性测试。不要在本提交创建 Runtime 包。
+### A. S2-2a Runtime 安全加固（已完成）
 
-文档同时把未知副作用路径统一为：可 best-effort Observe，但 V1 最终以
-`run.finished(outcome_unknown)` 收口；不提前实现用户 reconciliation 状态机。
+1. 同一 ModelTurn 的所有 ToolCall 完成 Registry、参数、Policy 和 GUI 数量预检后，才能
+   执行任何副作用；
+2. Provider 返回后和 `action.execution.started` 前补齐 Abort 安全检查；
+3. `commitEvent` 以 Writer 实际返回的 persisted Event 更新在线 Snapshot；
+4. 增加非法混合 Turn、started 前 cancel、在线/磁盘 Snapshot 相等的针对性测试。
+
+本轮 Tool 预检的责任边界：
+
+- Runtime 负责 Tool 是否注册、`ToolCallId` 非空且本 Turn 内不重复、整组 Policy 决策、审批
+  分流，以及 Computer 类 Tool 数量不超过一个；这些不是具体 Tool 重复实现的规则。
+- 每个 `ToolDefinition` 负责自身参数的领域校验。当前 `inputSchema` 主要用于向模型描述输入，
+  不能替代运行时 `validate`；后续加入真实 Tool 时再为该 Tool 提供对应校验，不提前建立通用
+  Schema 框架。
+- Computer Tool 的 `toAction` 只做无副作用转换；只有 Runtime 写入
+  `action.execution.started` 后，Computer Adapter 才能执行真实 GUI 副作用。
+- 具体 Tool、真实 Policy 和完整审批等待流程分别在其对应阶段实现；S2-2a 只把通用预检顺序和
+  阻断边界做正确。
 
 验收：
 
@@ -82,18 +100,57 @@ pnpm run typecheck
 pnpm test
 ```
 
-### B. S2-2 Runtime 骨架
+### B. Runtime 包内机械拆分（已完成）
 
-S2-1.1 通过后：
+S2-2a 通过后，在仍然只有一个 `packages/runtime` 的前提下，把当前单个大文件拆成少量职责文件：
 
-- 创建单一 `packages/runtime`；
-- 实现最小 RunController、`commitEvent`、ToolRegistry、Policy 和 ContextCompiler；
-- 用 FakeProvider/FakeComputer 跑通无外部命令 happy path；
-- 每个 Run 从第一版创建根 `AbortController`，并把 signal 传给 Provider/Computer；
-- 只检查安全边界，不在本阶段实现完整 cancel 竞态和命令 Inbox。
+```text
+contracts.ts
+tool-registry.ts
+defaults.ts
+run-controller.ts
+index.ts（public exports）
+```
 
-S2-2 退出门槛：一条 Fake Run 完整落盘，磁盘 read/reduce 得到的 Snapshot 与在线 Snapshot
-一致。
+这是纯移动提交，不改变公共行为，不创建独立 context/tools/providers package。真实 Provider 和
+CUA Adapter 仍分别属于后续 Stage 4 和 Stage 3。
+
+### C. S2-3 Inbox 与控制语义（已完成）
+
+完成 A/B 后，阅读
+[`run-turn-tool-and-user-correction-semantics.md`](./run-turn-tool-and-user-correction-semantics.md)，
+再实现：
+
+- 每 Run 单消费者 Inbox；
+- `submitUserInput`、`resolveApproval`、`pause`、`resume`；
+- started 前/后用户纠正的不同语义；
+- 完整 cancel 等待态和竞态；
+- finished 后命令拒绝。
+
+仍不接入真实 Provider、真实 CUA、后台 Job 或 Dashboard。
+
+## 当前立即执行的工作
+
+### D. S2-4 故障注入与退出审计
+
+只围绕已有协议和 Runtime 验证：
+
+- Event append、Asset 写入、Provider、Computer open/observe/execute/close 的失败注入；
+- started 后 terminal Event 写失败时停止且不重试 GUI Action；
+- Driver 能证明未发生副作用的 cancelled 与结果未知的 `outcome_unknown` 分流；
+- 从 JSONL 重放恢复 `unresolvedActionId`，并再次核对在线/磁盘 Snapshot；
+- 更新本入口和审计文档的实际测试命令、覆盖范围与剩余限制。
+
+本阶段仍不接入真实 Provider/CUA、后台 Job、Verifier、Dashboard 或新的公共事件/API。
+
+## Event 当前实现决定
+
+RuntimeEvent 当前以 JSONL Writer 为权威事实，以纯 Reducer 投影 Snapshot；它不是
+AsyncGenerator。S2-3 的命令 Inbox 也不与 Event 输出混为一个队列。
+
+当前没有 CLI/UI 实时订阅消费者，因此不新增公共 EventBus 或 AsyncIterable。等首次出现实时
+消费者时，再选择 listener 或每订阅者独立队列的 AsyncIterable；实时通知只能在 Event 落盘并
+更新 Snapshot 后发布，不能替代 JSONL、阻塞 Agent 主循环或破坏历史重放。
 
 ## Abort 的一句话规则
 
