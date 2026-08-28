@@ -126,8 +126,8 @@ pnpm test            通过（2 个测试文件，32 项）
 和 JSON-safe 参数、Protocol/Zod 事件清单及每类事件的字段级 round-trip。
 
 复审重新运行命令后为 32 项通过（trajectory 27 项、runtime 5 项），新增协议反例和 Fake
-Run 断言均有覆盖。本文件状态为“S2-2 骨架通过，允许进入 S2-3”，但不代表真实 Provider
-或 CUA 已验证。
+Run 断言均有覆盖。以上是 2026-08-28 的历史状态；当前状态与后续门禁见本文末尾的
+2026-08-29 实施结果，不代表真实 Provider 或 CUA 已验证。
 
 ## 下一步
 
