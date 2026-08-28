@@ -20,6 +20,15 @@ importers:
 
   packages/protocol: {}
 
+  packages/runtime:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/trajectory':
+        specifier: workspace:*
+        version: link:../trajectory
+
   packages/trajectory:
     dependencies:
       '@computer-harness/protocol':
