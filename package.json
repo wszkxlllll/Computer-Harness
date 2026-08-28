@@ -1,0 +1,23 @@
+{
+  "name": "computer-harness",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=18.19.0"
+  },
+  "scripts": {
+    "build": "pnpm run typecheck",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "probe:cua": "pnpm --filter @computer-harness/cua-driver-spike probe",
+    "probe:cua:daemon": "pnpm --filter @computer-harness/cua-driver-spike exec tsx probe-daemon.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}

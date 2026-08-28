@@ -1,0 +1,13 @@
+packages:
+  - "packages/*"
+  - "spikes/*"
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - '@trycua/cua-driver-darwin-arm64@0.22.2'
+  - '@trycua/cua-driver-darwin-x64@0.22.2'
+  - '@trycua/cua-driver-linux-arm64-gnu@0.22.2'
+  - '@trycua/cua-driver-linux-x64-gnu@0.22.2'
+  - '@trycua/cua-driver-win32-arm64-msvc@0.22.2'
+  - '@trycua/cua-driver-win32-x64-msvc@0.22.2'
+  - '@trycua/cua-driver@0.22.2'

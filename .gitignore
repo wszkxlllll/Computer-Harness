@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+.cache/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+
+# Local CUA probe output may contain screen captures.
+spikes/cua-driver/runs/
+spikes/cua-driver/**/runs/
+
+# Downloaded CUA binaries and daemon logs are local stage-0 evidence.
+.stage0/

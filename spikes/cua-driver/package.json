@@ -1,0 +1,16 @@
+{
+  "name": "@computer-harness/cua-driver-spike",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "probe": "tsx probe.ts",
+    "probe:daemon": "tsx probe-daemon.ts"
+  },
+  "dependencies": {
+    "@trycua/cua-driver": "0.22.2"
+  },
+  "devDependencies": {
+    "tsx": "4.19.2"
+  }
+}
