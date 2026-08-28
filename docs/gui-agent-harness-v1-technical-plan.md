@@ -156,7 +156,10 @@ interface AssetRef {
 }
 ```
 
-V1 通过临时文件写入后原子 rename 保证本地资产不会以半写状态被 Event 引用。当前没有跨机器传输校验或内容寻址需求，因此不在协议中加入哈希字段；以后出现真实完整性消费者时再设计。
+V1 通过临时文件写入后原子发布保证本地资产不会以半写状态被 Event 引用；当前
+`FileAssetStore` 在同一目录使用不可覆盖的硬链接发布，因此目标路径已存在时会
+明确失败，保留 write-once 事实语义。当前没有跨机器传输校验或内容寻址需求，因此
+不在协议中加入哈希字段；以后出现真实完整性消费者时再设计。
 
 ### 5.2 ComputerSession
 
@@ -719,7 +722,7 @@ append action.execution.completed / failed
 Observation 写入顺序：
 
 1. Driver 返回截图；
-2. AssetStore 原子写入临时文件并 rename；
+2. AssetStore 原子写入临时文件并不可覆盖地发布；
 3. 计算并记录资产元数据；
 4. append `observation.created`。
 

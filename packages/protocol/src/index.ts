@@ -124,6 +124,8 @@ export type RuntimeEventType =
   | "run.resumed"
   | "approval.requested"
   | "approval.resolved"
+  | "user.input.requested"
+  | "user.input.received"
   | "runtime.error"
   | "run.finished";
 
@@ -153,6 +155,8 @@ export type RuntimeEventData =
   | { type: "run.resumed" }
   | { type: "approval.requested"; requestId: string; reason: string }
   | { type: "approval.resolved"; requestId: string; approved: boolean }
+  | { type: "user.input.requested"; question: string }
+  | { type: "user.input.received"; text: string }
   | { type: "runtime.error"; category: string; message: string }
   | { type: "run.finished"; outcome: RunOutcome; summary?: string };
 

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, relative as pathRelative, resolve } from "node:path";
+import { z } from "zod";
 import type {
   ActionId,
   AssetId,
@@ -21,6 +22,7 @@ export interface RunSnapshot {
   stepCount: number;
   latestObservationId?: ObservationId;
   pendingApproval?: { requestId: string; reason: string };
+  pendingUserQuestion?: string;
   unresolvedActionId?: ActionId;
   startedAt?: string;
   endedAt?: string;
@@ -116,12 +118,21 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         const { pendingApproval: _pendingApproval, ...withoutPendingApproval } = snapshot;
         return event.approved
           ? { ...withoutPendingApproval, status: "running" }
-          : {
-              ...withoutPendingApproval,
-              status: "finished",
-              outcome: "cancelled",
-              endedAt: event.occurredAt,
-            };
+          : { ...withoutPendingApproval, status: "running" };
+      }
+    case "user.input.requested":
+      if (snapshot.pendingUserQuestion !== undefined) {
+        throw new Error("user input requested while another question is pending");
+      }
+      return {
+        ...snapshot,
+        status: "waiting_user",
+        pendingUserQuestion: event.question,
+      };
+    case "user.input.received":
+      {
+        const { pendingUserQuestion: _pendingUserQuestion, ...withoutPendingUserQuestion } = snapshot;
+        return { ...withoutPendingUserQuestion, status: "running" };
       }
     case "run.finished":
       return {
@@ -155,20 +166,29 @@ export interface RunEventWriter {
 
 export class JsonlRunEventWriter implements RunEventWriter {
   private readonly filePath: string;
+  private readonly runId: RunId;
   private readonly idFactory: EventIdFactory;
   private fileHandle: Awaited<ReturnType<typeof open>> | undefined;
   private queue: Promise<void> = Promise.resolve();
   private nextSequence = 0;
   private closed = false;
 
-  public constructor(filePath: string, idFactory: EventIdFactory = randomEventIdFactory) {
+  public constructor(
+    filePath: string,
+    runId: RunId,
+    idFactory: EventIdFactory = randomEventIdFactory,
+  ) {
     this.filePath = resolve(filePath);
+    this.runId = runId;
     this.idFactory = idFactory;
   }
 
   public async append(draft: RuntimeEventDraft): Promise<RuntimeEvent> {
     if (this.closed) {
       throw new Error("event writer is closed");
+    }
+    if (draft.runId !== this.runId) {
+      throw new Error(`event belongs to run ${draft.runId}; writer is bound to ${this.runId}`);
     }
     const event: RuntimeEvent = {
       ...draft,
@@ -276,7 +296,17 @@ export class FileAssetStore implements AssetStore {
           await handle.close();
         }
       });
-      await rename(temporaryPath, destination);
+      // A hard link publishes the fully-written temporary file atomically and
+      // fails if the destination already exists; this preserves write-once
+      // asset semantics on both Windows and POSIX filesystems.
+      try {
+        await link(temporaryPath, destination);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new Error(`asset already exists: ${destination}`);
+        }
+        throw error;
+      }
     } finally {
       await unlink(temporaryPath).catch(() => undefined);
     }
@@ -305,139 +335,148 @@ function relativePathFromRoot(rootDir: string, destination: string): string {
   return pathRelative(rootDir, destination).replaceAll("\\", "/");
 }
 
+const nonEmptyString = z.string().min(1);
+const pointSchema = z.object({ x: z.number().finite(), y: z.number().finite() });
+const viewportSchema = z.object({
+  width: z.number().int().nonnegative(),
+  height: z.number().int().nonnegative(),
+  coordinateSpace: z.enum(["physical", "logical", "reference"]),
+});
+const assetRefSchema = z.object({
+  assetId: nonEmptyString,
+  relativePath: nonEmptyString,
+  mediaType: nonEmptyString,
+  byteLength: z.number().int().nonnegative(),
+});
+const observationSchema = z.object({
+  id: nonEmptyString,
+  runId: nonEmptyString,
+  computerSessionId: nonEmptyString,
+  capturedAt: nonEmptyString,
+  viewport: viewportSchema,
+  screenshot: assetRefSchema,
+});
+const toolCallSchema = z.object({
+  id: nonEmptyString,
+  name: nonEmptyString,
+  arguments: z.unknown(),
+});
+const modelTurnSchema = z.union([
+  z.object({
+    type: z.literal("tool_calls"),
+    calls: z.array(toolCallSchema),
+    assistantText: z.string().optional(),
+  }),
+  z.object({ type: z.literal("user_input_required"), question: nonEmptyString }),
+  z.object({ type: z.literal("finish"), summary: nonEmptyString }),
+]);
+const actionBaseSchema = {
+  actionId: nonEmptyString,
+  basedOn: nonEmptyString,
+};
+const actionIntentSchema = z.discriminatedUnion("kind", [
+  z.object({ ...actionBaseSchema, kind: z.literal("click"), point: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("double_click"), point: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("right_click"), point: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("type"), text: z.string() }),
+  z.object({
+    ...actionBaseSchema,
+    kind: z.literal("keypress"),
+    keys: z.array(nonEmptyString).min(1),
+  }),
+  z.object({
+    ...actionBaseSchema,
+    kind: z.literal("scroll"),
+    deltaX: z.number().finite(),
+    deltaY: z.number().finite(),
+  }),
+  z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
+  z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
+]);
+const actionReceiptSchema = z.object({
+  actionId: nonEmptyString,
+  status: z.enum(["completed", "refused", "failed", "cancelled", "outcome_unknown"]),
+  startedAt: nonEmptyString,
+  endedAt: nonEmptyString.optional(),
+  durationMs: z.number().finite().nonnegative().optional(),
+  driverCode: nonEmptyString.optional(),
+  message: z.string().optional(),
+});
+const eventBaseSchema = {
+  eventId: nonEmptyString,
+  runId: nonEmptyString,
+  sequence: z.number().int().nonnegative(),
+  occurredAt: nonEmptyString,
+};
+
+export const runtimeEventSchema = z.discriminatedUnion("type", [
+  z.object({ ...eventBaseSchema, type: z.literal("run.created"), goal: nonEmptyString }),
+  z.object({ ...eventBaseSchema, type: z.literal("run.started") }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.open.started") }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("computer.open.completed"),
+    computerSessionId: nonEmptyString,
+  }),
+  z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("model.request.started"), providerId: nonEmptyString }),
+  z.object({ ...eventBaseSchema, type: z.literal("model.response.received"), turn: modelTurnSchema }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("model.request.failed"),
+    category: nonEmptyString,
+    message: z.string(),
+  }),
+  z.object({ ...eventBaseSchema, type: z.literal("tool.call.received"), call: toolCallSchema }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("tool.call.rejected"),
+    callId: nonEmptyString,
+    reason: z.string(),
+  }),
+  z.object({ ...eventBaseSchema, type: z.literal("action.proposed"), action: actionIntentSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("action.execution.started"), action: actionIntentSchema }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("action.execution.completed"),
+    receipt: actionReceiptSchema,
+  }),
+  z.object({ ...eventBaseSchema, type: z.literal("action.execution.failed"), receipt: actionReceiptSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("run.paused"), reason: z.string() }),
+  z.object({ ...eventBaseSchema, type: z.literal("run.resumed") }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("approval.requested"),
+    requestId: nonEmptyString,
+    reason: z.string(),
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("approval.resolved"),
+    requestId: nonEmptyString,
+    approved: z.boolean(),
+  }),
+  z.object({ ...eventBaseSchema, type: z.literal("user.input.requested"), question: nonEmptyString }),
+  z.object({ ...eventBaseSchema, type: z.literal("user.input.received"), text: z.string() }),
+  z.object({ ...eventBaseSchema, type: z.literal("runtime.error"), category: nonEmptyString, message: z.string() }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("run.finished"),
+    outcome: z.enum(["succeeded", "failed", "cancelled", "budget_exhausted", "outcome_unknown"]),
+    summary: z.string().optional(),
+  }),
+]);
+
 function parseRuntimeEvent(value: unknown, lineNumber: number): RuntimeEvent {
-  if (!isRecord(value)) {
-    throw new Error(`invalid runtime event at line ${lineNumber}: expected an object`);
+  const result = runtimeEventSchema.safeParse(value);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const path = issue?.path.length ? ` (${issue.path.join(".")})` : "";
+    throw new Error(
+      `invalid runtime event at line ${lineNumber}: ${issue?.message ?? "schema validation failed"}${path}`,
+    );
   }
-  if (
-    typeof value.eventId !== "string" ||
-    typeof value.runId !== "string" ||
-    !Number.isInteger(value.sequence) ||
-    (value.sequence as number) < 0 ||
-    typeof value.occurredAt !== "string" ||
-    typeof value.type !== "string"
-  ) {
-    throw new Error(`invalid runtime event at line ${lineNumber}: malformed event base`);
-  }
-  if (!runtimeEventTypes.has(value.type as RuntimeEvent["type"])) {
-    throw new Error(`invalid runtime event at line ${lineNumber}: unknown type ${value.type}`);
-  }
-
-  switch (value.type as RuntimeEvent["type"]) {
-    case "run.created":
-      requireString(value, "goal", lineNumber);
-      break;
-    case "computer.open.completed":
-      requireString(value, "computerSessionId", lineNumber);
-      break;
-    case "observation.created":
-      requireString(requireRecordField(value, "observation", lineNumber), "id", lineNumber);
-      break;
-    case "model.request.started":
-      requireString(value, "providerId", lineNumber);
-      break;
-    case "model.response.received":
-      requireRecordField(value, "turn", lineNumber);
-      break;
-    case "model.request.failed":
-      requireString(value, "category", lineNumber);
-      requireString(value, "message", lineNumber);
-      break;
-    case "tool.call.received":
-      requireRecordField(value, "call", lineNumber);
-      break;
-    case "tool.call.rejected":
-      requireString(value, "callId", lineNumber);
-      requireString(value, "reason", lineNumber);
-      break;
-    case "action.proposed":
-    case "action.execution.started":
-      requireString(requireRecordField(value, "action", lineNumber), "actionId", lineNumber);
-      break;
-    case "action.execution.completed":
-    case "action.execution.failed":
-      requireString(requireRecordField(value, "receipt", lineNumber), "actionId", lineNumber);
-      break;
-    case "run.paused":
-      requireString(value, "reason", lineNumber);
-      break;
-    case "approval.requested":
-      requireString(value, "requestId", lineNumber);
-      requireString(value, "reason", lineNumber);
-      break;
-    case "approval.resolved":
-      requireString(value, "requestId", lineNumber);
-      if (typeof value.approved !== "boolean") {
-        throw new Error(`invalid runtime event at line ${lineNumber}: approved must be boolean`);
-      }
-      break;
-    case "runtime.error":
-      requireString(value, "category", lineNumber);
-      requireString(value, "message", lineNumber);
-      break;
-    case "run.finished":
-      if (!runOutcomes.has(value.outcome as RunOutcome)) {
-        throw new Error(`invalid runtime event at line ${lineNumber}: unknown outcome`);
-      }
-      break;
-    default:
-      break;
-  }
-  return value as unknown as RuntimeEvent;
-}
-
-const runtimeEventTypes = new Set<RuntimeEvent["type"]>([
-  "run.created",
-  "run.started",
-  "computer.open.started",
-  "computer.open.completed",
-  "observation.created",
-  "model.request.started",
-  "model.response.received",
-  "model.request.failed",
-  "tool.call.received",
-  "tool.call.rejected",
-  "action.proposed",
-  "action.execution.started",
-  "action.execution.completed",
-  "action.execution.failed",
-  "run.paused",
-  "run.resumed",
-  "approval.requested",
-  "approval.resolved",
-  "runtime.error",
-  "run.finished",
-]);
-
-const runOutcomes = new Set<RunOutcome>([
-  "succeeded",
-  "failed",
-  "cancelled",
-  "budget_exhausted",
-  "outcome_unknown",
-]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function requireString(record: Record<string, unknown>, key: string, lineNumber: number): string {
-  if (typeof record[key] !== "string") {
-    throw new Error(`invalid runtime event at line ${lineNumber}: ${key} must be a string`);
-  }
-  return record[key] as string;
-}
-
-function requireRecordField(
-  record: Record<string, unknown>,
-  key: string,
-  lineNumber: number,
-): Record<string, unknown> {
-  const value = record[key];
-  if (!isRecord(value)) {
-    throw new Error(`invalid runtime event at line ${lineNumber}: ${key} must be an object`);
-  }
-  return value;
+  return result.data as unknown as RuntimeEvent;
 }
 
 export async function readRuntimeEvents(filePath: string): Promise<RuntimeEvent[]> {

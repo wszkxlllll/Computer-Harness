@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@computer-harness/protocol": "workspace:*"
+    "@computer-harness/protocol": "workspace:*",
+    "zod": "3.25.76"
   }
 }

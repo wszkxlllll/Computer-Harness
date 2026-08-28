@@ -149,8 +149,8 @@ describe("RunSnapshot reducer", () => {
       runId,
     );
     expect(denied.pendingApproval).toBeUndefined();
-    expect(denied.status).toBe("finished");
-    expect(denied.outcome).toBe("cancelled");
+    expect(denied.status).toBe("running");
+    expect(denied.outcome).toBeUndefined();
   });
 
   it("rejects an approval resolution for another request", () => {
@@ -176,13 +176,38 @@ describe("RunSnapshot reducer", () => {
       ),
     ).toThrow(/expected 1/);
   });
+
+  it("tracks a pending user question and clears it on an answer or correction", () => {
+    const waiting = reduceRuntimeEvents(
+      [event(0, { type: "user.input.requested", question: "Where should I save it?" })],
+      runId,
+    );
+    expect(waiting.status).toBe("waiting_user");
+    expect(waiting.pendingUserQuestion).toBe("Where should I save it?");
+
+    const resumed = reduceRuntimeEvents(
+      [
+        event(0, { type: "user.input.requested", question: "Where should I save it?" }),
+        event(1, { type: "user.input.received", text: "Save it in Documents." }),
+      ],
+      runId,
+    );
+    expect(resumed.status).toBe("running");
+    expect(resumed.pendingUserQuestion).toBeUndefined();
+
+    const corrected = reduceRuntimeEvents(
+      [event(0, { type: "user.input.received", text: "Do not save yet." })],
+      runId,
+    );
+    expect(corrected.status).toBe("running");
+  });
 });
 
 describe("JsonlRunEventWriter", () => {
   it("serializes events with monotonic sequence numbers", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
     const filePath = join(directory, "trajectory.jsonl");
-    const writer = new JsonlRunEventWriter(filePath, {
+    const writer = new JsonlRunEventWriter(filePath, runId, {
       next: (() => {
         let count = 0;
         return () => `event-${count++}` as EventId;
@@ -204,15 +229,26 @@ describe("JsonlRunEventWriter", () => {
   it("refuses to append a new writer to an existing trajectory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
     const filePath = join(directory, "trajectory.jsonl");
-    const writer = new JsonlRunEventWriter(filePath);
+    const writer = new JsonlRunEventWriter(filePath, runId);
     await writer.append({ runId, type: "run.created", goal: "one" });
     await writer.close();
 
-    const reopened = new JsonlRunEventWriter(filePath);
+    const reopened = new JsonlRunEventWriter(filePath, runId);
     await expect(reopened.append({ runId, type: "run.started" })).rejects.toThrow(
       /trajectory file already exists/,
     );
     expect((await readRuntimeEvents(filePath)).map((item) => item.sequence)).toEqual([0]);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects events from a different run", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+    await expect(
+      writer.append({ runId: "other-run" as RunId, type: "run.created", goal: "wrong run" }),
+    ).rejects.toThrow(/writer is bound to/);
+    await writer.close();
     await rm(directory, { recursive: true, force: true });
   });
 });
@@ -254,6 +290,23 @@ describe("FileAssetStore", () => {
     ).rejects.toThrow(/relativePath contains an invalid segment/);
     await rm(directory, { recursive: true, force: true });
   });
+
+  it("rejects overwriting an existing asset and preserves the original bytes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-assets-"));
+    const store = new FileAssetStore(directory);
+    const input = {
+      assetId: "asset-1" as AssetId,
+      relativePath: "screenshots/one.bin",
+      mediaType: "application/octet-stream",
+      data: new Uint8Array([1]),
+    };
+    await store.put(input);
+    await expect(store.put({ ...input, data: new Uint8Array([2]) })).rejects.toThrow(
+      /asset already exists/,
+    );
+    expect(await readFile(join(directory, "screenshots/one.bin"))).toEqual(Buffer.from([1]));
+    await rm(directory, { recursive: true, force: true });
+  });
 });
 
 describe("readRuntimeEvents", () => {
@@ -274,7 +327,41 @@ describe("readRuntimeEvents", () => {
       }) + "\n",
       "utf8",
     );
-    await expect(readRuntimeEvents(filePath)).rejects.toThrow(/goal must be a string/);
+    await expect(readRuntimeEvents(filePath)).rejects.toThrow(/goal/);
+
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        eventId: "event-0",
+        runId,
+        sequence: 0,
+        occurredAt: "2026-01-01T00:00:00.000Z",
+        type: "observation.created",
+        observation: { id: "o0" },
+      }) + "\n",
+      "utf8",
+    );
+    await expect(readRuntimeEvents(filePath)).rejects.toThrow(/observation/);
+
+    const parsed = await writeAndReadUserInputEvents(filePath);
+    expect(parsed.map((item) => item.type)).toEqual([
+      "user.input.requested",
+      "user.input.received",
+    ]);
     await rm(directory, { recursive: true, force: true });
   });
 });
+
+async function writeAndReadUserInputEvents(filePath: string): Promise<RuntimeEvent[]> {
+  await writeFile(
+    filePath,
+    [
+      event(0, { type: "user.input.requested", question: "Need a path" }),
+      event(1, { type: "user.input.received", text: "Documents" }),
+    ]
+      .map((item) => JSON.stringify(item))
+      .join("\n") + "\n",
+    "utf8",
+  );
+  return readRuntimeEvents(filePath);
+}

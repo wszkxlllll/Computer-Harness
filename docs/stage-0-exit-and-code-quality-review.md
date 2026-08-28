@@ -258,3 +258,180 @@ pnpm test           通过（1 个测试文件，13 项）
 
 本轮仍未实现 RunController、Provider、正式 CUA Adapter 或 Planning；下一步是补充
 Stage 1 的事件重建/资产引用集成测试，再重新检查进入 Stage 2 的门槛。
+
+## 10. 上一阶段实现复审（纳入更新后的技术设计）
+
+复审日期：2026-08-28
+复审范围：commit `d1596ba` 中的 Protocol、Trajectory、AssetStore、测试与文档
+当前结论：本节记录的两个数据完整性 P0 和协议收口工作已在后续修改中完成；Stage 1
+仍需集成验收，修复前不进入 Stage 2 的原门槛已经解除。
+
+### 10.1 已确认完成且实现方向正确
+
+- `action.execution.completed/failed` 已正确清除匹配的 `unresolvedActionId`；
+- 缺少 started、重复 started 和 Action ID 不匹配会明确报错；
+- `reduceRuntimeEvents` 已检查从 0 开始的连续 sequence；
+- 新 Writer 已拒绝从 sequence 0 追加到已有 JSONL；
+- README 参数、仓库内文档链接和 `*.tsbuildinfo` 忽略规则已修正；
+- `FileAssetStore` 已采用临时文件后 rename，避免 Event 引用半写文件；
+- 当前 `pnpm run typecheck` 和 13 项测试全部通过；
+- 已建立初始 Git commit，工作树干净。
+
+这些实现没有因为后续新增用户纠正设计而失效，应继续保留。
+
+### 10.2 P0：一个轨迹 Writer 可以混写多个 Run（已修复）
+
+位置：`packages/trajectory/src/index.ts:156-188`
+
+`JsonlRunEventWriter` 没有绑定 `RunId`，每次 `append` 都接受调用者传入的任意
+`draft.runId`。最小诊断已经写出：
+
+```json
+{
+  "mixedRunIds": ["run-a", "run-b"]
+}
+```
+
+这会让一个 Run 的权威轨迹包含另一个 Run 的事件，直到重建 Snapshot 时才报错，文件
+本身已经被污染。
+
+Stage 1 修复要求：一个 Writer 在创建时绑定唯一 `RunId`，或者在第一次 append 后锁定
+该 RunId 并拒绝后续不一致输入。由于当前没有正式消费者，优先采用构造时绑定，减少
+调用者重复传错的可能。
+
+### 10.3 P0：AssetStore 会静默覆盖已经存在的资产（已修复）
+
+位置：`packages/trajectory/src/index.ts:249-290`
+
+同一个 `relativePath` 连续写入两次时，当前 Windows 实测第二次没有报错，旧文件内容
+由 `[1]` 变成 `[2]`：
+
+```json
+{
+  "assetOverwrite": {
+    "error": null,
+    "finalBytes": [2]
+  }
+}
+```
+
+一旦旧 `observation.created` Event 已引用该路径，后续覆盖会在不修改历史 Event 的情况
+下改变旧 Observation 的实际图片，破坏 Trajectory 的不可变事实语义。
+
+Stage 1 修复要求：资产目标路径必须是 write-once；目标已存在时明确失败。实现仍应保证
+临时文件完整写入后，才原子地发布为最终文件，并补充重复路径测试。不要通过“覆盖后
+更新旧 Event”修补历史。
+
+### 10.4 P1：磁盘事件校验过浅，且容易与协议枚举漂移（已修复当前范围）
+
+位置：`packages/trajectory/src/index.ts:308-460`
+
+当前解析器只检查部分嵌套字段。例如以下不完整 Observation 会被接受：
+
+```json
+{
+  "type": "observation.created",
+  "observation": { "id": "o0" }
+}
+```
+
+它缺少 `runId`、`computerSessionId`、`capturedAt`、`viewport` 和 `screenshot`，后续消费者
+却会按完整 `ObservationFrame` 使用。
+
+同时事件类型目前分别存在于：
+
+- Protocol 的 TypeScript union；
+- `runtimeEventTypes` 手工集合；
+- `parseRuntimeEvent` switch。
+
+更新设计刚加入 `user.input.requested/received` 后，这三处已经出现现实的同步压力。
+
+Stage 1 应把磁盘边界 Schema 收敛为一个运行时权威来源，并由它校验实际会被消费者
+读取的完整字段。可以引入技术计划已经选定的 Zod；不要继续通过更多分散的字符串集合
+补丁扩充手写解析器。
+
+### 10.5 P1：拒绝一次审批不应默认取消整个 Run（已修复）
+
+位置：`packages/trajectory/src/index.ts:106-125`
+
+当前 `approval.resolved(approved=false)` 会直接产生：
+
+```text
+status = finished
+outcome = cancelled
+```
+
+这会把“用户不允许这一个风险动作”等同于“用户取消整个目标”。更新后的交互设计需要
+让 Agent 能收到拒绝结果并重新规划。
+
+Stage 1 建议语义：审批拒绝只清除 `pendingApproval` 并回到 `running`；审批结果作为事实
+进入下一轮 Context。只有显式 cancel 或 `run.finished(cancelled)` 才结束整个 Run。
+
+### 10.6 更新设计中应回补到 Stage 1 的内容（已完成数据协议部分）
+
+更新后的
+[`run-turn-tool-and-user-correction-semantics.md`](./run-turn-tool-and-user-correction-semantics.md)
+并不要求当前代码立即实现完整交互。Stage 1 只回补数据协议：
+
+1. `user.input.requested` RuntimeEvent；
+2. `user.input.received` RuntimeEvent；
+3. `RunSnapshot.pendingUserQuestion`；
+4. requested → `waiting_user`、received → `running` 的纯函数投影和测试；
+5. 磁盘 Schema 对新增事件的完整校验。
+
+以下内容不属于当前阶段，缺失不能算本轮代码缺陷：
+
+- 每 Run 单消费者命令队列：Stage 2 `RunController`；
+- `submitUserInput` 和安全 Turn 边界：Stage 2；
+- 真实 Provider 的提问/回答：Stage 4；
+- CLI 过程纠正体验：Stage 6；
+- 后台 Job 队列：V1 之后出现真实后台工具时再设计。
+
+### 10.7 Stage 1 最新施工顺序
+
+```text
+绑定 Writer 与单一 RunId
+        ↓
+保证 Asset write-once
+        ↓
+收敛 RuntimeEvent 磁盘 Schema
+        ↓
+加入 user.input requested/received 与 Snapshot 投影
+        ↓
+修正 approval denied 语义
+        ↓
+补一条 Event + Asset + Snapshot 集成测试
+        ↓
+重新执行 typecheck/test 和 Stage 1 退出审查
+```
+
+本轮仍不实现 RunController、命令队列、Provider、正式 CUA Adapter、Planning 或后台
+Job。
+
+## 11. 更新意见实施记录（2026-08-28）
+
+已按本节新增意见完成以下实现：
+
+1. `JsonlRunEventWriter` 在构造时绑定唯一 `RunId`，append 其他 Run 的事件会立即
+   拒绝，不会污染轨迹文件；
+2. `FileAssetStore` 使用临时文件完整写入后，以同目录不可覆盖的原子发布方式落盘。
+   目标路径已存在时明确失败，旧资产内容保持不变；
+3. 磁盘事件校验收敛到导出的 `runtimeEventSchema`（Zod discriminated union），覆盖
+   事件类型、公共字段、Observation、Action、Receipt、ModelTurn 和用户输入事件，
+   不再维护独立的事件类型集合与解析 switch；
+4. Protocol 增加 `user.input.requested` 与 `user.input.received`；Reducer 增加
+   `pendingUserQuestion`，requested 进入 `waiting_user`，received 清除问题并回到
+   `running`。没有待回答问题时收到的输入仍可作为过程纠正，不会结束 Run；
+5. 审批拒绝只清除 `pendingApproval` 并恢复 `running`，不会自动把整个 Run 标记为
+   `cancelled`。真正结束 Run 仍需显式 `run.finished` 或后续控制逻辑。
+
+本轮新增和更新测试后，验证结果为：
+
+```text
+pnpm run typecheck  通过
+pnpm test           通过（1 个测试文件，16 项）
+```
+
+因此，本节列出的实现缺口已处理。Stage 1 剩余工作是把 Event、Asset 和 Snapshot
+串成一条集成测试；完成后再决定是否进入 Stage 2 `RunController`，不在本轮提前实现
+命令队列或真实 Provider。

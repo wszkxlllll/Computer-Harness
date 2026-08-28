@@ -173,9 +173,9 @@ RunStatus = running
 ContextCompiler 将回答放入下一轮 ModelInput
 ```
 
-当前代码已有 `waiting_user` 状态和 `user_input_required` ModelTurn，但
-`RuntimeEvent`/`RunSnapshot` 尚未完整实现上述 requested/received 事件。这属于
-Stage 1/2 需要补齐的真实协议缺口。
+当前 Stage 1 已补齐 `user.input.requested`、`user.input.received` 事件和
+`RunSnapshot.pendingUserQuestion` 投影；真正从 CLI/SDK 接收输入并驱动下一轮模型的
+`RunController.submitUserInput(text)` 仍属于 Stage 2。
 
 V1 只允许一个 Run 同时等待一个用户问题，因此暂不需要问题队列或复杂关联 ID。
 
@@ -295,4 +295,3 @@ Stage 1/2 应补齐：
 - 任意时刻的强制 GUI 动作中断；
 - 用户纠正自动重写 PlanningTask；
 - 新的公共 `Step` 协议对象。
-
