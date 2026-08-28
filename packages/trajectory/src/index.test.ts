@@ -28,6 +28,7 @@ const runId = "run-test" as RunId;
 const observationId = "observation-test" as ObservationId;
 const actionId = "action-test" as ActionId;
 const callId = "call-test" as ToolCallId;
+const clickActionId = "click-action-test" as ActionId;
 
 function event(sequence: number, data: RuntimeEventData): RuntimeEvent {
   return {
@@ -88,6 +89,18 @@ function waitCompleted(sequence = 1): RuntimeEvent {
       startedAt: "2026-01-01T00:00:00.000Z",
       endedAt: "2026-01-01T00:00:00.010Z",
       durationMs: 10,
+    },
+  });
+}
+
+function clickStarted(sequence: number, basedOn: ObservationId = observationId): RuntimeEvent {
+  return event(sequence, {
+    type: "action.execution.started",
+    action: {
+      actionId: clickActionId,
+      kind: "click",
+      point: { x: 10, y: 20 },
+      basedOn,
     },
   });
 }
@@ -291,7 +304,7 @@ describe("RunSnapshot reducer", () => {
           byteLength: 1,
         },
       },
-    });
+    }) as Extract<RuntimeEvent, { type: "observation.created" }>;
     expect(() => reduceRuntimeEvents([...runningEvents(), foreignObservation], runId)).toThrow(
       /belongs to run other-run/,
     );
@@ -307,6 +320,54 @@ describe("RunSnapshot reducer", () => {
     expect(() =>
       reduceRuntimeEvents([...runningEvents(), waitStarted(5), mismatchedReceipt], runId),
     ).toThrow(/must carry a completed receipt/);
+
+    const foreignSessionObservation = {
+      ...foreignObservation,
+      observation: { ...foreignObservation.observation, runId, computerSessionId: "other-session" as ComputerSessionId },
+    };
+    expect(() => reduceRuntimeEvents([...runningEvents(), foreignSessionObservation], runId)).toThrow(
+      /belongs to session other-session/,
+    );
+  });
+
+  it("requires an open event before completing the computer session", () => {
+    expect(() =>
+      reduceRuntimeEvents(
+        [
+          runCreated(0),
+          runStarted(1),
+          event(2, { type: "computer.open.completed", computerSessionId: "computer-test" as ComputerSessionId }),
+        ],
+        runId,
+      ),
+    ).toThrow(/requires computer\.open\.started/);
+  });
+
+  it("does not allow a model request before the run is running", () => {
+    expect(() =>
+      reduceRuntimeEvents(
+        [runCreated(0), event(1, { type: "model.request.started", providerId: "provider-test" })],
+        runId,
+      ),
+    ).toThrow(/model\.request\.started requires running status/);
+  });
+
+  it("rejects GUI actions based on an older observation and preserves unknown side effects", () => {
+    expect(() => reduceRuntimeEvents([...runningEvents(), clickStarted(5, "old-observation" as ObservationId)], runId)).toThrow(
+      /is based on old-observation, not latest observation/,
+    );
+
+    const unknown = reduceRuntimeEvents(
+      [
+        ...runningEvents(),
+        waitStarted(5),
+        event(6, { type: "run.finished", outcome: "outcome_unknown" }),
+      ],
+      runId,
+    );
+    expect(unknown.status).toBe("finished");
+    expect(unknown.outcome).toBe("outcome_unknown");
+    expect(unknown.unresolvedActionId).toBe(actionId);
   });
 });
 
@@ -458,6 +519,71 @@ describe("readRuntimeEvents", () => {
     );
   });
 
+  it("round-trips the required fields of every current RuntimeEvent", () => {
+    const fixtures: RuntimeEvent[] = [
+      runCreated(0),
+      runStarted(0),
+      event(0, { type: "computer.open.started" }),
+      event(0, { type: "computer.open.completed", computerSessionId: "computer-test" as ComputerSessionId }),
+      event(0, {
+        type: "observation.created",
+        observation: {
+          id: observationId,
+          runId,
+          computerSessionId: "computer-test" as ComputerSessionId,
+          capturedAt: "2026-01-01T00:00:00.000Z",
+          viewport: { width: 1, height: 1, coordinateSpace: "physical" },
+          screenshot: {
+            assetId: "asset-test" as AssetId,
+            relativePath: "assets/one.png",
+            mediaType: "image/png",
+            byteLength: 1,
+          },
+        },
+      }),
+      event(0, { type: "model.request.started", providerId: "provider-test" }),
+      event(0, { type: "model.response.received", turn: { type: "finish", summary: "done" } }),
+      event(0, { type: "model.request.failed", category: "provider", message: "unavailable" }),
+      event(0, {
+        type: "tool.call.received",
+        call: { id: callId, name: "example", arguments: { nested: [true, 1, "ok", null] } },
+      }),
+      event(0, { type: "tool.call.rejected", callId, reason: "policy" }),
+      event(0, {
+        type: "tool.call.completed",
+        result: { callId, status: "completed", output: { ok: true } },
+      }),
+      event(0, {
+        type: "tool.call.failed",
+        result: { callId, status: "failed", error: { code: "FAILED", message: "no" } },
+      }),
+      event(0, { type: "action.proposed", action: { actionId, kind: "wait", durationMs: 1 } }),
+      event(0, { type: "action.execution.started", action: { actionId, kind: "wait", durationMs: 1 } }),
+      event(0, {
+        type: "action.execution.completed",
+        receipt: { actionId, status: "completed", startedAt: "2026-01-01T00:00:00.000Z" },
+      }),
+      event(0, {
+        type: "action.execution.failed",
+        receipt: { actionId, status: "failed", startedAt: "2026-01-01T00:00:00.000Z" },
+      }),
+      event(0, { type: "run.paused", reason: "operator" }),
+      event(0, { type: "run.resumed" }),
+      event(0, { type: "approval.requested", requestId: "approval-1", callId, reason: "confirm" }),
+      event(0, { type: "approval.resolved", requestId: "approval-1", approved: true }),
+      event(0, { type: "user.input.requested", question: "Where?" }),
+      event(0, { type: "user.input.received", text: "Here." }),
+      event(0, { type: "runtime.error", category: "runtime", message: "error" }),
+      event(0, { type: "run.finished", outcome: "failed", summary: "failed" }),
+    ];
+
+    expect(fixtures).toHaveLength(runtimeEventTypes.length);
+    for (const fixture of fixtures) {
+      const parsed = runtimeEventSchema.parse(JSON.parse(JSON.stringify(fixture)));
+      expect(parsed).toEqual(fixture);
+    }
+  });
+
   it("rejects cross-field ownership and receipt mismatches at the schema boundary", () => {
     const observation = {
       eventId: "event-0",
@@ -548,6 +674,12 @@ describe("Event, Asset and Snapshot integration", () => {
     const writer = new JsonlRunEventWriter(trajectoryPath, runId);
     await writer.append({ runId, type: "run.created", goal: "observe" });
     await writer.append({ runId, type: "run.started" });
+    await writer.append({ runId, type: "computer.open.started" });
+    await writer.append({
+      runId,
+      type: "computer.open.completed",
+      computerSessionId: "computer-integration" as ComputerSessionId,
+    });
     await writer.append({
       runId,
       type: "observation.created",

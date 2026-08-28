@@ -6,7 +6,9 @@ import type {
   ActionId,
   AssetId,
   AssetRef,
+  ComputerSessionId,
   EventId,
+  JsonValue,
   ObservationId,
   RunId,
   RunOutcome,
@@ -26,6 +28,8 @@ export interface RunSnapshot {
   pendingUserQuestion?: string;
   unresolvedActionId?: ActionId;
   createdAt?: string;
+  computerOpenStartedAt?: string;
+  computerSessionId?: ComputerSessionId;
   startedAt?: string;
   endedAt?: string;
 }
@@ -62,12 +66,21 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       if (snapshot.status !== "starting") {
         throw new Error(`computer.open.started requires starting status, got ${snapshot.status}`);
       }
-      return snapshot;
+      if (snapshot.computerOpenStartedAt !== undefined || snapshot.computerSessionId !== undefined) {
+        throw new Error("computer.open.started was already committed for this run");
+      }
+      return { ...snapshot, computerOpenStartedAt: event.occurredAt };
     case "computer.open.completed":
       if (snapshot.status !== "starting") {
         throw new Error(`computer.open.completed requires starting status, got ${snapshot.status}`);
       }
-      return snapshot;
+      if (snapshot.computerOpenStartedAt === undefined) {
+        throw new Error("computer.open.completed requires computer.open.started");
+      }
+      if (snapshot.computerSessionId !== undefined) {
+        throw new Error("computer.open.completed was already committed for this run");
+      }
+      return { ...snapshot, computerSessionId: event.computerSessionId };
     case "observation.created":
       if (event.observation.runId !== event.runId) {
         throw new Error(
@@ -76,6 +89,14 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       }
       if (snapshot.status !== "starting" && snapshot.status !== "running") {
         throw new Error(`observation.created requires an active run, got ${snapshot.status}`);
+      }
+      if (snapshot.computerSessionId === undefined) {
+        throw new Error("observation.created requires a completed computer.open");
+      }
+      if (event.observation.computerSessionId !== snapshot.computerSessionId) {
+        throw new Error(
+          `observation ${event.observation.id} belongs to session ${event.observation.computerSessionId}, not ${snapshot.computerSessionId}`,
+        );
       }
       return {
         ...snapshot,
@@ -87,7 +108,12 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
     case "model.request.failed":
     case "tool.call.received":
     case "tool.call.rejected":
+    case "tool.call.completed":
+    case "tool.call.failed":
     case "action.proposed":
+      if (snapshot.status !== "running") {
+        throw new Error(`${event.type} requires running status, got ${snapshot.status}`);
+      }
     case "runtime.error":
       return snapshot;
     case "action.execution.started":
@@ -96,6 +122,16 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       }
       if (snapshot.pendingApproval !== undefined || snapshot.pendingUserQuestion !== undefined) {
         throw new Error("action.execution.started is not allowed while user input or approval is pending");
+      }
+      if (event.action.kind !== "wait") {
+        if (snapshot.latestObservationId === undefined) {
+          throw new Error(`action ${event.action.actionId} requires a current observation`);
+        }
+        if (event.action.basedOn !== snapshot.latestObservationId) {
+          throw new Error(
+            `action ${event.action.actionId} is based on ${event.action.basedOn}, not latest observation ${snapshot.latestObservationId}`,
+          );
+        }
       }
       if (snapshot.unresolvedActionId !== undefined) {
         throw new Error(
@@ -221,7 +257,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         };
       }
     case "run.finished": {
-      if (snapshot.unresolvedActionId !== undefined) {
+      if (snapshot.unresolvedActionId !== undefined && event.outcome !== "outcome_unknown") {
         throw new Error("run.finished is not allowed while a GUI action is unresolved");
       }
       if (
@@ -474,10 +510,20 @@ const observationSchema = z.object({
   viewport: viewportSchema,
   screenshot: assetRefSchema,
 });
+const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.null(),
+    z.boolean(),
+    z.number().finite(),
+    z.string(),
+    z.array(jsonValueSchema),
+    z.record(jsonValueSchema),
+  ]),
+);
 const toolCallSchema = z.object({
   id: nonEmptyString,
   name: nonEmptyString,
-  arguments: z.unknown(),
+  arguments: jsonValueSchema,
 });
 const modelTurnSchema = z.union([
   z.object({
@@ -513,7 +559,7 @@ const actionIntentSchema = z.discriminatedUnion("kind", [
 ]);
 const actionReceiptSchema = z.object({
   actionId: nonEmptyString,
-  status: z.enum(["completed", "refused", "failed", "cancelled", "outcome_unknown"]),
+  status: z.enum(["completed", "refused", "failed", "cancelled"]),
   startedAt: nonEmptyString,
   endedAt: nonEmptyString.optional(),
   durationMs: z.number().finite().nonnegative().optional(),
@@ -555,6 +601,24 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("tool.call.rejected"),
     callId: nonEmptyString,
     reason: z.string(),
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("tool.call.completed"),
+    result: z.object({
+      callId: nonEmptyString,
+      status: z.literal("completed"),
+      output: jsonValueSchema,
+    }),
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("tool.call.failed"),
+    result: z.object({
+      callId: nonEmptyString,
+      status: z.enum(["failed", "rejected"]),
+      error: z.object({ code: nonEmptyString, message: z.string() }),
+    }),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("action.proposed"), action: actionIntentSchema }),
   z.object({ ...eventBaseSchema, type: z.literal("action.execution.started"), action: actionIntentSchema }),

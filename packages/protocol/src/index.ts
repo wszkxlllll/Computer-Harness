@@ -35,11 +35,41 @@ export interface ObservationFrame {
   screenshot: AssetRef;
 }
 
+/** Raw computer output before Runtime persists its screenshot asset. */
+export interface ObservationCapture {
+  capturedAt: string;
+  viewport: Viewport;
+  screenshot: {
+    mediaType: "image/png" | "image/jpeg";
+    data: Uint8Array;
+  };
+}
+
 export interface ToolCall {
   id: ToolCallId;
   name: string;
-  arguments: unknown;
+  arguments: JsonValue;
 }
+
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type ToolResult =
+  | {
+      callId: ToolCallId;
+      status: "completed";
+      output: JsonValue;
+    }
+  | {
+      callId: ToolCallId;
+      status: "failed" | "rejected";
+      error: { code: string; message: string };
+    };
 
 export type ModelTurn =
   | {
@@ -73,7 +103,7 @@ export type ActionIntent =
 
 export interface ActionReceipt {
   actionId: ActionId;
-  status: "completed" | "refused" | "failed" | "cancelled" | "outcome_unknown";
+  status: "completed" | "refused" | "failed" | "cancelled";
   startedAt: string;
   endedAt?: string;
   durationMs?: number;
@@ -95,7 +125,6 @@ export type RunStatus =
   | "waiting_user"
   | "waiting_approval"
   | "paused"
-  | "finishing"
   | "finished";
 
 export type RunOutcome =
@@ -123,6 +152,11 @@ export type RuntimeEventData =
   | { type: "model.request.failed"; category: string; message: string }
   | { type: "tool.call.received"; call: ToolCall }
   | { type: "tool.call.rejected"; callId: ToolCallId; reason: string }
+  | { type: "tool.call.completed"; result: Extract<ToolResult, { status: "completed" }> }
+  | {
+      type: "tool.call.failed";
+      result: Extract<ToolResult, { status: "failed" | "rejected" }>;
+    }
   | { type: "action.proposed"; action: ActionIntent }
   | { type: "action.execution.started"; action: ActionIntent }
   | { type: "action.execution.completed"; receipt: ActionReceipt }
@@ -155,6 +189,8 @@ export const runtimeEventTypes = [
   "model.request.failed",
   "tool.call.received",
   "tool.call.rejected",
+  "tool.call.completed",
+  "tool.call.failed",
   "action.proposed",
   "action.execution.started",
   "action.execution.completed",

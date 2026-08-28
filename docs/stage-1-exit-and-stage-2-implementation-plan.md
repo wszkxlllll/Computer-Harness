@@ -86,7 +86,8 @@ S2-0 至少建立以下不变量：
 - 主动纠正在 running 中保持 running，在 paused 中保持 paused；
 - waiting_approval 中不接受普通用户纠正来隐式绕过审批；先明确 resolve/deny approval；
 - pause 只在安全边界生效，resume 只允许从 paused 发生；
-- unresolved GUI Action 存在时不能直接 finish。
+- unresolved GUI Action 存在时不能以 succeeded/failed/cancelled 等确定结果 finish；只能以
+  显式 `outcome_unknown` 收口，并保留未决动作。
 
 为区分“刚创建的空投影”和“已经处理过 run.created”，`RunSnapshot` 可以加入
 `createdAt?: string`。它有当前生产者、当前消费者和明确的状态机用途，不属于预留字段。
@@ -481,7 +482,8 @@ Fake 不是 Mock 网站，也不用于声称 GUI 能力。它们是确定性 Run
 - ActionReceipt 从 Protocol 类型移除伪终态 `outcome_unknown`（S2-0 的事件边界已经先拒绝该值）；
 - 定义 ObservationCapture（属于 Computer/Runtime 接口，不写入 Trajectory）。
 
-退出门槛：所有新增 Event round-trip，旧 fixture 有明确迁移结果。
+退出门槛：所有新增 Event round-trip；旧 fixture 若缺少 `approval.callId` 或仍使用旧的
+`ActionReceipt.outcome_unknown`，必须明确标为“需重新导出/迁移”，不得静默补默认值。
 
 ### S2-2：Runtime 骨架
 

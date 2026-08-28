@@ -220,7 +220,7 @@ PlanningTask 不由 Runtime 擅自重写。模型收到纠正后，可以调用 
 
 - 不能假设动作被取消或没有发生；
 - 等待 Driver 返回 terminal receipt；
-- 若结果未知，保留 `outcome_unknown`；
+- 若结果未知，保留未决动作；只有 Run 以 `outcome_unknown` 收口时才记录该 Run 结果；
 - 重新 Observe；
 - 再把用户纠正交给下一轮模型。
 

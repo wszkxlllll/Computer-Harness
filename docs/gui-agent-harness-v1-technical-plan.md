@@ -207,8 +207,28 @@ Provider 世界与 Runtime 世界的正式边界为：
 interface ToolCall {
   id: ToolCallId;
   name: string;
-  arguments: unknown;
+  arguments: JsonValue;
 }
+
+type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+type ToolResult =
+  | {
+      callId: ToolCallId;
+      status: "completed";
+      output: JsonValue;
+    }
+  | {
+      callId: ToolCallId;
+      status: "failed" | "rejected";
+      error: { code: string; message: string };
+    };
 
 type ModelTurn =
   | {
@@ -278,7 +298,7 @@ V1 原则：
 ```ts
 interface ActionReceipt {
   actionId: ActionId;
-  status: "completed" | "refused" | "failed" | "cancelled" | "outcome_unknown";
+  status: "completed" | "refused" | "failed" | "cancelled";
   startedAt: string;
   endedAt?: string;
   durationMs?: number;
@@ -288,6 +308,10 @@ interface ActionReceipt {
 ```
 
 `completed` 只表示 Driver 已接受并完成动作调用，不表示用户目标或页面语义已经成功。
+
+`ActionReceipt` 不使用 `outcome_unknown` 伪装成一个已完成的动作终态。若
+`action.execution.started` 已经持久化，但 Runtime 无法确认 GUI 副作用是否发生，则不写
+虚假的 completed/failed Receipt，保留未决动作并让 Run 进入 `outcome_unknown` 恢复路径。
 
 ### 5.8 Run 状态与结果
 
@@ -299,7 +323,6 @@ type RunStatus =
   | "waiting_user"
   | "waiting_approval"
   | "paused"
-  | "finishing"
   | "finished";
 
 type RunOutcome =
@@ -331,7 +354,7 @@ interface ModelMessage {
 type ModelContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; asset: AssetRef }
-  | { type: "tool_result"; toolCallId: ToolCallId; result: unknown };
+  | { type: "tool_result"; result: ToolResult };
 ```
 
 `ContextCompiler` 产生 `ModelInput`，`ProviderAdapter` 消费它。Runtime 不拼接任何厂商专用消息。
@@ -403,6 +426,11 @@ V1 所有工具都必须在当前 Run 内返回明确结果后才能进入下一
 5. 写入对应 Runtime Event；
 6. 将结构化 Tool Result 加入下一轮 Context。
 
+`ToolResult` 是所有 Tool 返回 Provider 世界的统一结果。Computer Tool 仍以
+`ActionIntent/ActionReceipt` 表达 GUI 副作用事实，但在动作结束并获得后续 Observation 后，
+Runtime 还要为原始 `ToolCallId` 产生对应 ToolResult。Planning、Control 和 Side Tool 则直接
+产生 ToolResult。这样 Tool Registry 不需要把所有工具伪装成 GUI Action。
+
 V1 对一轮多个调用采用保守规则：
 
 - 可以接受多个不产生 GUI 副作用的 Planning/Control 调用，并按顺序执行；
@@ -417,7 +445,11 @@ V1 对一轮多个调用采用保守规则：
 ```ts
 interface Computer {
   open(options: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSession>;
-  observe(session: ComputerSession, signal: AbortSignal): Promise<ObservationFrame>;
+  observe(
+    session: ComputerSession,
+    observationId: ObservationId,
+    signal: AbortSignal,
+  ): Promise<ObservationCapture>;
   execute(
     session: ComputerSession,
     action: ActionIntent,
@@ -425,9 +457,24 @@ interface Computer {
   ): Promise<ActionReceipt>;
   close(session: ComputerSession): Promise<void>;
 }
+
+interface ObservationCapture {
+  capturedAt: string;
+  viewport: Viewport;
+  screenshot: {
+    mediaType: "image/png" | "image/jpeg";
+    data: Uint8Array;
+  };
+}
 ```
 
 `Computer` 只表达 Harness 所需语义，不原样暴露 `cua-driver` 的全部 API。
+
+`ObservationFrame` 是 Runtime 在截图资产成功落盘后创建的公共事实，不应由 Computer
+Adapter 提前构造一个尚未持久化的 AssetRef。Runtime 先分配 `ObservationId` 并传给
+`observe`；Adapter 可以在内部建立该 ID 到私有 Driver Frame 的映射，返回原始
+`ObservationCapture`；随后 Runtime 写入 Asset，再构造并 append
+`observation.created`。
 
 ### 8.2 CuaDriverComputer 职责
 
@@ -534,9 +581,9 @@ running
   ├─ model asks user ─────────→ waiting_user ── resume ─→ running
   ├─ policy needs approval ──→ waiting_approval ───────→ running / finished
   ├─ pause ──────────────────→ paused ───────── resume → running
-  ├─ finish requested ───────→ finishing ──────────────→ finished
-  ├─ cancel / budget / fatal error ───────────────────→ finishing
-  └─ uncertain side effect ──→ paused or finishing(outcome_unknown)
+  ├─ finish requested ───────→ finished
+  ├─ cancel / budget / fatal error ───────────────────→ finished
+  └─ uncertain side effect ──→ finished(outcome_unknown; unresolved action retained)
 ```
 
 非法状态转换必须抛出内部错误并写入 `runtime.error`，不能静默修改状态。
@@ -631,6 +678,10 @@ interface RuntimePolicy {
 
 Policy 使用确定性规则为主。不要在 V1 中把 Policy 变成第二个大模型 Agent。
 
+`approval.requested` 必须同时记录 Runtime 生成的 `requestId` 和被审批的
+`ToolCallId`。审批不是一个脱离动作的全局布尔值；`approval.resolved` 只能解析当前待定
+request。拒绝后为原 ToolCall 产生 rejected ToolResult 并重新规划，不自动取消整个 Run。
+
 ## 十二、RuntimeEvent、落盘与崩溃语义
 
 ### 12.1 Event 基础字段
@@ -662,6 +713,8 @@ model.response.received
 model.request.failed
 tool.call.received
 tool.call.rejected
+tool.call.completed
+tool.call.failed
 action.proposed
 action.execution.started
 action.execution.completed
@@ -705,7 +758,8 @@ append action.execution.completed / failed
 
 如果存在 `started` 而没有终态事件：
 
-- 投影状态标记该动作 `outcome_unknown`；
+- 投影状态保留该动作的 `unresolvedActionId`；只有显式的
+  `run.finished(outcome_unknown)` 才把 Run 收口为 `outcome_unknown`；
 - Runtime 不自动重复执行；
 - 恢复时先重新 Observe；
 - 无法通过观察确认时暂停并请求用户处理；
@@ -749,7 +803,14 @@ interface RunSnapshot {
   outcome?: RunOutcome;
   stepCount: number;
   latestObservationId?: ObservationId;
-  pendingApproval?: PendingApproval;
+  createdAt?: string;
+  computerOpenStartedAt?: string;
+  computerSessionId?: ComputerSessionId;
+  pendingApproval?: {
+    requestId: string;
+    callId: ToolCallId;
+    reason: string;
+  };
   pendingUserQuestion?: string;
   unresolvedActionId?: ActionId;
   startedAt?: string;
@@ -1044,6 +1105,7 @@ Fake 实现只属于测试基础设施，不进入产品 CLI。
 - ToolRegistry；
 - RuntimePolicy；
 - ContextCompiler 默认实现；
+- `ToolResult` 以及 `tool.call.completed/failed` 事件；
 - 每 Run 单消费者命令队列；
 - `submitUserInput`、审批结果和暂停/继续/取消的安全边界处理；
 - FakeProvider/FakeComputer 集成测试。
