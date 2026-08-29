@@ -4,8 +4,9 @@ Computer Harness 是一个独立的、Provider-neutral 的多模态 GUI Agent Ru
 实验仓库。它位于多模态模型和 Computer Driver 之间，负责统一 Observation、
 ToolCall、GUI Action、运行状态和轨迹记录。
 
-当前仓库已完成 Stage 2 Fake Runtime 和 S3-0 合同收口，下一步进入 Stage 3：
-实现一个真实 `CuaDriverComputer`。当前状态是“Runtime 可测试、真实桌面未宣称通过”：
+当前仓库已完成 Stage 2 Fake Runtime 和 S3-0 合同收口，下一步进入 Stage 3：先完成 CUA
+能力/Schema 探测和协议决策，再实现真实 `CuaDriverComputer`。当前状态是“Runtime 可测试、
+真实桌面未宣称通过”：
 
 - 已建立 pnpm workspace；
 - 已固定 TypeScript、Vitest 工程基线和 CUA Driver 0.22.2；外部输入需要 Schema 校验时再按包引入 Zod；
@@ -76,7 +77,9 @@ Protocol + EventWriter + Reducer
         ↓
 FakeProvider/FakeComputer + RunController（Stage 2 已完成）
         ↓
-CuaDriverComputer（Stage 3 当前入口）
+CUA 能力矩阵与协议决策（Stage 3 当前入口）
+        ↓
+CuaDriverComputer
         ↓
 第一个真实 Provider
         ↓
@@ -87,6 +90,9 @@ CuaDriverComputer（Stage 3 当前入口）
 
 - `docs/gui-agent-harness-v1-technical-plan.md`
 - `docs/multimodal-gui-agent-harness-product-plan.md`
+- `docs/stage-3-implementation-entry.md`
+- `docs/stage-3-cua-capability-audit-and-provider-boundary.md`
+- `docs/stage-3-s1-capability-probe-results.md`
 
 ## 安全与隐私
 

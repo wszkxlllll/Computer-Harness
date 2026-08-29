@@ -9,11 +9,12 @@
   },
   "scripts": {
     "build": "pnpm run typecheck",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc -b && pnpm exec tsc --noEmit -p spikes/cua-driver/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "probe:cua": "pnpm --filter @computer-harness/cua-driver-spike probe",
-    "probe:cua:daemon": "pnpm --filter @computer-harness/cua-driver-spike exec tsx probe-daemon.ts"
+    "probe:cua:daemon": "pnpm --filter @computer-harness/cua-driver-spike exec tsx probe-daemon.ts",
+    "probe:cua:capabilities": "pnpm --filter @computer-harness/cua-driver-spike probe:capabilities"
   },
   "devDependencies": {
     "@types/node": "22.10.2",

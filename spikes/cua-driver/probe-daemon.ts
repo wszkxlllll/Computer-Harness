@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import {
   CuaDriver,
@@ -24,6 +25,8 @@ interface ChildResult {
   stderr: string;
 }
 
+type DaemonProcess = ChildProcessByStdio<null, Readable, Readable>;
+
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
@@ -47,7 +50,8 @@ function normalizeWindowsNamedPipe(value: string): string {
   if (!match) {
     return value;
   }
-  return `\\\\.\\pipe\\${match[1].replace(/\\+/g, "\\")}`;
+  const pipeName = match[1];
+  return pipeName === undefined ? value : `\\\\.\\pipe\\${pipeName.replace(/\\+/g, "\\")}`;
 }
 
 function parseOptions(args: string[]): ProbeOptions {
@@ -119,7 +123,7 @@ async function readPngDimensions(path: string): Promise<{ width: number; height:
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
-function collectChild(child: ChildProcessWithoutNullStreams): Promise<ChildResult> {
+function collectChild(child: DaemonProcess): Promise<ChildResult> {
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -136,7 +140,7 @@ async function runCli(binaryPath: string, args: string[]): Promise<ChildResult> 
   return collectChild(spawn(binaryPath, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }));
 }
 
-async function waitForDaemon(options: ProbeOptions, daemon: ChildProcessWithoutNullStreams): Promise<ChildResult> {
+async function waitForDaemon(options: ProbeOptions, daemon: DaemonProcess): Promise<ChildResult> {
   const deadline = Date.now() + options.startupTimeoutMs;
   let last: ChildResult = { code: null, signal: null, stdout: "", stderr: "" };
   while (Date.now() < deadline) {
@@ -152,7 +156,7 @@ async function waitForDaemon(options: ProbeOptions, daemon: ChildProcessWithoutN
   throw new Error(`daemon readiness timeout: ${last.stdout}\n${last.stderr}`);
 }
 
-async function stopDaemon(options: ProbeOptions, daemon: ChildProcessWithoutNullStreams): Promise<ChildResult> {
+async function stopDaemon(options: ProbeOptions, daemon: DaemonProcess): Promise<ChildResult> {
   const stopResult = await runCli(options.binaryPath, ["stop", "--socket", options.socketPath]);
   if (stopResult.code === 0 && daemon.exitCode === null && daemon.signalCode === null) {
     await new Promise<void>((resolveExit) => {

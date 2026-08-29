@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "probe": "tsx probe.ts",
-    "probe:daemon": "tsx probe-daemon.ts"
+    "probe:daemon": "tsx probe-daemon.ts",
+    "probe:capabilities": "tsx capability-probe.ts"
   },
   "dependencies": {
     "@trycua/cua-driver": "0.22.2"

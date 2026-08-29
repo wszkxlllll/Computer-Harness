@@ -36,7 +36,13 @@ function parseOptions(args: string[]): ProbeOptions {
     throw new Error("--click-x and --click-y must be provided together");
   }
 
-  return { allowInput, click, typeText, outputDir, session };
+  return {
+    allowInput,
+    outputDir,
+    session,
+    ...(click === undefined ? {} : { click }),
+    ...(typeText === undefined ? {} : { typeText }),
+  };
 }
 
 function readStringOption(args: string[], name: string): string | undefined {

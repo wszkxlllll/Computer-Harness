@@ -32,6 +32,29 @@ Only run the input form when the desktop is prepared for the test. The probe wri
 JSON metadata and PNG captures locally; inspect the result before changing the
 Computer adapter.
 
+## Stage 3 capability probe (read-only)
+
+This probe records the CUA SDK/daemon contract without taking a screenshot or sending desktop
+input. It calls typed `metadata`, `listToolsJson`, session inspection, and the generic
+`callTool` path, then writes a JSON-safe report under the ignored output directory:
+
+```text
+pnpm --filter @computer-harness/cua-driver-spike probe:capabilities -- --session stage3-capabilities
+```
+
+To inspect an already running daemon instead of the embedded SDK, provide its private socket:
+
+```text
+pnpm --filter @computer-harness/cua-driver-spike probe:capabilities -- \
+  --socket <private-socket> --session stage3-capabilities
+```
+
+The report includes driver metadata, tool-inventory shape/count, typed versus generic session
+views, host-level session summaries, health/permission results, execution mode, availability,
+and per-operation errors. Prefer an absolute `--output` path when invoking through pnpm so the
+result is not made relative to the selected package's working directory. A successful read-only
+probe is not evidence that input actions or frame freshness work; those remain S3-2/S3-4 gates.
+
 ## Independent daemon comparison
 
 The embedded SDK runs inside `node.exe` and inherits its DPI context. To compare it

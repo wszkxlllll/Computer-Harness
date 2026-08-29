@@ -5,6 +5,12 @@
 > 适用范围：V1 单 Agent、单 Run、单 ComputerSession 的 TypeScript 实现  
 > 核心基础设施：`@trycua/cua-driver@0.22.2`
 
+> Stage 3 实施提示（2026-08-29）：真实 CUA 0.22.2 Schema 审计发现，桌面像素动作没有
+> Driver Frame token，且当前 `scroll(deltaX, deltaY)` 与 CUA 的落点/方向/粒度语义不等价。
+> Stage 3 的具体施工顺序、两级 Frame 新鲜度和协议决策以
+> [`stage-3-cua-capability-audit-and-provider-boundary.md`](./stage-3-cua-capability-audit-and-provider-boundary.md)
+> 为准；不要把本文中的所有 `CuaFrameRef` 描述视为桌面像素路径已经具备的能力。
+
 ## 一、文档目的
 
 本技术计划书把已经确认的产品方案下沉为可直接施工、测试和验收的工程设计。它重点解决以下问题：
