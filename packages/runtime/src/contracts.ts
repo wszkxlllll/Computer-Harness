@@ -2,8 +2,7 @@ import type {
   ActionId,
   ActionIntent,
   AssetId,
-  ComputerCapabilities,
-  ComputerSessionId,
+  ComputerSessionDescriptor,
   EventId,
   JsonValue,
   ModelTurn,
@@ -20,14 +19,8 @@ import type {
 } from "@computer-harness/protocol";
 import type { RunSnapshot } from "@computer-harness/trajectory";
 
-export interface ComputerSession {
-  id: ComputerSessionId;
-  backend: string;
-  status: "opening" | "ready" | "closing" | "closed" | "failed";
-  viewport: Viewport;
-  capabilities: ComputerCapabilities;
-  openedAt: string;
-}
+/** Runtime uses the serializable protocol description; adapter handles stay private. */
+export type ComputerSession = ComputerSessionDescriptor;
 
 export interface ComputerOpenOptions {
   viewport?: Viewport;
@@ -122,7 +115,8 @@ interface ToolDefinitionBase {
   description: string;
   category: ToolCategory;
   inputSchema?: JsonValue;
-  validate?: (args: JsonValue) => void;
+  /** Runtime argument validation; inputSchema only describes the model-facing shape. */
+  validate: (args: JsonValue) => void;
 }
 
 export interface ComputerToolDefinition extends ToolDefinitionBase {

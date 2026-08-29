@@ -123,6 +123,15 @@ export interface ComputerCapabilities {
   accessibility: boolean;
 }
 
+/** Stable, serializable description of an opened Computer session. */
+export interface ComputerSessionDescriptor {
+  readonly id: ComputerSessionId;
+  readonly backend: string;
+  readonly viewport: Readonly<Viewport>;
+  readonly capabilities: Readonly<ComputerCapabilities>;
+  readonly openedAt: string;
+}
+
 export type RunStatus =
   | "created"
   | "starting"
@@ -150,7 +159,7 @@ export type RuntimeEventData =
   | { type: "run.created"; goal: string }
   | { type: "run.started" }
   | { type: "computer.open.started" }
-  | { type: "computer.open.completed"; computerSessionId: ComputerSessionId }
+  | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
   | { type: "observation.created"; observation: ObservationFrame }
   | { type: "model.request.started"; providerId: string }
   | { type: "model.response.received"; turn: ModelTurn }

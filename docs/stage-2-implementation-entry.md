@@ -1,6 +1,6 @@
 # Stage 2 实施 Agent 唯一入口
 
-日期：2026-08-28
+日期：2026-08-29
 
 ## 目的
 
@@ -65,11 +65,17 @@
 
 ## 当前代码状态
 
-S2-1.1、S2-2 happy path、S2-2a 和 S2-3 已经实现：Protocol 关联已收口，`packages/runtime`
+S2-1.1、S2-2 happy path、S2-2a、S2-3、S3-0 Runtime 语义收口和 S3-0 Computer 合同收口已经
+实现：Protocol 关联已收口，`packages/runtime`
 已拆为少量职责文件，Fake Run 可以完成落盘和重放，命令 Inbox 与控制语义已经接入。不要重复
 实现或回退这些提交。
 
-最新独立审计结果与本轮实施记录以 `stage-2-s0-audit-and-gates.md` 最后一节为准。
+当前 Runtime/Trajectory 测试为 59 项，覆盖 S2-4 故障注入、真实参数预检、同批命令最终状态、cleanup
+diagnostic 和统一 Action/Capability/Viewport 校验。Stage 2 的 Fake Runtime 门禁已完成；这不
+等于真实桌面或真实 Provider 已可用。
+
+最新独立审计结果、问题优先级与施工顺序以
+`stage-2-s0-audit-and-gates.md` 最后一节“架构、正式模块接口与代码质量复审”为准。
 
 ## 本轮已完成的工作
 
@@ -144,13 +150,33 @@ CUA Adapter 仍分别属于后续 Stage 4 和 Stage 3。
 本阶段仍不接入真实 Provider/CUA、后台 Job、Verifier、Dashboard 或新的公共事件/API；这些
 属于后续 Stage 3/4 的独立施工范围。
 
+### E. S3-0 Runtime 语义收口（已完成）
+
+- `ToolDefinition.validate` 现在是必需的 Runtime preflight 合同；`inputSchema` 仍只描述模型
+  输入，不承担运行时校验；整轮参数检查失败时不会执行同批的其他 Tool；
+- `drainCommands()` 不再缓存与 Snapshot 重复的 `paused` 标志，pause/resume/correction 的
+  判断统一以 drain 完成后的最终 `snapshot.status` 为准；
+- 删除无实际语义的 `startPromise` 和 `pendingModelTurn.session`；公开读取接口返回副本；
+- 增加真实“非法 Computer Tool + 可计数 Non-Computer Tool”反例，以及 pause → resume、pause
+  → correction → resume 的 FIFO 测试。
+
+### F. S3-0 Computer 合同收口（已完成）
+
+- `ComputerSession` 收敛为只读稳定描述（id、backend、viewport、capabilities、openedAt），
+  RuntimeEvent 的 `computer.open.completed` 持久化完整描述；Driver handle 不进入公共协议；
+- 增加窄的 `onCleanupError` 诊断回调，Writer flush/close 和 Computer close 失败均可观察，但
+  不改写已经确定的 `RunOutcome`；
+- 新增纯函数 `validateActionIntent()`，在 `action.proposed` 前统一检查当前 Observation、
+  viewport 边界和 pointer/keyboard 能力；CUA 特有的 Frame token 检查仍由 Adapter 负责；
+- 增加越界坐标、拖拽端点、键盘能力和滚动能力测试。
+
 ## 下一步
 
-进入 Stage 3 CUA Adapter 前，先以本文件和
-[`stage-2-s0-audit-and-gates.md`](./stage-2-s0-audit-and-gates.md) 的实际结果为基线，另立
-Stage 3 施工入口。Stage 3 只负责把一个真实 Computer Backend 接到现有 `Computer` 接口，
-并验证 Observation、Action、Frame 绑定、坐标空间和 Driver 生命周期；不回头把真实 CUA、
-Provider、Dashboard 或验证器混进 Stage 2 Runtime。
+S3-0 两个窄提交已经完成并通过本地门禁。下一步使用新的
+[`stage-3-implementation-entry.md`](./stage-3-implementation-entry.md) 作为唯一入口，先实现
+一个真实 `CuaDriverComputer`。Stage 3 只负责把经过 Stage 0 验证的 daemon Backend 接到稳定
+`Computer` 接口，并验证 Observation、Action、Frame 绑定、坐标空间和 Driver 生命周期；不把
+真实 Provider、Dashboard、验证器、后台 Job 或 Subagent 混入本轮。
 
 ## Event 当前实现决定
 

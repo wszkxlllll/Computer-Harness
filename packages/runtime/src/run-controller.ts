@@ -38,6 +38,7 @@ import type {
   ToolPolicyDecision,
 } from "./contracts.js";
 import { randomIdFactory, systemClock } from "./defaults.js";
+import { validateActionIntent } from "./action-validation.js";
 import { ToolRegistry } from "./tool-registry.js";
 export interface RunControllerDependencies {
   runId: RunId;
@@ -51,6 +52,14 @@ export interface RunControllerDependencies {
   clock?: Clock;
   idFactory?: IdFactory;
   computerOpenOptions?: ComputerOpenOptions;
+  onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
+}
+
+export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close";
+
+export interface CleanupDiagnostic {
+  operation: CleanupOperation;
+  message: string;
 }
 
 type CallState = "received" | "proposed" | "executing" | "completed" | "failed" | "rejected";
@@ -184,7 +193,6 @@ interface PendingToolTurn {
 
 interface CommandEffects {
   correction: boolean;
-  paused: boolean;
 }
 
 export class RunController {
@@ -199,6 +207,7 @@ export class RunController {
   private readonly clock: Clock;
   private readonly idFactory: IdFactory;
   private readonly computerOpenOptions: ComputerOpenOptions;
+  private readonly onCleanupError: ((diagnostic: CleanupDiagnostic) => void) | undefined;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
   private readonly callStates = new Map<ToolCallId, CallState>();
@@ -208,11 +217,10 @@ export class RunController {
   private snapshot: RunSnapshot;
   private latestObservation: ObservationFrame | undefined;
   private nextSequence = 0;
-  private startPromise: Promise<RunOutcome> | undefined;
   private started = false;
   private pendingApproval: PendingApproval | undefined;
   private pendingToolTurn: PendingToolTurn | undefined;
-  private pendingModelTurn: { session: ComputerSession; turn: ModelTurn } | undefined;
+  private pendingModelTurn: { turn: ModelTurn } | undefined;
 
   public constructor(dependencies: RunControllerDependencies) {
     this.runId = dependencies.runId;
@@ -226,6 +234,7 @@ export class RunController {
     this.clock = dependencies.clock ?? systemClock;
     this.idFactory = dependencies.idFactory ?? randomIdFactory;
     this.computerOpenOptions = dependencies.computerOpenOptions ?? {};
+    this.onCleanupError = dependencies.onCleanupError;
     this.snapshot = {
       runId: this.runId,
       status: "created",
@@ -241,8 +250,7 @@ export class RunController {
       return Promise.reject(new Error(`RunController for ${this.runId} can only start once`));
     }
     this.started = true;
-    this.startPromise = this.run(goal);
-    return this.startPromise;
+    return this.run(goal);
   }
 
   public cancel(reason = "cancelled by caller"): void {
@@ -289,11 +297,11 @@ export class RunController {
   }
 
   public getSnapshot(): RunSnapshot {
-    return this.snapshot;
+    return structuredClone(this.snapshot);
   }
 
   public getEvents(): readonly RuntimeEvent[] {
-    return this.events;
+    return this.events.map((event) => structuredClone(event));
   }
 
   private async run(goal: string): Promise<RunOutcome> {
@@ -305,7 +313,7 @@ export class RunController {
       await this.commitEvent({ type: "run.started" });
       await this.commitEvent({ type: "computer.open.started" });
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
-      await this.commitEvent({ type: "computer.open.completed", computerSessionId: session.id });
+      await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 
       while (this.snapshot.status !== "finished") {
@@ -380,7 +388,7 @@ export class RunController {
           this.throwIfAborted();
           const afterResponse = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused") {
-            this.pendingModelTurn = { session, turn };
+            this.pendingModelTurn = { turn };
             continue;
           }
           if (afterResponse.correction) {
@@ -390,7 +398,7 @@ export class RunController {
         if (turn.type === "finish") {
           const beforeFinish = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused") {
-            this.pendingModelTurn = { session, turn };
+            this.pendingModelTurn = { turn };
             continue;
           }
           if (beforeFinish.correction) {
@@ -414,7 +422,7 @@ export class RunController {
           continue;
         }
         const turnResult = await this.processToolCalls(session, turn.calls);
-        if (turnResult.paused) {
+        if ((this.snapshot.status as string) === "paused") {
           continue;
         }
         const latestEvent = this.events[this.events.length - 1];
@@ -454,12 +462,29 @@ export class RunController {
       this.commandInbox.close();
       try {
         await this.eventWriter.flush();
-      } finally {
-        await this.eventWriter.close().catch(() => undefined);
-        if (session !== undefined) {
-          await this.computer.close(session).catch(() => undefined);
+      } catch (error) {
+        this.reportCleanupError({ operation: "event_writer.flush", message: errorMessage(error) });
+      }
+      try {
+        await this.eventWriter.close();
+      } catch (error) {
+        this.reportCleanupError({ operation: "event_writer.close", message: errorMessage(error) });
+      }
+      if (session !== undefined) {
+        try {
+          await this.computer.close(session);
+        } catch (error) {
+          this.reportCleanupError({ operation: "computer.close", message: errorMessage(error) });
         }
       }
+    }
+  }
+
+  private reportCleanupError(diagnostic: CleanupDiagnostic): void {
+    try {
+      this.onCleanupError?.(diagnostic);
+    } catch {
+      // Diagnostics must never replace the already determined RunOutcome.
     }
   }
 
@@ -476,12 +501,11 @@ export class RunController {
   }
 
   private async drainCommands(): Promise<CommandEffects> {
-    const effects: CommandEffects = { correction: false, paused: false };
+    const effects: CommandEffects = { correction: false };
     for (const command of this.commandInbox.drain()) {
       try {
         const commandEffect = await this.applyCommand(command);
         effects.correction = effects.correction || commandEffect.correction;
-        effects.paused = effects.paused || commandEffect.paused;
         command.resolve();
       } catch (error) {
         command.reject(error);
@@ -526,7 +550,7 @@ export class RunController {
         if (this.snapshot.status === "paused" && this.pendingToolTurn !== undefined) {
           this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
         }
-        return { correction: true, paused: this.snapshot.status === "paused" };
+        return { correction: true };
       case "approval_resolution":
         if (this.snapshot.status !== "waiting_approval" || this.snapshot.pendingApproval === undefined) {
           throw new Error("no approval is waiting for resolution");
@@ -547,7 +571,7 @@ export class RunController {
           this.pendingApproval = undefined;
           await this.rejectToolCall(pending.call.id, "approval denied");
         }
-        return { correction: false, paused: false };
+        return { correction: false };
       case "pause":
         if (this.snapshot.status !== "running") {
           throw new Error(`pause requires running status, got ${this.snapshot.status}`);
@@ -556,13 +580,13 @@ export class RunController {
           throw new Error("pause is not allowed while a GUI action is unresolved");
         }
         await this.commitEvent({ type: "run.paused", reason: command.reason });
-        return { correction: false, paused: true };
+        return { correction: false };
       case "resume":
         if (this.snapshot.status !== "paused") {
           throw new Error(`resume requires paused status, got ${this.snapshot.status}`);
         }
         await this.commitEvent({ type: "run.resumed" });
-        return { correction: false, paused: false };
+        return { correction: false };
     }
   }
 
@@ -603,7 +627,7 @@ export class RunController {
         continue;
       }
       try {
-        definition.validate?.(call.arguments);
+        definition.validate(call.arguments);
       } catch (error) {
         preflight.push({ call, definition, rejection: `invalid arguments: ${errorMessage(error)}` });
         continue;
@@ -639,7 +663,7 @@ export class RunController {
       for (const call of calls) {
         await this.rejectToolCall(call.id, groupRejection);
       }
-      return { correction: false, paused: false };
+      return { correction: false };
     }
 
     const approvalEntry = preflight.find(
@@ -659,12 +683,12 @@ export class RunController {
         definition: approvalEntry.definition,
         session,
       };
-      return { correction: false, paused: false };
+      return { correction: false };
     }
 
     const effects = await this.drainCommands();
     if (effects.correction) {
-      if (effects.paused) {
+      if (this.snapshot.status === "paused") {
         this.pendingToolTurn = {
           session,
           entries: preflight,
@@ -676,7 +700,7 @@ export class RunController {
       }
       return effects;
     }
-    if (effects.paused) {
+    if (this.snapshot.status === "paused") {
       this.pendingToolTurn = { session, entries: preflight, nextIndex: 0, invalidated: false };
       return effects;
     }
@@ -703,7 +727,7 @@ export class RunController {
       }
       const afterTool = await this.drainCommands();
       if (afterTool.correction) {
-        if (afterTool.paused) {
+        if (this.snapshot.status === "paused") {
           this.pendingToolTurn = {
             ...pendingTurn,
             nextIndex: index + 1,
@@ -714,7 +738,7 @@ export class RunController {
         }
         return afterTool;
       }
-      if (afterTool.paused) {
+      if (this.snapshot.status === "paused") {
         this.pendingToolTurn = { ...pendingTurn, nextIndex: index + 1 };
         return afterTool;
       }
@@ -722,7 +746,7 @@ export class RunController {
         return afterTool;
       }
     }
-    return { correction: false, paused: false };
+    return { correction: false };
   }
 
   private async rejectPendingEntries(
@@ -770,6 +794,18 @@ export class RunController {
     const draft = definition.toAction(call.arguments, context);
     this.throwIfAborted();
     const action = makeActionIntent(this.idFactory.actionId(), this.snapshot.latestObservationId, draft);
+    try {
+      validateActionIntent(action, {
+        capabilities: context.session.capabilities,
+        ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+      });
+    } catch (error) {
+      // Deterministic GUI contract violations are a rejected ToolCall, not a
+      // runtime crash. The model can observe the rejection and replan without
+      // any action.proposed or driver side effect being recorded.
+      await this.rejectToolCall(call.id, `invalid GUI action: ${errorMessage(error)}`);
+      return;
+    }
     if (this.callStates.get(call.id) !== "received") {
       throw new Error(`ToolCall ${call.id} is not available for action proposal`);
     }

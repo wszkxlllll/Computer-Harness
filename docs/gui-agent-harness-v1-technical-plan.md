@@ -164,17 +164,19 @@ V1 通过临时文件写入后原子发布保证本地资产不会以半写状�
 ### 5.2 ComputerSession
 
 ```ts
-interface ComputerSession {
-  id: ComputerSessionId;
-  backend: "cua-driver";
-  status: "opening" | "ready" | "closing" | "closed" | "failed";
-  viewport: Viewport;
-  capabilities: ComputerCapabilities;
-  openedAt: string;
+interface ComputerSessionDescriptor {
+  readonly id: ComputerSessionId;
+  readonly backend: string;
+  readonly viewport: Readonly<Viewport>;
+  readonly capabilities: Readonly<ComputerCapabilities>;
+  readonly openedAt: string;
 }
+
+type ComputerSession = ComputerSessionDescriptor;
 ```
 
-它表示当前 Run 控制的 GUI 世界，不等同于聊天会话、模型请求或 CUA 内部授权句柄。
+它表示当前 Run 控制的 GUI 世界，不等同于聊天会话、模型请求或 CUA 内部授权句柄。公开协议只
+持久化稳定描述；Driver handle、连接状态和 Frame Reference 由 Adapter 私有维护。
 
 ### 5.3 ObservationFrame
 
@@ -735,6 +737,9 @@ runtime.error
 run.finished
 ```
 
+`computer.open.completed` 持久化 `ComputerSessionDescriptor`（而不只是 Session ID），因此
+轨迹可以重建 backend、Viewport 和能力集合；Driver 私有句柄不会进入 RuntimeEvent。
+
 事件类型只有出现明确生产者和消费者时才增加。
 
 `action.proposed` 事件额外携带产生它的 `ToolCallId`；`callId` 属于 Runtime 编排关联，不放入
@@ -813,7 +818,7 @@ interface RunSnapshot {
   latestObservationId?: ObservationId;
   createdAt?: string;
   computerOpenStartedAt?: string;
-  computerSessionId?: ComputerSessionId;
+  computerSession?: ComputerSessionDescriptor;
   pendingApproval?: {
     requestId: string;
     callId: ToolCallId;

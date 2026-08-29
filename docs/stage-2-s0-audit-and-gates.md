@@ -1,6 +1,6 @@
 # Stage 2 开工前审计与 S2-0/S2-1/S2-2 结果
 
-日期：2026-08-28
+日期：2026-08-29
 
 ## 结论
 
@@ -9,11 +9,11 @@
 接入真实 Provider 或 CUA；随后完成了 S2-1 协议收口和 S2-2 Fake Runtime 骨架，仍未接入
 真实 Provider 或 CUA。
 
-2026-08-29 最新复审结论：**S2-0、S2-1.1、S2-2a 和 S2-3a/b 已完成并通过当前代码门槛。**
-Runtime 现在先完成同一 ModelTurn 的整组 ToolCall 预检，再允许 GUI 副作用；Provider 返回后和
-动作 started 前均有 Abort 安全边界；在线 Snapshot 由 Writer 实际返回的 Event 投影；每 Run
-已有单消费者命令 Inbox、用户回答/纠正、审批、pause/resume 和 finished 后命令拒绝。仍未接入
-真实 Provider/CUA、后台 Job 或 Dashboard；S2-4 故障注入和退出审计尚未完成。
+2026-08-29 最新复审结论：**Stage 2 的 Fake Runtime 门禁与两项 S3-0 合同收口已经完成。**
+Runtime 已具备整轮 ToolCall 预检、Abort 安全边界、persisted Event 投影、每 Run Inbox、未知
+副作用收口、稳定 Session 描述、可观察 cleanup 失败和统一 GUI Action 校验；当前 59 项测试全部
+通过。真实 Provider、真实 CUA、后台 Job 和 Dashboard 仍未接入，不能把 Fake Runtime 的通过
+写成真实桌面成功率。
 
 ## S2-0/S2-1 已完成的部分
 
@@ -313,8 +313,9 @@ JavaScript 中应采用一套协作式语义：
 S2-2 退出条件仍然保持简单：FakeProvider/FakeComputer 完成一条完整 Run，Event 可从磁盘读回
 并得到与在线状态相同的 Snapshot。此时不要求真实 Provider、CUA、后台任务或 Dashboard。
 
-另有一个低优先级边界：当前 Viewport 的磁盘 Schema 允许宽高为 0。它不阻塞 S2-2，但在
-Stage 3 坐标换算前应收紧为正整数，并添加 0×N/N×0 拒绝测试，避免除零和无效 Frame。
+历史边界：早期 Viewport 的磁盘 Schema 曾允许宽高为 0。S3-0 收口时已改为正整数，并由
+统一 Action 校验拒绝 0×N/N×0 的 Observation；这不是 Stage 3 的坐标特例。真实 CUA 仍需
+继续验证物理/逻辑/参考坐标空间是否与驱动返回一致。
 
 ---
 
@@ -649,6 +650,8 @@ CUA Adapter。
 
 ## 2026-08-29 S2-4 故障注入与退出门禁结果
 
+> 历史记录：本节记录 S3-0 收口前的 48 项测试状态；最终状态以文末“ S3-0 收口实施结果”为准。
+
 S2-4 已在 Fake Runtime 范围内完成验证，没有新增协议状态、重试器或外部依赖：
 
 - `action.execution.started` 写入失败时，`Computer.execute()` 调用次数为 0；
@@ -672,3 +675,276 @@ git diff --check     通过
 
 Stage 2 当前退出条件已在 Fake 环境覆盖。进入 Stage 3 前仍须由真实 CUA Adapter 单独验证
 Observation/Action 的坐标、Frame 绑定和 Driver 生命周期；本阶段没有声称真实桌面已可用。
+
+---
+
+## 2026-08-29 架构、正式模块接口与代码质量复审
+
+> 历史审查记录：本节提出的 S3-0 缺口已在文末实施结果中关闭；保留本节用于追溯审查依据。
+
+### 1. 总结结论
+
+本轮重新阅读了最新 `protocol`、`trajectory`、`runtime`、48 项测试以及当前实施文档。结论不是
+“推翻 Stage 2”，而是：
+
+- 核心架构方向正确。`RuntimeEvent → Writer → Reducer → RunSnapshot`、整轮 Tool preflight、
+  ToolCall/Action 两层语义、每 Run Inbox 和未知副作用收口，都是能覆盖一类问题的通用机制，
+  不是围绕单条轨迹堆出的条件分支；
+- 当前包边界也基本合适。`protocol`、`trajectory`、`runtime` 有真实职责差异，没有提前创建
+  context/providers/jobs/verifier 等空 package；
+- 但“Stage 2 全部门禁已经完成、可以立即写正式 CUA Adapter”的结论偏早。现有测试全部通过，
+  不等于计划中的业务语义全部被覆盖；当前仍有两个可直接触发的 Runtime 问题，以及两个会让
+  正式 Computer 模块返工的合同缺口；
+- 因此下一步不是重写 Runtime，也不是继续增加边界补丁，而是先完成一次窄的 **S3-0 接口收口**，
+  然后再实现 `CuaDriverComputer`。
+
+### 2. 已经形成的正确抽象
+
+以下部分可以保留，不应因新问题回退：
+
+1. `ObservationCapture` 是 Driver 原始输出，`ObservationFrame` 是资产成功发布后的 Runtime
+   事实；这让 Adapter 不必负责 Trajectory 路径和 Event 写入。
+2. `ActionIntent` 只表达 GUI 意图，`ToolCallId` 通过 `action.proposed` Event 关联，不污染
+   Computer 层。
+3. `Computer`、`ProviderAdapter`、`ContextCompiler`、`RuntimePolicy` 和 Store 均通过依赖注入
+   接入，后续真实实现无需修改协议对象的所有者。
+4. GUI 副作用只有在 `action.execution.started` 成功持久化后才允许进入 Driver；结果未知时不
+   自动重试。
+5. 命令 Inbox 是入站控制，RuntimeEvent 是已提交的出站事实，二者没有错误地合成一个
+   AsyncGenerator。
+6. 当前只把 Runtime 包拆成少量职责文件，没有为未来能力创建大量空接口，整体符合项目规模。
+
+### 3. S3-0 前必须修复的 P1 问题
+
+#### 3.1 参数预检合同没有真正成立，现有测试出现假阳性
+
+`ToolDefinition.validate` 当前是可选字段。测试中的 `click` 只在 `toAction()` 内检查参数，并未
+注册 `validate`。所谓“合法 click + 非法 click 在副作用前被参数预检拒绝”的测试，实际因为
+同一 Turn 含有两个 Computer Tool，先触发了“最多一个 GUI Tool”规则；即使完全删除参数校验，
+该测试仍会通过。
+
+这不是补一个测试文案即可。正式 Tool 接入前必须建立真实合同：
+
+- 当前方案下，把 `validate` 设为每个 ToolDefinition 的必需函数；无参数 Tool 也要明确接受
+  `null` 或空对象；
+- `inputSchema` 仍只负责向模型描述参数，不能冒充运行时校验器；
+- 增加“一个会记录执行次数的非 GUI Tool + 一个参数非法的 Computer Tool”反例，断言非 GUI
+  Tool 也没有先执行；同时检查拒绝原因确实来自参数校验；
+- 不为此引入通用 Schema 编译框架或 Tool 泛型体系。第一个真实 Tool 可以在自身模块内共享一个
+  Zod parser，分别供 `validate` 和 `toAction` 使用。
+
+#### 3.2 同一批命令中的 pause → resume 会留下孤立 pending ToolTurn
+
+`drainCommands()` 当前把 `CommandEffects.paused` 以逻辑 OR 累积。若 pause 和 resume 在同一次
+drain 中按 FIFO 依次成功，Snapshot 最终已经回到 `running`，但 `effects.paused` 仍为 true。
+`processToolCalls()` 因此保存一个 pending ToolTurn 并返回；主循环看到的却是 running，于是直接
+请求下一次模型，旧 pending ToolTurn 没有恢复入口。
+
+正确修复不是增加“pause 后紧跟 resume”的特殊分支，而是删除这份重复状态：
+
+- `CommandEffects` 只保留是否发生 correction 等无法直接从 Snapshot 得出的信息；
+- drain 完成后的暂停判断统一读取最终 `snapshot.status`；
+- 增加同批 `pause → resume`、`pause → correction → resume` 和命令 FIFO 测试。
+
+#### 3.3 ComputerSession 的公开状态与权威事实可能漂移
+
+`ComputerSession` 当前含有 `status`，但它只由 Adapter 在 `open()` 返回时填写；Runtime 关闭、
+失败或取消时不会更新这个对象。与此同时，真正的生命周期又由 RuntimeEvent/RunSnapshot 管理。
+这形成两份状态来源。
+
+Stage 3 前建议把 ComputerSession 收敛为不可变的公开描述：
+
+```text
+id / backend / viewport / capabilities / openedAt
+```
+
+删除不会被可靠维护的 `status`。底层 driver handle、连接状态和 FrameRef 继续由 Adapter 以
+`SessionId` 为键私有保存。`computer.open.completed` 需要持久化足够的稳定 Session 描述，而不
+应只留下一个 ID，否则真实轨迹无法回答使用了哪个 backend、坐标空间和能力集合。
+
+#### 3.4 清理失败目前被静默吞掉，且没有可用观察接口
+
+`finally` 中先关闭 EventWriter，再执行 `computer.close(session).catch(() => undefined)`。因此真实
+CUA daemon 或连接关闭失败既不能写 Event，也不会交给调用者或诊断输出。现有测试只证明它不
+覆盖 RunOutcome，没有证明失败可观察。
+
+这里不必为了清理再扩建一套 Event 状态机。采用一个窄接口即可：
+
+- 保持“清理失败不改写已经确定的 RunOutcome”；
+- 给 RunController 注入明确的 cleanup diagnostic sink/callback，至少能报告 Computer close 和
+  Writer close 失败；
+- 增加 close 失败被报告一次、原 RunOutcome 不变的测试；
+- Stage 3 再给 CUA close 加有上限的超时和进程清理验证。
+
+### 4. Stage 3 实现时必须落地、但不必提前扩建体系的约束
+
+#### 4.1 Runtime 仍缺统一 Action/Capability 校验
+
+当前 Reducer 能检查 `basedOn === latestObservationId`，但在进入 Driver 前没有统一验证：
+
+- click/drag 坐标是否落在对应 Observation viewport；
+- pointer/keyboard 能力是否支持当前 Action kind；
+- scroll、wait 和 keypress 等值是否满足执行约束。
+
+不能把这些全部留给每个 Tool 的字符串参数校验。Stage 3 应增加一个小型纯函数，在
+`toAction → action.proposed` 之间依据当前 Observation 和 Computer capabilities 校验
+`ActionIntent`。它是 Runtime 不变量，不是 CUA 特例；无需为它创建 Policy Agent 或新的公共
+框架。
+
+#### 4.2 Frame 新鲜度由现有接口留出了位置，但必须用真实 Adapter 证明
+
+`Computer.observe(session, observationId, signal)` 允许 CUA Adapter 私有维护
+`ObservationId → CuaFrameRef`，`execute()` 又能根据 `ActionIntent.basedOn` 查回原 Frame。这一
+接口足以实现 stale-frame 拒绝，不必把 CUA 私有引用塞进 Protocol。
+
+但 approval 或 pause 可能持续很久，恢复后直接执行旧 ToolCall 是否安全，不能只依赖
+`latestObservationId` 字符串相等。Stage 3 contract test 必须验证：Driver/Display 发生变化后，
+旧 Frame 被拒绝而不是在新界面继续点击。若 CUA 无法可靠证明新鲜度，Runtime 应丢弃旧 GUI
+ToolCall、重新 Observe 并请求模型重规划，而不是偷偷把旧坐标绑定到新截图。
+
+### 5. 进入真实 Provider 前必须处理的 Stage 4 接口问题
+
+这些问题不阻塞先做 CUA Adapter，但不能把当前默认实现直接当成正式 Provider 链路：
+
+1. `DefaultContextCompiler` 每轮接收全部 ToolResult，并反复注入历史上最后一条用户纠正；一次
+   “不要点击”可能在之后每个 ModelTurn 都被当成最新指令。正式 Context 必须明确“完整历史投影”
+   与“本轮尚未消费的新输入”的区别，不能靠继续追加 Prompt 补丁解决。
+2. `ContextCompiler.compile()` 是异步接口却没有 AbortSignal。未来只要它涉及图片读取、压缩或
+   模型摘要，cancel 就无法中断。正式异步 Context 实现前应补 signal；`RuntimePolicy` 若坚持
+   确定性本地规则，则可改为同步，避免制造一个不可取消的异步扩展点。
+3. 当前预算只读取 `RunSnapshot.stepCount`，而它只在 GUI Action 终态后递增。模型连续调用
+   Planning Tool、连续询问或空转时不会耗尽预算。真实 Provider 前需要独立、可重放的
+   ModelTurn 计数或模型调用预算，不要把它混进 GUI stepCount。
+4. 模型 `finish.summary` 已记录在 `model.response.received`，但最终 `run.finished` 没有携带该
+   summary。应在公共结果稳定前保留最终摘要，并继续明确 `RunOutcome.succeeded` 表示模型申请
+   结束被 Runtime 接受，不等于 Benchmark 官方成功。
+5. `ModelContentBlock.image` 只有 AssetRef。首个真实 Provider Adapter 必须获得明确的 Asset
+   读取依赖，不能各自猜测相对路径根目录。
+
+### 6. 暂不实现，但必须明确的扩展边界
+
+- 当前 NonComputer Tool 只有 completed/failed，没有 GUI Action 那样的 started/unknown
+  副作用语义。因此 V1 先只接入只读、幂等或本地可确定提交的 Planning/Control Tool。第一个
+  会发送消息、删除文件或修改外部系统的 Side Tool 出现时，再为“外部副作用 Tool”设计明确
+  生命周期；现在不要预加 effect 枚举。
+- 后台 Job、Subagent、Verifier、实时 Event 订阅继续按已有文档延后。当前接口没有阻塞它们：
+  Job 以后由 ToolExecutor/JobStore 产生事件，Subagent 作为独立 child Run，Verifier 作为
+  finish/action 周边的独立策略消费者；不需要现在增加占位字段。
+
+### 7. 代码质量判断
+
+正面结论：严格 TypeScript、品牌 ID、纯 Reducer、单一 `commitEvent`、原子 Asset 发布和确定性
+Fake 测试都具有较好工程质量。当前不是“大量 if 补丁组成的系统”。多数边界检查都能对应清楚
+的不变量或外部副作用风险。
+
+需要收口的部分：
+
+- `run-controller.ts` 已达到约 929 行。暂不拆新的 public package，也不创建通用
+  ToolExecutor/Workflow 状态机；完成上面两个行为修复后，可以只把已有、独立的
+  `CommandInbox` 机械移到 `command-inbox.ts`，其余 orchestration 继续留在 Controller；
+- 删除未产生行为的 `startPromise` 和 `pendingModelTurn.session`；
+- `getSnapshot()` 当前返回内部可变对象。公开给 CLI/SDK 前应返回不可变副本，避免外部代码直接
+  改坏 Controller 状态；
+- 测试文件可以继续按 Runtime control / failure 两组拆文件，但这只是可读性整理，不应与行为
+  修复混成一个提交；
+- 不引入 ESLint、DI 框架、EventBus、通用错误层或新状态机来“提升架构感”。
+
+### 8. 对当前测试结论的修正
+
+> 历史审查清单：下面记录的是 S3-0 实施前的缺口；覆盖状态以文末“ S3-0 收口实施结果”为准。
+
+本轮实际运行：
+
+```text
+pnpm run typecheck   通过
+pnpm test            通过（2 个测试文件，48 项）
+```
+
+但 Stage 2 原计划测试矩阵仍缺少或未真正覆盖：
+
+- type/keypress 的 Observation 绑定；
+- approval deny 后 rejected 并重新规划；
+- finish 前最后 drain 拦截纠正；
+- correction 在 action started 后只执行一次；
+- cancel 发生在未知状态 Computer 调用中的真实竞态；
+- 多条外部命令的 FIFO，尤其 pause/resume 同批次；
+- 每个 ToolCall 恰好一个 terminal ToolResult 的整体验证。
+
+因此当时的 48/48 只能证明现有测试通过，不能写成“12.2 全部通过”。
+
+### 9. 下一步唯一施工顺序（历史计划）
+
+#### 提交 1：S3-0 Runtime 语义收口
+
+- 让 Tool 参数校验成为真实、必需的 preflight 合同并修正假阳性测试；
+- 修复命令批处理中 pause/resume 的重复状态；
+- 补齐上节直接列出的 Stage 2 行为测试，保持无真实 sleep；
+- 不新增 package、状态机或真实 Provider/CUA。
+
+#### 提交 2：S3-0 Computer 合同收口
+
+- 去掉 ComputerSession 的重复可变 status，确定需要持久化的 Session 描述；
+- 提供可观察但不改写 RunOutcome 的 cleanup diagnostic；
+- 增加统一 Action/Capability/Viewport 校验及测试；
+- 不实现 CUA 私有逻辑。
+
+#### 提交 3：Stage 3 CuaDriverComputer
+
+- 只实现一个经过 Stage 0 验证的 daemon 路径；
+- Adapter 私有维护 Session handle 和 ObservationId → FrameRef；
+- 验证完整截图、DPI/坐标、stale Frame、动作后 Observe、断连和关闭；
+- 通过后再进入真实 Provider 与 Context 施工。
+
+上面两个 S3-0 提交现已完成并通过门禁，Stage 2 Fake Runtime 可以退出。不要把本轮发现的
+问题分别修成大量特殊 case；它们分别归属于四个共同机制：参数边界、命令最终状态、Computer
+生命周期和 GUI Action 不变量。真实桌面仍须由 Stage 3 单独验证。
+
+---
+
+## 2026-08-29 S3-0 收口实施结果
+
+本轮按上面的两个窄提交完成修正，没有引入真实 CUA、Provider、Dashboard、Job 或 Verifier。
+
+### Runtime 语义
+
+- `ToolDefinition.validate` 已改为必需函数；无参数 Tool 也必须显式接受 `null` 或空对象。
+  `inputSchema` 仍只服务模型描述。测试增加了“可计数 Non-Computer Tool + 非法 Computer
+  Tool”的整轮反例，确认参数失败不会先执行其他副作用。
+- `CommandEffects` 删除重复的 `paused` 字段。pause/resume/correction 的处理只读取同一批
+  命令完成后的最终 Snapshot，新增了 pause → resume 与 pause → correction → resume 的
+  FIFO 测试。
+- 删除无消费者的 `startPromise` 与 `pendingModelTurn.session`；`getSnapshot()` 和
+  `getEvents()` 返回副本，调用方不能直接改写 Controller 内部状态。
+
+### Computer 合同
+
+- 新增协议级 `ComputerSessionDescriptor`。`ComputerSession` 现在是稳定只读描述，
+  `computer.open.completed` 持久化完整 Session 描述；底层连接句柄仍属于 Adapter 私有状态。
+- `RunControllerDependencies.onCleanupError` 提供窄诊断边界。EventWriter flush/close 与
+  Computer close 失败分别报告一次，且不会覆盖已经确定的 RunOutcome。
+- 新增纯函数 `validateActionIntent()`，在 `action.proposed` 前检查当前 Observation、
+  viewport、pointer/keyboard 能力和基础数值约束。CUA 私有 Frame token、新鲜度和驱动错误仍
+  不在 Runtime 伪造，由 Stage 3 Adapter 验证。确定性的 GUI 合同错误会写成
+  `tool.call.rejected` 并让模型重规划，不会把一次非法坐标直接升级成 Runtime 崩溃。
+- 磁盘 `Viewport` Schema 已要求正整数宽高，避免无效 Frame 和坐标换算除零；坐标空间仍由
+  `physical`/`logical`/`reference` 明确表达。
+
+### 实际门禁
+
+```text
+pnpm run typecheck   通过
+pnpm test            通过（2 个测试文件，59 项）
+git diff --check     通过
+```
+
+因此可以进入 Stage 3，但入口仅限于一个真实 `CuaDriverComputer`：先验证 open/observe/execute/
+close、完整 Observation 资产、坐标空间和 stale Frame；不同时接入真实 Provider 或扩展其他
+产品能力。Stage 3 的唯一施工入口见
+[`stage-3-implementation-entry.md`](./stage-3-implementation-entry.md)。
+
+### 仍然明确保留的验证边界
+
+59 项测试覆盖 Fake Runtime 的确定性语义与失败分流，但没有把“真实桌面动作一定成功”或
+“真实 Frame 一定新鲜”推断为已证实。Stage 3 必须用真实 CUA Adapter 补齐这些外部事实，并
+保留不含隐私截图的运行摘要。若真实 Adapter 不能证明旧 Frame 未过期，默认重新观察和重规划，
+不自动重放未知 GUI 副作用。

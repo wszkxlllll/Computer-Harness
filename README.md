@@ -4,14 +4,18 @@ Computer Harness 是一个独立的、Provider-neutral 的多模态 GUI Agent Ru
 实验仓库。它位于多模态模型和 Computer Driver 之间，负责统一 Observation、
 ToolCall、GUI Action、运行状态和轨迹记录。
 
-当前仓库处于阶段 0/1：
+当前仓库已完成 Stage 2 Fake Runtime 和 S3-0 合同收口，下一步进入 Stage 3：
+实现一个真实 `CuaDriverComputer`。当前状态是“Runtime 可测试、真实桌面未宣称通过”：
 
 - 已建立 pnpm workspace；
 - 已固定 TypeScript、Vitest 工程基线和 CUA Driver 0.22.2；外部输入需要 Schema 校验时再按包引入 Zod；
 - 已实现核心 protocol 类型；
 - 已实现 JSONL RuntimeEvent Writer、最小 FileAssetStore 和纯函数 RunSnapshot Reducer；
 - 已加入 CUA 0.22.2 的安全技术探针；
-- 尚未接入真实 Provider、正式 RunController 或产品级 CuaDriverComputer。
+- 已实现 `packages/runtime` 的 FakeProvider/FakeComputer RunController、命令 Inbox、
+  失败注入和统一 Action/Capability/Viewport 校验；
+- 尚未接入真实 Provider 或产品级 CuaDriverComputer，不能把 59 项 Fake 测试通过写成真实
+  桌面成功率。
 
 ## 环境
 
@@ -59,7 +63,7 @@ packages/trajectory  Event 落盘、资产引用和 Snapshot 投影
 spikes/cua-driver     可删除的底层 CUA 探针，不属于正式 Adapter
 ```
 
-后续正式包将按技术计划逐步加入：`runtime`、`computer`、`computer-cua`、
+后续正式包将按技术计划逐步加入：`computer-cua`、
 `providers`、`tools`、`context`、`policy` 和可选 `planning`。每个包必须有
 当前生产者、消费者和测试，不为未来能力提前加入空接口。
 
@@ -70,9 +74,9 @@ CUA 探针与平台事实
         ↓
 Protocol + EventWriter + Reducer
         ↓
-FakeProvider/FakeComputer + RunController
+FakeProvider/FakeComputer + RunController（Stage 2 已完成）
         ↓
-CuaDriverComputer
+CuaDriverComputer（Stage 3 当前入口）
         ↓
 第一个真实 Provider
         ↓

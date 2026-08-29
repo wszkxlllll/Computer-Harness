@@ -9,6 +9,7 @@ import type {
   ComputerSessionId,
   EventId,
   ModelTurn,
+  ObservationFrame,
   ObservationId,
   RunId,
   ToolCall,
@@ -36,6 +37,7 @@ import {
   type ModelInput,
   type ProviderAdapter,
   type RuntimePolicy,
+  validateActionIntent,
 } from "./index.js";
 
 const runId = "runtime-test" as RunId;
@@ -67,7 +69,6 @@ class FakeComputer implements Computer {
   public readonly session: ComputerSession = {
     id: sessionId,
     backend: "fake",
-    status: "ready",
     viewport,
     capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
     openedAt: "2026-08-28T00:00:00.000Z",
@@ -160,6 +161,22 @@ class ApprovalClickPolicy extends DefaultRuntimePolicy {
   }
 }
 
+class BatchCommandPolicy extends DefaultRuntimePolicy {
+  private applied = false;
+
+  public constructor(private readonly enqueue: () => void) {
+    super();
+  }
+
+  public override async evaluateToolCall(context: Parameters<RuntimePolicy["evaluateToolCall"]>[0]) {
+    if (!this.applied && context.call.name === "click") {
+      this.applied = true;
+      this.enqueue();
+    }
+    return { decision: "allow" as const };
+  }
+}
+
 class FailingWriter implements RunEventWriter {
   public constructor(
     private readonly delegate: RunEventWriter,
@@ -182,6 +199,24 @@ class FailingWriter implements RunEventWriter {
   }
 }
 
+class CleanupFailingWriter implements RunEventWriter {
+  public constructor(private readonly delegate: RunEventWriter) {}
+
+  public append(draft: RuntimeEventDraft) {
+    return this.delegate.append(draft);
+  }
+
+  public async flush(): Promise<void> {
+    await this.delegate.flush();
+    throw new Error("injected flush failure");
+  }
+
+  public async close(): Promise<void> {
+    await this.delegate.close();
+    throw new Error("injected close failure");
+  }
+}
+
 function clickCall(callId: string): ToolCall {
   return {
     id: callId as ToolCallId,
@@ -198,24 +233,38 @@ function invalidClickCall(callId: string): ToolCall {
   };
 }
 
+function outOfBoundsClickCall(callId: string): ToolCall {
+  return {
+    id: callId as ToolCallId,
+    name: "click",
+    arguments: { x: 800, y: 50 },
+  };
+}
+
 function clickRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   registry.register({
     name: "click",
     description: "Click a point in the current observation.",
     category: "computer",
+    validate: validateClickArgs,
     toAction: (args) => {
-      if (typeof args !== "object" || args === null || Array.isArray(args)) {
-        throw new Error("click arguments must be an object");
-      }
-      const point = args as { x?: unknown; y?: unknown };
-      if (typeof point.x !== "number" || typeof point.y !== "number") {
-        throw new Error("click requires numeric x and y");
-      }
+      const point = validateClickArgs(args);
       return { kind: "click", point: { x: point.x, y: point.y } };
     },
   });
   return registry;
+}
+
+function validateClickArgs(args: import("@computer-harness/protocol").JsonValue): { x: number; y: number } {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    throw new Error("click arguments must be an object");
+  }
+  const point = args as { x?: unknown; y?: unknown };
+  if (typeof point.x !== "number" || !Number.isFinite(point.x) || typeof point.y !== "number" || !Number.isFinite(point.y)) {
+    throw new Error("click requires finite numeric x and y");
+  }
+  return { x: point.x, y: point.y };
 }
 
 async function makeController(
@@ -226,6 +275,7 @@ async function makeController(
   overrides: {
     eventWriter?: (path: string) => RunEventWriter;
     assetStore?: AssetStore;
+    onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -248,6 +298,7 @@ async function makeController(
     assetStore: overrides.assetStore ?? new FileAssetStore(join(directory, "assets")),
     idFactory: new TestIds(),
     clock: { now: () => "2026-08-28T00:00:00.000Z" },
+    ...(overrides.onCleanupError === undefined ? {} : { onCleanupError: overrides.onCleanupError }),
   });
   return { controller, computer: activeComputer, directory };
 }
@@ -296,6 +347,11 @@ describe("RunController S2-2 happy path", () => {
       name: "read_value",
       description: "Read a deterministic value.",
       category: "side",
+      validate: (args) => {
+        if (args !== null) {
+          throw new Error("read_value accepts null arguments");
+        }
+      },
       execute: async () => ({ value: 7 }),
     });
     const provider = new ScriptedProvider([
@@ -346,7 +402,7 @@ describe("RunController S2-2 happy path", () => {
 
   it("preflights invalid arguments before any GUI side effect", async () => {
     const provider = new ScriptedProvider([
-      { type: "tool_calls", calls: [clickCall("call-valid"), invalidClickCall("call-invalid")] },
+      { type: "tool_calls", calls: [invalidClickCall("call-invalid")] },
       { type: "finish", summary: "done" },
     ]);
     const { controller, computer, directory } = await makeController(provider);
@@ -354,7 +410,63 @@ describe("RunController S2-2 happy path", () => {
     await expect(controller.start("reject invalid arguments")).resolves.toBe("succeeded");
     const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
-    expect(events.filter((event) => event.type === "tool.call.rejected")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "tool.call.rejected")).toHaveLength(1);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects a GUI action outside the current Observation viewport", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [outOfBoundsClickCall("call-outside")] },
+      { type: "finish", summary: "done after rejection" },
+    ]);
+    const { controller, computer, directory } = await makeController(provider);
+
+    await expect(controller.start("reject an out-of-bounds click")).resolves.toBe("succeeded");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(controller.getEvents().some((event) => event.type === "action.proposed")).toBe(false);
+    expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.reason.includes("outside viewport"))).toBe(true);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("validates the whole turn before running a non-GUI call", async () => {
+    let executions = 0;
+    const registry = clickRegistry();
+    registry.register({
+      name: "record_call",
+      description: "Record a deterministic call.",
+      category: "planning",
+      validate: (args) => {
+        if (args !== null) {
+          throw new Error("record_call accepts null arguments");
+        }
+      },
+      execute: async () => {
+        executions += 1;
+        return { ok: true };
+      },
+    });
+    const provider = new ScriptedProvider([
+      {
+        type: "tool_calls",
+        calls: [
+          { id: "call-record" as ToolCallId, name: "record_call", arguments: null },
+          invalidClickCall("call-invalid-with-side-call"),
+        ],
+      },
+      { type: "finish", summary: "done" },
+    ]);
+    const { controller, computer, directory } = await makeController(provider, new FakeComputer(), registry);
+
+    await expect(controller.start("reject invalid mixed turn")).resolves.toBe("succeeded");
+    expect(executions).toBe(0);
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    const rejected = controller.getEvents().filter((event) => event.type === "tool.call.rejected");
+    expect(rejected).toHaveLength(2);
+    expect(rejected.every((event) => event.type !== "tool.call.rejected" || event.reason.includes("invalid arguments"))).toBe(true);
+    const receivedIds = controller.getEvents()
+      .filter((event): event is Extract<typeof event, { type: "tool.call.received" }> => event.type === "tool.call.received")
+      .map((event) => event.call.id);
+    expect(rejected.map((event) => event.type === "tool.call.rejected" ? event.callId : undefined)).toEqual(receivedIds);
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -386,6 +498,54 @@ describe("RunController S2-2 happy path", () => {
     expect(events.some((event) => event.type === "tool.call.received")).toBe(false);
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("shared GUI Action validation", () => {
+  const observation: ObservationFrame = {
+    id: "validation-observation" as ObservationId,
+    runId,
+    computerSessionId: sessionId,
+    capturedAt: "2026-08-28T00:00:00.000Z",
+    viewport,
+    screenshot: {
+      assetId: "validation-asset" as AssetId,
+      relativePath: "screenshots/validation.png",
+      mediaType: "image/png",
+      byteLength: 1,
+    },
+  };
+
+  it("checks keyboard capability for type and keypress actions", async () => {
+    expect(() => validateActionIntent({
+      actionId: "type-action" as ActionId,
+      basedOn: observation.id,
+      kind: "type",
+      text: "hello",
+    }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: false, accessibility: false } })).toThrow(/keyboard/);
+    expect(() => validateActionIntent({
+      actionId: "key-action" as ActionId,
+      basedOn: observation.id,
+      kind: "keypress",
+      keys: ["ENTER"],
+    }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: false, accessibility: false } })).toThrow(/keyboard/);
+  });
+
+  it("checks pointer capability and all drag endpoints", async () => {
+    expect(() => validateActionIntent({
+      actionId: "drag-action" as ActionId,
+      basedOn: observation.id,
+      kind: "drag",
+      from: { x: 10, y: 10 },
+      to: { x: 800, y: 10 },
+    }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false } })).toThrow(/outside viewport/);
+    expect(() => validateActionIntent({
+      actionId: "scroll-action" as ActionId,
+      basedOn: observation.id,
+      kind: "scroll",
+      deltaX: 0,
+      deltaY: 10,
+    }, { observation, capabilities: { screenshot: true, pointer: false, keyboard: true, accessibility: false } })).toThrow(/pointer/);
   });
 });
 
@@ -432,6 +592,32 @@ describe("RunController cancellation and unknown side effects", () => {
     const snapshot = reduceRuntimeEvents(events, runId);
     expect(snapshot.unresolvedActionId).toBeDefined();
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("classifies cancellation during an unknown Computer execution as outcome_unknown", async () => {
+    let executeStartedResolve: (() => void) | undefined;
+    const executeStarted = new Promise<void>((resolve) => {
+      executeStartedResolve = resolve;
+    });
+    const computer = new FakeComputer();
+    computer.execute = async (_session, _action, signal) => {
+      executeStartedResolve?.();
+      return await new Promise<import("@computer-harness/protocol").ActionReceipt>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    const provider = new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("call-cancel-during-action")] }]);
+    const created = await makeController(provider, computer);
+    const running = created.controller.start("cancel during action");
+    await executeStarted;
+    created.controller.cancel("cancel during unknown action");
+
+    await expect(running).resolves.toBe("outcome_unknown");
+    const events = created.controller.getEvents();
+    expect(events.some((event) => event.type === "action.execution.started")).toBe(true);
+    expect(events.some((event) => event.type === "action.execution.completed" || event.type === "action.execution.failed")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "outcome_unknown" });
+    await rm(created.directory, { recursive: true, force: true });
   });
 });
 
@@ -524,6 +710,51 @@ describe("RunController command inbox and control semantics", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("uses the final status when pause and resume arrive in one FIFO drain", async () => {
+    let controller!: RunController;
+    let commandsDone!: Promise<void>;
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("call-same-drain")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const policy = new BatchCommandPolicy(() => {
+      const paused = controller.pause("inspect");
+      const resumed = controller.resume();
+      commandsDone = Promise.all([paused, resumed]).then(() => undefined);
+    });
+    const created = await makeController(provider, new FakeComputer(), clickRegistry(), policy);
+    controller = created.controller;
+    const running = controller.start("pause then resume in one drain");
+    await expect(running).resolves.toBe("succeeded");
+    await expect(commandsDone).resolves.toBeUndefined();
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
+    expect(provider.inputs).toHaveLength(2);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("keeps correction semantics when pause, correction, and resume share one drain", async () => {
+    let controller!: RunController;
+    let commandsDone!: Promise<void>;
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("call-corrected-drain")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const policy = new BatchCommandPolicy(() => {
+      const paused = controller.pause("inspect");
+      const corrected = controller.submitUserInput("Do not click");
+      const resumed = controller.resume();
+      commandsDone = Promise.all([paused, corrected, resumed]).then(() => undefined);
+    });
+    const created = await makeController(provider, new FakeComputer(), clickRegistry(), policy);
+    controller = created.controller;
+    const running = controller.start("pause, correct, then resume in one drain");
+    await expect(running).resolves.toBe("succeeded");
+    await expect(commandsDone).resolves.toBeUndefined();
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.reason === "superseded by user correction")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("waits for approval, executes only after approval, and records the resolution", async () => {
     let approvalSeenResolve: (() => void) | undefined;
     const approvalSeen = new Promise<void>((resolve) => {
@@ -550,6 +781,33 @@ describe("RunController command inbox and control semantics", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("records approval denial as a terminal rejected ToolResult before replanning", async () => {
+    let approvalSeenResolve: (() => void) | undefined;
+    const approvalSeen = new Promise<void>((resolve) => {
+      approvalSeenResolve = resolve;
+    });
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("call-approval-denied")] },
+      { type: "finish", summary: "done after denial" },
+    ]);
+    const policy = new ApprovalClickPolicy(() => approvalSeenResolve?.());
+    const created = await makeController(provider, new FakeComputer(), clickRegistry(), policy);
+    const running = created.controller.start("click only if approved");
+    await approvalSeen;
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    const requestId = created.controller.getSnapshot().pendingApproval?.requestId;
+    await expect(created.controller.resolveApproval(requestId ?? "", false)).resolves.toBeUndefined();
+    await expect(running).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    const events = created.controller.getEvents();
+    expect(events.some((event) => event.type === "approval.resolved" && event.approved === false)).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "call-approval-denied")).toBe(true);
+    expect(provider.inputs[1]?.messages.some((message) =>
+      message.content.some((content) => content.type === "tool_result" && content.result.status === "rejected"),
+    )).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("cancels after a provider turn is returned but before it can cause a GUI side effect", async () => {
     let controller!: RunController;
     const provider = new ScriptedProvider(
@@ -567,6 +825,37 @@ describe("RunController command inbox and control semantics", () => {
     await expect(running).resolves.toBe("cancelled");
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     expect(controller.getEvents().some((event) => event.type === "action.execution.started")).toBe(false);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not repeat an already-started action when correction arrives during execution", async () => {
+    let controller!: RunController;
+    let correction!: Promise<void>;
+    const computer = new FakeComputer();
+    computer.execute = async (_session, action, signal) => {
+      signal.throwIfAborted();
+      computer.calls.push("execute:click");
+      correction = controller.submitUserInput("The click already happened; continue from here");
+      return {
+        actionId: action.actionId,
+        status: "completed" as const,
+        startedAt: "2026-08-28T00:00:10.000Z",
+        endedAt: "2026-08-28T00:00:10.010Z",
+        durationMs: 10,
+      };
+    };
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("call-correction-after-start")] },
+      { type: "finish", summary: "continued" },
+    ]);
+    const created = await makeController(provider, computer);
+    controller = created.controller;
+    const running = controller.start("click once");
+
+    await expect(running).resolves.toBe("succeeded");
+    await expect(correction).resolves.toBeUndefined();
+    expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    expect(provider.inputs).toHaveLength(2);
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -684,11 +973,40 @@ describe("RunController S2-4 failure boundaries", () => {
     expect(observeEvents.some((event) => event.type === "observation.created")).toBe(false);
 
     const closeRun = await makeController(new ScriptedProvider([{ type: "finish", summary: "done" }]), new CloseFailComputer());
+    const closeDiagnostics: Array<{ operation: string; message: string }> = [];
+    const closeRunWithDiagnostics = await makeController(
+      new ScriptedProvider([{ type: "finish", summary: "done" }]),
+      new CloseFailComputer(),
+      clickRegistry(),
+      new DefaultRuntimePolicy(),
+      { onCleanupError: (diagnostic) => closeDiagnostics.push(diagnostic) },
+    );
     await expect(closeRun.controller.start("close failure")).resolves.toBe("succeeded");
+    await expect(closeRunWithDiagnostics.controller.start("close failure with diagnostics")).resolves.toBe("succeeded");
+    expect(closeDiagnostics).toEqual([{ operation: "computer.close", message: "injected close failure" }]);
+
+    const writerDiagnostics: Array<{ operation: string; message: string }> = [];
+    const writerRun = await makeController(
+      new ScriptedProvider([{ type: "finish", summary: "done" }]),
+      new FakeComputer(),
+      clickRegistry(),
+      new DefaultRuntimePolicy(),
+      {
+        eventWriter: (path) => new CleanupFailingWriter(jsonlWriter(path)),
+        onCleanupError: (diagnostic) => writerDiagnostics.push(diagnostic),
+      },
+    );
+    await expect(writerRun.controller.start("writer cleanup failure")).resolves.toBe("succeeded");
+    expect(writerDiagnostics).toEqual([
+      { operation: "event_writer.flush", message: "injected flush failure" },
+      { operation: "event_writer.close", message: "injected close failure" },
+    ]);
 
     await rm(openRun.directory, { recursive: true, force: true });
     await rm(observeRun.directory, { recursive: true, force: true });
     await rm(closeRun.directory, { recursive: true, force: true });
+    await rm(closeRunWithDiagnostics.directory, { recursive: true, force: true });
+    await rm(writerRun.directory, { recursive: true, force: true });
   });
 
   it("accepts a Driver-proven cancelled receipt without classifying it as unknown", async () => {

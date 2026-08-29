@@ -6,6 +6,7 @@ import type {
   ActionId,
   AssetId,
   ComputerSessionId,
+  ComputerSessionDescriptor,
   EventId,
   ObservationId,
   RunId,
@@ -29,6 +30,13 @@ const observationId = "observation-test" as ObservationId;
 const actionId = "action-test" as ActionId;
 const callId = "call-test" as ToolCallId;
 const clickActionId = "click-action-test" as ActionId;
+const session: ComputerSessionDescriptor = {
+  id: "computer-test" as ComputerSessionId,
+  backend: "fake",
+  viewport: { width: 100, height: 100, coordinateSpace: "physical" },
+  capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+  openedAt: "2026-01-01T00:00:00.000Z",
+};
 
 function event(sequence: number, data: RuntimeEventData): RuntimeEvent {
   return {
@@ -60,7 +68,7 @@ function runningEvents(): RuntimeEvent[] {
     runCreated(0),
     runStarted(1),
     event(2, { type: "computer.open.started" }),
-    event(3, { type: "computer.open.completed", computerSessionId: "computer-test" as ComputerSessionId }),
+    event(3, { type: "computer.open.completed", session }),
     event(4, {
       type: "observation.created",
       observation: {
@@ -336,7 +344,7 @@ describe("RunSnapshot reducer", () => {
         [
           runCreated(0),
           runStarted(1),
-          event(2, { type: "computer.open.completed", computerSessionId: "computer-test" as ComputerSessionId }),
+          event(2, { type: "computer.open.completed", session }),
         ],
         runId,
       ),
@@ -368,6 +376,18 @@ describe("RunSnapshot reducer", () => {
     expect(unknown.status).toBe("finished");
     expect(unknown.outcome).toBe("outcome_unknown");
     expect(unknown.unresolvedActionId).toBe(actionId);
+  });
+
+  it.each([
+    ["type", { actionId: "type-action" as ActionId, kind: "type" as const, text: "hello", basedOn: observationId }],
+    ["keypress", { actionId: "key-action" as ActionId, kind: "keypress" as const, keys: ["ENTER"], basedOn: observationId }],
+  ])("requires an Observation binding for %s actions", (_kind, action) => {
+    const started = event(5, { type: "action.execution.started", action });
+    expect(() => reduceRuntimeEvents([...runningEvents(), started], runId)).not.toThrow();
+    const unbound = { ...action, basedOn: "other-observation" as ObservationId };
+    expect(() => reduceRuntimeEvents([...runningEvents(), event(5, { type: "action.execution.started", action: unbound })], runId)).toThrow(
+      /is based on other-observation, not latest observation/,
+    );
   });
 });
 
@@ -524,7 +544,7 @@ describe("readRuntimeEvents", () => {
       runCreated(0),
       runStarted(0),
       event(0, { type: "computer.open.started" }),
-      event(0, { type: "computer.open.completed", computerSessionId: "computer-test" as ComputerSessionId }),
+      event(0, { type: "computer.open.completed", session }),
       event(0, {
         type: "observation.created",
         observation: {
@@ -634,6 +654,19 @@ describe("readRuntimeEvents", () => {
       },
     };
     expect(runtimeEventSchema.safeParse(rejectedAsFailed).success).toBe(false);
+
+    const zeroViewportSession = {
+      eventId: "event-0",
+      runId,
+      sequence: 0,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "computer.open.completed" as const,
+      session: {
+        ...session,
+        viewport: { width: 0, height: 100, coordinateSpace: "physical" as const },
+      },
+    };
+    expect(runtimeEventSchema.safeParse(zeroViewportSession).success).toBe(false);
   });
 
   it("reports malformed JSON and malformed event data with line numbers", async () => {
@@ -696,7 +729,7 @@ describe("Event, Asset and Snapshot integration", () => {
     await writer.append({
       runId,
       type: "computer.open.completed",
-      computerSessionId: "computer-integration" as ComputerSessionId,
+      session: { ...session, id: "computer-integration" as ComputerSessionId },
     });
     await writer.append({
       runId,

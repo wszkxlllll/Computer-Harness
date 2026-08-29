@@ -6,7 +6,7 @@ import type {
   ActionId,
   AssetId,
   AssetRef,
-  ComputerSessionId,
+  ComputerSessionDescriptor,
   EventId,
   JsonValue,
   ObservationId,
@@ -29,7 +29,7 @@ export interface RunSnapshot {
   unresolvedActionId?: ActionId;
   createdAt?: string;
   computerOpenStartedAt?: string;
-  computerSessionId?: ComputerSessionId;
+  computerSession?: ComputerSessionDescriptor;
   startedAt?: string;
   endedAt?: string;
 }
@@ -66,7 +66,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       if (snapshot.status !== "starting") {
         throw new Error(`computer.open.started requires starting status, got ${snapshot.status}`);
       }
-      if (snapshot.computerOpenStartedAt !== undefined || snapshot.computerSessionId !== undefined) {
+      if (snapshot.computerOpenStartedAt !== undefined || snapshot.computerSession !== undefined) {
         throw new Error("computer.open.started was already committed for this run");
       }
       return { ...snapshot, computerOpenStartedAt: event.occurredAt };
@@ -77,10 +77,10 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       if (snapshot.computerOpenStartedAt === undefined) {
         throw new Error("computer.open.completed requires computer.open.started");
       }
-      if (snapshot.computerSessionId !== undefined) {
+      if (snapshot.computerSession !== undefined) {
         throw new Error("computer.open.completed was already committed for this run");
       }
-      return { ...snapshot, computerSessionId: event.computerSessionId };
+      return { ...snapshot, computerSession: event.session };
     case "observation.created":
       if (event.observation.runId !== event.runId) {
         throw new Error(
@@ -90,12 +90,12 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       if (snapshot.status !== "starting" && snapshot.status !== "running") {
         throw new Error(`observation.created requires an active run, got ${snapshot.status}`);
       }
-      if (snapshot.computerSessionId === undefined) {
+      if (snapshot.computerSession === undefined) {
         throw new Error("observation.created requires a completed computer.open");
       }
-      if (event.observation.computerSessionId !== snapshot.computerSessionId) {
+      if (event.observation.computerSessionId !== snapshot.computerSession.id) {
         throw new Error(
-          `observation ${event.observation.id} belongs to session ${event.observation.computerSessionId}, not ${snapshot.computerSessionId}`,
+          `observation ${event.observation.id} belongs to session ${event.observation.computerSessionId}, not ${snapshot.computerSession.id}`,
         );
       }
       return {
@@ -492,9 +492,21 @@ function relativePathFromRoot(rootDir: string, destination: string): string {
 const nonEmptyString = z.string().min(1);
 const pointSchema = z.object({ x: z.number().finite(), y: z.number().finite() });
 const viewportSchema = z.object({
-  width: z.number().int().nonnegative(),
-  height: z.number().int().nonnegative(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
   coordinateSpace: z.enum(["physical", "logical", "reference"]),
+});
+const computerSessionSchema = z.object({
+  id: nonEmptyString,
+  backend: nonEmptyString,
+  viewport: viewportSchema,
+  capabilities: z.object({
+    screenshot: z.boolean(),
+    pointer: z.boolean(),
+    keyboard: z.boolean(),
+    accessibility: z.boolean(),
+  }),
+  openedAt: nonEmptyString,
 });
 const assetRefSchema = z.object({
   assetId: nonEmptyString,
@@ -584,7 +596,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     ...eventBaseSchema,
     type: z.literal("computer.open.completed"),
-    computerSessionId: nonEmptyString,
+    session: computerSessionSchema,
   }),
   z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),
   z.object({ ...eventBaseSchema, type: z.literal("model.request.started"), providerId: nonEmptyString }),
