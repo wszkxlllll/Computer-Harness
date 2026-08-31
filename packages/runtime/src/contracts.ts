@@ -2,6 +2,7 @@ import type {
   ActionId,
   ActionIntent,
   AssetId,
+  AssetRef,
   ComputerSessionDescriptor,
   EventId,
   JsonValue,
@@ -49,7 +50,9 @@ export interface ModelToolSpec {
 
 export type ModelContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; asset: ObservationFrame["screenshot"] }
+  | { type: "image"; asset: AssetRef; viewport: Viewport }
+  /** Viewport of the observation that informed this call, when known. */
+  | { type: "tool_call"; call: ToolCall; viewport?: Viewport }
   | { type: "tool_result"; result: ToolResult };
 
 export interface ModelMessage {
@@ -63,32 +66,27 @@ export interface ModelInput {
   tools: ModelToolSpec[];
 }
 
-export interface ProviderProgressEvent {
-  type: string;
-  message?: string;
-}
-
 export interface ProviderAdapter {
   readonly id: string;
   generate(
     input: ModelInput,
-    options: {
-      signal: AbortSignal;
-      onEvent?: (event: ProviderProgressEvent) => void;
-    },
+    options: { signal: AbortSignal },
   ): Promise<ModelTurn>;
 }
 
 export interface ContextCompileInput {
   goal: string;
-  snapshot: RunSnapshot;
   latestObservation?: ObservationFrame;
   recentEvents: readonly RuntimeEvent[];
-  toolResults: readonly ToolResult[];
 }
 
 export interface ContextCompiler {
-  compile(input: ContextCompileInput): Promise<ModelInput>;
+  compile(input: ContextCompileInput, signal: AbortSignal): Promise<ModelInput>;
+}
+
+/** Reads a persisted asset without exposing filesystem paths to Providers. */
+export interface AssetReader {
+  read(ref: AssetRef, signal: AbortSignal): Promise<Uint8Array>;
 }
 
 export type ToolCategory = "computer" | "planning" | "control" | "side";
@@ -99,7 +97,7 @@ export type GuiActionDraft =
   | { kind: "right_click"; point: Point }
   | { kind: "type"; text: string }
   | { kind: "keypress"; keys: string[] }
-  | { kind: "scroll"; deltaX: number; deltaY: number }
+  | { kind: "scroll"; point: Point; direction: "up" | "down" | "left" | "right"; ticks: number }
   | { kind: "drag"; from: Point; to: Point }
   | { kind: "wait"; durationMs: number };
 
@@ -114,7 +112,7 @@ interface ToolDefinitionBase {
   name: string;
   description: string;
   category: ToolCategory;
-  inputSchema?: JsonValue;
+  inputSchema: JsonValue;
   /** Runtime argument validation; inputSchema only describes the model-facing shape. */
   validate: (args: JsonValue) => void;
 }

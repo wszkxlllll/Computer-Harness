@@ -94,9 +94,6 @@ function waitCompleted(sequence = 1): RuntimeEvent {
     receipt: {
       actionId,
       status: "completed",
-      startedAt: "2026-01-01T00:00:00.000Z",
-      endedAt: "2026-01-01T00:00:00.010Z",
-      durationMs: 10,
     },
   });
 }
@@ -143,9 +140,6 @@ describe("RunSnapshot reducer", () => {
         receipt: {
           actionId,
           status: "failed",
-          startedAt: "2026-01-01T00:00:00.000Z",
-          endedAt: "2026-01-01T00:00:00.010Z",
-          durationMs: 10,
         },
       }),
     ],
@@ -168,7 +162,6 @@ describe("RunSnapshot reducer", () => {
       receipt: {
         actionId: "other-action" as ActionId,
         status: "completed",
-        startedAt: "2026-01-01T00:00:00.000Z",
       },
     });
     expect(() =>
@@ -322,7 +315,6 @@ describe("RunSnapshot reducer", () => {
       receipt: {
         actionId,
         status: "failed",
-        startedAt: "2026-01-01T00:00:00.000Z",
       },
     });
     expect(() =>
@@ -562,8 +554,8 @@ describe("readRuntimeEvents", () => {
         },
       }),
       event(0, { type: "model.request.started", providerId: "provider-test" }),
-      event(0, { type: "model.response.received", turn: { type: "finish", summary: "done" } }),
-      event(0, { type: "model.request.failed", category: "provider", message: "unavailable" }),
+      event(0, { type: "model.response.received", turn: { type: "finish", summary: "done", reportedStatus: "failure" } }),
+      event(0, { type: "model.request.failed", category: "provider", message: "unavailable", code: "HTTP_429", retryable: true }),
       event(0, {
         type: "tool.call.received",
         call: { id: callId, name: "example", arguments: { nested: [true, 1, "ok", null] } },
@@ -585,11 +577,11 @@ describe("readRuntimeEvents", () => {
       event(0, { type: "action.execution.started", action: { actionId, kind: "wait", durationMs: 1 } }),
       event(0, {
         type: "action.execution.completed",
-        receipt: { actionId, status: "completed", startedAt: "2026-01-01T00:00:00.000Z" },
+        receipt: { actionId, status: "completed" },
       }),
       event(0, {
         type: "action.execution.failed",
-        receipt: { actionId, status: "failed", startedAt: "2026-01-01T00:00:00.000Z" },
+        receipt: { actionId, status: "failed" },
       }),
       event(0, { type: "run.paused", reason: "operator" }),
       event(0, { type: "run.resumed" }),
@@ -598,7 +590,7 @@ describe("readRuntimeEvents", () => {
       event(0, { type: "user.input.requested", question: "Where?" }),
       event(0, { type: "user.input.received", text: "Here." }),
       event(0, { type: "runtime.error", category: "runtime", message: "error" }),
-      event(0, { type: "run.finished", outcome: "failed", summary: "failed" }),
+      event(0, { type: "run.finished", outcome: "failed", summary: "failed", reportedStatus: "failure" }),
     ];
 
     expect(fixtures).toHaveLength(runtimeEventTypes.length);
@@ -637,7 +629,7 @@ describe("readRuntimeEvents", () => {
       sequence: 0,
       occurredAt: "2026-01-01T00:00:00.000Z",
       type: "action.execution.completed" as const,
-      receipt: { actionId, status: "failed", startedAt: "2026-01-01T00:00:00.000Z" },
+      receipt: { actionId, status: "failed" },
     };
     expect(runtimeEventSchema.safeParse(failedAsCompleted).success).toBe(false);
 

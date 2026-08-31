@@ -76,7 +76,13 @@ export type ToolResult =
       error: { code: string; message: string };
     };
 
-export type ModelTurn =
+export interface ModelUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+export type ModelTurn = (
   | {
       type: "tool_calls";
       calls: ToolCall[];
@@ -89,7 +95,10 @@ export type ModelTurn =
   | {
       type: "finish";
       summary: string;
-    };
+      /** Structured termination status supplied by providers that expose it. */
+      reportedStatus?: "success" | "failure";
+    }
+) & { usage?: ModelUsage };
 
 export interface GuiActionBase {
   actionId: ActionId;
@@ -102,16 +111,19 @@ export type ActionIntent =
   | (GuiActionBase & { kind: "right_click"; point: Point })
   | (GuiActionBase & { kind: "type"; text: string })
   | (GuiActionBase & { kind: "keypress"; keys: string[] })
-  | (GuiActionBase & { kind: "scroll"; deltaX: number; deltaY: number })
+  | (GuiActionBase & {
+      kind: "scroll";
+      point: Point;
+      direction: "up" | "down" | "left" | "right";
+      /** Positive driver-independent wheel ticks; the Computer adapter chooses its unit mapping. */
+      ticks: number;
+    })
   | (GuiActionBase & { kind: "drag"; from: Point; to: Point })
   | { actionId: ActionId; kind: "wait"; durationMs: number };
 
 export interface ActionReceipt {
   actionId: ActionId;
   status: "completed" | "refused" | "failed" | "cancelled";
-  startedAt: string;
-  endedAt?: string;
-  durationMs?: number;
   driverCode?: string;
   message?: string;
 }
@@ -163,7 +175,13 @@ export type RuntimeEventData =
   | { type: "observation.created"; observation: ObservationFrame }
   | { type: "model.request.started"; providerId: string }
   | { type: "model.response.received"; turn: ModelTurn }
-  | { type: "model.request.failed"; category: string; message: string }
+  | {
+      type: "model.request.failed";
+      category: string;
+      message: string;
+      code?: string;
+      retryable?: boolean;
+    }
   | { type: "tool.call.received"; call: ToolCall }
   | { type: "tool.call.rejected"; callId: ToolCallId; reason: string }
   | { type: "tool.call.completed"; result: Extract<ToolResult, { status: "completed" }> }
@@ -182,7 +200,12 @@ export type RuntimeEventData =
   | { type: "user.input.requested"; question: string }
   | { type: "user.input.received"; text: string }
   | { type: "runtime.error"; category: string; message: string }
-  | { type: "run.finished"; outcome: RunOutcome; summary?: string };
+  | {
+      type: "run.finished";
+      outcome: RunOutcome;
+      summary?: string;
+      reportedStatus?: "success" | "failure";
+    };
 
 export type RuntimeEvent = RuntimeEventBase & RuntimeEventData;
 

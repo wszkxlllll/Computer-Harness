@@ -10,6 +10,7 @@ coverage/
 *.tsbuildinfo
 
 # Local CUA probe output may contain screen captures.
+runs/
 spikes/cua-driver/runs/
 spikes/cua-driver/**/runs/
 

@@ -59,8 +59,12 @@ export function validateActionIntent(
       return;
     case "scroll":
       requireCapability(context.capabilities.pointer, action.kind, "pointer");
-      if (!Number.isFinite(action.deltaX) || !Number.isFinite(action.deltaY)) {
-        throw new Error("scroll deltas must be finite numbers");
+      assertPointInViewport(action.point, observation.viewport.width, observation.viewport.height, "scroll");
+      if (!["up", "down", "left", "right"].includes(action.direction)) {
+        throw new Error(`scroll direction ${String(action.direction)} is invalid`);
+      }
+      if (!Number.isInteger(action.ticks) || action.ticks <= 0) {
+        throw new Error("scroll ticks must be a positive integer");
       }
       return;
     case "type":

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { dirname, relative as pathRelative, resolve } from "node:path";
 import { z } from "zod";
 import type {
@@ -16,6 +16,7 @@ import type {
   RuntimeEvent,
   RuntimeEventDraft,
   ToolCallId,
+  ModelUsage,
 } from "@computer-harness/protocol";
 
 export interface RunSnapshot {
@@ -23,6 +24,7 @@ export interface RunSnapshot {
   status: RunStatus;
   outcome?: RunOutcome;
   stepCount: number;
+  modelRequestCount: number;
   latestObservationId?: ObservationId;
   pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
@@ -32,10 +34,13 @@ export interface RunSnapshot {
   computerSession?: ComputerSessionDescriptor;
   startedAt?: string;
   endedAt?: string;
+  summary?: string;
+  reportedStatus?: "success" | "failure";
+  modelUsage?: ModelUsage;
 }
 
 export function initialRunSnapshot(runId: RunId): RunSnapshot {
-  return { runId, status: "created", stepCount: 0 };
+  return { runId, status: "created", stepCount: 0, modelRequestCount: 0 };
 }
 
 export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunSnapshot {
@@ -104,7 +109,18 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         latestObservationId: event.observation.id,
       };
     case "model.request.started":
+      if (snapshot.status !== "running") {
+        throw new Error(`${event.type} requires running status, got ${snapshot.status}`);
+      }
+      return { ...snapshot, modelRequestCount: snapshot.modelRequestCount + 1 };
     case "model.response.received":
+      if (snapshot.status !== "running") {
+        throw new Error(`${event.type} requires running status, got ${snapshot.status}`);
+      }
+      return {
+        ...snapshot,
+        ...(event.turn.usage === undefined ? {} : { modelUsage: addUsage(snapshot.modelUsage, event.turn.usage) }),
+      };
     case "model.request.failed":
     case "tool.call.received":
     case "tool.call.rejected":
@@ -275,6 +291,8 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         status: "finished",
         outcome: event.outcome,
         endedAt: event.occurredAt,
+        ...(event.summary === undefined ? {} : { summary: event.summary }),
+        ...(event.reportedStatus === undefined ? {} : { reportedStatus: event.reportedStatus }),
       };
     }
     default:
@@ -284,6 +302,14 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
 
 function assertNever(value: never): never {
   throw new Error(`unhandled runtime event: ${String(value)}`);
+}
+
+function addUsage(previous: ModelUsage | undefined, next: ModelUsage): ModelUsage {
+  return {
+    ...(previous?.inputTokens === undefined && next.inputTokens === undefined ? {} : { inputTokens: (previous?.inputTokens ?? 0) + (next.inputTokens ?? 0) }),
+    ...(previous?.outputTokens === undefined && next.outputTokens === undefined ? {} : { outputTokens: (previous?.outputTokens ?? 0) + (next.outputTokens ?? 0) }),
+    ...(previous?.totalTokens === undefined && next.totalTokens === undefined ? {} : { totalTokens: (previous?.totalTokens ?? 0) + (next.totalTokens ?? 0) }),
+  };
 }
 
 export interface EventIdFactory {
@@ -472,6 +498,27 @@ export class FileAssetStore implements AssetStore {
       byteLength: input.data.byteLength,
     };
   }
+
+  public async read(ref: AssetRef, signal: AbortSignal): Promise<Uint8Array> {
+    signal.throwIfAborted();
+    const relativePath = normalizeAssetPath(ref.relativePath);
+    const destination = resolve(this.rootDir, relativePath);
+    if (relativePathFromRoot(this.rootDir, destination) !== relativePath) {
+      throw new Error(`asset path escapes root directory: ${ref.relativePath}`);
+    }
+    const metadata = await stat(destination);
+    signal.throwIfAborted();
+    if (!metadata.isFile()) {
+      throw new Error(`asset is not a regular file: ${ref.relativePath}`);
+    }
+    if (metadata.size !== ref.byteLength) {
+      throw new Error(`asset byte length mismatch for ${ref.assetId}: expected ${ref.byteLength}, got ${metadata.size}`);
+    }
+    signal.throwIfAborted();
+    const data = await readFile(destination, { signal });
+    signal.throwIfAborted();
+    return new Uint8Array(data);
+  }
 }
 
 function normalizeAssetPath(value: string): string {
@@ -532,6 +579,11 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
     z.record(jsonValueSchema),
   ]),
 );
+const modelUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  totalTokens: z.number().int().nonnegative().optional(),
+});
 const toolCallSchema = z.object({
   id: nonEmptyString,
   name: nonEmptyString,
@@ -542,9 +594,15 @@ const modelTurnSchema = z.union([
     type: z.literal("tool_calls"),
     calls: z.array(toolCallSchema),
     assistantText: z.string().optional(),
+    usage: modelUsageSchema.optional(),
   }),
-  z.object({ type: z.literal("user_input_required"), question: nonEmptyString }),
-  z.object({ type: z.literal("finish"), summary: nonEmptyString }),
+  z.object({ type: z.literal("user_input_required"), question: nonEmptyString, usage: modelUsageSchema.optional() }),
+  z.object({
+    type: z.literal("finish"),
+    summary: nonEmptyString,
+    reportedStatus: z.enum(["success", "failure"]).optional(),
+    usage: modelUsageSchema.optional(),
+  }),
 ]);
 const actionBaseSchema = {
   actionId: nonEmptyString,
@@ -563,8 +621,9 @@ const actionIntentSchema = z.discriminatedUnion("kind", [
   z.object({
     ...actionBaseSchema,
     kind: z.literal("scroll"),
-    deltaX: z.number().finite(),
-    deltaY: z.number().finite(),
+    point: pointSchema,
+    direction: z.enum(["up", "down", "left", "right"]),
+    ticks: z.number().int().positive(),
   }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
@@ -572,9 +631,6 @@ const actionIntentSchema = z.discriminatedUnion("kind", [
 const actionReceiptSchema = z.object({
   actionId: nonEmptyString,
   status: z.enum(["completed", "refused", "failed", "cancelled"]),
-  startedAt: nonEmptyString,
-  endedAt: nonEmptyString.optional(),
-  durationMs: z.number().finite().nonnegative().optional(),
   driverCode: nonEmptyString.optional(),
   message: z.string().optional(),
 });
@@ -606,6 +662,8 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("model.request.failed"),
     category: nonEmptyString,
     message: z.string(),
+    code: nonEmptyString.optional(),
+    retryable: z.boolean().optional(),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("tool.call.received"), call: toolCallSchema }),
   z.object({
@@ -672,6 +730,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("run.finished"),
     outcome: z.enum(["succeeded", "failed", "cancelled", "budget_exhausted", "outcome_unknown"]),
     summary: z.string().optional(),
+    reportedStatus: z.enum(["success", "failure"]).optional(),
   }),
 ]);
 

@@ -8,6 +8,7 @@
     "rootDir": "src"
   },
   "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"],
   "references": [
     { "path": "../protocol" },
     { "path": "../trajectory" }

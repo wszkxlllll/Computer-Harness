@@ -26,7 +26,6 @@ import {
   type RunEventWriter,
 } from "@computer-harness/trajectory";
 import {
-  DefaultContextCompiler,
   DefaultRuntimePolicy,
   RunController,
   ToolRegistry,
@@ -39,6 +38,7 @@ import {
   type RuntimePolicy,
   validateActionIntent,
 } from "./index.js";
+import { DefaultContextCompiler } from "../../context/src/index.js";
 
 const runId = "runtime-test" as RunId;
 const sessionId = "fake-computer" as ComputerSessionId;
@@ -106,9 +106,6 @@ class FakeComputer implements Computer {
     return {
       actionId: action.actionId,
       status: "completed" as const,
-      startedAt: "2026-08-28T00:00:10.000Z",
-      endedAt: "2026-08-28T00:00:10.010Z",
-      durationMs: 10,
     };
   }
 
@@ -247,6 +244,12 @@ function clickRegistry(): ToolRegistry {
     name: "click",
     description: "Click a point in the current observation.",
     category: "computer",
+    inputSchema: {
+      type: "object",
+      properties: { x: { type: "number" }, y: { type: "number" } },
+      required: ["x", "y"],
+      additionalProperties: false,
+    },
     validate: validateClickArgs,
     toAction: (args) => {
       const point = validateClickArgs(args);
@@ -341,12 +344,37 @@ describe("RunController S2-2 happy path", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("projects model request count and the finish summary separately from outcome", async () => {
+    const provider = new ScriptedProvider([{ type: "finish", summary: "model says done", usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 } }]);
+    const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 1));
+    await expect(controller.start("finish now")).resolves.toBe("succeeded");
+    expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, summary: "model says done", outcome: "succeeded", modelUsage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 } });
+  });
+
+  it("preserves a provider-reported failure as a failed run", async () => {
+    const provider = new ScriptedProvider([{ type: "finish", summary: "the task is not complete", reportedStatus: "failure" }]);
+    const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 1));
+    await expect(controller.start("finish unsuccessfully")).resolves.toBe("failed");
+    expect(controller.getSnapshot()).toMatchObject({ outcome: "failed", reportedStatus: "failure", summary: "the task is not complete" });
+  });
+
+  it("uses a model-request budget independently from the GUI step budget", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "budget-1" as ToolCallId, name: "missing", arguments: null }] },
+      { type: "tool_calls", calls: [{ id: "budget-2" as ToolCallId, name: "missing", arguments: null }] },
+    ]);
+    const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 2));
+    await expect(controller.start("do not loop")).resolves.toBe("budget_exhausted");
+    expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, stepCount: 0, outcome: "budget_exhausted" });
+  });
+
   it("returns ToolResult for a non-computer tool without creating an ActionIntent", async () => {
     const registry = clickRegistry();
     registry.register({
       name: "read_value",
       description: "Read a deterministic value.",
       category: "side",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
       validate: (args) => {
         if (args !== null) {
           throw new Error("read_value accepts null arguments");
@@ -435,6 +463,7 @@ describe("RunController S2-2 happy path", () => {
       name: "record_call",
       description: "Record a deterministic call.",
       category: "planning",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
       validate: (args) => {
         if (args !== null) {
           throw new Error("record_call accepts null arguments");
@@ -531,6 +560,15 @@ describe("shared GUI Action validation", () => {
     }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: false, accessibility: false } })).toThrow(/keyboard/);
   });
 
+  it("rejects a GUI action bound to an older observation", () => {
+    expect(() => validateActionIntent({
+      actionId: "stale-action" as ActionId,
+      basedOn: "older-observation" as ObservationId,
+      kind: "click",
+      point: { x: 10, y: 10 },
+    }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false } })).toThrow(/not current observation/);
+  });
+
   it("checks pointer capability and all drag endpoints", async () => {
     expect(() => validateActionIntent({
       actionId: "drag-action" as ActionId,
@@ -543,9 +581,18 @@ describe("shared GUI Action validation", () => {
       actionId: "scroll-action" as ActionId,
       basedOn: observation.id,
       kind: "scroll",
-      deltaX: 0,
-      deltaY: 10,
+      point: { x: 100, y: 100 },
+      direction: "down",
+      ticks: 10,
     }, { observation, capabilities: { screenshot: true, pointer: false, keyboard: true, accessibility: false } })).toThrow(/pointer/);
+    expect(() => validateActionIntent({
+      actionId: "scroll-invalid-direction" as ActionId,
+      basedOn: observation.id,
+      kind: "scroll",
+      point: { x: 100, y: 100 },
+      direction: "diagonal" as "down",
+      ticks: 1,
+    }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false } })).toThrow(/direction/);
   });
 });
 
@@ -571,6 +618,7 @@ describe("RunController cancellation and unknown side effects", () => {
 
     await expect(running).resolves.toBe("cancelled");
     const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "model.request.failed" && event.category === "cancelled" && event.message.includes("test cancellation"))).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "cancelled" });
     await rm(directory, { recursive: true, force: true });
   });
@@ -671,11 +719,27 @@ describe("RunController command inbox and control semantics", () => {
     await waitUntil(() => correction !== undefined);
     await expect(correction).resolves.toBeUndefined();
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(created.computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
     expect(controller.getEvents().some((event) => event.type === "user.input.received")).toBe(true);
+    expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.reason.includes("superseded"))).toBe(true);
     expect(reduceRuntimeEvents(await readRuntimeEvents(join(created.directory, "trajectory.jsonl")), runId)).toEqual(controller.getSnapshot());
     expect(provider.inputs[1]?.messages.some((message) =>
       message.content.some((content) => content.type === "text" && content.text.includes("Do not click")),
     )).toBe(true);
+    expect(provider.inputs[1]?.messages.some((message) =>
+      message.content.some((content) => content.type === "tool_result" && content.result.status === "rejected"),
+    )).toBe(true);
+    const correctedMessages = provider.inputs[1]?.messages ?? [];
+    const correctedAssistantIndex = correctedMessages.findIndex((message) => message.role === "assistant");
+    const correctedResultIndex = correctedMessages.findIndex((message) =>
+      message.role === "tool" && message.content.some((content) => content.type === "tool_result" && content.result.callId === "call-correction"),
+    );
+    const correctionIndex = correctedMessages.findIndex((message) =>
+      message.role === "user" && message.content.some((content) => content.type === "text" && content.text.includes("Do not click")),
+    );
+    expect(correctedAssistantIndex).toBeGreaterThanOrEqual(0);
+    expect(correctedResultIndex).toBeGreaterThan(correctedAssistantIndex);
+    expect(correctedResultIndex).toBeLessThan(correctionIndex);
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -752,6 +816,198 @@ describe("RunController command inbox and control semantics", () => {
     await expect(commandsDone).resolves.toBeUndefined();
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.reason === "superseded by user correction")).toBe(true);
+    expect(created.computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    const correctedTurnMessages = provider.inputs[1]?.messages ?? [];
+    expect(correctedTurnMessages.filter((message) =>
+      message.role === "tool" && message.content.some((content) => content.type === "tool_result" && content.result.callId === "call-corrected-drain"),
+    )).toHaveLength(1);
+    expect(correctedTurnMessages.some((message) =>
+      message.role === "user" && message.content.some((content) => content.type === "text" && content.text.includes("Do not click")),
+    )).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("keeps a same-batch correction across a later resume", async () => {
+    let controller!: RunController;
+    let commandsDone: Promise<void> | undefined;
+    let notifyReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      notifyReady = resolve;
+    });
+    const provider = new ScriptedProvider(
+      [{ type: "tool_calls", calls: [clickCall("call-paused-correction")] }, { type: "finish", summary: "done" }],
+      (count) => {
+        if (count === 1) {
+          commandsDone = Promise.all([
+            controller.pause("inspect"),
+            controller.submitUserInput("Do not click"),
+          ]).then(() => undefined);
+          notifyReady();
+        }
+      },
+    );
+    const created = await makeController(provider);
+    controller = created.controller;
+    const running = controller.start("pause and correct before action");
+    await ready;
+    await expect(commandsDone).resolves.toBeUndefined();
+    await waitUntil(() => controller.getSnapshot().status === "paused");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+
+    await expect(controller.resume()).resolves.toBeUndefined();
+    await expect(running).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(created.computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    const rejected = created.controller.getEvents().filter((event) => event.type === "tool.call.rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({ callId: "call-paused-correction", reason: "superseded by user correction" });
+    const correctedTurnMessages = provider.inputs[1]?.messages ?? [];
+    const correctedResult = correctedTurnMessages.find((message) =>
+      message.role === "tool" && message.content.some((content) =>
+        content.type === "tool_result" && content.result.callId === "call-paused-correction",
+      ),
+    );
+    expect(correctedResult).toBeDefined();
+    expect(correctedTurnMessages.some((message) =>
+      message.role === "user" && message.content.some((content) =>
+        content.type === "text" && content.text.includes("Do not click"),
+      ),
+    )).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not consume a corrected finish turn after a later resume", async () => {
+    let controller!: RunController;
+    let commandsDone: Promise<void> | undefined;
+    let notifyReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      notifyReady = resolve;
+    });
+    const provider = new ScriptedProvider(
+      [{ type: "finish", summary: "stale finish" }, { type: "finish", summary: "corrected finish" }],
+      (count) => {
+        if (count === 1) {
+          commandsDone = Promise.all([
+            controller.pause("inspect"),
+            controller.submitUserInput("Continue checking"),
+          ]).then(() => undefined);
+          notifyReady();
+        }
+      },
+    );
+    const created = await makeController(provider);
+    controller = created.controller;
+    const running = controller.start("pause and correct before finish");
+    await ready;
+    await expect(commandsDone).resolves.toBeUndefined();
+    await waitUntil(() => controller.getSnapshot().status === "paused");
+
+    await expect(controller.resume()).resolves.toBeUndefined();
+    await expect(running).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(controller.getSnapshot()).toMatchObject({ summary: "corrected finish" });
+    expect(created.controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+    expect(created.computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("invalidates a deferred turn when correction follows resume without waiting", async () => {
+    let controller!: RunController;
+    let pauseReadyResolve!: () => void;
+    const pauseReady = new Promise<void>((resolve) => {
+      pauseReadyResolve = resolve;
+    });
+    const provider = new ScriptedProvider(
+      [{ type: "tool_calls", calls: [clickCall("call-resume-then-correction")] }, { type: "finish", summary: "done" }],
+      (count) => {
+        if (count === 1) {
+          void controller.pause("inspect").then(() => pauseReadyResolve());
+        }
+      },
+    );
+    const created = await makeController(provider);
+    controller = created.controller;
+    const running = controller.start("pause, resume, then correct");
+    await pauseReady;
+    await waitUntil(() => controller.getSnapshot().status === "paused");
+
+    const resumed = controller.resume();
+    const corrected = controller.submitUserInput("Change the target");
+    await Promise.all([resumed, corrected]);
+    await expect(running).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(created.controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(1);
+    expect(provider.inputs).toHaveLength(2);
+    const correctedMessages = provider.inputs[1]?.messages ?? [];
+    expect(correctedMessages.some((message) =>
+      message.role === "user" && message.content.some((content) =>
+        content.type === "text" && content.text.includes("Change the target"),
+      ),
+    )).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("invalidates remaining ToolCalls when correction follows resume without waiting", async () => {
+    let controller!: RunController;
+    let pauseDone: Promise<void> | undefined;
+    let firstExecutedResolve!: () => void;
+    const firstExecuted = new Promise<void>((resolve) => {
+      firstExecutedResolve = resolve;
+    });
+    const executed: string[] = [];
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "first_side_effect",
+      description: "Run the first deterministic side effect.",
+      category: "planning",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      validate: (args) => {
+        if (args !== null) throw new Error("first_side_effect accepts null arguments");
+      },
+      execute: async () => {
+        executed.push("first");
+        firstExecutedResolve();
+        pauseDone = controller.pause("inspect after first call");
+        return { executed: "first" };
+      },
+    });
+    registry.register({
+      name: "second_side_effect",
+      description: "Run the second deterministic side effect.",
+      category: "planning",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      validate: (args) => {
+        if (args !== null) throw new Error("second_side_effect accepts null arguments");
+      },
+      execute: async () => {
+        executed.push("second");
+        return { executed: "second" };
+      },
+    });
+    const provider = new ScriptedProvider([
+      {
+        type: "tool_calls",
+        calls: [
+          { id: "first-side-call" as ToolCallId, name: "first_side_effect", arguments: null },
+          { id: "second-side-call" as ToolCallId, name: "second_side_effect", arguments: null },
+        ],
+      },
+      { type: "finish", summary: "done" },
+    ]);
+    const created = await makeController(provider, undefined, registry);
+    controller = created.controller;
+    const running = controller.start("pause after one side effect, then correct");
+    await firstExecuted;
+    await expect(pauseDone).resolves.toBeUndefined();
+    expect(controller.getSnapshot().status).toBe("paused");
+
+    const resumed = controller.resume();
+    const corrected = controller.submitUserInput("Change the target");
+    await Promise.all([resumed, corrected]);
+    await expect(running).resolves.toBe("succeeded");
+    expect(executed).toEqual(["first"]);
+    expect(created.controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(1);
+    expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "second-side-call")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -839,9 +1095,6 @@ describe("RunController command inbox and control semantics", () => {
       return {
         actionId: action.actionId,
         status: "completed" as const,
-        startedAt: "2026-08-28T00:00:10.000Z",
-        endedAt: "2026-08-28T00:00:10.010Z",
-        durationMs: 10,
       };
     };
     const provider = new ScriptedProvider([
@@ -1014,8 +1267,6 @@ describe("RunController S2-4 failure boundaries", () => {
     computer.execute = async (_session, action) => ({
       actionId: action.actionId,
       status: "cancelled" as const,
-      startedAt: "2026-08-28T00:00:10.000Z",
-      endedAt: "2026-08-28T00:00:10.010Z",
       driverCode: "NOT_STARTED",
       message: "driver proved the click was not sent",
     });

@@ -212,7 +212,6 @@ export class RunController {
   private readonly events: RuntimeEvent[] = [];
   private readonly callStates = new Map<ToolCallId, CallState>();
   private readonly actionCallIds = new Map<ActionId, ToolCallId>();
-  private readonly toolResults: ToolResult[] = [];
   private readonly commandInbox = new CommandInbox();
   private snapshot: RunSnapshot;
   private latestObservation: ObservationFrame | undefined;
@@ -220,7 +219,8 @@ export class RunController {
   private started = false;
   private pendingApproval: PendingApproval | undefined;
   private pendingToolTurn: PendingToolTurn | undefined;
-  private pendingModelTurn: { turn: ModelTurn } | undefined;
+  private pendingModelTurn: { turn: ModelTurn; invalidated?: boolean } | undefined;
+  private pendingReobserve = false;
 
   public constructor(dependencies: RunControllerDependencies) {
     this.runId = dependencies.runId;
@@ -239,6 +239,7 @@ export class RunController {
       runId: this.runId,
       status: "created",
       stepCount: 0,
+      modelRequestCount: 0,
     };
   }
 
@@ -319,6 +320,13 @@ export class RunController {
       while (this.snapshot.status !== "finished") {
         if (this.snapshot.status === "paused" || this.snapshot.status === "waiting_user" || this.snapshot.status === "waiting_approval") {
           await this.waitForControlCommand();
+          if ((this.snapshot.status as string) === "running") {
+            // A resume can release the waiter before a correction enqueued in
+            // the same user turn is drained.  Apply queued control commands
+            // before consuming any deferred decision or tool turn.
+            await this.drainCommands();
+            await this.refreshAfterUserInput(session);
+          }
           if (this.pendingApproval !== undefined) {
             const pending = this.pendingApproval;
             this.pendingApproval = undefined;
@@ -343,6 +351,7 @@ export class RunController {
         if (beforeTurn.correction) {
           continue;
         }
+        await this.refreshAfterUserInput(session);
         this.throwIfAborted();
         const budget = this.policy.checkBudget(this.snapshot);
         if (!budget.allowed) {
@@ -359,15 +368,22 @@ export class RunController {
         const pendingModelTurn = this.pendingModelTurn;
         if (pendingModelTurn !== undefined) {
           this.pendingModelTurn = undefined;
+          if (pendingModelTurn.invalidated) {
+            if (pendingModelTurn.turn.type === "tool_calls") {
+              await this.rejectModelTurn(pendingModelTurn.turn, "superseded by user correction");
+            }
+            continue;
+          }
           turn = pendingModelTurn.turn;
         } else {
-          const context = await this.contextCompiler.compile({
-            goal,
-            snapshot: this.snapshot,
-            recentEvents: this.events,
-            toolResults: this.toolResults,
-            ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
-          });
+          const context = await this.contextCompiler.compile(
+            {
+              goal,
+              recentEvents: this.events,
+              ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
+            },
+            this.abortController.signal,
+          );
           this.throwIfAborted();
           await this.commitEvent({ type: "model.request.started", providerId: this.provider.id });
 
@@ -378,6 +394,7 @@ export class RunController {
               type: "model.request.failed",
               category: this.isAborted() ? "cancelled" : "provider",
               message: errorMessage(error),
+              ...providerErrorDetails(error),
             });
             outcome = this.isAborted() ? "cancelled" : "failed";
             break;
@@ -388,17 +405,27 @@ export class RunController {
           this.throwIfAborted();
           const afterResponse = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused") {
-            this.pendingModelTurn = { turn };
+            // A correction can arrive in the same command drain as pause.
+            // The turn is stashed only after that drain, so carry the batch
+            // marker forward instead of allowing the stale turn to execute
+            // after a later resume.
+            this.pendingModelTurn = { turn, invalidated: afterResponse.correction };
             continue;
           }
           if (afterResponse.correction) {
+            if (turn.type === "tool_calls") {
+              await this.rejectModelTurn(turn, "superseded by user correction");
+            }
             continue;
           }
         }
         if (turn.type === "finish") {
           const beforeFinish = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused") {
-            this.pendingModelTurn = { turn };
+            // Keep the same correction marker for a finish turn as for a
+            // tool-call turn.  A paused turn must not be consumed as if no
+            // correction happened merely because it has no GUI action.
+            this.pendingModelTurn = { turn, invalidated: beforeFinish.correction };
             continue;
           }
           if (beforeFinish.correction) {
@@ -414,14 +441,20 @@ export class RunController {
             outcome = "failed";
             break;
           }
-          outcome = "succeeded";
+          outcome = turn.reportedStatus === "failure" ? "failed" : "succeeded";
+          await this.commitEvent({
+            type: "run.finished",
+            outcome,
+            summary: turn.summary,
+            ...(turn.reportedStatus === undefined ? {} : { reportedStatus: turn.reportedStatus }),
+          });
           break;
         }
         if (turn.type === "user_input_required") {
           await this.commitEvent({ type: "user.input.requested", question: turn.question });
           continue;
         }
-        const turnResult = await this.processToolCalls(session, turn.calls);
+        await this.processToolCalls(session, turn.calls);
         if ((this.snapshot.status as string) === "paused") {
           continue;
         }
@@ -439,6 +472,11 @@ export class RunController {
     } catch (error) {
       if (this.snapshot.status !== "finished") {
         if (this.isAborted() && this.snapshot.unresolvedActionId === undefined) {
+          await this.commitEvent({
+            type: "runtime.error",
+            category: "cancelled",
+            message: errorMessage(error),
+          });
           outcome = "cancelled";
         } else if (this.snapshot.unresolvedActionId !== undefined) {
           await this.commitEvent({
@@ -530,6 +568,22 @@ export class RunController {
     }
   }
 
+  private async refreshAfterUserInput(session: ComputerSession): Promise<void> {
+    if (!this.pendingReobserve || this.snapshot.status !== "running") {
+      return;
+    }
+    this.pendingReobserve = false;
+    await this.observeAndCommit(session);
+  }
+
+  private async rejectModelTurn(turn: Extract<ModelTurn, { type: "tool_calls" }>, reason: string): Promise<void> {
+    for (const call of turn.calls) {
+      if (this.callStates.has(call.id)) continue;
+      this.callStates.set(call.id, "rejected");
+      await this.commitEvent({ type: "tool.call.rejected", callId: call.id, reason });
+    }
+  }
+
   private async applyCommand(command: RuntimeCommand): Promise<CommandEffects> {
     switch (command.kind) {
       case "user_input":
@@ -544,10 +598,16 @@ export class RunController {
           throw new Error(`user input is not accepted while run is ${this.snapshot.status}`);
         }
         await this.commitEvent({ type: "user.input.received", text: command.text });
-        if (this.snapshot.status === "paused" && this.pendingModelTurn !== undefined) {
-          this.pendingModelTurn = undefined;
+        this.pendingReobserve = true;
+        if (this.pendingModelTurn !== undefined) {
+          // Invalidation follows the deferred decision, not the transient
+          // run status.  A correction may be queued immediately after
+          // resume, while the ModelTurn is still waiting to be consumed.
+          this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
         }
-        if (this.snapshot.status === "paused" && this.pendingToolTurn !== undefined) {
+        if (this.pendingToolTurn !== undefined) {
+          // Apply the same rule to the remaining calls of a paused ToolTurn;
+          // already-started actions are never rolled back here.
           this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
         }
         return { correction: true };
@@ -771,7 +831,6 @@ export class RunController {
       const output = await definition.execute(call.arguments, context);
       const result: ToolResult = { callId: call.id, status: "completed", output };
       await this.commitEvent({ type: "tool.call.completed", result });
-      this.toolResults.push(result);
       this.callStates.set(call.id, "completed");
     } catch (error) {
       const result: ToolResult = {
@@ -780,7 +839,6 @@ export class RunController {
         error: { code: "TOOL_FAILED", message: errorMessage(error) },
       };
       await this.commitEvent({ type: "tool.call.failed", result });
-      this.toolResults.push(result);
       this.callStates.set(call.id, "failed");
     }
   }
@@ -860,7 +918,6 @@ export class RunController {
       await this.commitEvent({ type: "tool.call.failed", result });
       this.callStates.set(call.id, "failed");
     }
-    this.toolResults.push(result);
   }
 
   private async rejectToolCall(callId: ToolCallId, reason: string): Promise<void> {
@@ -870,7 +927,6 @@ export class RunController {
       error: { code: "TOOL_REJECTED", message: reason },
     };
     await this.commitEvent({ type: "tool.call.rejected", callId, reason });
-    this.toolResults.push(result);
     this.callStates.set(callId, "rejected");
   }
 
@@ -961,5 +1017,14 @@ function actionReceiptOutput(receipt: import("@computer-harness/protocol").Actio
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function providerErrorDetails(error: unknown): { code?: string; retryable?: boolean } {
+  if (typeof error !== "object" || error === null) return {};
+  const candidate = error as { code?: unknown; retryable?: unknown };
+  return {
+    ...(typeof candidate.code === "string" && candidate.code.length > 0 ? { code: candidate.code } : {}),
+    ...(typeof candidate.retryable === "boolean" ? { retryable: candidate.retryable } : {}),
+  };
 }
 
