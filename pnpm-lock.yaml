@@ -18,7 +18,70 @@ importers:
         specifier: 2.1.8
         version: 2.1.8(@types/node@22.10.2)
 
+  apps/cli:
+    dependencies:
+      '@computer-harness/computer-cua':
+        specifier: workspace:*
+        version: link:../../packages/computer-cua
+      '@computer-harness/context':
+        specifier: workspace:*
+        version: link:../../packages/context
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@computer-harness/provider-glm':
+        specifier: workspace:*
+        version: link:../../packages/provider-glm
+      '@computer-harness/provider-qwen':
+        specifier: workspace:*
+        version: link:../../packages/provider-qwen
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@computer-harness/trajectory':
+        specifier: workspace:*
+        version: link:../../packages/trajectory
+
+  packages/computer-cua:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@trycua/cua-driver':
+        specifier: 0.22.2
+        version: 0.22.2
+
+  packages/context:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
   packages/protocol: {}
+
+  packages/provider-glm:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
+  packages/provider-qwen:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
   packages/runtime:
     dependencies:
@@ -40,6 +103,21 @@ importers:
 
   spikes/cua-driver:
     dependencies:
+      '@computer-harness/computer-cua':
+        specifier: workspace:*
+        version: link:../../packages/computer-cua
+      '@computer-harness/context':
+        specifier: workspace:*
+        version: link:../../packages/context
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@computer-harness/trajectory':
+        specifier: workspace:*
+        version: link:../../packages/trajectory
       '@trycua/cua-driver':
         specifier: 0.22.2
         version: 0.22.2

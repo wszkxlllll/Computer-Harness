@@ -3,6 +3,11 @@
   "references": [
     { "path": "packages/protocol" },
     { "path": "packages/trajectory" },
-    { "path": "packages/runtime" }
+    { "path": "packages/runtime" },
+    { "path": "packages/context" },
+    { "path": "packages/provider-glm" },
+    { "path": "packages/provider-qwen" },
+    { "path": "apps/cli" },
+    { "path": "packages/computer-cua" }
   ]
 }
