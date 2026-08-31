@@ -1,0 +1,133 @@
+import { describe, expect, it, vi } from "vitest";
+import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { AssetReader, ModelInput } from "@computer-harness/runtime";
+import { GlmAdapter, type GlmHttpClient } from "./index.js";
+
+const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 3 };
+
+class Reader implements AssetReader {
+  public async read(_ref: typeof asset, signal: AbortSignal): Promise<Uint8Array> {
+    signal.throwIfAborted();
+    return new Uint8Array([1, 2, 3]);
+  }
+}
+
+class Client implements GlmHttpClient {
+  public body: Record<string, unknown> | undefined;
+  public constructor(private readonly response: unknown) {}
+  public async post(_url: string, body: Record<string, unknown>, _headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
+    signal.throwIfAborted();
+    this.body = body;
+    return this.response;
+  }
+}
+
+function input(): ModelInput {
+  return {
+    system: "system",
+    messages: [{ role: "user", content: [
+      { type: "text", text: "click" },
+      { type: "image", asset, viewport },
+    ] }],
+    tools: [{ name: "click", description: "click", inputSchema: { type: "object" } }],
+  };
+}
+
+function inputWithoutImage(): ModelInput {
+  return {
+    system: "system",
+    messages: [{ role: "user", content: [{ type: "text", text: "click" }] }],
+    tools: [{ name: "click", description: "click", inputSchema: { type: "object" } }],
+  };
+}
+
+describe("GLM provider adapter", () => {
+  it("reads images, sends canonical tools, and maps normalized coordinates", async () => {
+    const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "glm-call", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250 }) } }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: client });
+    const turn = await adapter.generate(input(), { signal: new AbortController().signal });
+    expect(turn).toEqual({ type: "tool_calls", calls: [{ id: "glm-call", name: "click", arguments: { x: 400, y: 150 } }] });
+    expect(client.body?.tools).toEqual([{ type: "function", function: { name: "click", description: "click Coordinates x/y/fromX/fromY/toX/toY are normalized numbers from 0 to 1000.", parameters: { type: "object" } } }]);
+    expect(client.body?.thinking).toEqual({ type: "disabled" });
+    const messages = client.body?.messages as Array<Record<string, unknown>>;
+    const userContent = messages[1]?.content as Array<Record<string, unknown>>;
+    const imageBlock = userContent[1];
+    expect((imageBlock?.image_url as { url?: string } | undefined)?.url).toMatch(/^data:image\/png;base64,/);
+    expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).toContain("normalized to 0..1000");
+    expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).not.toContain("Coordinates are pixels in the current image viewport");
+  });
+
+  it("rejects malformed, duplicate, and out-of-range provider output", async () => {
+    const duplicate = new Client({ choices: [{ message: { tool_calls: [
+      { id: "same", function: { name: "click", arguments: "{\"x\":1,\"y\":1}" } },
+      { id: "same", function: { name: "click", arguments: "{\"x\":2,\"y\":2}" } },
+    ] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: duplicate });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toThrow(/duplicate/);
+    const outOfRange = new Client({ choices: [{ message: { tool_calls: [{ id: "bad", function: { name: "click", arguments: "{\"x\":1001,\"y\":1}" } }] } }] });
+    const second = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: outOfRange });
+    await expect(second.generate(input(), { signal: new AbortController().signal })).rejects.toThrow(/outside/);
+  });
+
+  it("returns non-empty text as finish and honors abort before reading", async () => {
+    const client = new Client({ choices: [{ message: { content: "finished" } }], usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 } });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
+    expect(await adapter.generate(input(), { signal: new AbortController().signal })).toEqual({ type: "finish", summary: "finished", usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9 } });
+    expect(client.body?.thinking).toEqual({ type: "enabled" });
+    const messages = client.body?.messages as Array<Record<string, unknown>>;
+    expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).toContain("Coordinates are pixels");
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    await expect(adapter.generate(input(), { signal: controller.signal })).rejects.toThrow("cancelled");
+  });
+
+  it("does not pass normalized pixel coordinates through without an image viewport", async () => {
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "no-viewport", function: { name: "click", arguments: "{\"x\":500,\"y\":250}" } }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(inputWithoutImage(), { signal: new AbortController().signal })).rejects.toThrow(/image viewport/);
+  });
+
+  it("does not treat a truncated response as a normal finish", async () => {
+    const client = new Client({ choices: [{ message: { content: "partial" }, finish_reason: "length" }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_INCOMPLETE_RESPONSE" });
+  });
+
+  it("encodes canonical pixel history back into the GLM profile coordinate space", async () => {
+    const client = new Client({ choices: [{ message: { content: "done" } }] });
+    const call = { id: "history-call" as ToolCallId, name: "click", arguments: { x: 400, y: 150 } };
+    const history: ModelInput = {
+      ...input(),
+      messages: [
+        ...input().messages,
+        { role: "assistant", content: [{ type: "tool_call", call, viewport }] },
+        { role: "tool", content: [{ type: "tool_result", result: { callId: call.id, status: "completed", output: { ok: true } } }] },
+      ],
+    };
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: client });
+    await adapter.generate(history, { signal: new AbortController().signal });
+    const messages = client.body?.messages as Array<Record<string, unknown>>;
+    const assistant = messages.find((message) => message.role === "assistant" && message.tool_calls !== undefined);
+    const toolCall = (assistant?.tool_calls as Array<Record<string, unknown>> | undefined)?.[0];
+    expect(JSON.parse(String((toolCall?.function as Record<string, unknown> | undefined)?.arguments))).toEqual({ x: 500, y: 250 });
+    expect(messages.some((message) => message.role === "tool" && message.tool_call_id === call.id)).toBe(true);
+  });
+
+  it("classifies the provider's 1305 overload response as retryable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: { code: "1305" } }),
+    })));
+    try {
+      const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader() });
+      await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({
+        code: "1305",
+        retryable: true,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
