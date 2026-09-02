@@ -30,11 +30,65 @@ Context、canonical Computer Tools、GLM/Qwen Provider 和 CLI。当前状态是
 
 ## 安装与检查
 
+从 GitHub 获取仓库后，依赖会安装在本仓库的 pnpm workspace 中，不会改动其他项目的
+Node.js、OpenClaw 或 LightSpeaker 环境。推荐使用仓库声明的 pnpm 版本：
+
 ```text
-pnpm install
+git clone https://github.com/wszkxlllll/Computer-Harness.git
+cd Computer-Harness
+corepack enable
+corepack prepare pnpm@11.19.0 --activate
+pnpm install --frozen-lockfile
+```
+
+`pnpm install` 会安装 `@computer-harness/computer-cua` 所需的
+`@trycua/cua-driver@0.22.2` 及当前平台的原生 Node 绑定。可以用下面的命令确认 CUA
+依赖已经进入对应 workspace package：
+
+```text
+pnpm --filter @computer-harness/computer-cua list @trycua/cua-driver --depth 0
 pnpm run typecheck
 pnpm test
 ```
+
+### 环境变量
+
+真实模型运行需要本地 `.env`（不要提交到 Git）。CLI 会在 `--env-file` 指定的文件中读取：
+
+```dotenv
+# GLM-5.3-Flash
+ZHIPUAI_API_KEY=replace-with-your-key
+# 可选：兼容 OpenAI 协议的自定义端点
+GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
+
+# Qwen GUI-Plus
+DASHSCOPE_API_KEY=replace-with-your-key
+# 可选：工作空间与端点，二选一即可；未设置时使用公共 compatible-mode 端点
+DASHSCOPE_WORKSPACE_ID=replace-with-your-workspace-id
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+```
+
+只需要测试 fake provider、协议或类型检查时不需要 API key。API key 只从进程环境或
+`--env-file` 读取，轨迹和 `summary.json` 不会写入密钥。
+
+### CUA 依赖与 daemon 的边界
+
+仓库安装的是 CUA 的 TypeScript/Node 客户端和平台绑定；`@computer-harness/computer-cua`
+是连接层，不会自动启动 CUA daemon，也不包含可直接分发的 `cua-driver` 可执行文件。
+因此真实桌面运行还需要单独准备与启动官方 CUA daemon，并把同一个私有 socket 传给 CLI：
+
+```text
+# 在已经准备好的隔离桌面上启动 daemon（示例；替换为实际二进制路径）
+<path-to-cua-driver> serve --socket "<private-socket>" --no-overlay
+
+# 在另一个终端运行 Harness
+pnpm --filter @computer-harness/cli build
+pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model glm-5.3-flash --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
+```
+
+Windows named pipe、macOS/Linux socket 路径必须与 daemon 完全一致。daemon 的安装、路径和
+桌面权限属于运行环境准备，不由 `pnpm install` 或本仓库自动完成；没有 daemon 时仍可运行
+类型检查、单元测试和 fake/静态 API 探针。
 
 ## Stage 4 CLI（隔离真实运行）
 
