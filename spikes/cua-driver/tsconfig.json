@@ -1,7 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": "../..",
+    "paths": {
+      "@computer-harness/*": ["packages/*/src/index.ts"]
+    }
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "../../scripts/api-conformance.ts"]
 }

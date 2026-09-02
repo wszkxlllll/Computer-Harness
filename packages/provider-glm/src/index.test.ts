@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import type { AssetReader, ModelInput } from "@computer-harness/runtime";
-import { GlmAdapter, type GlmHttpClient } from "./index.js";
+import { GlmAdapter, type GlmHttpClient, type GlmProfile } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 3 };
+const normalizedProfile: GlmProfile = { name: "test-normalized", thinking: "disabled", coordinateMode: "normalized_1000" };
 
 class Reader implements AssetReader {
   public async read(_ref: typeof asset, signal: AbortSignal): Promise<Uint8Array> {
@@ -45,7 +46,7 @@ function inputWithoutImage(): ModelInput {
 describe("GLM provider adapter", () => {
   it("reads images, sends canonical tools, and maps normalized coordinates", async () => {
     const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "glm-call", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250 }) } }] } }] });
-    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: client });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
     const turn = await adapter.generate(input(), { signal: new AbortController().signal });
     expect(turn).toEqual({ type: "tool_calls", calls: [{ id: "glm-call", name: "click", arguments: { x: 400, y: 150 } }] });
     expect(client.body?.tools).toEqual([{ type: "function", function: { name: "click", description: "click Coordinates x/y/fromX/fromY/toX/toY are normalized numbers from 0 to 1000.", parameters: { type: "object" } } }]);
@@ -63,10 +64,10 @@ describe("GLM provider adapter", () => {
       { id: "same", function: { name: "click", arguments: "{\"x\":1,\"y\":1}" } },
       { id: "same", function: { name: "click", arguments: "{\"x\":2,\"y\":2}" } },
     ] } }] });
-    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: duplicate });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: duplicate });
     await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toThrow(/duplicate/);
     const outOfRange = new Client({ choices: [{ message: { tool_calls: [{ id: "bad", function: { name: "click", arguments: "{\"x\":1001,\"y\":1}" } }] } }] });
-    const second = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: outOfRange });
+    const second = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: outOfRange });
     await expect(second.generate(input(), { signal: new AbortController().signal })).rejects.toThrow(/outside/);
   });
 
@@ -84,7 +85,7 @@ describe("GLM provider adapter", () => {
 
   it("does not pass normalized pixel coordinates through without an image viewport", async () => {
     const client = new Client({ choices: [{ message: { tool_calls: [{ id: "no-viewport", function: { name: "click", arguments: "{\"x\":500,\"y\":250}" } }] } }] });
-    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: client });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
     await expect(adapter.generate(inputWithoutImage(), { signal: new AbortController().signal })).rejects.toThrow(/image viewport/);
   });
 
@@ -105,7 +106,7 @@ describe("GLM provider adapter", () => {
         { role: "tool", content: [{ type: "tool_result", result: { callId: call.id, status: "completed", output: { ok: true } } }] },
       ],
     };
-    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader(), httpClient: client });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
     await adapter.generate(history, { signal: new AbortController().signal });
     const messages = client.body?.messages as Array<Record<string, unknown>>;
     const assistant = messages.find((message) => message.role === "assistant" && message.tool_calls !== undefined);
@@ -121,7 +122,7 @@ describe("GLM provider adapter", () => {
       json: async () => ({ error: { code: "1305" } }),
     })));
     try {
-      const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-4.6v-flash", assetReader: new Reader() });
+      const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader() });
       await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({
         code: "1305",
         retryable: true,

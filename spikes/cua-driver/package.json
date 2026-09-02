@@ -6,9 +6,21 @@
   "scripts": {
     "probe": "tsx probe.ts",
     "probe:daemon": "tsx probe-daemon.ts",
-    "probe:capabilities": "tsx capability-probe.ts"
+    "probe:capabilities": "tsx capability-probe.ts",
+    "probe:actions:daemon": "tsx action-probe-daemon.ts",
+    "probe:adapter": "tsx adapter-contract-probe.ts",
+    "probe:runtime": "tsx runtime-contract-probe.ts",
+    "run:stage4-task": "tsx stage4-local-runner.ts",
+    "test:stage4-runner": "tsx ../../scripts/stage4-local/runner-contract-check.ts",
+    "test:stage4-runner-lifecycle": "node ../../scripts/stage4-local/runner-lifecycle-check.mjs",
+    "probe:api": "tsx --tsconfig tsconfig.json ../../scripts/api-conformance.ts"
   },
   "dependencies": {
+    "@computer-harness/computer-cua": "workspace:*",
+    "@computer-harness/context": "workspace:*",
+    "@computer-harness/protocol": "workspace:*",
+    "@computer-harness/runtime": "workspace:*",
+    "@computer-harness/trajectory": "workspace:*",
     "@trycua/cua-driver": "0.22.2"
   },
   "devDependencies": {

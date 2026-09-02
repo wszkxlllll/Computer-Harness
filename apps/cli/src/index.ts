@@ -35,8 +35,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const model = value("--model") as ModelName | undefined;
   const socket = value("--cua-socket") ?? value("--socket");
   if (goal === undefined || goal.trim().length === 0) throw new Error("--goal is required");
-  if (model !== "glm-4.6v-flash" && model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26") {
-    throw new Error("--model must be glm-4.6v-flash, glm-5.3-flash, or gui-plus-2026-02-26");
+  if (model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26") {
+    throw new Error("--model must be glm-5.3-flash or gui-plus-2026-02-26");
   }
   if (socket === undefined || socket.trim().length === 0) throw new Error("--cua-socket is required");
   const output = resolve(value("--output") ?? "runs/live-cli");
@@ -68,7 +68,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-4.6v-flash|glm-5.3-flash|gui-plus-2026-02-26> --cua-socket <socket> [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--interactive]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|gui-plus-2026-02-26> --cua-socket <socket> [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--interactive]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));

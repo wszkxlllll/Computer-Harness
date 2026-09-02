@@ -21,6 +21,20 @@ interface ProbeError {
   message: string;
 }
 
+interface OperationStatus {
+  returned: boolean;
+  succeeded: boolean;
+  isError: boolean | null;
+  errorCode: string | null;
+  degraded: boolean | null;
+}
+
+interface Inventory {
+  shape: string;
+  tools: unknown[];
+  valid: boolean;
+}
+
 function readOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
@@ -61,23 +75,43 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(jsonSafe(value), null, 2)}\n`, "utf8");
 }
 
-function parseInventory(raw: string): { shape: string; tools: unknown[] } {
+function parseInventory(raw: string): Inventory {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw) as unknown;
   } catch {
-    return { shape: "non-json", tools: [] };
+    return { shape: "non-json", tools: [], valid: false };
   }
   if (Array.isArray(parsed)) {
-    return { shape: "array", tools: parsed };
+    return { shape: "array", tools: parsed, valid: true };
   }
   if (parsed && typeof parsed === "object") {
     const tools = (parsed as Record<string, unknown>).tools;
     if (Array.isArray(tools)) {
-      return { shape: "object.tools", tools };
+      return { shape: "object.tools", tools, valid: true };
     }
   }
-  return { shape: typeof parsed, tools: [] };
+  return { shape: typeof parsed, tools: [], valid: false };
+}
+
+function operationStatus(value: unknown): OperationStatus {
+  if (value === undefined) {
+    return { returned: false, succeeded: false, isError: null, errorCode: null, degraded: null };
+  }
+  if (!value || typeof value !== "object") {
+    return { returned: true, succeeded: true, isError: null, errorCode: null, degraded: null };
+  }
+  const record = value as Record<string, unknown>;
+  const isError = typeof record.isError === "boolean" ? record.isError : null;
+  const errorCode = typeof record.errorCode === "string" ? record.errorCode : null;
+  const degraded = typeof record.degraded === "boolean" ? record.degraded : null;
+  return {
+    returned: true,
+    succeeded: isError !== true && errorCode === null && degraded !== true,
+    isError,
+    errorCode,
+    degraded,
+  };
 }
 
 async function main(): Promise<void> {
@@ -104,7 +138,9 @@ async function main(): Promise<void> {
   try {
     const metadata = await record("metadata", () => driver.metadata({ signal }));
     const toolsJson = await record("listToolsJson", () => driver.listToolsJson({ signal }));
-    const inventory = toolsJson === undefined ? { shape: "unavailable", tools: [] } : parseInventory(toolsJson);
+    const inventory = toolsJson === undefined
+      ? { shape: "unavailable", tools: [], valid: false }
+      : parseInventory(toolsJson);
     await writeJson(join(options.outputDir, "metadata.json"), metadata ?? { unavailable: true });
     await writeJson(join(options.outputDir, "tools.json"), {
       rawJson: toolsJson ?? null,
@@ -152,6 +188,20 @@ async function main(): Promise<void> {
       permissionReport,
     });
 
+    const operations = {
+      metadata: operationStatus(metadata),
+      listToolsJson: { ...operationStatus(toolsJson), succeeded: toolsJson !== undefined && inventory.valid },
+      startSession: operationStatus(start),
+      getSession: operationStatus(typedSession),
+      getSessionState: operationStatus(typedState),
+      listSessions: operationStatus(listedSessions),
+      listHostSessionsJson: operationStatus(hostSessionsJson),
+      genericGetSession: operationStatus(genericSession),
+      genericGetSessionState: operationStatus(genericState),
+      healthReport: operationStatus(healthReport),
+      checkPermissions: operationStatus(permissionReport),
+    };
+
     reportBase = {
       probeVersion: "0.3.0-capabilities",
       startedAt,
@@ -163,20 +213,8 @@ async function main(): Promise<void> {
         executionMode: driver.executionMode(),
         runtimeScopePrefix: driver.runtimeScopePrefix(),
       },
-      inventory: { shape: inventory.shape, count: inventory.tools.length },
-      operations: {
-        metadata: metadata !== undefined,
-        listToolsJson: toolsJson !== undefined,
-        startSession: start !== undefined,
-        getSession: typedSession !== undefined,
-        getSessionState: typedState !== undefined,
-        listSessions: listedSessions !== undefined,
-        listHostSessionsJson: hostSessionsJson !== undefined,
-        genericGetSession: genericSession !== undefined,
-        genericGetSessionState: genericState !== undefined,
-        healthReport: healthReport !== undefined,
-        checkPermissions: permissionReport !== undefined,
-      },
+      inventory: { shape: inventory.shape, count: inventory.tools.length, valid: inventory.valid },
+      operations,
       errors,
     };
   } finally {
@@ -192,9 +230,12 @@ async function main(): Promise<void> {
   if (reportBase !== undefined) {
     reportBase.completedAt = new Date().toISOString();
     await writeJson(join(options.outputDir, "capability-report.json"), reportBase);
-    const inventory = reportBase.inventory as { shape: string; count: number };
+    const inventory = reportBase.inventory as { shape: string; count: number; valid: boolean };
+    const operations = reportBase.operations as Record<string, OperationStatus>;
+    const ok = errors.length === 0 && inventory.valid && Object.values(operations).every((status) => status.succeeded);
+    process.exitCode = ok ? 0 : 1;
     console.log(JSON.stringify({
-      ok: errors.length === 0,
+      ok,
       outputDir: options.outputDir,
       session: options.session,
       inventory,

@@ -17,20 +17,16 @@ import type {
 
 export type GlmCoordinateMode = "normalized_1000" | "actual_pixels";
 
-export type GlmProfileName = "glm-4.6v-flash" | "glm-5.3-flash";
+export type GlmProfileName = "glm-5.3-flash";
 
 export interface GlmProfile {
-  readonly name: GlmProfileName;
+  /** Provider model id; custom profiles may use another id explicitly. */
+  readonly name: string;
   readonly thinking: "disabled" | "enabled";
   readonly coordinateMode: GlmCoordinateMode;
 }
 
 export const glmProfiles: Readonly<Record<GlmProfileName, GlmProfile>> = {
-  "glm-4.6v-flash": {
-    name: "glm-4.6v-flash",
-    thinking: "disabled",
-    coordinateMode: "normalized_1000",
-  },
   "glm-5.3-flash": {
     name: "glm-5.3-flash",
     thinking: "enabled",
