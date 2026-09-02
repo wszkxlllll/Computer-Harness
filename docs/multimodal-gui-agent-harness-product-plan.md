@@ -177,7 +177,7 @@ Approval 的最终决定属于 Runtime Policy，而不是模型。模型若主�
 
 ### 3.5 ActionIntent
 
-`ActionIntent` 是 Harness 对模型 GUI 操作意图的统一表示。不同 Provider 可以使用 Function Calling、Structured Output 或原生 Computer Use Protocol，但最终都由 Adapter 转换成统一 ActionIntent。
+`ActionIntent` 是 Harness 对模型 GUI 操作意图的统一表示。不同 Provider 可以使用 Function Calling、Structured Output 或原生 Computer Use Protocol，但 Provider Adapter 只负责把模型输出规范化为 `ModelTurn/ToolCall`；随后由 Runtime 的 Computer Tool Executor 把 Computer ToolCall 转换成统一 ActionIntent。
 
 V1 的 GUI Action 包括：
 
@@ -212,17 +212,19 @@ V1 默认一次 ModelTurn 最多执行一个 GUI Action。批量文本输入仍�
 
 `ActionReceipt` 表示底层 Computer Backend 实际执行 Action 后产生的结果，用于明确区分“模型希望执行什么”和“系统实际执行了什么”。
 
+`ActionIntent` 与 `ActionReceipt` 是 Harness Runtime 和 Computer Adapter 共享的 Computer 边界
+协议，不是具体 Driver 的原生请求或返回。Runtime 生产 ActionIntent、Adapter 消费它；Adapter
+把 Driver 私有结果规范化成 ActionReceipt，Runtime 再消费 Receipt。具体 Driver 类型只存在于
+对应 Adapter 内部。
+
 它至少记录：
 
 - 对应 ActionIntent；
 - 执行状态；
--开始和完成时间；
--耗时；
--Driver 返回的 effect、delivery、refusal 或错误；
--是否被取消；
--执行后 Observation 的关联。
+- Driver 的稳定错误码和必要消息；
+- 是否被拒绝、失败或取消。
 
-Action 执行成功只表示 Driver 接受或完成了操作，不代表用户目标已经完成。V1 不将语义级 Verification 强制放入每一步主链，避免额外多模态调用显著增加延迟。
+Action 执行成功只表示 Driver 接受或完成了操作，不代表用户目标已经完成。动作开始和结束时间由 Runtime Event 提供，动作后 Observation 由独立的 `observation.created` Event 保存，不重复塞进 Receipt。V1 不实现 `effect` 状态或语义级 Verification；只保留动作前后 Observation，未来有真实核验消费者时再由独立扩展产生新的验证事件。
 
 ### 3.7 RuntimeEvent
 

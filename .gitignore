@@ -16,3 +16,6 @@ spikes/cua-driver/**/runs/
 
 # Downloaded CUA binaries and daemon logs are local stage-0 evidence.
 .stage0/
+
+# Historical planning/audit documents stay local for provenance and are not tracked.
+docs/history/

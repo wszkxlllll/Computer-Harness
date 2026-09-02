@@ -6,10 +6,11 @@
 > 核心基础设施：`@trycua/cua-driver@0.22.2`
 
 > Stage 3 实施提示（2026-08-29）：真实 CUA 0.22.2 Schema 审计发现，桌面像素动作没有
-> Driver Frame token，且当前 `scroll(deltaX, deltaY)` 与 CUA 的落点/方向/粒度语义不等价。
-> Stage 3 的具体施工顺序、两级 Frame 新鲜度和协议决策以
-> [`stage-3-cua-capability-audit-and-provider-boundary.md`](./stage-3-cua-capability-audit-and-provider-boundary.md)
-> 为准；不要把本文中的所有 `CuaFrameRef` 描述视为桌面像素路径已经具备的能力。
+> Driver Frame token；S3-1C 之前的 `scroll(deltaX, deltaY)` 已在 S3-2 收窄为带落点、方向和正
+> 整数 ticks 的动作，以匹配已实测的 CUA wheel 输入边界。
+> Stage 3 的具体施工顺序、两级 Frame 新鲜度和协议决策以当前
+> [总体审计](./trajectory-review-2026-09-02/runtime-trajectory-cua-adapter-issues-2026-09-02.md)及本地历史证据为准；
+> 不要把本文中的所有 `CuaFrameRef` 描述视为桌面像素路径已经具备的能力。
 
 ## 一、文档目的
 
@@ -30,7 +31,7 @@
 
 - 一个可独立运行的 TypeScript GUI Agent Runtime；
 - 一个统一的 `Computer` 接口和 `CuaDriverComputer` 实现；
-- 至少两个国内多模态模型 Provider Adapter；
+- 两个真实多模态 Provider Adapter 和两个当前可运行模型配置；
 - Provider 无关的 `ModelTurn`、`ToolCall`、`ActionIntent` 和 `ActionReceipt` 协议；
 - 单 Run 的 `Observe → Model → Act → Observe` 循环；
 - Frame 绑定、坐标边界、Session 状态等确定性校验；
@@ -38,8 +39,8 @@
 - JSONL Runtime Event、截图资产和运行结果的完整落盘；
 - 可选的轻量 Planning Task 工具；
 - CLI 与 SDK 两种入口；
-- 在 5–10 个真实跨应用任务上完成端到端验证；
-- 相同 Runtime 下切换 Provider，不修改 Agent Loop。
+- 在一组冻结且具有外部验收标准的真实任务上完成端到端验证；
+- 相同 Runtime 下切换 GLM model profile 或 Qwen Adapter，不修改 Agent Loop。
 
 ### 2.2 V1 明确不做
 
@@ -92,7 +93,7 @@ gui-agent-harness/
 │  ├─ providers/            # Provider 公共接口
 │  ├─ provider-doubao/      # 豆包 Adapter
 │  ├─ provider-glm/         # GLM Adapter
-│  ├─ provider-qwen/        # Qwen Adapter；首版是否启用由模型试验决定
+│  ├─ provider-qwen/        # Qwen GUI-Plus Adapter
 │  ├─ tools/                # Tool Registry、Schema 和路由
 │  ├─ computer/             # Computer 公共接口
 │  ├─ computer-cua/         # trycua/cua-driver 适配
@@ -243,7 +244,7 @@ type ToolResult =
       error: { code: string; message: string };
     };
 
-type ModelTurn =
+type ModelTurn = (
   | {
       type: "tool_calls";
       calls: ToolCall[];
@@ -256,7 +257,16 @@ type ModelTurn =
   | {
       type: "finish";
       summary: string;
-    };
+      reportedStatus?: "success" | "failure";
+    }
+) & { usage?: ModelUsage };
+
+// Provider usage is optional diagnostics, not a control signal.
+interface ModelUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
 ```
 
 审批不由模型直接下最终结论。模型若认为需要授权，调用一个控制类工具提出请求，是否进入审批状态由 `RuntimePolicy` 决定。
@@ -277,6 +287,26 @@ ModelTurn.tool_calls
 
 所有 GUI Action 可以由 Tool 表达，但不是所有 Tool 都是 GUI Action。`TaskUpdate`、请求用户输入和未来的查询工具不得被强行转换为 `ActionIntent`。
 
+`ActionIntent` 和 `ActionReceipt` 都属于 Harness 定义的 **Computer 边界协议**，但不属于
+`cua-driver` 的私有协议：
+
+```text
+Provider 输出 ToolCall
+        ↓
+Runtime 的 Computer Tool Executor 生成 ActionIntent
+        ↓
+Computer Adapter 转换为具体 Driver 请求
+        ↓
+Driver 私有结果
+        ↓
+Computer Adapter 规范化为 ActionReceipt
+        ↓
+Runtime 写 Event、生成 ToolResult 并决定下一步
+```
+
+因此，Runtime 不直接依赖 CUA action/result 类型，Adapter 也不负责理解模型 ToolCall、任务目标
+或语义是否完成。
+
 ### 5.6 ActionIntent
 
 ```ts
@@ -291,7 +321,12 @@ type ActionIntent =
   | (GuiActionBase & { kind: "right_click"; point: Point })
   | (GuiActionBase & { kind: "type"; text: string })
   | (GuiActionBase & { kind: "keypress"; keys: string[] })
-  | (GuiActionBase & { kind: "scroll"; deltaX: number; deltaY: number })
+  | (GuiActionBase & {
+      kind: "scroll";
+      point: Point;
+      direction: "up" | "down" | "left" | "right";
+      ticks: number;
+    })
   | (GuiActionBase & { kind: "drag"; from: Point; to: Point })
   | { actionId: ActionId; kind: "wait"; durationMs: number };
 ```
@@ -312,15 +347,31 @@ V1 原则：
 interface ActionReceipt {
   actionId: ActionId;
   status: "completed" | "refused" | "failed" | "cancelled";
-  startedAt: string;
-  endedAt?: string;
-  durationMs?: number;
   driverCode?: string;
   message?: string;
 }
 ```
 
 `completed` 只表示 Driver 已接受并完成动作调用，不表示用户目标或页面语义已经成功。
+
+字段所有权如下：
+
+| 字段 | 生产者 | 当前消费者 |
+|---|---|---|
+| `ActionIntent.actionId` | Runtime ID Factory | Runtime Event、Adapter 和 Receipt 关联检查 |
+| `ActionIntent.basedOn` | Runtime 从当前有效 Observation 注入 | Runtime Validation、Computer Adapter |
+| `ActionIntent.kind` 与参数 | Computer Tool Definition 的 `toAction` | Runtime Validation、Computer Adapter |
+| `ActionReceipt.actionId` | Adapter 回显收到的 Action ID | Runtime 将回执关联到进行中的 Action |
+| `ActionReceipt.status` | Adapter 根据 Driver 返回或明确拒绝进行规范化 | Runtime 分支、Event、ToolResult |
+| `driverCode` / `message` | Adapter 从结构化 Driver 错误中提取 | ToolResult 错误、Trajectory 诊断和审计界面 |
+
+任何新的公共协议字段在合入前都必须回答：谁生产、谁消费、何时创建或更新、缺失时如何处理。
+如果只有生产者没有当前消费者、只能从私有 Driver 猜测、或没有可靠更新机制，该字段只能留在
+Adapter 私有状态或能力实验记录中，不能进入 Protocol。
+
+动作开始和结束时间已经由 `action.execution.started/completed/failed` Event 的 `occurredAt`
+提供；持续时间可以从两个 Event 推导，因此不在 Receipt 中重复维护。CUA 的 `effect`、`route`、
+`delivery` 和原始 JSON 目前没有公共消费者，不进入 Protocol。
 
 `ActionReceipt` 不使用 `outcome_unknown` 伪装成一个已完成的动作终态。若
 `action.execution.started` 已经持久化，但 Runtime 无法确认 GUI 副作用是否发生，则不写
@@ -366,7 +417,8 @@ interface ModelMessage {
 
 type ModelContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; asset: AssetRef }
+  | { type: "image"; asset: AssetRef; viewport: Viewport }
+  | { type: "tool_call"; call: ToolCall; viewport?: Viewport }
   | { type: "tool_result"; result: ToolResult };
 ```
 
@@ -377,14 +429,9 @@ type ModelContentBlock =
 ```ts
 interface ProviderAdapter {
   readonly id: string;
-  readonly capabilities: ProviderCapabilities;
-
   generate(
     input: ModelInput,
-    options: {
-      signal: AbortSignal;
-      onEvent?: (event: ProviderProgressEvent) => void;
-    },
+    options: { signal: AbortSignal },
   ): Promise<ModelTurn>;
 }
 ```
@@ -397,21 +444,18 @@ interface ProviderAdapter {
 - Provider Adapter 不读取全局 Run 状态，也不直接写 PlanningTask；
 - Provider 原始响应可作为脱敏调试资产保存，但不进入核心协议。
 
+Stage 4 的真实能力边界不是“所有 Provider 都支持同一种 Computer Use”。当前已固定两种可验证
+presentation：GLM 使用原生 OpenAI-compatible Function ToolCall，并按 profile 声明 normalized 0..1000
+或当前图片像素坐标；Qwen GUI-Plus 使用官方 `computer_use` XML 文本协议的明确子集。Qwen 的
+`terminate.status`、`wait.time` 和动作白名单由 Adapter 负责；不能用 canonical 工具名或未经验证的
+wheel/drag 转换冒充官方协议。Provider 进入 Runtime 前必须同时满足：真实请求形状、模型响应解析、第二轮
+ToolCall/ToolResult 历史呈现三者一致。模型没有返回结构化 status 时，Runtime 不从普通文本猜测成功或失败。
+
 ### 6.3 Provider 能力
 
-V1 只声明实际会被 ContextCompiler 和 Adapter 消费的能力：
-
-```ts
-interface ProviderCapabilities {
-  vision: boolean;
-  nativeToolCalling: boolean;
-  structuredOutput: boolean;
-  streaming: boolean;
-  maxImagesPerRequest?: number;
-}
-```
-
-若能力没有当前消费者，不提前加入字段。
+Stage 4 暂不定义公共 `ProviderCapabilities`。GLM profile 和 Qwen Adapter 各自只保存真实消费者需要的
+模型名、思考模式、坐标模式和请求差异；等两个 Adapter 出现相同的 Context/Tool presentation 需求后再
+提升为公共合同。
 
 ## 七、Tool Registry 与执行路由
 
@@ -422,7 +466,13 @@ interface ToolDefinition {
   name: string;
   description: string;
   category: "computer" | "planning" | "control" | "side";
-  inputSchema: unknown;
+  inputSchema: JsonValue;
+  validate(args: JsonValue): void;
+}
+
+interface ComputerToolDefinition extends ToolDefinition {
+  category: "computer";
+  toAction(args: JsonValue, context: ToolExecutionContext): GuiActionDraft;
 }
 ```
 
@@ -494,6 +544,7 @@ Adapter 提前构造一个尚未持久化的 AssetRef。Runtime 先分配 `Obser
 - 管理底层 Driver 的启动、连接、健康检查和关闭；
 - 将 CUA 截图与元数据转换为 `ObservationFrame`；
 - 将 `ActionIntent` 转换为 CUA 调用；
+- 将 CUA 返回和结构化错误规范化为最小 `ActionReceipt`，不透传私有结果对象；
 - 在 Adapter 内部保存并解释 `ObservationId → CuaFrameRef` 映射；
 - 将 CUA 错误归一化为 Runtime Error；
 - 确认截图尺寸、Viewport 和坐标空间一致；
@@ -534,7 +585,7 @@ Adapter 提前构造一个尚未持久化的 AssetRef。Runtime 先分配 `Obser
 
 ```ts
 interface ContextCompiler {
-  compile(input: ContextCompileInput): Promise<ModelInput>;
+  compile(input: ContextCompileInput, signal: AbortSignal): Promise<ModelInput>;
 }
 ```
 
@@ -821,6 +872,7 @@ interface RunSnapshot {
   status: RunStatus;
   outcome?: RunOutcome;
   stepCount: number;
+  modelRequestCount: number;
   latestObservationId?: ObservationId;
   createdAt?: string;
   computerOpenStartedAt?: string;
@@ -834,6 +886,9 @@ interface RunSnapshot {
   unresolvedActionId?: ActionId;
   startedAt?: string;
   endedAt?: string;
+  summary?: string;
+  reportedStatus?: "success" | "failure";
+  modelUsage?: ModelUsage;
 }
 ```
 
@@ -1145,27 +1200,35 @@ Fake 实现只属于测试基础设施，不进入产品 CLI。
 Windows 环境完成 20 轮 `observe → click/type → observe`，无静默裁剪、坐标漂移和
 残留 daemon。
 
-### 阶段 4：第一个 Provider
+### 阶段 4：双模型 Provider 基线
 
-先选择当前 API 文档、视觉能力和结构化输出最稳定的一个厂商，而不是同时开发三个。
-
-产物：
-
-- Provider Adapter；
-- 契约测试；
-- 真实 API 固定样例；
-- CLI 可运行一个完整任务。
-
-门槛：3–5 个短任务能够生成合法 ActionIntent，并留存完整轨迹。
-
-### 阶段 5：第二个 Provider
+实现两个 Provider Adapter 包和两个当前模型配置：`provider-glm` 支持
+`glm-5.3-flash`，`provider-qwen` 支持 `gui-plus-2026-02-26`。两个模型共享完全相同的
+Runtime、Context 合同、ToolRegistry、Computer 和 Trajectory。
 
 产物：
 
-- 第二 Provider Adapter；
-- 相同任务、相同 Tool 和相同 Computer 的对照记录。
+- 两个 Provider Adapter；
+- 两个模型配置的契约测试；
+- 同一组真实 API 固定样例；
+- CLI 可选择两个模型运行完整任务。
 
-门槛：切换 Provider 只改配置，Runtime、Computer 和 Tool 代码零修改。这是 Provider-neutral 命题的首个硬门槛。
+门槛：两个模型均能生成合法 ModelTurn/ActionIntent 并留存完整轨迹；协议失败、模型能力失败和 fixture
+任务失败分开记录。
+
+### 阶段 5：真实任务验证与 Provider-neutral 对照
+
+产物：
+
+- 一组预先冻结、具有外部验收标准的真实任务；本计划暂不指定具体任务内容；
+- 两个模型在相同任务、初始环境、Context、Tool、Computer 和预算下的对照记录；
+- 外部验收成功、模型提前结束/未完成、步骤数、模型调用数、延迟、Token/图片成本、非法 ToolCall、
+  基础设施故障和人工介入报告；
+- 以默认 Context 为冻结基线，后续 Context 调整使用独立实验比较。
+
+门槛：任务、环境、Context、Tool、预算和验收器在比较前冻结；GLM 使用当前 profile，Qwen 只改
+Adapter，Runtime、Computer、Context 语义和 Tool 代码零修改；完整 Trajectory 足以把失败归入基础设施、
+Context、Tool、Provider 协议、模型能力、任务定义或验收器。不得根据单条任务反复给 Prompt 打补丁。
 
 ### 阶段 6：Planning、审批和 CLI 完整化
 
@@ -1181,30 +1244,27 @@ Windows 环境完成 20 轮 `observe → click/type → observe`，无静默裁�
 门槛：用户可从 CLI 了解当前 Run 状态、待审批动作、最近 Observation 和失败原因，
 并能在同一个 Run 中回答模型问题或提交过程纠正。
 
-### 阶段 7：真实任务评测
+### 阶段 7：扩大真实任务评测
 
-选择 5–10 个覆盖浏览器和桌面应用的真实任务，至少包括：
+在阶段 5 的冻结实验合同通过后，再根据已观察到的结果决定是否扩大任务数量和应用覆盖面。扩大前不得
+修改原基线任务与验收器；新增任务单独版本化并保留独立结果。具体任务内容在进入本阶段前另行确定，
+不在技术计划中提前写死。
 
-- 纯导航；
-- 文本输入；
-- 多窗口切换；
-- 带等待或加载；
-- 一个需要暂停/确认的风险动作；
-- 一个会触发错误恢复的任务。
-
-每个 Provider 在相同环境重复运行，统计成功率、步骤数、耗时、模型调用次数、图像输入量、人工接管次数和失败类型。
+每个纳入比较的模型在相同环境重复运行，统计外部验收成功率、步骤数、耗时、模型调用次数、图像输入
+量、人工接管次数和失败类型。若样本扩充没有改变主要失败机制或模型排序，则停止扩样，转入针对已证实
+瓶颈的独立实验。
 
 ## 二十二、V1 完成标准
 
 同时满足以下条件才视为 V1 完成：
 
-1. 两个不同 Provider 在不修改 Runtime 的情况下运行；
+1. `provider-glm` 的两个模型 profile 和 `provider-qwen` 的 GUI-Plus 在不修改 Runtime 的情况下运行；
 2. `CuaDriverComputer` 是唯一底层依赖入口，Runtime 不引用 CUA 专用类型；
 3. 除 wait 外，每个 GUI 输入动作都能追溯到 ObservationFrame；
 4. 每个 GUI 副作用都有 started 和 completed/failed，缺失终态时可识别 outcome_unknown；
 5. 取消、暂停、审批、步数和时长预算可实际触发；
 6. 任意一次 Run 可仅凭轨迹文件重建其运行流程和最终状态；
-7. 5–10 个真实任务完成端到端运行并形成可比较报告；
+7. 一组冻结且具有外部验收标准的真实任务完成端到端运行并形成可比较报告；
 8. Provider、Driver 和 EventStore 失败不会抹掉已写入事实；
 9. 敏感配置不进入轨迹，截图导出需显式操作；
 10. README 能让另一名成员在干净环境中完成安装、配置和首个任务。
@@ -1213,7 +1273,7 @@ Windows 环境完成 20 轮 `observe → click/type → observe`，无静默裁�
 
 以下事项暂不写死为长期架构结论：
 
-- 第一个正式支持的 Provider 是豆包、GLM 还是 Qwen；
+- 两个当前模型中哪个适合作为默认模型；
 - CUA 首选 direct 还是 private-worker；
 - 默认保留几轮历史事件和几张历史截图；
 - 是否需要把 Accessibility 数据默认加入 Context；

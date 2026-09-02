@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "purpose": "Stage 4 local short-task comparison; outcome-only goals with deterministic external text evaluation.",
+  "models": [
+    "glm-5.3-flash",
+    "gui-plus-2026-02-26"
+  ],
+  "fixture": {
+    "name": "ProbeWindow",
+    "initialText": "READY\n",
+    "reset": "restart the fixture for every run",
+    "success": "the external evaluator reports exact equality of fixture text and expectedText",
+    "failure": "the external evaluator reports exact inequality; runtime/provider errors remain failures and are not converted to success"
+  },
+  "budgets": {
+    "maxSteps": 12,
+    "maxModelRequests": 16,
+    "runs": "3 tasks x 2 models = 6 formal runs, after one attended runner smoke check"
+  },
+  "tasks": [
+    {
+      "id": "text-replace-alpha",
+      "goal": "Replace the entire text in the editor with exactly: CH_TASK_ALPHA",
+      "expectedText": "CH_TASK_ALPHA",
+      "initialText": "READY\n",
+      "maxSteps": 12,
+      "maxModelRequests": 16
+    },
+    {
+      "id": "text-replace-beta",
+      "goal": "Replace the entire text in the editor with exactly: CH_TASK_BETA_2026",
+      "expectedText": "CH_TASK_BETA_2026",
+      "initialText": "READY\n",
+      "maxSteps": 12,
+      "maxModelRequests": 16
+    },
+    {
+      "id": "text-replace-gamma",
+      "goal": "Replace the entire text in the editor with exactly: CH_TASK_GAMMA_42",
+      "expectedText": "CH_TASK_GAMMA_42",
+      "initialText": "READY\n",
+      "maxSteps": 12,
+      "maxModelRequests": 16
+    }
+  ]
+}
