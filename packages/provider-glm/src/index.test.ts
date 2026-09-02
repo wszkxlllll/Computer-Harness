@@ -71,6 +71,12 @@ describe("GLM provider adapter", () => {
     await expect(second.generate(input(), { signal: new AbortController().signal })).rejects.toThrow(/outside/);
   });
 
+  it("rejects a function that was not offered in this run", async () => {
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "unknown", function: { name: "drag", arguments: "{}" } }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_UNAVAILABLE_TOOL" });
+  });
+
   it("returns non-empty text as finish and honors abort before reading", async () => {
     const client = new Client({ choices: [{ message: { content: "finished" } }], usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 } });
     const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
@@ -81,6 +87,15 @@ describe("GLM provider adapter", () => {
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
     await expect(adapter.generate(input(), { signal: controller.signal })).rejects.toThrow("cancelled");
+  });
+
+  it("adds actual-pixel bounds to the Function Schema when a viewport is available", async () => {
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "pixel-call", function: { name: "click", arguments: "{\"x\":799,\"y\":599}" } }] } }] });
+    const profile: GlmProfile = { name: "test-pixels", thinking: "disabled", coordinateMode: "actual_pixels" };
+    const adapter = new GlmAdapter({ apiKey: "key", profile, assetReader: new Reader(), httpClient: client });
+    const pixelInput: ModelInput = { ...input(), tools: [{ name: "click", description: "click", inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false } }] };
+    await expect(adapter.generate(pixelInput, { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ arguments: { x: 799, y: 599 } }] });
+    expect(client.body?.tools).toMatchObject([{ function: { parameters: { properties: { x: { minimum: 0, maximum: 799 }, y: { minimum: 0, maximum: 599 } } } } }]);
   });
 
   it("does not pass normalized pixel coordinates through without an image viewport", async () => {

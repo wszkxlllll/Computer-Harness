@@ -11,6 +11,7 @@ import type {
   ModelContentBlock,
   ModelInput,
   ModelMessage,
+  ModelToolSpec,
   ProviderAdapter,
 } from "@computer-harness/runtime";
 
@@ -24,6 +25,8 @@ export interface QwenPreparedImage {
   bytes: Uint8Array;
   mediaType: string;
 }
+
+export type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
 
 /** May re-encode/resize the full image; cropping requires a different spatial contract. */
 export type QwenImagePreprocessor =
@@ -40,6 +43,7 @@ export interface QwenAdapterOptions {
   endpoint?: string;
   workspaceId?: string;
   model?: "gui-plus-2026-02-26";
+  coordinateMode?: QwenCoordinateMode;
   imagePreprocessor?: QwenImagePreprocessor;
   httpClient?: QwenHttpClient;
 }
@@ -60,6 +64,7 @@ export class QwenGuiPlusAdapter implements ProviderAdapter {
   private readonly apiKey: string;
   private readonly assetReader: AssetReader;
   private readonly endpoint: string;
+  private readonly coordinateMode: QwenCoordinateMode;
   private readonly imagePreprocessor: QwenImagePreprocessor;
   private readonly httpClient: QwenHttpClient;
 
@@ -69,22 +74,22 @@ export class QwenGuiPlusAdapter implements ProviderAdapter {
     this.apiKey = options.apiKey;
     this.assetReader = options.assetReader;
     this.endpoint = resolveQwenEndpoint(options.endpoint, options.workspaceId);
+    this.coordinateMode = options.coordinateMode ?? "normalized_1000";
     this.imagePreprocessor = options.imagePreprocessor ?? identityImagePreprocessor;
     this.httpClient = options.httpClient ?? new FetchQwenHttpClient();
   }
 
   public async generate(input: ModelInput, options: { signal: AbortSignal }): Promise<ModelTurn> {
     options.signal.throwIfAborted();
-    const computerUseTool = qwenComputerUseTool(input);
     const messages = await this.presentMessages(
-      `${input.system}\n${buildGuiPlusSystemPrompt()}`,
+      `${input.system}\n${buildGuiPlusSystemPrompt(this.coordinateMode)}`,
       input.messages,
       options.signal,
     );
     const body = {
       model: this.id,
       messages,
-      tools: [computerUseTool],
+      tools: qwenFunctionTools(input, this.coordinateMode, latestViewport(input)),
       stream: false,
       temperature: 0,
       vl_high_resolution_images: true,
@@ -125,7 +130,7 @@ export class QwenGuiPlusAdapter implements ProviderAdapter {
           // This model uses normalized coordinates, independent of pixel size.
           contentParts.push({ type: "image_url", image_url: { url: toDataUrl(prepared.mediaType, prepared.bytes) } });
         } else if (block.type === "tool_call") {
-          historicalCalls.push(formatHistoricalCall(block));
+          historicalCalls.push(formatHistoricalCall(block, this.coordinateMode));
         }
       }
       if (message.role === "assistant") {
@@ -147,12 +152,12 @@ export class QwenGuiPlusAdapter implements ProviderAdapter {
     const content = response.content;
     const usage = response.usage;
     if (response.calls.length > 1) {
-      throw new QwenProviderError("GUI-Plus requires exactly one computer_use call per response", "QWEN_MULTIPLE_TOOL_CALLS");
+      throw new QwenProviderError("GUI-Plus requires exactly one Function Calling tool call per response", "QWEN_MULTIPLE_TOOL_CALLS");
     }
     if (response.calls.length === 1) {
       const raw = response.calls[0];
-      if (!isRecord(raw) || raw.type !== "function" || typeof raw.id !== "string" || raw.id.trim().length === 0 || !isRecord(raw.function) || raw.function.name !== "computer_use" || typeof raw.function.arguments !== "string") {
-        throw new QwenProviderError("Qwen native call requires id, function name computer_use and JSON arguments", "QWEN_INVALID_TOOL_CALL");
+      if (!isRecord(raw) || raw.type !== "function" || typeof raw.id !== "string" || raw.id.trim().length === 0 || !isRecord(raw.function) || typeof raw.function.name !== "string" || raw.function.name.trim().length === 0 || typeof raw.function.arguments !== "string") {
+        throw new QwenProviderError("Qwen native function call requires id, function name, and JSON arguments", "QWEN_INVALID_TOOL_CALL");
       }
       let parsed: unknown;
       try {
@@ -160,36 +165,19 @@ export class QwenGuiPlusAdapter implements ProviderAdapter {
       } catch (error) {
         throw new QwenProviderError(`Qwen tool_call is not JSON: ${error instanceof Error ? error.message : String(error)}`, "QWEN_INVALID_TOOL_CALL");
       }
-      const call = mapComputerUse(
+      const call = mapQwenToolCall(
         { name: raw.function.name, arguments: parsed },
+        input,
         latestViewport(input),
+        this.coordinateMode,
         raw.id as ToolCallId,
       );
-      if (call.name === "__finish__") {
-        const finishArgs = jsonRecord(call.arguments);
-        if (finishArgs === undefined || typeof finishArgs.summary !== "string") {
-          throw new QwenProviderError("Qwen terminate did not produce a summary", "QWEN_INVALID_TOOL_CALL");
-        }
-        const reportedStatus = finishArgs.reportedStatus;
-        if (reportedStatus !== "success" && reportedStatus !== "failure") {
-          throw new QwenProviderError("Qwen terminate requires status success or failure", "QWEN_INVALID_TOOL_CALL");
-        }
-        return { type: "finish", summary: finishArgs.summary, reportedStatus, ...(usage === undefined ? {} : { usage }) };
-      }
-      if (call.name === "__user_input_required__") {
-        const userArgs = jsonRecord(call.arguments);
-        if (userArgs === undefined || typeof userArgs.question !== "string") {
-          throw new QwenProviderError("Qwen interact requires text", "QWEN_INVALID_TOOL_CALL");
-        }
-        return { type: "user_input_required", question: userArgs.question, ...(usage === undefined ? {} : { usage }) };
-      }
-      if (!input.tools.some((tool) => tool.name === call.name)) {
-        throw new QwenProviderError(`Qwen selected a tool not offered by this run: ${call.name}`, "QWEN_UNAVAILABLE_TOOL");
-      }
+      if (call.type === "finish") return { ...call, ...(usage === undefined ? {} : { usage }) };
+      if (call.type === "user_input_required") return { ...call, ...(usage === undefined ? {} : { usage }) };
       const assistantText = content.trim();
       return assistantText.length === 0
-        ? { type: "tool_calls", calls: [call], ...(usage === undefined ? {} : { usage }) }
-        : { type: "tool_calls", calls: [call], assistantText, ...(usage === undefined ? {} : { usage }) };
+        ? { type: "tool_calls", calls: [call.call], ...(usage === undefined ? {} : { usage }) }
+        : { type: "tool_calls", calls: [call.call], assistantText, ...(usage === undefined ? {} : { usage }) };
     }
     if (/<\/?tool_call\b/iu.test(content) || /```[\s\S]*?(?:"name"|"type")\s*:\s*"computer_use"/iu.test(content) || looksLikeUntaggedComputerUseJson(content)) {
       throw new QwenProviderError(
@@ -264,64 +252,163 @@ function normalizeEndpoint(value: string): string {
   return `${endpoint}/chat/completions`;
 }
 
-function qwenComputerUseTool(input: ModelInput): Record<string, unknown> {
-  const available = new Set(input.tools.map((tool) => tool.name));
-  const actions = [
-    ...(available.has("keypress") || available.has("hotkey") ? ["key"] : []),
-    ...(available.has("type") ? ["type"] : []),
-    ...(available.has("click") ? ["left_click"] : []),
-    ...(available.has("wait") ? ["wait"] : []),
-    "terminate", "interact",
-  ];
-  return {
+function qwenFunctionTools(input: ModelInput, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): Record<string, unknown>[] {
+  const names = new Set(input.tools.map((tool) => tool.name));
+  const tools: Record<string, unknown>[] = input.tools.map((tool) => ({
     type: "function",
     function: {
-      name: "computer_use",
-      description: `Perform one GUI action or end/hand off the task. Available actions: ${actions.join(", ")}. Coordinates are normalized numbers from 0 to 1000 in the supplied image. key uses keys; type uses text; left_click uses coordinate; wait uses time in seconds; terminate requires status=success or failure and may include text; interact requires text. Use only the available actions.`,
-      parameters: {
+      name: tool.name,
+      description: `${tool.description}${coordinateDescription(tool.name, coordinateMode, viewport)}`,
+      parameters: qwenToolParameters(tool, coordinateMode, viewport),
+    },
+  }));
+  if (!names.has("terminate")) {
+    tools.push({
+      type: "function",
+      function: {
+        name: "terminate",
+        description: "Finish the GUI task and report whether the user goal is complete. Use failure when the goal is not complete; do not infer success from a tool receipt alone.",
+        parameters: {
+          type: "object",
+          properties: {
+            status: { type: "string", enum: ["success", "failure"], description: "Whether the user goal is complete." },
+            text: { type: "string", description: "Short explanation of the final status." },
+          },
+          required: ["status"],
+          additionalProperties: false,
+        },
+      },
+    });
+  }
+  if (!names.has("interact")) {
+    tools.push({
+      type: "function",
+      function: {
+        name: "interact",
+        description: "Ask the user for information or confirmation when the GUI task cannot proceed safely without it.",
+        parameters: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "The question or confirmation request shown to the user." },
+          },
+          required: ["text"],
+          additionalProperties: false,
+        },
+      },
+    });
+  }
+  return tools;
+}
+
+function qwenToolParameters(tool: ModelToolSpec, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): JsonValue {
+  const coordinate = qwenCoordinateArraySchema(coordinateMode, viewport);
+  switch (tool.name) {
+    case "click":
+      return {
+        type: "object",
+        properties: { coordinate: { ...coordinate, description: `Target point as [x, y] in the current image viewport. ${String(coordinate.description)}` } },
+        required: ["coordinate"],
+        additionalProperties: false,
+      };
+    case "scroll":
+      return {
         type: "object",
         properties: {
-          action: { type: "string", enum: actions },
-          coordinate: { type: "array", items: { type: "number", minimum: 0, maximum: 1000 }, minItems: 2, maxItems: 2 },
-          keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
-          text: { type: "string" },
-          time: { type: "number", minimum: 0 },
-          status: { type: "string", enum: ["success", "failure"] },
+          coordinate: { ...coordinate, description: `Point where scrolling starts, as [x, y] in the current image viewport. ${String(coordinate.description)}` },
+          pixels: { type: "integer", description: "Non-zero scroll amount. Positive values move up or right; negative values move down or left." },
+          direction: { type: "string", enum: ["up", "down", "left", "right"], description: "Scroll direction. Use up/down for vertical scrolling and left/right for horizontal scrolling." },
         },
-        required: ["action"],
+        required: ["coordinate", "pixels", "direction"],
         additionalProperties: false,
-      },
-    },
+      };
+    case "drag":
+      return {
+        type: "object",
+        properties: {
+          coordinate: { ...coordinate, description: `Drag start point as [x, y] in the current image viewport. ${String(coordinate.description)}` },
+          coordinate2: { ...coordinate, description: `Drag end point as [x, y] in the current image viewport. ${String(coordinate.description)}` },
+        },
+        required: ["coordinate", "coordinate2"],
+        additionalProperties: false,
+      };
+    case "wait":
+      return {
+        type: "object",
+        properties: { time: { type: "number", minimum: 0, description: "Non-negative wait duration in seconds." } },
+        required: ["time"],
+        additionalProperties: false,
+      };
+    default:
+      return addQwenCoordinateDetails(tool.inputSchema ?? { type: "object", properties: {}, additionalProperties: false }, tool.name, coordinateMode, viewport);
+  }
+}
+
+function qwenCoordinateArraySchema(coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): Record<string, JsonValue> {
+  const maximum = coordinateMode === "normalized_1000"
+    ? 1000
+    : undefined;
+  const description = coordinateMode === "normalized_1000"
+    ? "Two numbers [x, y] normalized to 0..1000."
+    : viewport === undefined
+      ? "Two pixel numbers [x, y] in the current image viewport."
+      : `Two pixel numbers [x, y] in the current image viewport (x 0-${viewport.width - 1}, y 0-${viewport.height - 1}).`;
+  return {
+    type: "array",
+    description,
+    items: { type: "number", minimum: 0, ...(maximum === undefined ? {} : { maximum }) },
+    minItems: 2,
+    maxItems: 2,
   };
 }
 
-function buildGuiPlusSystemPrompt(): string {
-  return "Use the native computer_use function for GUI actions. Emit at most one call per turn; do not serialize calls as XML or Markdown text. Coordinates are normalized from 0 to 1000 relative to the current image, not image pixels. Observe is automatic after an action. Use terminate with status success or failure to finish; use interact with text to ask the user a question. A tool execution receipt is not proof of task completion.";
+function coordinateDescription(name: string, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): string {
+  if (!hasCoordinateField(name)) return "";
+  return coordinateMode === "actual_pixels"
+    ? viewport === undefined
+      ? " Coordinates are pixels in the current image viewport."
+      : ` Coordinates are pixels in the current image viewport (x 0-${viewport.width - 1}, y 0-${viewport.height - 1}).`
+    : " Coordinates are normalized numbers from 0 to 1000 relative to the current image.";
 }
 
-function formatHistoricalCall(block: Extract<ModelContentBlock, { type: "tool_call" }>): unknown {
+function hasCoordinateField(name: string): boolean {
+  return name === "click" || name === "scroll" || name === "drag";
+}
+
+function addQwenCoordinateDetails(schema: JsonValue, toolName: string, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): JsonValue {
+  if (!hasCoordinateField(toolName)) return schema;
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return schema;
+  const record = schema as Record<string, JsonValue>;
+  const properties = record.properties;
+  if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return schema;
+  const nextProperties = { ...(properties as Record<string, JsonValue>) };
+  for (const key of ["x", "y", "fromX", "fromY", "toX", "toY"]) {
+    const property = nextProperties[key];
+    if (typeof property !== "object" || property === null || Array.isArray(property)) continue;
+    const nextProperty = { ...(property as Record<string, JsonValue>) };
+    nextProperty.description = coordinateMode === "actual_pixels"
+      ? `${typeof nextProperty.description === "string" ? `${nextProperty.description} ` : ""}Pixel coordinate in the current image viewport.`
+      : `${typeof nextProperty.description === "string" ? `${nextProperty.description} ` : ""}Normalized coordinate from 0 to 1000.`;
+    const isX = key.endsWith("X") || key === "x";
+    const maximum = coordinateMode === "normalized_1000" ? 1000 : isX ? viewport === undefined ? undefined : viewport.width - 1 : viewport === undefined ? undefined : viewport.height - 1;
+    nextProperty.minimum = 0;
+    if (maximum !== undefined) nextProperty.maximum = maximum;
+    nextProperties[key] = nextProperty;
+  }
+  return { ...record, properties: nextProperties };
+}
+
+function buildGuiPlusSystemPrompt(coordinateMode: QwenCoordinateMode): string {
+  const coordinateRule = coordinateMode === "actual_pixels"
+    ? "Coordinates are pixels in the current image viewport."
+    : "Coordinates are normalized from 0 to 1000 relative to the current image.";
+  return `Use the available Function Calling tools for GUI actions. Emit at most one tool call per turn. ${coordinateRule} Observe is automatic after an action. Use terminate with status success or failure to finish; use interact with text to ask the user a question. A tool execution receipt is not proof of task completion.`;
+}
+
+function formatHistoricalCall(block: Extract<ModelContentBlock, { type: "tool_call" }>, coordinateMode: QwenCoordinateMode): unknown {
   const args = jsonRecord(block.call.arguments);
   if (args === undefined) throw new QwenProviderError("Historical tool arguments must be an object", "QWEN_INVALID_HISTORY");
-  let wire: Record<string, unknown>;
-  switch (block.call.name) {
-    case "click": {
-      if (block.viewport === undefined || typeof args.x !== "number" || typeof args.y !== "number") {
-        throw new QwenProviderError("Historical click requires its own viewport and coordinates", "QWEN_INVALID_HISTORY");
-      }
-      wire = { action: "left_click", coordinate: [args.x * 1000 / block.viewport.width, args.y * 1000 / block.viewport.height] };
-      break;
-    }
-    case "type": wire = { action: "type", text: args.text }; break;
-    case "keypress":
-    case "hotkey": wire = { action: "key", keys: args.keys }; break;
-    case "wait": {
-      if (typeof args.durationMs !== "number") throw new QwenProviderError("Historical wait requires durationMs", "QWEN_INVALID_HISTORY");
-      wire = { action: "wait", time: args.durationMs / 1000 };
-      break;
-    }
-    default: throw new QwenProviderError(`Historical tool is unsupported: ${block.call.name}`, "QWEN_INVALID_HISTORY");
-  }
-  return { id: block.call.id, type: "function", function: { name: "computer_use", arguments: JSON.stringify(wire) } };
+  const wire = encodeQwenArguments(args, block.call.name, block.viewport, coordinateMode);
+  return { id: block.call.id, type: "function", function: { name: block.call.name, arguments: JSON.stringify(wire) } };
 }
 
 function toDataUrl(mediaType: string, bytes: Uint8Array): string {
@@ -367,53 +454,228 @@ function readUsage(value: unknown): ModelUsage | undefined {
   return Object.keys(parsed).length === 0 ? undefined : parsed;
 }
 
-function mapComputerUse(
-  value: unknown,
+type MappedQwenToolCall =
+  | { type: "call"; call: ToolCall }
+  | { type: "finish"; summary: string; reportedStatus: "success" | "failure" }
+  | { type: "user_input_required"; question: string };
+
+function mapQwenToolCall(
+  value: { name: string; arguments: unknown },
+  input: ModelInput,
   targetViewport: Viewport | undefined,
+  coordinateMode: QwenCoordinateMode,
   generatedId: ToolCallId,
-): ToolCall {
-  if (!isRecord(value) || value.name !== "computer_use" || !isRecord(value.arguments)) throw new QwenProviderError("Qwen tool_call must contain name computer_use and arguments", "QWEN_INVALID_TOOL_CALL");
-  const args = value.arguments;
-  if (typeof args.action !== "string") throw new QwenProviderError("Qwen computer_use requires action", "QWEN_INVALID_TOOL_CALL");
-  const action = args.action;
-  if (action === "terminate") {
+): MappedQwenToolCall {
+  const args = jsonRecord(value.arguments);
+  if (args === undefined) throw new QwenProviderError("Qwen function arguments must be an object", "QWEN_INVALID_TOOL_CALL");
+  if (value.name === "terminate") {
     if (args.status !== "success" && args.status !== "failure") throw new QwenProviderError("Qwen terminate requires status success or failure", "QWEN_INVALID_TOOL_CALL");
     const summary = typeof args.text === "string" && args.text.trim().length > 0 ? args.text : `GUI-Plus terminated with ${args.status}`;
-    return { id: generatedId, name: "__finish__", arguments: { summary, reportedStatus: args.status } };
+    return { type: "finish", summary, reportedStatus: args.status };
   }
-  if (action === "interact") {
+  if (value.name === "interact") {
     if (typeof args.text !== "string" || args.text.trim().length === 0) throw new QwenProviderError("Qwen interact requires text", "QWEN_INVALID_TOOL_CALL");
-    return { id: generatedId, name: "__user_input_required__", arguments: { question: args.text } };
+    return { type: "user_input_required", question: args.text };
   }
-  if (action === "left_click") {
-    return { id: generatedId, name: "click", arguments: mapCoordinate(args.coordinate, targetViewport) };
+  if (!input.tools.some((tool) => tool.name === value.name)) {
+    throw new QwenProviderError(`Qwen selected a tool not offered by this run: ${value.name}`, "QWEN_UNAVAILABLE_TOOL");
   }
-  if (action === "type") {
-    if (typeof args.text !== "string") throw new QwenProviderError("Qwen type action requires text", "QWEN_INVALID_TOOL_CALL");
-    return { id: generatedId, name: "type", arguments: { text: args.text } };
-  }
-  if (action === "key") {
-    if (!Array.isArray(args.keys) || args.keys.length === 0 || args.keys.some((key) => typeof key !== "string" || key.length === 0)) throw new QwenProviderError("Qwen key action requires keys", "QWEN_INVALID_TOOL_CALL");
-    return { id: generatedId, name: args.keys.length === 1 ? "keypress" : "hotkey", arguments: { keys: args.keys } };
-  }
-  if (action === "wait") {
-    if (typeof args.time !== "number" || !Number.isFinite(args.time) || args.time < 0) throw new QwenProviderError("Qwen wait action requires non-negative time in seconds", "QWEN_INVALID_TOOL_CALL");
-    return { id: generatedId, name: "wait", arguments: { durationMs: args.time * 1000 } };
-  }
-  throw new QwenProviderError(`Qwen action is unsupported: ${action}`, "QWEN_UNSUPPORTED_ACTION");
+  return {
+    type: "call",
+    call: {
+      id: generatedId,
+      name: value.name,
+      arguments: mapQwenArguments(args, value.name, targetViewport, coordinateMode),
+    },
+  };
 }
 
-function mapCoordinate(
-  value: unknown,
+/** Convert the provider's GUI-Plus wire arguments into the canonical Harness shape. */
+function mapQwenArguments(
+  args: Record<string, JsonValue>,
+  toolName: string,
   targetViewport: Viewport | undefined,
+  coordinateMode: QwenCoordinateMode,
+): Record<string, JsonValue> {
+  switch (toolName) {
+    case "click": {
+      const point = readQwenPoint(args.coordinate, "click.coordinate", targetViewport, coordinateMode);
+      return { x: point.x, y: point.y };
+    }
+    case "drag": {
+      const from = readQwenPoint(args.coordinate, "drag.coordinate", targetViewport, coordinateMode);
+      const to = readQwenPoint(args.coordinate2, "drag.coordinate2", targetViewport, coordinateMode);
+      return { fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
+    }
+    case "scroll": {
+      const point = readQwenPoint(args.coordinate, "scroll.coordinate", targetViewport, coordinateMode);
+      const pixels = readQwenPixels(args.pixels);
+      const direction = readQwenDirection(args.direction, pixels);
+      return { x: point.x, y: point.y, direction, ticks: Math.abs(pixels) };
+    }
+    case "wait": {
+      const time = args.time;
+      if (typeof time === "number" && Number.isFinite(time) && time >= 0) return { durationMs: time * 1000 };
+      // Keep accepting canonical fixtures from callers that bypass the provider wire schema.
+      const durationMs = args.durationMs;
+      if (typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0) return { durationMs };
+      throw new QwenProviderError("Qwen wait requires a non-negative time in seconds", "QWEN_INVALID_TOOL_CALL");
+    }
+    case "type":
+      if (typeof args.text !== "string") throw new QwenProviderError("Qwen type requires text", "QWEN_INVALID_TOOL_CALL");
+      return { text: args.text };
+    case "keypress":
+    case "hotkey":
+      return { keys: readQwenKeys(args.keys, toolName) };
+    default:
+      // Planning and future provider-neutral tools retain their declared schema. Known
+      // coordinate fields still use the generic normalized/pixel conversion as a fallback.
+      return mapCoordinates(args, toolName, targetViewport, coordinateMode);
+  }
+}
+
+function readQwenPoint(value: JsonValue | undefined, label: string, viewport: Viewport | undefined, coordinateMode: QwenCoordinateMode): { x: number; y: number } {
+  if (!Array.isArray(value) || value.length !== 2) throw new QwenProviderError(`Qwen ${label} must be [x, y]`, "QWEN_INVALID_TOOL_CALL");
+  const x = value[0];
+  const y = value[1];
+  if (typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) {
+    throw new QwenProviderError(`Qwen ${label} must contain finite numbers`, "QWEN_INVALID_TOOL_CALL");
+  }
+  if (coordinateMode === "normalized_1000") {
+    if (viewport === undefined) throw new QwenProviderError("Qwen normalized coordinates require an image viewport", "QWEN_MISSING_VIEWPORT");
+    if (x < 0 || x > 1000 || y < 0 || y > 1000) throw new QwenProviderError(`Qwen normalized ${label} is outside 0..1000`, "QWEN_COORDINATE_OUT_OF_RANGE");
+    return { x: x * viewport.width / 1000, y: y * viewport.height / 1000 };
+  }
+  if (viewport !== undefined && (x < 0 || x >= viewport.width || y < 0 || y >= viewport.height)) {
+    throw new QwenProviderError(`Qwen pixel ${label} is outside the current viewport`, "QWEN_COORDINATE_OUT_OF_RANGE");
+  }
+  return { x, y };
+}
+
+function readQwenPixels(value: JsonValue | undefined): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || !Number.isFinite(value) || value === 0) {
+    throw new QwenProviderError("Qwen scroll.pixels must be a non-zero integer", "QWEN_INVALID_TOOL_CALL");
+  }
+  return value;
+}
+
+function readQwenDirection(value: JsonValue | undefined, pixels: number): "up" | "down" | "left" | "right" {
+  if (value === "up" || value === "down" || value === "left" || value === "right") return value;
+  // Official GUI-Plus responses only carry signed pixels. Infer the vertical direction
+  // for those responses while allowing our richer schema to preserve horizontal intent.
+  return pixels > 0 ? "up" : "down";
+}
+
+function readQwenKeys(value: JsonValue | undefined, toolName: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.some((key) => typeof key !== "string" || key.length === 0)) {
+    throw new QwenProviderError(`Qwen ${toolName} requires a non-empty keys array`, "QWEN_INVALID_TOOL_CALL");
+  }
+  if (toolName === "keypress" && value.length !== 1) {
+    throw new QwenProviderError("Qwen keypress.keys must contain exactly one key; use hotkey for a shortcut", "QWEN_INVALID_TOOL_CALL");
+  }
+  return value as string[];
+}
+
+function mapCoordinates(
+  args: Record<string, JsonValue>,
+  toolName: string,
+  targetViewport: Viewport | undefined,
+  coordinateMode: QwenCoordinateMode,
+): Record<string, JsonValue> {
+  const coordinateKeys = toolName === "click" || toolName === "scroll"
+    ? ["x", "y"]
+    : toolName === "drag"
+      ? ["fromX", "fromY", "toX", "toY"]
+      : [];
+  if (coordinateKeys.length === 0 || coordinateMode === "actual_pixels") return args;
+  if (targetViewport === undefined) throw new QwenProviderError("Qwen normalized coordinates require an image viewport", "QWEN_MISSING_VIEWPORT");
+  const next = { ...args };
+  for (const key of coordinateKeys) {
+    const value = next[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1000) {
+      throw new QwenProviderError(`Qwen normalized coordinate ${key} is outside 0..1000`, "QWEN_COORDINATE_OUT_OF_RANGE");
+    }
+    const isX = key.endsWith("X") || key === "x";
+    next[key] = value * (isX ? targetViewport.width : targetViewport.height) / 1000;
+  }
+  return next;
+}
+
+function encodeCoordinates(
+  args: Record<string, JsonValue>,
+  toolName: string,
+  viewport: Viewport | undefined,
+  coordinateMode: QwenCoordinateMode,
+): Record<string, JsonValue> {
+  const coordinateKeys = toolName === "click" || toolName === "scroll"
+    ? ["x", "y"]
+    : toolName === "drag"
+      ? ["fromX", "fromY", "toX", "toY"]
+      : [];
+  if (coordinateKeys.length === 0 || coordinateMode === "actual_pixels") return args;
+  if (viewport === undefined) throw new QwenProviderError("Historical normalized coordinates require a viewport", "QWEN_INVALID_HISTORY");
+  const next = { ...args };
+  for (const key of coordinateKeys) {
+    const value = next[key];
+    if (typeof value !== "number" || !Number.isFinite(value)) throw new QwenProviderError(`Historical coordinate ${key} must be finite`, "QWEN_INVALID_HISTORY");
+    const isX = key.endsWith("X") || key === "x";
+    next[key] = value * (isX ? 1000 / viewport.width : 1000 / viewport.height);
+  }
+  return next;
+}
+
+/** Convert canonical Harness calls back to the provider-native GUI-Plus schema for history. */
+function encodeQwenArguments(
+  args: Record<string, JsonValue>,
+  toolName: string,
+  viewport: Viewport | undefined,
+  coordinateMode: QwenCoordinateMode,
+): Record<string, JsonValue> {
+  switch (toolName) {
+    case "click": {
+      const point = readCanonicalPoint(args, "x", "y", "click", viewport, coordinateMode);
+      return { coordinate: [point.x, point.y] };
+    }
+    case "drag": {
+      const from = readCanonicalPoint(args, "fromX", "fromY", "drag.from", viewport, coordinateMode);
+      const to = readCanonicalPoint(args, "toX", "toY", "drag.to", viewport, coordinateMode);
+      return { coordinate: [from.x, from.y], coordinate2: [to.x, to.y] };
+    }
+    case "scroll": {
+      const point = readCanonicalPoint(args, "x", "y", "scroll", viewport, coordinateMode);
+      const direction = args.direction;
+      const ticks = args.ticks;
+      if (direction !== "up" && direction !== "down" && direction !== "left" && direction !== "right") throw new QwenProviderError("Historical scroll direction is invalid", "QWEN_INVALID_HISTORY");
+      if (typeof ticks !== "number" || !Number.isInteger(ticks) || ticks <= 0) throw new QwenProviderError("Historical scroll ticks must be a positive integer", "QWEN_INVALID_HISTORY");
+      return { coordinate: [point.x, point.y], pixels: direction === "up" || direction === "right" ? ticks : -ticks, direction };
+    }
+    case "wait": {
+      const durationMs = args.durationMs;
+      if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) throw new QwenProviderError("Historical wait durationMs must be non-negative", "QWEN_INVALID_HISTORY");
+      return { time: durationMs / 1000 };
+    }
+    default:
+      return encodeCoordinates(args, toolName, viewport, coordinateMode);
+  }
+}
+
+function readCanonicalPoint(
+  args: Record<string, JsonValue>,
+  xKey: string,
+  yKey: string,
+  label: string,
+  viewport: Viewport | undefined,
+  coordinateMode: QwenCoordinateMode,
 ): { x: number; y: number } {
-  if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== "number" || typeof value[1] !== "number" || !Number.isFinite(value[0]) || !Number.isFinite(value[1])) throw new QwenProviderError("Qwen coordinate must be [x,y]", "QWEN_INVALID_TOOL_CALL");
-  if (targetViewport === undefined) throw new QwenProviderError("Qwen coordinates require an image viewport", "QWEN_MISSING_VIEWPORT");
-  if (value[0] < 0 || value[0] > 1000 || value[1] < 0 || value[1] > 1000) throw new QwenProviderError("Qwen normalized coordinate is outside 0..1000", "QWEN_COORDINATE_OUT_OF_RANGE");
-  return {
-    x: value[0] * targetViewport.width / 1000,
-    y: value[1] * targetViewport.height / 1000,
-  };
+  const x = args[xKey];
+  const y = args[yKey];
+  if (typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) throw new QwenProviderError(`Historical ${label} coordinates must be finite`, "QWEN_INVALID_HISTORY");
+  if (coordinateMode === "normalized_1000") {
+    if (viewport === undefined) throw new QwenProviderError("Historical normalized coordinates require a viewport", "QWEN_INVALID_HISTORY");
+    return { x: x * 1000 / viewport.width, y: y * 1000 / viewport.height };
+  }
+  return { x, y };
 }
 
 function latestViewport(input: ModelInput): Viewport | undefined {
@@ -432,7 +694,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function jsonRecord(value: JsonValue): Record<string, JsonValue> | undefined {
+function jsonRecord(value: unknown): Record<string, JsonValue> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, JsonValue>
     : undefined;

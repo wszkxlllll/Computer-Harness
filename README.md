@@ -15,7 +15,7 @@ Context、canonical Computer Tools、GLM/Qwen Provider 和 CLI。当前状态是
 - 已加入 CUA 0.22.2 的安全技术探针和真实 `packages/computer-cua` 适配器；
 - 已实现 `packages/runtime` 的 FakeProvider/FakeComputer RunController、命令 Inbox、
   失败注入和统一 Action/Capability/Viewport 校验；
-- 已实现 `packages/context` 的时序投影、`packages/provider-glm` 的两个 profile、
+- 已实现 `packages/context` 的时序投影、`packages/provider-glm` 的 profile 抽象（当前生产 profile 为 `glm-5.3-flash`）、
   `packages/provider-qwen` 的 GUI-Plus 原生工具调用适配，以及 `apps/cli` 组合入口；
 - fake 契约不等于真实模型成功率，真实 API 和隔离 CUA fixture 仍需按 Stage 4 门槛运行。
 
@@ -92,8 +92,11 @@ spikes/cua-driver       可删除的底层 CUA 探针
 ```
 
 每个包必须有当前生产者、消费者和测试，不为未来能力提前加入空接口。V1 暂不包含
-Memory、Verifier、RL、后台 Job、Subagent、Dashboard 或第三个 Provider。Qwen GUI-Plus 当前只声明
-官方 `computer_use` 的 `key/type/left_click/wait/terminate/interact` 子集；scroll/drag 不会被伪装为已支持。
+Memory、Verifier、RL、后台 Job、Subagent、Dashboard 或第三个 Provider。两个 Adapter 都使用原生
+Function Calling，并按本轮 Runtime 工具逐个生成 Schema。Qwen 在 Adapter 边界将 GUI-Plus 的
+`coordinate`、`coordinate2`、`pixels`、`time` 映射为 canonical 的 click/scroll/drag/wait 参数；
+Schema 和 Parser 都不会让未知工具或缺失字段进入 Runtime。Qwen 官方 text `computer_use` 协议仅作为
+历史兼容错误检测，不是当前生产请求格式。
 
 ## 施工顺序
 

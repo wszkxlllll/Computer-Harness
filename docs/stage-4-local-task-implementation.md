@@ -28,7 +28,10 @@ Verifier、RL 或 Dashboard。
 - `packages/computer-cua` 负责把 Harness Computer 合同接到 CUA daemon；`spikes/cua-driver/stage4-local-runner.ts`
   负责独立 daemon、fixture、CLI、evaluator 和清理。
 - `scripts/stage4-local/evaluate-fixture.ps1` 是模型上下文之外的确定性评分器；不把模型自报 finish 当作任务成功。
-- 当前本地回归：`pnpm test` 为 95/95，`pnpm run typecheck` 通过，runner contract check 通过。
+- 当前本地回归：`pnpm test` 为 99/99，`pnpm run typecheck` 通过，runner contract check 通过。
+- 真实 API conformance 已通过：GLM-5.3-Flash 与 Qwen GUI-Plus 各完成两轮 Function Calling 请求（HTTP 200、
+  每轮一个原生 `message.tool_calls`）；仅使用脱敏合成图片，未执行 CUA 或桌面动作。证据位于
+  `runs/api-conformance/function-schema-live-20260903/summary.json`。
 - 旧的三模型首轮成功率和 Provider 失败记录属于历史证据，不能和本轮双模型结果混算。
 
 ## 当前阻塞与下一步
@@ -36,14 +39,20 @@ Verifier、RL 或 Dashboard。
 正式排名和扩大任务集前，先按总体审计关闭 P0：
 
 1. 动作已确定完成但动作后 Observe 失败时，仍必须写入 ToolCall 终态；
-2. Qwen native 与官方文本协议的对照必须在同一冻结输入上完成，先确认 wire 合同再决定是否改 Adapter；
-3. GLM-5.3 的 `reasoning_content` 历史呈现需要补齐，避免多轮请求丢失模型上下文。
+2. Qwen Function Calling 坐标协议对照必须在同一冻结输入上完成，比较实际像素与 0--1000 归一化；
+3. GLM-5.3 的 `reasoning_content` 历史呈现需要补齐，避免多轮请求丢失模型上下文；
+4. Qwen/GLM 的 per-tool Function Calling Schema（description、required、Viewport 坐标边界和未知工具拒绝）
+   已通过静态门和真实 API conformance；Qwen provider-native 坐标/时间参数的解析映射也已覆盖测试。
+
+GLM 的 `terminate`/`interact` 结构化控制函数列为 P1，不阻断本轮坐标协议和短任务诊断；后续独立 Provider PR
+再补齐 Schema、解析映射和 Runtime 消费测试，避免与当前 P0 坐标变量混杂。
 
 P0 通过后，先做一次 Qwen paired run，再按相同任务、预算和 evaluator 运行两个模型的 6 个正式 Run。
 实验输出写入 ignored 的 `runs/`，每个 Run 单独目录，保存 Event、截图、请求计数、延迟、成本、评分和清理结果。
 
-Paired runner 的临时位置约定为 `scripts/experiments/qwen-wire-paired.ts`；不修改 Runtime/Protocol，实验结束
-可删除脚本和 `runs/experiments/qwen-wire-paired/`，只有通用结论才另开 Provider PR。
+Paired runner 的临时位置约定为 `scripts/experiments/qwen-wire-paired.ts`；只使用 Function Calling，分别运行
+`actual_pixels` 与 `normalized_1000` 两个坐标模式。不修改 Runtime/Protocol，实验结束可删除脚本和
+`runs/experiments/qwen-wire-paired/`，只有通用坐标或 Schema 结论才另开 Provider PR。
 
 ## 实施要求
 
@@ -83,4 +92,3 @@ pnpm --dir spikes/cua-driver run run:stage4-task -- `
 
 每个 Run 报告：模型和实际配置、`runtimeOutcome`、模型 summary、evaluator success/reason、动作/模型请求数、
 耗时与用量、轨迹路径、人工介入、实验干扰和清理状态。完成后更新本入口的“当前阻塞与下一步”，不覆盖历史结果。
-

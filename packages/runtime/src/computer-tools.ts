@@ -23,7 +23,10 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       category: "computer",
       inputSchema: {
         type: "object",
-        properties: { x: { type: "number" }, y: { type: "number" } },
+        properties: {
+          x: { type: "number", description: "Horizontal coordinate in the current observation coordinate space." },
+          y: { type: "number", description: "Vertical coordinate in the current observation coordinate space." },
+        },
         required: ["x", "y"],
         additionalProperties: false,
       },
@@ -36,7 +39,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       category: "computer",
       inputSchema: {
         type: "object",
-        properties: { text: { type: "string" } },
+        properties: { text: { type: "string", description: "Text to type into the currently focused GUI control." } },
         required: ["text"],
         additionalProperties: false,
       },
@@ -49,7 +52,15 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       category: "computer",
       inputSchema: {
         type: "object",
-        properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 1 } },
+        properties: {
+          keys: {
+            type: "array",
+            description: "Exactly one key name, such as ENTER, ESC, or A. Use hotkey for a simultaneous shortcut.",
+            items: { type: "string", minLength: 1 },
+            minItems: 1,
+            maxItems: 1,
+          },
+        },
         required: ["keys"],
         additionalProperties: false,
       },
@@ -62,7 +73,14 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       category: "computer",
       inputSchema: {
         type: "object",
-        properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 } },
+        properties: {
+          keys: {
+            type: "array",
+            description: "Key names pressed together, such as [\"CTRL\", \"L\"] for a browser address-bar shortcut.",
+            items: { type: "string", minLength: 1 },
+            minItems: 1,
+          },
+        },
         required: ["keys"],
         additionalProperties: false,
       },
@@ -76,10 +94,10 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       inputSchema: {
         type: "object",
         properties: {
-          x: { type: "number" },
-          y: { type: "number" },
-          direction: { type: "string", enum: ["up", "down", "left", "right"] },
-          ticks: { type: "integer", minimum: 1 },
+          x: { type: "number", description: "Horizontal coordinate where the scroll starts, in the current observation coordinate space." },
+          y: { type: "number", description: "Vertical coordinate where the scroll starts, in the current observation coordinate space." },
+          direction: { type: "string", enum: ["up", "down", "left", "right"], description: "Direction of the scroll movement." },
+          ticks: { type: "integer", minimum: 1, description: "Positive number of wheel ticks to send." },
         },
         required: ["x", "y", "direction", "ticks"],
         additionalProperties: false,
@@ -94,10 +112,10 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       inputSchema: {
         type: "object",
         properties: {
-          fromX: { type: "number" },
-          fromY: { type: "number" },
-          toX: { type: "number" },
-          toY: { type: "number" },
+          fromX: { type: "number", description: "Horizontal drag start coordinate in the current observation coordinate space." },
+          fromY: { type: "number", description: "Vertical drag start coordinate in the current observation coordinate space." },
+          toX: { type: "number", description: "Horizontal drag end coordinate in the current observation coordinate space." },
+          toY: { type: "number", description: "Vertical drag end coordinate in the current observation coordinate space." },
         },
         required: ["fromX", "fromY", "toX", "toY"],
         additionalProperties: false,
@@ -111,7 +129,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       category: "computer",
       inputSchema: {
         type: "object",
-        properties: { durationMs: { type: "number", minimum: 0 } },
+        properties: { durationMs: { type: "number", minimum: 0, description: "Non-negative time to wait in milliseconds before observing again." } },
         required: ["durationMs"],
         additionalProperties: false,
       },

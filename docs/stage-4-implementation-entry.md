@@ -29,16 +29,24 @@ Stage 4 分成两条互不覆盖的路线：
   `packages/context` 管时序投影；Provider 只负责 API 协议和模型输出映射。
 - `ActionIntent` 表示模型决定，`ActionReceipt` 表示 Computer 实际执行结果；两者不等同于任务完成。
 - Event 先写 execution started，再执行副作用，最后写 completed/failed；未知副作用默认重新观察，不能自动重试。
-- 当前本地回归为 `pnpm test` 95/95、`pnpm run typecheck` 通过；这不等于真实模型或 OSWorld 任务成功率。
+- 当前本地回归为 `pnpm test` 99/99、`pnpm run typecheck` 和 runner contract check 通过；真实 API
+  conformance 也已完成（GLM-5.3-Flash、Qwen GUI-Plus 各两轮原生 Function Calling，HTTP 200，无 CUA/桌面副作用）。
+  证据在 `runs/api-conformance/function-schema-live-20260903/summary.json`；这不等于真实模型或 OSWorld 任务成功率。
 
 ## 当前门槛与顺序
 
-1. 先处理总体审计中的 P0：动作后观察失败时补齐 ToolCall 终态；冻结 Qwen native/text wire 对照；补齐
-   GLM-5.3 多轮 `reasoning_content` 呈现。
+P0 的当前代码基线、PR 拆分和验收细节以
+[P0 开工就绪复审](./trajectory-review-2026-09-02/p0-readiness-reaudit-2026-09-02.md) 为准。
+
+1. 先处理总体审计中的剩余 P0：动作后观察失败时补齐 ToolCall 终态；冻结 Qwen Function Calling 坐标对照；
+   补齐 GLM-5.3 多轮 `reasoning_content` 呈现。Qwen/GLM per-tool Function Schema 静态门和真实 API
+   conformance 已通过，不再作为当前阻塞项。
 2. Qwen 对照实验只放在临时 `scripts/experiments/qwen-wire-paired.ts`，同一冻结输入分别跑
-   `native` / `official-text`，结果分目录保存；只把通用结论提升到 Provider PR。
-3. A 再运行当前 manifest 的 3 个短任务 × 2 个模型，共 6 个正式 Run；B 同步完成 OSWorld 的 B4 迁移探索。
-4. 两条路线分别通过自己的验收后，协调方再发布 Stage 5 的 Harness 接入任务；不能用环境安装通过代替
+   `actual_pixels` / `normalized_1000`；结果分目录保存；只把通用结论提升到 Provider PR。
+3. 在坐标实验前保留对 Qwen/GLM 工具 description、条件 required、Viewport 坐标边界、未知工具拒绝和 Runtime
+   二次校验的回归；这些 Schema 检查已通过，后续只比较坐标变量，避免混淆结果。
+4. A 再运行当前 manifest 的 3 个短任务 × 2 个模型，共 6 个正式 Run；B 同步完成 OSWorld 的 B4 迁移探索。
+5. 两条路线分别通过自己的验收后，协调方再发布 Stage 5 的 Harness 接入任务；不能用环境安装通过代替
    Harness 端到端通过。
 
 ## 文档和证据规则
@@ -55,4 +63,3 @@ Stage 4 分成两条互不覆盖的路线：
 
 Memory、长期 Compact、Verifier、RL、后台 Job、Subagent、Dashboard、第三 Provider、CUA 自动安装和跨平台
 生产 Adapter 都不属于当前 Stage 4 施工范围。
-

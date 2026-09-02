@@ -10,6 +10,21 @@ describe("default Computer tools", () => {
     expect(registry.modelTools().every((tool) => tool.inputSchema !== undefined)).toBe(true);
   });
 
+  it("keeps model-facing fields explicit and required", () => {
+    const tools = createDefaultComputerTools().modelTools();
+    const click = tools.find((tool) => tool.name === "click");
+    expect(click?.inputSchema).toMatchObject({
+      properties: {
+        x: { description: expect.stringContaining("coordinate") },
+        y: { description: expect.stringContaining("coordinate") },
+      },
+      required: ["x", "y"],
+      additionalProperties: false,
+    });
+    const scroll = tools.find((tool) => tool.name === "scroll");
+    expect(scroll?.inputSchema).toMatchObject({ required: ["x", "y", "direction", "ticks"] });
+  });
+
   it("validates and maps canonical arguments without provider-specific logic", () => {
     const registry = createDefaultComputerTools();
     const context = {

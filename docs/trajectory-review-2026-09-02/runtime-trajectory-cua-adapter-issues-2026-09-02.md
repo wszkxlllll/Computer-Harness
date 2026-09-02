@@ -75,17 +75,24 @@ run.finished(failed)
 
 **验收：** FakeComputer 首次观察成功、动作返回 completed、第二次观察抛错；最终必须同时存在 Action 终态、ToolCall 终态、观察错误和 `run.finished(failed)`，且不能重放动作。
 
-### P0-2 Qwen 的正式 wire mode 尚未与官方推荐协议完成对照冻结
+### P0-2 Qwen 的正式 Function Calling 坐标模式尚未冻结
 
-**确认存在，但原审计应表述得更精确。** 阿里云模型页确实将
-`gui-plus-2026-02-26` 标为支持 Function Calling；与此同时，当前 GUI 自动化指南明确要求使用该版本专属 System Prompt，并示范在文本中返回严格的 `<tool_call>` 块。当前 Adapter 则：
+**确认需要实验，但不再把 XML 文本协议作为当前实验变量。** 阿里云模型页将
+`gui-plus-2026-02-26` 标为支持 Function Calling。当前 Adapter 使用 `tools` 字段并读取
+`message.tool_calls`，需要在同一 Function Calling wire 下比较两种坐标表示：实际像素和 0--1000
+归一化。单一 `computer_use(action=...)` 的生产呈现已在工作树改为 per-tool Function Schema：
 
-- 通过 `tools` 字段发送缩减版 `computer_use`；
-- 只接受原生 `message.tool_calls`；
-- 主动拒绝文本 `<tool_call>`；
-- 没有采用官方推荐的完整 GUI System Prompt 和动作目录。
+- 每个本轮可用 Runtime 工具独立出现在 `tools[].function`；
+- `terminate`/`interact` 作为明确的控制函数，不再塞进动作参数的 `action` 枚举；
+- `scroll`/`drag` 等 Runtime 动作可以按工具集合被完整呈现；
+- Parser 仍只接受原生 `message.tool_calls`，并在进入 Runtime 前拒绝未提供的函数名。
 
-这不是“原生 Function Calling 一定错误”，因为此前真实 API 探针证明当前 Workspace 能返回原生 ToolCall；问题是正式本地任务中 Qwen 只有 1/3 外部验收通过，而请求呈现方式又没有与官方推荐路径做受控对照，因此当前结果不能归因成模型能力上限。
+真实 API conformance 已证明当前 Workspace 接受这套 per-tool Function Calling：在脱敏合成图片上，Qwen
+`gui-plus-2026-02-26` 连续两轮均返回 HTTP 200、`finish_reason=tool_calls` 和一个原生 `click` ToolCall；
+Adapter 将 GUI-Plus 返回的 `coordinate: [x, y]` 严格转换为 Harness 像素坐标。证据位于
+`runs/api-conformance/function-schema-live-20260903/summary.json`，不包含真实桌面操作。该结果只关闭“请求/响应
+协议能否跑通”，没有选择 actual-pixels 或 normalized-1000 的任务效果默认；正式本地任务中 Qwen 只有 1/3 外部
+验收通过，仍不能归因成模型能力上限。
 
 官方依据：
 
@@ -93,9 +100,28 @@ run.finished(failed)
 - [GUI 自动化指南](https://help.aliyun.com/zh/model-studio/gui-automation)
 - [GUI-Plus API 参考](https://help.aliyun.com/zh/model-studio/gui-plus-interface-interaction-model)
 
-**最小修复原则：** 不用正则“修补”损坏 JSON，也不同时改变任务、历史窗口和坐标策略。保留现有 native 模式作对照，增加一个严格的官方推荐呈现模式，固定 endpoint、模型快照、System Prompt、输出解析和历史回放方式后做 paired run，再选择正式模式。
+该 API 参考明确给出 GUI-Plus 参数名：`coordinate` 是二元坐标数组，`pixels` 是滚动量（正值向上、负值向下），
+`time` 是等待秒数，`status` 只用于 `terminate`。因此 Qwen Adapter 采用这些 provider-native 字段，再在边界
+映射为 Harness 的 `x/y`、`fromX/fromY/toX/toY`、`direction/ticks` 与 `durationMs`；这不是把 Qwen 字段泄漏到
+Runtime，而是协议适配的单一职责。
 
-**验收：** 同一冻结环境、同一任务和同一预算下，两种协议都能保存脱敏后的实际请求/响应、严格解析结果和外部 evaluator 结果；最终只保留有证据支持的默认模式。
+**最小实验原则：** 不用正则“修补”损坏 JSON，也不同时改变任务、历史窗口或 Prompt。保留当前
+Function Calling 结构，固定 endpoint、模型快照、System Prompt、工具集合、输出解析和历史回放方式，
+仅切换坐标模式后做 paired run，再选择正式坐标模式。
+
+**验收：** 同一冻结环境、同一任务和同一预算下，两种坐标模式都能保存脱敏后的实际请求/响应、严格解析
+结果、坐标转换诊断和外部 evaluator 结果；最终只保留有证据支持的默认坐标模式。
+
+### P0-4 Function Calling Schema 的条件约束（由原 P1-7 升级）
+
+**整改已完成，静态质量门和真实 API conformance 均通过。** Qwen 现按 Runtime 工具逐个生成 Function Schema；
+GLM 保持同一逐工具映射。两者都携带字段级 `required`/description，并在有当前 viewport 时为归一化或实际
+像素坐标添加可表达的范围约束。Qwen/GLM Parser 还拒绝本轮未提供的函数名。Qwen 的 provider-native 参数
+（`coordinate`、`coordinate2`、`pixels`、`direction`、`time`）在 Adapter 边界转换为 Runtime 的 canonical
+参数，避免把官方 wire 形状泄漏到 ToolRegistry。
+
+**原则：** Function Calling Schema 只提供生成约束，不能替代 Runtime 校验。任何 Provider 返回仍必须经过
+严格解析、工具存在性检查、参数校验和 Policy。
 
 ### P0-3 `glm-5.3-flash` 的交错思考历史缺少 `reasoning_content`
 
@@ -144,7 +170,9 @@ Qwen 采用 0..1000 归一化坐标，完整图 resize 不改变归一化映射�
 
 ### P1-5 Provider 工具能力矩阵未成为任务筛选的显式输入
 
-**确认存在。** Runtime 注册 click/type/keypress/hotkey/scroll/drag/wait 等动作；Qwen 当前只暴露 key/type/left_click/wait 加 terminate/interact。不同 Provider 支持不同子集本身不是错误，但如果任务需要未暴露动作，比较结果就不公平。
+**确认存在。** Runtime 注册 click/type/keypress/hotkey/scroll/drag/wait 等动作；当前 Qwen/GLM Adapter 会按
+本轮 `input.tools` 逐个呈现这些工具（另加 terminate/interact 控制函数），但底层 Provider 原生动作仍可能是
+其子集或不同参数形状。不同 Provider 支持不同子集本身不是错误，但如果任务需要未暴露动作，比较结果就不公平。
 
 **要求：** 先以实验清单或 Runner 校验消费这份能力信息，不必立刻设计宏大的通用 Capability 协议。每个进入比较的任务必须证明其所需动作属于所有候选 Provider 与 Computer 的交集；否则标为 unsupported，不计作模型能力失败。
 
@@ -153,6 +181,17 @@ Qwen 采用 0..1000 归一化坐标，完整图 resize 不改变归一化映射�
 **确认存在。** Provider 将网络错误、429 和部分 5xx 标记为 retryable，Runtime 只把它写入 `model.request.failed` 后结束 Run。字段目前只有报告/诊断消费者，没有恢复消费者；历史 4.6V 的平台过载记录不再进入现行模型实验。
 
 **要求：** 当前阶段先在实验 Runner 外层实现“重新初始化 fixture 后的有界 Run 重调度”，记录每个 attempt，不覆盖原失败轨迹；不要在 Action 层自动重试，也不要同时造 Provider fallback、Job Queue 或通用分布式调度。若以后进入 Runtime，再新增明确 attempt 事件和 RetryPolicy。
+
+### P1-7 GLM 缺少与 Qwen 对称的结构化控制函数
+
+**确认存在，但不阻断当前诊断实验。** Qwen Adapter 会自动暴露 `terminate(status, text?)` 和
+`interact(text)`，并把它们分别转换为 `ModelTurn.finish` 与 `ModelTurn.user_input_required`；GLM 当前只呈现
+`input.tools`，没有自动加入这两个控制函数，通常只能通过普通文本产生 `ModelTurn.finish`。这使两个 Provider
+在“结束任务”和“请求用户输入”上的协议不对称，也会让 GLM 的控制语义依赖 Runtime 是否额外注册控制工具。
+
+**要求：** 在后续独立 Provider PR 中，为 GLM 明确加入与当前 Qwen 相同的控制工具 Schema，并在 Adapter 边界
+把 `terminate`/`interact` 映射为结构化 `ModelTurn`；补充原始响应、历史回传和 Runtime 消费测试。不得把这项
+未验证的控制函数改动混入当前 Qwen 坐标对照，也不能仅通过 Prompt 声称 GLM 已支持结构化结束。
 
 ## 4. P2：不阻断当前诊断开发
 
@@ -242,7 +281,8 @@ Provider Adapter 应统一输出 canonical `ModelTurn/ToolCall`，不要求所�
 2. 补 GLM reasoning continuation 的明确生产/消费链与两轮 fixture；
 3. 在不覆盖现有实现的前提下做 Qwen native 与官方推荐协议 paired run，冻结正式 wire mode。
 
-第一批完成后才生成可用于 Provider 排名的结果。三项可以拆成独立 PR，避免 Runtime、GLM、Qwen 互相污染。
+第一批完成后才生成可用于 Provider 排名的结果。四项可以拆成独立 PR，避免 Runtime、GLM、Qwen 互相污染；
+P0-4 的 Schema 静态门必须先于 Qwen 坐标 paired run。
 
 ### 第二批：关闭会污染扩大实验的 P1
 

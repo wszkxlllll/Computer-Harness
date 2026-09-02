@@ -13,6 +13,7 @@
 | [stage-4-local-task-implementation.md](./stage-4-local-task-implementation.md) | A：Windows 本地任务真实闭环 |
 | [osworld-environment-implementation.md](./osworld-environment-implementation.md) | B：OSWorld 环境、评分/reset 和 Harness 迁移探索 |
 | [trajectory-review-2026-09-02/runtime-trajectory-cua-adapter-issues-2026-09-02.md](./trajectory-review-2026-09-02/runtime-trajectory-cua-adapter-issues-2026-09-02.md) | 总体 Runtime / Trajectory / CUA / Provider 审计 |
+| [trajectory-review-2026-09-02/p0-readiness-reaudit-2026-09-02.md](./trajectory-review-2026-09-02/p0-readiness-reaudit-2026-09-02.md) | 当前代码基线的 P0 开工门、拆分和验收顺序 |
 | [stage-4-local-tasks-2026-08-31.json](./stage-4-local-tasks-2026-08-31.json) | A 的机器可读冻结任务清单，不是叙述性计划 |
 
 ## 全局设计文档
@@ -36,4 +37,3 @@
 - 新结果优先写入对应路线文档的“已确认事实 / 下一步”；详细原始输出放在 ignored 的运行目录。
 - 被替代的文档移动到 `docs/history/`，不删除本地证据，不继续被当前入口引用。
 - 提交时只包含全局文档、两条路线入口、总体审计和必要的机器可读 manifest；历史目录保持未跟踪。
-

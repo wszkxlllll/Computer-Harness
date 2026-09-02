@@ -82,7 +82,7 @@ export class GlmAdapter implements ProviderAdapter {
     const body = {
       model: this.profile.name,
       messages: await this.presentMessages(`${input.system}\n${profilePrompt(this.profile)}`, input.messages, options.signal),
-      tools: input.tools.map((tool) => toGlmTool(tool, this.profile)),
+      tools: input.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(input))),
       stream: false,
       thinking: { type: this.profile.thinking },
     } satisfies Record<string, unknown>;
@@ -153,6 +153,9 @@ export class GlmAdapter implements ProviderAdapter {
           throw new GlmProviderError(`GLM returned duplicate ToolCall id: ${parsed.id}`, "GLM_DUPLICATE_TOOL_CALL");
         }
         ids.add(parsed.id);
+        if (!input.tools.some((tool) => tool.name === parsed.name)) {
+          throw new GlmProviderError(`GLM selected a tool not offered by this run: ${parsed.name}`, "GLM_UNAVAILABLE_TOOL");
+        }
         calls.push(mapCoordinates(parsed, latestViewport(input), this.profile.coordinateMode));
       }
       const assistantText = typeof message.content === "string" && message.content.trim().length > 0
@@ -205,16 +208,18 @@ class FetchGlmHttpClient implements GlmHttpClient {
   }
 }
 
-function toGlmTool(tool: ModelToolSpec, profile: GlmProfile): Record<string, unknown> {
+function toGlmTool(tool: ModelToolSpec, profile: GlmProfile, viewport: Viewport | undefined): Record<string, unknown> {
   const coordinateHint = profile.coordinateMode === "normalized_1000"
     ? " Coordinates x/y/fromX/fromY/toX/toY are normalized numbers from 0 to 1000."
-    : " Coordinates are pixels in the current image viewport.";
+    : viewport === undefined
+      ? " Coordinates are pixels in the current image viewport."
+      : ` Coordinates are pixels in the current image viewport (x 0-${viewport.width - 1}, y 0-${viewport.height - 1}).`;
   return {
     type: "function",
     function: {
       name: tool.name,
       description: `${tool.description}${coordinateHint}`,
-      parameters: addCoordinateBounds(tool.inputSchema ?? { type: "object", properties: {} }, profile.coordinateMode),
+      parameters: addCoordinateBounds(tool.inputSchema ?? { type: "object", properties: {} }, tool.name, profile.coordinateMode, viewport),
     },
   };
 }
@@ -317,8 +322,9 @@ function encodeCoordinates(call: ToolCall, viewport: Viewport | undefined, mode:
   return args;
 }
 
-function addCoordinateBounds(schema: JsonValue, mode: GlmCoordinateMode): JsonValue {
-  if (mode !== "normalized_1000" || typeof schema !== "object" || schema === null || Array.isArray(schema)) return schema;
+function addCoordinateBounds(schema: JsonValue, toolName: string, mode: GlmCoordinateMode, viewport: Viewport | undefined): JsonValue {
+  if (toolName !== "click" && toolName !== "scroll" && toolName !== "drag") return schema;
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return schema;
   const record = schema as Record<string, JsonValue>;
   const properties = record.properties;
   if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return schema;
@@ -326,7 +332,9 @@ function addCoordinateBounds(schema: JsonValue, mode: GlmCoordinateMode): JsonVa
   for (const key of ["x", "y", "fromX", "fromY", "toX", "toY"]) {
     const property = nextProperties[key];
     if (typeof property !== "object" || property === null || Array.isArray(property)) continue;
-    nextProperties[key] = { ...(property as Record<string, JsonValue>), minimum: 0, maximum: 1000 };
+    const isX = key.endsWith("X") || key === "x";
+    const maximum = mode === "normalized_1000" ? 1000 : isX ? viewport === undefined ? undefined : viewport.width - 1 : viewport === undefined ? undefined : viewport.height - 1;
+    nextProperties[key] = { ...(property as Record<string, JsonValue>), minimum: 0, ...(maximum === undefined ? {} : { maximum }) };
   }
   return { ...record, properties: nextProperties };
 }

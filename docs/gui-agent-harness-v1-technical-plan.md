@@ -444,12 +444,16 @@ interface ProviderAdapter {
 - Provider Adapter 不读取全局 Run 状态，也不直接写 PlanningTask；
 - Provider 原始响应可作为脱敏调试资产保存，但不进入核心协议。
 
-Stage 4 的真实能力边界不是“所有 Provider 都支持同一种 Computer Use”。当前已固定两种可验证
-presentation：GLM 使用原生 OpenAI-compatible Function ToolCall，并按 profile 声明 normalized 0..1000
-或当前图片像素坐标；Qwen GUI-Plus 使用官方 `computer_use` XML 文本协议的明确子集。Qwen 的
-`terminate.status`、`wait.time` 和动作白名单由 Adapter 负责；不能用 canonical 工具名或未经验证的
-wheel/drag 转换冒充官方协议。Provider 进入 Runtime 前必须同时满足：真实请求形状、模型响应解析、第二轮
-ToolCall/ToolResult 历史呈现三者一致。模型没有返回结构化 status 时，Runtime 不从普通文本猜测成功或失败。
+Stage 4 的真实能力边界不是“所有 Provider 都支持同一种 Computer Use”。当前两个 Provider 都使用
+OpenAI-compatible Function Calling；GLM 生产 profile 固定为 `actual_pixels`，Qwen 的 Experiment C 暂时
+比较 `actual_pixels` 与 `normalized_1000` 两种坐标表示。两者都按 Runtime 工具逐个生成 Function Schema，
+并把工具自身的 `required`、字段 description、`additionalProperties` 和当前 viewport 的坐标范围带到
+模型请求中；Qwen 另提供 `terminate(status)` 与 `interact(text)` 控制函数，并在 Adapter 边界把
+GUI-Plus 的 `coordinate`/`coordinate2`/`pixels`/`time` 参数映射为 Harness canonical 参数。Provider 负责函数名白名单、
+参数解析与坐标映射，不能用未经验证的 Provider 协议冒充 canonical 工具。Provider 进入 Runtime 前必须同时
+满足：真实请求形状、模型响应解析、第二轮 ToolCall/ToolResult 历史呈现三者一致。Function Calling Schema
+是生成约束，不取代 Parser、ToolRegistry 和 Runtime Policy 的二次校验；模型没有返回结构化 status 时，
+Runtime 不从普通文本猜测成功或失败。
 
 ### 6.3 Provider 能力
 
@@ -1258,7 +1262,7 @@ Context、Tool、Provider 协议、模型能力、任务定义或验收器。不
 
 同时满足以下条件才视为 V1 完成：
 
-1. `provider-glm` 的两个模型 profile 和 `provider-qwen` 的 GUI-Plus 在不修改 Runtime 的情况下运行；
+1. `provider-glm` 的 profile 抽象（当前生产模型为 `glm-5.3-flash`）和 `provider-qwen` 的 GUI-Plus 在不修改 Runtime 的情况下运行；
 2. `CuaDriverComputer` 是唯一底层依赖入口，Runtime 不引用 CUA 专用类型；
 3. 除 wait 外，每个 GUI 输入动作都能追溯到 ObservationFrame；
 4. 每个 GUI 副作用都有 started 和 completed/failed，缺失终态时可识别 outcome_unknown；
