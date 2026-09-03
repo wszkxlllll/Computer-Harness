@@ -139,6 +139,9 @@ function modelTurnMessage(
       if (turn.assistantText !== undefined && turn.assistantText.trim().length > 0) {
         content.push({ type: "text", text: turn.assistantText });
       }
+      if (turn.continuation !== undefined) {
+        content.push({ type: "provider_continuation", continuation: turn.continuation });
+      }
       for (const call of turn.calls) {
         content.push({ type: "tool_call", call, ...(viewport === undefined ? {} : { viewport }) });
       }

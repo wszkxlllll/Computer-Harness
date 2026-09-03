@@ -7,6 +7,7 @@ import type {
   EventId,
   JsonValue,
   ModelTurn,
+  ModelContinuation,
   ObservationCapture,
   ObservationFrame,
   ObservationId,
@@ -51,6 +52,8 @@ export interface ModelToolSpec {
 export type ModelContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; asset: AssetRef; viewport: Viewport }
+  /** Provider continuation data projected from the corresponding ModelTurn. */
+  | { type: "provider_continuation"; continuation: ModelContinuation }
   /** Viewport of the observation that informed this call, when known. */
   | { type: "tool_call"; call: ToolCall; viewport?: Viewport }
   | { type: "tool_result"; result: ToolResult };

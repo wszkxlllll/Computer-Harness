@@ -34,11 +34,12 @@ import {
   type ComputerSession,
   type IdFactory,
   type ModelInput,
+  type ModelMessage,
   type ProviderAdapter,
   type RuntimePolicy,
+  type ContextCompiler,
   validateActionIntent,
 } from "./index.js";
-import { DefaultContextCompiler } from "../../context/src/index.js";
 
 const runId = "runtime-test" as RunId;
 const sessionId = "fake-computer" as ComputerSessionId;
@@ -132,6 +133,73 @@ class ScriptedProvider implements ProviderAdapter {
       throw new Error("fake provider script exhausted");
     }
     return turn;
+  }
+}
+
+/** Runtime tests use a local contract double; the real Context package is tested separately. */
+class TestContextCompiler implements ContextCompiler {
+  public constructor(private readonly registry: ToolRegistry) {}
+
+  public async compile(input: Parameters<ContextCompiler["compile"]>[0], signal: AbortSignal): Promise<ModelInput> {
+    signal.throwIfAborted();
+    const messages: ModelMessage[] = [{ role: "user", content: [{ type: "text", text: input.goal }] }];
+    let viewport = input.latestObservation?.viewport;
+    const orderedEvents = [...input.recentEvents].sort((left, right) => left.sequence - right.sequence);
+    const resultsByCallId = new Map<string, ModelMessage["content"][number]>();
+    for (const event of orderedEvents) {
+      if (event.type === "tool.call.completed") resultsByCallId.set(event.result.callId, { type: "tool_result", result: event.result });
+      else if (event.type === "tool.call.failed") resultsByCallId.set(event.result.callId, { type: "tool_result", result: event.result });
+      else if (event.type === "tool.call.rejected") resultsByCallId.set(event.callId, { type: "tool_result", result: { callId: event.callId, status: "rejected", error: { code: "TOOL_REJECTED", message: event.reason } } });
+    }
+    const pendingCallIds: string[] = [];
+    const emittedCallIds = new Set<string>();
+    const flushPending = (): void => {
+      for (const callId of [...pendingCallIds]) {
+        const result = resultsByCallId.get(callId);
+        if (result === undefined || emittedCallIds.has(callId)) continue;
+        messages.push({ role: "tool", content: [result] });
+        emittedCallIds.add(callId);
+      }
+      pendingCallIds.length = 0;
+    };
+    const emitResult = (callId: string, result: ModelMessage["content"][number]): void => {
+      if (emittedCallIds.has(callId)) return;
+      const pendingIndex = pendingCallIds.indexOf(callId);
+      if (pendingIndex >= 0) pendingCallIds.splice(pendingIndex, 1);
+      messages.push({ role: "tool", content: [result] });
+      emittedCallIds.add(callId);
+    };
+    for (const event of orderedEvents) {
+      signal.throwIfAborted();
+      if (event.type === "observation.created") {
+        viewport = event.observation.viewport;
+      } else if (event.type === "model.response.received") {
+        if (event.turn.type === "tool_calls") {
+          const content: ModelMessage["content"] = [];
+          if (event.turn.assistantText !== undefined) content.push({ type: "text", text: event.turn.assistantText });
+          if (event.turn.continuation !== undefined) content.push({ type: "provider_continuation", continuation: event.turn.continuation });
+          for (const call of event.turn.calls) content.push({ type: "tool_call", call, ...(viewport === undefined ? {} : { viewport }) });
+          messages.push({ role: "assistant", content });
+          pendingCallIds.push(...event.turn.calls.map((call) => call.id));
+        } else if (event.turn.type === "finish") {
+          messages.push({ role: "assistant", content: [{ type: "text", text: event.turn.summary }] });
+        }
+      } else if (event.type === "tool.call.completed") {
+        emitResult(event.result.callId, { type: "tool_result", result: event.result });
+      } else if (event.type === "tool.call.failed") {
+        emitResult(event.result.callId, { type: "tool_result", result: event.result });
+      } else if (event.type === "tool.call.rejected") {
+        emitResult(event.callId, { type: "tool_result", result: { callId: event.callId, status: "rejected", error: { code: "TOOL_REJECTED", message: event.reason } } });
+      } else if (event.type === "user.input.received") {
+        flushPending();
+        messages.push({ role: "user", content: [{ type: "text", text: event.text }] });
+      }
+    }
+    flushPending();
+    if (input.latestObservation !== undefined) {
+      messages.push({ role: "user", content: [{ type: "image", asset: input.latestObservation.screenshot, viewport: input.latestObservation.viewport }] });
+    }
+    return { system: "runtime test context", messages, tools: this.registry.modelTools() };
   }
 }
 
@@ -294,7 +362,7 @@ async function makeController(
     runId,
     provider,
     computer: activeComputer,
-    contextCompiler: new DefaultContextCompiler(registry),
+    contextCompiler: new TestContextCompiler(registry),
     toolRegistry: registry,
     policy,
     eventWriter: writer,
@@ -349,6 +417,23 @@ describe("RunController S2-2 happy path", () => {
     const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 1));
     await expect(controller.start("finish now")).resolves.toBe("succeeded");
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, summary: "model says done", outcome: "succeeded", modelUsage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 } });
+  });
+
+  it("carries a provider continuation from one ModelTurn into the next context", async () => {
+    const provider = new ScriptedProvider([
+      {
+        type: "tool_calls",
+        calls: [clickCall("call-with-continuation")],
+        continuation: { providerId: "fake-provider", kind: "reasoning_content", content: "retain this reasoning" },
+      },
+      { type: "finish", summary: "done" },
+    ]);
+    const { controller } = await makeController(provider);
+
+    await expect(controller.start("preserve provider context")).resolves.toBe("succeeded");
+    expect(provider.inputs[1]?.messages.some((message) => message.content.some((block) =>
+      block.type === "provider_continuation" && block.continuation.content === "retain this reasoning",
+    ))).toBe(true);
   });
 
   it("preserves a provider-reported failure as a failed run", async () => {
@@ -1180,6 +1265,40 @@ describe("RunController S2-4 failure boundaries", () => {
     const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
     expect(events.some((event) => event.type === "observation.created")).toBe(false);
     expect(provider.inputs).toHaveLength(0);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("closes Action and ToolCall before failing on a post-action observation", async () => {
+    class PostActionObserveFailComputer extends FakeComputer {
+      private observationCalls = 0;
+
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        this.observationCalls += 1;
+        if (this.observationCalls === 2) {
+          throw new Error("injected post-action observation failure");
+        }
+        return super.observe(session, observationId, signal);
+      }
+    }
+
+    const computer = new PostActionObserveFailComputer();
+    const created = await makeController(
+      new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("call-post-observe-failure")] }]),
+      computer,
+    );
+
+    await expect(created.controller.start("fail after the click is applied")).resolves.toBe("failed");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    const actionTerminalIndex = events.findIndex((event) => event.type === "action.execution.completed");
+    const toolTerminalIndex = events.findIndex((event) => event.type === "tool.call.completed");
+    const postObserveErrorIndex = events.findIndex((event) => event.type === "runtime.error" && event.message.includes("post-action observation"));
+    expect(actionTerminalIndex).toBeGreaterThan(-1);
+    expect(toolTerminalIndex).toBeGreaterThan(actionTerminalIndex);
+    expect(postObserveErrorIndex).toBeGreaterThan(toolTerminalIndex);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
+    expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "tool.call.completed")).toHaveLength(1);
     await rm(created.directory, { recursive: true, force: true });
   });
 

@@ -80,4 +80,25 @@ describe("DefaultContextCompiler", () => {
     controller.abort(new Error("cancelled"));
     await expect(compiler.compile({ goal: "goal", recentEvents: events }, controller.signal)).rejects.toThrow("cancelled");
   });
+
+  it("projects a ModelTurn continuation into the assistant history", async () => {
+    const first = observation("obs-continuation");
+    const call = { id: "call-continuation" as ToolCallId, name: "click", arguments: { x: 10, y: 20 } };
+    const events: RuntimeEvent[] = [
+      event(0, { type: "run.created", goal: "ignored" }),
+      event(1, { type: "run.started" }),
+      event(2, { type: "observation.created", observation: first }),
+      event(3, {
+        type: "model.response.received",
+        turn: {
+          type: "tool_calls",
+          calls: [call],
+          continuation: { providerId: "glm-5.3-flash", kind: "reasoning_content", content: "keep this for GLM" },
+        },
+      }),
+      event(4, { type: "tool.call.completed", result: { callId: call.id, status: "completed", output: { ok: true } } }),
+    ];
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({ goal: "continue", recentEvents: events, latestObservation: first }, new AbortController().signal);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "provider_continuation" && block.continuation.content === "keep this for GLM"))).toBe(true);
+  });
 });

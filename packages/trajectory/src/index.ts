@@ -584,6 +584,11 @@ const modelUsageSchema = z.object({
   outputTokens: z.number().int().nonnegative().optional(),
   totalTokens: z.number().int().nonnegative().optional(),
 });
+const modelContinuationSchema = z.object({
+  providerId: nonEmptyString,
+  kind: z.literal("reasoning_content"),
+  content: z.string(),
+});
 const toolCallSchema = z.object({
   id: nonEmptyString,
   name: nonEmptyString,
@@ -595,6 +600,7 @@ const modelTurnSchema = z.union([
     calls: z.array(toolCallSchema),
     assistantText: z.string().optional(),
     usage: modelUsageSchema.optional(),
+    continuation: modelContinuationSchema.optional(),
   }),
   z.object({ type: z.literal("user_input_required"), question: nonEmptyString, usage: modelUsageSchema.optional() }),
   z.object({

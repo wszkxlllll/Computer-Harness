@@ -1,17 +1,17 @@
 import { createInterface } from "node:readline";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId } from "@computer-harness/protocol";
 import { GlmAdapter, type GlmProfileName } from "@computer-harness/provider-glm";
-import { QwenGuiPlusAdapter } from "@computer-harness/provider-qwen";
+import { FetchQwenHttpClient, Qwen38FlashAdapter, QwenGuiPlusAdapter, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import { DefaultRuntimePolicy, RunController, createDefaultComputerTools, type CleanupDiagnostic } from "@computer-harness/runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
 
-type ModelName = GlmProfileName | "gui-plus-2026-02-26";
+type ModelName = GlmProfileName | "gui-plus-2026-02-26" | "qwen3.8-flash";
 
 interface CliOptions {
   goal: string;
@@ -23,6 +23,8 @@ interface CliOptions {
   fixtureResult?: string;
   envFile?: string;
   screenshotDir?: string;
+  qwenCoordinateMode?: QwenCoordinateMode;
+  qwenThinking?: Qwen38ThinkingMode;
   interactive: boolean;
 }
 
@@ -35,8 +37,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const model = value("--model") as ModelName | undefined;
   const socket = value("--cua-socket") ?? value("--socket");
   if (goal === undefined || goal.trim().length === 0) throw new Error("--goal is required");
-  if (model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26") {
-    throw new Error("--model must be glm-5.3-flash or gui-plus-2026-02-26");
+  if (model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
+    throw new Error("--model must be glm-5.3-flash, gui-plus-2026-02-26, or qwen3.8-flash");
   }
   if (socket === undefined || socket.trim().length === 0) throw new Error("--cua-socket is required");
   const output = resolve(value("--output") ?? "runs/live-cli");
@@ -45,6 +47,23 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const fixtureResult = value("--fixture-result");
   const envFile = value("--env-file");
   const screenshotDir = value("--screenshot-dir");
+  const qwenCoordinateModeValue = value("--qwen-coordinate-mode");
+  if (qwenCoordinateModeValue !== undefined && qwenCoordinateModeValue !== "normalized_1000" && qwenCoordinateModeValue !== "actual_pixels") {
+    throw new Error("--qwen-coordinate-mode must be normalized_1000 or actual_pixels");
+  }
+  if (qwenCoordinateModeValue !== undefined && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
+    throw new Error("--qwen-coordinate-mode is only valid with a Qwen model");
+  }
+  if (model === "qwen3.8-flash" && qwenCoordinateModeValue === undefined) {
+    throw new Error("--qwen-coordinate-mode is required for qwen3.8-flash until coordinate calibration selects a mode");
+  }
+  const qwenThinkingValue = value("--qwen-thinking");
+  if (qwenThinkingValue !== undefined && qwenThinkingValue !== "disabled" && qwenThinkingValue !== "low" && qwenThinkingValue !== "medium" && qwenThinkingValue !== "xhigh") {
+    throw new Error("--qwen-thinking must be disabled, low, medium, or xhigh");
+  }
+  if (qwenThinkingValue !== undefined && model !== "qwen3.8-flash") {
+    throw new Error("--qwen-thinking is only valid with qwen3.8-flash");
+  }
   const interactive = argv.includes("--interactive");
   return {
     goal,
@@ -56,6 +75,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
     ...(fixtureResult === undefined ? {} : { fixtureResult: resolve(fixtureResult) }),
     ...(envFile === undefined ? {} : { envFile: resolve(envFile) }),
     ...(screenshotDir === undefined ? {} : { screenshotDir: resolve(screenshotDir) }),
+    ...(qwenCoordinateModeValue === undefined ? {} : { qwenCoordinateMode: qwenCoordinateModeValue as QwenCoordinateMode }),
+    ...(model === "qwen3.8-flash" ? { qwenThinking: (qwenThinkingValue ?? "low") as Qwen38ThinkingMode } : {}),
     interactive,
   };
 }
@@ -68,7 +89,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|gui-plus-2026-02-26> --cua-socket <socket> [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--interactive]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|gui-plus-2026-02-26|qwen3.8-flash> --cua-socket <socket> [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--interactive]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -79,7 +100,7 @@ async function main(): Promise<void> {
   const eventWriter = new JsonlRunEventWriter(resolve(options.output, "trajectory.jsonl"), runId);
   const tools = createDefaultComputerTools();
   const assetReader = assetStore;
-  const provider = makeProvider(options.model, assetReader);
+  const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking);
   const computer = new CuaDriverComputer({
     socketPath: options.socket,
     screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
@@ -103,6 +124,8 @@ async function main(): Promise<void> {
   const summary = {
     runId,
     model: options.model,
+    coordinateMode: options.qwenCoordinateMode ?? null,
+    thinkingMode: options.qwenThinking ?? null,
     computerSession: snapshot.computerSession ?? null,
     runtimeOutcome: outcome,
     modelSummary: snapshot.summary ?? null,
@@ -111,6 +134,9 @@ async function main(): Promise<void> {
     cleanupDiagnostics,
     fixture,
     trajectory: resolve(options.output, "trajectory.jsonl"),
+    providerExchanges: options.model === "gui-plus-2026-02-26" || options.model === "qwen3.8-flash"
+      ? resolve(options.output, "provider-exchanges.jsonl")
+      : null,
     metrics: {
       steps: snapshot.stepCount,
       modelRequests: snapshot.modelRequestCount,
@@ -126,17 +152,96 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
-function makeProvider(model: ModelName, assetReader: AssetReader) {
+function makeProvider(model: ModelName, assetReader: AssetReader, output: string, qwenCoordinateMode?: QwenCoordinateMode, qwenThinking?: Qwen38ThinkingMode) {
   if (model === "gui-plus-2026-02-26") {
     const key = process.env.DASHSCOPE_API_KEY;
     if (key === undefined || key.trim().length === 0) throw new Error("DASHSCOPE_API_KEY is required for gui-plus-2026-02-26");
     const endpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
     const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
-    return new QwenGuiPlusAdapter({ apiKey: key, assetReader, ...(endpoint === undefined ? {} : { endpoint }), ...(workspaceId === undefined ? {} : { workspaceId }) });
+    return new QwenGuiPlusAdapter({ apiKey: key, assetReader, httpClient: new RecordingQwenHttpClient(resolve(output, "provider-exchanges.jsonl"), qwenCoordinateMode ?? "normalized_1000"), ...(endpoint === undefined ? {} : { endpoint }), ...(workspaceId === undefined ? {} : { workspaceId }), ...(qwenCoordinateMode === undefined ? {} : { coordinateMode: qwenCoordinateMode }) });
+  }
+  if (model === "qwen3.8-flash") {
+    const key = process.env.DASHSCOPE_API_KEY;
+    if (key === undefined || key.trim().length === 0) throw new Error("DASHSCOPE_API_KEY is required for qwen3.8-flash");
+    const endpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
+    const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
+    return new Qwen38FlashAdapter({ apiKey: key, assetReader, httpClient: new RecordingQwenHttpClient(resolve(output, "provider-exchanges.jsonl"), qwenCoordinateMode ?? "normalized_1000", qwenThinking ?? "low"), thinking: qwenThinking ?? "low", coordinateMode: qwenCoordinateMode ?? "normalized_1000", ...(endpoint === undefined ? {} : { endpoint }), ...(workspaceId === undefined ? {} : { workspaceId }) });
   }
   const key = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   if (key === undefined || key.trim().length === 0) throw new Error("ZHIPUAI_API_KEY is required for GLM profiles");
   return new GlmAdapter({ apiKey: key, profile: model, assetReader, ...(process.env.GLM_BASE_URL === undefined ? {} : { endpoint: process.env.GLM_BASE_URL }) });
+}
+
+class RecordingQwenHttpClient implements QwenHttpClient {
+  private readonly inner = new FetchQwenHttpClient();
+  private requestNumber = 0;
+
+  public constructor(
+    private readonly path: string,
+    private readonly coordinateMode: QwenCoordinateMode,
+    private readonly thinkingMode?: Qwen38ThinkingMode,
+  ) {}
+
+  public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
+    this.requestNumber += 1;
+    const startedAt = Date.now();
+    try {
+      const response = await this.inner.post(url, body, headers, signal);
+      await appendFile(this.path, `${JSON.stringify({
+        request: this.requestNumber,
+        latencyMs: Date.now() - startedAt,
+        requestedModel: typeof body.model === "string" ? body.model : null,
+        coordinateMode: this.coordinateMode,
+        thinkingMode: this.thinkingMode ?? null,
+        toolNames: qwenToolNames(body.tools),
+        response: summarizeQwenResponse(response),
+      })}\n`, "utf8");
+      return response;
+    } catch (error) {
+      await appendFile(this.path, `${JSON.stringify({
+        request: this.requestNumber,
+        latencyMs: Date.now() - startedAt,
+        requestedModel: typeof body.model === "string" ? body.model : null,
+        transportError: error instanceof Error ? { name: error.name, message: error.message } : { message: String(error) },
+      })}\n`, "utf8");
+      throw error;
+    }
+  }
+}
+
+function qwenToolNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => isPlainRecord(item) && isPlainRecord(item.function) && typeof item.function.name === "string" ? [item.function.name] : []);
+}
+
+function summarizeQwenResponse(value: unknown): Record<string, unknown> {
+  if (!isPlainRecord(value)) return { shape: typeof value };
+  const choice = Array.isArray(value.choices) && isPlainRecord(value.choices[0]) ? value.choices[0] : undefined;
+  const message = choice !== undefined && isPlainRecord(choice.message) ? choice.message : undefined;
+  const calls = message !== undefined && Array.isArray(message.tool_calls)
+    ? message.tool_calls.map((call) => {
+        const record = isPlainRecord(call) ? call : undefined;
+        const fn = record !== undefined && isPlainRecord(record.function) ? record.function : undefined;
+        return {
+          id: record !== undefined && typeof record.id === "string" ? record.id : null,
+          type: record !== undefined && typeof record.type === "string" ? record.type : null,
+          name: fn !== undefined && typeof fn.name === "string" ? fn.name : null,
+          arguments: fn !== undefined && typeof fn.arguments === "string" ? fn.arguments : null,
+        };
+      })
+    : [];
+  return {
+    model: typeof value.model === "string" ? value.model : null,
+    finishReason: choice !== undefined && typeof choice.finish_reason === "string" ? choice.finish_reason : null,
+    contentLength: message !== undefined && typeof message.content === "string" ? message.content.length : 0,
+    reasoningContentLength: message !== undefined && typeof message.reasoning_content === "string" ? message.reasoning_content.length : 0,
+    toolCalls: calls,
+    usage: isPlainRecord(value.usage) ? value.usage : null,
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function loadEnvFile(path: string): Promise<void> {

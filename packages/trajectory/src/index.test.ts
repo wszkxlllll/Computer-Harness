@@ -406,6 +406,40 @@ describe("JsonlRunEventWriter", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("round-trips provider continuation data through JSONL", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-continuation-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+    await writer.append({
+      runId,
+      type: "model.response.received",
+      turn: {
+        type: "tool_calls",
+        calls: [{ id: callId, name: "click", arguments: { x: 10, y: 20 } }],
+        continuation: {
+          providerId: "glm-5.3-flash",
+          kind: "reasoning_content",
+          content: "preserve this exact continuation",
+        },
+      },
+    });
+    await writer.close();
+
+    expect(await readRuntimeEvents(filePath)).toEqual([
+      expect.objectContaining({
+        type: "model.response.received",
+        turn: expect.objectContaining({
+          continuation: {
+            providerId: "glm-5.3-flash",
+            kind: "reasoning_content",
+            content: "preserve this exact continuation",
+          },
+        }),
+      }),
+    ]);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("refuses to append a new writer to an existing trajectory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
     const filePath = join(directory, "trajectory.jsonl");

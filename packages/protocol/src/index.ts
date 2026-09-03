@@ -82,23 +82,37 @@ export interface ModelUsage {
   totalTokens?: number;
 }
 
-export type ModelTurn = (
+/**
+ * Provider-owned continuation data that must survive a subsequent request in
+ * the same Run.  The protocol keeps the payload narrow and serializable; a
+ * Provider Adapter decides whether it can consume a particular kind.
+ */
+export interface ModelContinuation {
+  providerId: string;
+  kind: "reasoning_content";
+  content: string;
+}
+
+export type ModelTurn =
   | {
       type: "tool_calls";
       calls: ToolCall[];
       assistantText?: string;
+      continuation?: ModelContinuation;
+      usage?: ModelUsage;
     }
   | {
       type: "user_input_required";
       question: string;
+      usage?: ModelUsage;
     }
   | {
       type: "finish";
       summary: string;
       /** Structured termination status supplied by providers that expose it. */
       reportedStatus?: "success" | "failure";
-    }
-) & { usage?: ModelUsage };
+      usage?: ModelUsage;
+    };
 
 export interface GuiActionBase {
   actionId: ActionId;

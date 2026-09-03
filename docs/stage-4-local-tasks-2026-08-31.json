@@ -3,7 +3,8 @@
   "purpose": "Stage 4 local short-task comparison; outcome-only goals with deterministic external text evaluation.",
   "models": [
     "glm-5.3-flash",
-    "gui-plus-2026-02-26"
+    "gui-plus-2026-02-26",
+    "qwen3.8-flash"
   ],
   "fixture": {
     "name": "ProbeWindow",

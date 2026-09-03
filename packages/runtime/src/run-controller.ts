@@ -899,7 +899,6 @@ export class RunController {
     } else {
       await this.commitEvent({ type: "action.execution.failed", receipt });
     }
-    await this.observeAndCommit(context.session);
     const result: ToolResult =
       receipt.status === "completed"
         ? { callId: call.id, status: "completed", output: actionReceiptOutput(receipt) }
@@ -918,6 +917,10 @@ export class RunController {
       await this.commitEvent({ type: "tool.call.failed", result });
       this.callStates.set(call.id, "failed");
     }
+    // The action and ToolCall facts are durable before taking the follow-up
+    // observation. If observing the post-action state fails, the Run can be
+    // marked failed without leaving a completed action with a dangling call.
+    await this.observeAndCommit(context.session);
   }
 
   private async rejectToolCall(callId: ToolCallId, reason: string): Promise<void> {

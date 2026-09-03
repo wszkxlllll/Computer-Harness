@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
 
-type ModelName = "glm-5.3-flash" | "gui-plus-2026-02-26";
+type ModelName = "glm-5.3-flash" | "gui-plus-2026-02-26" | "qwen3.8-flash";
+type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
+type QwenThinkingMode = "disabled" | "low" | "medium" | "xhigh";
 type DaemonProcess = ChildProcessByStdio<null, Readable, Readable>;
 
 interface FrozenTask {
@@ -32,6 +34,8 @@ interface Options {
   socket: string;
   output: string;
   envFile: string;
+  qwenCoordinateMode?: QwenCoordinateMode;
+  qwenThinking?: QwenThinkingMode;
   startupTimeoutMs: number;
   maxSteps?: number;
   maxModelRequests?: number;
@@ -61,6 +65,8 @@ interface RunnerResult {
   status: "completed" | "failed";
   taskId: string;
   model: ModelName;
+  coordinateMode?: QwenCoordinateMode;
+  thinkingMode?: QwenThinkingMode;
   output: string;
   fixtureState: string;
   cli: { code: number | null; signal: NodeJS.Signals | null; stdoutFile: string; stderrFile: string };
@@ -100,11 +106,28 @@ function normalizePipe(value: string): string {
 
 function parseOptions(args: readonly string[]): Options {
   const model = requiredOption(args, "--model") as ModelName;
-  if (model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26") {
-    throw new Error("--model must be glm-5.3-flash or gui-plus-2026-02-26");
+  if (model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
+    throw new Error("--model must be glm-5.3-flash, gui-plus-2026-02-26, or qwen3.8-flash");
   }
   const maxStepsValue = option(args, "--max-steps");
   const maxRequestsValue = option(args, "--max-model-requests");
+  const coordinateModeValue = option(args, "--qwen-coordinate-mode");
+  if (coordinateModeValue !== undefined && coordinateModeValue !== "normalized_1000" && coordinateModeValue !== "actual_pixels") {
+    throw new Error("--qwen-coordinate-mode must be normalized_1000 or actual_pixels");
+  }
+  if (coordinateModeValue !== undefined && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
+    throw new Error("--qwen-coordinate-mode is only valid with a Qwen model");
+  }
+  if (model === "qwen3.8-flash" && coordinateModeValue === undefined) {
+    throw new Error("--qwen-coordinate-mode is required for qwen3.8-flash until coordinate calibration selects a mode");
+  }
+  const thinkingValue = option(args, "--qwen-thinking");
+  if (thinkingValue !== undefined && thinkingValue !== "disabled" && thinkingValue !== "low" && thinkingValue !== "medium" && thinkingValue !== "xhigh") {
+    throw new Error("--qwen-thinking must be disabled, low, medium, or xhigh");
+  }
+  if (thinkingValue !== undefined && model !== "qwen3.8-flash") {
+    throw new Error("--qwen-thinking is only valid with qwen3.8-flash");
+  }
   return {
     binary: resolve(requiredOption(args, "--binary")),
     fixture: resolve(requiredOption(args, "--fixture")),
@@ -114,6 +137,8 @@ function parseOptions(args: readonly string[]): Options {
     socket: normalizePipe(requiredOption(args, "--socket")),
     output: resolve(requiredOption(args, "--output")),
     envFile: resolve(requiredOption(args, "--env-file")),
+    ...(coordinateModeValue === undefined ? {} : { qwenCoordinateMode: coordinateModeValue as QwenCoordinateMode }),
+    ...(model === "qwen3.8-flash" ? { qwenThinking: (thinkingValue ?? "low") as QwenThinkingMode } : {}),
     startupTimeoutMs: positiveInteger(option(args, "--startup-timeout-ms"), 20000, "--startup-timeout-ms"),
     ...(maxStepsValue === undefined ? {} : { maxSteps: positiveInteger(maxStepsValue, 12, "--max-steps") }),
     ...(maxRequestsValue === undefined ? {} : { maxModelRequests: positiveInteger(maxRequestsValue, 16, "--max-model-requests") }),
@@ -441,7 +466,7 @@ async function readRuntimeResult(path: string): Promise<RuntimeResult> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
-    process.stdout.write("Usage: run:stage4-task --binary <cua-driver.exe> --fixture <ProbeWindow.exe> --task <task-id> --model <model> --socket <pipe> --output <dir> --env-file <.env> [--tasks <manifest>] [--max-steps N] [--max-model-requests N]\n");
+    process.stdout.write("Usage: run:stage4-task --binary <cua-driver.exe> --fixture <ProbeWindow.exe> --task <task-id> --model <glm-5.3-flash|gui-plus-2026-02-26|qwen3.8-flash> --socket <pipe> --output <dir> --env-file <.env> [--tasks <manifest>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--max-steps N] [--max-model-requests N]\n");
     return;
   }
   const options = parseOptions(args);
@@ -502,6 +527,12 @@ async function main(): Promise<void> {
       "--max-steps", String(options.maxSteps ?? task.maxSteps),
       "--max-model-requests", String(options.maxModelRequests ?? task.maxModelRequests),
     ];
+    if (options.qwenCoordinateMode !== undefined) {
+      cliArgs.push("--qwen-coordinate-mode", options.qwenCoordinateMode);
+    }
+    if (options.qwenThinking !== undefined) {
+      cliArgs.push("--qwen-thinking", options.qwenThinking);
+    }
     // Bootstrap cleanup and state-file reads also yield: cancellation can arrive
     // after the final driver operation, before a model process exists to stop.
     runAbort.signal.throwIfAborted();
@@ -569,6 +600,8 @@ async function main(): Promise<void> {
     status: errorMessage === undefined ? "completed" : "failed",
     taskId: task.id,
     model: options.model,
+    ...(options.qwenCoordinateMode === undefined ? {} : { coordinateMode: options.qwenCoordinateMode }),
+    ...(options.qwenThinking === undefined ? {} : { thinkingMode: options.qwenThinking }),
     output: options.output,
     fixtureState: statePath,
     cli: { code: cliResult.code, signal: cliResult.signal, stdoutFile: cliStdoutPath, stderrFile: cliStderrPath },

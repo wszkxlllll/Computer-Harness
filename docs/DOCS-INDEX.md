@@ -1,6 +1,6 @@
 # Computer Harness 文档索引
 
-日期：2026-09-02
+日期：2026-09-03
 
 这是 `docs/` 的唯一导航入口。实施 Agent 不按文件名猜测路线；先读本索引，再读
 [Stage 4 总入口](./stage-4-implementation-entry.md) 和自己负责的路线文档。
@@ -11,6 +11,7 @@
 |---|---|
 | [stage-4-implementation-entry.md](./stage-4-implementation-entry.md) | 两条路线的共同基线、门槛和交接 |
 | [stage-4-local-task-implementation.md](./stage-4-local-task-implementation.md) | A：Windows 本地任务真实闭环 |
+| [qwen38-adapter-localization-audit-2026-09-03.md](./qwen38-adapter-localization-audit-2026-09-03.md) | Qwen3.8 Adapter、坐标校准证据与进入真实桌面前的整改门 |
 | [osworld-environment-implementation.md](./osworld-environment-implementation.md) | B：OSWorld 环境、评分/reset 和 Harness 迁移探索 |
 | [trajectory-review-2026-09-02/runtime-trajectory-cua-adapter-issues-2026-09-02.md](./trajectory-review-2026-09-02/runtime-trajectory-cua-adapter-issues-2026-09-02.md) | 总体 Runtime / Trajectory / CUA / Provider 审计 |
 | [trajectory-review-2026-09-02/p0-readiness-reaudit-2026-09-02.md](./trajectory-review-2026-09-02/p0-readiness-reaudit-2026-09-02.md) | 当前代码基线的 P0 开工门、拆分和验收顺序 |

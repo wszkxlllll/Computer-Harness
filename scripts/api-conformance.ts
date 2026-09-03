@@ -2,7 +2,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { GlmAdapter, type GlmAdapterOptions, type GlmHttpClient } from "@computer-harness/provider-glm";
-import { QwenGuiPlusAdapter, type QwenAdapterOptions, type QwenHttpClient } from "@computer-harness/provider-qwen";
+import { Qwen38FlashAdapter, QwenGuiPlusAdapter, type Qwen38AdapterOptions, type Qwen38ThinkingMode, type QwenAdapterOptions, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import type {
   AssetId,
   AssetRef,
@@ -19,7 +19,7 @@ import type {
 } from "@computer-harness/protocol";
 import { createDefaultComputerTools, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 
-type ProviderName = "glm-5.3-flash" | "gui-plus-2026-02-26";
+type ProviderName = "glm-5.3-flash" | "gui-plus-2026-02-26" | "qwen3.8-flash";
 
 interface CliOptions {
   envFile: string;
@@ -27,6 +27,7 @@ interface CliOptions {
   output: string;
   timeoutMs: number;
   model: ProviderName | "all";
+  qwenThinking: Qwen38ThinkingMode;
 }
 
 interface RequestRecord {
@@ -38,7 +39,18 @@ interface RequestRecord {
   hasNativeTools: boolean;
   highResolutionFlag?: boolean;
   thinking?: unknown;
-  messages: Array<{ role: string; contentShape: string; textLength: number; imageCount: number; hasToolCalls: boolean }>;
+  reasoningEffort?: unknown;
+  preserveThinking?: unknown;
+  enableThinking?: unknown;
+  messages: Array<{
+    role: string;
+    contentShape: string;
+    textLength: number;
+    imageCount: number;
+    hasToolCalls: boolean;
+    hasReasoningContent: boolean;
+    reasoningContentLength: number;
+  }>;
   responseShape?: { choiceCount: number; contentLength?: number; tagNames: string[]; openToolCallTags: number; closeToolCallTags: number; hasJsonFence: boolean; toolCallJson?: { length: number; firstChar: string; lastChar: string; parses: boolean; rootKeys: string[]; nameType?: string; typeValue?: string; argumentsType?: string; argumentKeys?: string[]; actionType?: string } };
   finishReason?: string;
   usage?: unknown;
@@ -95,6 +107,9 @@ class RecordingHttpClient implements GlmHttpClient, QwenHttpClient {
       hasNativeTools: Array.isArray(body.tools),
       ...(typeof body.vl_high_resolution_images === "boolean" ? { highResolutionFlag: body.vl_high_resolution_images } : {}),
       ...(body.thinking === undefined ? {} : { thinking: body.thinking }),
+      ...(body.reasoning_effort === undefined ? {} : { reasoningEffort: body.reasoning_effort }),
+      ...(body.preserve_thinking === undefined ? {} : { preserveThinking: body.preserve_thinking }),
+      ...(body.enable_thinking === undefined ? {} : { enableThinking: body.enable_thinking }),
       messages: summarizeMessages(body.messages),
       status: 0,
     };
@@ -153,17 +168,20 @@ function parseArgs(argv: readonly string[]): CliOptions {
     }
   }
   const modelValue = values.get("model") ?? "all";
-  if (modelValue !== "all" && modelValue !== "glm-5.3-flash" && modelValue !== "gui-plus-2026-02-26") {
+  if (modelValue !== "all" && modelValue !== "glm-5.3-flash" && modelValue !== "gui-plus-2026-02-26" && modelValue !== "qwen3.8-flash") {
     throw new Error(`unsupported --model: ${modelValue}`);
   }
   const timeoutValue = Number(values.get("timeout-ms") ?? "120000");
   if (!Number.isInteger(timeoutValue) || timeoutValue < 1000) throw new Error("--timeout-ms must be an integer >= 1000");
+  const qwenThinking = values.get("qwen-thinking") ?? "low";
+  if (qwenThinking !== "disabled" && qwenThinking !== "low" && qwenThinking !== "medium" && qwenThinking !== "xhigh") throw new Error("--qwen-thinking must be disabled, low, medium, or xhigh");
   return {
     envFile: resolve(values.get("env-file") ?? ".env"),
     image: resolve(values.get("image") ?? "runs/api-conformance/non-sensitive-ui.png"),
     output: resolve(values.get("output") ?? `runs/api-conformance/${new Date().toISOString().replace(/[-:.TZ]/g, "")}`),
     timeoutMs: timeoutValue,
     model: modelValue,
+    qwenThinking,
   };
 }
 
@@ -260,6 +278,8 @@ function summarizeMessages(value: unknown): RequestRecord["messages"] {
       textLength,
       imageCount,
       hasToolCalls: Array.isArray(record.tool_calls) && record.tool_calls.length > 0,
+      hasReasoningContent: typeof record.reasoning_content === "string",
+      reasoningContentLength: typeof record.reasoning_content === "string" ? record.reasoning_content.length : 0,
     };
   });
 }
@@ -271,6 +291,9 @@ function summarizeTurn(turn: ModelTurn): Record<string, unknown> {
       callCount: turn.calls.length,
       calls: turn.calls.map(summarizeCall),
       assistantTextLength: turn.assistantText?.length ?? 0,
+      ...(turn.continuation === undefined ? {} : {
+        continuation: { providerId: turn.continuation.providerId, kind: turn.continuation.kind, contentLength: turn.continuation.content.length },
+      }),
       usage: turn.usage,
     };
   }
@@ -376,16 +399,17 @@ async function runModel(
   env: Record<string, string>,
   reader: AssetReader,
   timeoutMs: number,
+  qwenThinking: Qwen38ThinkingMode,
   secondInput: (first: ModelTurn, firstCall: ToolCall) => Promise<ModelInput>,
 ): Promise<ModelRunResult> {
   const requests: RequestRecord[] = [];
   const turns: Array<Record<string, unknown>> = [];
   const client = new RecordingHttpClient(provider, timeoutMs);
-  const apiKey = provider === "gui-plus-2026-02-26"
+  const apiKey = provider === "gui-plus-2026-02-26" || provider === "qwen3.8-flash"
     ? envValue(env, "DASHSCOPE_API_KEY")
     : envValue(env, "ZHIPUAI_API_KEY") ?? envValue(env, "ZHIPU_API_KEY") ?? envValue(env, "GLM_API_KEY");
   if (apiKey === undefined) return { provider, requests, turns, status: "skipped", error: { code: "MISSING_API_KEY", message: "provider key is not configured in the selected env file" } };
-  let adapter: QwenGuiPlusAdapter | GlmAdapter;
+  let adapter: QwenGuiPlusAdapter | Qwen38FlashAdapter | GlmAdapter;
   if (provider === "gui-plus-2026-02-26") {
     const qwenOptions: QwenAdapterOptions = { apiKey, assetReader: reader, httpClient: client };
     const workspaceId = envValue(env, "DASHSCOPE_WORKSPACE_ID");
@@ -393,6 +417,13 @@ async function runModel(
     if (workspaceId !== undefined) qwenOptions.workspaceId = workspaceId;
     if (endpoint !== undefined) qwenOptions.endpoint = endpoint;
     adapter = new QwenGuiPlusAdapter(qwenOptions);
+  } else if (provider === "qwen3.8-flash") {
+    const qwen38Options: Qwen38AdapterOptions = { apiKey, assetReader: reader, httpClient: client, thinking: qwenThinking, coordinateMode: "normalized_1000" };
+    const workspaceId = envValue(env, "DASHSCOPE_WORKSPACE_ID");
+    const endpoint = envValue(env, "DASHSCOPE_ENDPOINT");
+    if (workspaceId !== undefined) qwen38Options.workspaceId = workspaceId;
+    if (endpoint !== undefined) qwen38Options.endpoint = endpoint;
+    adapter = new Qwen38FlashAdapter(qwen38Options);
   } else {
     const glmOptions: GlmAdapterOptions = { apiKey, profile: provider, assetReader: reader, httpClient: client };
     const endpoint = envValue(env, "GLM_ENDPOINT");
@@ -434,10 +465,10 @@ async function main(): Promise<void> {
   const secondObservation = makeObservation(runId, sessionId, "static-observation-2", asset, viewport);
   const compiler = new DefaultContextCompiler(createDefaultComputerTools());
   const firstInput = await compiler.compile({ goal: "Click the blue button in the synthetic UI once, then report whether the request was completed.", latestObservation: firstObservation, recentEvents: baseEvents(runId, sessionId, firstObservation) }, new AbortController().signal);
-  const models: ProviderName[] = options.model === "all" ? ["glm-5.3-flash", "gui-plus-2026-02-26"] : [options.model];
+  const models: ProviderName[] = options.model === "all" ? ["glm-5.3-flash", "gui-plus-2026-02-26", "qwen3.8-flash"] : [options.model];
   const results: ModelRunResult[] = [];
   for (const provider of models) {
-    const result = await runModel(provider, firstInput, env, reader, options.timeoutMs, async (first, firstCall) => {
+    const result = await runModel(provider, firstInput, env, reader, options.timeoutMs, options.qwenThinking, async (first, firstCall) => {
       const events = [
         ...baseEvents(runId, sessionId, firstObservation),
         makeEvent(runId, 5, "model.response.received", { turn: first }),
@@ -453,7 +484,7 @@ async function main(): Promise<void> {
     kind: "static_api_conformance",
     protocol: "provider-adapter-v1",
     fixture: { kind: "synthetic_non_sensitive_image", fileName: basename(options.image), byteLength: imageBytes.byteLength, viewport },
-    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs },
+    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs, qwenThinking: options.qwenThinking },
     results,
   };
   await writeFile(resolve(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");

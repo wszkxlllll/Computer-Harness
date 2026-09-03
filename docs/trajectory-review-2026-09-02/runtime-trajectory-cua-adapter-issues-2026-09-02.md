@@ -15,11 +15,13 @@
 2. **进入 V1 验收或扩大实验前应补齐的合同**；
 3. **当前明确接受的 V1 边界或未来扩展能力**。
 
-复核后确认 **3 项 P0、6 项 P1、7 组 P2**。当前代码不是不可继续开发，但不应在 P0 完成前形成正式 Provider 排名；P1 不必全部挡住小规模诊断实验，但应在 V1 完成或扩大数据收集前关闭。
+复核后确认 **4 项 P0 已闭环**：P0-1、P0-3、P0-4 的代码与测试已通过，P0-3 的真实两轮 conformance 成功；
+P0-2 的坐标诊断已完成并得到 GUI-Plus 负向结论。GLM 可以进入下一阶段，GUI-Plus 保留为基线，新的 Qwen
+候选单独实验。另有 7 项 P1、7 组 P2；P1 不必挡住小规模诊断，但应在 V1 验收或扩大数据收集前关闭。
 
 本轮同时更正四点：
 
-- Trajectory 当前是 **29 项测试**，不是原文写的 30 项；全仓库实际为 **8 个测试文件、95/95 通过**。
+- Trajectory 当前是 **30 项测试**；全仓库实际为 **8 个测试文件、104/104 通过**。
 - 没有 `fsync` 与“不能续写已有 Run”是产品计划已经接受的 V1 边界，不应列成当前缺陷。
 - `glm-4.6v-flash` 已从现行代码、CLI、API conformance runner 和 Stage 4 任务 manifest 清理；历史实验文档仍保留作为不可变证据。
 - CUA 提供的字段不等于都应进入 Harness 公共协议。只有存在明确生产者、消费者和决策用途的最小语义才应进入协议。
@@ -43,7 +45,9 @@ API conformance runner、Stage 4 runner 参数和活动任务 manifest 移除；
 
 ### P0-1 动作后观察失败会留下没有终态的 ToolCall
 
-**确认存在。** `RunController.executeComputerCall()` 当前顺序为：
+**整改状态（2026-09-03）：已关闭。** `RunController.executeComputerCall()` 已改为先提交 Action/ToolCall
+终态，再执行 post-action Observe；定向测试证明 Observe 失败后 Run 为 failed、动作只执行一次且事实链完整。
+以下保留原问题机制作为审计依据。原顺序为：
 
 ```text
 action.execution.completed / failed
@@ -77,7 +81,11 @@ run.finished(failed)
 
 ### P0-2 Qwen 的正式 Function Calling 坐标模式尚未冻结
 
-**确认需要实验，但不再把 XML 文本协议作为当前实验变量。** 阿里云模型页将
+**整改状态（2026-09-03）：诊断已完成，作为负向结果关闭。** `actual_pixels` evaluator 0/3 且全部
+budget exhausted；`normalized_1000` paired evaluator 0/3，连同 attended smoke 累计 1/4。normalized 能进入编辑区，
+但重复输入、全选失败和 false-positive finish 表明问题不只来自坐标。GUI-Plus 不冻结为生产默认，保留为负向基线。
+
+阿里云模型页将
 `gui-plus-2026-02-26` 标为支持 Function Calling。当前 Adapter 使用 `tools` 字段并读取
 `message.tool_calls`，需要在同一 Function Calling wire 下比较两种坐标表示：实际像素和 0--1000
 归一化。单一 `computer_use(action=...)` 的生产呈现已在工作树改为 per-tool Function Schema：
@@ -114,19 +122,22 @@ Function Calling 结构，固定 endpoint、模型快照、System Prompt、工�
 
 ### P0-4 Function Calling Schema 的条件约束（由原 P1-7 升级）
 
-**整改已完成，静态质量门和真实 API conformance 均通过。** Qwen 现按 Runtime 工具逐个生成 Function Schema；
-GLM 保持同一逐工具映射。两者都携带字段级 `required`/description，并在有当前 viewport 时为归一化或实际
-像素坐标添加可表达的范围约束。Qwen/GLM Parser 还拒绝本轮未提供的函数名。Qwen 的 provider-native 参数
-（`coordinate`、`coordinate2`、`pixels`、`direction`、`time`）在 Adapter 边界转换为 Runtime 的 canonical
-参数，避免把官方 wire 形状泄漏到 ToolRegistry。
+**整改已完成，提交为 `c2b4a19`。静态质量门通过；真实 API conformance 已证明两轮 `click` Function Calling
+握手可用，但没有逐项实测全部工具。** Qwen 现按 Runtime 工具逐个生成 Function Schema；
+GLM 保持同一逐工具映射。两者都携带字段级 `required`/description；归一化坐标用 Schema 数值边界约束，
+Qwen 的实际像素二元数组则由描述提示 x/y 上限、由 Parser 和 Runtime 确定性校验。Qwen Adapter 使用模型
+熟悉的 `coordinate`、`coordinate2`、`pixels`、`time`，并增加 Harness 水平滚动所需的 `direction`，再在
+Adapter 边界转换为 Runtime canonical 参数；`direction` 不是官方 GUI-Plus 原生字段。
 
 **原则：** Function Calling Schema 只提供生成约束，不能替代 Runtime 校验。任何 Provider 返回仍必须经过
 严格解析、工具存在性检查、参数校验和 Policy。
 
 ### P0-3 `glm-5.3-flash` 的交错思考历史缺少 `reasoning_content`
 
-**确认存在。** 当前 profile 对 `glm-5.3-flash` 发送 `thinking: { type: "enabled" }`，但
-`readResponse()` 不读取 `reasoning_content`，`ModelTurn` 也不携带它，后续 assistant 工具调用历史只回传 `content` 和 `tool_calls`。
+**整改状态（2026-09-03）：已关闭。** 当前由 GLM Parser 生产窄类型
+`ModelContinuation`，Runtime Event 与 JSONL 保存，Context Compiler 投影，下一轮 GLM presenter 按 providerId
+消费；Runtime、Context、GLM 两轮 fixture、Trajectory round-trip 和真实两轮 API conformance 均通过。以下保留
+原问题机制作为审计依据。
 
 智谱官方说明 GLM-5.3-Flash 默认/强制思考；使用“交错思考 + 工具”时，必须保留并在工具结果后一并回传上一轮 `reasoning_content`。当前两轮探针被服务接受，只能证明服务端没有立即拒绝，不能证明多轮工具协议完整。
 
@@ -277,12 +288,14 @@ Provider Adapter 应统一输出 canonical `ModelTurn/ToolCall`，不要求所�
 
 ### 第一批：先关闭 P0
 
-1. 修 Runtime 的 ToolCall 终态顺序并增加动作后观察失败测试；
-2. 补 GLM reasoning continuation 的明确生产/消费链与两轮 fixture；
-3. 在不覆盖现有实现的前提下做 Qwen native 与官方推荐协议 paired run，冻结正式 wire mode。
+1. Runtime ToolCall 终态顺序和动作后观察失败测试已完成；
+2. GLM reasoning continuation 生产/消费链、两轮 fixture 与 Trajectory round-trip 已完成；再做一次真实两轮
+   conformance；
+3. 保持已关闭的 P0-4 Function Schema 静态门，不再重复改造；
+4. 在同一 Function Calling wire 下做 Qwen actual-pixels 与 normalized-1000 paired run，冻结正式坐标模式。
 
-第一批完成后才生成可用于 Provider 排名的结果。四项可以拆成独立 PR，避免 Runtime、GLM、Qwen 互相污染；
-P0-4 的 Schema 静态门必须先于 Qwen 坐标 paired run。
+Qwen 坐标诊断完成并冻结当前链路默认后，才生成用于工程比较的 6-run 结果。Runtime、GLM 与 Qwen 实验保持
+独立，避免变量互相污染；P0-4 的 Schema 静态门已经先行通过。
 
 ### 第二批：关闭会污染扩大实验的 P1
 
@@ -299,13 +312,19 @@ P2 不应一次性全部施工。对应消费者出现时再做：跨版本轨�
 
 ## 8. 本轮验证
 
-- `pnpm test`：8 个测试文件，95/95 通过；
+- `pnpm test`：8 个测试文件，104/104 通过；
 - `pnpm run typecheck`：通过；
+- Stage 4 runner contract：通过；
+- Stage 4 runner lifecycle：10/10 场景通过；
+- Qwen paired `--plan-only`：6 个 Qwen 坐标诊断 Run；
 - 官方协议复核：Qwen 模型能力页、GUI 自动化指南、GUI-Plus API 参考、GLM 思考模式与 Function Calling 文档；
 - 代码复核：Trajectory writer/reader、RunController 动作与观察顺序、CUA result 映射、Qwen/GLM 历史呈现和坐标映射。
 
-测试通过证明现有已覆盖路径没有回归，不会推翻上述缺口；其中 P0-1 和 P0-3 恰好缺少相应失败 fixture，P0-2 则需要真实 API 的受控协议对照。
+测试与真实诊断证明四项 P0 已闭环。GLM 可进入下一阶段；GUI-Plus 的负向结果不能外推为全部 Qwen 模型上限，
+后续 `qwen3.8-flash` 必须作为新的受控候选运行。
 
 ## 9. 操作边界
 
-本轮只重组审计文档并执行只读测试、类型检查和官方文档核验；没有修改 Runtime、Trajectory、CUA Adapter、Provider、Runner、Prompt 或桌面环境，也没有调用任何付费模型 API。
+当前工作树包含实施 Agent 的 P0-1/P0-3 与实验 runner 改动；本轮额外修正 lifecycle 测试、补 Trajectory
+continuation round-trip，并将 paired runner 收敛为 Qwen-only 与基础设施 fail-fast。没有修改 Prompt、调用付费
+模型 API 或操作桌面环境。

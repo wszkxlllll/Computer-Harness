@@ -5,6 +5,7 @@ import type {
   ToolCall,
   ToolCallId,
   Viewport,
+  ModelContinuation,
 } from "@computer-harness/protocol";
 import type {
   AssetReader,
@@ -109,12 +110,19 @@ export class GlmAdapter implements ProviderAdapter {
       }
       const content: unknown[] = [];
       const toolCalls: unknown[] = [];
+      let reasoningContent: string | undefined;
       for (const block of message.content) {
         if (block.type === "text") {
           content.push({ type: "text", text: block.text });
         } else if (block.type === "image") {
           const bytes = await this.assetReader.read(block.asset, signal);
           content.push({ type: "image_url", image_url: { url: toDataUrl(block.asset.mediaType, bytes) } });
+        } else if (block.type === "provider_continuation") {
+          if (block.continuation.providerId !== this.id || block.continuation.kind !== "reasoning_content") continue;
+          if (reasoningContent !== undefined && reasoningContent !== block.continuation.content) {
+            throw new GlmProviderError("GLM history contains conflicting reasoning continuations", "GLM_INVALID_HISTORY");
+          }
+          reasoningContent = block.continuation.content;
         } else if (block.type === "tool_call") {
           toolCalls.push({
             id: block.call.id,
@@ -127,6 +135,9 @@ export class GlmAdapter implements ProviderAdapter {
         }
       }
       const presented: Record<string, unknown> = { role: message.role, content };
+      if (reasoningContent !== undefined) {
+        presented.reasoning_content = reasoningContent;
+      }
       if (toolCalls.length > 0) {
         presented.tool_calls = toolCalls;
       }
@@ -161,11 +172,15 @@ export class GlmAdapter implements ProviderAdapter {
       const assistantText = typeof message.content === "string" && message.content.trim().length > 0
         ? message.content
         : undefined;
+      const continuation = reasoningContinuation(message.reasoning_content, this.id);
       return assistantText === undefined
-        ? { type: "tool_calls", calls, ...(usage === undefined ? {} : { usage }) }
-        : { type: "tool_calls", calls, assistantText, ...(usage === undefined ? {} : { usage }) };
+        ? { type: "tool_calls", calls, ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) }
+        : { type: "tool_calls", calls, assistantText, ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) };
     }
     if (typeof message.content === "string" && message.content.trim().length > 0) {
+      if (message.reasoning_content !== undefined && typeof message.reasoning_content !== "string") {
+        throw new GlmProviderError("GLM reasoning_content must be a string", "GLM_INVALID_RESPONSE");
+      }
       return { type: "finish", summary: message.content, ...(usage === undefined ? {} : { usage }) };
     }
     throw new GlmProviderError("GLM returned an empty assistant response", "GLM_EMPTY_RESPONSE");
@@ -228,7 +243,7 @@ function toDataUrl(mediaType: string, bytes: Uint8Array): string {
   return `data:${mediaType};base64,${Buffer.from(bytes).toString("base64")}`;
 }
 
-function readResponse(value: unknown): { message: { content?: unknown; tool_calls?: unknown }; finishReason?: string; usage?: ModelUsage } {
+function readResponse(value: unknown): { message: { content?: unknown; tool_calls?: unknown; reasoning_content?: unknown }; finishReason?: string; usage?: ModelUsage } {
   if (!isRecord(value) || !Array.isArray(value.choices) || value.choices.length === 0) {
     throw new GlmProviderError("GLM response has no choices", "GLM_INVALID_RESPONSE");
   }
@@ -245,6 +260,14 @@ function readResponse(value: unknown): { message: { content?: unknown; tool_call
     ...(typeof first.finish_reason === "string" ? { finishReason: first.finish_reason } : {}),
     ...(usage === undefined ? {} : { usage }),
   };
+}
+
+function reasoningContinuation(value: unknown, providerId: string): ModelContinuation | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new GlmProviderError("GLM reasoning_content must be a string", "GLM_INVALID_RESPONSE");
+  }
+  return { providerId, kind: "reasoning_content", content: value };
 }
 
 function assertCompleteFinishReason(reason: string | undefined): void {

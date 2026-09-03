@@ -7,5 +7,5 @@
       "@computer-harness/*": ["packages/*/src/index.ts"]
     }
   },
-  "include": ["*.ts", "../../scripts/api-conformance.ts"]
+  "include": ["*.ts", "../../scripts/api-conformance.ts", "../../scripts/experiments/*.ts"]
 }

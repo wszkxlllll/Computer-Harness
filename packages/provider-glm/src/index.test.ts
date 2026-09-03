@@ -130,6 +130,41 @@ describe("GLM provider adapter", () => {
     expect(messages.some((message) => message.role === "tool" && message.tool_call_id === call.id)).toBe(true);
   });
 
+  it("preserves reasoning_content through a two-round tool continuation", async () => {
+    const firstClient = new Client({
+      choices: [{ message: {
+        reasoning_content: "reason about the current frame",
+        tool_calls: [{ id: "reasoning-call", function: { name: "click", arguments: JSON.stringify({ x: 400, y: 300 }) } }],
+      } }],
+    });
+    const firstAdapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: firstClient });
+    const first = await firstAdapter.generate(input(), { signal: new AbortController().signal });
+    expect(first).toMatchObject({
+      type: "tool_calls",
+      continuation: { providerId: "glm-5.3-flash", kind: "reasoning_content", content: "reason about the current frame" },
+    });
+    if (first.type !== "tool_calls" || first.continuation === undefined) throw new Error("fixture did not produce a continuation");
+    const call = first.calls[0];
+    if (call === undefined) throw new Error("fixture did not produce a ToolCall");
+    const secondClient = new Client({ choices: [{ message: { content: "done" } }] });
+    const secondAdapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: secondClient });
+    await secondAdapter.generate({
+      ...input(),
+      messages: [
+        ...input().messages,
+        { role: "assistant", content: [
+          { type: "provider_continuation", continuation: first.continuation },
+          { type: "tool_call", call, viewport },
+        ] },
+        { role: "tool", content: [{ type: "tool_result", result: { callId: call.id, status: "completed", output: { ok: true } } }] },
+      ],
+    }, { signal: new AbortController().signal });
+    const messages = secondClient.body?.messages as Array<Record<string, unknown>>;
+    const assistant = messages.find((message) => message.role === "assistant" && message.tool_calls !== undefined);
+    expect(assistant?.reasoning_content).toBe("reason about the current frame");
+    expect((assistant?.tool_calls as Array<Record<string, unknown>> | undefined)?.[0]).toMatchObject({ id: "reasoning-call" });
+  });
+
   it("classifies the provider's 1305 overload response as retryable", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: false,

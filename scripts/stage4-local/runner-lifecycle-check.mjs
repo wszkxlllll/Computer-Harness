@@ -30,7 +30,13 @@ async function runScenario(scenario) {
   Object.assign(proc, {
     platform: "win32", execPath: "mock-node",
     stdout: { write() {} }, stderr: { write() {} },
-    kill(pid) { killedPids.push(pid); return true; },
+    kill(pid) {
+      killedPids.push(pid);
+      if (scenario === "cleanup_fallback_fails") {
+        throw Object.assign(new Error("mock PID fallback failed"), { code: "EPERM" });
+      }
+      return true;
+    },
     argv: ["mock-node", filename, "--binary", "mock-driver.exe", "--fixture", "mock-fixture.exe",
       "--task", "audit", "--model", "glm-5.3-flash", "--socket", "mock-pipe",
       "--output", "mock-output", "--env-file", "mock.env"],
@@ -56,7 +62,7 @@ async function runScenario(scenario) {
     async startSession() {},
     async endSession(input, options) {
       if (input.session.startsWith("stage4-bootstrap-") && scenario === "cancel_at_bootstrap_end") cancel();
-      if (input.session.startsWith("stage4-cleanup-") && scenario === "cleanup_end_hangs") {
+      if (input.session.startsWith("stage4-cleanup-") && (scenario === "cleanup_end_hangs" || scenario === "cleanup_fallback_fails")) {
         return new Promise((_, reject) => {
           const signal = options?.signal;
           if (signal?.aborted) reject(signal.reason);
@@ -144,18 +150,20 @@ async function runScenario(scenario) {
   assert.equal(cliSpawns, blocked ? 0 : 1, scenario + ": unexpected model process launch");
   assert(killedPids.includes(12345), scenario + ": fixture was not cleaned up");
   assert(daemon.exitCode !== null || daemon.signalCode !== null, scenario + ": daemon leaked");
-  assert.equal(report.status, ["normal", "task_failed"].includes(scenario) ? "completed" : "failed");
+  assert.equal(report.status, ["normal", "task_failed", "cleanup_end_hangs"].includes(scenario) ? "completed" : "failed");
   if (scenario === "task_failed") {
     assert.equal(report.taskSuccess, false); assert.equal(report.runtimeOutcome, "failed");
   }
   if (scenario === "cancel_during_cli") assert.equal(report.runtime.status, "unavailable");
-  if (scenario === "stop_spawn_error" || scenario === "cleanup_end_hangs") assert(report.cleanup.errors.length > 0);
+  if (scenario === "cleanup_end_hangs") assert(report.cleanup.warnings.length > 0);
+  if (scenario === "stop_spawn_error" || scenario === "cleanup_fallback_fails") assert(report.cleanup.errors.length > 0);
   return { scenario, cliSpawns, status: report.status, passed: true };
 }
 
 const results = [];
 for (const scenario of ["normal", "task_failed", "cancel_at_bootstrap_end", "cancel_at_final_state_read",
-  "foreground_refused", "initial_mismatch", "cancel_during_cli", "cleanup_end_hangs", "stop_spawn_error"]) {
+  "foreground_refused", "initial_mismatch", "cancel_during_cli", "cleanup_end_hangs", "cleanup_fallback_fails",
+  "stop_spawn_error"]) {
   results.push(await runScenario(scenario));
 }
 process.stdout.write(JSON.stringify(results, null, 2) + "\n");
