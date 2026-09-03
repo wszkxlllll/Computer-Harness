@@ -93,7 +93,7 @@ gui-agent-harness/
 │  ├─ providers/            # Provider 公共接口
 │  ├─ provider-doubao/      # 豆包 Adapter
 │  ├─ provider-glm/         # GLM Adapter
-│  ├─ provider-qwen/        # Qwen GUI-Plus Adapter
+│  ├─ provider-qwen/        # Qwen3.8-Flash Adapter
 │  ├─ tools/                # Tool Registry、Schema 和路由
 │  ├─ computer/             # Computer 公共接口
 │  ├─ computer-cua/         # trycua/cua-driver 适配
@@ -448,8 +448,7 @@ Stage 4 的真实能力边界不是“所有 Provider 都支持同一种 Compute
 OpenAI-compatible Function Calling；GLM 生产 profile 固定为 `actual_pixels`，Qwen 的 Experiment C 暂时
 比较 `actual_pixels` 与 `normalized_1000` 两种坐标表示。两者都按 Runtime 工具逐个生成 Function Schema，
 并把工具自身的 `required`、字段 description、`additionalProperties` 和当前 viewport 的坐标范围带到
-模型请求中；Qwen 另提供 `terminate(status)` 与 `interact(text)` 控制函数，并在 Adapter 边界把
-GUI-Plus 的 `coordinate`/`coordinate2`/`pixels`/`time` 参数映射为 Harness canonical 参数。Provider 负责函数名白名单、
+模型请求中；Qwen3.8 另提供 `terminate(status)` 与 `interact(text)` 控制函数。Provider 负责函数名白名单、
 参数解析与坐标映射，不能用未经验证的 Provider 协议冒充 canonical 工具。Provider 进入 Runtime 前必须同时
 满足：真实请求形状、模型响应解析、第二轮 ToolCall/ToolResult 历史呈现三者一致。Function Calling Schema
 是生成约束，不取代 Parser、ToolRegistry 和 Runtime Policy 的二次校验；模型没有返回结构化 status 时，
@@ -1207,7 +1206,7 @@ Windows 环境完成 20 轮 `observe → click/type → observe`，无静默裁�
 ### 阶段 4：双模型 Provider 基线
 
 实现两个 Provider Adapter 包和两个当前模型配置：`provider-glm` 支持
-`glm-5.3-flash`，`provider-qwen` 支持 `gui-plus-2026-02-26`。两个模型共享完全相同的
+`glm-5.3-flash`，`provider-qwen` 支持 `qwen3.8-flash`。两个模型共享完全相同的
 Runtime、Context 合同、ToolRegistry、Computer 和 Trajectory。
 
 产物：
@@ -1262,7 +1261,7 @@ Context、Tool、Provider 协议、模型能力、任务定义或验收器。不
 
 同时满足以下条件才视为 V1 完成：
 
-1. `provider-glm` 的 profile 抽象（当前生产模型为 `glm-5.3-flash`）和 `provider-qwen` 的 GUI-Plus 在不修改 Runtime 的情况下运行；
+1. `provider-glm` 的 profile 抽象（当前生产模型为 `glm-5.3-flash`）和 `provider-qwen` 的 Qwen3.8-Flash 在不修改 Runtime 的情况下运行；
 2. `CuaDriverComputer` 是唯一底层依赖入口，Runtime 不引用 CUA 专用类型；
 3. 除 wait 外，每个 GUI 输入动作都能追溯到 ObservationFrame；
 4. 每个 GUI 副作用都有 started 和 completed/failed，缺失终态时可识别 outcome_unknown；

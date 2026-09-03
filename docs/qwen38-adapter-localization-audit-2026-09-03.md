@@ -2,15 +2,15 @@
 
 日期：2026-09-03  
 文档角色：审计  
-状态：Qwen3.8 三题工程门通过；删除 GUI-Plus 仍受 P1-4 阻塞  
+状态：Qwen3.8 三题工程门、终止语义、删除后回归均通过；GUI-Plus 已退出活动代码
 当前入口：[Stage 4-A：Windows 本地任务验证](./stage-4-local-task-implementation.md)  
-基线：工作树 `fd67faf` 之上的未提交 Qwen3.8 实现与 2026-09-03 本地证据  
-范围：Qwen3.8 Provider Adapter、API conformance、无 CUA 坐标校准及进入真实桌面前的门槛；不涉及业务任务或 GUI-Plus 删除
+基线：`2d6eff1`；终止语义修复：`c8167ed`；活动代码删除：`1dce442`
+范围：Qwen3.8 Provider Adapter、API conformance、无 CUA 坐标校准、真实桌面门槛及 GUI-Plus 退出活动代码的回归
 
 ## 1. 结论与放行范围
 
-当前结论是**Qwen3.8 normalized 已通过无 CUA 定位门，alpha/beta/gamma 三题 attended 工程门均通过；仍不能删除
-GUI-Plus，直到 P1-4 的 plain-text finish 语义收紧并通过回归测试**。
+当前结论是**Qwen3.8 normalized 已通过无 CUA 定位门，alpha/beta/gamma 三题 attended 工程门、终止语义和删除后回归均通过；
+GUI-Plus 已退出活动代码**。
 
 首次校准中，`normalized_1000` 的两条可解析响应经 Adapter 换算后几乎落在目标中心；第三条失败是模型返回了非法 JSON。
 审计还发现校准 fixture 曾传入不完整的 click schema，导致一次重跑的三个 raw arguments 都是字符串数组，不能作为模型结论。
@@ -21,7 +21,7 @@ GUI-Plus，直到 P1-4 的 plain-text finish 语义收紧并通过回归测试**
 首次校准暴露的实现问题已处理；仍需保留的后续问题是：
 
 1. 三个同构任务已通过，但样本量仍不足以代表通用 GUI 成功率；
-2. plain assistant text 的终止语义（P1-4）仍未收紧，正式验收前必须避免把普通文本当作成功完成；
+2. plain assistant text 的终止语义（P1-4）已收紧为 Provider 协议错误，并有回归测试；
 3. 图像 resize 与 viewport 同步、全部 thinking 档位配置和 Provider 原始证据已实现并通过本轮回归。
 
 上述证据和核心坐标问题已修复，并已完成一次修正后的 normalized 校准；不应根据这 3 个样本给 Prompt 添加位置特例。
@@ -182,13 +182,11 @@ normalized 成功样本不在边界，因此这不是它们的误差来源。
 actual-pixel 坐标先在 presented 范围校验，再映射回 source；历史 ToolCall 执行反向变换。无效 prepared viewport 会被拒绝。
 默认 identity 行为不变，400×300 presented image 到 800×600 source observation 的右下角映射已有定向测试。
 
-#### P1-4 plain assistant text 会被当作成功结束
+#### P1-4 plain assistant text 会被当作成功结束（已修复）
 
-Qwen3.8 已显式提供 `terminate`，但 `parseResponse()` 在没有 ToolCall、只有文本时仍生成无 `reportedStatus` 的 finish；Runtime
-会把它视为 `succeeded`。这不解释坐标校准失败，但可能在桌面实验中制造 false-positive finish。应在 Qwen3.8 profile 中要求
-结束必须来自 `terminate`；普通文本若不属于已定义的用户交互语义，应作为 Provider 协议错误，而不是默认成功。由于本次
-alpha 有独立 evaluator，若该路径出现会被记录为 false-positive 而不会污染外部任务成功率，因此不阻塞一次诊断 smoke；
-但在三题正式门和 GUI-Plus 删除前必须修复并补测试。
+Qwen3.8 `parseResponse()` 现在要求结束必须来自显式 `terminate` ToolCall；`finish_reason=stop` 且只有普通文本时返回稳定的
+`QWEN_UNCONFIRMED_FINISH` Provider 协议错误，不再生成隐式成功 finish。显式 `interact` 和 ToolCall 携带的
+`assistantText` 语义不变，并已补回归测试。
 
 ### P2：不阻塞下一次诊断复跑
 
@@ -229,7 +227,7 @@ alpha 有独立 evaluator，若该路径出现会被记录为 false-positive 而
 ### 第三步：桌面门（三题工程门已完成）
 
 normalized 确认通过后，先用 `reasoning_effort=low` 运行 alpha；只有失败明确属于规划/状态追踪，才按入口文档允许一次
-medium 对照。坐标、Prompt、工具 Schema 与 thinking 不能同时改变。三题达到既定门槛后，才执行 GUI-Plus 删除清单。
+medium 对照。坐标、Prompt、工具 Schema 与 thinking 不能同时改变。三题达到既定门槛后执行 GUI-Plus 删除清单。
 
 本轮使用固定的 `normalized_1000 + reasoning_effort=low` 完成三个 attended Run：
 
@@ -244,6 +242,11 @@ medium 对照。坐标、Prompt、工具 Schema 与 thinking 不能同时改变�
 这证明 Qwen3.8 在当前冻结 ProbeWindow 任务上通过工程门，但不等价于通用 GUI 成功率。此前 alpha 失败的 R1 记录仍保留为
 历史 Provider schema/解析问题，不与本批次成功率混算。
 
+终止语义修复后的 alpha 首次输出了非法参数 `{"x":[497,508]}`，被 Provider 以 `QWEN_INVALID_TOOL_CALL` 拒绝，未执行
+桌面动作；同配置受控重试位于 `runs/stage4-local/qwen38-20260903-r3-retry/text-replace-alpha/`，evaluator 和 Runtime
+均成功。GUI-Plus 删除后的装配复核位于 `runs/stage4-local/qwen38-20260903-post-delete/text-replace-alpha/`，同样由
+evaluator 和 Runtime 同时判定成功。
+
 ### 独立复审放行条件
 
 本次曾只放行以下一个动作：运行冻结的 `text-replace-alpha` attended smoke。配置必须为：
@@ -255,8 +258,8 @@ medium 对照。坐标、Prompt、工具 Schema 与 thinking 不能同时改变�
 - 不同时修改 Prompt、Context、Tool Schema、任务、预算或坐标换算；
 - 记录 `runtimeOutcome`、外部 evaluator、每轮 ToolCall、continuation、动作/观察事件、清理结果和任何 false-positive finish。
 
-alpha、beta、gamma 均已通过，当前三题工程门放行；后续若进入删除 GUI-Plus 的变更，仍必须先关闭 P1-4，并保留这些 Run
-及其 `provider-exchanges.jsonl` 作为脱敏证据。不得因为本批次成功就直接修改 Prompt 或添加坐标特例。
+alpha、beta、gamma 均已通过，且修复后的受控 alpha 重试和删除后的 alpha 也通过；这些 Run 及其 `provider-exchanges.jsonl`
+作为脱敏证据保留。不得因为本批次成功就直接修改 Prompt 或添加坐标特例。
 
 ## 6. 验收条件
 
@@ -274,23 +277,20 @@ alpha、beta、gamma 均已通过，当前三题工程门放行；后续若进�
 
 ### 7.1 结论
 
-用户提出的五步顺序**可以执行，但需按以下修正版实施**。Qwen3.8 已在固定
-`normalized_1000 + low` 下完成 alpha/beta/gamma 3/3，因此关闭 plain-text finish 后，只需一条 alpha 验证该窄改动，
-不需要再次消费额度重跑 beta/gamma。GUI-Plus 删除后仍需一条 post-delete alpha，确认共享 Provider/CLI 装配未被误删。
+用户提出的五步顺序已执行完成。Qwen3.8 在固定 `normalized_1000 + low` 下完成 alpha/beta/gamma 3/3；终止语义
+修复后的首次 alpha 因模型返回非法坐标数组失败，受控重试通过；GUI-Plus 删除后的 post-delete alpha 也通过，确认共享
+Provider/CLI 装配未被误删。
 
 ### 7.2 先保存的必须是 commit，不是脏工作树指针
 
-当前 `main` 仍指向 `fd67faf`，工作树存在 27 项修改/未跟踪内容，且尚无保存当前状态的 tag。Git branch 和 tag 都只指向
-commit，不能保存未提交修改。因此不能直接在当前 HEAD 上打“当前状态”标签，否则标签实际不包含 Qwen3.8 Adapter、
-最新 runner、实验脚本和文档。
+当前基线已保存为 commit `2d6eff1`，终止语义修复为 `c8167ed`；活动代码删除为 `1dce442`。`.env`、`runs/` 和本机
+fixture binary 未提交。
 
 正确顺序：
 
-1. 审查 staged 文件，只纳入当前实现所需的源码、测试、manifest、实验脚本和当前文档；
+1. 基线 commit 纳入当前实现所需的源码、测试、manifest、实验脚本和当前文档；
 2. 排除 `.env`、`runs/`、隐私截图以及 `.stage4-qwen38-fixture-alpha/` 等临时构建目录；
-3. 在专门分支形成一个明确的 **pre-GUI-Plus-removal baseline commit**；
-4. 如需不可移动标记，再在该 commit 上创建 annotated tag；branch 用于继续追溯/修补，tag 用于冻结准确提交；
-5. ignored 的历史 Run 继续本地保留，当前文档保存脱敏摘要和路径。Git tag 保存可复现代码，不会自动打包 ignored 证据。
+3. ignored 的历史 Run 和 GUI-Plus 旧脚本继续本地保留，当前文档只保存脱敏摘要和路径。
 
 提交前仍需按仓库规则核对 repository-local author/committer 身份；本审计不代替实际提交或远程归属验证。
 
@@ -305,9 +305,9 @@ commit，不能保存未提交修改。因此不能直接在当前 HEAD 上打�
 - 空响应和 `finish_reason=tool_calls` 却没有 calls 仍保持原有错误。
 
 新增测试至少覆盖：plain text 拒绝、terminate success/failure、interact、ToolCall+assistantText、空响应。不要修改 Runtime
-的通用 finish 语义，也不要改变 GUI-Plus 历史 Adapter；问题属于 Qwen3.8 已声明控制工具后的 Provider 合同。
+的通用 finish 语义，也不要恢复已归档的 GUI-Plus Adapter；问题属于 Qwen3.8 已声明控制工具后的 Provider 合同。
 
-### 7.4 修正后的执行顺序
+### 7.4 修正后的执行顺序（已完成）
 
 1. **冻结基线**：形成包含 GUI-Plus、Qwen3.8、当前复现脚本和文档的 baseline commit；可再加 annotated tag。
 2. **单独修终止语义**：只改 Qwen3.8 无 ToolCall 文本分支及对应测试，形成独立 commit。
@@ -317,8 +317,8 @@ commit，不能保存未提交修改。因此不能直接在当前 HEAD 上打�
 4. **单独删除 GUI-Plus**：删除活动 Adapter、model union、CLI/runner 参数、manifest 候选、conformance 候选、专用单测、
    `qwen-wire-paired` 和其他 GUI-Plus 活动探针；保留 provider-qwen 包、Qwen3.8 与共享 HTTP/图片/坐标/诊断代码。历史结果
    和文档事实不删除，只移除活动入口。
-5. **删除后验证**：全量测试、typecheck、runner contract/lifecycle 全部通过；再执行一次 Qwen3.8 low alpha。它验证的是
-   删除没有误伤共享 Adapter/CLI/runner 真实装配，不替代此前三题结果。通过后才能宣布 GUI-Plus 已安全退出活动代码。
+5. **删除后验证**：全量测试 101/101、typecheck、runner contract/lifecycle 全部通过；Qwen3.8 low alpha evaluator 和
+   Runtime 均成功。它验证删除没有误伤共享 Adapter/CLI/runner 真实装配，不替代此前三题结果。
 
 ### 7.5 删除时的审查清单
 
@@ -326,5 +326,5 @@ commit，不能保存未提交修改。因此不能直接在当前 HEAD 上打�
   和历史叙述；
 - 不删除 Qwen3.8 正在消费的 `QwenHttpClient`、endpoint/auth、image preprocessing、normalized 坐标、continuation 和
   `provider-exchanges.jsonl` 记录；
-- 测试总数会因删除 GUI-Plus 专用测试而减少，验收依据是所有剩余测试通过，而不是继续等于删除前的 112；
+- 测试总数因删除 GUI-Plus 专用测试从删除前的 113 降为 101，验收依据是所有剩余测试通过；
 - 删除 commit 保持单一目的，不夹带 Prompt、Context、Runtime 或任务修改，便于回滚和比较。

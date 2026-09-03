@@ -8,15 +8,13 @@ Verifier、RL 或 Dashboard。
 
 ## 当前范围
 
-当前活动代码包含三个模型：
+当前活动代码包含两个模型：
 
 - `glm-5.3-flash`，`packages/provider-glm`；
-- `gui-plus-2026-02-26`，`packages/provider-qwen`；
 - `qwen3.8-flash`，`packages/provider-qwen`。
 
-`qwen3.8-flash` 已通过本轮真实 API、坐标校准和三题桌面工程门；仍需关闭 P1-4 终止语义、形成可追溯基线 commit，
-再按[专项审计的删除计划](./qwen38-adapter-localization-audit-2026-09-03.md#7-gui-plus-基线保留与删除计划复审)
-替换 GUI-Plus 的活动实现。
+Qwen3.8 已通过本轮真实 API、坐标校准、三题桌面工程门、显式终止语义修复和删除后的 alpha；GUI-Plus
+已退出活动代码，仅保留 Git 历史和历史实验说明。
 
 `glm-4.6v-flash` 已退出现行代码和实验入口；旧结果留在 `docs/history/`，不再作为命令或新样本。
 
@@ -34,18 +32,15 @@ Verifier、RL 或 Dashboard。
 - `packages/computer-cua` 负责把 Harness Computer 合同接到 CUA daemon；`spikes/cua-driver/stage4-local-runner.ts`
   负责独立 daemon、fixture、CLI、evaluator 和清理。
 - `scripts/stage4-local/evaluate-fixture.ps1` 是模型上下文之外的确定性评分器；不把模型自报 finish 当作任务成功。
-- 当前本地回归：`pnpm test` 为 112/112，`pnpm run typecheck`、runner contract check 和 10 个 runner
+- 当前删除后本地回归：`pnpm test` 为 101/101，`pnpm run typecheck`、runner contract check 和 10 个 runner
   lifecycle 场景通过。
-- 真实 API conformance 已通过：GLM-5.3-Flash 与 Qwen GUI-Plus 各完成两轮 Function Calling 请求（HTTP 200、
-  每轮一个原生 `message.tool_calls`）；仅使用脱敏合成图片，未执行 CUA 或桌面动作。证据位于
-  `runs/api-conformance/function-schema-live-20260903/summary.json`。
+- 真实 API conformance 已通过：GLM-5.3-Flash 与 Qwen3.8-Flash 均完成原生 Function Calling 请求（HTTP 200）；
+  仅使用脱敏合成图片，未执行 CUA 或桌面动作。证据位于 `runs/api-conformance/` 下对应目录。
 - 本轮更新后的 GLM 两轮真实 conformance 已通过：第二轮 assistant 历史明确带有 `reasoning_content`（仅记录存在性和
   长度，不落原文），服务端返回 HTTP 200 / `stop`。证据位于
   `runs/api-conformance/glm-live-20260903-r2/summary.json`。
-- 一组 attended GUI-Plus smoke 已通过：`text-replace-alpha`、`normalized_1000`，`runtimeOutcome=succeeded`、
-  evaluator success、CLI exit code 0、daemon stop code 0。fixture 常规关闭返回
-  `foreign_process_termination_denied` warning，但无 cleanup error 且没有残留进程。证据位于
-  `runs/stage4-local/qwen-smoke-20260903-r1/runner.json`。
+- Qwen3.8 attended alpha/beta/gamma 均通过 evaluator 和 Runtime；删除前与删除后的 alpha 证据分别保留在
+  `runs/stage4-local/qwen38-20260903-r2/`、`qwen38-20260903-r3-retry/` 和 `qwen38-20260903-post-delete/`。
 - Qwen 坐标配对矩阵已完成：6/6 个 Run 均由 runner 完整收尾、无 cleanup error。`actual_pixels` 为 0/3 任务成功，
   均耗尽 12-step budget；`normalized_1000` 为 0/3 任务成功，2/3 runtime 正常结束、1/3 耗尽 budget。证据位于
   `runs/stage4-local/qwen-paired-20260903-r2/summary.json`。
@@ -57,14 +52,14 @@ Verifier、RL 或 Dashboard。
   `reasoning_effort`/`preserve_thinking`、`reasoning_content` continuation、原生多 ToolCall 解析和控制调用隔离；已通过
   无 CUA 真实 API conformance。
 - 无 CUA 坐标校准入口 `run:qwen38-coordinate-calibration` 已完成 3 个确定性合成目标 × 2 种坐标模式的真实校准；修正
-  canonical schema 后的 normalized 确认实验为 3/3，尚未进入真实桌面 Run。
+  canonical schema 后的 normalized 确认实验为 3/3，并已通过真实桌面 alpha/beta/gamma 门。
 
 ## 当前阻塞与下一步
 
-正式排名和扩大任务集前，先按总体审计关闭 P0：
+当前路线的代码与窄任务验收门已关闭；正式排名和扩大任务集仍不能把这组同构任务外推为通用 GUI 成功率：
 
 1. 动作已确定完成但动作后 Observe 失败时，仍必须写入 ToolCall 终态（代码与失败路径测试已补齐）；
-2. GUI-Plus Function Calling 坐标配对已经完成，但两种模式任务成功率均为 0/3，不能仅凭旧结果冻结生产默认；
+2. GUI-Plus 坐标配对是历史负向证据，不再作为活动 Provider 或生产默认；
 3. GLM-5.3 的 `reasoning_content` 历史呈现已通过代码、fixture 和真实两轮 API conformance；
 4. Qwen/GLM 的 per-tool Function Calling Schema（description、required、Viewport 坐标边界和未知工具拒绝）
    已通过静态门和真实 API conformance；Qwen provider-native 坐标/时间参数的解析映射也已覆盖测试。
@@ -72,22 +67,13 @@ Verifier、RL 或 Dashboard。
 GLM 的 `terminate`/`interact` 结构化控制函数列为 P1，不阻断本轮坐标协议和短任务诊断；后续独立 Provider PR
 再补齐 Schema、解析映射和 Runtime 消费测试，避免与当前 P0 坐标变量混杂。
 
-Qwen3.8 已完成 conformance、证据整改、normalized 确认和三题 attended 工程验收，三题均为 evaluator success、
-`runtimeOutcome=succeeded`，且每个 Run 都生成了 `provider-exchanges.jsonl`。独立复审见
-[Qwen3.8 Adapter 与定位实验审计](./qwen38-adapter-localization-audit-2026-09-03.md)。当前仍不能删除 GUI-Plus：
-plain-text finish 语义必须先收紧并补测试，防止正式验收中的 false-positive finish。
-删除顺序、Git 基线要求和前后验证门以
-[GUI-Plus 基线保留与删除计划复审](./qwen38-adapter-localization-audit-2026-09-03.md#7-gui-plus-基线保留与删除计划复审)
-为准；branch/tag 不能代替保存脏工作树的 baseline commit。
+Qwen3.8 的 plain-text finish 语义已收紧为 `QWEN_UNCONFIRMED_FINISH` Provider 错误，并有回归测试；删除前受控
+alpha 首次遇到模型非法坐标参数、重试通过，删除后 alpha 也通过。GUI-Plus 活动代码已删除，Git 基线和历史证据仍保留。
 实验输出写入 ignored 的 `runs/`，每个 Run 单独目录，
 保存 Event、截图、请求计数、延迟、成本、评分和清理结果。
 
-Paired runner 位于 `scripts/experiments/qwen-wire-paired.ts`，通过已有 Stage 4 runner 顺序启动每个独立 daemon、
-fixture 和 CLI；只使用 Function Calling，分别运行 `actual_pixels` 与 `normalized_1000` 两个坐标模式。坐标开关
-只存在于 CLI/实验入口的显式参数，不在 Provider 内部做 paired 逻辑。每个输出目录必须为空，旧证据不会覆盖；实验
-结束后可删除 `scripts/experiments/qwen-wire-paired.ts` 及对应 `runs/` 子目录，只有通用坐标结论才另开 Provider PR。
-当前 `--plan-only` 只包含 Qwen 两种模式，共 6 个诊断 Run。基础设施错误会停止后续批次，避免重复消耗 API；
-普通 `taskSuccess=false` 仍继续收集。
+GUI-Plus paired runner 已归档到本地 `docs/history/legacy-experiments/`，不再提供活动命令。Qwen3.8 坐标校准脚本仍可
+用于后续 Provider 变更的受控复核；普通任务失败仍应与 Provider、Runtime、工具和 evaluator 错误分开记录。
 
 ## 最近一次实测
 
@@ -116,7 +102,7 @@ fixture 和 CLI；只使用 Function Calling，分别运行 `actual_pixels` 与 
 `GLM HTTP 500 (1234)`，因此 runtime 为 `failed`；该结果保留为异常证据，不纳入成功率。使用新目录
 `glm-20260903-r3` 重跑后完整成功，说明这次是 Provider 瞬时错误，不是动作或 evaluator 失败。
 
-## Qwen 坐标配对结果（2026-09-03）
+## Qwen GUI-Plus 历史坐标配对结果（2026-09-03）
 
 | 坐标模式 | Run 数 | evaluator 成功 | runtime succeeded | budget_exhausted | 总 tokens | 平均耗时 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -137,10 +123,9 @@ fixture 和 CLI；只使用 Function Calling，分别运行 `actual_pixels` 与 
 ### 结论
 
 - `glm-5.3-flash` 进入下一阶段，作为当前主模型；
-- `gui-plus-2026-02-26` 停止继续做 Prompt/Schema 补丁，保留代码和轨迹作为负向基线；若仍需运行，只使用
-  `normalized_1000` 诊断配置；
-- 新增 `qwen3.8-flash` 作为第二 Provider 候选；先完成官方协议对齐、坐标校准、conformance 和 3 题工程门。
-  达到本文删除门槛后直接从活动代码删除 GUI-Plus；未达到前不得先删，以免失去可复现实验基线。
+- `gui-plus-2026-02-26` 的负向结果和代码已冻结为历史基线，活动 Adapter、入口和 paired runner 已删除；历史证据不删除；
+- `qwen3.8-flash` 已完成官方协议对齐、坐标校准、conformance、3 题工程门、显式 terminate 修复及删除后 alpha，作为
+  当前第二 Provider。
 
 GLM 的证据应分两层报告：三个任务的外部 evaluator 首次均成功；其中 gamma 在任务实际完成后的下一次模型请求
 遇到可重试 `HTTP 500 (1234)`，所以首批 Runtime clean finish 为 2/3，重新运行后为 3/3。它足以进入下一阶段工程
@@ -209,10 +194,11 @@ tokens，低于 GUI-Plus 的输入 1.5 元、输出 4.5 元。按本轮 GUI-Plus
 保持 Runtime、Context、任务、预算、evaluator 和 CUA 截图链不变，只替换 Qwen Provider profile 和由其生成的模型
 请求：
 
-1. **独立 profile**：在现有 `packages/provider-qwen` 内新增 `qwen3.8-flash` profile，共用 HTTP、鉴权、图片、usage、
-   错误映射和 ToolCall 解析基础设施；不要新建 Provider 包，也不要仅把 `QwenGuiPlusAdapter` 的 model 字符串替换掉。
-2. **清除 GUI-Plus 私有假设**：Qwen3.8 使用当前规范 per-tool schema，如 `click({x,y})`、`type({text})`、
-   `keypress({keys})`。GUI-Plus 的 `coordinate`、`coordinate2`、`pixels`、`time` 仅留在旧 Adapter，不能泄漏到新 profile。
+1. **独立 profile（已完成）**：在现有 `packages/provider-qwen` 内实现 `qwen3.8-flash` profile，共用 HTTP、鉴权、图片、
+   usage、错误映射和 ToolCall 解析基础设施；不新建 Provider 包，也不通过替换旧 model 字符串复用协议。
+2. **清除 GUI-Plus 私有假设（已完成）**：Qwen3.8 使用当前规范 per-tool schema，如 `click({x,y})`、`type({text})`、
+   `keypress({keys})`。GUI-Plus 的 `coordinate`、`coordinate2`、`pixels`、`time` 已从活动 Adapter 移除，仅留在历史
+   实验说明中。
 3. **静态测试**：覆盖请求 model、完整图片输入、每个工具的 required/description、返回一个和多个 Tool Call、未知工具、
    畸形参数、ToolCall ID 对应的 tool result 历史、usage 与错误映射。
 4. **无 CUA API conformance**：先用 non-thinking 完成至少两轮原生 Function Calling；第一轮返回 Tool Call，第二轮
@@ -269,31 +255,18 @@ endpoint、坐标模式、thinking 配置、图片实际尺寸、viewport、工�
 - 合计 3/3 evaluator success、3/3 Runtime success、15 次模型请求、95,439 tokens、无 Provider/Parser/Trajectory/
   cleanup error；每个 Run 都生成了 `provider-exchanges.jsonl`，可审查原始 ToolCall。已知
   `foreign_process_termination_denied` 仍只是 cleanup warning，不影响精确清理。
-- **决策**：三题工程门通过，但 GUI-Plus 删除仍被 P1-4（普通文本可能被当成成功 finish）阻塞；先修正终止语义并补测试，
-  再执行删除门，不能把这 3 个同构任务外推为通用 GUI 成功率。
+- **决策**：三题工程门通过；随后 Qwen3.8 plain-text finish 已改为 `QWEN_UNCONFIRMED_FINISH` 并补回归测试。
+  修复后的首次 alpha 因模型返回非法坐标数组而失败，受控重试通过；这些结果不外推为通用 GUI 成功率。
 
-### Qwen3.8-Flash 通过后的 GUI-Plus 删除门
+### GUI-Plus 退出活动代码结果（2026-09-03）
 
-只有同时满足以下条件，实施 Agent 才直接删除 GUI-Plus 活动实现：
-
-1. Qwen3.8 API conformance 通过；
-2. 坐标校准选出一个 3/3 模式；
-3. 三个冻结桌面任务均由外部 evaluator 判定成功；
-4. false-positive finish 为 0；
-5. Provider、Parser、Trajectory 和 cleanup error 均为 0；
-6. Qwen3.8 plain-text finish 语义已收紧并有回归测试，不能把未确认的普通文本当作成功完成。
-
-通过后，在同一个受控改动中：
-
-- 删除 `gui-plus-2026-02-26` 的活动 model union、CLI 参数/帮助、manifest 候选和 conformance 候选；
-- 删除 `QwenGuiPlusAdapter`、GUI-Plus 私有 Action 映射及其专用单测；
-- 删除已无消费者的 GUI-Plus 坐标配对实验入口；
-- 将 `packages/provider-qwen` 的公开出口明确命名为 Qwen3.8 profile/adapter，但保留包本身；
-- 更新当前入口和命令，只保留 `glm-5.3-flash` 与 `qwen3.8-flash`；
-- 保留历史结果摘要、脱敏证据路径和 Git 历史，不删除旧实验事实；
-- 重新执行 typecheck、全量单测、runner contract，并在清理后再跑一次 alpha smoke，防止删除时误伤共享代码。
-
-若未通过删除门，不删除 GUI-Plus 历史实现，也不继续针对它优化；它只作为冻结负向基线存在。
+- 基线提交：`2d6eff1`；终止语义修复：`c8167ed`；活动代码删除：`1dce442`。
+- 删除前静态回归：全量测试 113/113、typecheck、runner contract/lifecycle 均通过；修复后 alpha 受控重试通过。
+- 删除后静态回归：全量测试 101/101、typecheck、runner contract/lifecycle 均通过。
+- 删除后 Qwen3.8 alpha：evaluator success、`runtimeOutcome=succeeded`、4 steps、5 requests、无 Provider/Parser/
+  Trajectory/cleanup error；输出位于 `runs/stage4-local/qwen38-20260903-post-delete/text-replace-alpha/`。
+- GUI-Plus 活动 model union、Adapter、私有映射、CLI/runner/conformance 入口和 paired runner 已移除；旧脚本仅在本地
+  `docs/history/legacy-experiments/` 归档，历史运行证据仍在 ignored 的 `runs/` 和 Git 历史中。
 
 ## 实施要求
 
@@ -343,31 +316,7 @@ pnpm --dir spikes/cua-driver run run:stage4-task -- `
 ```
 
 当前 CLI/runner 支持 `--qwen-thinking disabled|low|medium|xhigh`，省略时默认 `low`，并在 summary/runner 中记录实际值。
-这条命令会启动 CUA 和操作真实桌面，只有用户确认独占时间窗后才能执行；本次固定 `low`，不同 thinking 档位不能与
-Provider 参数问题同时改变。alpha、beta、gamma 当前均已完成；在 P1-4 终止语义修复前不再扩跑、不删除 GUI-Plus，也不要
-恢复旧 4.6V 命令。
-
-以下 `run:qwen-paired` 是已经完成的 GUI-Plus 历史坐标诊断入口，不得直接拿来代表 Qwen3.8 校准，也不需要重跑：
-
-```powershell
-pnpm --dir spikes/cua-driver run run:qwen-paired -- `
-  --binary "<path-to-cua-driver.exe>" `
-  --fixture "<path-to-ProbeWindow.exe>" `
-  --output "<absolute-paired-output>" `
-  --env-file "<absolute-path-to-.env>" `
-  --socket-prefix "<unique-pipe-prefix>"
-```
-
-只检查矩阵而不启动 daemon 或调用模型：
-
-```powershell
-pnpm --dir spikes/cua-driver run run:qwen-paired -- `
-  --binary "<path-to-cua-driver.exe>" `
-  --fixture "<path-to-ProbeWindow.exe>" `
-  --output "<absolute-paired-output>" `
-  --env-file "<absolute-path-to-.env>" `
-  --plan-only
-```
+真实桌面命令会启动 CUA 并操作专用 fixture，必须使用独立 socket 和输出目录；GUI-Plus paired 命令已归档，不再重跑。
 
 Qwen3.8 真实 API conformance 必须分两次执行并使用独立输出目录：先关闭思考验证原生 Function Calling，再用
 `low` 验证 `reasoning_content` continuation。以下命令只做 API 请求，不启动 CUA；执行前必须取得用户确认：

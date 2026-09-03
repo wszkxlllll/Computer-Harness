@@ -17,8 +17,9 @@ Stage 4 分成两条互不覆盖的路线：
 现行活动代码包含：
 
 - `glm-5.3-flash` → `packages/provider-glm`；
-- `gui-plus-2026-02-26` → `packages/provider-qwen`；
-- `qwen3.8-flash` → `packages/provider-qwen`。Qwen3.8 已通过三题工程门，等待终止语义修复和独立删除提交。
+- `qwen3.8-flash` → `packages/provider-qwen`。Qwen3.8 已通过终止语义修复、静态回归和删除后的 alpha；GUI-Plus 已退出活动代码。
+
+GUI-Plus 只保留在 Git 历史和历史实验说明中，不再作为 CLI、runner、manifest 或 conformance 的可选模型。
 
 `glm-4.6v-flash` 已从现行 profile、CLI、conformance runner、Stage 4 manifest 和活动命令移除。旧实验
 结果和协议探针保存在本地 `docs/history/`，作为不可变证据，不提交、不覆盖、不恢复为新命令。
@@ -30,9 +31,8 @@ Stage 4 分成两条互不覆盖的路线：
   `packages/context` 管时序投影；Provider 只负责 API 协议和模型输出映射。
 - `ActionIntent` 表示模型决定，`ActionReceipt` 表示 Computer 实际执行结果；两者不等同于任务完成。
 - Event 先写 execution started，再执行副作用，最后写 completed/failed；未知副作用默认重新观察，不能自动重试。
-- 当前本地回归为 `pnpm test` 112/112、`pnpm run typecheck`、runner contract 和 lifecycle check 通过；真实 API
-  conformance 也已完成（GLM-5.3-Flash、Qwen GUI-Plus 各两轮原生 Function Calling，HTTP 200，无 CUA/桌面副作用）。
-  证据在 `runs/api-conformance/function-schema-live-20260903/summary.json`；这不等于真实模型或 OSWorld 任务成功率。
+- 当前删除后本地回归为 `pnpm test` 101/101、`pnpm run typecheck`、runner contract 和 lifecycle check 通过；真实 API
+  conformance 与 Qwen3.8 三题 attended 工程门的历史证据仍保留在 `runs/`，不等于通用模型或 OSWorld 任务成功率。
 
 ## 当前门槛与顺序
 
@@ -40,24 +40,18 @@ P0 的当前代码基线、PR 拆分和验收细节以
 [P0 开工就绪复审](./trajectory-review-2026-09-02/p0-readiness-reaudit-2026-09-02.md) 为准。
 
 1. P0-1（动作后观察失败的事实顺序）和 P0-3（GLM 多轮 `reasoning_content`）的代码、Trajectory round-trip、
-   lifecycle suite、更新后的 GLM 两轮 API conformance 与一组 attended GUI-Plus smoke 均已通过。Qwen/GLM per-tool
+   lifecycle suite、更新后的 GLM 两轮 API conformance 与一组历史 attended GUI-Plus smoke 均已通过。Qwen/GLM per-tool
    Function Schema 不再作为阻塞项。
-2. Qwen 对照实验只放在临时 `scripts/experiments/qwen-wire-paired.ts`，同一冻结输入分别跑
-   `actual_pixels` / `normalized_1000`；脚本顺序调用现有 Stage 4 runner，结果分目录保存；只把通用结论提升到
-   Provider PR。
+2. 已完成的 GUI-Plus paired 实验入口已归档到本地 `docs/history/legacy-experiments/`，不再作为活动命令；Qwen3.8
+   坐标校准脚本仍保留用于后续 Provider 变更时的受控复核。
 3. 在坐标实验前保留对 Qwen/GLM 工具 description、条件 required、Viewport 坐标边界、未知工具拒绝和 Runtime
    二次校验的回归；这些 Schema 检查已通过，后续只比较坐标变量，避免混淆结果。
-4. A 的 GLM 三个任务外部验收均通过，进入下一阶段作为主模型；GUI-Plus 停止继续做 Prompt/Schema 补丁并保留为
-   临时负向基线。Qwen3.8 已完成 conformance、raw ToolCall/指标整改、normalized 边界修复与修正后的 3/3 无 CUA
-   确认。按[专项复审](./qwen38-adapter-localization-audit-2026-09-03.md)，当前只放行固定
-   `normalized_1000 + low thinking` 的 attended alpha。首次 alpha 在第一个 ToolCall 参数解析阶段失败且未执行动作；
-   resize viewport 同步、完整 thinking 档位入口和本地脱敏 Provider exchange 记录现已补齐，只允许同配置诊断复跑一次。
-   alpha 的 Runtime 与外部 evaluator 一致通过后，再跑同配置 beta/gamma。全部达到路线 A 文档的删除门后，直接从活动
-   代码移除 GUI-Plus，但保留历史结果；不重跑已有 GLM。
+4. A 的 GLM 三个任务外部验收均通过；Qwen3.8 已完成 conformance、坐标修复、三题 attended 工程门和显式
+   `terminate` 终止语义修复。修复后的 alpha 首次因模型返回非法 `x` 数组而失败，受控重试通过；删除后的 alpha
+   也通过，Runtime 与外部 evaluator 一致成功。GUI-Plus 活动实现随后已独立删除，历史结果不变。
    B 可同步完成 OSWorld 的 B4 迁移探索。
-5. GUI-Plus 删除顺序按[专项审计第 7 节](./qwen38-adapter-localization-audit-2026-09-03.md#7-gui-plus-基线保留与删除计划复审)：
-   脏工作树先形成 baseline commit，终止语义单独提交并验证一条 alpha，GUI-Plus 再单独删除；删除后除完整静态回归外，
-   还需一条 Qwen3.8 alpha 验证真实装配。
+5. GUI-Plus 删除已按专项审计顺序完成：baseline `2d6eff1`、终止语义修复 `c8167ed`、活动代码删除
+   `1dce442`；删除后的静态回归和 Qwen3.8 alpha 均通过。
 6. 两条路线分别通过自己的验收后，协调方再发布 Stage 5 的 Harness 接入任务；不能用环境安装通过代替
    Harness 端到端通过。
 
