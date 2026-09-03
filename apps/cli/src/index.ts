@@ -5,13 +5,13 @@ import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId } from "@computer-harness/protocol";
 import { GlmAdapter, type GlmProfileName } from "@computer-harness/provider-glm";
-import { FetchQwenHttpClient, Qwen38FlashAdapter, QwenGuiPlusAdapter, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
+import { FetchQwenHttpClient, Qwen38FlashAdapter, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import { DefaultRuntimePolicy, RunController, createDefaultComputerTools, type CleanupDiagnostic } from "@computer-harness/runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
 
-type ModelName = GlmProfileName | "gui-plus-2026-02-26" | "qwen3.8-flash";
+type ModelName = GlmProfileName | "qwen3.8-flash";
 
 interface CliOptions {
   goal: string;
@@ -37,8 +37,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const model = value("--model") as ModelName | undefined;
   const socket = value("--cua-socket") ?? value("--socket");
   if (goal === undefined || goal.trim().length === 0) throw new Error("--goal is required");
-  if (model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
-    throw new Error("--model must be glm-5.3-flash, gui-plus-2026-02-26, or qwen3.8-flash");
+  if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") {
+    throw new Error("--model must be glm-5.3-flash or qwen3.8-flash");
   }
   if (socket === undefined || socket.trim().length === 0) throw new Error("--cua-socket is required");
   const output = resolve(value("--output") ?? "runs/live-cli");
@@ -51,7 +51,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (qwenCoordinateModeValue !== undefined && qwenCoordinateModeValue !== "normalized_1000" && qwenCoordinateModeValue !== "actual_pixels") {
     throw new Error("--qwen-coordinate-mode must be normalized_1000 or actual_pixels");
   }
-  if (qwenCoordinateModeValue !== undefined && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
+  if (qwenCoordinateModeValue !== undefined && model !== "qwen3.8-flash") {
     throw new Error("--qwen-coordinate-mode is only valid with a Qwen model");
   }
   if (model === "qwen3.8-flash" && qwenCoordinateModeValue === undefined) {
@@ -89,7 +89,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|gui-plus-2026-02-26|qwen3.8-flash> --cua-socket <socket> [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--interactive]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --cua-socket <socket> [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--interactive]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -134,7 +134,7 @@ async function main(): Promise<void> {
     cleanupDiagnostics,
     fixture,
     trajectory: resolve(options.output, "trajectory.jsonl"),
-    providerExchanges: options.model === "gui-plus-2026-02-26" || options.model === "qwen3.8-flash"
+    providerExchanges: options.model === "qwen3.8-flash"
       ? resolve(options.output, "provider-exchanges.jsonl")
       : null,
     metrics: {
@@ -153,13 +153,6 @@ async function main(): Promise<void> {
 }
 
 function makeProvider(model: ModelName, assetReader: AssetReader, output: string, qwenCoordinateMode?: QwenCoordinateMode, qwenThinking?: Qwen38ThinkingMode) {
-  if (model === "gui-plus-2026-02-26") {
-    const key = process.env.DASHSCOPE_API_KEY;
-    if (key === undefined || key.trim().length === 0) throw new Error("DASHSCOPE_API_KEY is required for gui-plus-2026-02-26");
-    const endpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
-    const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
-    return new QwenGuiPlusAdapter({ apiKey: key, assetReader, httpClient: new RecordingQwenHttpClient(resolve(output, "provider-exchanges.jsonl"), qwenCoordinateMode ?? "normalized_1000"), ...(endpoint === undefined ? {} : { endpoint }), ...(workspaceId === undefined ? {} : { workspaceId }), ...(qwenCoordinateMode === undefined ? {} : { coordinateMode: qwenCoordinateMode }) });
-  }
   if (model === "qwen3.8-flash") {
     const key = process.env.DASHSCOPE_API_KEY;
     if (key === undefined || key.trim().length === 0) throw new Error("DASHSCOPE_API_KEY is required for qwen3.8-flash");

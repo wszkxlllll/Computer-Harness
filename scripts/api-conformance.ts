@@ -2,7 +2,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { GlmAdapter, type GlmAdapterOptions, type GlmHttpClient } from "@computer-harness/provider-glm";
-import { Qwen38FlashAdapter, QwenGuiPlusAdapter, type Qwen38AdapterOptions, type Qwen38ThinkingMode, type QwenAdapterOptions, type QwenHttpClient } from "@computer-harness/provider-qwen";
+import { Qwen38FlashAdapter, type Qwen38AdapterOptions, type Qwen38ThinkingMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import type {
   AssetId,
   AssetRef,
@@ -19,7 +19,7 @@ import type {
 } from "@computer-harness/protocol";
 import { createDefaultComputerTools, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 
-type ProviderName = "glm-5.3-flash" | "gui-plus-2026-02-26" | "qwen3.8-flash";
+type ProviderName = "glm-5.3-flash" | "qwen3.8-flash";
 
 interface CliOptions {
   envFile: string;
@@ -168,7 +168,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     }
   }
   const modelValue = values.get("model") ?? "all";
-  if (modelValue !== "all" && modelValue !== "glm-5.3-flash" && modelValue !== "gui-plus-2026-02-26" && modelValue !== "qwen3.8-flash") {
+  if (modelValue !== "all" && modelValue !== "glm-5.3-flash" && modelValue !== "qwen3.8-flash") {
     throw new Error(`unsupported --model: ${modelValue}`);
   }
   const timeoutValue = Number(values.get("timeout-ms") ?? "120000");
@@ -405,19 +405,12 @@ async function runModel(
   const requests: RequestRecord[] = [];
   const turns: Array<Record<string, unknown>> = [];
   const client = new RecordingHttpClient(provider, timeoutMs);
-  const apiKey = provider === "gui-plus-2026-02-26" || provider === "qwen3.8-flash"
+  const apiKey = provider === "qwen3.8-flash"
     ? envValue(env, "DASHSCOPE_API_KEY")
     : envValue(env, "ZHIPUAI_API_KEY") ?? envValue(env, "ZHIPU_API_KEY") ?? envValue(env, "GLM_API_KEY");
   if (apiKey === undefined) return { provider, requests, turns, status: "skipped", error: { code: "MISSING_API_KEY", message: "provider key is not configured in the selected env file" } };
-  let adapter: QwenGuiPlusAdapter | Qwen38FlashAdapter | GlmAdapter;
-  if (provider === "gui-plus-2026-02-26") {
-    const qwenOptions: QwenAdapterOptions = { apiKey, assetReader: reader, httpClient: client };
-    const workspaceId = envValue(env, "DASHSCOPE_WORKSPACE_ID");
-    const endpoint = envValue(env, "DASHSCOPE_ENDPOINT");
-    if (workspaceId !== undefined) qwenOptions.workspaceId = workspaceId;
-    if (endpoint !== undefined) qwenOptions.endpoint = endpoint;
-    adapter = new QwenGuiPlusAdapter(qwenOptions);
-  } else if (provider === "qwen3.8-flash") {
+  let adapter: Qwen38FlashAdapter | GlmAdapter;
+  if (provider === "qwen3.8-flash") {
     const qwen38Options: Qwen38AdapterOptions = { apiKey, assetReader: reader, httpClient: client, thinking: qwenThinking, coordinateMode: "normalized_1000" };
     const workspaceId = envValue(env, "DASHSCOPE_WORKSPACE_ID");
     const endpoint = envValue(env, "DASHSCOPE_ENDPOINT");
@@ -465,7 +458,7 @@ async function main(): Promise<void> {
   const secondObservation = makeObservation(runId, sessionId, "static-observation-2", asset, viewport);
   const compiler = new DefaultContextCompiler(createDefaultComputerTools());
   const firstInput = await compiler.compile({ goal: "Click the blue button in the synthetic UI once, then report whether the request was completed.", latestObservation: firstObservation, recentEvents: baseEvents(runId, sessionId, firstObservation) }, new AbortController().signal);
-  const models: ProviderName[] = options.model === "all" ? ["glm-5.3-flash", "gui-plus-2026-02-26", "qwen3.8-flash"] : [options.model];
+  const models: ProviderName[] = options.model === "all" ? ["glm-5.3-flash", "qwen3.8-flash"] : [options.model];
   const results: ModelRunResult[] = [];
   for (const provider of models) {
     const result = await runModel(provider, firstInput, env, reader, options.timeoutMs, options.qwenThinking, async (first, firstCall) => {

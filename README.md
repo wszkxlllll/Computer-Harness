@@ -16,7 +16,7 @@ Context、canonical Computer Tools、GLM/Qwen Provider 和 CLI。当前状态是
 - 已实现 `packages/runtime` 的 FakeProvider/FakeComputer RunController、命令 Inbox、
   失败注入和统一 Action/Capability/Viewport 校验；
 - 已实现 `packages/context` 的时序投影、`packages/provider-glm` 的 profile 抽象（当前生产 profile 为 `glm-5.3-flash`）、
-  `packages/provider-qwen` 的 GUI-Plus 原生工具调用适配，以及 `apps/cli` 组合入口；
+  `packages/provider-qwen` 的 Qwen3.8-Flash 原生工具调用适配，以及 `apps/cli` 组合入口；
 - fake 契约不等于真实模型成功率，真实 API 和隔离 CUA fixture 仍需按 Stage 4 门槛运行。
 
 ## 环境
@@ -61,7 +61,7 @@ ZHIPUAI_API_KEY=replace-with-your-key
 # 可选：兼容 OpenAI 协议的自定义端点
 GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
 
-# Qwen GUI-Plus
+# Qwen3.8-Flash
 DASHSCOPE_API_KEY=replace-with-your-key
 # 可选：工作空间与端点，二选一即可；未设置时使用公共 compatible-mode 端点
 DASHSCOPE_WORKSPACE_ID=replace-with-your-workspace-id
@@ -102,7 +102,7 @@ pnpm --filter @computer-harness/cli start -- --goal "click the input and type Ha
 # 需要终端回答时才追加：--interactive
 ```
 
-允许的 `--model` 值为 `glm-5.3-flash` 和 `gui-plus-2026-02-26`。GLM 使用
+允许的 `--model` 值为 `glm-5.3-flash` 和 `qwen3.8-flash`。GLM 使用
 `ZHIPUAI_API_KEY`，Qwen 使用
 `DASHSCOPE_API_KEY`；Qwen 若未提供 `DASHSCOPE_BASE_URL/ENDPOINT`，会由
 `DASHSCOPE_WORKSPACE_ID` 生成已验证的 Workspace endpoint，否则使用公共 compatible-mode endpoint。
@@ -139,7 +139,7 @@ packages/trajectory     Event 落盘、资产引用和 Snapshot 投影
 packages/runtime        RunController、Policy、Tool Registry 和 GUI Action 路由
 packages/context        默认时序 Context 编译器
 packages/provider-glm   GLM-5.3 profile
-packages/provider-qwen  GUI-Plus Adapter
+packages/provider-qwen  Qwen3.8-Flash Adapter
 packages/computer-cua   trycua/cua-driver 适配器
 apps/cli                组合依赖、运行展示和轨迹输出
 spikes/cua-driver       可删除的底层 CUA 探针
@@ -147,9 +147,8 @@ spikes/cua-driver       可删除的底层 CUA 探针
 
 每个包必须有当前生产者、消费者和测试，不为未来能力提前加入空接口。V1 暂不包含
 Memory、Verifier、RL、后台 Job、Subagent、Dashboard 或第三个 Provider。两个 Adapter 都使用原生
-Function Calling，并按本轮 Runtime 工具逐个生成 Schema。Qwen 在 Adapter 边界将 GUI-Plus 的
-`coordinate`、`coordinate2`、`pixels`、`time` 映射为 canonical 的 click/scroll/drag/wait 参数；
-Schema 和 Parser 都不会让未知工具或缺失字段进入 Runtime。Qwen 官方 text `computer_use` 协议仅作为
+Function Calling，并按本轮 Runtime 工具逐个生成 Schema。Qwen3.8 在 Adapter 边界使用 canonical 的
+click/scroll/drag/wait 参数和显式坐标模式；Schema 和 Parser 都不会让未知工具或缺失字段进入 Runtime。Qwen 官方 text `computer_use` 协议仅作为
 历史兼容错误检测，不是当前生产请求格式。
 
 ## 施工顺序

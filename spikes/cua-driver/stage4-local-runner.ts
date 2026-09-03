@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
 
-type ModelName = "glm-5.3-flash" | "gui-plus-2026-02-26" | "qwen3.8-flash";
+type ModelName = "glm-5.3-flash" | "qwen3.8-flash";
 type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
 type QwenThinkingMode = "disabled" | "low" | "medium" | "xhigh";
 type DaemonProcess = ChildProcessByStdio<null, Readable, Readable>;
@@ -106,8 +106,8 @@ function normalizePipe(value: string): string {
 
 function parseOptions(args: readonly string[]): Options {
   const model = requiredOption(args, "--model") as ModelName;
-  if (model !== "glm-5.3-flash" && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
-    throw new Error("--model must be glm-5.3-flash, gui-plus-2026-02-26, or qwen3.8-flash");
+  if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") {
+    throw new Error("--model must be glm-5.3-flash or qwen3.8-flash");
   }
   const maxStepsValue = option(args, "--max-steps");
   const maxRequestsValue = option(args, "--max-model-requests");
@@ -115,7 +115,7 @@ function parseOptions(args: readonly string[]): Options {
   if (coordinateModeValue !== undefined && coordinateModeValue !== "normalized_1000" && coordinateModeValue !== "actual_pixels") {
     throw new Error("--qwen-coordinate-mode must be normalized_1000 or actual_pixels");
   }
-  if (coordinateModeValue !== undefined && model !== "gui-plus-2026-02-26" && model !== "qwen3.8-flash") {
+  if (coordinateModeValue !== undefined && model !== "qwen3.8-flash") {
     throw new Error("--qwen-coordinate-mode is only valid with a Qwen model");
   }
   if (model === "qwen3.8-flash" && coordinateModeValue === undefined) {
@@ -466,7 +466,7 @@ async function readRuntimeResult(path: string): Promise<RuntimeResult> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) {
-    process.stdout.write("Usage: run:stage4-task --binary <cua-driver.exe> --fixture <ProbeWindow.exe> --task <task-id> --model <glm-5.3-flash|gui-plus-2026-02-26|qwen3.8-flash> --socket <pipe> --output <dir> --env-file <.env> [--tasks <manifest>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--max-steps N] [--max-model-requests N]\n");
+    process.stdout.write("Usage: run:stage4-task --binary <cua-driver.exe> --fixture <ProbeWindow.exe> --task <task-id> --model <glm-5.3-flash|qwen3.8-flash> --socket <pipe> --output <dir> --env-file <.env> [--tasks <manifest>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--max-steps N] [--max-model-requests N]\n");
     return;
   }
   const options = parseOptions(args);
