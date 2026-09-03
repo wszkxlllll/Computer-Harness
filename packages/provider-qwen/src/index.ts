@@ -360,7 +360,12 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
       throw new QwenProviderError("Qwen returned a computer_use payload in text instead of native tool_calls", "QWEN_UNTAGGED_TOOL_CALL");
     }
     if (response.finishReason === "tool_calls") throw new QwenProviderError("Qwen tool_calls finish reason has no calls", "QWEN_INVALID_RESPONSE");
-    if (response.content.trim().length > 0) return { type: "finish", summary: response.content.trim(), ...(usage === undefined ? {} : { usage }) };
+    if (response.content.trim().length > 0) {
+      throw new QwenProviderError(
+        "Qwen returned plain assistant text without an explicit terminate tool call",
+        "QWEN_UNCONFIRMED_FINISH",
+      );
+    }
     throw new QwenProviderError("Qwen returned an empty assistant response", "QWEN_EMPTY_RESPONSE");
   }
 }

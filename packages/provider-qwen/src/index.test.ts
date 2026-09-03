@@ -189,6 +189,12 @@ describe("Qwen GUI-Plus provider adapter", () => {
 });
 
 describe("Qwen3.8-Flash provider adapter", () => {
+  it("rejects plain assistant text without an explicit terminate tool call", async () => {
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: "done" } }] });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_UNCONFIRMED_FINISH" });
+  });
+
   it("uses the canonical per-tool schema and maps normalized coordinates", async () => {
     const client = new Client({
       choices: [{ finish_reason: "tool_calls", message: { content: "", reasoning_content: "locate the target", tool_calls: [{ id: "q38-call-1", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 400, y: 500 }) } }] } }],
@@ -224,7 +230,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
         { role: "tool", content: [{ type: "tool_result", result: { callId: first.calls[0]!.id, status: "completed", output: { ok: true } } }] },
       ],
     };
-    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: "done" } }] });
+    const secondClient = new Client(response("terminate", { status: "success", text: "done" }));
     const secondAdapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: secondClient, thinking: "low" });
     await secondAdapter.generate(historyInput, { signal: new AbortController().signal });
     const messages = secondClient.body?.messages as Array<Record<string, unknown>>;
