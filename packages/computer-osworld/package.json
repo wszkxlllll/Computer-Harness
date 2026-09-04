@@ -1,0 +1,19 @@
+{
+  "name": "@computer-harness/computer-osworld",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@computer-harness/protocol": "workspace:*",
+    "@computer-harness/runtime": "workspace:*"
+  }
+}

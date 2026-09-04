@@ -14,6 +14,7 @@
     { "path": "../../packages/runtime" },
     { "path": "../../packages/context" },
     { "path": "../../packages/computer-cua" },
+    { "path": "../../packages/computer-osworld" },
     { "path": "../../packages/provider-glm" },
     { "path": "../../packages/provider-qwen" }
   ]

@@ -2,10 +2,11 @@ import { createInterface } from "node:readline";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { CuaDriverComputer } from "@computer-harness/computer-cua";
+import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId } from "@computer-harness/protocol";
-import { GlmAdapter, type GlmProfileName } from "@computer-harness/provider-glm";
-import { FetchQwenHttpClient, Qwen38FlashAdapter, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
+import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfileName } from "@computer-harness/provider-glm";
+import { FetchQwenHttpClient, Qwen38FlashAdapter, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import { DefaultRuntimePolicy, RunController, createDefaultComputerTools, type CleanupDiagnostic } from "@computer-harness/runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
@@ -16,7 +17,9 @@ type ModelName = GlmProfileName | "qwen3.8-flash";
 interface CliOptions {
   goal: string;
   model: ModelName;
-  socket: string;
+  computer: "cua" | "osworld";
+  cuaSocket?: string;
+  osworldBridge?: string;
   output: string;
   maxSteps: number;
   maxModelRequests: number;
@@ -25,6 +28,7 @@ interface CliOptions {
   screenshotDir?: string;
   qwenCoordinateMode?: QwenCoordinateMode;
   qwenThinking?: Qwen38ThinkingMode;
+  qwenOutputMode?: Qwen38OutputMode;
   interactive: boolean;
 }
 
@@ -35,12 +39,16 @@ function parseArgs(argv: readonly string[]): CliOptions {
   };
   const goal = value("--goal");
   const model = value("--model") as ModelName | undefined;
-  const socket = value("--cua-socket") ?? value("--socket");
+  const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
   if (goal === undefined || goal.trim().length === 0) throw new Error("--goal is required");
   if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") {
     throw new Error("--model must be glm-5.3-flash or qwen3.8-flash");
   }
-  if (socket === undefined || socket.trim().length === 0) throw new Error("--cua-socket is required");
+  if (computer !== "cua" && computer !== "osworld") throw new Error("--computer must be cua or osworld");
+  const cuaSocket = value("--cua-socket") ?? value("--socket");
+  const osworldBridge = value("--osworld-bridge");
+  if (computer === "cua" && (cuaSocket === undefined || cuaSocket.trim().length === 0)) throw new Error("--cua-socket is required when --computer cua");
+  if (computer === "osworld" && (osworldBridge === undefined || osworldBridge.trim().length === 0)) throw new Error("--osworld-bridge is required when --computer osworld");
   const output = resolve(value("--output") ?? "runs/live-cli");
   const maxSteps = positiveInteger(value("--max-steps"), 30, "--max-steps");
   const maxModelRequests = positiveInteger(value("--max-model-requests"), 30, "--max-model-requests");
@@ -64,11 +72,20 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (qwenThinkingValue !== undefined && model !== "qwen3.8-flash") {
     throw new Error("--qwen-thinking is only valid with qwen3.8-flash");
   }
+  const qwenOutputModeValue = value("--qwen-output-mode");
+  if (qwenOutputModeValue !== undefined && qwenOutputModeValue !== "native_tools" && qwenOutputModeValue !== "strict_json") {
+    throw new Error("--qwen-output-mode must be native_tools or strict_json");
+  }
+  if (qwenOutputModeValue !== undefined && model !== "qwen3.8-flash") {
+    throw new Error("--qwen-output-mode is only valid with qwen3.8-flash");
+  }
   const interactive = argv.includes("--interactive");
   return {
     goal,
     model,
-    socket,
+    computer,
+    ...(cuaSocket === undefined ? {} : { cuaSocket }),
+    ...(osworldBridge === undefined ? {} : { osworldBridge }),
     output,
     maxSteps,
     maxModelRequests,
@@ -77,6 +94,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     ...(screenshotDir === undefined ? {} : { screenshotDir: resolve(screenshotDir) }),
     ...(qwenCoordinateModeValue === undefined ? {} : { qwenCoordinateMode: qwenCoordinateModeValue as QwenCoordinateMode }),
     ...(model === "qwen3.8-flash" ? { qwenThinking: (qwenThinkingValue ?? "low") as Qwen38ThinkingMode } : {}),
+    ...(model === "qwen3.8-flash" ? { qwenOutputMode: (qwenOutputModeValue ?? "strict_json") as Qwen38OutputMode } : {}),
     interactive,
   };
 }
@@ -89,7 +107,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --cua-socket <socket> [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--interactive]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -100,11 +118,18 @@ async function main(): Promise<void> {
   const eventWriter = new JsonlRunEventWriter(resolve(options.output, "trajectory.jsonl"), runId);
   const tools = createDefaultComputerTools();
   const assetReader = assetStore;
-  const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking);
-  const computer = new CuaDriverComputer({
-    socketPath: options.socket,
-    screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
-  });
+  const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking, options.qwenOutputMode);
+  const computer = options.computer === "cua"
+    ? new CuaDriverComputer({
+        socketPath: options.cuaSocket!,
+        screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
+      })
+    : new OsworldComputer({
+        bridge: new OsworldBridgeClient({
+          baseUrl: options.osworldBridge!,
+          ...(process.env.OSWORLD_BRIDGE_TOKEN === undefined ? {} : { token: process.env.OSWORLD_BRIDGE_TOKEN }),
+        }),
+      });
   const cleanupDiagnostics: CleanupDiagnostic[] = [];
   const controller = new RunController({
     runId,
@@ -124,8 +149,10 @@ async function main(): Promise<void> {
   const summary = {
     runId,
     model: options.model,
+    computer: options.computer,
     coordinateMode: options.qwenCoordinateMode ?? null,
     thinkingMode: options.qwenThinking ?? null,
+    outputMode: options.qwenOutputMode ?? null,
     computerSession: snapshot.computerSession ?? null,
     runtimeOutcome: outcome,
     modelSummary: snapshot.summary ?? null,
@@ -134,9 +161,7 @@ async function main(): Promise<void> {
     cleanupDiagnostics,
     fixture,
     trajectory: resolve(options.output, "trajectory.jsonl"),
-    providerExchanges: options.model === "qwen3.8-flash"
-      ? resolve(options.output, "provider-exchanges.jsonl")
-      : null,
+    providerExchanges: resolve(options.output, "provider-exchanges.jsonl"),
     metrics: {
       steps: snapshot.stepCount,
       modelRequests: snapshot.modelRequestCount,
@@ -152,17 +177,50 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
-function makeProvider(model: ModelName, assetReader: AssetReader, output: string, qwenCoordinateMode?: QwenCoordinateMode, qwenThinking?: Qwen38ThinkingMode) {
+function makeProvider(model: ModelName, assetReader: AssetReader, output: string, qwenCoordinateMode?: QwenCoordinateMode, qwenThinking?: Qwen38ThinkingMode, qwenOutputMode?: Qwen38OutputMode) {
   if (model === "qwen3.8-flash") {
     const key = process.env.DASHSCOPE_API_KEY;
     if (key === undefined || key.trim().length === 0) throw new Error("DASHSCOPE_API_KEY is required for qwen3.8-flash");
     const endpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
     const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
-    return new Qwen38FlashAdapter({ apiKey: key, assetReader, httpClient: new RecordingQwenHttpClient(resolve(output, "provider-exchanges.jsonl"), qwenCoordinateMode ?? "normalized_1000", qwenThinking ?? "low"), thinking: qwenThinking ?? "low", coordinateMode: qwenCoordinateMode ?? "normalized_1000", ...(endpoint === undefined ? {} : { endpoint }), ...(workspaceId === undefined ? {} : { workspaceId }) });
+    return new Qwen38FlashAdapter({ apiKey: key, assetReader, httpClient: new RecordingQwenHttpClient(resolve(output, "provider-exchanges.jsonl"), qwenCoordinateMode ?? "normalized_1000", qwenThinking ?? "low", qwenOutputMode ?? "strict_json"), thinking: qwenThinking ?? "low", coordinateMode: qwenCoordinateMode ?? "normalized_1000", outputMode: qwenOutputMode ?? "strict_json", ...(endpoint === undefined ? {} : { endpoint }), ...(workspaceId === undefined ? {} : { workspaceId }) });
   }
   const key = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   if (key === undefined || key.trim().length === 0) throw new Error("ZHIPUAI_API_KEY is required for GLM profiles");
-  return new GlmAdapter({ apiKey: key, profile: model, assetReader, ...(process.env.GLM_BASE_URL === undefined ? {} : { endpoint: process.env.GLM_BASE_URL }) });
+  return new GlmAdapter({ apiKey: key, profile: model, assetReader, httpClient: new RecordingGlmHttpClient(resolve(output, "provider-exchanges.jsonl")), ...(process.env.GLM_BASE_URL === undefined ? {} : { endpoint: process.env.GLM_BASE_URL }) });
+}
+
+class RecordingGlmHttpClient implements GlmHttpClient {
+  private readonly inner = new FetchGlmHttpClient();
+  private requestNumber = 0;
+
+  public constructor(private readonly path: string) {}
+
+  public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
+    this.requestNumber += 1;
+    const startedAt = Date.now();
+    try {
+      const response = await this.inner.post(url, body, headers, signal);
+      await appendFile(this.path, `${JSON.stringify({
+        provider: "glm",
+        request: this.requestNumber,
+        latencyMs: Date.now() - startedAt,
+        requestedModel: typeof body.model === "string" ? body.model : null,
+        toolNames: providerToolNames(body.tools),
+        response: summarizeProviderResponse(response),
+      })}\n`, "utf8");
+      return response;
+    } catch (error) {
+      await appendFile(this.path, `${JSON.stringify({
+        provider: "glm",
+        request: this.requestNumber,
+        latencyMs: Date.now() - startedAt,
+        requestedModel: typeof body.model === "string" ? body.model : null,
+        transportError: error instanceof Error ? { name: error.name, message: error.message } : { message: String(error) },
+      })}\n`, "utf8");
+      throw error;
+    }
+  }
 }
 
 class RecordingQwenHttpClient implements QwenHttpClient {
@@ -173,6 +231,7 @@ class RecordingQwenHttpClient implements QwenHttpClient {
     private readonly path: string,
     private readonly coordinateMode: QwenCoordinateMode,
     private readonly thinkingMode?: Qwen38ThinkingMode,
+    private readonly outputMode: Qwen38OutputMode = "strict_json",
   ) {}
 
   public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
@@ -186,8 +245,9 @@ class RecordingQwenHttpClient implements QwenHttpClient {
         requestedModel: typeof body.model === "string" ? body.model : null,
         coordinateMode: this.coordinateMode,
         thinkingMode: this.thinkingMode ?? null,
-        toolNames: qwenToolNames(body.tools),
-        response: summarizeQwenResponse(response),
+        outputMode: this.outputMode,
+        toolNames: providerToolNames(body.tools),
+        response: summarizeProviderResponse(response),
       })}\n`, "utf8");
       return response;
     } catch (error) {
@@ -202,12 +262,12 @@ class RecordingQwenHttpClient implements QwenHttpClient {
   }
 }
 
-function qwenToolNames(value: unknown): string[] {
+function providerToolNames(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => isPlainRecord(item) && isPlainRecord(item.function) && typeof item.function.name === "string" ? [item.function.name] : []);
 }
 
-function summarizeQwenResponse(value: unknown): Record<string, unknown> {
+function summarizeProviderResponse(value: unknown): Record<string, unknown> {
   if (!isPlainRecord(value)) return { shape: typeof value };
   const choice = Array.isArray(value.choices) && isPlainRecord(value.choices[0]) ? value.choices[0] : undefined;
   const message = choice !== undefined && isPlainRecord(choice.message) ? choice.message : undefined;
@@ -229,8 +289,40 @@ function summarizeQwenResponse(value: unknown): Record<string, unknown> {
     contentLength: message !== undefined && typeof message.content === "string" ? message.content.length : 0,
     reasoningContentLength: message !== undefined && typeof message.reasoning_content === "string" ? message.reasoning_content.length : 0,
     toolCalls: calls,
+    structuredContent: summarizeStructuredContent(message?.content),
     usage: isPlainRecord(value.usage) ? value.usage : null,
   };
+}
+
+function summarizeStructuredContent(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return { json: false };
+  }
+  if (!isPlainRecord(parsed)) return { json: true, rootType: Array.isArray(parsed) ? "array" : typeof parsed };
+  return {
+    json: true,
+    kind: typeof parsed.kind === "string" ? parsed.kind : null,
+    id: typeof parsed.id === "string" ? parsed.id : null,
+    name: typeof parsed.name === "string" ? parsed.name : null,
+    arguments: summarizeProviderArguments(parsed.arguments),
+    textLength: typeof parsed.text === "string" ? parsed.text.length : 0,
+  };
+}
+
+function summarizeProviderArguments(value: unknown): Record<string, unknown> | null {
+  if (!isPlainRecord(value)) return null;
+  const result: Record<string, unknown> = {};
+  for (const key of ["x", "y", "fromX", "fromY", "toX", "toY", "durationMs", "ticks", "direction", "status"]) {
+    const item = value[key];
+    if (typeof item === "number" || typeof item === "string") result[key] = item;
+  }
+  if (typeof value.text === "string") result.textLength = value.text.length;
+  if (Array.isArray(value.keys)) result.keyCount = value.keys.length;
+  return result;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

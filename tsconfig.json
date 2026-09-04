@@ -8,6 +8,7 @@
     { "path": "packages/provider-glm" },
     { "path": "packages/provider-qwen" },
     { "path": "apps/cli" },
-    { "path": "packages/computer-cua" }
+    { "path": "packages/computer-cua" },
+    { "path": "packages/computer-osworld" }
   ]
 }

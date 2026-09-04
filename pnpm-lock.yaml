@@ -23,6 +23,9 @@ importers:
       '@computer-harness/computer-cua':
         specifier: workspace:*
         version: link:../../packages/computer-cua
+      '@computer-harness/computer-osworld':
+        specifier: workspace:*
+        version: link:../../packages/computer-osworld
       '@computer-harness/context':
         specifier: workspace:*
         version: link:../../packages/context
@@ -53,6 +56,15 @@ importers:
       '@trycua/cua-driver':
         specifier: 0.22.2
         version: 0.22.2
+
+  packages/computer-osworld:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
   packages/context:
     dependencies:
