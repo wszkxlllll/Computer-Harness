@@ -2,7 +2,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { GlmAdapter, type GlmAdapterOptions, type GlmHttpClient } from "@computer-harness/provider-glm";
-import { Qwen38FlashAdapter, type Qwen38AdapterOptions, type Qwen38ThinkingMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
+import { Qwen38FlashAdapter, type Qwen38AdapterOptions, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import type {
   AssetId,
   AssetRef,
@@ -28,6 +28,7 @@ interface CliOptions {
   timeoutMs: number;
   model: ProviderName | "all";
   qwenThinking: Qwen38ThinkingMode;
+  qwenOutputMode: Qwen38OutputMode;
 }
 
 interface RequestRecord {
@@ -42,6 +43,8 @@ interface RequestRecord {
   reasoningEffort?: unknown;
   preserveThinking?: unknown;
   enableThinking?: unknown;
+  responseFormatType?: unknown;
+  responseFormatName?: unknown;
   messages: Array<{
     role: string;
     contentShape: string;
@@ -51,7 +54,7 @@ interface RequestRecord {
     hasReasoningContent: boolean;
     reasoningContentLength: number;
   }>;
-  responseShape?: { choiceCount: number; contentLength?: number; tagNames: string[]; openToolCallTags: number; closeToolCallTags: number; hasJsonFence: boolean; toolCallJson?: { length: number; firstChar: string; lastChar: string; parses: boolean; rootKeys: string[]; nameType?: string; typeValue?: string; argumentsType?: string; argumentKeys?: string[]; actionType?: string } };
+  responseShape?: { choiceCount: number; contentLength?: number; tagNames: string[]; openToolCallTags: number; closeToolCallTags: number; hasJsonFence: boolean; toolCallJson?: { length: number; firstChar: string; lastChar: string; parses: boolean; rootKeys: string[]; nameType?: string; typeValue?: string; argumentsType?: string; argumentKeys?: string[]; actionType?: string }; structuredJson?: { parses: boolean; rootType: string; kind?: string; id?: string; name?: string; argumentKeys?: string[] } };
   finishReason?: string;
   usage?: unknown;
   status: number;
@@ -110,6 +113,8 @@ class RecordingHttpClient implements GlmHttpClient, QwenHttpClient {
       ...(body.reasoning_effort === undefined ? {} : { reasoningEffort: body.reasoning_effort }),
       ...(body.preserve_thinking === undefined ? {} : { preserveThinking: body.preserve_thinking }),
       ...(body.enable_thinking === undefined ? {} : { enableThinking: body.enable_thinking }),
+      ...(isRecord(body.response_format) && typeof body.response_format.type === "string" ? { responseFormatType: body.response_format.type } : {}),
+      ...(isRecord(body.response_format) && isRecord(body.response_format.json_schema) && typeof body.response_format.json_schema.name === "string" ? { responseFormatName: body.response_format.json_schema.name } : {}),
       messages: summarizeMessages(body.messages),
       status: 0,
     };
@@ -175,6 +180,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (!Number.isInteger(timeoutValue) || timeoutValue < 1000) throw new Error("--timeout-ms must be an integer >= 1000");
   const qwenThinking = values.get("qwen-thinking") ?? "low";
   if (qwenThinking !== "disabled" && qwenThinking !== "low" && qwenThinking !== "medium" && qwenThinking !== "xhigh") throw new Error("--qwen-thinking must be disabled, low, medium, or xhigh");
+  const qwenOutputMode = values.get("qwen-output-mode") ?? "strict_json";
+  if (qwenOutputMode !== "native_tools" && qwenOutputMode !== "strict_json") throw new Error("--qwen-output-mode must be native_tools or strict_json");
   return {
     envFile: resolve(values.get("env-file") ?? ".env"),
     image: resolve(values.get("image") ?? "runs/api-conformance/non-sensitive-ui.png"),
@@ -182,6 +189,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     timeoutMs: timeoutValue,
     model: modelValue,
     qwenThinking,
+    qwenOutputMode,
   };
 }
 
@@ -359,6 +367,22 @@ function summarizeResponseShape(value: unknown): NonNullable<RequestRecord["resp
       ...(isRecord(parsed) && isRecord(parsed.arguments) ? { argumentKeys: Object.keys(parsed.arguments).sort(), ...(typeof parsed.arguments.action === "string" ? { actionType: parsed.arguments.action } : {}) } : {}),
     };
   }
+  let structuredJson: NonNullable<NonNullable<RequestRecord["responseShape"]>["structuredJson"]> | undefined;
+  if (content !== undefined) {
+    try {
+      const parsed = JSON.parse(content) as unknown;
+      structuredJson = {
+        parses: true,
+        rootType: Array.isArray(parsed) ? "array" : typeof parsed,
+        ...(isRecord(parsed) && typeof parsed.kind === "string" ? { kind: parsed.kind } : {}),
+        ...(isRecord(parsed) && typeof parsed.id === "string" ? { id: parsed.id } : {}),
+        ...(isRecord(parsed) && typeof parsed.name === "string" ? { name: parsed.name } : {}),
+        ...(isRecord(parsed) && isRecord(parsed.arguments) ? { argumentKeys: Object.keys(parsed.arguments).sort() } : {}),
+      };
+    } catch {
+      structuredJson = { parses: false, rootType: "invalid" };
+    }
+  }
   return {
     choiceCount: value.choices.length,
     ...(content === undefined ? {} : { contentLength: content.length }),
@@ -367,6 +391,7 @@ function summarizeResponseShape(value: unknown): NonNullable<RequestRecord["resp
     closeToolCallTags: content === undefined ? 0 : (content.match(/<\/\s*tool_call\s*>/giu) ?? []).length,
     hasJsonFence: content === undefined ? false : /```\s*json/iu.test(content),
     ...(toolCallJson === undefined ? {} : { toolCallJson }),
+    ...(structuredJson === undefined ? {} : { structuredJson }),
   };
 }
 
@@ -400,6 +425,7 @@ async function runModel(
   reader: AssetReader,
   timeoutMs: number,
   qwenThinking: Qwen38ThinkingMode,
+  qwenOutputMode: Qwen38OutputMode,
   secondInput: (first: ModelTurn, firstCall: ToolCall) => Promise<ModelInput>,
 ): Promise<ModelRunResult> {
   const requests: RequestRecord[] = [];
@@ -411,7 +437,7 @@ async function runModel(
   if (apiKey === undefined) return { provider, requests, turns, status: "skipped", error: { code: "MISSING_API_KEY", message: "provider key is not configured in the selected env file" } };
   let adapter: Qwen38FlashAdapter | GlmAdapter;
   if (provider === "qwen3.8-flash") {
-    const qwen38Options: Qwen38AdapterOptions = { apiKey, assetReader: reader, httpClient: client, thinking: qwenThinking, coordinateMode: "normalized_1000" };
+    const qwen38Options: Qwen38AdapterOptions = { apiKey, assetReader: reader, httpClient: client, thinking: qwenThinking, coordinateMode: "normalized_1000", outputMode: qwenOutputMode };
     const workspaceId = envValue(env, "DASHSCOPE_WORKSPACE_ID");
     const endpoint = envValue(env, "DASHSCOPE_ENDPOINT");
     if (workspaceId !== undefined) qwen38Options.workspaceId = workspaceId;
@@ -461,7 +487,7 @@ async function main(): Promise<void> {
   const models: ProviderName[] = options.model === "all" ? ["glm-5.3-flash", "qwen3.8-flash"] : [options.model];
   const results: ModelRunResult[] = [];
   for (const provider of models) {
-    const result = await runModel(provider, firstInput, env, reader, options.timeoutMs, options.qwenThinking, async (first, firstCall) => {
+    const result = await runModel(provider, firstInput, env, reader, options.timeoutMs, options.qwenThinking, options.qwenOutputMode, async (first, firstCall) => {
       const events = [
         ...baseEvents(runId, sessionId, firstObservation),
         makeEvent(runId, 5, "model.response.received", { turn: first }),
@@ -477,7 +503,7 @@ async function main(): Promise<void> {
     kind: "static_api_conformance",
     protocol: "provider-adapter-v1",
     fixture: { kind: "synthetic_non_sensitive_image", fileName: basename(options.image), byteLength: imageBytes.byteLength, viewport },
-    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs, qwenThinking: options.qwenThinking },
+    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs, qwenThinking: options.qwenThinking, qwenOutputMode: options.qwenOutputMode },
     results,
   };
   await writeFile(resolve(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");

@@ -51,7 +51,7 @@ export class GlmProviderError extends Error {
   public constructor(
     message: string,
     public readonly code = "GLM_PROVIDER_ERROR",
-    public readonly retryable = false,
+    public readonly retryable = isRetryableGlmErrorCode(code),
   ) {
     super(message);
     this.name = "GlmProviderError";
@@ -187,7 +187,7 @@ export class GlmAdapter implements ProviderAdapter {
   }
 }
 
-class FetchGlmHttpClient implements GlmHttpClient {
+export class FetchGlmHttpClient implements GlmHttpClient {
   public async post(
     url: string,
     body: Record<string, unknown>,
@@ -387,6 +387,15 @@ function readErrorCode(value: unknown): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRetryableGlmErrorCode(code: string): boolean {
+  return code === "GLM_INVALID_RESPONSE"
+    || code === "GLM_INVALID_TOOL_CALL"
+    || code === "GLM_DUPLICATE_TOOL_CALL"
+    || code === "GLM_UNAVAILABLE_TOOL"
+    || code === "GLM_EMPTY_RESPONSE"
+    || code === "GLM_INCOMPLETE_RESPONSE";
 }
 
 function isJsonValue(value: unknown): value is JsonValue {

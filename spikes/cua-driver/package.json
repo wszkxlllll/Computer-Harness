@@ -11,7 +11,6 @@
     "probe:adapter": "tsx adapter-contract-probe.ts",
     "probe:runtime": "tsx runtime-contract-probe.ts",
     "run:stage4-task": "tsx stage4-local-runner.ts",
-    "run:qwen38-coordinate-calibration": "tsx ../../scripts/experiments/qwen38-coordinate-calibration.ts",
     "test:stage4-runner": "tsx ../../scripts/stage4-local/runner-contract-check.ts",
     "test:stage4-runner-lifecycle": "node ../../scripts/stage4-local/runner-lifecycle-check.mjs",
     "probe:api": "tsx --tsconfig tsconfig.json ../../scripts/api-conformance.ts"

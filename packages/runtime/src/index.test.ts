@@ -1317,6 +1317,68 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("retries retryable Provider response errors with an explicit reason before any action", async () => {
+    let requests = 0;
+    const inputs: ModelInput[] = [];
+    const provider: ProviderAdapter = {
+      id: "retrying-provider",
+      generate: async (input, { signal }) => {
+        signal.throwIfAborted();
+        requests += 1;
+        inputs.push(input);
+        if (requests === 1) {
+          throw Object.assign(new Error("click.x must be a finite number"), {
+            code: "QWEN_INVALID_TOOL_CALL",
+            retryable: true,
+          });
+        }
+        return { type: "finish", summary: "done" };
+      },
+    };
+    const created = await makeController(provider);
+
+    await expect(created.controller.start("retry the malformed call")).resolves.toBe("succeeded");
+    expect(requests).toBe(2);
+    expect(inputs[1]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: expect.stringContaining("[QWEN_INVALID_TOOL_CALL] click.x must be a finite number") }],
+    });
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(1);
+    expect(events.find((event) => event.type === "model.request.failed")).toMatchObject({
+      retryable: true,
+      message: expect.stringContaining("retrying model request 1/3"),
+    });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("stops after three Provider retries without executing a GUI action", async () => {
+    let requests = 0;
+    const computer = new FakeComputer();
+    const provider: ProviderAdapter = {
+      id: "always-invalid-provider",
+      generate: async (_input, { signal }) => {
+        signal.throwIfAborted();
+        requests += 1;
+        throw Object.assign(new Error("tool arguments do not match the schema"), {
+          code: "GLM_INVALID_TOOL_CALL",
+          retryable: true,
+        });
+      },
+    };
+    const created = await makeController(provider, computer);
+
+    await expect(created.controller.start("do not execute invalid calls")).resolves.toBe("failed");
+    expect(requests).toBe(4);
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(4);
+    expect(events.at(-2)).toMatchObject({ message: expect.stringContaining("retry limit reached after 3 retries") });
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("separates open/observe/close failures from GUI action execution", async () => {
     class OpenFailComputer extends FakeComputer {
       public override async open(_options: ComputerOpenOptions, _signal: AbortSignal): Promise<ComputerSession> {

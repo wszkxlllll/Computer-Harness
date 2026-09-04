@@ -45,10 +45,62 @@ function response(name: string, argumentsValue: Record<string, unknown>, usage?:
 }
 
 describe("Qwen3.8-Flash provider adapter", () => {
+  it("does not append a provider-specific prompt patch to the caller's system message", async () => {
+    const client = new Client(response("terminate", { status: "success", text: "done" }));
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
+    await adapter.generate(input(), { signal: new AbortController().signal });
+    const messages = client.body?.messages as Array<Record<string, unknown>>;
+    expect(messages[0]).toEqual({ role: "system", content: "system" });
+  });
+
+  it("uses the official strict JSON response format by default", async () => {
+    const client = new Client({
+      choices: [{
+          finish_reason: "stop",
+          message: {
+          content: JSON.stringify({ kind: "tool_call", id: "q38-json-1", name: "click", arguments: { x: 400, y: 500 } }),
+        },
+      }],
+    });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({
+      type: "tool_calls",
+      calls: [{ id: "q38-json-1", name: "click", arguments: { x: 319.6, y: 299.5 } }],
+    });
+    expect(client.body?.tools).toBeUndefined();
+    expect(client.body?.tool_choice).toBeUndefined();
+    expect(client.body?.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: { name: "qwen_model_turn", strict: true, schema: { additionalProperties: false, required: ["kind", "id", "name", "arguments"], properties: { arguments: { additionalProperties: false, properties: { x: { type: "number", maximum: 1000 }, y: { type: "number", maximum: 1000 }, status: { enum: ["success", "failure"] } } } } } },
+    });
+  });
+
+  it("projects strict-mode tool history as JSON content instead of native tool messages", async () => {
+    const firstClient = new Client({
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-json-history", name: "click", arguments: { x: 10, y: 20 } }) } }],
+    });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "disabled", outputMode: "strict_json" });
+    const first = await adapter.generate(input(), { signal: new AbortController().signal });
+    if (first.type !== "tool_calls") throw new Error("expected tool call");
+    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "finish", id: "q38-json-finish", name: "terminate", arguments: { status: "success", text: "done" } }) } }] });
+    const secondInput: ModelInput = {
+      ...input(),
+      messages: [
+        ...input().messages,
+        { role: "assistant", content: [{ type: "tool_call", call: first.calls[0]!, viewport }] },
+        { role: "tool", content: [{ type: "tool_result", result: { callId: first.calls[0]!.id, status: "completed", output: { ok: true } } }] },
+      ],
+    };
+    await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: secondClient, thinking: "disabled", outputMode: "strict_json" }).generate(secondInput, { signal: new AbortController().signal });
+    const messages = secondClient.body?.messages as Array<Record<string, unknown>>;
+    expect(messages.some((message) => Array.isArray(message.tool_calls))).toBe(false);
+    expect(messages.some((message) => message.role === "user" && typeof message.content === "string" && message.content.includes("Tool result"))).toBe(true);
+  });
+
   it("rejects plain assistant text without an explicit terminate tool call", async () => {
     const client = new Client({ choices: [{ finish_reason: "stop", message: { content: "done" } }] });
-    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
-    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_UNCONFIRMED_FINISH" });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_UNCONFIRMED_FINISH", retryable: true });
   });
 
   it("uses the canonical per-tool schema and maps normalized coordinates", async () => {
@@ -56,7 +108,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
       choices: [{ finish_reason: "tool_calls", message: { content: "", reasoning_content: "locate the target", tool_calls: [{ id: "q38-call-1", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 400, y: 500 }) } }] } }],
       usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
     });
-    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "low" });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "low", outputMode: "native_tools" });
     await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({
       type: "tool_calls",
       calls: [{ id: "q38-call-1", name: "click", arguments: { x: 319.6, y: 299.5 } }],
@@ -74,7 +126,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
 
   it("round-trips reasoning continuation and preserves native ToolCall IDs", async () => {
     const firstClient = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", reasoning_content: "step one", tool_calls: [{ id: "q38-call-1", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 10, y: 20 }) } }] } }] });
-    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "low" });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "low", outputMode: "native_tools" });
     const first = await adapter.generate(input(), { signal: new AbortController().signal });
     expect(first.type).toBe("tool_calls");
     if (first.type !== "tool_calls") throw new Error("expected tool calls");
@@ -87,7 +139,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
       ],
     };
     const secondClient = new Client(response("terminate", { status: "success", text: "done" }));
-    const secondAdapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: secondClient, thinking: "low" });
+    const secondAdapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: secondClient, thinking: "low", outputMode: "native_tools" });
     await secondAdapter.generate(historyInput, { signal: new AbortController().signal });
     const messages = secondClient.body?.messages as Array<Record<string, unknown>>;
     const assistant = messages.find((message) => message.role === "assistant");
@@ -98,23 +150,23 @@ describe("Qwen3.8-Flash provider adapter", () => {
 
   it("keeps actual-pixel coordinates in the physical viewport and rejects out-of-range values", async () => {
     const client = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: "q38-pixel", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 799, y: 599 }) } }] } }] });
-    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", coordinateMode: "actual_pixels" });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels" });
     await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ name: "click", arguments: { x: 799, y: 599 } }] });
     const tools = client.body?.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
     expect(tools[0]).toMatchObject({ function: { name: "click", parameters: { properties: { x: { maximum: 799 }, y: { maximum: 599 } } } } });
     const bad = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: "q38-bad", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 800, y: 599 }) } }] } }] });
-    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: bad, thinking: "disabled", coordinateMode: "actual_pixels" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_COORDINATE_OUT_OF_RANGE" });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: bad, thinking: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_COORDINATE_OUT_OF_RANGE" });
   });
 
   it("maps normalized boundary coordinates to the last physical pixel", async () => {
     const client = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: "q38-edge", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 1000, y: 1000 }) } }] } }] });
-    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", coordinateMode: "normalized_1000" }).generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ arguments: { x: 799, y: 599 } }] });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools", coordinateMode: "normalized_1000" }).generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ arguments: { x: 799, y: 599 } }] });
     const onePixelViewport: ModelInput = {
       ...input(),
       messages: [{ role: "user", content: [{ type: "image", asset, viewport: { width: 1, height: 1, coordinateSpace: "physical" } }] }],
     };
     const onePixelClient = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: "q38-one", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 1000, y: 1000 }) } }] } }] });
-    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: onePixelClient, thinking: "disabled", coordinateMode: "normalized_1000" }).generate(onePixelViewport, { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ arguments: { x: 0, y: 0 } }] });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: onePixelClient, thinking: "disabled", outputMode: "native_tools", coordinateMode: "normalized_1000" }).generate(onePixelViewport, { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ arguments: { x: 0, y: 0 } }] });
   });
 
   it("maps actual coordinates from a resized presented image back to the Observation viewport", async () => {
@@ -124,6 +176,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
       assetReader: reader,
       httpClient: client,
       thinking: "disabled",
+      outputMode: "native_tools",
       coordinateMode: "actual_pixels",
       imagePreprocessor: async () => ({
         bytes: new Uint8Array([1]),
@@ -141,6 +194,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
       apiKey: "key",
       assetReader: reader,
       httpClient: new Client({}),
+      outputMode: "native_tools",
       imagePreprocessor: async () => ({
         bytes: new Uint8Array([1]),
         mediaType: "image/jpeg",
@@ -153,7 +207,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
   it("passes every supported enabled thinking level to Qwen3.8", async () => {
     for (const thinking of ["low", "medium", "xhigh"] as const) {
       const client = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: `q38-${thinking}`, type: "function", function: { name: "click", arguments: JSON.stringify({ x: 1, y: 2 }) } }] } }] });
-      await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking }).generate(input(), { signal: new AbortController().signal });
+      await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking, outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal });
       expect(client.body?.reasoning_effort).toBe(thinking);
       expect(client.body?.preserve_thinking).toBe(true);
       expect(client.body?.enable_thinking).toBeUndefined();
@@ -163,11 +217,11 @@ describe("Qwen3.8-Flash provider adapter", () => {
   it("accepts multiple independent native calls but rejects mixed control calls", async () => {
     const calls = ["click", "type"].map((name, index) => ({ id: `q38-call-${index + 1}`, type: "function", function: { name, arguments: JSON.stringify(name === "click" ? { x: 1, y: 2 } : { text: "hello" }) } }));
     const client = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: calls } }] });
-    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
     await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ id: "q38-call-1" }, { id: "q38-call-2" }] });
     expect(client.body?.enable_thinking).toBe(false);
     expect(client.body?.preserve_thinking).toBe(false);
     const mixed = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [...calls, { id: "q38-control", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "success" }) } }] } }] });
-    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mixed, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_TOOL_CALL" });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mixed, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_TOOL_CALL" });
   });
 });

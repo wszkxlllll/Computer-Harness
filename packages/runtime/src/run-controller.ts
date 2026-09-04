@@ -31,6 +31,8 @@ import type {
   GuiActionDraft,
   IdFactory,
   NonComputerToolDefinition,
+  ModelInput,
+  ModelMessage,
   ProviderAdapter,
   RuntimePolicy,
   ToolDefinition,
@@ -40,6 +42,8 @@ import type {
 import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
 import { ToolRegistry } from "./tool-registry.js";
+
+const MAX_PROVIDER_RETRIES = 3;
 export interface RunControllerDependencies {
   runId: RunId;
   provider: ProviderAdapter;
@@ -364,7 +368,7 @@ export class RunController {
           break;
         }
 
-        let turn: ModelTurn;
+        let turn: ModelTurn | undefined;
         const pendingModelTurn = this.pendingModelTurn;
         if (pendingModelTurn !== undefined) {
           this.pendingModelTurn = undefined;
@@ -385,18 +389,47 @@ export class RunController {
             this.abortController.signal,
           );
           this.throwIfAborted();
-          await this.commitEvent({ type: "model.request.started", providerId: this.provider.id });
-
-          try {
-            turn = await this.provider.generate(context, { signal: this.abortController.signal });
-          } catch (error) {
-            await this.commitEvent({
-              type: "model.request.failed",
-              category: this.isAborted() ? "cancelled" : "provider",
-              message: errorMessage(error),
-              ...providerErrorDetails(error),
-            });
-            outcome = this.isAborted() ? "cancelled" : "failed";
+          let requestContext = context;
+          let retryCount = 0;
+          let providerFailed = false;
+          turn = undefined;
+          while (turn === undefined) {
+            if (retryCount > 0) {
+              const retryBudget = this.policy.checkBudget(this.snapshot);
+              if (!retryBudget.allowed) {
+                await this.commitEvent({
+                  type: "runtime.error",
+                  category: "budget",
+                  message: retryBudget.reason ?? "model retry budget exhausted",
+                });
+                outcome = "budget_exhausted";
+                providerFailed = true;
+                break;
+              }
+            }
+            this.throwIfAborted();
+            await this.commitEvent({ type: "model.request.started", providerId: this.provider.id });
+            try {
+              turn = await this.provider.generate(requestContext, { signal: this.abortController.signal });
+            } catch (error) {
+              const details = providerErrorDetails(error);
+              const retry = !this.isAborted() && details.retryable === true && retryCount < MAX_PROVIDER_RETRIES;
+              await this.commitEvent({
+                type: "model.request.failed",
+                category: this.isAborted() ? "cancelled" : "provider",
+                message: providerFailureMessage(error, retry, retryCount + 1),
+                ...details,
+              });
+              if (!retry) {
+                outcome = this.isAborted() ? "cancelled" : "failed";
+                providerFailed = true;
+                break;
+              }
+              retryCount += 1;
+              requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
+            }
+          }
+          if (providerFailed || turn === undefined) {
             break;
           }
 
@@ -1029,5 +1062,32 @@ function providerErrorDetails(error: unknown): { code?: string; retryable?: bool
     ...(typeof candidate.code === "string" && candidate.code.length > 0 ? { code: candidate.code } : {}),
     ...(typeof candidate.retryable === "boolean" ? { retryable: candidate.retryable } : {}),
   };
+}
+
+function providerFailureMessage(error: unknown, retry: boolean, attempt: number): string {
+  const reason = errorMessage(error);
+  if (retry) return `${reason}; no tool was executed; retrying model request ${attempt}/${MAX_PROVIDER_RETRIES}`;
+  const details = providerErrorDetails(error);
+  return details.retryable === true && attempt > MAX_PROVIDER_RETRIES
+    ? `${reason}; no tool was executed; retry limit reached after ${MAX_PROVIDER_RETRIES} retries`
+    : reason;
+}
+
+function addProviderRetryFeedback(
+  context: ModelInput,
+  error: unknown,
+  retryCount: number,
+  maxRetries: number,
+): ModelInput {
+  const details = providerErrorDetails(error);
+  const code = details.code === undefined ? "" : `[${details.code}] `;
+  const feedback: ModelMessage = {
+    role: "user",
+    content: [{
+      type: "text",
+      text: `The previous model response was rejected before any tool was executed. Reason: ${code}${errorMessage(error)}. This is retry ${retryCount}/${maxRetries}; return one valid response that matches the supplied provider contract. Do not repeat the rejected representation or assume that any tool was executed.`,
+    }],
+  };
+  return { ...context, messages: [...context.messages, feedback] };
 }
 

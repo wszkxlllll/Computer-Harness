@@ -65,7 +65,7 @@ describe("GLM provider adapter", () => {
       { id: "same", function: { name: "click", arguments: "{\"x\":2,\"y\":2}" } },
     ] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: duplicate });
-    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toThrow(/duplicate/);
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_DUPLICATE_TOOL_CALL", retryable: true });
     const outOfRange = new Client({ choices: [{ message: { tool_calls: [{ id: "bad", function: { name: "click", arguments: "{\"x\":1001,\"y\":1}" } }] } }] });
     const second = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: outOfRange });
     await expect(second.generate(input(), { signal: new AbortController().signal })).rejects.toThrow(/outside/);
