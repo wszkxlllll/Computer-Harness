@@ -6,7 +6,7 @@ ToolCall、GUI Action、运行状态和轨迹记录。
 
 当前仓库已完成 Stage 3 的真实 CUA 合同收口，并按 Stage 4 入口接入
 Context、canonical Computer Tools、GLM/Qwen Provider 和 CLI。当前状态是“Runtime、CUA
-适配器和 Provider fake 契约可测试，真实模型/桌面任务仍需在隔离环境中运行”：
+适配器和 Provider fake 契约可测试，Stage 5 OSWorld Bridge/CLI 连接骨架已就绪，真实模型/桌面任务仍需在隔离环境中运行”：
 
 - 已建立 pnpm workspace；
 - 已固定 TypeScript、Vitest 工程基线和 CUA Driver 0.22.2；外部输入需要 Schema 校验时再按包引入 Zod；
@@ -16,8 +16,10 @@ Context、canonical Computer Tools、GLM/Qwen Provider 和 CLI。当前状态是
 - 已实现 `packages/runtime` 的 FakeProvider/FakeComputer RunController、命令 Inbox、
   失败注入和统一 Action/Capability/Viewport 校验；
 - 已实现 `packages/context` 的时序投影、`packages/provider-glm` 的 profile 抽象（当前生产 profile 为 `glm-5.3-flash`）、
-  `packages/provider-qwen` 的 Qwen3.8-Flash 原生工具调用适配，以及 `apps/cli` 组合入口；
-- fake 契约不等于真实模型成功率，真实 API 和隔离 CUA fixture 仍需按 Stage 4 门槛运行。
+  `packages/provider-qwen` 的 Qwen3.8-Flash strict-json/native-tools 双路径适配，以及 `apps/cli` 组合入口；
+- 已实现 `packages/computer-osworld`、loopback Python Bridge 和 `--computer osworld` CLI 组装；真实
+  `DesktopEnv`/VM 仅由 Stage 5 脚本在专用环境启动；
+- fake 契约不等于真实模型成功率；Stage 5 已有单任务真实 API/OSWorld 证据，批量比较仍需按当前入口运行。
 
 ## 环境
 
@@ -47,6 +49,7 @@ pnpm install --frozen-lockfile
 
 ```text
 pnpm --filter @computer-harness/computer-cua list @trycua/cua-driver --depth 0
+pnpm --filter @computer-harness/cli build
 pnpm run typecheck
 pnpm test
 ```
@@ -63,8 +66,9 @@ GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
 
 # Qwen3.8-Flash
 DASHSCOPE_API_KEY=replace-with-your-key
-# 可选：工作空间与端点，二选一即可；未设置时使用公共 compatible-mode 端点
+# 可选：工作空间或自定义端点，未设置时使用公共 compatible-mode 端点
 DASHSCOPE_WORKSPACE_ID=replace-with-your-workspace-id
+# 与 WORKSPACE_ID 二选一；同时设置时以 BASE_URL 为准
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
@@ -84,6 +88,12 @@ DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 # 在另一个终端运行 Harness
 pnpm --filter @computer-harness/cli build
 pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model glm-5.3-flash --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
+```
+
+Qwen 运行必须显式选择坐标单位；严格 JSON 实验建议同时关闭 thinking：
+
+```text
+pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model qwen3.8-flash --cua-socket "<private-socket>" --qwen-coordinate-mode normalized_1000 --qwen-thinking disabled --qwen-output-mode strict_json --output "runs/live-qwen" --env-file ".env"
 ```
 
 Windows named pipe、macOS/Linux socket 路径必须与 daemon 完全一致。daemon 的安装、路径和
@@ -108,7 +118,19 @@ pnpm --filter @computer-harness/cli start -- --goal "click the input and type Ha
 `DASHSCOPE_WORKSPACE_ID` 生成已验证的 Workspace endpoint，否则使用公共 compatible-mode endpoint。
 可用 `GLM_BASE_URL` 或 `DASHSCOPE_BASE_URL` 覆盖端点。可选
 `--max-steps`、`--max-model-requests`、`--fixture-result` 和
-`--screenshot-dir` 用于隔离实验。
+`--screenshot-dir` 用于隔离实验。Qwen 还支持
+`--qwen-output-mode native_tools|strict_json`；默认是 `strict_json`，
+`native_tools` 仅用于协议对照或兼容性回归。Qwen 还必须设置
+`--qwen-coordinate-mode normalized_1000|actual_pixels`。
+
+Stage 5 OSWorld 路径由外层 runner 先调用 Bridge 的 `environment.reset`，再把返回的 instruction
+交给同一个 CLI。无模型的 Gate 2 连接测试命令和 Python 环境要求见
+[`integrations/osworld/README.md`](./integrations/osworld/README.md)；CLI 只需指定：
+
+```text
+pnpm --filter @computer-harness/cli build
+pnpm --filter @computer-harness/cli start -- --goal "<reset 返回的 instruction>" --model glm-5.3-flash --computer osworld --osworld-bridge "http://127.0.0.1:<port>" --output "runs/stage5-osworld" --env-file ".env"
+```
 
 ## 阶段 0：CUA 安全探针
 
@@ -141,15 +163,17 @@ packages/context        默认时序 Context 编译器
 packages/provider-glm   GLM-5.3 profile
 packages/provider-qwen  Qwen3.8-Flash Adapter
 packages/computer-cua   trycua/cua-driver 适配器
+packages/computer-osworld OSWorld DesktopEnv Bridge 适配器
 apps/cli                组合依赖、运行展示和轨迹输出
 spikes/cua-driver       可删除的底层 CUA 探针
 ```
 
 每个包必须有当前生产者、消费者和测试，不为未来能力提前加入空接口。V1 暂不包含
-Memory、Verifier、RL、后台 Job、Subagent、Dashboard 或第三个 Provider。两个 Adapter 都使用原生
-Function Calling，并按本轮 Runtime 工具逐个生成 Schema。Qwen3.8 在 Adapter 边界使用 canonical 的
-click/scroll/drag/wait 参数和显式坐标模式；Schema 和 Parser 都不会让未知工具或缺失字段进入 Runtime。Qwen 官方 text `computer_use` 协议仅作为
-历史兼容错误检测，不是当前生产请求格式。
+Memory、Verifier、RL、后台 Job、Subagent、Dashboard 或第三个 Provider。GLM 使用原生 Function Calling；
+Qwen3.8 默认使用 strict-json，并保留 native-tools 作为对照路径。两条 Qwen 路径都从本轮 Runtime 工具逐个
+生成 Schema。Qwen3.8 在 Adapter 边界使用 canonical 的 click/scroll/drag/wait 参数和显式坐标模式；Schema
+和 Parser 都不会让未知工具或缺失字段进入 Runtime。Qwen 官方 text `computer_use` 协议仅作为历史兼容错误检测，
+不是当前生产请求格式。
 
 ## 施工顺序
 
@@ -169,6 +193,10 @@ S4-1 canonical Computer Tools
 S4-2 GLM/Qwen Adapter
         ↓
 S4-3 CLI 与隔离真实短任务
+        ↓
+S5-0 OSWorld Bridge/Computer 合同
+        ↓
+S5-1 OSWorld 无模型 Gate 2 与单题门
 ```
 
 文档先读 [docs/DOCS-INDEX.md](./docs/DOCS-INDEX.md)。它区分当前执行、长期设计、历史证据和已废弃路线；新增或修改文档遵守 [开发文档规范](./docs/development-documentation-standard.md)。详细协议、状态机、失败语义和验收门槛见：

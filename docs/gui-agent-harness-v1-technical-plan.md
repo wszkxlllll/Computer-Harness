@@ -9,7 +9,7 @@
 > Driver Frame token；S3-1C 之前的 `scroll(deltaX, deltaY)` 已在 S3-2 收窄为带落点、方向和正
 > 整数 ticks 的动作，以匹配已实测的 CUA wheel 输入边界。
 > Stage 3 的具体施工顺序、两级 Frame 新鲜度和协议决策以当前
-> [总体审计](./trajectory-review-2026-09-02/runtime-trajectory-cua-adapter-issues-2026-09-02.md)及本地历史证据为准；
+> [总体审计](./stage-5-gate2-provider-entry-and-snapshot-audit-2026-09-04.md)及本地历史证据为准；
 > 不要把本文中的所有 `CuaFrameRef` 描述视为桌面像素路径已经具备的能力。
 
 ## 一、文档目的
@@ -452,7 +452,9 @@ OpenAI-compatible Function Calling；GLM 生产 profile 固定为 `actual_pixels
 参数解析与坐标映射，不能用未经验证的 Provider 协议冒充 canonical 工具。Provider 进入 Runtime 前必须同时
 满足：真实请求形状、模型响应解析、第二轮 ToolCall/ToolResult 历史呈现三者一致。Function Calling Schema
 是生成约束，不取代 Parser、ToolRegistry 和 Runtime Policy 的二次校验；模型没有返回结构化 status 时，
-Runtime 不从普通文本猜测成功或失败。
+Runtime 不从普通文本猜测成功或失败。Qwen Adapter 另提供显式的 `strict_json` 实验模式：按照官方
+`response_format.type="json_schema"`/`strict=true` 返回 JSON content envelope，再映射到同一 `ModelTurn`；
+该模式不发送 native tools，当前作为 Qwen 默认路径；`native_tools` 保留用于协议对照和兼容性回归。
 
 ### 6.3 Provider 能力
 
@@ -580,7 +582,8 @@ Adapter 提前构造一个尚未持久化的 AssetRef。Runtime 先分配 `Obser
 5. direct 与 private-worker 两种运行方式的稳定性和退出清理；
 6. macOS/Linux 的最小接口可用性由队友分别验证。
 
-探针结果决定首个 Adapter 的默认启动模式。计划书不预设两套产品实现都进入 V1。
+Stage 5 的无副作用探针与单任务复跑已将 Qwen 默认启动模式确定为 `strict_json`；`native_tools` 仍保留为显式对照路径。
+计划书不预设两套产品实现都作为默认产品路径长期维护。
 
 ## 九、ContextCompiler
 
@@ -987,8 +990,9 @@ runtime.invariant_violation
 
 ### 15.2 重试原则
 
-- Provider 限流、短暂网络异常：按 Provider 配置有限重试；
-- 模型结构化输出错误：最多一次带 Schema 错误反馈的修复轮；
+- Provider 明确标记为可重试的限流、短暂网络异常或结构化输出错误：Runtime 最多再尝试 3 次（初始请求之外），且每次都受模型请求预算约束；
+- 每次重试都写入 `model.request.failed` 的原因，并向下一次模型请求附加“未执行任何工具、上一响应为何被拒绝以及应遵循的 Schema”反馈；
+- 不可重试的输入、历史、Viewport 或持久化错误立即结束 Run，不把错误伪装成模型可修复问题；
 - 纯观察失败：可有限重试；
 - GUI 副作用调用结果未知：禁止自动重试；
 - CUA Session ended：Adapter 可以重建连接，但旧 Frame 必须作废，并要求重新 Observe；

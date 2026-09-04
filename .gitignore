@@ -8,6 +8,8 @@ coverage/
 !.env.example
 *.log
 *.tsbuildinfo
+__pycache__/
+*.pyc
 
 # Local CUA probe output may contain screen captures.
 runs/
@@ -19,3 +21,7 @@ spikes/cua-driver/**/runs/
 
 # Historical planning/audit documents stay local for provenance and are not tracked.
 docs/history/
+scripts/history/
+
+.stage4-qwen38-fixture-alpha
+.vmware_vms
