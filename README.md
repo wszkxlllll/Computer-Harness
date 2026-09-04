@@ -23,8 +23,8 @@ Context、canonical Computer Tools、GLM/Qwen Provider 和 CLI。当前状态是
 
 ## 环境
 
-- Node.js 18.19 或更高的 LTS 版本；
-- pnpm 11；
+- Node.js 22.13 或更高版本（pnpm 11 的最低运行版本）；
+- pnpm 11.19.0；
 - Windows、macOS、Linux 均可参与代码开发；
 - 真实 CUA 探针需要对应平台的原生权限和桌面会话。
 
@@ -39,9 +39,23 @@ Node.js、OpenClaw 或 LightSpeaker 环境。推荐使用仓库声明的 pnpm �
 git clone https://github.com/wszkxlllll/Computer-Harness.git
 cd Computer-Harness
 corepack enable
-corepack prepare pnpm@11.19.0 --activate
+corepack install --global pnpm@11.19.0
 pnpm install --frozen-lockfile
 ```
+
+安装前先确认版本：
+
+```text
+node --version
+corepack --version
+pnpm --version
+```
+
+`node --version` 应为 `v22.13.0` 或更高，`pnpm --version` 应为 `11.19.0`。
+如果 Node 自带的 Corepack 过旧或无法启动，可在升级 Node 后执行
+`npm install --global corepack@latest`，再重新执行 `corepack enable` 和
+`corepack install --global pnpm@11.19.0`。不要在 Node 18 上强行运行 pnpm 11；如必须使用
+Node 18，需要另行固定 pnpm 10 并重新验证仓库，不能混用本 README 的 pnpm 11 lockfile 流程。
 
 `pnpm install` 会安装 `@computer-harness/computer-cua` 所需的
 `@trycua/cua-driver@0.22.2` 及当前平台的原生 Node 绑定。可以用下面的命令确认 CUA
@@ -53,6 +67,33 @@ pnpm --filter @computer-harness/cli build
 pnpm run typecheck
 pnpm test
 ```
+
+### Windows PowerShell 的 `.ps1` shim
+
+pnpm 在 Windows 下会同时生成 `.cmd` 和 `.ps1` wrapper。`.ps1` 文件可能同时包含
+Windows 分支和 POSIX/WSL 分支，因此看到 `/mnt/e/...` 这一行本身不代表损坏；原生
+PowerShell 会在 `$IsWindows -eq $true` 时走 Windows 分支。可以这样检查当前 shell 和入口：
+
+```text
+$IsWindows
+where.exe node
+where.exe pnpm.*
+pnpm --version
+```
+
+原生 PowerShell 中 `$IsWindows` 应为 `True`，`where.exe pnpm.*` 不应指向 WSL/Git Bash
+脚本。如果 Windows 分支的实际路径仍是 `/mnt/...`，说明依赖曾在 WSL/Unix shell 中生成，
+或当前 PATH 混用了另一套 pnpm。请关闭 WSL/Git Bash 终端，在仓库根目录的原生 PowerShell
+中仅清理本仓库的 `node_modules` 后重新安装（不要删除 `pnpm-lock.yaml`）：
+
+```text
+Remove-Item -LiteralPath .\node_modules -Recurse -Force
+pnpm.cmd install --frozen-lockfile
+```
+
+如果 PowerShell 的执行策略阻止 `.ps1`，可暂时使用 `pnpm.cmd` 执行所有 pnpm 命令；这与
+路径转换问题是两件独立的事。重新安装后再运行 `pnpm --filter @computer-harness/cli build`、
+`pnpm run typecheck` 和 `pnpm test`。
 
 ### 环境变量
 
