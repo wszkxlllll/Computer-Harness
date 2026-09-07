@@ -11,6 +11,8 @@ from pathlib import Path
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+PNG_2X1 = bytearray(PNG_1X1)
+PNG_2X1[19] = 2
 
 
 class FakeDesktopEnv:
@@ -21,6 +23,7 @@ class FakeDesktopEnv:
         self.steps = []
         self.closed = False
         self.fail_step = False
+        self.next_screenshot = None
         FakeDesktopEnv.instance = self
 
     def reset(self, task_config):
@@ -28,7 +31,7 @@ class FakeDesktopEnv:
         return {"screenshot": PNG_1X1}
 
     def _get_obs(self):
-        return {"screenshot": PNG_1X1}
+        return {"screenshot": self.next_screenshot or PNG_1X1}
 
     def step(self, action, pause=2):
         self.steps.append((action, pause))
@@ -142,6 +145,29 @@ class BridgeContractTest(unittest.TestCase):
             with self.assertRaises(BridgeError) as raised:
                 service.execute({"kind": "click", "x": 0, "y": 0})
             self.assertEqual(raised.exception.code, "EXECUTION_ERROR")
+
+    def test_screenshot_viewport_change_is_reported_before_completion(self):
+        from integrations.osworld.bridge import BridgeError, DesktopEnvBridge
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_dir = root / "evaluation_examples" / "examples" / "fake"
+            task_dir.mkdir(parents=True)
+            (task_dir / "fake-task.json").write_text(json.dumps({"id": "fake-task", "instruction": "fake"}), encoding="utf-8")
+            args = argparse.Namespace(
+                osworld_root=str(root), provider="fake", path_to_vm="fake.vmx", snapshot_name="init_state",
+                cache_dir=str(root / "cache"), screen_width=1, screen_height=1, headless=True,
+                os_type="Ubuntu", enable_proxy=False, osworld_version="test",
+            )
+            service = DesktopEnvBridge(args)
+            service.reset("fake-task")
+            service.observe()
+            FakeDesktopEnv.instance.next_screenshot = bytes(PNG_2X1)
+            with self.assertRaises(BridgeError) as raised:
+                service.execute({"kind": "click", "x": 0, "y": 0})
+            self.assertEqual(raised.exception.code, "SCREENSHOT_VIEWPORT_CHANGED")
+            self.assertIn("expected=1x1, actual=2x1", str(raised.exception))
+            self.assertEqual(len(FakeDesktopEnv.instance.steps), 1)
 
 
 if __name__ == "__main__":

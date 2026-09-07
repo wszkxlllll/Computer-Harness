@@ -1,5 +1,9 @@
 # OSWorld Bridge
 
+> 可复现实验入口见[`docs/stage-5-osworld-reproducibility.md`](../../docs/stage-5-osworld-reproducibility.md)。特别注意：VMware 快照不在 Git 仓库中，队友必须获取完整 VM artifact 或自行创建等价快照；只拿到 `.vmx` 或快照名称是不够的。
+
+当前真实 VM 路径已在 Windows 11 + VMware Workstation 上验证。macOS/Linux 可以运行 Harness 代码和测试；要运行同一 OSWorld VM 实验，还必须先用本机 VMware/`vmrun` 通过无模型 Gate 2，不能把 Windows 的绝对路径或 `vmrun.exe` 路径直接照搬。
+
 `bridge.py` is the only process in this repository that owns an OSWorld
 `DesktopEnv`. It exposes a loopback JSON RPC endpoint at `POST /rpc` with the
 following methods:
@@ -69,6 +73,12 @@ The Python-side contract can be checked without OSWorld dependencies or a VM:
 ```text
 python -m unittest integrations.osworld.test_bridge -v
 ```
+
+Before a model run, verify the local VM snapshot and guest display. The current calibrated
+experiment name is `osworld_initial_1920x1080_clean_r4_20260906`; it is a local VMware
+artifact, not a repository file. The VM must be powered off or controlled only by the runner,
+and the guest must report an actual 1920x1080 display. If a run reports
+`SCREENSHOT_VIEWPORT_CHANGED`, stop the model run and repair the VM baseline first.
 
 For a model-backed task, use the runner so reset/evaluate remain outside the
 Harness Run:

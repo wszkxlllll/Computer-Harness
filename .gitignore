@@ -16,6 +16,9 @@ runs/
 spikes/cua-driver/runs/
 spikes/cua-driver/**/runs/
 
+# OSWorld task fixtures and evaluator-generated artifacts may contain user data.
+cache/
+
 # Downloaded CUA binaries and daemon logs are local stage-0 evidence.
 .stage0/
 

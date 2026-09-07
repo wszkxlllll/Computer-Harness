@@ -209,20 +209,31 @@ function parseDescription(value: unknown): OsworldBridgeDescription {
   if (!isRecord(value)) throw new OsworldBridgeClientError("BRIDGE_INVALID_RESULT", "OSWorld description is invalid");
   const viewport = parseViewport(value.viewport);
   const capabilities = parseCapabilities(value.capabilities);
-  return { viewport, capabilities };
+  const guestScreenSize = parseOptionalScreenSize(value.guestScreenSize);
+  return { viewport, capabilities, ...(guestScreenSize === undefined ? {} : { guestScreenSize }) };
 }
 
 function parseCapture(value: unknown): OsworldBridgeCapture {
   if (!isRecord(value) || value.mediaType !== "image/png" || typeof value.dataBase64 !== "string" || value.dataBase64.length === 0 || !positiveInteger(value.width) || !positiveInteger(value.height) || typeof value.capturedAt !== "string" || value.capturedAt.trim().length === 0) {
     throw new OsworldBridgeClientError("BRIDGE_INVALID_RESULT", "OSWorld screenshot result is invalid");
   }
+  const guestScreenSize = parseOptionalScreenSize(value.guestScreenSize);
   return {
     mediaType: "image/png",
     dataBase64: value.dataBase64,
     width: value.width,
     height: value.height,
     capturedAt: value.capturedAt,
+    ...(guestScreenSize === undefined ? {} : { guestScreenSize }),
   };
+}
+
+function parseOptionalScreenSize(value: unknown): { width: number; height: number } | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || !positiveInteger(value.width) || !positiveInteger(value.height)) {
+    throw new OsworldBridgeClientError("BRIDGE_INVALID_RESULT", "OSWorld guest screen size is invalid");
+  }
+  return { width: value.width, height: value.height };
 }
 
 function parseExecuteResult(value: unknown): OsworldBridgeExecuteResult {

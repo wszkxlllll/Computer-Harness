@@ -1,5 +1,7 @@
 # GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计
 
+> 2026-09-07 统一说明：本文保留 Memory/Advisory 的研究构思；具体施工以 [技术计划书的当前扩展主线](./gui-agent-harness-v1-technical-plan.md#当前扩展主线contextplanmemoryadvisory-与-monitor2026-09-07) 为准。Plan 是主 Agent 的工具和独立状态；Memory 经召回进入 Context；Advisory 是主 Agent 显式调用、拥有独立上下文和受限权限的工具。确定性 Monitor 只向 Context 报告事实，不自动调模型。下文未来能力不代表已经实现。
+
 ## 一、设计背景
 
 现有 GUI Agent 的上下文管理大多仍沿用文本 Agent 的基本思路，即将用户目标、历史模型回复、工具调用结果和当前截图组合为消息序列，并在上下文长度增长后通过截断或文本摘要控制输入规模。这种方式能够支持短流程任务，但对于长时间运行的 Computer Use Agent 存在明显局限。
@@ -90,9 +92,9 @@ Subagent 返回的结果也不直接修改 Runtime State，而统一表示为 Ad
 
 ## 十、Advisory Subagent 的触发机制
 
-Advisory Subagent 不宜在每一个 GUI Step 都自动运行，否则会显著增加 API 请求数量、运行延迟和成本。因此，更合理的方式是根据 Runtime 状态按条件触发。
+Advisory Subagent 通过主 Agent 的 `consult_advisor` 工具调用触发。Monitor 使用脚本规则生成停滞等信号并交给 Context，主 Agent 决定是否需要额外推理。当前不由 Monitor 或 Runtime 自动调度第二个模型。
 
-例如在 Run 开始时，可以调用 Planner 对复杂任务进行一次初始分析；进入视觉结构复杂的新页面时，可以调用 Visual Analyst；连续相同 Action 或连续失败达到阈值时，可以调用 Recovery Advisor；在 Context 即将进行较大规模 Reduction 时，可以调用状态总结 Agent；高风险操作前也可以根据 Policy 决定是否请求额外分析。
+例如主 Agent 可在复杂任务开始时请求规划建议，在难页面请求视觉分析，在重复失败后请求恢复建议。第一版使用一个通用 Advisor，通过 question 表达问题；专门角色和自动调用策略作为后续独立实验，不先建立完整 Agent Team。
 
 这种按需调用方式使 Subagent 成为主 Agent 的“外部思考资源”，而不是每轮固定增加的推理链路。
 
@@ -116,7 +118,7 @@ Memory 与 Advisory Subagent 可以进一步组合。
 
 ## 十三、与 ContextCompiler 的集成
 
-Memory 和 Advisory Subagent 最终都不直接改变 Agent Loop，而通过 `ContextCompiler` 与主模型连接。
+Memory 的召回结果通过 ContextCompiler 与主模型连接；Advisory 的调用由现有工具调度入口执行，结果以 ToolResult 进入 ContextCompiler。所谓“不改变 Agent Loop”是复用执行主干，并不表示子模型调用无需预算、取消和工具结果处理。第一版父 Run 等待 Advisor 工具结束，主 Agent 仍拥有唯一 GUI 执行权。
 
 ContextCompiler 的输入来源可以逐渐扩展为当前用户目标、最新 Observation、Working Memory、Planning State、近期 RuntimeEvent、Retrieved Episodic Memory、Semantic Memory 和 Subagent Advice。ContextCompiler 根据当前 Token/Image Budget 和任务阶段选择真正发送给模型的信息。
 
@@ -128,7 +130,7 @@ ContextCompiler 的输入来源可以逐渐扩展为当前用户目标、最新 
 
 V1 首先完成稳定的单 Agent Runtime、Provider Adapter、ComputerSession、ObservationFrame、Action、RuntimeEvent、Planning 和基础 ContextCompiler。只有在积累真实 GUI Trajectory 后，Memory 系统才有足够数据进行实验，因此后续首先适合研究 Working Memory 和 Visual Context Reduction，例如比较固定历史窗口、关键 Frame、Action Summary 和 Task-aware Context 对任务成功率和成本的影响。
 
-在此基础上，可以进一步建设 Episodic Multimodal Memory，将真实 Trajectory 转化为可检索 GUI Episode，并开展 Text Retrieval、Visual Retrieval 和 Multimodal Retrieval 的对照实验。
+在此基础上，可以进一步建设 Episodic Multimodal Memory，将真实 Trajectory 转化为可检索 GUI Episode，并开展 Text Retrieval、Visual Retrieval 和 Multimodal Retrieval 的对照实验。工具形式的 Advisor 可以独立于长期 Memory 实现；它读取当前任务和近期证据即可开展实验，不以 Memory 证明有效为前置条件。
 
 随后引入 Advisory Subagent，由 Planner、Visual Analyst 和 Recovery Advisor 等只读 Agent 在特定状态下提供辅助建议。最后，在多 ComputerSession 和环境隔离机制成熟以后，再考虑具有真实 GUI 操作权限的 Execution Subagent 和 Agent Team。
 

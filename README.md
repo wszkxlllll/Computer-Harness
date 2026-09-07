@@ -168,6 +168,11 @@ Stage 5 OSWorld 路径由外层 runner 先调用 Bridge 的 `environment.reset`�
 交给同一个 CLI。无模型的 Gate 2 连接测试命令和 Python 环境要求见
 [`integrations/osworld/README.md`](./integrations/osworld/README.md)；CLI 只需指定：
 
+OSWorld 的 VMware 虚拟机和快照是实验外部 artifact，不会随 Git 仓库下载。队友若要复现实验，必须获取完整 VM
+目录及快照 manifest，或自行创建等价的 1920×1080 基线快照；不能只复制 `.vmx` 或填写一个不存在的快照名。
+完整的获取、校准、Gate 2 和模型运行步骤见
+[`docs/stage-5-osworld-reproducibility.md`](./docs/stage-5-osworld-reproducibility.md)。
+
 ```text
 pnpm --filter @computer-harness/cli build
 pnpm --filter @computer-harness/cli start -- --goal "<reset 返回的 instruction>" --model glm-5.3-flash --computer osworld --osworld-bridge "http://127.0.0.1:<port>" --output "runs/stage5-osworld" --env-file ".env"

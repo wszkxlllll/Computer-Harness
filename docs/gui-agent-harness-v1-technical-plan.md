@@ -9,8 +9,115 @@
 > Driver Frame token；S3-1C 之前的 `scroll(deltaX, deltaY)` 已在 S3-2 收窄为带落点、方向和正
 > 整数 ticks 的动作，以匹配已实测的 CUA wheel 输入边界。
 > Stage 3 的具体施工顺序、两级 Frame 新鲜度和协议决策以当前
-> [总体审计](./stage-5-gate2-provider-entry-and-snapshot-audit-2026-09-04.md)及本地历史证据为准；
+> 当前模型任务结果以[Stage 5 模型任务结果总表](./stage-5-model-task-results-2026-09-07.md)及本地历史证据为准；
 > 不要把本文中的所有 `CuaFrameRef` 描述视为桌面像素路径已经具备的能力。
+
+## 当前扩展主线：Context、Plan、Memory、Advisory 与 Monitor（2026-09-07）
+
+本节是 V1 之后增强模块的统一实现依据；与后文 V1 非目标或两份长期构思冲突时，以本节为准。下述工具和数据结构是拟实施设计，不表示已经完成。原 V1 非目标只描述基线交付范围，不阻止现在开展设计实验。
+
+### 主线和执行顺序
+
+主 Agent 负责选择操作、维护计划和请求辅助推理。ContextCompiler 将目标、当前计划、记忆、观察、工具结果和建议组织为 ModelInput。Runtime 负责工具调度、预算、审批和唯一 GUI 执行权。
+
+```text
+用户目标/纠正 + PlanStore + 召回的 Memory + 近期工具结果/Advice
+                              + 最新 Observation + Monitor 信号
+                                              ↓
+                                       ContextCompiler
+                                              ↓
+                                        Main Agent
+                    ┌─────────────────────────┼──────────────────────┐
+                    ↓                         ↓                      ↓
+               Computer tools           Planning tools       consult_advisor
+                    ↓                         ↓                      ↓
+          Policy / Approval              PlanStore          独立上下文、受限工具
+                    ↓                         ↓                      ↓
+             Computer.execute            ToolResult              Advice ToolResult
+                    ↓                         └──────────┬───────────┘
+             新 Observation                             ↓
+                    ↓                             下一轮 Context
+          确定性 ProgressMonitor
+                    ↓
+              下一轮 Context
+```
+
+工具调度沿用现有 ToolRegistry：所有调用先校验并经 Policy；computer 类转换为 ActionIntent，planning/advisory 类执行后返回 ToolResult。非 GUI 工具不增加 GUI step，模型请求和 Advisor 请求分别记录并受预算约束。Monitor 只在取得新的观察后运行，不能因一次 Plan 更新或 Advisor 返回就重复计数。
+
+### 1. Planning：主 Agent 使用工具维护独立任务状态
+
+第一版在 `packages/planning` 实现 TaskCreate、TaskUpdate、TaskList、TaskGet，注册为现有 `planning` 类工具。使用一组独立于 RunSnapshot 的数据结构：
+
+```ts
+interface PlanningTask {
+  id: string;                 // 程序生成，主 Agent 引用
+  subject: string;            // 模型描述一个待完成目标
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "blocked";
+}
+interface PlanState {
+  runId: RunId;
+  tasks: PlanningTask[];
+}
+```
+
+PlanStore 按 Run 保存 `plan.json`。TaskCreate 不要求模型生成 ID；TaskUpdate 用 ID 更新目标或状态。工具返回实际保存的记录，ContextCompiler 每轮读取最新 PlanState，把当前和未完成任务置于显著位置，已完成任务压缩显示。Plan 的 completed 只代表主 Agent 的进度声明，不等于 evaluator 通过或真实副作用证据。
+
+Plan 写入与工具成功结果需要保持一致：成功 ToolResult 只能在保存成功后返回；持久化更新无法确认时报告错误，不能静默声称成功。先使用现有 ToolCall/ToolResult 记录变化，不同时新增一套重复 task 事件。Task 工具完整输出可用于重建 PlanStore；具体实现必须测试该恢复路径。
+
+### 2. Memory：独立保存经验，召回后进入 Context
+
+`packages/memory` 拥有 MemoryStore、写入和召回逻辑；Runtime 不负责检索算法。第一版先做文本经验及其来源引用，再逐步比较关键 Frame/ROI。最小条目为程序 ID、经验描述、来源 Run/Observation 引用；未消费的置信度、评分、嵌入字段不提前进入公共协议。
+
+生命周期：任务结束后选择值得保留的经验 → MemoryStore → 新任务开始或当前计划/失败线索变化时召回 → ContextCompiler 选取有限内容。不要每个点击都检索。经验写入和召回作为独立实验开关，现阶段不默认赋予主 Agent 任意长期写入权限。
+
+Working Memory 是当前计划、近期错误、关键观察和已知任务事实的工作视图，先由 Context 层组织；它不要求立刻再建一个数据库。Episodic/Semantic Memory 是跨 Run 的后续实验。历史坐标不作为当前可执行坐标，必须基于最新截图重新定位。
+
+### 3. Advisory Subagent：主 Agent 可调用的受限工具
+
+`packages/advisory` 提供 `consult_advisor({ question, observationIds? })`。第一版只需一个可配置的通用 Advisor；模型和提示词由应用配置决定，主 Agent 不通过参数自行扩大权限。工具通过现有非 Computer 执行入口接入，初期可使用 `side` 类，不为名称分类增加新的调度系统。
+
+AdvisorService 构造独立 ModelInput：用户目标、当前 Plan、主 Agent 的问题、选中的最新/历史观察以及相关错误。默认不给完整聊天历史，不继承主 Agent 的 ToolRegistry、Computer 句柄、Plan 写权限、Shell 或 Provider 密钥文本。它通过注入的 ProviderAdapter 推理，默认只读；以后确有需要才显式允许只读检索工具。
+
+返回 `Advice { text, observationIds }`，外层 ToolResult 已包含 callId；Advice 的来源和适用观察由程序绑定，不能让模型伪造。建议不直接修改 Plan、点击桌面或触发用户审批，主 Agent 在下一轮选择采用或忽略。Context 明示这是建议，并在画面或目标已经改变时标识其历史来源。
+
+第一版采用等待结果的工具调用：主 Run 等待 Advisor，Advisor 完成后返回 ToolResult，再进行下一轮主模型推理。无需先实现后台队列；父 Run abort 必须取消子调用，子请求有独立上限，其 token/请求成本合并进入实验统计。子推理失败是该工具失败，可以让主 Agent 换方法；不允许递归调用自身。父 Run 在等待期间收到用户纠正时，旧 Advice 不作为当前指令强制使用。
+
+以后若需要后台推理，才增加 Job ID、结果收件箱和 wait/cancel；即使并行推理，GUI 执行权仍归主 Agent。
+
+### 4. Context：统一组装入口，各模块提供信息
+
+沿用 `packages/context` 和 Runtime 的 `ContextCompiler` 合同。应用组合层向具体 Compiler 注入 PlanStore、MemoryRetriever 等只读依赖；Runtime 仍只调用 `compile()`，不依赖默认 Context 实现或具体检索库。新增依赖只在对应模块接入时实现，不先扩充一个全部可选的大参数对象。
+
+每轮组织顺序：系统工具规则 → 原始目标与最新用户纠正 → 当前计划 → 相关记忆 → 保留配对关系的近期 ToolCall/ToolResult（含 Advice）→ 当前观察和 Monitor 事实。历史摘要不能覆盖用户纠正；Memory/Advice 作为经验和建议，不冒充用户或系统授权。主 Agent 能看到的具体消息格式仍由 ProviderAdapter 转换。
+
+历史裁剪保留 ToolCall/ToolResult 配对与 Provider 所需 continuation；Advice 已作为 ToolResult 进入历史，不再额外复制全文。重复 Monitor 信号只展示当前一份；新事实变化后撤去旧提示，但原始 Trajectory 保留。Context 策略可以独立比较历史窗口、关键帧、Plan 注入和 Memory 召回，不改变 Computer 执行接口。
+
+### 5. Monitor：确定性事实提示，主 Agent 决定是否 Replan
+
+在主循环 `observeAndCommit()` 后调用一个独立的确定性检测函数，输入近期 Action/Observation 与可计算的画面变化，输出例如“同一点击连续出现 6 次，画面变化很小”。不调用 AI，不推断用户意图、不判任务完成、不自动启动 Advisor。
+
+事件可采用 `progress.stalled`，其含义严格限制为触发了已声明的检测规则。ContextCompiler 消费它；主 Agent 可以换动作、更新 Task，或调用 `consult_advisor`。Replan 是主 Agent 的决策行为，不另加 RunStatus、不自动改 Plan，也不要求额外一轮模型审核。
+
+第一版直接在主循环固定位置调用检测组件；目前无需通用 Hook 注册系统。Memory 召回属于 Context 输入准备，Plan/Advisor 属于工具，Policy 属于执行前控制，它们不需要统一到同一个 Hook。以后真的出现多个同阶段确定性检测器时再组合。
+
+### 6. Policy、Approval 和 Verifier 的边界
+
+当前已有 `RuntimePolicy.evaluateToolCall()`、allow/deny/require_approval 与 `waiting_approval` 控制路径，但 `DefaultRuntimePolicy` 默认 allow。审批是运行时等待用户授权的机制，并非只给 AI 一段提示；AI 不能批准自己的动作。
+
+对于具备明确语义的发送、删除、支付工具，可以确定性要求审批；普通 `click(x,y)` 本身不能告诉程序它是否在支付，工具名或坐标不足以实现可靠风险识别。未来可使用明确的应用语义或按需建议辅助识别，不能在文档中宣称当前已实现通用 GUI 意图风险控制。
+
+当前开发路线不加入独立 Verifier。完成与效率实验保留外部 evaluator、模型 finish 和 Runtime outcome 三类结果；Monitor 不充当 Verifier。以后有明确需要独立核验的任务，再作为单独实验提案。
+
+### 7. 现有基础、接入改动与实验顺序
+
+已确认代码：`packages/runtime/src/contracts.ts` 有 ContextCompiler、planning/side 非 Computer 工具合同；`run-controller.ts` 有非 GUI 工具和审批执行路径；`packages/context` 目前主要投影历史工具结果并附上最新截图，尚无完整 Plan/Memory/Advisor 消费链。
+
+新增工具还要同步验证 Provider 的工具表达。GLM 使用传入 Tool schema；Qwen strict-json 的参数合并和解析要验证嵌套字段、工具名以及非坐标参数，不能认为注册到 ToolRegistry 就自动完成所有 Provider 适配。通用工具绝不能被映射成 GUI Action。
+
+具体施工以 [Next gate 第 7 节](./stage-5-first-batch-analysis-and-next-gates-2026-09-07.md#7-next-gate从当前代码到增强模块效果评测的完整路线) 为准：P0/统计/任务准备与 Planning tools + Context 消费并行；接通 Planning 后立即评测；随后分别开发和评测 Context 策略、确定性 Monitor；再并行开发 Memory 召回与 Advisor tool，分别评测后组合。当前没有 Plan 实现，不能单设 Replan 阶段。每个模块保留独立开关，单项无收益可以关闭并继续下一假设。
+
+研究理由：重复尝试对应 Monitor/Recovery；长任务遗漏与顺序混乱对应 Plan；重新寻找已有信息对应 Context/Working Memory；跨任务重复探索对应 Memory；难页面独立分析对应 Advisor。比较外部成功率、可避免步骤、token 和总时长；不能只因任务提前失败、动作减少就判定优化成功。跨 Run Memory 的写入来源必须排除最终 holdout 的目标轨迹和 evaluator 答案。
 
 ## 一、文档目的
 

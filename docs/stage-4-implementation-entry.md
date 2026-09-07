@@ -1,6 +1,6 @@
 # Stage 4/5 Computer Harness 当前实施入口
 
-日期：2026-09-04
+日期：2026-09-07
 文档角色：入口 / 交接
 状态：当前执行
 当前入口：本文件
@@ -14,17 +14,18 @@
 
 - A：本地 CUA/Windows 任务，见[本地路线](./stage-4-local-task-implementation.md)；
 - B：OSWorld/VM 任务，见[OSWorld 路线](./osworld-environment-implementation.md)；
-- Provider/快照/协议证据，见[最新总体审计](./stage-5-gate2-provider-entry-and-snapshot-audit-2026-09-04.md)。
+- Provider/快照/协议证据，见[Stage 5 模型任务结果总表](./stage-5-model-task-results-2026-09-07.md)。
+
+下一阶段完整施工顺序以 [Next gate 第 7 节](./stage-5-first-batch-analysis-and-next-gates-2026-09-07.md) 为准：P0/统计与 Planning + Context 并行开发、Planning 接通后开始第一轮效果实验、再开展 Context/Monitor、Memory/Advisor 与最终评测。本文保留两条 Computer 路线边界，不再以早期 Provider 探针作为增强模块开发的前置总门槛。
 
 ## 已有基础
 
 - `packages/runtime` 负责 Run 循环、命令 Inbox、预算、Action 生命周期和通用重试；
 - `packages/context` 从 RuntimeEvent 投影模型上下文；
 - `packages/provider-glm` 与 `packages/provider-qwen` 将 Provider 协议映射为统一 `ModelTurn`；
-- Qwen `strict_json` 使用官方 `response_format.type=json_schema`、`strict=true`，不发送 native `tools`；它已按决策设为默认，
-  但当前无副作用 probe 仅有 1/3 稳定，不能把默认选择写成稳定性结论；
+- Qwen `strict_json` 使用 `response_format.type=json_schema`、`strict=true`，不发送 native `tools`；当前 GLM 30 条、Qwen 5 条任务结果见总体结果表。新增 Planning/Advisor 工具仍要验证 schema 与往返解析；
 - `packages/computer-cua` 和 `packages/computer-osworld` 分别连接本地 CUA daemon 与 OSWorld Bridge；
-- 全量静态回归当前为 120/120，真实 Provider 结果必须以各自 runner、trajectory、evaluation 和清理记录为准。
+- 旧阶段静态测试数字只代表当时版本；当前验证按实际代码与执行记录报告，真实 Provider 结果以 runner、trajectory、evaluation 和清理记录为准。
 
 ## 本阶段目标
 
@@ -43,11 +44,11 @@
 
 ## 执行顺序与门槛
 
-1. 已完成 3 次同条件 strict-json no-execute probe，但只有 1/3 成功；先收紧协议或评估 Provider 输出；
-2. strict-json 稳定后，再在 B 路线扩展冻结任务，并与 GLM native-tools 做同条件比较；
-3. A 路线独立验证本地 CUA 的屏幕、点击、输入和清理，不与 B 的评分混算；
-4. 出现协议错误时保留原始错误和 `provider-exchanges.jsonl`，只在对应 Adapter 修复；
-5. 只有重复任务表现稳定后，才考虑 Context、Memory、Verifier 或更复杂 Tool 能力。
+1. 按 Next gate 分工并行开发基础设施修复与 Planning/Context，公共合同和 CLI 由集成负责人协调；
+2. 同版基础设施上的配对任务验证增强效果；不要求全量重跑或 Qwen 全面追平 GLM；
+3. 本地 CUA 与 OSWorld 路线独立验证，不混算评分；同一 VM 的 reset 和真实操作串行；
+4. 新工具在各 Provider 的格式错误由相应 Adapter 修复；保留原始失败；
+5. Monitor 只提供脚本事实，没有独立 Replan/Verifier 阶段；效果实验和任务扩充时间遵循 Next gate。
 
 ## 产物与完成条件
 

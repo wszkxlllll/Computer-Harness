@@ -90,6 +90,14 @@ async function waitForReady(child) {
 
 async function stop(child) {
   if (child.exitCode !== null) return;
+  if (process.platform === "win32" && child.pid !== undefined) {
+    try {
+      await execFileAsync("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
+    } catch {
+      // The process may have exited between the check and taskkill.
+    }
+    if (child.exitCode !== null) return;
+  }
   child.kill("SIGTERM");
   const exited = await new Promise((resolveDone) => {
     const timer = setTimeout(() => resolveDone(false), 5_000);

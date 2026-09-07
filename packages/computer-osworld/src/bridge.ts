@@ -8,6 +8,8 @@ export interface OsworldBridgeCapture {
   width: number;
   height: number;
   capturedAt: string;
+  /** Actual guest display size reported by OSWorld when available. */
+  guestScreenSize?: { width: number; height: number };
 }
 
 export interface OsworldBridgeCapabilities {
@@ -18,6 +20,8 @@ export interface OsworldBridgeCapabilities {
 
 export interface OsworldBridgeDescription {
   viewport: Viewport;
+  /** Actual guest display size reported by OSWorld when available. */
+  guestScreenSize?: { width: number; height: number };
   /** Accessibility is not advertised until a producer and Context consumer exist. */
   capabilities: OsworldBridgeCapabilities;
 }

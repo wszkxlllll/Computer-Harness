@@ -99,7 +99,7 @@ class DesktopEnvBridge:
         viewport = self._viewport
         if viewport is None:
             raise BridgeError("NO_TASK", "reset a task before describing the computer")
-        return {
+        result: dict[str, Any] = {
             "viewport": {
                 "width": viewport[0],
                 "height": viewport[1],
@@ -107,6 +107,10 @@ class DesktopEnvBridge:
             },
             "capabilities": {"screenshot": True, "pointer": True, "keyboard": True},
         }
+        guest_screen_size = self._guest_screen_size()
+        if guest_screen_size is not None:
+            result["guestScreenSize"] = guest_screen_size
+        return result
 
     def observe(self) -> dict[str, Any]:
         initial = self._initial_capture
@@ -114,7 +118,11 @@ class DesktopEnvBridge:
             self._initial_capture = None
             return initial
         env = self._require_task_env()
-        return self._capture(env._get_obs().get("screenshot"))
+        return self._capture(
+            env._get_obs().get("screenshot"),
+            expected_viewport=self._viewport,
+            operation="observe",
+        )
 
     def execute(self, action: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(action, dict):
@@ -135,7 +143,14 @@ class DesktopEnvBridge:
             # a side effect.  The TypeScript adapter will propagate this as an
             # uncertain execution rather than fabricate a failed receipt.
             raise BridgeError("EXECUTION_ERROR", str(exc)) from exc
-        return {"status": "completed", "postActionCapture": self._capture(capture)}
+        return {
+            "status": "completed",
+            "postActionCapture": self._capture(
+                capture,
+                expected_viewport=self._viewport,
+                operation=f"post_action:{typed['kind']}",
+            ),
+        }
 
     def evaluate(self) -> dict[str, Any]:
         env = self._require_task_env()
@@ -185,18 +200,55 @@ class DesktopEnvBridge:
             raise BridgeError("TASK_INVALID", f"task {task_id} has an invalid instruction")
         return value
 
-    def _capture(self, screenshot: Any) -> dict[str, Any]:
+    def _capture(
+        self,
+        screenshot: Any,
+        *,
+        expected_viewport: tuple[int, int] | None = None,
+        operation: str = "capture",
+    ) -> dict[str, Any]:
         if not isinstance(screenshot, (bytes, bytearray)) or not screenshot:
             raise BridgeError("SCREENSHOT_ERROR", "OSWorld did not return screenshot bytes")
         payload = bytes(screenshot)
         width, height = png_dimensions(payload)
-        return {
+        guest_screen_size = self._guest_screen_size()
+        if expected_viewport is not None and (width, height) != expected_viewport:
+            task = self._task_id or "<no-task>"
+            expected_width, expected_height = expected_viewport
+            guest = "unknown" if guest_screen_size is None else f"{guest_screen_size['width']}x{guest_screen_size['height']}"
+            raise BridgeError(
+                "SCREENSHOT_VIEWPORT_CHANGED",
+                f"{operation} screenshot viewport changed for task {task}: "
+                f"expected={expected_width}x{expected_height}, actual={width}x{height}, guestScreenSize={guest}",
+            )
+        result: dict[str, Any] = {
             "mediaType": "image/png",
             "dataBase64": base64.b64encode(payload).decode("ascii"),
             "width": width,
             "height": height,
             "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
         }
+        if guest_screen_size is not None:
+            result["guestScreenSize"] = guest_screen_size
+        return result
+
+    def _guest_screen_size(self) -> dict[str, int] | None:
+        env = self._env
+        if env is None:
+            return None
+        try:
+            value = getattr(env, "vm_screen_size", None)
+            value = value() if callable(value) else value
+        except Exception as exc:  # pragma: no cover - external guest diagnostic
+            LOGGER.warning("Could not read guest screen size: %s", exc)
+            return None
+        if not isinstance(value, dict):
+            return None
+        width = value.get("width")
+        height = value.get("height")
+        if isinstance(width, int) and width > 0 and isinstance(height, int) and height > 0:
+            return {"width": width, "height": height}
+        return None
 
     def _validate_typed_action(self, action: dict[str, Any]) -> dict[str, Any]:
         kind = action.get("kind")

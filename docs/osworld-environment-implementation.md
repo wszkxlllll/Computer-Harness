@@ -16,7 +16,7 @@
 - Qwen3.8-Flash strict-json 已完成同任务：官方 score=1、7 GUI steps、8 次模型请求、
   `invalidToolCalls=0`、`runtimeErrors=0`、`providerErrors=[]`、`cleanupErrors=[]`；
 - strict-json 已按决策成为默认，但同条件 no-execute probe 当前为 1/3 成功；以上是单任务证据，不等于整体成功率。
-  详细原始结果见[最新总体审计](./stage-5-gate2-provider-entry-and-snapshot-audit-2026-09-04.md)。
+  详细模型任务结果见[Stage 5 模型任务结果总表](./stage-5-model-task-results-2026-09-07.md)。
 
 ## 运行要求
 

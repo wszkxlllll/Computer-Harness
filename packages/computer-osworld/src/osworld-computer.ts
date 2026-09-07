@@ -53,6 +53,9 @@ export class OsworldComputer implements Computer {
     const viewport = validateViewport(description.viewport);
     const capabilities = validateCapabilities(description.capabilities);
     if (!capabilities.screenshot) throw new Error("OSWorld bridge does not provide screenshot capability");
+    if (description.guestScreenSize !== undefined && !sameScreenSize(description.guestScreenSize, viewport)) {
+      throw new Error(`OSWorld guest screen size ${description.guestScreenSize.width}x${description.guestScreenSize.height} does not match viewport ${viewport.width}x${viewport.height}`);
+    }
     if (options.viewport !== undefined && !sameViewport(options.viewport, viewport)) {
       throw new Error(`requested viewport ${options.viewport.width}x${options.viewport.height}/${options.viewport.coordinateSpace} does not match OSWorld viewport ${viewport.width}x${viewport.height}/${viewport.coordinateSpace}`);
     }
@@ -129,6 +132,9 @@ function materializeCapture(capture: OsworldBridgeCapture, viewport: Viewport): 
   const dimensions = readPngDimensions(data);
   if (dimensions === undefined) throw new Error("OSWorld bridge returned invalid PNG screenshot data");
   if (dimensions.width !== capture.width || dimensions.height !== capture.height) throw new Error(`OSWorld PNG dimensions ${dimensions.width}x${dimensions.height} do not match bridge metadata ${capture.width}x${capture.height}`);
+  if (capture.guestScreenSize !== undefined && !sameScreenSize(capture.guestScreenSize, { width: dimensions.width, height: dimensions.height })) {
+    throw new Error(`OSWorld guest screen size ${capture.guestScreenSize.width}x${capture.guestScreenSize.height} does not match screenshot ${dimensions.width}x${dimensions.height}`);
+  }
   if (dimensions.width !== viewport.width || dimensions.height !== viewport.height) throw new Error(`OSWorld screenshot ${dimensions.width}x${dimensions.height} does not match session viewport ${viewport.width}x${viewport.height}`);
   if (typeof capture.capturedAt !== "string" || capture.capturedAt.trim().length === 0) throw new Error("OSWorld bridge returned an invalid capture timestamp");
   return {
@@ -172,6 +178,10 @@ function validateViewport(viewport: Viewport): Viewport {
 
 function sameViewport(left: Viewport, right: Viewport): boolean {
   return left.width === right.width && left.height === right.height && left.coordinateSpace === right.coordinateSpace;
+}
+
+function sameScreenSize(left: { width: number; height: number }, right: { width: number; height: number }): boolean {
+  return left.width === right.width && left.height === right.height;
 }
 
 function refused(actionId: ActionReceipt["actionId"], driverCode: string, message: string): ActionReceipt {
