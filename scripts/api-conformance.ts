@@ -3,6 +3,7 @@ import { basename, relative, resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { GlmAdapter, type GlmAdapterOptions, type GlmHttpClient } from "@computer-harness/provider-glm";
 import { Qwen38FlashAdapter, type Qwen38AdapterOptions, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
+import { InMemoryPlanStore, createPlanningTools } from "@computer-harness/planning";
 import type {
   AssetId,
   AssetRef,
@@ -17,7 +18,7 @@ import type {
   ToolCallId,
   Viewport,
 } from "@computer-harness/protocol";
-import { createDefaultComputerTools, type AssetReader, type ModelInput } from "@computer-harness/runtime";
+import { createDefaultToolRegistry, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 
 type ProviderName = "glm-5.3-flash" | "qwen3.8-flash";
 
@@ -29,6 +30,7 @@ interface CliOptions {
   model: ProviderName | "all";
   qwenThinking: Qwen38ThinkingMode;
   qwenOutputMode: Qwen38OutputMode;
+  planning: boolean;
 }
 
 interface RequestRecord {
@@ -190,6 +192,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     model: modelValue,
     qwenThinking,
     qwenOutputMode,
+    planning: argv.includes("--planning"),
   };
 }
 
@@ -482,8 +485,10 @@ async function main(): Promise<void> {
   const viewport: Viewport = { width: 640, height: 360, coordinateSpace: "physical" };
   const firstObservation = makeObservation(runId, sessionId, "static-observation-1", asset, viewport);
   const secondObservation = makeObservation(runId, sessionId, "static-observation-2", asset, viewport);
-  const compiler = new DefaultContextCompiler(createDefaultComputerTools());
-  const firstInput = await compiler.compile({ goal: "Click the blue button in the synthetic UI once, then report whether the request was completed.", latestObservation: firstObservation, recentEvents: baseEvents(runId, sessionId, firstObservation) }, new AbortController().signal);
+  const registry = createDefaultToolRegistry();
+  if (options.planning) registry.registerMany(createPlanningTools(new InMemoryPlanStore()));
+  const compiler = new DefaultContextCompiler(registry);
+  const firstInput = await compiler.compile({ runId, goal: "Click the blue button in the synthetic UI once, then report whether the request was completed.", latestObservation: firstObservation, recentEvents: baseEvents(runId, sessionId, firstObservation) }, new AbortController().signal);
   const models: ProviderName[] = options.model === "all" ? ["glm-5.3-flash", "qwen3.8-flash"] : [options.model];
   const results: ModelRunResult[] = [];
   for (const provider of models) {
@@ -494,7 +499,7 @@ async function main(): Promise<void> {
         makeEvent(runId, 6, "tool.call.completed", { result: { callId: firstCall.id, status: "completed", output: { fixture: "external_import", executed: false } } }),
         makeEvent(runId, 7, "observation.created", { observation: secondObservation }),
       ];
-      return compiler.compile({ goal: "Click the blue button in the synthetic UI once, then report whether the request was completed.", latestObservation: secondObservation, recentEvents: events }, new AbortController().signal);
+      return compiler.compile({ runId, goal: "Click the blue button in the synthetic UI once, then report whether the request was completed.", latestObservation: secondObservation, recentEvents: events }, new AbortController().signal);
     });
     results.push(result);
   }
@@ -503,7 +508,8 @@ async function main(): Promise<void> {
     kind: "static_api_conformance",
     protocol: "provider-adapter-v1",
     fixture: { kind: "synthetic_non_sensitive_image", fileName: basename(options.image), byteLength: imageBytes.byteLength, viewport },
-    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs, qwenThinking: options.qwenThinking, qwenOutputMode: options.qwenOutputMode },
+    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs, qwenThinking: options.qwenThinking, qwenOutputMode: options.qwenOutputMode, planning: options.planning },
+    toolNames: registry.modelTools().map((tool) => tool.name),
     results,
   };
   await writeFile(resolve(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");

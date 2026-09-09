@@ -21,6 +21,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       name: "click",
       description: "Click one point in the current screen observation.",
       category: "computer",
+      coordinate: { fields: ["x", "y"] },
       inputSchema: {
         type: "object",
         properties: {
@@ -91,6 +92,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       name: "scroll",
       description: "Scroll at a screen point by positive wheel ticks.",
       category: "computer",
+      coordinate: { fields: ["x", "y"] },
       inputSchema: {
         type: "object",
         properties: {
@@ -109,6 +111,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
       name: "drag",
       description: "Drag from one desktop point to another in the current observation.",
       category: "computer",
+      coordinate: { fields: ["fromX", "fromY", "toX", "toY"] },
       inputSchema: {
         type: "object",
         properties: {

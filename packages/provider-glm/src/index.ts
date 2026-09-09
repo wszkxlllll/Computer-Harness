@@ -14,6 +14,8 @@ import type {
   ModelMessage,
   ModelToolSpec,
   ProviderAdapter,
+  ControlKind,
+  CoordinateField,
 } from "@computer-harness/runtime";
 
 export type GlmCoordinateMode = "normalized_1000" | "actual_pixels";
@@ -39,6 +41,13 @@ export interface GlmHttpClient {
   post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown>;
 }
 
+export type GlmRetryMode = "same_input" | "feedback";
+
+export interface FetchGlmHttpClientOptions {
+  /** Maximum wall-clock time for fetch plus response-body consumption. */
+  readonly requestTimeoutMs?: number;
+}
+
 export interface GlmAdapterOptions {
   apiKey: string;
   profile: GlmProfileName | GlmProfile;
@@ -52,6 +61,7 @@ export class GlmProviderError extends Error {
     message: string,
     public readonly code = "GLM_PROVIDER_ERROR",
     public readonly retryable = isRetryableGlmErrorCode(code),
+    public readonly retryMode: GlmRetryMode = "feedback",
   ) {
     super(message);
     this.name = "GlmProviderError";
@@ -82,7 +92,7 @@ export class GlmAdapter implements ProviderAdapter {
     options.signal.throwIfAborted();
     const body = {
       model: this.profile.name,
-      messages: await this.presentMessages(`${input.system}\n${profilePrompt(this.profile)}`, input.messages, options.signal),
+      messages: await this.presentMessages(`${input.system}\n${profilePrompt(this.profile)}`, input.messages, input.tools, options.signal),
       tools: input.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(input))),
       stream: false,
       thinking: { type: this.profile.thinking },
@@ -97,7 +107,7 @@ export class GlmAdapter implements ProviderAdapter {
     return this.parseResponse(response, input);
   }
 
-  private async presentMessages(system: string, messages: readonly ModelMessage[], signal: AbortSignal): Promise<unknown[]> {
+  private async presentMessages(system: string, messages: readonly ModelMessage[], tools: readonly ModelToolSpec[], signal: AbortSignal): Promise<unknown[]> {
     const result: unknown[] = [{ role: "system", content: system }];
     for (const message of messages) {
       signal.throwIfAborted();
@@ -124,12 +134,13 @@ export class GlmAdapter implements ProviderAdapter {
           }
           reasoningContent = block.continuation.content;
         } else if (block.type === "tool_call") {
+          const tool = tools.find((item) => item.name === block.call.name);
           toolCalls.push({
             id: block.call.id,
             type: "function",
             function: {
               name: block.call.name,
-              arguments: JSON.stringify(encodeCoordinates(block.call, block.viewport, this.profile.coordinateMode)),
+              arguments: JSON.stringify(encodeCoordinates(block.call, block.viewport, this.profile.coordinateMode, tool?.coordinate?.fields)),
             },
           });
         }
@@ -167,7 +178,17 @@ export class GlmAdapter implements ProviderAdapter {
         if (!input.tools.some((tool) => tool.name === parsed.name)) {
           throw new GlmProviderError(`GLM selected a tool not offered by this run: ${parsed.name}`, "GLM_UNAVAILABLE_TOOL");
         }
-        calls.push(mapCoordinates(parsed, latestViewport(input), this.profile.coordinateMode));
+        const tool = input.tools.find((item) => item.name === parsed.name);
+        if (tool?.control !== undefined) {
+          if (calls.length > 0 || rawToolCalls.length !== 1) {
+            throw new GlmProviderError("GLM control calls cannot be mixed with other tool calls", "GLM_INVALID_TOOL_CALL");
+          }
+          const control = mapControlCall(tool.control, parsed.arguments, parsed.name);
+          return control.type === "finish"
+            ? { ...control, ...(usage === undefined ? {} : { usage }) }
+            : { ...control, ...(usage === undefined ? {} : { usage }) };
+        }
+        calls.push(mapCoordinates(parsed, latestViewport(input), this.profile.coordinateMode, tool?.coordinate?.fields));
       }
       const assistantText = typeof message.content === "string" && message.content.trim().length > 0
         ? message.content
@@ -188,53 +209,131 @@ export class GlmAdapter implements ProviderAdapter {
 }
 
 export class FetchGlmHttpClient implements GlmHttpClient {
+  private readonly requestTimeoutMs: number;
+
+  public constructor(options: FetchGlmHttpClientOptions = {}) {
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 240_000;
+    if (!Number.isInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new Error("GLM requestTimeoutMs must be a positive integer");
+    }
+  }
+
   public async post(
     url: string,
     body: Record<string, unknown>,
     headers: Readonly<Record<string, string>>,
     signal: AbortSignal,
   ): Promise<unknown> {
-    let response: Response;
+    const requestController = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      requestController.abort(new Error(`GLM request deadline exceeded after ${this.requestTimeoutMs}ms`));
+    }, this.requestTimeoutMs);
+    const abortRequest = () => requestController.abort(signal.reason);
+    if (signal.aborted) {
+      abortRequest();
+    } else {
+      signal.addEventListener("abort", abortRequest, { once: true });
+    }
     try {
-      response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      });
-    } catch (error) {
-      if (signal.aborted) throw error;
-      throw new GlmProviderError(
-        `GLM network request failed: ${error instanceof Error ? error.message : String(error)}`,
-        "GLM_NETWORK_ERROR",
-        true,
-      );
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: requestController.signal,
+        });
+      } catch (error) {
+        if (signal.aborted) throw signal.reason ?? error;
+        if (timedOut) {
+          throw new GlmProviderError(
+            `GLM request timed out after ${this.requestTimeoutMs}ms`,
+            "GLM_REQUEST_TIMEOUT",
+            true,
+            "same_input",
+          );
+        }
+        throw new GlmProviderError(
+          `GLM network request failed (${networkDiagnostic(error)})`,
+          "GLM_NETWORK_ERROR",
+          true,
+          "same_input",
+        );
+      }
+      const payload = await response.json().catch((error: unknown) => {
+        if (signal.aborted) throw signal.reason ?? error;
+        if (timedOut) {
+          throw new GlmProviderError(
+            `GLM response body timed out after ${this.requestTimeoutMs}ms`,
+            "GLM_REQUEST_TIMEOUT",
+            true,
+            "same_input",
+          );
+        }
+        throw new GlmProviderError(
+          `GLM response body could not be read (${networkDiagnostic(error)})`,
+          "GLM_NETWORK_ERROR",
+          true,
+          "same_input",
+        );
+      }) as unknown;
+      if (!response.ok) {
+        const code = readErrorCode(payload);
+        const providerMessage = readErrorMessage(payload);
+        const retryable = code === "1305" || response.status === 429 || response.status >= 500;
+        throw new GlmProviderError(
+          `GLM HTTP ${response.status}${code === undefined ? "" : ` (${code})`}${providerMessage === undefined ? "" : `: ${sanitizeDiagnosticText(providerMessage)}`}`,
+          code ?? `GLM_HTTP_${response.status}`,
+          retryable,
+          retryable ? "same_input" : "feedback",
+        );
+      }
+      return payload;
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abortRequest);
     }
-    const payload = await response.json().catch(() => undefined) as unknown;
-    if (!response.ok) {
-      const code = readErrorCode(payload);
-      throw new GlmProviderError(
-        `GLM HTTP ${response.status}${code === undefined ? "" : ` (${code})`}`,
-        code ?? `GLM_HTTP_${response.status}`,
-        code === "1305" || response.status === 429 || response.status >= 500,
-      );
-    }
-    return payload;
   }
 }
 
+function networkDiagnostic(error: unknown): string {
+  if (!(error instanceof Error)) return `type=${typeof error}; message=${sanitizeDiagnosticText(String(error))}`;
+  const cause = isRecord(error.cause) ? error.cause : undefined;
+  const causeCode = cause !== undefined && typeof cause.code === "string" ? cause.code : undefined;
+  const causeName = cause !== undefined && typeof cause.name === "string" ? cause.name : undefined;
+  const parts = [`name=${error.name}`];
+  if (causeCode !== undefined) parts.push(`causeCode=${causeCode}`);
+  if (causeName !== undefined) parts.push(`causeName=${causeName}`);
+  if (error.message.trim().length > 0) parts.push(`message=${sanitizeDiagnosticText(error.message)}`);
+  return parts.join("; ");
+}
+
+function sanitizeDiagnosticText(value: string): string {
+  return value
+    .slice(0, 240)
+    .replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+/giu, "$1[redacted]")
+    .replace(/(bearer\s+)[A-Za-z0-9._~+\-/]+=*/giu, "$1[redacted]")
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|auth(?:orization)?|token|secret|password|signature|sig)=)[^&\s]+/giu, "$1[redacted]")
+    .replace(/((?:api[_-]?key|access[_-]?token|auth(?:orization)?|token|secret|password|signature|sig)\s*[:=]\s*)[^\s,;]+/giu, "$1[redacted]")
+    .replace(/(https?:\/\/)[^/\s@]+@/giu, "$1[redacted]@");
+}
+
 function toGlmTool(tool: ModelToolSpec, profile: GlmProfile, viewport: Viewport | undefined): Record<string, unknown> {
-  const coordinateHint = profile.coordinateMode === "normalized_1000"
-    ? " Coordinates x/y/fromX/fromY/toX/toY are normalized numbers from 0 to 1000."
-    : viewport === undefined
-      ? " Coordinates are pixels in the current image viewport."
-      : ` Coordinates are pixels in the current image viewport (x 0-${viewport.width - 1}, y 0-${viewport.height - 1}).`;
+  const coordinateHint = tool.coordinate === undefined
+    ? ""
+    : profile.coordinateMode === "normalized_1000"
+      ? ` Coordinates ${tool.coordinate.fields.join(",")} are normalized numbers from 0 to 1000.`
+      : viewport === undefined
+        ? ` Coordinates ${tool.coordinate.fields.join(",")} are pixels in the current image viewport.`
+        : ` Coordinates ${tool.coordinate.fields.join(",")} are pixels in the current image viewport.`;
   return {
     type: "function",
     function: {
       name: tool.name,
       description: `${tool.description}${coordinateHint}`,
-      parameters: addCoordinateBounds(tool.inputSchema ?? { type: "object", properties: {} }, tool.name, profile.coordinateMode, viewport),
+      parameters: addCoordinateBounds(tool.inputSchema ?? { type: "object", properties: {} }, tool.coordinate?.fields, profile.coordinateMode, viewport),
     },
   };
 }
@@ -309,17 +408,16 @@ function readToolCall(value: unknown): { id: ToolCallId; name: string; arguments
   return { id: value.id as ToolCallId, name: value.function.name, arguments: args };
 }
 
-function mapCoordinates(call: { id: ToolCallId; name: string; arguments: JsonValue }, viewport: Viewport | undefined, mode: GlmCoordinateMode): ToolCall {
-  if (mode !== "normalized_1000" || typeof call.arguments !== "object" || call.arguments === null || Array.isArray(call.arguments)) {
+function mapCoordinates(call: { id: ToolCallId; name: string; arguments: JsonValue }, viewport: Viewport | undefined, mode: GlmCoordinateMode, fields: readonly CoordinateField[] | undefined): ToolCall {
+  if (mode !== "normalized_1000" || fields === undefined || typeof call.arguments !== "object" || call.arguments === null || Array.isArray(call.arguments)) {
     return call;
   }
   const args = { ...(call.arguments as Record<string, JsonValue>) };
-  const coordinateKeys = ["x", "y", "fromX", "fromY", "toX", "toY"];
-  if (viewport === undefined && coordinateKeys.some((key) => args[key] !== undefined)) {
+  if (viewport === undefined && fields.some((key) => args[key] !== undefined)) {
     throw new GlmProviderError("GLM normalized coordinates require an image viewport", "GLM_MISSING_VIEWPORT");
   }
   if (viewport === undefined) return call;
-  for (const key of coordinateKeys) {
+  for (const key of fields) {
     const value = args[key];
     if (value === undefined) continue;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1000) {
@@ -330,13 +428,12 @@ function mapCoordinates(call: { id: ToolCallId; name: string; arguments: JsonVal
   return { ...call, arguments: args };
 }
 
-function encodeCoordinates(call: ToolCall, viewport: Viewport | undefined, mode: GlmCoordinateMode): JsonValue {
-  if (mode !== "normalized_1000" || viewport === undefined || typeof call.arguments !== "object" || call.arguments === null || Array.isArray(call.arguments)) {
+function encodeCoordinates(call: ToolCall, viewport: Viewport | undefined, mode: GlmCoordinateMode, fields: readonly CoordinateField[] | undefined): JsonValue {
+  if (mode !== "normalized_1000" || fields === undefined || viewport === undefined || typeof call.arguments !== "object" || call.arguments === null || Array.isArray(call.arguments)) {
     return call.arguments;
   }
   const args = { ...(call.arguments as Record<string, JsonValue>) };
-  const coordinateKeys = ["x", "y", "fromX", "fromY", "toX", "toY"];
-  for (const key of coordinateKeys) {
+  for (const key of fields) {
     const value = args[key];
     if (value === undefined) continue;
     if (typeof value !== "number" || !Number.isFinite(value)) return call.arguments;
@@ -345,14 +442,14 @@ function encodeCoordinates(call: ToolCall, viewport: Viewport | undefined, mode:
   return args;
 }
 
-function addCoordinateBounds(schema: JsonValue, toolName: string, mode: GlmCoordinateMode, viewport: Viewport | undefined): JsonValue {
-  if (toolName !== "click" && toolName !== "scroll" && toolName !== "drag") return schema;
+function addCoordinateBounds(schema: JsonValue, fields: readonly CoordinateField[] | undefined, mode: GlmCoordinateMode, viewport: Viewport | undefined): JsonValue {
+  if (fields === undefined) return schema;
   if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return schema;
   const record = schema as Record<string, JsonValue>;
   const properties = record.properties;
   if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return schema;
   const nextProperties = { ...(properties as Record<string, JsonValue>) };
-  for (const key of ["x", "y", "fromX", "fromY", "toX", "toY"]) {
+  for (const key of fields) {
     const property = nextProperties[key];
     if (typeof property !== "object" || property === null || Array.isArray(property)) continue;
     const isX = key.endsWith("X") || key === "x";
@@ -380,9 +477,27 @@ function latestViewport(input: ModelInput): Viewport | undefined {
   return undefined;
 }
 
+function mapControlCall(control: ControlKind, argumentsValue: JsonValue, name: string): ModelTurn {
+  if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) {
+    throw new GlmProviderError(`GLM control ${name} arguments must be an object`, "GLM_INVALID_TOOL_CALL");
+  }
+  const args = argumentsValue as Record<string, JsonValue>;
+  if (control === "finish") {
+    if (args.status !== "success" && args.status !== "failure") throw new GlmProviderError("GLM terminate requires status success or failure", "GLM_INVALID_TOOL_CALL");
+    return { type: "finish", summary: typeof args.text === "string" && args.text.trim().length > 0 ? args.text : `GLM terminated with ${args.status}`, reportedStatus: args.status };
+  }
+  if (typeof args.text !== "string" || args.text.trim().length === 0) throw new GlmProviderError("GLM interact requires text", "GLM_INVALID_TOOL_CALL");
+  return { type: "user_input_required", question: args.text };
+}
+
 function readErrorCode(value: unknown): string | undefined {
   if (!isRecord(value) || !isRecord(value.error) || typeof value.error.code !== "string") return undefined;
   return value.error.code;
+}
+
+function readErrorMessage(value: unknown): string | undefined {
+  if (!isRecord(value) || !isRecord(value.error) || typeof value.error.message !== "string" || value.error.message.trim().length === 0) return undefined;
+  return value.error.message;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

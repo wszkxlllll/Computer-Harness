@@ -37,13 +37,21 @@ import type {
   RuntimePolicy,
   ToolDefinition,
   ToolExecutionContext,
+  ToolAudience,
   ToolPolicyDecision,
 } from "./contracts.js";
 import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
 import { ToolRegistry } from "./tool-registry.js";
 
-const MAX_PROVIDER_RETRIES = 3;
+const MAX_PROVIDER_RETRIES = 1;
+const PROVIDER_RETRY_BASE_DELAY_MS = 500;
+const PROVIDER_RETRY_DELAY_CAP_MS = 5_000;
+const PROVIDER_ATTEMPT_DEADLINE_MS = 240_000;
+/** Covers the initial request, one retry and their bounded delay for the default HTTP clients. */
+const MAX_PROVIDER_RETRY_WINDOW_MS = 480_000;
+/** Once GUI actions are exhausted, allow only a small number of model decisions for finish/plan closure. */
+const MAX_ACTION_BUDGET_CLOSE_TURNS = 2;
 export interface RunControllerDependencies {
   runId: RunId;
   provider: ProviderAdapter;
@@ -56,6 +64,8 @@ export interface RunControllerDependencies {
   clock?: Clock;
   idFactory?: IdFactory;
   computerOpenOptions?: ComputerOpenOptions;
+  /** Execution audience is explicit even when only the main Run exists today. */
+  toolAudience?: ToolAudience;
   onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
 }
 
@@ -212,6 +222,7 @@ export class RunController {
   private readonly idFactory: IdFactory;
   private readonly computerOpenOptions: ComputerOpenOptions;
   private readonly onCleanupError: ((diagnostic: CleanupDiagnostic) => void) | undefined;
+  private readonly toolAudience: ToolAudience;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
   private readonly callStates = new Map<ToolCallId, CallState>();
@@ -225,6 +236,8 @@ export class RunController {
   private pendingToolTurn: PendingToolTurn | undefined;
   private pendingModelTurn: { turn: ModelTurn; invalidated?: boolean } | undefined;
   private pendingReobserve = false;
+  private actionBudgetExhausted = false;
+  private actionBudgetCloseTurnsRemaining = MAX_ACTION_BUDGET_CLOSE_TURNS;
 
   public constructor(dependencies: RunControllerDependencies) {
     this.runId = dependencies.runId;
@@ -238,12 +251,14 @@ export class RunController {
     this.clock = dependencies.clock ?? systemClock;
     this.idFactory = dependencies.idFactory ?? randomIdFactory;
     this.computerOpenOptions = dependencies.computerOpenOptions ?? {};
+    this.toolAudience = dependencies.toolAudience ?? "main";
     this.onCleanupError = dependencies.onCleanupError;
     this.snapshot = {
       runId: this.runId,
       status: "created",
       stepCount: 0,
       modelRequestCount: 0,
+      plan: { runId: this.runId, tasks: [] },
     };
   }
 
@@ -357,6 +372,15 @@ export class RunController {
         }
         await this.refreshAfterUserInput(session);
         this.throwIfAborted();
+        if (this.actionBudgetExhausted && this.actionBudgetCloseTurnsRemaining <= 0) {
+          await this.commitEvent({
+            type: "runtime.error",
+            category: "budget",
+            message: "GUI action budget exhausted; closing decision limit reached",
+          });
+          outcome = "budget_exhausted";
+          break;
+        }
         const budget = this.policy.checkBudget(this.snapshot);
         if (!budget.allowed) {
           await this.commitEvent({
@@ -382,16 +406,29 @@ export class RunController {
         } else {
           const context = await this.contextCompiler.compile(
             {
+              runId: this.runId,
               goal,
+              plan: this.snapshot.plan,
               recentEvents: this.events,
               ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
             },
             this.abortController.signal,
           );
           this.throwIfAborted();
+          // A user correction may arrive while the compiler is awaiting
+          // assets or assembling a long context.  Do not send that stale
+          // ModelInput to the Provider: consume the command, refresh the
+          // observation if needed, and compile again from the new facts.
+          const afterCompile = await this.drainCommands();
+          if ((this.snapshot.status as string) === "paused" || afterCompile.correction) {
+            if (afterCompile.correction) await this.refreshAfterUserInput(session);
+            continue;
+          }
           let requestContext = context;
           let retryCount = 0;
           let providerFailed = false;
+          const retryWindowStartedAt = Date.now();
+          let closeTurnConsumed = false;
           turn = undefined;
           while (turn === undefined) {
             if (retryCount > 0) {
@@ -408,12 +445,22 @@ export class RunController {
               }
             }
             this.throwIfAborted();
+            if (this.actionBudgetExhausted && !closeTurnConsumed) {
+              this.actionBudgetCloseTurnsRemaining -= 1;
+              closeTurnConsumed = true;
+            }
             await this.commitEvent({ type: "model.request.started", providerId: this.provider.id });
             try {
               turn = await this.provider.generate(requestContext, { signal: this.abortController.signal });
             } catch (error) {
               const details = providerErrorDetails(error);
-              const retry = !this.isAborted() && details.retryable === true && retryCount < MAX_PROVIDER_RETRIES;
+              const nextRetryCount = retryCount + 1;
+              const retryDelayMs = providerRetryDelayMs(nextRetryCount);
+              const retryWindowRemaining = MAX_PROVIDER_RETRY_WINDOW_MS - (Date.now() - retryWindowStartedAt);
+              const retry = !this.isAborted()
+                && details.retryable === true
+                && retryCount < MAX_PROVIDER_RETRIES
+                && retryWindowRemaining > retryDelayMs + PROVIDER_ATTEMPT_DEADLINE_MS;
               await this.commitEvent({
                 type: "model.request.failed",
                 category: this.isAborted() ? "cancelled" : "provider",
@@ -425,8 +472,11 @@ export class RunController {
                 providerFailed = true;
                 break;
               }
-              retryCount += 1;
-              requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
+              retryCount = nextRetryCount;
+              await waitBeforeProviderRetry(this.abortController.signal, retryCount);
+              if (providerErrorDetails(error).retryMode !== "same_input") {
+                requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
+              }
             }
           }
           if (providerFailed || turn === undefined) {
@@ -692,6 +742,8 @@ export class RunController {
     };
     if (pending.definition.category === "computer") {
       await this.executeComputerCall(pending.call, pending.definition, context);
+    } else if (pending.definition.category === "control") {
+      await this.rejectToolCall(pending.call.id, "control decisions must be mapped by the Provider, not executed as tools");
     } else {
       await this.executeNonComputerCall(pending.call, pending.definition, context);
     }
@@ -714,9 +766,9 @@ export class RunController {
 
     const preflight: PreflightEntry[] = [];
     for (const call of calls) {
-      const definition = this.toolRegistry.get(call.name);
+      const definition = this.toolRegistry.getForAudience(call.name, this.toolAudience);
       if (definition === undefined) {
-        preflight.push({ call, rejection: `unknown tool: ${call.name}` });
+        preflight.push({ call, rejection: `tool is not available to ${this.toolAudience}: ${call.name}` });
         continue;
       }
       try {
@@ -725,7 +777,23 @@ export class RunController {
         preflight.push({ call, definition, rejection: `invalid arguments: ${errorMessage(error)}` });
         continue;
       }
+      if (definition.category === "control") {
+        preflight.push({ call, definition, rejection: "control decisions must be returned as ModelTurn control results" });
+        continue;
+      }
       const decision = await this.policy.evaluateToolCall({ call, tool: definition, snapshot: this.snapshot });
+      if (definition.category === "computer") {
+        const actionBudget = this.policy.checkActionBudget(this.snapshot);
+        if (!actionBudget.allowed) {
+          this.actionBudgetExhausted = true;
+          preflight.push({
+            call,
+            definition,
+            rejection: actionBudget.reason ?? "computer action budget exhausted",
+          });
+          continue;
+        }
+      }
       if (decision.decision === "allow") {
         preflight.push({ call, definition, decision });
       } else if (decision.decision === "require_approval") {
@@ -815,8 +883,16 @@ export class RunController {
       this.throwIfAborted();
       if (entry.definition.category === "computer") {
         await this.executeComputerCall(entry.call, entry.definition, context);
+      } else if (entry.definition.category === "control") {
+        await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
         await this.executeNonComputerCall(entry.call, entry.definition, context);
+      }
+      const callState = this.callStates.get(entry.call.id);
+      if (callState === "failed" || callState === "rejected") {
+        if (this.snapshot.status === "finished") return { correction: false };
+        await this.rejectPendingEntries(pendingTurn.entries, index + 1, `previous ToolCall ${entry.call.id} did not complete; remaining calls were not executed`);
+        return { correction: false };
       }
       const afterTool = await this.drainCommands();
       if (afterTool.correction) {
@@ -862,6 +938,32 @@ export class RunController {
   ): Promise<void> {
     try {
       const output = await definition.execute(call.arguments, context);
+      if (definition.category === "planning" && definition.planMutationFromResult !== undefined) {
+        const mutation = definition.planMutationFromResult(output);
+        if (mutation !== undefined) {
+          await this.commitEvent({ type: "planning.task.updated", callId: call.id, mutation });
+          if (definition.afterPlanCommit !== undefined) {
+            try {
+              await definition.afterPlanCommit(mutation, context);
+            } catch (error) {
+              const result: ToolResult = {
+                callId: call.id,
+                status: "failed",
+                error: { code: "PLAN_MATERIALIZATION_FAILED", message: errorMessage(error) },
+              };
+              await this.commitEvent({ type: "tool.call.failed", result });
+              this.callStates.set(call.id, "failed");
+              await this.commitEvent({
+                type: "runtime.error",
+                category: "planning_materialization_failed",
+                message: errorMessage(error),
+              });
+              await this.commitEvent({ type: "run.finished", outcome: "failed" });
+              return;
+            }
+          }
+        }
+      }
       const result: ToolResult = { callId: call.id, status: "completed", output };
       await this.commitEvent({ type: "tool.call.completed", result });
       this.callStates.set(call.id, "completed");
@@ -1055,13 +1157,43 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function providerErrorDetails(error: unknown): { code?: string; retryable?: boolean } {
+function providerErrorDetails(error: unknown): { code?: string; retryable?: boolean; retryMode?: "same_input" | "feedback" } {
   if (typeof error !== "object" || error === null) return {};
   const candidate = error as { code?: unknown; retryable?: unknown };
   return {
     ...(typeof candidate.code === "string" && candidate.code.length > 0 ? { code: candidate.code } : {}),
     ...(typeof candidate.retryable === "boolean" ? { retryable: candidate.retryable } : {}),
+    ...((candidate as { retryMode?: unknown }).retryMode === "same_input" || (candidate as { retryMode?: unknown }).retryMode === "feedback"
+      ? { retryMode: (candidate as { retryMode: "same_input" | "feedback" }).retryMode }
+      : {}),
   };
+}
+
+async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number): Promise<void> {
+  const delayMs = providerRetryDelayMs(retryCount);
+  await new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new Error("run aborted"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new Error("run aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function providerRetryDelayMs(retryCount: number): number {
+  return Math.min(
+    PROVIDER_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, retryCount - 1)),
+    PROVIDER_RETRY_DELAY_CAP_MS,
+  );
 }
 
 function providerFailureMessage(error: unknown, retry: boolean, attempt: number): string {

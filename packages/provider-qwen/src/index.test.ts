@@ -34,7 +34,19 @@ function input(): ModelInput {
     drag: { type: "object", properties: { fromX: { type: "number" }, fromY: { type: "number" }, toX: { type: "number" }, toY: { type: "number" } }, required: ["fromX", "fromY", "toX", "toY"], additionalProperties: false },
     wait: { type: "object", properties: { durationMs: { type: "number" } }, required: ["durationMs"], additionalProperties: false },
   };
-  return { system: "system", messages: [{ role: "user", content: [{ type: "image", asset, viewport }] }], tools: Object.keys(schemas).map((name) => ({ name, description: `${name} description`, inputSchema: schemas[name]! })) };
+  const tools: ModelInput["tools"] = Object.keys(schemas).map((name) => ({
+    name,
+    description: `${name} description`,
+    category: "computer" as const,
+    ...(name === "click" || name === "scroll" ? { coordinate: { fields: ["x", "y"] as const } } : {}),
+    ...(name === "drag" ? { coordinate: { fields: ["fromX", "fromY", "toX", "toY"] as const } } : {}),
+    inputSchema: schemas[name]!,
+  }));
+  tools.push(
+    { name: "terminate", description: "finish", category: "control" as const, control: "finish" as const, inputSchema: { type: "object", properties: { status: { type: "string", enum: ["success", "failure"] }, text: { type: "string" } }, required: ["status"], additionalProperties: false } },
+    { name: "interact", description: "ask", category: "control" as const, control: "user_input_required" as const, inputSchema: { type: "object", properties: { text: { type: "string" } } } },
+  );
+  return { system: "system", messages: [{ role: "user", content: [{ type: "image", asset, viewport }] }], tools };
 }
 
 function response(name: string, argumentsValue: Record<string, unknown>, usage?: Record<string, number>): unknown {
@@ -42,6 +54,10 @@ function response(name: string, argumentsValue: Record<string, unknown>, usage?:
     choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "native-call-1", type: "function", function: { name, arguments: JSON.stringify(argumentsValue) } }] } }],
     ...(usage === undefined ? {} : { usage }),
   };
+}
+
+function withoutControls(value: ModelInput): ModelInput {
+  return { ...value, tools: value.tools.filter((tool) => tool.control === undefined) };
 }
 
 describe("Qwen3.8-Flash provider adapter", () => {
@@ -71,8 +87,30 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.tool_choice).toBeUndefined();
     expect(client.body?.response_format).toMatchObject({
       type: "json_schema",
-      json_schema: { name: "qwen_model_turn", strict: true, schema: { additionalProperties: false, required: ["kind", "id", "name", "arguments"], properties: { arguments: { additionalProperties: false, properties: { x: { type: "number", maximum: 1000 }, y: { type: "number", maximum: 1000 }, status: { enum: ["success", "failure"] } } } } } },
+      json_schema: { name: "qwen_model_turn", strict: true, schema: { type: "object", anyOf: expect.any(Array) } },
     });
+    const variants = (client.body?.response_format as { json_schema?: { schema?: { anyOf?: Array<Record<string, unknown>> } } } | undefined)?.json_schema?.schema?.anyOf ?? [];
+    const variantName = (variant: Record<string, unknown>): string | undefined => {
+      const properties = variant.properties;
+      if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return undefined;
+      const name = (properties as Record<string, unknown>).name;
+      if (typeof name !== "object" || name === null || Array.isArray(name)) return undefined;
+      const values = (name as Record<string, unknown>).enum;
+      return Array.isArray(values) && typeof values[0] === "string" ? values[0] : undefined;
+    };
+    const variantKind = (variant: Record<string, unknown>): unknown => {
+      const properties = variant.properties;
+      if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return undefined;
+      const kind = (properties as Record<string, unknown>).kind;
+      if (typeof kind !== "object" || kind === null || Array.isArray(kind)) return undefined;
+      return (kind as Record<string, unknown>).enum;
+    };
+    expect(variants.length).toBeGreaterThan(0);
+    expect(variants.every((variant) => JSON.stringify(variantKind(variant)) === JSON.stringify(["tool_call"]))).toBe(true);
+    const clickVariant = variants.find((variant) => variantName(variant) === "click");
+    const terminateVariant = variants.find((variant) => variantName(variant) === "terminate");
+    expect(clickVariant?.properties).toMatchObject({ arguments: { properties: { x: { maximum: 1000 }, y: { maximum: 1000 } } } });
+    expect(terminateVariant?.properties).toMatchObject({ arguments: { properties: { status: { enum: ["success", "failure"] } } } });
   });
 
   it("projects strict-mode tool history as JSON content instead of native tool messages", async () => {
@@ -82,7 +120,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "disabled", outputMode: "strict_json" });
     const first = await adapter.generate(input(), { signal: new AbortController().signal });
     if (first.type !== "tool_calls") throw new Error("expected tool call");
-    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "finish", id: "q38-json-finish", name: "terminate", arguments: { status: "success", text: "done" } }) } }] });
+    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-json-finish", name: "terminate", arguments: { status: "success", text: "done" } }) } }] });
     const secondInput: ModelInput = {
       ...input(),
       messages: [
@@ -95,6 +133,24 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const messages = secondClient.body?.messages as Array<Record<string, unknown>>;
     expect(messages.some((message) => Array.isArray(message.tool_calls))).toBe(false);
     expect(messages.some((message) => message.role === "user" && typeof message.content === "string" && message.content.includes("Tool result"))).toBe(true);
+  });
+
+  it("maps strict controls through registry metadata and rejects unavailable or legacy envelopes", async () => {
+    const unavailable = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-no-control", name: "terminate", arguments: { status: "success" } }) } }] });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: unavailable, thinking: "disabled" }).generate(withoutControls(input()), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_UNAVAILABLE_TOOL" });
+
+    const aliasInput: ModelInput = {
+      ...input(),
+      tools: input().tools.map((tool) => tool.name === "terminate" ? { ...tool, name: "complete" } : tool),
+    };
+    const aliasClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-alias", name: "complete", arguments: { status: "success", text: "done" } }) } }] });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: aliasClient, thinking: "disabled" }).generate(aliasInput, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success" });
+
+    const mismatch = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "user_input_required", id: "q38-mismatch", name: "terminate", arguments: { status: "success" } }) } }] });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mismatch, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_RESPONSE" });
+
+    const interactClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-interact", name: "interact", arguments: { text: "Which window should I use?" } }) } }] });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: interactClient, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "user_input_required", question: "Which window should I use?" });
   });
 
   it("rejects plain assistant text without an explicit terminate tool call", async () => {

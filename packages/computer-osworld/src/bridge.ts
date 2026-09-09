@@ -16,6 +16,8 @@ export interface OsworldBridgeCapabilities {
   screenshot: boolean;
   pointer: boolean;
   keyboard: boolean;
+  /** Backend-provided key vocabulary used for pre-dispatch validation. */
+  keyboardKeys?: string[];
 }
 
 export interface OsworldBridgeDescription {

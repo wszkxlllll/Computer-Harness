@@ -35,7 +35,7 @@ const server = createServer(async (request, response) => {
   switch (input.method) {
     case "health": result = { status: "ok", protocolVersion: mode === "bad-version" ? "999" : "1" }; break;
     case "environment.reset": result = { taskId: input.params.taskId, instruction: "fake task" }; break;
-    case "computer.describe": result = { viewport: { width: 800, height: 600, coordinateSpace: "physical" }, capabilities: { screenshot: true, pointer: true, keyboard: true } }; break;
+    case "computer.describe": result = { viewport: { width: 800, height: 600, coordinateSpace: "physical" }, capabilities: { screenshot: true, pointer: true, keyboard: true, keyboardKeys: ["ctrl", "a", "enter", "shift", "down"] } }; break;
     case "computer.observe": result = mode === "bad-capture" ? { ...capture, mediaType: "image/jpeg" } : capture; break;
     case "computer.execute": result = { status: "completed", postActionCapture: capture }; break;
     case "environment.evaluate": result = { score: 1 }; break;

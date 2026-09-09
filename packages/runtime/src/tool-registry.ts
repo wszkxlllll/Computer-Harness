@@ -1,5 +1,5 @@
 import type { JsonValue } from "@computer-harness/protocol";
-import type { ModelToolSpec, ToolDefinition } from "./contracts.js";
+import type { ModelToolSpec, ToolAudience, ToolDefinition } from "./contracts.js";
 
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition>();
@@ -11,24 +11,44 @@ export class ToolRegistry {
     this.definitions.set(definition.name, definition);
   }
 
+  public registerMany(definitions: readonly ToolDefinition[]): void {
+    for (const definition of definitions) this.register(definition);
+  }
+
   public get(name: string): ToolDefinition | undefined {
     return this.definitions.get(name);
+  }
+
+  public getForAudience(name: string, audience: ToolAudience = "main"): ToolDefinition | undefined {
+    const definition = this.get(name);
+    return definition !== undefined && isVisibleTo(definition, audience) ? definition : undefined;
   }
 
   public list(): readonly ToolDefinition[] {
     return [...this.definitions.values()];
   }
 
-  public modelTools(): ModelToolSpec[] {
-    return this.list().map((definition) => {
+  public modelTools(audience: ToolAudience = "main"): ModelToolSpec[] {
+    return this.list().filter((definition) => isVisibleTo(definition, audience)).map((definition) => {
       const base: ModelToolSpec = {
         name: definition.name,
         description: definition.description,
+        category: definition.category,
       };
       if (definition.inputSchema !== undefined) {
         base.inputSchema = definition.inputSchema;
       }
+      if (definition.coordinate !== undefined) {
+        base.coordinate = { fields: [...definition.coordinate.fields] };
+      }
+      if (definition.category === "control") {
+        base.control = definition.control;
+      }
       return base;
     });
   }
+}
+
+function isVisibleTo(definition: ToolDefinition, audience: ToolAudience): boolean {
+  return definition.audiences === undefined ? audience === "main" : definition.audiences.includes(audience);
 }

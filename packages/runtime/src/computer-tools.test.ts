@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultComputerTools } from "./computer-tools.js";
+import { createDefaultToolRegistry } from "./control-tools.js";
 
 describe("default Computer tools", () => {
   it("exposes one canonical definition for each V1 action", () => {
@@ -46,5 +47,25 @@ describe("default Computer tools", () => {
         kind: "drag", from: { x: 1, y: 2 }, to: { x: 3, y: 4 },
       });
     }
+  });
+
+  it("projects controls and audience permissions from one registry", () => {
+    const registry = createDefaultToolRegistry();
+    registry.register({
+      name: "advisor_note",
+      description: "Read-only advisor note.",
+      category: "side",
+      audiences: ["advisor"],
+      inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+      validate: () => undefined,
+      execute: async () => ({ ok: true }),
+    });
+    expect(registry.modelTools().map((tool) => tool.name)).toContain("terminate");
+    expect(registry.modelTools().map((tool) => tool.name)).not.toContain("advisor_note");
+    expect(registry.modelTools("advisor").map((tool) => tool.name)).toEqual(["advisor_note"]);
+    expect(registry.getForAudience("advisor_note")).toBeUndefined();
+    expect(registry.getForAudience("advisor_note", "advisor")?.category).toBe("side");
+    expect(registry.modelTools().find((tool) => tool.name === "click")).toMatchObject({ category: "computer", coordinate: { fields: ["x", "y"] } });
+    expect(registry.modelTools().find((tool) => tool.name === "terminate")).toMatchObject({ category: "control", control: "finish" });
   });
 });

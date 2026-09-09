@@ -50,14 +50,19 @@ class BridgeContractTest(unittest.TestCase):
     def setUp(self):
         desktop_env = types.ModuleType("desktop_env")
         desktop_env_module = types.ModuleType("desktop_env.desktop_env")
+        actions_module = types.ModuleType("desktop_env.actions")
         desktop_env_module.DesktopEnv = FakeDesktopEnv
+        actions_module.KEYBOARD_KEYS = ["ctrl", "a", "enter", "shift", "down", "l"]
         desktop_env.desktop_env = desktop_env_module
+        desktop_env.actions = actions_module
         sys.modules["desktop_env"] = desktop_env
         sys.modules["desktop_env.desktop_env"] = desktop_env_module
+        sys.modules["desktop_env.actions"] = actions_module
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
     def tearDown(self):
         sys.modules.pop("desktop_env.desktop_env", None)
+        sys.modules.pop("desktop_env.actions", None)
         sys.modules.pop("desktop_env", None)
 
     def test_structured_action_routing_and_keyboard_normalization(self):
@@ -87,6 +92,7 @@ class BridgeContractTest(unittest.TestCase):
             service = DesktopEnvBridge(args)
             self.assertEqual(service.reset("fake-task")["instruction"], "fake instruction")
             self.assertEqual(service.describe()["viewport"], {"width": 1, "height": 1, "coordinateSpace": "physical"})
+            self.assertIn("ctrl", service.describe()["capabilities"]["keyboardKeys"])
             service.observe()
             service.execute({"kind": "click", "x": 0, "y": 0})
             service.execute({"kind": "type", "text": "hello"})
@@ -125,6 +131,26 @@ class BridgeContractTest(unittest.TestCase):
             self.assertEqual(result["status"], "refused")
             self.assertEqual(FakeDesktopEnv.instance.steps, [])
 
+    def test_unsupported_key_is_refused_before_desktop_step(self):
+        from integrations.osworld.bridge import DesktopEnvBridge
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_dir = root / "evaluation_examples" / "examples" / "fake"
+            task_dir.mkdir(parents=True)
+            (task_dir / "fake-task.json").write_text(json.dumps({"id": "fake-task", "instruction": "fake"}), encoding="utf-8")
+            args = argparse.Namespace(
+                osworld_root=str(root), provider="fake", path_to_vm="fake.vmx", snapshot_name="init_state",
+                cache_dir=str(root / "cache"), screen_width=1, screen_height=1, headless=True,
+                os_type="Ubuntu", enable_proxy=False, osworld_version="test",
+            )
+            service = DesktopEnvBridge(args)
+            service.reset("fake-task")
+            result = service.execute({"kind": "keypress", "key": "MENU"})
+            self.assertEqual(result["status"], "refused")
+            self.assertEqual(result["code"], "UNSUPPORTED_KEY")
+            self.assertEqual(FakeDesktopEnv.instance.steps, [])
+
     def test_step_exception_is_reported_as_execution_error(self):
         from integrations.osworld.bridge import BridgeError, DesktopEnvBridge
 
@@ -146,7 +172,7 @@ class BridgeContractTest(unittest.TestCase):
                 service.execute({"kind": "click", "x": 0, "y": 0})
             self.assertEqual(raised.exception.code, "EXECUTION_ERROR")
 
-    def test_screenshot_viewport_change_is_reported_before_completion(self):
+    def test_screenshot_viewport_change_updates_current_viewport_after_completion(self):
         from integrations.osworld.bridge import BridgeError, DesktopEnvBridge
 
         with tempfile.TemporaryDirectory() as directory:
@@ -163,10 +189,10 @@ class BridgeContractTest(unittest.TestCase):
             service.reset("fake-task")
             service.observe()
             FakeDesktopEnv.instance.next_screenshot = bytes(PNG_2X1)
-            with self.assertRaises(BridgeError) as raised:
-                service.execute({"kind": "click", "x": 0, "y": 0})
-            self.assertEqual(raised.exception.code, "SCREENSHOT_VIEWPORT_CHANGED")
-            self.assertIn("expected=1x1, actual=2x1", str(raised.exception))
+            result = service.execute({"kind": "click", "x": 0, "y": 0})
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["postActionCapture"]["width"], 2)
+            self.assertEqual(service.describe()["viewport"], {"width": 2, "height": 1, "coordinateSpace": "physical"})
             self.assertEqual(len(FakeDesktopEnv.instance.steps), 1)
 
 

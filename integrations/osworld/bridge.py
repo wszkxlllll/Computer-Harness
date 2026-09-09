@@ -41,8 +41,9 @@ class DesktopEnvBridge:
         sys.path.insert(0, str(osworld_root))
         try:
             from desktop_env.desktop_env import DesktopEnv
+            from desktop_env.actions import KEYBOARD_KEYS
         except Exception as exc:  # pragma: no cover - depends on the external OSWorld environment
-            raise BridgeError("IMPORT_ERROR", f"could not import OSWorld DesktopEnv: {exc}") from exc
+            raise BridgeError("IMPORT_ERROR", f"could not import OSWorld DesktopEnv/actions: {exc}") from exc
 
         self._args = args
         self._env: Any | None = None
@@ -50,6 +51,12 @@ class DesktopEnvBridge:
         self._instruction: str | None = None
         self._initial_capture: dict[str, Any] | None = None
         self._viewport: tuple[int, int] | None = None
+        # Keep the backend's actual pyautogui key vocabulary at the bridge
+        # boundary.  The public protocol still carries strings, while the
+        # adapter can reject unsupported keys before DesktopEnv.step().
+        self._keyboard_keys = frozenset(
+            key.lower() for key in KEYBOARD_KEYS if isinstance(key, str) and key
+        )
         self._closed = False
         self._lock = Lock()
 
@@ -105,7 +112,12 @@ class DesktopEnvBridge:
                 "height": viewport[1],
                 "coordinateSpace": "physical",
             },
-            "capabilities": {"screenshot": True, "pointer": True, "keyboard": True},
+            "capabilities": {
+                "screenshot": True,
+                "pointer": True,
+                "keyboard": True,
+                "keyboardKeys": sorted(self._keyboard_keys),
+            },
         }
         guest_screen_size = self._guest_screen_size()
         if guest_screen_size is not None:
@@ -212,15 +224,22 @@ class DesktopEnvBridge:
         payload = bytes(screenshot)
         width, height = png_dimensions(payload)
         guest_screen_size = self._guest_screen_size()
+        # A guest may resize its display after reset (for example after a
+        # window manager or application changes the VM mode).  The screenshot
+        # is the authoritative current coordinate space; retain the new size
+        # instead of turning an already-dispatched action into an uncertain
+        # execution merely because the viewport changed.
         if expected_viewport is not None and (width, height) != expected_viewport:
-            task = self._task_id or "<no-task>"
-            expected_width, expected_height = expected_viewport
-            guest = "unknown" if guest_screen_size is None else f"{guest_screen_size['width']}x{guest_screen_size['height']}"
-            raise BridgeError(
-                "SCREENSHOT_VIEWPORT_CHANGED",
-                f"{operation} screenshot viewport changed for task {task}: "
-                f"expected={expected_width}x{expected_height}, actual={width}x{height}, guestScreenSize={guest}",
+            LOGGER.info(
+                "%s screenshot viewport changed for task %s: expected=%sx%s actual=%sx%s",
+                operation,
+                self._task_id or "<no-task>",
+                expected_viewport[0],
+                expected_viewport[1],
+                width,
+                height,
             )
+        self._viewport = (width, height)
         result: dict[str, Any] = {
             "mediaType": "image/png",
             "dataBase64": base64.b64encode(payload).decode("ascii"),
@@ -270,11 +289,16 @@ class DesktopEnvBridge:
             if kind == "keypress" and not isinstance(action.get("key"), str):
                 raise BridgeError("INVALID_ACTION", "keypress.key must be a string")
             if kind == "keypress" and isinstance(action.get("key"), str):
-                normalized["key"] = action["key"].lower()
+                key = action["key"].lower()
+                self._check_key(key)
+                normalized["key"] = key
             if kind == "hotkey" and (not isinstance(action.get("keys"), list) or not action["keys"] or any(not isinstance(key, str) or not key for key in action["keys"])):
                 raise BridgeError("INVALID_ACTION", "hotkey.keys must be a non-empty string list")
             if kind == "hotkey":
-                normalized["keys"] = [key.lower() for key in action["keys"]]
+                keys = [key.lower() for key in action["keys"]]
+                for key in keys:
+                    self._check_key(key)
+                normalized["keys"] = keys
         if kind == "scroll":
             if action.get("direction") not in {"up", "down", "left", "right"} or not positive_integer(action.get("ticks")):
                 raise BridgeError("INVALID_ACTION", "scroll direction/ticks are invalid")
@@ -286,6 +310,13 @@ class DesktopEnvBridge:
         viewport = self._viewport
         if viewport is None or x < 0 or x >= viewport[0] or y < 0 or y >= viewport[1]:
             raise BridgeError("INVALID_ACTION", f"{label} point is outside the OSWorld viewport")
+
+    def _check_key(self, key: str) -> None:
+        if key not in self._keyboard_keys:
+            raise BridgeError(
+                "UNSUPPORTED_KEY",
+                f"OSWorld backend does not support key {key!r}; supported keys come from desktop_env.actions.KEYBOARD_KEYS",
+            )
 
     def _execute_typed(self, env: Any, action: dict[str, Any]) -> bytes:
         kind = action["kind"]

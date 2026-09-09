@@ -5,9 +5,10 @@ import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId } from "@computer-harness/protocol";
-import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfileName } from "@computer-harness/provider-glm";
+import { FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmHttpClient, type GlmProfile, type GlmProfileName } from "@computer-harness/provider-glm";
 import { FetchQwenHttpClient, Qwen38FlashAdapter, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
-import { DefaultRuntimePolicy, RunController, createDefaultComputerTools, type CleanupDiagnostic } from "@computer-harness/runtime";
+import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
+import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type CleanupDiagnostic } from "@computer-harness/runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
@@ -29,6 +30,7 @@ interface CliOptions {
   qwenCoordinateMode?: QwenCoordinateMode;
   qwenThinking?: Qwen38ThinkingMode;
   qwenOutputMode?: Qwen38OutputMode;
+  planning: boolean;
   interactive: boolean;
 }
 
@@ -80,6 +82,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     throw new Error("--qwen-output-mode is only valid with qwen3.8-flash");
   }
   const interactive = argv.includes("--interactive");
+  const planning = argv.includes("--planning");
   return {
     goal,
     model,
@@ -95,6 +98,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     ...(qwenCoordinateModeValue === undefined ? {} : { qwenCoordinateMode: qwenCoordinateModeValue as QwenCoordinateMode }),
     ...(model === "qwen3.8-flash" ? { qwenThinking: (qwenThinkingValue ?? "low") as Qwen38ThinkingMode } : {}),
     ...(model === "qwen3.8-flash" ? { qwenOutputMode: (qwenOutputModeValue ?? "strict_json") as Qwen38OutputMode } : {}),
+    planning,
     interactive,
   };
 }
@@ -107,7 +111,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -116,7 +120,11 @@ async function main(): Promise<void> {
   await mkdir(options.output, { recursive: true });
   const assetStore = new FileAssetStore(resolve(options.output, "assets"));
   const eventWriter = new JsonlRunEventWriter(resolve(options.output, "trajectory.jsonl"), runId);
-  const tools = createDefaultComputerTools();
+  const tools = createDefaultToolRegistry();
+  const planStoreRoot = options.planning ? resolve(options.output, "plan-store") : undefined;
+  if (planStoreRoot !== undefined) {
+    tools.registerMany(createPlanningTools(new FilePlanStore(planStoreRoot)));
+  }
   const assetReader = assetStore;
   const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking, options.qwenOutputMode);
   const computer = options.computer === "cua"
@@ -153,6 +161,10 @@ async function main(): Promise<void> {
     coordinateMode: options.qwenCoordinateMode ?? null,
     thinkingMode: options.qwenThinking ?? null,
     outputMode: options.qwenOutputMode ?? null,
+    glmThinking: process.env.GLM_THINKING === "disabled" || process.env.GLM_THINKING === "enabled" ? process.env.GLM_THINKING : "enabled",
+    planning: options.planning,
+    tools: tools.modelTools().map((tool) => tool.name),
+    planStoreRoot: planStoreRoot ?? null,
     computerSession: snapshot.computerSession ?? null,
     runtimeOutcome: outcome,
     modelSummary: snapshot.summary ?? null,
@@ -167,6 +179,12 @@ async function main(): Promise<void> {
       modelRequests: snapshot.modelRequestCount,
       eventCount: events.length,
       invalidToolCalls: events.filter((event) => event.type === "tool.call.rejected").length,
+      rejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected").length,
+      budgetRejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected" && /action budget exhausted/iu.test(event.reason)).length,
+      budgetRuntimeErrors: events.filter((event) => event.type === "runtime.error" && event.category === "budget").length,
+      argumentRejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected" && /invalid arguments|invalid GUI action/iu.test(event.reason)).length,
+      toolExecutionFailed: events.filter((event) => event.type === "tool.call.failed").length,
+      providerFailed: events.filter((event) => event.type === "model.request.failed").length,
       runtimeErrors: events.filter((event) => event.type === "runtime.error").length,
       providerErrors: events
         .filter((event): event is Extract<typeof event, { type: "model.request.failed" }> => event.type === "model.request.failed")
@@ -187,7 +205,12 @@ function makeProvider(model: ModelName, assetReader: AssetReader, output: string
   }
   const key = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   if (key === undefined || key.trim().length === 0) throw new Error("ZHIPUAI_API_KEY is required for GLM profiles");
-  return new GlmAdapter({ apiKey: key, profile: model, assetReader, httpClient: new RecordingGlmHttpClient(resolve(output, "provider-exchanges.jsonl")), ...(process.env.GLM_BASE_URL === undefined ? {} : { endpoint: process.env.GLM_BASE_URL }) });
+  const configuredThinking = process.env.GLM_THINKING;
+  const profile: GlmProfile = {
+    ...glmProfiles[model],
+    thinking: configuredThinking === "disabled" ? "disabled" : "enabled",
+  };
+  return new GlmAdapter({ apiKey: key, profile, assetReader, httpClient: new RecordingGlmHttpClient(resolve(output, "provider-exchanges.jsonl")), ...(process.env.GLM_BASE_URL === undefined ? {} : { endpoint: process.env.GLM_BASE_URL }) });
 }
 
 class RecordingGlmHttpClient implements GlmHttpClient {

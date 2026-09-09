@@ -1,6 +1,6 @@
 # B：OSWorld / VM 任务路线
 
-日期：2026-09-04
+日期：2026-09-07
 文档角色：入口 / 结果摘要
 状态：当前执行
 当前入口：[Stage 4/5 Computer Harness 当前实施入口](./stage-4-implementation-entry.md)
@@ -17,6 +17,9 @@
   `invalidToolCalls=0`、`runtimeErrors=0`、`providerErrors=[]`、`cleanupErrors=[]`；
 - strict-json 已按决策成为默认，但同条件 no-execute probe 当前为 1/3 成功；以上是单任务证据，不等于整体成功率。
   详细模型任务结果见[Stage 5 模型任务结果总表](./stage-5-model-task-results-2026-09-07.md)。
+- A 线已在独立副本完成 P0-A/B/C/D：截图尺寸变化现在形成新的当前 viewport；OSWorld 键能力来自
+  `desktop_env.actions.KEYBOARD_KEYS` 并在副作用前拒绝；GLM 网络错误保留脱敏 cause 诊断；GUI action budget 与
+  model request budget 分离，动作预算耗尽仍可请求一次收尾模型 Turn。
 
 ## 运行要求
 
@@ -34,6 +37,15 @@ node scripts/stage5-osworld/run-task.mjs --osworld-root "<osworld>" --path-to-vm
 2. 稳定后，在保持 task、snapshot、OSWorld commit、预算和坐标模式不变的条件下扩展冻结任务；
 3. 每次分别检查 Bridge health/reset、Harness `runtimeOutcome`、官方 `evaluate()`、Provider exchange 和清理；
 4. 若 strict-json 在多任务中稳定，才考虑把它作为唯一 Qwen 生产协议；否则保留 native 对照并评估 point-tuple。
+
+已有轨迹的离线统计不启动 VM、不调用模型：
+
+```text
+node scripts/stage5-osworld/analyze-trajectory.mjs --root "<runs root>" --output "<statistics.json>"
+```
+
+它只汇总事件中已有的动作、连续重复候选、ToolCall 拒绝、Provider/Action 延迟和 token；重复动作不是语义失败真值，
+evaluator 和视觉变化不由脚本猜测。
 
 ## 禁止事项
 

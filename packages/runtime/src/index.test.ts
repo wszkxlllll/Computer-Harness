@@ -346,6 +346,7 @@ async function makeController(
   overrides: {
     eventWriter?: (path: string) => RunEventWriter;
     assetStore?: AssetStore;
+    contextCompiler?: ContextCompiler;
     onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
   } = {},
 ) {
@@ -362,7 +363,7 @@ async function makeController(
     runId,
     provider,
     computer: activeComputer,
-    contextCompiler: new TestContextCompiler(registry),
+    contextCompiler: overrides.contextCompiler ?? new TestContextCompiler(registry),
     toolRegistry: registry,
     policy,
     eventWriter: writer,
@@ -412,6 +413,37 @@ describe("RunController S2-2 happy path", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("recompiles context when a user correction arrives while compilation is pending", async () => {
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    let releaseResolve!: () => void;
+    const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    const inputs: Array<Parameters<ContextCompiler["compile"]>[0]> = [];
+    const compiler: ContextCompiler = {
+      compile: async (input, signal) => {
+        signal.throwIfAborted();
+        inputs.push(input);
+        if (inputs.length === 1) {
+          enteredResolve();
+          await release;
+        }
+        signal.throwIfAborted();
+        return { system: "system", messages: [{ role: "user", content: [{ type: "text", text: input.goal }] }], tools: [] };
+      },
+    };
+    const provider = new ScriptedProvider([{ type: "finish", summary: "finished after correction" }]);
+    const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(5, 3), { contextCompiler: compiler });
+    const run = controller.start("original goal");
+    await entered;
+    const correction = controller.submitUserInput("corrected goal context");
+    releaseResolve();
+    await correction;
+    await expect(run).resolves.toBe("succeeded");
+    expect(inputs).toHaveLength(2);
+    expect(inputs[1]?.recentEvents.some((event) => event.type === "user.input.received" && event.text === "corrected goal context")).toBe(true);
+    expect(provider.inputs).toHaveLength(1);
+  });
+
   it("projects model request count and the finish summary separately from outcome", async () => {
     const provider = new ScriptedProvider([{ type: "finish", summary: "model says done", usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 } }]);
     const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 1));
@@ -451,6 +483,38 @@ describe("RunController S2-2 happy path", () => {
     const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 2));
     await expect(controller.start("do not loop")).resolves.toBe("budget_exhausted");
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, stepCount: 0, outcome: "budget_exhausted" });
+  });
+
+  it("allows a closing model turn after the last GUI action budget is consumed", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("last-action")] },
+      { type: "tool_calls", calls: [clickCall("over-budget-action")] },
+      { type: "finish", summary: "closed after action budget" },
+    ]);
+    const { controller, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(1, 4));
+    await expect(controller.start("use one action then finish")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.reason.includes("action budget exhausted"))).toBe(true);
+    expect(controller.getSnapshot()).toMatchObject({ stepCount: 1, modelRequestCount: 3, outcome: "succeeded" });
+  });
+
+  it("limits post-budget closing decisions and never restores the GUI action budget", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("budget-last-action")] },
+      { type: "tool_calls", calls: [clickCall("budget-rejected-1")] },
+      { type: "tool_calls", calls: [clickCall("budget-rejected-2")] },
+      { type: "tool_calls", calls: [clickCall("budget-rejected-3")] },
+      { type: "finish", summary: "must not be reached" },
+    ]);
+    const { controller, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(1, 10));
+    await expect(controller.start("stop retrying GUI actions after the budget")).resolves.toBe("budget_exhausted");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "tool.call.rejected" && event.reason.includes("action budget exhausted"))).toHaveLength(3);
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(4);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "budget" && event.message.includes("closing decision limit"))).toBe(true);
+    expect(provider.inputs).toHaveLength(4);
   });
 
   it("returns ToolResult for a non-computer tool without creating an ActionIntent", async () => {
@@ -511,6 +575,28 @@ describe("RunController S2-2 happy path", () => {
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     expect(events.filter((event) => event.type === "tool.call.rejected")).toHaveLength(2);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("enforces main audience visibility at execution, not only in modelTools", async () => {
+    let executions = 0;
+    const registry = clickRegistry();
+    registry.register({
+      name: "advisor_only",
+      description: "Advisor-only operation.",
+      category: "side",
+      audiences: ["advisor"],
+      inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+      validate: (args) => { if (args !== null) throw new Error("advisor_only accepts null"); },
+      execute: async () => { executions += 1; return { ok: true }; },
+    });
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "advisor-call" as ToolCallId, name: "advisor_only", arguments: null }] },
+      { type: "finish", summary: "done" },
+    ]);
+    const created = await makeController(provider, new FakeComputer(), registry);
+    await expect(created.controller.start("reject advisor-only execution")).resolves.toBe("succeeded");
+    expect(executions).toBe(0);
+    expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.reason.includes("not available to main"))).toBe(true);
   });
 
   it("preflights invalid arguments before any GUI side effect", async () => {
@@ -1348,12 +1434,12 @@ describe("RunController S2-4 failure boundaries", () => {
     expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(1);
     expect(events.find((event) => event.type === "model.request.failed")).toMatchObject({
       retryable: true,
-      message: expect.stringContaining("retrying model request 1/3"),
+      message: expect.stringContaining("retrying model request 1/1"),
     });
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("stops after three Provider retries without executing a GUI action", async () => {
+  it("stops after one Provider retry without executing a GUI action", async () => {
     let requests = 0;
     const computer = new FakeComputer();
     const provider: ProviderAdapter = {
@@ -1370,12 +1456,45 @@ describe("RunController S2-4 failure boundaries", () => {
     const created = await makeController(provider, computer);
 
     await expect(created.controller.start("do not execute invalid calls")).resolves.toBe("failed");
-    expect(requests).toBe(4);
+    expect(requests).toBe(2);
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
-    expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(4);
-    expect(events.at(-2)).toMatchObject({ message: expect.stringContaining("retry limit reached after 3 retries") });
+    expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(2);
+    expect(events.at(-2)).toMatchObject({ message: expect.stringContaining("retry limit reached after 1 retries") });
     expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("retries network failures with the identical ModelInput and without GUI execution", async () => {
+    let requests = 0;
+    const inputs: ModelInput[] = [];
+    const provider: ProviderAdapter = {
+      id: "network-retrying-provider",
+      generate: async (input, { signal }) => {
+        signal.throwIfAborted();
+        requests += 1;
+        inputs.push(input);
+        if (requests === 1) {
+          throw Object.assign(new Error("connection reset"), {
+            code: "GLM_NETWORK_ERROR",
+            retryable: true,
+            retryMode: "same_input",
+          });
+        }
+        return { type: "finish", summary: "done" };
+      },
+    };
+    const created = await makeController(provider);
+
+    await expect(created.controller.start("retry the network request")).resolves.toBe("succeeded");
+    expect(requests).toBe(2);
+    expect(inputs[1]).toBe(inputs[0]);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.find((event) => event.type === "model.request.failed")).toMatchObject({
+      code: "GLM_NETWORK_ERROR",
+      retryable: true,
+      message: expect.stringContaining("no tool was executed; retrying model request 1/1"),
+    });
     await rm(created.directory, { recursive: true, force: true });
   });
 

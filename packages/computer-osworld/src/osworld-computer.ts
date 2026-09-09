@@ -24,6 +24,7 @@ export interface OsworldComputerOptions {
 interface PrivateSession {
   descriptor: ComputerSessionDescriptor;
   active: boolean;
+  keyboardKeys?: ReadonlySet<string>;
 }
 
 interface PendingCapture {
@@ -66,7 +67,13 @@ export class OsworldComputer implements Computer {
       capabilities,
       openedAt: this.now(),
     };
-    this.session = { descriptor, active: true };
+    this.session = {
+      descriptor,
+      active: true,
+      ...(description.capabilities.keyboardKeys === undefined
+        ? {}
+        : { keyboardKeys: new Set(description.capabilities.keyboardKeys.map((key) => key.toLowerCase())) }),
+    };
     return descriptor;
   }
 
@@ -77,7 +84,10 @@ export class OsworldComputer implements Computer {
     this.pendingPostActionCapture = undefined;
     const result = pending?.sessionId === session.id
       ? pending.capture
-      : materializeCapture(await this.bridge.observe(signal), current.descriptor.viewport);
+      : materializeCapture(await this.bridge.observe(signal));
+    if (result.viewport.width !== current.descriptor.viewport.width || result.viewport.height !== current.descriptor.viewport.height) {
+      current.descriptor = { ...current.descriptor, viewport: result.viewport };
+    }
     this.latestObservationId = observationId;
     return result;
   }
@@ -96,14 +106,18 @@ export class OsworldComputer implements Computer {
     }
     let mapped;
     try {
-      mapped = mapActionIntent(action, current.descriptor.viewport);
+      mapped = mapActionIntent(action, current.descriptor.viewport, current.keyboardKeys);
     } catch (error) {
       if (error instanceof OsworldActionMappingError) return refused(action.actionId, error.code, error.message);
       throw error;
     }
     const result = await this.bridge.execute(mapped, signal);
     if (result.status === "refused") return refused(action.actionId, result.code, result.message);
-    this.pendingPostActionCapture = { sessionId: session.id, capture: materializeCapture(result.postActionCapture, current.descriptor.viewport) };
+    const postActionCapture = materializeCapture(result.postActionCapture);
+    if (postActionCapture.viewport.width !== current.descriptor.viewport.width || postActionCapture.viewport.height !== current.descriptor.viewport.height) {
+      current.descriptor = { ...current.descriptor, viewport: postActionCapture.viewport };
+    }
+    this.pendingPostActionCapture = { sessionId: session.id, capture: postActionCapture };
     return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
   }
 
@@ -126,7 +140,7 @@ export class OsworldComputer implements Computer {
   }
 }
 
-function materializeCapture(capture: OsworldBridgeCapture, viewport: Viewport): ObservationCapture {
+function materializeCapture(capture: OsworldBridgeCapture): ObservationCapture {
   if (capture.mediaType !== "image/png") throw new Error("OSWorld bridge returned a non-PNG screenshot");
   const data = decodeBase64(capture.dataBase64);
   const dimensions = readPngDimensions(data);
@@ -135,11 +149,10 @@ function materializeCapture(capture: OsworldBridgeCapture, viewport: Viewport): 
   if (capture.guestScreenSize !== undefined && !sameScreenSize(capture.guestScreenSize, { width: dimensions.width, height: dimensions.height })) {
     throw new Error(`OSWorld guest screen size ${capture.guestScreenSize.width}x${capture.guestScreenSize.height} does not match screenshot ${dimensions.width}x${dimensions.height}`);
   }
-  if (dimensions.width !== viewport.width || dimensions.height !== viewport.height) throw new Error(`OSWorld screenshot ${dimensions.width}x${dimensions.height} does not match session viewport ${viewport.width}x${viewport.height}`);
   if (typeof capture.capturedAt !== "string" || capture.capturedAt.trim().length === 0) throw new Error("OSWorld bridge returned an invalid capture timestamp");
   return {
     capturedAt: capture.capturedAt,
-    viewport,
+    viewport: { width: dimensions.width, height: dimensions.height, coordinateSpace: "physical" },
     screenshot: { mediaType: capture.mediaType, data },
   };
 }
@@ -162,9 +175,12 @@ function readPngDimensions(data: Uint8Array): { width: number; height: number } 
   return width > 0 && height > 0 ? { width, height } : undefined;
 }
 
-function validateCapabilities(capabilities: { screenshot: boolean; pointer: boolean; keyboard: boolean }): ComputerCapabilities {
+function validateCapabilities(capabilities: { screenshot: boolean; pointer: boolean; keyboard: boolean; keyboardKeys?: string[] }): ComputerCapabilities {
   for (const key of ["screenshot", "pointer", "keyboard"] as const) {
     if (typeof capabilities[key] !== "boolean") throw new Error(`OSWorld bridge returned invalid capability ${key}`);
+  }
+  if (capabilities.keyboard && (capabilities.keyboardKeys === undefined || capabilities.keyboardKeys.length === 0 || capabilities.keyboardKeys.some((key) => typeof key !== "string" || key.length === 0))) {
+    throw new Error("OSWorld bridge must advertise keyboardKeys when keyboard capability is enabled");
   }
   return { screenshot: capabilities.screenshot, pointer: capabilities.pointer, keyboard: capabilities.keyboard, accessibility: false };
 }

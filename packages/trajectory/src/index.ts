@@ -13,6 +13,7 @@ import type {
   RunId,
   RunOutcome,
   RunStatus,
+  PlanState,
   RuntimeEvent,
   RuntimeEventDraft,
   ToolCallId,
@@ -37,10 +38,11 @@ export interface RunSnapshot {
   summary?: string;
   reportedStatus?: "success" | "failure";
   modelUsage?: ModelUsage;
+  plan: PlanState;
 }
 
 export function initialRunSnapshot(runId: RunId): RunSnapshot {
-  return { runId, status: "created", stepCount: 0, modelRequestCount: 0 };
+  return { runId, status: "created", stepCount: 0, modelRequestCount: 0, plan: { runId, tasks: [] } };
 }
 
 export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunSnapshot {
@@ -197,6 +199,22 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
           stepCount: snapshot.stepCount + 1,
         };
       }
+    case "planning.task.updated": {
+      if (snapshot.status !== "running") {
+        throw new Error(`planning.task.updated requires running status, got ${snapshot.status}`);
+      }
+      const previous = snapshot.plan.tasks;
+      const index = previous.findIndex((task) => task.id === event.mutation.task.id);
+      if (event.mutation.operation === "created") {
+        if (index >= 0) throw new Error(`planning task ${event.mutation.task.id} already exists`);
+      } else if (index < 0) {
+        throw new Error(`planning task ${event.mutation.task.id} does not exist`);
+      }
+      const tasks = [...previous];
+      if (event.mutation.operation === "created") tasks.push(event.mutation.task);
+      else tasks[index] = event.mutation.task;
+      return { ...snapshot, plan: { runId: snapshot.runId, tasks } };
+    }
     case "run.paused":
       if (snapshot.status !== "running") {
         throw new Error(`run.paused requires running status, got ${snapshot.status}`);
@@ -644,6 +662,13 @@ const completedActionReceiptSchema = actionReceiptSchema.extend({ status: z.lite
 const failedActionReceiptSchema = actionReceiptSchema.extend({
   status: z.enum(["refused", "failed", "cancelled"]),
 });
+const planningTaskSchema = z.object({
+  id: nonEmptyString,
+  subject: nonEmptyString,
+  description: z.string().optional(),
+  status: z.enum(["pending", "in_progress", "completed", "blocked"]),
+  blockedBy: z.array(nonEmptyString).optional(),
+});
 const eventBaseSchema = {
   eventId: nonEmptyString,
   runId: nonEmptyString,
@@ -712,6 +737,15 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     ...eventBaseSchema,
     type: z.literal("action.execution.failed"),
     receipt: failedActionReceiptSchema,
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("planning.task.updated"),
+    callId: nonEmptyString,
+    mutation: z.discriminatedUnion("operation", [
+      z.object({ operation: z.literal("created"), task: planningTaskSchema }),
+      z.object({ operation: z.literal("updated"), task: planningTaskSchema }),
+    ]),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("run.paused"), reason: z.string() }),
   z.object({ ...eventBaseSchema, type: z.literal("run.resumed") }),

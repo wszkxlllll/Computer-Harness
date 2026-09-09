@@ -29,6 +29,9 @@ importers:
       '@computer-harness/context':
         specifier: workspace:*
         version: link:../../packages/context
+      '@computer-harness/planning':
+        specifier: workspace:*
+        version: link:../../packages/planning
       '@computer-harness/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -74,6 +77,22 @@ importers:
       '@computer-harness/runtime':
         specifier: workspace:*
         version: link:../runtime
+
+  packages/planning:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+    devDependencies:
+      '@computer-harness/context':
+        specifier: workspace:*
+        version: link:../context
+      '@computer-harness/trajectory':
+        specifier: workspace:*
+        version: link:../trajectory
 
   packages/protocol: {}
 

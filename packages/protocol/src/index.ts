@@ -8,6 +8,29 @@ export type ToolCallId = Brand<string, "ToolCallId">;
 export type EventId = Brand<string, "EventId">;
 export type AssetId = Brand<string, "AssetId">;
 
+/** Shared task description used by Planning and future read-only consumers. */
+export interface TaskSpec {
+  subject: string;
+  description?: string;
+}
+
+export type PlanningTaskStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export interface PlanningTask extends TaskSpec {
+  id: string;
+  status: PlanningTaskStatus;
+  blockedBy?: string[];
+}
+
+export interface PlanState {
+  runId: RunId;
+  tasks: PlanningTask[];
+}
+
+export type PlanningTaskMutation =
+  | { operation: "created"; task: PlanningTask }
+  | { operation: "updated"; task: PlanningTask };
+
 export interface Viewport {
   width: number;
   height: number;
@@ -207,6 +230,7 @@ export type RuntimeEventData =
   | { type: "action.execution.started"; action: ActionIntent }
   | { type: "action.execution.completed"; receipt: ActionReceipt }
   | { type: "action.execution.failed"; receipt: ActionReceipt }
+  | { type: "planning.task.updated"; callId: ToolCallId; mutation: PlanningTaskMutation }
   | { type: "run.paused"; reason: string }
   | { type: "run.resumed" }
   | { type: "approval.requested"; requestId: string; callId: ToolCallId; reason: string }
@@ -246,6 +270,7 @@ export const runtimeEventTypes = [
   "action.execution.started",
   "action.execution.completed",
   "action.execution.failed",
+  "planning.task.updated",
   "run.paused",
   "run.resumed",
   "approval.requested",

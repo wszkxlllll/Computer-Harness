@@ -97,13 +97,14 @@ function positiveInteger(value, fallback, name) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
-    process.stdout.write("Usage: node scripts/stage5-osworld/run-task.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <verified snapshot> --task-id <id> [--model glm-5.3-flash|qwen3.8-flash] [--max-steps <n>] [--max-model-requests <n>] [--qwen-coordinate-mode normalized_1000|actual_pixels] [--qwen-thinking disabled|low|medium|xhigh] [--qwen-output-mode native_tools|strict_json] [--cli <dist/index.js>] [--python python] [--vmrun-path <vmrun.exe>] [--output <dir>] [--env-file <path>]\n");
+    process.stdout.write("Usage: node scripts/stage5-osworld/run-task.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <verified snapshot> --task-id <id> [--model glm-5.3-flash|qwen3.8-flash] [--planning] [--max-steps <n>] [--max-model-requests <n>] [--qwen-coordinate-mode normalized_1000|actual_pixels] [--qwen-thinking disabled|low|medium|xhigh] [--qwen-output-mode native_tools|strict_json] [--cli <dist/index.js>] [--python python] [--vmrun-path <vmrun.exe>] [--output <dir>] [--env-file <path>]\n");
     return;
   }
   const osworldRoot = resolve(required(argv, "--osworld-root"));
   const vmx = resolve(required(argv, "--path-to-vm"));
   const taskId = required(argv, "--task-id");
   const model = value(argv, "--model") ?? "glm-5.3-flash";
+  const planning = argv.includes("--planning");
   if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") throw new Error("--model must be glm-5.3-flash or qwen3.8-flash");
   const qwenCoordinateMode = value(argv, "--qwen-coordinate-mode") ?? "normalized_1000";
   const qwenThinking = value(argv, "--qwen-thinking") ?? "low";
@@ -135,6 +136,7 @@ async function main() {
     maxModelRequests,
     bridgeTimeoutsMs: { computer: OsworldBridgeClient.computerRequestTimeoutMs, environment: OsworldBridgeClient.environmentRequestTimeoutMs },
     model,
+    planning,
     output,
     bridgeHealth: null,
     reset: null,
@@ -159,6 +161,7 @@ async function main() {
       "--osworld-bridge", `http://127.0.0.1:${port}`,
       "--max-steps", String(maxSteps),
       "--max-model-requests", String(maxModelRequests),
+      ...(planning ? ["--planning"] : []),
       "--output", resolve(output, "harness"),
       ...(envFile === undefined ? [] : ["--env-file", resolve(envFile)]),
       ...(model === "qwen3.8-flash" ? ["--qwen-coordinate-mode", qwenCoordinateMode, "--qwen-thinking", qwenThinking, "--qwen-output-mode", qwenOutputMode] : []),

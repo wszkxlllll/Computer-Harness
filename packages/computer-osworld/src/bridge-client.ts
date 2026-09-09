@@ -273,7 +273,17 @@ function parseCapabilities(value: unknown): OsworldBridgeCapabilities {
   if (!isRecord(value) || typeof value.screenshot !== "boolean" || typeof value.pointer !== "boolean" || typeof value.keyboard !== "boolean") {
     throw new OsworldBridgeClientError("BRIDGE_INVALID_RESULT", "OSWorld capabilities are invalid");
   }
-  return { screenshot: value.screenshot, pointer: value.pointer, keyboard: value.keyboard };
+  const keyboardKeys = value.keyboardKeys === undefined
+    ? undefined
+    : Array.isArray(value.keyboardKeys) && value.keyboardKeys.every((key) => typeof key === "string" && key.length > 0)
+      ? [...value.keyboardKeys]
+      : (() => { throw new OsworldBridgeClientError("BRIDGE_INVALID_RESULT", "OSWorld keyboardKeys are invalid"); })();
+  return {
+    screenshot: value.screenshot,
+    pointer: value.pointer,
+    keyboard: value.keyboard,
+    ...(keyboardKeys === undefined ? {} : { keyboardKeys }),
+  };
 }
 
 function positiveInteger(value: unknown): value is number {

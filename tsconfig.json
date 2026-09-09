@@ -5,6 +5,7 @@
     { "path": "packages/trajectory" },
     { "path": "packages/runtime" },
     { "path": "packages/context" },
+    { "path": "packages/planning" },
     { "path": "packages/provider-glm" },
     { "path": "packages/provider-qwen" },
     { "path": "apps/cli" },

@@ -87,6 +87,14 @@ Harness Run:
 node scripts/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model glm-5.3-flash --env-file "<local secrets file>" --output "<run output>"
 ```
 
+Add `--planning` for the Planning/Plan Context arm. Without it, the same
+runner uses the Computer + Control baseline; both arms share the same
+infrastructure, budgets and Control definitions.
+
+```text
+node scripts/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model glm-5.3-flash --planning --env-file "<local secrets file>" --output "<run output>"
+```
+
 Qwen 任务需要显式坐标和输出协议；建议在完成 no-model Gate 2 后再运行：
 
 ```text

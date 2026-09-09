@@ -11,6 +11,8 @@ import type {
   ObservationCapture,
   ObservationFrame,
   ObservationId,
+  PlanState,
+  PlanningTaskMutation,
   Point,
   RunId,
   RuntimeEvent,
@@ -47,6 +49,12 @@ export interface ModelToolSpec {
   name: string;
   description: string;
   inputSchema?: JsonValue;
+  /** Functional category is metadata for Provider projection, not execution permission. */
+  category?: ToolCategory;
+  /** Only tools with declared coordinate fields may be transformed by a Provider. */
+  coordinate?: CoordinateSemantics;
+  /** Control tools map to a ModelTurn decision instead of a ToolCall execution. */
+  control?: ControlKind;
 }
 
 export type ModelContentBlock =
@@ -78,8 +86,10 @@ export interface ProviderAdapter {
 }
 
 export interface ContextCompileInput {
+  runId: RunId;
   goal: string;
   latestObservation?: ObservationFrame;
+  plan?: PlanState;
   recentEvents: readonly RuntimeEvent[];
 }
 
@@ -93,6 +103,16 @@ export interface AssetReader {
 }
 
 export type ToolCategory = "computer" | "planning" | "control" | "side";
+
+export type ToolAudience = "main" | "advisor";
+
+export type ControlKind = "finish" | "user_input_required";
+
+export type CoordinateField = "x" | "y" | "fromX" | "fromY" | "toX" | "toY";
+
+export interface CoordinateSemantics {
+  readonly fields: readonly CoordinateField[];
+}
 
 export type GuiActionDraft =
   | { kind: "click"; point: Point }
@@ -116,6 +136,9 @@ interface ToolDefinitionBase {
   description: string;
   category: ToolCategory;
   inputSchema: JsonValue;
+  /** Omitted means the definition is available to the main Agent only. */
+  audiences?: readonly ToolAudience[];
+  coordinate?: CoordinateSemantics;
   /** Runtime argument validation; inputSchema only describes the model-facing shape. */
   validate: (args: JsonValue) => void;
 }
@@ -126,11 +149,19 @@ export interface ComputerToolDefinition extends ToolDefinitionBase {
 }
 
 export interface NonComputerToolDefinition extends ToolDefinitionBase {
-  category: Exclude<ToolCategory, "computer">;
+  category: "planning" | "side";
   execute: (args: JsonValue, context: ToolExecutionContext) => Promise<JsonValue>;
+  /** Optional Planning projection; only Planning tools may provide these hooks. */
+  planMutationFromResult?: (output: JsonValue) => PlanningTaskMutation | undefined;
+  afterPlanCommit?: (mutation: PlanningTaskMutation, context: ToolExecutionContext) => Promise<void>;
 }
 
-export type ToolDefinition = ComputerToolDefinition | NonComputerToolDefinition;
+export interface ControlToolDefinition extends ToolDefinitionBase {
+  category: "control";
+  control: ControlKind;
+}
+
+export type ToolDefinition = ComputerToolDefinition | NonComputerToolDefinition | ControlToolDefinition;
 
 export interface PolicyContext {
   call: ToolCall;
@@ -156,6 +187,7 @@ export interface FinishDecision {
 export interface RuntimePolicy {
   evaluateToolCall(context: PolicyContext): Promise<ToolPolicyDecision>;
   checkBudget(snapshot: RunSnapshot): BudgetDecision;
+  checkActionBudget(snapshot: RunSnapshot): BudgetDecision;
   canFinish(snapshot: RunSnapshot): FinishDecision;
 }
 

@@ -1,6 +1,6 @@
 # Computer Harness 文档索引
 
-日期：2026-09-07
+日期：2026-09-08
 文档角色：入口
 状态：当前执行
 当前入口：本文件
@@ -11,6 +11,8 @@
 
 ## 当前实施入口
 
+当前 A 实施交接：[Stage 5 结果分析与下一阶段路线，第 10 节](./stage-5-first-batch-analysis-and-next-gates-2026-09-07.md#10-a-空间本轮实施交接-2026-09-08)。前三项修复已完成离线回归；新扩集候选等待人工审查，尚未启动 VM 或真实任务。
+
 | 文件 | 用途 |
 |---|---|
 | [stage-4-implementation-entry.md](./stage-4-implementation-entry.md) | 两条 Computer 路线的共同边界、默认 Provider 和交接顺序 |
@@ -20,6 +22,7 @@
 | [stage-5-osworld-first-batch-task-candidates-2026-09-06.md](./stage-5-osworld-first-batch-task-candidates-2026-09-06.md) | OSWorld 首批 30 个正式候选、10 个备用任务及难度/预检规则 |
 | [stage-5-model-task-results-2026-09-07.md](./stage-5-model-task-results-2026-09-07.md) | GLM 30 个任务、Qwen 5 个任务的统一结果和后续原因分析入口 |
 | [stage-5-first-batch-analysis-and-next-gates-2026-09-07.md](./stage-5-first-batch-analysis-and-next-gates-2026-09-07.md) | 首批结果归因、P0 修复、定向重跑、停滞实验与扩集门槛 |
+| [stage-5-b-line-tools-planning-context-2026-09-07.md](./stage-5-b-line-tools-planning-context-2026-09-07.md) | B：工具共同合同、Planning/PlanStore、Context 消费与 Provider 交接 |
 | [stage-4-local-tasks-2026-08-31.json](./stage-4-local-tasks-2026-08-31.json) | 冻结任务的机器可读 manifest |
 
 ## 全局设计与规范
@@ -36,6 +39,8 @@
 ## 代码与实验入口
 
 - `scripts/stage5-osworld/`：当前 OSWorld Bridge/真实任务 runner；
+- `scripts/stage5-osworld/analyze-trajectory.mjs`：离线读取已有 `trajectory.jsonl` 的步骤、重复候选、错误、token 和延迟统计；
+- `scripts/stage5-planning-api-smoke.mjs`：Planning registry + DefaultContextCompiler + FakeComputer 的小规模真实 Provider smoke；不操作真实桌面或 VM；
 - `scripts/api-conformance.ts`：Provider 无副作用协议探针，默认 Qwen `strict_json`；
 - `scripts/stage4-local/`：本地路线回归检查；
 - `integrations/osworld/README.md`：OSWorld Bridge 的环境准备和命令细节；

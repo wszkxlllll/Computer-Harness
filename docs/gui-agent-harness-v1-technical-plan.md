@@ -46,6 +46,8 @@
 
 ### 1. Planning：主 Agent 使用工具维护独立任务状态
 
+实施前先完成本节末尾“工具共同基础与影响清单”的公共合同对齐。以下 Planning 数据示意使用最终共享的 TaskSpec 与规划状态；不得另建一套 Provider 私有任务结构。
+
 第一版在 `packages/planning` 实现 TaskCreate、TaskUpdate、TaskList、TaskGet，注册为现有 `planning` 类工具。使用一组独立于 RunSnapshot 的数据结构：
 
 ```ts
@@ -118,6 +120,154 @@ AdvisorService 构造独立 ModelInput：用户目标、当前 Plan、主 Agent 
 具体施工以 [Next gate 第 7 节](./stage-5-first-batch-analysis-and-next-gates-2026-09-07.md#7-next-gate从当前代码到增强模块效果评测的完整路线) 为准：P0/统计/任务准备与 Planning tools + Context 消费并行；接通 Planning 后立即评测；随后分别开发和评测 Context 策略、确定性 Monitor；再并行开发 Memory 召回与 Advisor tool，分别评测后组合。当前没有 Plan 实现，不能单设 Replan 阶段。每个模块保留独立开关，单项无收益可以关闭并继续下一假设。
 
 研究理由：重复尝试对应 Monitor/Recovery；长任务遗漏与顺序混乱对应 Plan；重新寻找已有信息对应 Context/Working Memory；跨任务重复探索对应 Memory；难页面独立分析对应 Advisor。比较外部成功率、可避免步骤、token 和总时长；不能只因任务提前失败、动作减少就判定优化成功。跨 Run Memory 的写入来源必须排除最终 holdout 的目标轨迹和 evaluator 答案。
+
+### 8. 工具共同基础与影响清单（Planning 接入前完成）
+
+#### 8.1 唯一注册来源，Provider 仅转换表达
+
+现有 ToolRegistry 可以保存任意已支持类别，问题主要在应用只装配 Computer 工具，以及 Provider 仍存在私有定义与坐标假设。先在现有 runtime 工具合同/注册表上重构组合方式，不必为了文件夹整齐立即拆一个新 tools 包。
+
+```text
+Computer / Planning / Advisory / Control 的规范定义
+                 ↓
+应用组合层按功能与权限建立本次 Run 的 ToolRegistry
+          ├─ 执行侧：查找定义、参数校验、Policy、调度
+          └─ modelTools()：只读、可序列化的工具视图
+                              ↓
+                        Context → ModelInput.tools
+                              ↓
+                   GLM / Qwen Provider 表达转换
+```
+
+createDefaultComputerTools 可保留为兼容 helper，但不再是唯一注册入口；应用建立一个 registry，再注册 Computer 与启用的 Planning 定义。定义由对应功能模块提供，Context 不维护第二份工具表。Provider 消费传入的 ModelInput.tools，不导入业务实现或可执行 registry，不持有工具权限，也不追加私有工具。
+
+当前 Qwen 的 terminate/interact 需要迁移到统一 Control 定义来源，名称、描述和 schema 在注册表定义一次。它们对应已有 finish/user_input_required ModelTurn，而非 GUI Action：为注册定义增加有明确消费者的 decision 分支，声明目标控制语义，不能给它伪造一个普通 execute handler。Provider 根据该声明编码、解码到现有 ModelTurn；Runtime 继续处理 finish、等待用户等控制语义。普通可执行工具才走 ToolCall/ToolResult 生命周期。
+
+GLM 与 Qwen 都从同一注册投影获取控制定义；保留原有纯文本终止兼容行为时要显式记录，不能在此次工具重构中无声改变 baseline。禁用的决策能力不能被 Provider 私自恢复。interact 是询问用户，不是批准动作；真正 approval 仍由 Policy 和用户控制通道完成。
+
+#### 8.2 分类、权限与描述各有用途
+
+第一版保留现有类别 computer/planning/control/side；Advisor 可归 side，不为未来能力先造十几个类别。类别是功能分组，不能等同于风险等级。真正执行分支由明确的 computer-action、普通 execute、decision 区分；主 Run 和 Advisor 使用各自显式 allowlist 形成 registry，子 Agent 不继承主 Agent 工具集。
+
+| 工具组 | 执行影响 | 描述中必须说明 | 当前/后续权限 |
+|---|---|---|---|
+| Computer | 桌面状态变化或等待 | 坐标/焦点依据、动作边界、返回结果不等于目标完成 | 主 Agent 可按 Policy 执行，Advisor 不注册 |
+| Planning 读取 | 当前 Run 计划读取 | 返回哪些任务字段 | 主 Agent；子 Agent 可接收只读快照 |
+| Planning 写入 | 当前 Run 计划变更 | ID 由程序生成/引用、可更新字段、状态含义 | 主 Agent；Advisor 不自动获得 |
+| Advisor | 额外模型调用、返回建议 | 问题输入、证据选择、等待结果、建议没有执行权 | 主 Agent，受子调用预算限制 |
+| Control | finish/询问用户等决策 | 何时使用、必填状态或问题、控制语义 | 按本次 Run 允许的决策能力注册 |
+
+每个工具定义统一维护 name、description、inputSchema、运行时 validate 和执行/决策分支。描述写明用途、前置条件、参数含义和结果意义；required/additionalProperties 与实际 validate 保持一致。纯函数参数解析应尽量复用，不能让模型 schema 和执行校验各自漂移。
+
+坐标元信息仅用于需要坐标的 Computer 定义；注册投影把需要转换的坐标字段及轴向传给 Provider，Provider 据此处理当前图片空间。不能仅因参数名叫 x/y 或工具属于 computer 就转换所有数值。GLM 当前通用坐标说明与编码路径、Qwen 依赖工具名的分支，都应纳入本次核对。
+
+权限通过实际可执行 registry 和 Policy 强制执行；模型看不见工具不等于权限保证。派发时必须使用相同受限 registry 再校验。暂不添加无人消费的风险评分/权限等级字段。
+
+#### 8.3 Plan 与子 Agent 共享任务描述，不共享执行状态
+
+统一基础可以是如下具体接口方向：
+
+```ts
+interface TaskSpec {
+  subject: string;
+  description: string;
+}
+interface PlanningTask extends TaskSpec {
+  id: string;
+  status: "pending" | "in_progress" | "completed" | "blocked";
+}
+// Advisor 实现时引入，由程序复制当前计划描述作为只读上下文。
+interface AdvisorRequest {
+  question: string;
+  task?: Readonly<TaskSpec>;
+  // 实现阶段按实际需要绑定 planTaskId、Observation 引用。
+}
+```
+
+现在由 planning 包导出 TaskSpec/PlanningTask 与只读视图；Advisor 接入时可消费 TaskSpec 或只读任务快照，不依赖 PlanStore 的写实现。若后续多个模块共同消费且出现依赖问题，再将这些小合同移到 protocol，避免现在增添通用 metadata/扩展字段。
+
+PlanState 按 Run 保存任务进度；Advisor 的运行 ID、执行完成/失败、预算是子调用事实。Advisor 成功只表示建议生成成功，不能把 PlanningTask.status 改成 completed。计划引用失效或用户目标变化后，历史 Advice 仍保留来源，主 Agent 以当前计划重新判断。
+
+#### 8.4 必须覆盖的接入面
+
+| 位置 | 必须检查的改动 |
+|---|---|
+| runtime/contracts、tool-registry、computer-tools | 工具与控制定义的区分、组合注册、序列化投影、参数校验与权限过滤 |
+| Planning 包与 Store | 共享 TaskSpec、程序 ID、状态读写、结果与保存一致、只读快照 |
+| Context | 从同一 registry 取工具；计划最新状态、工具结果配对、用户纠正优先；不重复附加控制定义 |
+| GLM/Qwen 请求、响应、历史重编码 | 统一工具名/描述/schema 来源；非 GUI 参数不改坐标；Qwen 不按同名字段合并不同工具 schema；控制决策往返一致 |
+| RunController、Policy | 非 GUI 工具不走 ActionIntent；混合调用按顺序执行、每轮最多一个 GUI 动作；工具失败后不假定后续依赖条件已满足 |
+| CLI、OSWorld runner | 注册组合、开关透传、实际配置和工具集记录；关闭增强保持基线 |
+| 轨迹/统计/构建 | 普通工具、GUI action、模型请求分别计数；沿用已有结果事件；新包导出、workspace 和测试引用可用 |
+
+特别注意模型在同一 Turn 同时输出“创建 Task”和“使用新 Task ID”的依赖调用：新 ID 尚未返回，不能提前引用。工具描述要求等待创建结果后再更新；验证发现非法引用时明确失败。Advisor 返回前也不能假设建议内容。不要把非 GUI 批调用自动并行化。
+
+第一批合同测试必须覆盖：Computer-only 兼容、注册 Planning 后两个 Provider 可见同一规范工具集、禁用工具不可执行、Planning status 与终止 status 不碰撞、带 x/y 的非 GUI 参数不被误转换、TaskCreate→ToolResult→下一轮更新、控制决策仍正确结束/等待。Qwen wire schema 的实现要采用已支持的表达并验证；不靠放松公共参数校验解决供应商限制。
+
+这些共同基础由 B 提出具体合同与针对性测试，A 统一集成公共 Runtime/CLI 变更。双方先对齐这一交付，再分别推进 P0 与 Planning；对应分工以 Next gate 为准。
+
+### 9. 通信、并发与 Context 插入约定
+
+本节区分已实现路径和新增模块必须补的行为。当前为单进程、单主 Run 串行执行；存在 Promise 不表示存在后台 Agent。实施时不新建通用消息总线，先复用现有工具返回、Context 输入和 CommandInbox。
+
+#### 9.1 谁通过什么渠道通信
+
+| 来源 → 目标 | 当前或计划采用的渠道 | 谁能改变权威状态 |
+|---|---|---|
+| 用户 → Runtime | 已有 submitUserInput/pause/resume/resolveApproval → CommandInbox | RunController 在安全边界写事件和更新状态 |
+| 用户取消 → Runtime/正在等待的调用 | 已有 cancel → AbortSignal；Advisor 必须向子调用传播 | RunController 负责收尾；子组件不能另写 run.finished |
+| 主 Agent → Planning | 注册工具 → execute → ToolResult | Planning 工具串行写当前 Run 的 PlanStore |
+| 主 Agent → Advisor | consult_advisor → await 子推理 → ToolResult | 子 Agent 只产建议；父 Runtime 落工具结果 |
+| Plan/Memory → Context | 只读快照、召回结果，经依赖注入传给 Compiler | 不改 RunSnapshot 或用户指令 |
+| Monitor → Context | 观察后检测结果 → 记录 progress.stalled → Compiler 投影 | 只报告可计算信号，不改计划或执行动作 |
+
+Advisor 无需直接向主 Agent Inbox 发消息；主 Agent 等待工具返回后，下一轮自然读到 ToolResult。Memory 也无需把召回结果伪装为 ToolCall。只有真正后台 Advisor 出现后，才需要独立的结果到达渠道。
+
+#### 9.2 串行写入与并发读取
+
+一个 Run 的事件序号由 RunController 分配，Trajectory 单写入者保持不变。Plan 更新由主 Agent 工具串行执行；UI/Advisor 先只读取快照。PlanStore 以 runId 隔离，不能让两个 Run 共享一个可变 plan.json；未来要支持 UI 直接改计划时，另走受控命令通道，不直接编辑运行中的文件。
+
+同一 ModelTurn 的工具按现有执行顺序等待，不能把 TaskCreate、TaskUpdate、Advisor、GUI 调用统一 Promise.all。整组预检只确认当时可确认的条件：运行时生成的 ID 和前序返回值必须在真正执行时再次验证。前序工具失败后，第一版停止执行该批剩余调用，给未执行调用明确结果，让下一轮重新决策；不猜测这些调用是否独立。当前 executeNonComputerCall 返回 void 且批执行会继续，这是需随工具合同重构补齐的行为。
+
+PlanStore 返回拷贝或只读快照，Context/Advisor 不能修改它。第一版 Memory 实验冻结库作为只读源；Memory Writer 在任务结束后集中写入，暂不引入检索期间的并发写库。多 Advisor 并行是后续能力，第一版同步工具只等待一个子请求。
+
+#### 9.3 Context 在何时冻结，插入什么
+
+每轮先处理已排队的用户命令、必要时重新观察，再截取事件列表和 Plan 快照；Compiler 从这份快照组织输入。使用事件数组副本而不是对活跃数组的共享引用。Memory 召回基于本轮目标/任务快照；Advisor 得到的也应是调用时选定的证据快照。
+
+Context 的插入位置与生命周期：
+
+- Plan：每轮最新只读视图；由工具更新，下一轮刷新，不把每版计划全文无限重复注入。
+- Memory：目标与当前任务相关的有限召回条目；查询条件改变后刷新，没有结果可为空；不能将上一任务的缓存结果当本轮记忆。
+- Advisor：作为对应调用的 ToolResult，与 ToolCall 配对；不另插一份相同 Advice，也不伪装成 system/user 授权。
+- Monitor：当前检测周期的一份事实提示，保留触发时的 Action/Observation 来源；状态变化后不持续作为当前警报展示。
+- 用户纠正：以已有 user.input.received 记录进入历史；最新要求优先于旧 Plan、Memory 和 Advice，主 Agent 下一轮自行更新计划。
+
+Provider 请求发出后不能修改正在发送的 ModelInput。若异步 Context 准备期间有新纠正入队，应在发出请求前再处理命令并重建输入；若请求已经发出，沿用已有返回后检查/丢弃旧决定的路径。这样无需为同步第一版引入普遍 revision 协议，但要实际测试边界。
+
+裁剪历史必须同时保留调用和返回，且满足 Provider continuation 约束。压缩工具结果可以缩短其内容，不能丢掉 callId 对应关系。保留的历史工具调用即使当前已禁用，也仍是历史事实，不能因此重新授予执行权限。
+
+#### 9.4 用户纠正、暂停、取消与迟到结果
+
+当前 pause/用户纠正是边界处理：等待工具时先入队，通常在工具返回后应用；不承诺即时抢占正在进行的子请求。cancel 是立即发出 AbortSignal，需要 Provider/工具配合终止 I/O。
+
+Advisor 返回后先闭合它的 ToolResult，再处理等待的用户纠正；纠正使尚未执行的批调用失效，不能继续执行旧计划下的 click。Advice 的 observationIds/任务描述说明它基于旧证据，Compiler 在新纠正后的上下文中不将其视为当前计划。第一版不自动把“取消子请求”当作“取消整个 Run”，除非来源确实是父 Run 的 cancel。
+
+Memory 检索失败不能返回上一查询的旧条目来掩盖失败，可作为无记忆条件继续并记录诊断；用户取消必须继续传播。Advisor 超时/失败返回工具错误，由主 Agent 判断是否继续，子请求不可无界重试。子请求计入独立预算和总实验成本，不能只统计父 Provider。
+
+GUI 动作已经开始后，纠正或取消不意味着动作未发生；保持原有 ActionReceipt/outcome_unknown 规则。Plan 保存成功但 ToolResult 落盘失败也不能伪装成“保存失败可安全重复”：停止本次 Run 并保留两侧记录供核对；第一版不承诺任意崩溃点自动恢复。原始事实不回滚，禁止自动重复未知 GUI 副作用。
+
+#### 9.5 后台子任务何时引入队列
+
+当产品要求“主 Agent 继续操作同时 Advisor 推理”时，才增加 jobId、结果收件箱、wait/cancel、启动证据引用及过期结果处理。后台服务只投递结果，仍由主 Runtime 在安全边界写事件、决定下一轮是否纳入 Context。不能让后台回调直接拼接正在使用的 messages 或写父 RunSnapshot。
+
+这一升级不要求重写 Plan/Advice：共享任务描述与证据引用仍可用，Job 生命周期单独维护。当前的工具型同步 Advisor 能先验证建议是否有价值，暂不承诺后台调度已存在。
+
+#### 9.6 责任与针对性验证
+
+B 负责工具失败传播合同、Plan 快照和 Context 插入实现，并提供测试需求；A 集成 Runtime 边界/批调用行为、CLI 配置与统计。Advisor 阶段再补子取消、超时与子成本，Memory 阶段再补检索生命周期。
+
+随对应模块逐步验证：TaskCreate 返回 ID 后更新；前序工具失败时剩余调用不执行；Context 准备期间纠正不使用旧输入；Advisor 等待期间纠正使后续旧 GUI 调用失效；父取消终止子请求；一个 Run 的 Plan 不进入另一个 Run；用户纠正优先于旧 Advice；裁剪后 ToolCall/ToolResult 仍配对。先测真实控制语义，不为尚未实现的后台系统写测试。
 
 ## 一、文档目的
 
@@ -838,14 +988,17 @@ interface RuntimePolicy {
     | { decision: "deny"; reason: string }
   >;
 
+  /** Model request budget; it does not consume the GUI action budget. */
   checkBudget(snapshot: RunSnapshot): BudgetDecision;
+  /** GUI side-effect budget; exhaustion still permits a closing model turn. */
+  checkActionBudget(snapshot: RunSnapshot): BudgetDecision;
   canFinish(snapshot: RunSnapshot): FinishDecision;
 }
 ```
 
 ### 11.2 V1 策略范围
 
-- `maxSteps`；
+- GUI action budget (`maxSteps` in the current CLI) and independent model-request budget；
 - `maxDurationMs`；
 - Provider 请求次数或成本预算；
 - Tool allowlist；

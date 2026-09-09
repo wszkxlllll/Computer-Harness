@@ -57,7 +57,7 @@ describe("DefaultContextCompiler", () => {
       event(7, { type: "observation.created", observation: latest }),
     ];
     const compiler = new DefaultContextCompiler(createDefaultComputerTools());
-    const input = await compiler.compile({ goal: "open the app", recentEvents: events, latestObservation: latest }, new AbortController().signal);
+    const input = await compiler.compile({ runId, goal: "open the app", recentEvents: events, latestObservation: latest }, new AbortController().signal);
     expect(input.messages[0]).toEqual({ role: "user", content: [{ type: "text", text: "open the app" }] });
     expect(input.messages.filter((message) => message.content.some((block) => block.type === "image"))).toHaveLength(1);
     const assistant = input.messages.find((message) => message.role === "assistant");
@@ -75,10 +75,10 @@ describe("DefaultContextCompiler", () => {
     const other = observation("obs-other");
     const compiler = new DefaultContextCompiler(createDefaultComputerTools());
     const events = [event(0, { type: "observation.created", observation: latest })];
-    await expect(compiler.compile({ goal: "goal", recentEvents: events, latestObservation: other }, new AbortController().signal)).rejects.toThrow(/latestObservation/);
+    await expect(compiler.compile({ runId, goal: "goal", recentEvents: events, latestObservation: other }, new AbortController().signal)).rejects.toThrow(/latestObservation/);
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
-    await expect(compiler.compile({ goal: "goal", recentEvents: events }, controller.signal)).rejects.toThrow("cancelled");
+    await expect(compiler.compile({ runId, goal: "goal", recentEvents: events }, controller.signal)).rejects.toThrow("cancelled");
   });
 
   it("projects a ModelTurn continuation into the assistant history", async () => {
@@ -98,7 +98,59 @@ describe("DefaultContextCompiler", () => {
       }),
       event(4, { type: "tool.call.completed", result: { callId: call.id, status: "completed", output: { ok: true } } }),
     ];
-    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({ goal: "continue", recentEvents: events, latestObservation: first }, new AbortController().signal);
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({ runId, goal: "continue", recentEvents: events, latestObservation: first }, new AbortController().signal);
     expect(input.messages.some((message) => message.content.some((block) => block.type === "provider_continuation" && block.continuation.content === "keep this for GLM"))).toBe(true);
+  });
+
+  it("injects the latest run plan after user corrections", async () => {
+    const latest = observation("obs-plan");
+    const events: RuntimeEvent[] = [
+      event(0, { type: "run.created", goal: "ignored" }),
+      event(1, { type: "run.started" }),
+      event(2, { type: "observation.created", observation: latest }),
+      event(3, { type: "user.input.received", text: "Use the other document" }),
+    ];
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "finish the document",
+      recentEvents: events,
+      latestObservation: latest,
+      plan: { runId, tasks: [{ id: "task-1", subject: "Open Writer", description: "Use the other document", status: "in_progress" }] },
+    }, new AbortController().signal);
+    const planIndex = input.messages.findIndex((message) => message.content.some((block) => block.type === "text" && block.text.includes("Current run plan")));
+    const correctionIndex = input.messages.findIndex((message) => message.content.some((block) => block.type === "text" && block.text === "Use the other document"));
+    expect(planIndex).toBeGreaterThan(correctionIndex);
+    expect(input.messages[planIndex]?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("task-1") });
+  });
+
+  it("keeps complete tool history while summarizing only unfinished plan phases", async () => {
+    const latest = observation("obs-plan-summary");
+    const call = { id: "call-plan-summary" as ToolCallId, name: "task_update", arguments: { taskId: "t2", status: "in_progress" } };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "finish the document",
+      recentEvents: [
+        event(0, { type: "run.created", goal: "ignored" }),
+        event(1, { type: "run.started" }),
+        event(2, { type: "observation.created", observation: latest }),
+        event(3, { type: "model.response.received", turn: { type: "tool_calls", calls: [call] } }),
+        event(4, { type: "tool.call.completed", result: { callId: call.id, status: "completed", output: { task: { id: "t2", status: "in_progress" } } } }),
+      ],
+      latestObservation: latest,
+      plan: {
+        runId,
+        tasks: [
+          { id: "t1", subject: "Collect source", status: "completed" },
+          { id: "t2", subject: "Write report", description: "Save the unfinished report", status: "in_progress" },
+        ],
+      },
+    }, new AbortController().signal);
+    const planText = input.messages
+      .flatMap((message) => message.content)
+      .find((block) => block.type === "text" && block.text.includes("Current run plan"));
+    expect(planText).toMatchObject({ type: "text", text: expect.stringContaining("t2"), });
+    expect(planText).toMatchObject({ type: "text", text: expect.not.stringContaining("t1: Collect source") });
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_call" && block.call.id === call.id))).toBe(true);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_result" && block.result.callId === call.id))).toBe(true);
   });
 });

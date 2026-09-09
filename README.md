@@ -104,6 +104,8 @@ pnpm.cmd install --frozen-lockfile
 ZHIPUAI_API_KEY=replace-with-your-key
 # 可选：兼容 OpenAI 协议的自定义端点
 GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
+# 可选：GLM thinking 档位；默认 enabled，可用 disabled 做延迟对照
+GLM_THINKING=enabled
 
 # Qwen3.8-Flash
 DASHSCOPE_API_KEY=replace-with-your-key
@@ -129,6 +131,12 @@ DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 # 在另一个终端运行 Harness
 pnpm --filter @computer-harness/cli build
 pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model glm-5.3-flash --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
+```
+
+Planning 对照在同一 CLI/Registry 上显式打开；关闭 `--planning` 即为 Computer + Control baseline：
+
+```text
+pnpm --filter @computer-harness/cli start -- --goal "create and complete a plan" --model glm-5.3-flash --cua-socket "<private-socket>" --planning --output "runs/live-glm-planning" --env-file ".env"
 ```
 
 Qwen 运行必须显式选择坐标单位；严格 JSON 实验建议同时关闭 thinking：
@@ -157,7 +165,8 @@ pnpm --filter @computer-harness/cli start -- --goal "click the input and type Ha
 `ZHIPUAI_API_KEY`，Qwen 使用
 `DASHSCOPE_API_KEY`；Qwen 若未提供 `DASHSCOPE_BASE_URL/ENDPOINT`，会由
 `DASHSCOPE_WORKSPACE_ID` 生成已验证的 Workspace endpoint，否则使用公共 compatible-mode endpoint。
-可用 `GLM_BASE_URL` 或 `DASHSCOPE_BASE_URL` 覆盖端点。可选
+可用 `GLM_BASE_URL` 或 `DASHSCOPE_BASE_URL` 覆盖端点；GLM 可用进程级
+`GLM_THINKING=disabled|enabled` 做 thinking 对照。可选
 `--max-steps`、`--max-model-requests`、`--fixture-result` 和
 `--screenshot-dir` 用于隔离实验。Qwen 还支持
 `--qwen-output-mode native_tools|strict_json`；默认是 `strict_json`，

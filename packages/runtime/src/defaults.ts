@@ -20,11 +20,15 @@ export class DefaultRuntimePolicy implements RuntimePolicy {
   }
 
   public checkBudget(snapshot: RunSnapshot): { allowed: boolean; reason?: string } {
-    if (snapshot.stepCount >= this.maxSteps) {
-      return { allowed: false, reason: `step budget exhausted at ${this.maxSteps}` };
-    }
     if (snapshot.modelRequestCount >= this.maxModelRequests) {
       return { allowed: false, reason: `model request budget exhausted at ${this.maxModelRequests}` };
+    }
+    return { allowed: true };
+  }
+
+  public checkActionBudget(snapshot: RunSnapshot): { allowed: boolean; reason?: string } {
+    if (snapshot.stepCount >= this.maxSteps) {
+      return { allowed: false, reason: `action budget exhausted at ${this.maxSteps}; finish or continue without GUI actions` };
     }
     return { allowed: true };
   }

@@ -27,6 +27,16 @@ function capture(seed: number): OsworldBridgeCapture {
   };
 }
 
+function captureAt(width: number, height: number, seed: number): OsworldBridgeCapture {
+  return {
+    mediaType: "image/png",
+    dataBase64: Buffer.from(makePng(width, height, seed)).toString("base64"),
+    width,
+    height,
+    capturedAt: "2026-09-04T00:00:00.000Z",
+  };
+}
+
 function crc32(data: Uint8Array): number {
   let crc = 0xffffffff;
   for (const value of data) {
@@ -69,7 +79,7 @@ function makePng(width: number, height: number, seed: number): Uint8Array {
 class FakeBridge implements OsworldBridge {
   public readonly description: OsworldBridgeDescription = {
     viewport,
-    capabilities: { screenshot: true, pointer: true, keyboard: true },
+    capabilities: { screenshot: true, pointer: true, keyboard: true, keyboardKeys: ["ctrl", "a", "enter", "shift", "down"] },
   };
   public observeCalls = 0;
   public executeCalls: OsworldTypedAction[] = [];
@@ -167,6 +177,14 @@ describe("OsworldComputer", () => {
     expect(bridge.observeCalls).toBe(1);
   });
 
+  it("accepts whitespace keyboard keys advertised by OSWorld", async () => {
+    const bridge = new FakeBridge();
+    bridge.description.capabilities.keyboardKeys = ["ctrl", " ", "\t", "enter"];
+    await expect(computer(bridge).open({}, abortSignal)).resolves.toMatchObject({
+      capabilities: { keyboard: true },
+    });
+  });
+
   it("rejects a requested viewport or bridge description that cannot be used safely", async () => {
     const bridge = new FakeBridge();
     const instance = computer(bridge);
@@ -192,6 +210,20 @@ describe("OsworldComputer", () => {
     expect(bridge.observeCalls).toBe(1);
     await instance.observe(session, observationId("fresh"), abortSignal);
     expect(bridge.observeCalls).toBe(2);
+  });
+
+  it("promotes a post-action viewport change to the next current coordinate space", async () => {
+    const bridge = new FakeBridge();
+    bridge.nextExecuteResult = { status: "completed", postActionCapture: captureAt(1024, 768, 9) };
+    const instance = computer(bridge);
+    const session = await instance.open({}, abortSignal);
+    const initialId = observationId("viewport-initial");
+    await instance.observe(session, initialId, abortSignal);
+    await expect(instance.execute(session, { actionId: actionId("resize"), basedOn: initialId, kind: "click", point: { x: 10, y: 20 } }, abortSignal)).resolves.toMatchObject({ status: "completed" });
+    const resizedId = observationId("viewport-resized");
+    const resized = await instance.observe(session, resizedId, abortSignal);
+    expect(resized.viewport).toEqual({ width: 1024, height: 768, coordinateSpace: "physical" });
+    await expect(instance.execute(session, { actionId: actionId("new-space"), basedOn: resizedId, kind: "click", point: { x: 1000, y: 700 } }, abortSignal)).resolves.toMatchObject({ status: "completed" });
   });
 
   it("rejects stale observations and deterministic mapping failures before bridge side effects", async () => {
@@ -263,11 +295,16 @@ describe("OsworldComputer", () => {
     expect(mapActionIntent({ ...base, kind: "double_click", point: { x: 1, y: 2 } }, viewport)).toEqual({ kind: "double_click", x: 1, y: 2 });
     expect(mapActionIntent({ ...base, kind: "right_click", point: { x: 1, y: 2 } }, viewport)).toEqual({ kind: "right_click", x: 1, y: 2 });
     expect(mapActionIntent({ ...base, kind: "type", text: "hello" }, viewport)).toEqual({ kind: "type", text: "hello" });
-    expect(mapActionIntent({ ...base, kind: "keypress", keys: ["ENTER"] }, viewport)).toEqual({ kind: "keypress", key: "ENTER" });
-    expect(mapActionIntent({ ...base, kind: "keypress", keys: ["CTRL", "A"] }, viewport)).toEqual({ kind: "hotkey", keys: ["CTRL", "A"] });
+    expect(mapActionIntent({ ...base, kind: "keypress", keys: ["ENTER"] }, viewport)).toEqual({ kind: "keypress", key: "enter" });
+    expect(mapActionIntent({ ...base, kind: "keypress", keys: ["CTRL", "A"] }, viewport)).toEqual({ kind: "hotkey", keys: ["ctrl", "a"] });
     expect(mapActionIntent({ ...base, kind: "scroll", point: { x: 1, y: 2 }, direction: "down", ticks: 3 }, viewport)).toEqual({ kind: "scroll", x: 1, y: 2, direction: "down", ticks: 3 });
     expect(mapActionIntent({ ...base, kind: "drag", from: { x: 1, y: 2 }, to: { x: 3, y: 4 } }, viewport)).toEqual({ kind: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4 });
     expect(mapActionIntent({ actionId: actionId("wait"), kind: "wait", durationMs: 10 }, viewport)).toEqual({ kind: "wait", durationMs: 10 });
+  });
+
+  it("rejects a key that the OSWorld description does not advertise", () => {
+    const base = { actionId: actionId("key-capability"), basedOn: observationId("obs") };
+    expect(() => mapActionIntent({ ...base, kind: "keypress", keys: ["MENU"] }, viewport, new Set(["enter", "ctrl"]))).toThrow(/does not support key MENU/i);
   });
 
   it("clears all observation state on logical close and does not call environment lifecycle methods", async () => {

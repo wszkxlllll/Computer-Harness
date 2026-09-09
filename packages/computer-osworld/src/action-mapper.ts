@@ -8,7 +8,7 @@ export class OsworldActionMappingError extends Error {
   }
 }
 
-export function mapActionIntent(action: ActionIntent, viewport: Viewport): OsworldTypedAction {
+export function mapActionIntent(action: ActionIntent, viewport: Viewport, keyboardKeys?: ReadonlySet<string>): OsworldTypedAction {
   switch (action.kind) {
     case "click":
       return { kind: "click", ...readPoint(action.point, "click", viewport) };
@@ -20,7 +20,7 @@ export function mapActionIntent(action: ActionIntent, viewport: Viewport): Oswor
       if (typeof action.text !== "string") throw new OsworldActionMappingError("type.text must be a string");
       return { kind: "type", text: action.text };
     case "keypress":
-      return mapKeys(action.keys);
+      return mapKeys(action.keys, keyboardKeys);
     case "scroll":
       if (!Number.isInteger(action.ticks) || action.ticks <= 0) {
         throw new OsworldActionMappingError("scroll.ticks must be a positive integer");
@@ -41,13 +41,23 @@ export function mapActionIntent(action: ActionIntent, viewport: Viewport): Oswor
   }
 }
 
-function mapKeys(keys: string[]): OsworldTypedAction {
+function mapKeys(keys: string[], keyboardKeys?: ReadonlySet<string>): OsworldTypedAction {
   if (!Array.isArray(keys) || keys.length === 0 || keys.some((key) => typeof key !== "string" || key.length === 0)) {
     throw new OsworldActionMappingError("keypress.keys must be a non-empty array of non-empty strings");
   }
-  return keys.length === 1
-    ? { kind: "keypress", key: keys[0]! }
-    : { kind: "hotkey", keys: [...keys] };
+  const normalized = keys.map((key) => key.toLowerCase());
+  if (keyboardKeys !== undefined) {
+    const unsupported = normalized.find((key) => !keyboardKeys.has(key));
+    if (unsupported !== undefined) {
+      throw new OsworldActionMappingError(
+        `OSWorld backend does not support key ${unsupported}; use a key advertised by the computer description`,
+        "OSWORLD_UNSUPPORTED_KEY",
+      );
+    }
+  }
+  return normalized.length === 1
+    ? { kind: "keypress", key: normalized[0]! }
+    : { kind: "hotkey", keys: normalized };
 }
 
 function readPoint(point: Point, label: string, viewport: Viewport): { x: number; y: number } {

@@ -111,6 +111,17 @@ function clickStarted(sequence: number, basedOn: ObservationId = observationId):
 }
 
 describe("RunSnapshot reducer", () => {
+  it("projects Planning mutations into the run-isolated PlanState", () => {
+    const task = { id: "task-1", subject: "Open Writer", status: "pending" as const };
+    const events = [
+      ...runningEvents(),
+      event(5, { type: "planning.task.updated", callId, mutation: { operation: "created", task } }),
+      event(6, { type: "planning.task.updated", callId, mutation: { operation: "updated", task: { ...task, status: "completed" as const } } }),
+    ];
+    const snapshot = events.reduce(reduceRunEvent, initialRunSnapshot(runId));
+    expect(snapshot.plan).toEqual({ runId, tasks: [{ ...task, status: "completed" }] });
+  });
+
   it("is deterministic and leaves an unresolved side effect visible", () => {
     const events: RuntimeEvent[] = [
       ...runningEvents(),
@@ -617,6 +628,7 @@ describe("readRuntimeEvents", () => {
         type: "action.execution.failed",
         receipt: { actionId, status: "failed" },
       }),
+      event(0, { type: "planning.task.updated", callId, mutation: { operation: "created", task: { id: "task-1", subject: "Open the app", status: "pending" } } }),
       event(0, { type: "run.paused", reason: "operator" }),
       event(0, { type: "run.resumed" }),
       event(0, { type: "approval.requested", requestId: "approval-1", callId, reason: "confirm" }),

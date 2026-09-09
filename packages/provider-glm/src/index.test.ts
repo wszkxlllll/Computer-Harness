@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import type { AssetReader, ModelInput } from "@computer-harness/runtime";
-import { GlmAdapter, type GlmHttpClient, type GlmProfile } from "./index.js";
+import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 3 };
@@ -31,7 +31,7 @@ function input(): ModelInput {
       { type: "text", text: "click" },
       { type: "image", asset, viewport },
     ] }],
-    tools: [{ name: "click", description: "click", inputSchema: { type: "object" } }],
+    tools: [{ name: "click", description: "click", category: "computer", coordinate: { fields: ["x", "y"] }, inputSchema: { type: "object" } }],
   };
 }
 
@@ -39,7 +39,18 @@ function inputWithoutImage(): ModelInput {
   return {
     system: "system",
     messages: [{ role: "user", content: [{ type: "text", text: "click" }] }],
-    tools: [{ name: "click", description: "click", inputSchema: { type: "object" } }],
+    tools: [{ name: "click", description: "click", category: "computer", coordinate: { fields: ["x", "y"] }, inputSchema: { type: "object" } }],
+  };
+}
+
+function inputWithControls(): ModelInput {
+  return {
+    ...input(),
+    tools: [
+      ...input().tools,
+      { name: "terminate", description: "finish", category: "control", control: "finish", inputSchema: { type: "object" } },
+      { name: "interact", description: "ask", category: "control", control: "user_input_required", inputSchema: { type: "object" } },
+    ],
   };
 }
 
@@ -49,7 +60,7 @@ describe("GLM provider adapter", () => {
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
     const turn = await adapter.generate(input(), { signal: new AbortController().signal });
     expect(turn).toEqual({ type: "tool_calls", calls: [{ id: "glm-call", name: "click", arguments: { x: 400, y: 150 } }] });
-    expect(client.body?.tools).toEqual([{ type: "function", function: { name: "click", description: "click Coordinates x/y/fromX/fromY/toX/toY are normalized numbers from 0 to 1000.", parameters: { type: "object" } } }]);
+    expect(client.body?.tools).toEqual([{ type: "function", function: { name: "click", description: "click Coordinates x,y are normalized numbers from 0 to 1000.", parameters: { type: "object" } } }]);
     expect(client.body?.thinking).toEqual({ type: "disabled" });
     const messages = client.body?.messages as Array<Record<string, unknown>>;
     const userContent = messages[1]?.content as Array<Record<string, unknown>>;
@@ -89,11 +100,18 @@ describe("GLM provider adapter", () => {
     await expect(adapter.generate(input(), { signal: controller.signal })).rejects.toThrow("cancelled");
   });
 
+  it("maps control definitions from the shared tool projection", async () => {
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "done" }) } }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success", summary: "done" });
+    expect((client.body?.tools as Array<Record<string, unknown>>).map((item) => (item.function as Record<string, unknown>).name)).toContain("terminate");
+  });
+
   it("adds actual-pixel bounds to the Function Schema when a viewport is available", async () => {
     const client = new Client({ choices: [{ message: { tool_calls: [{ id: "pixel-call", function: { name: "click", arguments: "{\"x\":799,\"y\":599}" } }] } }] });
     const profile: GlmProfile = { name: "test-pixels", thinking: "disabled", coordinateMode: "actual_pixels" };
     const adapter = new GlmAdapter({ apiKey: "key", profile, assetReader: new Reader(), httpClient: client });
-    const pixelInput: ModelInput = { ...input(), tools: [{ name: "click", description: "click", inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false } }] };
+    const pixelInput: ModelInput = { ...input(), tools: [{ name: "click", description: "click", category: "computer", coordinate: { fields: ["x", "y"] }, inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false } }] };
     await expect(adapter.generate(pixelInput, { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ arguments: { x: 799, y: 599 } }] });
     expect(client.body?.tools).toMatchObject([{ function: { parameters: { properties: { x: { minimum: 0, maximum: 799 }, y: { minimum: 0, maximum: 599 } } } } }]);
   });
@@ -177,6 +195,89 @@ describe("GLM provider adapter", () => {
         code: "1305",
         retryable: true,
       });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves a sanitized network cause code for diagnostics", async () => {
+    const cause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw Object.assign(new TypeError("fetch failed https://user:password@example.test/path?api_key=secret-value Authorization: Bearer synthetic-token-123"), { cause });
+    }));
+    try {
+      const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader() });
+      let caught: unknown;
+      try {
+        await adapter.generate(input(), { signal: new AbortController().signal });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({
+        code: "GLM_NETWORK_ERROR",
+        retryable: true,
+        message: expect.stringContaining("causeCode=ECONNRESET"),
+      });
+      const message = caught instanceof Error ? caught.message : String(caught);
+      expect(message).toContain("api_key=[redacted]");
+      expect(message).toContain("Authorization: [redacted]");
+      expect(message).not.toContain("synthetic-token-123");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("applies one deadline to fetch and response-body reading", async () => {
+    let observedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => {
+      observedSignal = options.signal;
+      return {
+        ok: true,
+        status: 200,
+        json: () => new Promise<never>((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+        }),
+      };
+    }));
+    try {
+      const adapter = new GlmAdapter({
+        apiKey: "key",
+        profile: normalizedProfile,
+        assetReader: new Reader(),
+        httpClient: new FetchGlmHttpClient({ requestTimeoutMs: 10 }),
+      });
+      await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({
+        code: "GLM_REQUEST_TIMEOUT",
+        retryable: true,
+        retryMode: "same_input",
+      });
+      expect(observedSignal?.aborted).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves user cancellation instead of classifying it as a retryable timeout", async () => {
+    let observedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => {
+      observedSignal = options.signal;
+      if (options.signal.aborted) return Promise.reject(options.signal.reason);
+      return new Promise<never>((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      });
+    }));
+    try {
+      const controller = new AbortController();
+      const adapter = new GlmAdapter({
+        apiKey: "key",
+        profile: normalizedProfile,
+        assetReader: new Reader(),
+        httpClient: new FetchGlmHttpClient({ requestTimeoutMs: 1_000 }),
+      });
+      const request = adapter.generate(input(), { signal: controller.signal });
+      controller.abort(new Error("user cancelled"));
+      await expect(request).rejects.toThrow("user cancelled");
+      expect(observedSignal?.aborted).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }
