@@ -56,9 +56,22 @@ async function stop(child) {
   });
 }
 
-function candidateIds(markdown, includeReserve) {
-  const primary = markdown.match(/## 首批 30 个正式候选[\s\S]*?(?=## 备用候选 10 个|$)/u)?.[0] ?? "";
-  const reserve = markdown.match(/## 备用候选 10 个[\s\S]*/u)?.[0] ?? "";
+function candidateIds(documentText, includeReserve, selectedLabels) {
+  try {
+    const parsed = JSON.parse(documentText);
+    if (Array.isArray(parsed?.tasks)) {
+      const labels = selectedLabels === undefined ? undefined : new Set(selectedLabels);
+      return parsed.tasks
+        .filter((task) => task?.proposedSplit !== "reserve" || includeReserve)
+        .filter((task) => labels === undefined || labels.has(task?.label))
+        .map((task) => task?.taskId)
+        .filter((taskId) => typeof taskId === "string" && taskId.length > 0);
+    }
+  } catch {
+    // Keep compatibility with the original Markdown candidate document.
+  }
+  const primary = documentText.match(/## 首批 30 个正式候选[\s\S]*?(?=## 备用候选 10 个|$)/u)?.[0] ?? "";
+  const reserve = documentText.match(/## 备用候选 10 个[\s\S]*/u)?.[0] ?? "";
   const text = includeReserve ? `${primary}\n${reserve}` : primary;
   return [...new Set(text.match(ID_RE) ?? [])];
 }
@@ -66,7 +79,7 @@ function candidateIds(markdown, includeReserve) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
-    process.stdout.write("Usage: node scripts/stage5-osworld/preflight-batch.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <name> --candidate-doc <path> --python <python> --vmrun-path <vmrun> --output <dir> [--include-reserve]\n");
+    process.stdout.write("Usage: node scripts/stage5-osworld/preflight-batch.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <name> --candidate-doc <path> --python <python> --vmrun-path <vmrun> --output <dir> [--include-reserve] [--labels V06,V07]\n");
     return;
   }
   const osworldRoot = resolve(required(argv, "--osworld-root"));
@@ -77,7 +90,9 @@ async function main() {
   const vmrunPath = resolve(required(argv, "--vmrun-path"));
   const output = resolve(required(argv, "--output"));
   const includeReserve = argv.includes("--include-reserve");
-  const taskIds = candidateIds(await readFile(candidateDoc, "utf8"), includeReserve);
+  const labelsValue = value(argv, "--labels");
+  const selectedLabels = labelsValue === undefined ? undefined : labelsValue.split(",").map((label) => label.trim()).filter(Boolean);
+  const taskIds = candidateIds(await readFile(candidateDoc, "utf8"), includeReserve, selectedLabels);
   if (taskIds.length === 0) throw new Error("candidate document did not contain task IDs");
   await mkdir(output, { recursive: true });
   const osworldCommit = (await execFileAsync("git", ["-C", osworldRoot, "rev-parse", "HEAD"])).stdout.trim();

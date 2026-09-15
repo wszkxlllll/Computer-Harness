@@ -40,7 +40,20 @@ def main() -> int:
 
     task_root = osworld_root / "evaluation_examples" / "examples"
     candidate_text = args.candidate_doc.read_text(encoding="utf-8")
-    task_ids = list(dict.fromkeys(TASK_ID_RE.findall(candidate_text)))
+    # JSON manifests may contain provenance IDs such as replacementOf. Only
+    # taskId entries are candidates; do not mistake audit metadata for tasks.
+    try:
+        candidate_manifest = json.loads(candidate_text)
+    except json.JSONDecodeError:
+        candidate_manifest = None
+    if isinstance(candidate_manifest, dict) and isinstance(candidate_manifest.get("tasks"), list):
+        task_ids = list(dict.fromkeys(
+            task["taskId"]
+            for task in candidate_manifest["tasks"]
+            if isinstance(task, dict) and isinstance(task.get("taskId"), str)
+        ))
+    else:
+        task_ids = list(dict.fromkeys(TASK_ID_RE.findall(candidate_text)))
     task_files = {path.stem: path for path in task_root.rglob("*.json")}
     rows: list[dict[str, Any]] = []
 
