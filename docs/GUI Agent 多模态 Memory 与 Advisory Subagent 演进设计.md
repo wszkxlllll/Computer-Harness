@@ -1,6 +1,6 @@
 # GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计
 
-> 2026-09-07 统一说明：本文保留 Memory/Advisory 的研究构思；具体施工以 [技术计划书的当前扩展主线](./gui-agent-harness-v1-technical-plan.md#当前扩展主线contextplanmemoryadvisory-与-monitor2026-09-07) 为准。Plan 是主 Agent 的工具和独立状态；Memory 经召回进入 Context；Advisory 是主 Agent 显式调用、拥有独立上下文和受限权限的工具。确定性 Monitor 只向 Context 报告事实，不自动调模型。下文未来能力不代表已经实现。
+> 2026-09-15 统一说明：本文只保留 Memory/Advisory 的长期研究构思；当前施工和实验以 [Stage 6 起始状态](./stage-6-convergence-and-start-state-2026-09-15.md) 为准。Plan 是主 Agent 的工具和独立状态；Memory 经召回进入 Context；Advisory 是主 Agent 显式调用、拥有独立上下文和受限权限的工具。下文未来能力不代表已经实现。
 
 ## 一、设计背景
 

@@ -1,6 +1,6 @@
 # Computer Harness 文档索引
 
-日期：2026-09-08
+日期：2026-09-15
 文档角色：入口
 状态：当前执行
 当前入口：本文件
@@ -11,26 +11,24 @@
 
 ## 当前实施入口
 
-当前 A 实施交接：[Stage 5 结果分析与下一阶段路线，第 10 节](./stage-5-first-batch-analysis-and-next-gates-2026-09-07.md#10-a-空间本轮实施交接-2026-09-08)。前三项修复已完成离线回归；新扩集候选等待人工审查，尚未启动 VM 或真实任务。
+当前唯一阶段入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)。工程集成已通过；验证集 G0 仍在并行预检，验证完成前不冻结正式任务、预算或快照。
 
 | 文件 | 用途 |
 |---|---|
-| [stage-4-implementation-entry.md](./stage-4-implementation-entry.md) | 两条 Computer 路线的共同边界、默认 Provider 和交接顺序 |
-| [stage-4-local-task-implementation.md](./stage-4-local-task-implementation.md) | A：本地 CUA/Windows 任务 |
-| [osworld-environment-implementation.md](./osworld-environment-implementation.md) | B：OSWorld/VM、Bridge、官方评分和真实任务 |
-| [stage-5-osworld-reproducibility.md](./stage-5-osworld-reproducibility.md) | OSWorld VM artifact、快照、显示校准和队友复现实验入口 |
-| [stage-5-osworld-first-batch-task-candidates-2026-09-06.md](./stage-5-osworld-first-batch-task-candidates-2026-09-06.md) | OSWorld 首批 30 个正式候选、10 个备用任务及难度/预检规则 |
-| [stage-5-model-task-results-2026-09-07.md](./stage-5-model-task-results-2026-09-07.md) | GLM 30 个任务、Qwen 5 个任务的统一结果和后续原因分析入口 |
-| [stage-5-first-batch-analysis-and-next-gates-2026-09-07.md](./stage-5-first-batch-analysis-and-next-gates-2026-09-07.md) | 首批结果归因、P0 修复、定向重跑、停滞实验与扩集门槛 |
-| [stage-5-b-line-tools-planning-context-2026-09-07.md](./stage-5-b-line-tools-planning-context-2026-09-07.md) | B：工具共同合同、Planning/PlanStore、Context 消费与 Provider 交接 |
-| [stage-4-local-tasks-2026-08-31.json](./stage-4-local-tasks-2026-08-31.json) | 冻结任务的机器可读 manifest |
+| [stage-6-convergence-and-start-state-2026-09-15.md](./stage-6-convergence-and-start-state-2026-09-15.md) | 当前收敛状态、冻结条件、P/C/B/M1/M2/N 消融顺序和停止条件 |
+| [qwen-flat-regression-and-integration-acceptance-2026-09-15.md](./qwen-flat-regression-and-integration-acceptance-2026-09-15.md) | Qwen flat 真实 API 回归、GLM/Qwen Composite/Memory/Planning 及双后端集成验收 |
+| [qwen-flat-source-audit-and-migration-2026-09-15.md](./qwen-flat-source-audit-and-migration-2026-09-15.md) | Qwen strict 固定 `calls[]` 源码复审、提示词边界与协议迁移证据 |
+| [real-api-conformance-2026-09-15.md](./real-api-conformance-2026-09-15.md) | 真实 API 的详细请求、响应与历史失败证据 |
+| [harness-development-validation-candidates-2026-09-10.json](./harness-development-validation-candidates-2026-09-10.json) | G0 修订3候选 manifest：20开发/20验证/11备用；V19由R10替代，主集动态预检已回填、预算未定，不可直接当正式 runner 输入 |
+| [g0-preflight-progress-2026-09-10.md](./g0-preflight-progress-2026-09-10.md) | G0 主集动态预检：Development 20/20、Validation 20/20（V19由R10替代）；evaluator正例校准和预算冻结未完成 |
+| [osworld-environment-implementation.md](./osworld-environment-implementation.md) | OSWorld/VM、Bridge、官方评分和真实任务环境 |
+| [stage-5-osworld-reproducibility.md](./stage-5-osworld-reproducibility.md) | OSWorld artifact、快照、显示校准和复现实验入口 |
 
 ## 全局设计与规范
 
 | 文件 | 用途 |
 |---|---|
 | [development-documentation-standard.md](./development-documentation-standard.md) | 文档角色、证据、归档和提交规范 |
-| [gui-agent-harness-v1-technical-plan.md](./gui-agent-harness-v1-technical-plan.md) | 技术基线；顶部“当前扩展主线”统一 Context、Plan tools、Memory、Advisor tool、Monitor 与 Policy 的施工边界 |
 | [multimodal-gui-agent-harness-product-plan.md](./multimodal-gui-agent-harness-product-plan.md) | 产品定位和扩展边界 |
 | [run-turn-tool-and-user-correction-semantics.md](./run-turn-tool-and-user-correction-semantics.md) | Run、Turn、Tool 和用户纠正语义 |
 | [GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计.md](./GUI%20Agent%20多模态%20Memory%20与%20Advisory%20Subagent%20演进设计.md) | 长期 Memory/Advisory 设计，当前不作为实施指令 |
@@ -42,15 +40,18 @@
 - `scripts/stage5-osworld/analyze-trajectory.mjs`：离线读取已有 `trajectory.jsonl` 的步骤、重复候选、错误、token 和延迟统计；
 - `scripts/stage5-planning-api-smoke.mjs`：Planning registry + DefaultContextCompiler + FakeComputer 的小规模真实 Provider smoke；不操作真实桌面或 VM；
 - `scripts/api-conformance.ts`：Provider 无副作用协议探针，默认 Qwen `strict_json`；
+- `scripts/real-memory-api-conformance.mjs`：正式 Memory tools + Runtime 的无桌面真实 GLM/Qwen 闭环与多调用探针；
+- `scripts/real-batch-api-conformance.mjs`：真实 GLM/Qwen 的 `click→type` Provider + Fake Computer Batch 探针；不操作真实桌面；
+- `scripts/batch-backend-fixture.mjs`：同一 Runtime 在 CUA/OSWorld fake backend seam 上的双后端 Batch 合同验证；
+- `scripts/qwen-flat-return-matrix.mjs`：Qwen 固定 `calls[]` 的单调用、Batch、Plan/Memory、Composite 和多轮读取矩阵；
 - `scripts/stage4-local/`：本地路线回归检查；
+- `packages/memory/`：Run 内 Fact Notes/轻实体 Store 与工具；由 Runtime 事件提交和 Context 召回组装；
 - `integrations/osworld/README.md`：OSWorld Bridge 的环境准备和命令细节；
 - `runs/`：本地原始运行产物，包含可能敏感的截图，默认不跟踪、不提交。
 
 ## 历史资料
 
-`docs/history/` 保存已完成阶段、被替代方案和旧审计；`scripts/history/` 保存已停止使用的实验脚本。它们只用于追溯，不是当前实施指令；如果历史结论
-仍然有效，应先压缩到当前路线摘要，再让 Agent 执行。当前新增归档：旧 Gate2/协作审计、旧 Qwen strict-json 审计、截图根因审计、首批预检结果和单轮 smoke 结果；
-统一结果以 [stage-5-model-task-results-2026-09-07.md](./stage-5-model-task-results-2026-09-07.md) 为准。
+`docs/history/` 保存已完成阶段、被替代方案和旧审计；`scripts/history/` 保存已停止使用的实验脚本。它们只用于追溯，不是当前实施指令。本轮已归档 Stage 4/5 施工记录、旧 G1–G3 审计、旧 Planning 交接、旧扩展技术计划和 Qwen 失败样本；统一当前路线以 Stage 6 入口为准。
 
 提交时只包含本索引、全局设计/规范、两条路线摘要、最新总体审计和必要 manifest；`docs/history/`、`.env`、截图、VM
 文件和 `runs/` 原始资产不提交。

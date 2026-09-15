@@ -3,7 +3,7 @@
 日期：2026-08-28  
 状态：V1 设计说明，供 Stage 1/2 执行 Agent 使用
 
-> 2026-09-07 更新：本文保留 Run/Turn 与输入语义。submitUserInput、CommandInbox、审批等待和取消路径已在 Runtime 实现，后文 Stage 1/2 的“待实施”是历史说明。新增 Plan/Memory/Advisor 的通信、并发、批调用失败和 Context 插入以 [技术计划书顶部第 9 小节](./gui-agent-harness-v1-technical-plan.md) 为准。同步 Advisor 使用工具结果渠道，不新增后台消息队列。
+> 2026-09-15 更新：本文只保留 Run/Turn、输入、审批和取消语义。submitUserInput、CommandInbox、审批等待和取消路径已在 Runtime 实现，后文早期阶段的“待实施”是历史说明。当前模块启停、实验顺序和收敛条件以 [Stage 6 起始状态](./stage-6-convergence-and-start-state-2026-09-15.md) 为准。
 
 ## 1. 核心结论
 

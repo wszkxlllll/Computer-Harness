@@ -1,6 +1,6 @@
 # 面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计
 
-> 2026-09-07 统一说明：本文解释产品与研究目标；具体实现以 [技术计划书的当前扩展主线](./gui-agent-harness-v1-technical-plan.md#当前扩展主线contextplanmemoryadvisory-与-monitor2026-09-07) 为准。当前路线为主 Agent 调用 Planning/Advisor 工具、Memory 召回到 Context、Monitor 脚本报告信号、Runtime Policy 执行许可与审批；不加入独立 Verifier。相关语义识别能力属于待实验设计，不代表基础设施已经能判断任意坐标点击的风险。
+> 2026-09-15 统一说明：本文解释产品与研究目标；当前实施入口为 [Stage 6 起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)。当前路线为主 Agent 调用 Planning 工具、Memory 召回到 Context、Runtime Policy 执行许可与审批；不加入独立 Verifier。Guard、Advisory 和更复杂语义识别属于后续设计，不代表基础设施已经能判断任意坐标点击的风险。
 
 ## 一、技术路线调整背景
 
