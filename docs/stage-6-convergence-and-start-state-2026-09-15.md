@@ -23,7 +23,7 @@
 
 G0 评测准备仍由并行验证线负责。当前修订 3 manifest 保持 20 Development + 20 Validation；两侧动态负态预检均已完成，原 V19 因 Hugging Face 输入缓存 TLS 失败由同层备用 R10 替代，证据见 `g0-preflight-progress-2026-09-10.md`。验证线仍需完成 evaluator 正/负（适用时部分）校准、预算回填和最终 manifest 冻结；在此之前不得启动正式效果实验，也不得把 score=0 的负态预检写成模型结果。
 
-当前工作树还有未提交修改，因此不能称为最终 tag。验证集闭合后，必须一次性记录源码版本、Provider 参数、模块开关、任务 manifest、OSWorld 快照、预算和环境版本，再开始效果消融。
+当前尚未创建正式实验冻结 tag。验证集闭合后，必须一次性记录源码版本、Provider 参数、模块开关、任务 manifest、OSWorld 快照、预算和环境版本，再开始效果消融。
 
 ## 3. 下一阶段实验矩阵
 
@@ -52,7 +52,9 @@ G0 评测准备仍由并行验证线负责。当前修订 3 manifest 保持 20 D
 
 ## 5. 暂不进入的工作
 
-Guard、Sandbox 后端、Subagent/Delegation、跨 Run Memory、自动语义 Verifier 和复杂压缩策略不属于本阶段入口。只有当消融结果显示 Context/Planning/Memory 的瓶颈已明确，才安排下一轮设计。
+Sandbox 后端、Subagent/Delegation、跨 Run Memory、自动逐步语义 Verifier 和复杂压缩策略不属于本阶段入口。P/C/B/M1/M2/N 效果实验不得混入尚未冻结的 Guard。
+
+最新产品顺序允许最小 Risk Guard 在独立开关和独立测试下与 G0/Development 准备并行开发。它必须复用现有 RuntimePolicy、Approval、Inbox、Event 和 Batch 边界；关闭后保持当前基线。Risk Guard 受控验收后暂停新增功能，转向真实 CUA 稳定性、延迟、诊断和使用体验；统一后的全局设计与整改依据见[产品与架构基线](./multimodal-gui-agent-harness-product-plan.md)和[全局设计文档一致性审计](./global-design-consistency-audit-2026-09-15.md)。
 
 ## 6. 文档边界
 
@@ -64,6 +66,7 @@ Guard、Sandbox 后端、Subagent/Delegation、跨 Run Memory、自动语义 Ver
 
 - 删除了本机盘符、用户名、相邻工作树名以及本机 Python、VMX、VMware 路径；可执行命令统一使用仓库相对路径和 `<OSWORLD_ROOT>`、`<OSWORLD_VMX>`、`<ENV_FILE>` 等占位符；
 - README 与 OSWorld 路线已改为当前固定 `calls[]`、双后端 fake fixture 已通过和 `clean_r4` 快照口径；
+- 产品/架构、Run/Turn、Run Memory/长期演进和意图守护四份全局文档已统一到当前协议与优先级；
 - Markdown 本地链接均可解析，且不再链接 Git 忽略的 `runs/` 或 `docs/history/` 资产；
 - UTF-8 扫描未发现替换字符或连续问号损坏。
 

@@ -1,233 +1,239 @@
-# 面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计
+# 面向视障场景的 GUI Agent 意图守护与 Risk Guard 路线
 
-> 2026-09-15 统一说明：本文解释产品与研究目标；当前实施入口为 [Stage 6 起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)。当前路线为主 Agent 调用 Planning 工具、Memory 召回到 Context、Runtime Policy 执行许可与审批；不加入独立 Verifier。Guard、Advisory 和更复杂语义识别属于后续设计，不代表基础设施已经能判断任意坐标点击的风险。
+日期：2026-09-15
+文档角色：产品研究方向 / 下一功能设计边界
+状态：方向当前有效；最小 Risk Guard 待独立实施计划
+当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
 
-## 一、技术路线调整背景
+## 一、研究问题
 
-本项目最初围绕视障用户使用 GUI Agent 时缺乏持续视觉监督这一问题展开，计划通过候选动作级风险样本构建、页面上下文抽取、动作级风险评估模型、执行前后检查以及语音确认等机制，对 GUI Agent 的潜在危险操作进行识别和干预。
+视障用户难以持续观察 GUI Agent 的每一步执行。风险不仅来自某个孤立点击，也来自：
 
-随着 Computer Use Agent 和 Agent Harness 技术的发展，项目对这一问题的认识也进一步发生变化。GUI Agent 在实际运行中的风险并不完全表现为某一个孤立动作是否“危险”，而往往来源于长程任务中的目标偏移、上下文遗失、页面诱导、无关推荐、异常跳转、工具副作用、历史错误累积以及模型对当前任务阶段的错误理解。例如，用户最初仅要求查询账单，但 Agent 在多轮操作后可能逐渐偏离目标并尝试订阅额外服务；又或者页面中出现推荐、默认勾选项和权限请求，Agent 因缺乏对原始目标和当前任务阶段的持续关注而执行无关操作。
+- 长程任务中逐渐遗失原始目标；
+- 页面推荐、默认勾选或异常跳转诱导无关操作；
+- 窗口、焦点和界面状态与模型理解不一致；
+- 发送、支付、删除、授权等外部副作用；
+- 历史错误、重复动作和不确定执行结果累积；
+- 用户无法及时发现并打断偏离。
 
-因此，如果仍采用“主 Agent 生成动作—独立风险模型逐步审核—执行后再次检查”的固定流水线，虽然能够提供一定保护，但会引入额外模型调用、显著增加端到端延迟和推理成本，同时容易将安全问题过度简化为单步分类问题。
+因此，项目不再把核心方案定义为“第二个模型逐动作判断安全”，而是研究 GUI-native Harness 如何持续保持意图、在高风险边界分级干预，并提供低打扰、可理解、可打断的用户控制。
 
-基于此，本项目拟将研究重点从“为每个动作额外挂载专用风险检测模型”调整为“通过 GUI Agent Harness 的上下文管理、任务状态、记忆、工具权限、运行时策略和按需协同推理，提高 Agent 对用户意图的持续保持能力，并在真正具有副作用或异常性的操作前进行分级干预”。
-
-项目的研究主题保持不变，即仍然面向视障用户难以持续观察 GUI Agent 执行过程的问题，研究如何减少 Agent 偏离用户真实意图以及执行高风险操作的可能性。变化主要发生在实现路径和系统架构上。
-
-## 二、总体技术思路
-
-调整后的系统不再默认将安全能力实现为独立于 Agent Harness 的外部风险检测流水线，而是尽可能将“意图保持”和“风险控制”融入 GUI Agent 的正常运行机制。
-
-系统首先通过 Context、Planning 和 Memory 等机制，使主 Agent 在长时间任务执行过程中持续获得与用户目标相关的信息，从源头减少无关动作和目标偏移。对于具有明确外部副作用的操作，则由 Runtime Policy、Tool 权限和 Approval 等确定性机制建立执行边界。对于复杂、异常或存在较大不确定性的状态，可以进一步按需启动 Advisory Subagent，从规划、视觉理解、风险或失败恢复等角度为主 Agent 提供额外建议，而不是在每一个动作前都调用第二个模型。
-
-整体技术逻辑可以概括为：
+## 二、总体路线
 
 ```text
-Context / Planning / Memory
-        ↓
-帮助 Main Agent 持续保持用户意图
-        ↓
-Advisory Subagent
-        ↓
-仅在复杂、异常或高风险场景增强推理
-        ↓
-Tool / Runtime Policy
-        ↓
-限制真正具有副作用的操作
-        ↓
-Accessible Approval
-        ↓
-仅在必要情况下请求视障用户确认
+Goal + Current Observation
+        + Context / Plan / Run Memory
+                    ↓
+               Main Agent
+                    ↓
+           ToolCall / ActionIntent
+                    ↓
+               Risk Guard
+          allow / confirm / deny
+                    ↓
+        Runtime execution / Approval
+                    ↓
+       Receipt + Observation + Event
 ```
 
-这一设计的重点从“Agent 犯错以后再检测错误”逐渐转向“通过 Harness 设计降低 Agent 犯错概率，并仅对无法通过普通运行机制解决的高风险情况升级干预”。
+Context、Planning 和 Run Memory 用于减少意图遗失；Risk Guard 在真正执行前建立准入边界；Approval 是用户授权通道；Trajectory 提供事实、评测和后续数据。它们职责不同，不能互相冒充。
 
-## 三、Context 作为意图保持的核心机制
+## 三、当前基础能力与未实现边界
 
-GUI Agent 的长程执行高度依赖 Context。如果模型每轮主要看到当前截图，而原始用户目标、当前子任务和近期执行状态在上下文中逐渐弱化，Agent 很容易受到页面局部内容的影响，产生与用户真实意图无关的行为。
+### 已实现
 
-因此，本项目将 Context Management 作为新的重点研究方向之一。
+- Goal、Observation、ModelTurn、ToolCall、ActionIntent、ActionReceipt；
+- ToolRegistry、Tool category、参数和 capability 校验；
+- RuntimePolicy 的 `allow | require_approval | deny` 接口；
+- waiting_approval、resolveApproval、Abort、用户纠正；
+- Event-first 副作用、未知结果处理和完整 Trajectory；
+- 可选 Context、Planning、Run Memory 与受限 Batch。
 
-ContextCompiler 不再只是简单拼接当前 Screenshot 和历史消息，而需要根据当前 Run 状态动态决定模型真正需要看到的信息，例如原始用户目标、当前 Observation、当前 PlanningTask、近期关键动作、结构化错误以及重要的历史状态。
+### 尚未实现
 
-对于视障辅助场景，这一机制具有额外意义。普通用户可以通过持续观察屏幕发现 Agent 正在偏离目标，而视障用户无法承担这一持续监督职责。因此，Harness 本身需要承担更强的“意图锚定”责任。
+- DefaultRuntimePolicy 当前对 ToolCall 默认全部 allow，没有语义 Risk Guard；
+- 通用 click/type 没有自动识别支付、删除、发送等页面语义；
+- 没有在线 Monitor 向 Context 注入重复动作或低画面变化信号；
+- 没有风险标签体系、风险证据对象或 Guard 专用事件；
+- 没有证明 Context/Planning/Memory 已降低意图偏移；
+- 没有专用 Risk Model 或 Advisory Subagent。
 
-后续可以系统比较不同 Context 策略，例如仅提供当前 Observation、加入原始用户目标、加入当前 PlanningTask、加入近期关键历史或者加入压缩后的长期状态摘要，从而研究哪些信息最有助于减少无关推荐、误导页面和长程任务中的目标偏移。
+离线轨迹分析脚本可以统计相邻重复动作候选，但它不是在线风险判断。
 
-因此，原方案中的“候选动作中心化上下文抽取”可以进一步升级为“面向 Agent 意图保持和风险控制的动态 Context 构建”。
+## 四、意图保持层
 
-## 四、Planning 作为长程任务中的 Intent Anchor
+### Context
 
-Planning Tool 在本项目中不仅用于提高复杂 GUI 任务的完成率，还可以承担长程意图保持的功能。
+每轮必须保留原始 Goal 和最新 Observation，并按选定策略加入近期闭合 ToolCall/ToolResult、用户纠正、可选 Plan 和 Run Memory。当前 raw/recent 只解决历史规模和协议闭合，不自动判断意图偏移。
 
-用户给出的目标通常是高层级的，例如“购买明天去杭州的火车票”。主 Agent 在执行过程中可能将其拆分为查询车次、选择车次、填写乘客信息和支付等多个子任务。如果当前系统能够明确保存“当前正在进行的子任务”，那么模型在面对页面中的会员推荐、保险推荐或广告跳转时，就更容易判断这些操作是否属于当前任务。
+### Planning
 
-因此，Planning State 可以成为原始用户目标与当前 GUI Action 之间的一层结构化语义约束。
+PlanningTask 可以作为复杂任务的阶段 Intent Anchor，但它是模型声明的状态，不是事实真值。短任务不应强制建计划；是否降低偏移需要通过 Planning 消融实验回答。
 
-例如，当当前 PlanningTask 为“选择车次”时，Agent 提出“开通会员”这一 ActionIntent，系统可以更容易发现该行为与当前任务阶段缺乏直接关系。
+### Run Memory
 
-不过，Planning 并不被强制绑定到所有任务。短任务可能并不需要显式 Task 管理，后续需要通过评测验证 Planning 在何种任务长度和复杂度下真正具有收益。
+Run Memory 保存当前 Run 后续仍需要的事实、约束和对象状态。它可以避免重要信息被近期历史裁剪，但不等于跨 Session 风险经验库，也不自动证明记忆内容正确。
 
-## 五、Memory 用于长期经验和风险模式复用
+三者首先帮助主 Agent做出更好的决定，不能替代执行前的风险准入。
 
-对于较长任务以及跨 Session 的 Agent，单纯依赖当前 Context 难以长期保存所有有价值的信息。因此，项目后续可以进一步引入多模态 Memory。
+## 五、最小 Risk Guard
 
-Memory 的作用不是简单保存完整聊天记录，而是从过去 GUI Trajectory 中提取可复用经验。例如，系统可以记住某类订票页面经常出现额外保险推荐、某些设置页面容易通过广告区域发生错误跳转，或者某类任务过去曾出现多次相似失败。
+### 5.1 宿主位置
 
-这些经验可以以文字摘要、关键视觉 Frame、局部 ROI 或结构化 Episode 的形式保存。当未来出现相似 Task 和 Observation 时，Retriever 从历史 Memory 中选择最相关经验，并由 ContextCompiler 注入当前模型输入。
+Risk Guard 应属于 RuntimePolicy 的可插拔策略族，而不是新的 Agent Loop。现有 `evaluateToolCall` 继续负责 ToolCall 级确定性准入；它当前只接收 ToolCall、ToolDefinition 和 RunSnapshot，并没有完整 Goal、Observation 或 canonical ActionIntent，因此不能被描述为已经足够支持语义风险判断。
 
-因此，Memory 可以承担一种“风险经验复用”的作用，使 Agent 不需要在每一次任务中重新遭遇相同错误后才学习如何处理。
-
-后续研究可以比较无 Memory、纯文本 Memory、视觉 Memory 以及多模态 Episodic Memory 等不同策略对任务成功率、目标偏移率、重复错误率和推理成本的影响。
-
-## 六、Tool 与 Runtime Policy 作为确定性执行边界
-
-虽然 Context、Planning 和 Memory 可以显著降低模型产生错误 Action 的概率，但这些能力本质上仍然属于模型推理层，不能完全替代确定性的运行时约束。
-
-对于支付、购买、订阅、发送消息、删除数据、上传敏感信息、权限授权等真正具有外部副作用的操作，系统仍需要通过 Tool Policy 和 Runtime Policy 建立明确的执行边界。
-
-对于发送、支付、删除等具备明确语义的 Tool，Runtime 可以根据工具定义执行确定性审批规则。但通用 click/type Action 仅提供坐标或文本，程序不能仅凭它知道界面背后的支付、订阅或权限含义。这部分需要应用语义证据或后续按需推理；不能因为审批接口已经存在就宣称通用 GUI 风险识别已经实现。
-
-在具备上述可信语义依据时，允许操作直接执行，需要授权的操作进入 Runtime 的 waiting_approval，禁止操作明确拒绝。审批由用户或受信授权端解决；主 Agent 或 Advisor 的建议不构成用户批准。当前默认 Policy 放行工具，专门许可规则需要另行实现。
-
-因此，调整后的技术路线并不是取消安全控制，而是将其中可以确定性解决的部分从模型判断中剥离出来，由 Runtime 承担。
-
-这种机制可以减少额外模型调用，同时避免将支付、删除、发送等重要操作完全依赖于语言模型的概率性判断。
-
-## 七、Advisory Subagent 作为按需增强机制
-
-对于无法通过简单规则确定、但又具有较大不确定性的情况，可以使用 Advisory Subagent 进行按需分析。
-
-与让多个 Agent 同时操作同一桌面的 Execution Subagent 不同，Advisory Subagent 不直接获得 ComputerSession 的 GUI 执行权，而只读取经过授权的 Task、Observation、Planning State、Trajectory 或 Memory，并返回结构化建议。
-
-例如，当主 Agent 连续操作失败时，可以启动 Recovery Advisor 分析最近的执行轨迹；当页面结构复杂时，可以启动 Visual Analyst 对当前界面进行独立分析；当某个候选动作可能与用户原始目标冲突时，也可以启动 Intent/Risk Advisor 判断该动作是否合理。
-
-其核心原则是：
-
-**推理可以并行，真实 GUI 副作用保持串行。**
-
-主 Agent 仍然是唯一的 Action 决策和 Computer 执行主体，Subagent 只负责提供额外分析。
-
-相比“每个 Action 固定调用 Risk Model”，这种机制能够将额外模型成本集中在真正复杂或高风险的场景中，更符合低延迟和低打扰的设计目标。
-
-## 八、从固定前后检查调整为事件驱动检查
-
-原方案中的“执行前检查”和“执行后检查”不再作为每一步必须执行的固定模块。
-
-对于普通 click、scroll、文本输入和页面导航，如果 Harness 已经具有可靠的 Context 和 Runtime validation，没有必要再次调用额外模型。
-
-系统可以采用事件驱动方式，仅在特定条件下增加额外检查。例如：
-
-- 即将执行具有明显外部副作用的操作；
-- Action 的执行结果为 `outcome_unknown`；
-- 连续多次操作失败；
-- 页面发生异常跳转或显著状态变化；
-- 当前行为明显偏离 Planning State；
-- Runtime 或 Main Agent 自身报告较高不确定性。
-
-这些条件是未来研究候选，不都能通过脚本可靠识别。当前只实现重复动作、低画面变化、明确工具错误等确定性 Monitor 信号，交由主 Agent 判断是否更新 Plan 或调用 Advisor。异常跳转和意图偏移不伪装成已具备的确定性能力；未来若要自动触发模型，必须作为独立策略实验。
-
-因此，“Pre/Post Verification”可以从默认执行流程降级为按需触发的增强能力。
-
-## 九、专用 Risk Model 的角色调整
-
-原项目计划训练动作级风险评估模型。调整后，专用 Risk Model 不再作为系统核心链路的必要组成部分，而可以保留为可选实验方案。
-
-项目可以在统一评测集上比较：
+最小实现需要在 canonical ActionIntent/候选 Batch 构造完成后、`action.execution.started` 之前增加 action-level policy hook。输入引用 Runtime 已维护的 Goal、最新 Observation、PlanState、MemoryState 和 Action，不创建第二套可漂移状态。
 
 ```text
-Baseline Harness
-
-Baseline
-+ Improved Context
-
-Baseline
-+ Planning
-
-Baseline
-+ Memory
-
-Baseline
-+ Advisory Subagent
-
-Baseline
-+ Dedicated Risk Model
+RunController preflight
+   → Tool exists / arguments / audience / capabilities
+   → ToolCall-level policy
+   → canonical ActionIntent / candidate Batch
+   → action-level Risk Guard
+   → allow | require_approval | deny
+   → existing Approval or execution path
 ```
 
-如果专用 Risk Model 能在可接受延迟下显著提高风险识别能力，则可以作为一种增强方案；如果 Context、Planning、Tool Policy 或 Advisory Subagent 已经获得更好的总体效果，则没有必要为了保持原计划而强行保留额外风险模型。
+关闭 Guard 后必须恢复当前基线：不增加工具、不注入 Prompt、不增加模型请求，也不改变 Action 执行顺序。
 
-这种调整使“是否需要专用风险模型”本身成为一个可以通过实验回答的问题，而不是预先确定的技术结论。
+### 5.2 输入
 
-## 十、语音确认作为 Accessible Approval，而非核心风险模型输出
+候选输入来自已有标准对象：
 
-语音确认仍然是视障应用场景中的重要组成部分，但其系统定位需要调整。
+- 用户 Goal 与最新用户纠正；
+- ToolCall，以及转换后的 ActionIntent 或候选 Batch；
+- 当前 Observation 与 viewport；
+- 当前 PlanState；
+- 相关 Run Memory；
+- Computer capabilities 与 Run constraints；
+- 必要的近期结构化错误/Receipt。
 
-语音模块本身并不负责决定风险，而是作为 Runtime Approval 的无障碍交互前端。当 RuntimePolicy 或 Advisory Agent 判断某个操作确实需要用户参与时，系统再生成简洁、可理解的语音说明。
+不能加入没有生产者或更新机制的 `riskScore`、`foregroundApp` 或“动作效果”等孤立字段。
 
-例如，系统不应在每一个普通点击前询问用户，而只在关键情况下提示：
+### 5.3 输出
 
-“Agent 正准备开启每月 29 元的自动续费服务。你的原始任务只是查询套餐使用情况，该操作不是完成当前任务所必需的。是否继续？”
+```ts
+type ToolPolicyDecision =
+  | { decision: "allow" }
+  | { decision: "deny"; reason: string }
+  | { decision: "require_approval"; reason: string };
+```
 
-用户可以通过语音继续、拒绝或打断当前 Run。
+- allow：证据足够且无需用户介入；
+- require_approval：动作可能合理，但需要用户授权；
+- deny：违反明确策略、权限或用户约束。
 
-因此，项目原来提出的“可理解、可打断、低打扰”目标仍然保留，但实现机制从固定动作确认升级为风险和副作用触发的 Accessible Approval。
+第一版不新增第四种模糊状态。证据不足但风险较高时进入 Approval，而不是伪装成确定性拒绝。
 
-## 十一、Trajectory 在数据构建和系统评测中的作用
+### 5.4 首批风险类别
 
-现有 Harness 中的 RuntimeEvent 和 Trajectory 可以成为后续研究的重要数据基础。
+- destructive：删除、覆盖、不可逆修改；
+- financial：支付、购买、订阅、自动续费；
+- external commitment：发送、发布、提交、确认；
+- privacy/account：上传敏感信息、修改账号/权限/隐私；
+- intent violation：与 Goal、纠正或当前阶段明显冲突。
 
-系统已经能够结构化记录用户目标、ObservationFrame、ModelTurn、ActionIntent、ActionReceipt、Planning 更新以及用户干预等信息，因此不需要额外构建一套独立的 GUI 行为记录系统。
+GUI primitive 本身通常没有业务语义。仅凭 click 坐标不能可靠判断支付或删除；第一版必须明确语义证据来源和保守回退，不能把 Approval 接口存在写成风险识别已经完成。
 
-未来可以直接从真实 Run 中抽取：
+## 六、Risk Guard 与 Action Batch
+
+风险边界必须终止 Batch。以下动作不得藏在开放式序列中：
+
+- Enter/提交/确认；
+- 导航到新页面或切换对象；
+- 删除、发送、支付、授权；
+- 操作目标或焦点可能改变；
+- Guard 要求 Approval；
+- 当前 Observation、viewport 或 session 失效。
+
+当前 Batch 只允许面向同一文本控件输入的 click/type/Ctrl+A 调用形状。现有 Runtime 没有 element identity，不能证明它们语义上确属同一控件。Risk Guard 对整个 ModelTurn 预检，并在每个 primitive 执行前基于最新执行 Observation 重新应用必要的确定性检查。若任何一步被拒绝、要求审批、失败或 Abort，后缀停止。
+
+## 七、Verification 与 Monitor 的位置
+
+### 不采用固定逐步 Verifier
+
+普通 click、type、scroll 不默认追加第二次 VLM 调用。ActionReceipt 只表示 Driver 执行结果，动作后 Observation 提供下一轮事实；是否完成用户目标由 Agent 与外部 evaluator分别判断。
+
+### 可选按需检查
+
+未来可以在以下事件后触发额外检查：
+
+- outcome_unknown；
+- 连续结构化失败；
+- 受控脚本确认的停滞信号；
+- 高风险动作缺少足够语义证据；
+- 主 Agent主动请求 Advisor。
+
+这些必须作为独立开关和实验变量，不能先写成当前既有能力。
+
+## 八、Accessible Approval
+
+语音不是风险判断器，而是 Approval 的无障碍前端。理想提示应说明：
+
+- Agent 准备做什么；
+- 为什么与当前目标相关或存在风险；
+- 可能产生什么外部后果；
+- 用户可以继续、拒绝或中止。
+
+语音确认应复用同一个 requestId 和 resolveApproval，不建立第二套授权状态。低风险动作不应频繁打扰用户。
+
+## 九、Trajectory 与评测
+
+统一 Trajectory 可形成：
 
 ```text
-User Goal
-+
-Observation
-+
-Planning State
-+
-Proposed Action
-+
-Action Result
-+
-Next Observation
-+
-Human Annotation
+Goal / correction
++ Observation
++ Plan / relevant Memory
++ proposed ToolCall / Action
++ Guard decision
++ approval result
++ ActionReceipt
++ next Observation
++ external evaluator / human label
 ```
 
-形成动作级或 Episode 级研究数据。
+Risk Guard 实验至少记录：
 
-这些数据既可以用于分析 Agent 为什么发生目标偏移，也可以用于 Memory 构建、Context 实验、Subagent 调用策略研究，甚至在确有必要时用于训练专用分类模型。
+- 高风险召回率和漏检；
+- 误拦截率；
+- Approval 次数与用户打扰；
+- Task Success 和 Partial Reward；
+- 额外 Model Calls、Tokens 与 Latency；
+- Batch 被拆分次数；
+- Guard 关闭时的基线一致性；
+- 未知副作用和恢复率。
 
-因此，原项目中的“动作级风险样本构建”仍然具有价值，但数据定义可以从简单的“截图—动作—风险标签”升级为基于完整 Agent Runtime Trajectory 的多模态行为样本。
+不能只统计 Guard 自己输出的分类准确率，也不能用模型声明的 finish 代替官方 evaluator。
 
-## 十二、调整后的研究重点
+## 十、开发与验证顺序
 
-综合上述调整，本项目后续不再将重点放在“训练一个独立 Risk Model 对所有 GUI Action 做固定前后检查”，而是研究 GUI Agent Harness 如何通过更好的运行时设计降低视障用户缺乏持续监督所带来的风险。
+```text
+G0 evaluator / budget / manifest 冻结
+        ├─ P/C/B/M1/M2/N 效果消融
+        └─ 最小 Risk Guard 独立开发
+                         ↓
+             合同测试与受控风险任务
+                         ↓
+                  Risk Guard 冻结
+                         ↓
+                   暂停功能开发
+                         ↓
+             真实 CUA 体验与稳定性
+```
 
-主要研究方向可以归纳为以下几个方面。
+Risk Guard 不混入既有模块的首轮消融。它先证明接口正确和基线可关闭，再单独进行风险任务对照。
 
-首先，研究 Context Management 如何影响 Agent 在复杂 GUI 环境中的目标一致性，包括视觉历史选择、当前任务状态和上下文压缩等问题。
+## 十一、后续保留方向
 
-其次，研究 Planning State 是否能够作为长任务中的 Intent Anchor，减少 Agent 受到页面局部推荐和无关信息影响。
+以下能力仍属于项目演进空间，但不是 Risk Guard 的前置：
 
-第三，研究多模态 Episodic Memory 是否可以帮助 Agent 利用过去 GUI 任务中的成功经验和失败模式。
+- 跨 Run Episodic/Semantic/Visual Memory，用于复用风险经验；
+- Advisory Subagent，用于复杂视觉、恢复、规划或风险建议；
+- Sandbox / ExecutionEnvironment，用于隔离 Computer、Workspace、Network 和 Credentials；
+- Execution Subagent，在独立 ComputerSession 上执行委派任务；
+- 专用 Risk Model，用实验决定是否值得额外延迟与成本。
 
-第四，研究 Advisory Subagent 是否能够在复杂或异常情况下提供有效辅助，以及其带来的成功率收益是否能够抵消额外推理延迟和成本。
+最终研究问题是：
 
-第五，研究 Tool Policy、Runtime Policy 和 Approval 如何在不频繁打扰用户的情况下建立可靠的副作用执行边界。
-
-最后，研究适合视障用户的 Accessible Approval 机制，使系统在真正需要用户介入时能够提供简洁、可理解且可打断的语音说明。
-
-## 十三、总体研究问题
-
-经过技术路线调整后，本项目的核心研究问题可以进一步概括为：
-
-**在用户无法持续视觉监督的场景下，GUI Agent Harness 如何通过上下文管理、外部任务状态、历史经验、工具权限和按需协同推理，使 Agent 在长程 GUI 任务中持续保持与用户意图一致，并仅在必要情况下请求用户介入？**
-
-这一研究问题仍然延续项目最初的视障辅助和 GUI Agent 意图守护主题，但技术路线从单一动作风险分类扩展到了完整 Agent Runtime 与 Harness 设计。
-
-最终系统希望形成一种低延迟、低打扰的运行模式：Context、Planning 和 Memory 首先帮助 Agent 尽量避免错误；Advisory Subagent 仅在复杂状态下提供额外推理；Tool 和 Runtime Policy 对真正具有外部副作用的行为建立确定性边界；语音交互则只在必要情况下承担用户确认和控制功能。
-
-因此，项目的重点将从“为 GUI Agent 增加一个安全检查器”进一步发展为“研究面向低监督用户的风险感知 GUI Agent Harness”。
+> 在用户无法持续视觉监督的场景下，GUI Agent Harness 如何通过可追踪的意图状态、运行时风险准入和低打扰 Approval，减少长程任务中的目标偏移与高风险副作用，同时保持真实任务成功率和可接受延迟？

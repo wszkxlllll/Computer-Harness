@@ -24,6 +24,8 @@ Runtime 与 ToolRegistry。工程集成已通过；正式效果实验仍需等�
 - Qwen `strict_json` 已统一为固定 `calls[]` 协议；真实 API 集成已通过，但返回矩阵仍有偶发格式偏离；
 - fake 契约不等于真实模型成功率；Stage 5 已有单任务真实 API/OSWorld 证据，正式批量比较须等 G0 冻结后按当前入口运行。
 
+当前产品顺序是：完成评测冻结与现有模块消融，同时以独立开关开发最小 Risk Guard；Guard 验收后暂停增加新功能，优先改善真实 CUA 的截图、焦点、动作、session、延迟、诊断与部署体验。跨 Run Memory、Advisory Subagent、Sandbox 和 Execution Subagent 仍在长期路线中，但不是当前最高优先级。
+
 ## 环境
 
 - Node.js 22.13 或更高版本（pnpm 11 的最低运行版本）；

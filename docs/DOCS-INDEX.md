@@ -16,6 +16,7 @@
 | 文件 | 用途 |
 |---|---|
 | [stage-6-convergence-and-start-state-2026-09-15.md](./stage-6-convergence-and-start-state-2026-09-15.md) | 当前收敛状态、冻结条件、P/C/B/M1/M2/N 消融顺序和停止条件 |
+| [global-design-consistency-audit-2026-09-15.md](./global-design-consistency-audit-2026-09-15.md) | 全局设计一致性审计与本轮整改记录 |
 | [qwen-flat-regression-and-integration-acceptance-2026-09-15.md](./qwen-flat-regression-and-integration-acceptance-2026-09-15.md) | Qwen flat 真实 API 回归、GLM/Qwen Composite/Memory/Planning 及双后端集成验收 |
 | [qwen-flat-source-audit-and-migration-2026-09-15.md](./qwen-flat-source-audit-and-migration-2026-09-15.md) | Qwen strict 固定 `calls[]` 源码复审、提示词边界与协议迁移证据 |
 | [real-api-conformance-2026-09-15.md](./real-api-conformance-2026-09-15.md) | 真实 API 的详细请求、响应与历史失败证据 |
@@ -29,10 +30,10 @@
 | 文件 | 用途 |
 |---|---|
 | [development-documentation-standard.md](./development-documentation-standard.md) | 文档角色、证据、归档和提交规范 |
-| [multimodal-gui-agent-harness-product-plan.md](./multimodal-gui-agent-harness-product-plan.md) | 产品定位和扩展边界 |
-| [run-turn-tool-and-user-correction-semantics.md](./run-turn-tool-and-user-correction-semantics.md) | Run、Turn、Tool 和用户纠正语义 |
-| [GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计.md](./GUI%20Agent%20多模态%20Memory%20与%20Advisory%20Subagent%20演进设计.md) | 长期 Memory/Advisory 设计，当前不作为实施指令 |
-| [面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计.md](./面向视障场景的%20GUI%20Agent%20意图守护技术路线调整与系统设计.md) | 长期产品与研究方向 |
+| [multimodal-gui-agent-harness-product-plan.md](./multimodal-gui-agent-harness-product-plan.md) | 当前产品、架构、协议、优先级和长期演进的全局基线 |
+| [run-turn-tool-and-user-correction-semantics.md](./run-turn-tool-and-user-correction-semantics.md) | 当前 Run、ModelTurn、多调用、Batch、Approval、Abort 和用户纠正语义 |
+| [GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计.md](./GUI%20Agent%20多模态%20Memory%20与%20Advisory%20Subagent%20演进设计.md) | 已实现 Run Memory，以及长期 Memory、Advisory、Sandbox/Execution Subagent 的分层路线 |
+| [面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计.md](./面向视障场景的%20GUI%20Agent%20意图守护技术路线调整与系统设计.md) | 意图守护、最小 Risk Guard、Accessible Approval 和验证边界 |
 
 ## 代码与实验入口
 
