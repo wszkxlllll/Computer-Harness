@@ -75,6 +75,14 @@ describe("CuaDriverComputer", () => {
       }, new AbortController().signal);
       expect(click).toMatchObject({ actionId: "click-1", status: "completed" });
 
+      const staleExecution = await computer.execute(session, {
+        actionId: "stale-execution" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 0, y: 0 },
+      }, new AbortController().signal, { executionObservationId: "other-observation" as ObservationId });
+      expect(staleExecution).toMatchObject({ status: "refused", driverCode: "STALE_OBSERVATION" });
+
       const scroll = await computer.execute(session, {
         actionId: "scroll-1" as ActionId,
         basedOn: observationId,

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { dirname, relative as pathRelative, resolve } from "node:path";
 import { z } from "zod";
+import { reduceMemoryMutation } from "@computer-harness/protocol";
 import type {
   ActionId,
   AssetId,
@@ -14,6 +15,7 @@ import type {
   RunOutcome,
   RunStatus,
   PlanState,
+  MemoryState,
   RuntimeEvent,
   RuntimeEventDraft,
   ToolCallId,
@@ -39,10 +41,11 @@ export interface RunSnapshot {
   reportedStatus?: "success" | "failure";
   modelUsage?: ModelUsage;
   plan: PlanState;
+  memory: MemoryState;
 }
 
 export function initialRunSnapshot(runId: RunId): RunSnapshot {
-  return { runId, status: "created", stepCount: 0, modelRequestCount: 0, plan: { runId, tasks: [] } };
+  return { runId, status: "created", stepCount: 0, modelRequestCount: 0, plan: { runId, tasks: [] }, memory: { runId, facts: [], entities: [] } };
 }
 
 export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunSnapshot {
@@ -145,9 +148,15 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         if (snapshot.latestObservationId === undefined) {
           throw new Error(`action ${event.action.actionId} requires a current observation`);
         }
-        if (event.action.basedOn !== snapshot.latestObservationId) {
+        const executionObservationId = event.executionObservationId ?? event.action.basedOn;
+        if (executionObservationId !== snapshot.latestObservationId) {
+          if (event.executionObservationId === undefined) {
+            throw new Error(
+              `action ${event.action.actionId} is based on ${event.action.basedOn}, not latest observation ${snapshot.latestObservationId}`,
+            );
+          }
           throw new Error(
-            `action ${event.action.actionId} is based on ${event.action.basedOn}, not latest observation ${snapshot.latestObservationId}`,
+            `action ${event.action.actionId} executes against ${executionObservationId}, not latest observation ${snapshot.latestObservationId}`,
           );
         }
       }
@@ -215,6 +224,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       else tasks[index] = event.mutation.task;
       return { ...snapshot, plan: { runId: snapshot.runId, tasks } };
     }
+    case "memory.updated":
+      if (snapshot.status !== "running") {
+        throw new Error(`memory.updated requires running status, got ${snapshot.status}`);
+      }
+      return { ...snapshot, memory: reduceMemoryMutation(snapshot.memory, event.mutation) };
     case "run.paused":
       if (snapshot.status !== "running") {
         throw new Error(`run.paused requires running status, got ${snapshot.status}`);
@@ -669,6 +683,35 @@ const planningTaskSchema = z.object({
   status: z.enum(["pending", "in_progress", "completed", "blocked"]),
   blockedBy: z.array(nonEmptyString).optional(),
 });
+const memoryFactSchema = z.object({
+  id: nonEmptyString,
+  subject: z.union([
+    z.object({ type: z.literal("run") }),
+    z.object({ type: z.literal("entity"), entityId: nonEmptyString }),
+  ]).default({ type: "run" }),
+  key: nonEmptyString,
+  value: z.string(),
+  sourceEventId: nonEmptyString,
+  status: z.enum(["active", "needs_check", "superseded"]),
+  relatedTaskIds: z.array(nonEmptyString).optional(),
+  updatedSequence: z.number().int().nonnegative(),
+});
+const memoryEntitySchema = z.object({
+  id: nonEmptyString,
+  type: nonEmptyString,
+  description: z.string(),
+  sourceEventId: nonEmptyString.default("legacy:entity-source"),
+  status: z.enum(["active", "stale", "superseded"]),
+  relatedTaskIds: z.array(nonEmptyString).optional(),
+  updatedSequence: z.number().int().nonnegative(),
+});
+const memoryMutationSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("upsert_fact"), fact: memoryFactSchema }),
+  z.object({ operation: z.literal("supersede_fact"), factId: nonEmptyString, replacement: memoryFactSchema.optional() }),
+  z.object({ operation: z.literal("mark_fact_needs_check"), factId: nonEmptyString }),
+  z.object({ operation: z.literal("upsert_entity"), entity: memoryEntitySchema }),
+  z.object({ operation: z.literal("invalidate_entity"), entityId: nonEmptyString }),
+]);
 const eventBaseSchema = {
   eventId: nonEmptyString,
   runId: nonEmptyString,
@@ -686,7 +729,23 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     session: computerSessionSchema,
   }),
   z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),
-  z.object({ ...eventBaseSchema, type: z.literal("model.request.started"), providerId: nonEmptyString }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("model.request.started"),
+    providerId: nonEmptyString,
+    contextBudget: z.object({
+      mode: z.enum(["raw", "recent"]),
+      estimatedInputTokens: z.number().int().nonnegative(),
+      estimatedFixedTextTokens: z.number().int().nonnegative().optional(),
+      estimatedHistoryTextTokens: z.number().int().nonnegative().optional(),
+      estimatedToolSchemaTokens: z.number().int().nonnegative().optional(),
+      imageCount: z.number().int().nonnegative().optional(),
+      selectedHistoryEvents: z.number().int().nonnegative(),
+      omittedHistoryEvents: z.number().int().nonnegative(),
+      maxHistoryEvents: z.number().int().positive().optional(),
+      maxInputTokens: z.number().int().positive().optional(),
+    }).optional(),
+  }),
   z.object({ ...eventBaseSchema, type: z.literal("model.response.received"), turn: modelTurnSchema }),
   z.object({
     ...eventBaseSchema,
@@ -726,8 +785,9 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("action.proposed"),
     callId: nonEmptyString,
     action: actionIntentSchema,
+    executionObservationId: nonEmptyString.optional(),
   }),
-  z.object({ ...eventBaseSchema, type: z.literal("action.execution.started"), action: actionIntentSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("action.execution.started"), action: actionIntentSchema, executionObservationId: nonEmptyString.optional() }),
   z.object({
     ...eventBaseSchema,
     type: z.literal("action.execution.completed"),
@@ -746,6 +806,12 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       z.object({ operation: z.literal("created"), task: planningTaskSchema }),
       z.object({ operation: z.literal("updated"), task: planningTaskSchema }),
     ]),
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("memory.updated"),
+    callId: nonEmptyString,
+    mutation: memoryMutationSchema,
   }),
   z.object({ ...eventBaseSchema, type: z.literal("run.paused"), reason: z.string() }),
   z.object({ ...eventBaseSchema, type: z.literal("run.resumed") }),

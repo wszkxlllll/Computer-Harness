@@ -1,5 +1,5 @@
 import type { JsonValue } from "@computer-harness/protocol";
-import type { ModelToolSpec, ToolAudience, ToolDefinition } from "./contracts.js";
+import type { ModelToolSpec, ToolAudience, ToolCategory, ToolDefinition } from "./contracts.js";
 
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition>();
@@ -28,8 +28,10 @@ export class ToolRegistry {
     return [...this.definitions.values()];
   }
 
-  public modelTools(audience: ToolAudience = "main"): ModelToolSpec[] {
-    return this.list().filter((definition) => isVisibleTo(definition, audience)).map((definition) => {
+  public modelTools(audience: ToolAudience = "main", options: { enabledCategories?: readonly ToolCategory[]; enabledToolNames?: readonly string[] } = {}): ModelToolSpec[] {
+    const enabled = options.enabledCategories === undefined ? undefined : new Set(options.enabledCategories);
+    const names = options.enabledToolNames === undefined ? undefined : new Set(options.enabledToolNames);
+    return this.list().filter((definition) => isVisibleTo(definition, audience) && (enabled === undefined || enabled.has(definition.category)) && (names === undefined || names.has(definition.name))).map((definition) => {
       const base: ModelToolSpec = {
         name: definition.name,
         description: definition.description,

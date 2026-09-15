@@ -9,7 +9,7 @@ import type {
   ToolCallId,
 } from "@computer-harness/protocol";
 import { createDefaultComputerTools } from "@computer-harness/runtime";
-import { DefaultContextCompiler } from "./index.js";
+import { DefaultContextCompiler, selectMemoryForContext } from "./index.js";
 
 const runId = "run-context" as RunId;
 const sessionId = "session-context" as ComputerSessionId;
@@ -152,5 +152,108 @@ describe("DefaultContextCompiler", () => {
     expect(planText).toMatchObject({ type: "text", text: expect.not.stringContaining("t1: Collect source") });
     expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_call" && block.call.id === call.id))).toBe(true);
     expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_result" && block.result.callId === call.id))).toBe(true);
+  });
+
+  it("supports a bounded recent-history mode without dropping the latest image or call/result pair", async () => {
+    const latest = observation("obs-recent");
+    const oldCall = { id: "call-old" as ToolCallId, name: "click", arguments: { x: 10, y: 20 } };
+    const newCall = { id: "call-new" as ToolCallId, name: "click", arguments: { x: 30, y: 40 } };
+    const events: RuntimeEvent[] = [
+      event(0, { type: "run.created", goal: "ignored" }),
+      event(1, { type: "run.started" }),
+      event(2, { type: "observation.created", observation: latest }),
+      event(3, { type: "model.response.received", turn: { type: "tool_calls", calls: [oldCall] } }),
+      event(4, { type: "tool.call.completed", result: { callId: oldCall.id, status: "completed", output: { ok: true } } }),
+      event(5, { type: "model.response.received", turn: { type: "tool_calls", calls: [newCall] } }),
+      event(6, { type: "tool.call.completed", result: { callId: newCall.id, status: "completed", output: { ok: true } } }),
+    ];
+    const input = await new DefaultContextCompiler(createDefaultComputerTools(), { mode: "recent", maxHistoryEvents: 3 }).compile({
+      runId, goal: "recent", recentEvents: events, latestObservation: latest,
+    }, new AbortController().signal);
+    expect(input.contextBudget?.mode).toBe("recent");
+    expect(input.contextBudget?.omittedHistoryEvents).toBeGreaterThan(0);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_call" && block.call.id === oldCall.id))).toBe(false);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_call" && block.call.id === newCall.id))).toBe(true);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_result" && block.result.callId === newCall.id))).toBe(true);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId))).toBe(true);
+  });
+
+  it("injects only active Run Memory facts and keeps memory absent when empty", async () => {
+    const latest = observation("obs-memory");
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const base = { runId, goal: "continue", recentEvents: [event(0, { type: "observation.created", observation: latest })] };
+    const withMemory = await compiler.compile({
+      ...base,
+      memory: {
+        runId,
+        facts: [
+          { id: "m1", subject: { type: "run" }, key: "target_file", value: "report.odt", sourceEventId: "event-1" as EventId, status: "active", updatedSequence: 1 },
+          { id: "m2", subject: { type: "run" }, key: "old", value: "ignore", sourceEventId: "event-2" as EventId, status: "superseded", updatedSequence: 2 },
+        ],
+        entities: [],
+      },
+    }, new AbortController().signal);
+    expect(withMemory.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("target_file")))).toBe(true);
+    expect(withMemory.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("old = ignore")))).toBe(false);
+    const empty = await compiler.compile(base, new AbortController().signal);
+    expect(empty.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Current run memory")))).toBe(false);
+  });
+
+  it("ranks memory by active task relevance, status and recency with bounded hot selection", () => {
+    const memory = {
+      runId,
+      facts: [
+        { id: "old", subject: { type: "run" as const }, key: "old", value: "1", sourceEventId: "e1" as EventId, status: "active" as const, updatedSequence: 1 },
+        { id: "task", subject: { type: "run" as const }, key: "task", value: "2", sourceEventId: "e2" as EventId, status: "active" as const, relatedTaskIds: ["t1"], updatedSequence: 2 },
+        { id: "check", subject: { type: "run" as const }, key: "check", value: "3", sourceEventId: "e3" as EventId, status: "needs_check" as const, updatedSequence: 3 },
+      ],
+      entities: [],
+    };
+    const selection = selectMemoryForContext(memory, { runId, tasks: [{ id: "t1", subject: "active phase", status: "in_progress" }] }, { maxIndexFacts: 2, maxHotFacts: 1 });
+    expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["task", "check"]);
+    expect(selection.hotFacts.map((fact) => fact.id)).toEqual(["task"]);
+  });
+
+  it("composes feature-specific instructions without leaking disabled planning or batch semantics", async () => {
+    const latest = observation("obs-features");
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), {
+      features: { planning: "off", memory: "off", batching: "off" },
+    });
+    const off = await compiler.compile({ runId, goal: "baseline", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off" } }, new AbortController().signal);
+    expect(off.system).not.toContain("Planning tools");
+    expect(off.system).not.toContain("Run Memory");
+    expect(off.system).toContain("at most one Computer tool call");
+    const batch = await compiler.compile({ runId, goal: "batch", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
+    expect(batch.system).toContain("state writes");
+    expect(batch.system).toContain("click→type");
+  });
+
+  it("recalls active entity facts through the normalized subject link and hides stale entities", () => {
+    const selection = selectMemoryForContext({
+      runId,
+      entities: [
+        { id: "e1", type: "document", description: "report.odt", sourceEventId: "e1-source" as EventId, status: "active", updatedSequence: 2 },
+        { id: "e2", type: "document", description: "old.odt", sourceEventId: "e2-source" as EventId, status: "stale", updatedSequence: 3 },
+      ],
+      facts: [
+        { id: "f1", subject: { type: "entity", entityId: "e1" }, key: "saved", value: "false", sourceEventId: "f1-source" as EventId, status: "active", updatedSequence: 4 },
+        { id: "f2", subject: { type: "entity", entityId: "e2" }, key: "saved", value: "true", sourceEventId: "f2-source" as EventId, status: "active", updatedSequence: 5 },
+      ],
+    }, undefined);
+    expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["f1"]);
+    expect(selection.indexEntities.map((entity) => entity.id)).toEqual(["e1"]);
+  });
+
+  it("keeps the compact entity index closed over selected entity facts", () => {
+    const selection = selectMemoryForContext({
+      runId,
+      entities: [
+        { id: "e-old", type: "document", description: "old", sourceEventId: "e-old-source" as EventId, status: "active", updatedSequence: 1 },
+        { id: "e-hot", type: "document", description: "hot", sourceEventId: "e-hot-source" as EventId, status: "active", updatedSequence: 2 },
+      ],
+      facts: [{ id: "f-hot", subject: { type: "entity", entityId: "e-hot" }, key: "saved", value: "false", sourceEventId: "f-hot-source" as EventId, status: "active", updatedSequence: 3 }],
+    }, undefined, { maxIndexFacts: 1, maxIndexEntities: 1, maxHotFacts: 1, maxHotEntities: 1 });
+    expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["f-hot"]);
+    expect(selection.indexEntities.map((entity) => entity.id)).toEqual(["e-hot"]);
   });
 });

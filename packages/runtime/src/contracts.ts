@@ -8,6 +8,8 @@ import type {
   JsonValue,
   ModelTurn,
   ModelContinuation,
+  MemoryMutation,
+  MemoryState,
   ObservationCapture,
   ObservationFrame,
   ObservationId,
@@ -41,8 +43,14 @@ export interface Computer {
     session: ComputerSession,
     action: ActionIntent,
     signal: AbortSignal,
+    options?: ComputerExecuteOptions,
   ): Promise<import("@computer-harness/protocol").ActionReceipt>;
   close(session: ComputerSession): Promise<void>;
+}
+
+/** Runtime's current observation for a primitive; backend references stay private. */
+export interface ComputerExecuteOptions {
+  executionObservationId?: ObservationId;
 }
 
 export interface ModelToolSpec {
@@ -75,6 +83,27 @@ export interface ModelInput {
   system: string;
   messages: ModelMessage[];
   tools: ModelToolSpec[];
+  contextBudget?: ContextBudgetReport;
+}
+
+export interface ContextBudgetReport {
+  mode: "raw" | "recent";
+  estimatedInputTokens: number;
+  estimatedFixedTextTokens?: number;
+  estimatedHistoryTextTokens?: number;
+  estimatedToolSchemaTokens?: number;
+  imageCount?: number;
+  selectedHistoryEvents: number;
+  omittedHistoryEvents: number;
+  maxHistoryEvents?: number;
+  maxInputTokens?: number;
+}
+
+/** Immutable Run-level switches shared by Registry projection, Runtime and Context. */
+export interface RunFeatureConfig {
+  planning: "off" | "tasks-v1";
+  memory: "off" | "facts-v1" | "entities-v1";
+  batching: "off" | "same-control-input-v1";
 }
 
 export interface ProviderAdapter {
@@ -91,6 +120,18 @@ export interface ContextCompileInput {
   latestObservation?: ObservationFrame;
   plan?: PlanState;
   recentEvents: readonly RuntimeEvent[];
+  context?: ContextOptions;
+  enabledCategories?: readonly ToolCategory[];
+  enabledToolNames?: readonly string[];
+  memory?: MemoryState;
+  features?: RunFeatureConfig;
+}
+
+export interface ContextOptions {
+  mode?: "raw" | "recent";
+  maxHistoryEvents?: number;
+  /** Approximate text/tool budget; image cost is reported by the Provider when available. */
+  maxInputTokens?: number;
 }
 
 export interface ContextCompiler {
@@ -154,6 +195,9 @@ export interface NonComputerToolDefinition extends ToolDefinitionBase {
   /** Optional Planning projection; only Planning tools may provide these hooks. */
   planMutationFromResult?: (output: JsonValue) => PlanningTaskMutation | undefined;
   afterPlanCommit?: (mutation: PlanningTaskMutation, context: ToolExecutionContext) => Promise<void>;
+  /** Optional Run Memory projection; the Runtime commits it before materialization. */
+  memoryMutationFromResult?: (output: JsonValue, context: ToolExecutionContext) => MemoryMutation | undefined;
+  afterMemoryCommit?: (mutation: MemoryMutation, context: ToolExecutionContext) => Promise<void>;
 }
 
 export interface ControlToolDefinition extends ToolDefinitionBase {

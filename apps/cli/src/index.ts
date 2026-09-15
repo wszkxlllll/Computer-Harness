@@ -8,6 +8,7 @@ import type { RunId } from "@computer-harness/protocol";
 import { FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmHttpClient, type GlmProfile, type GlmProfileName } from "@computer-harness/provider-glm";
 import { FetchQwenHttpClient, Qwen38FlashAdapter, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
+import { createMemoryTools, FileMemoryStore, type MemoryToolMode } from "@computer-harness/memory";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type CleanupDiagnostic } from "@computer-harness/runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
@@ -31,6 +32,11 @@ interface CliOptions {
   qwenThinking?: Qwen38ThinkingMode;
   qwenOutputMode?: Qwen38OutputMode;
   planning: boolean;
+  memory: "off" | MemoryToolMode;
+  batching: "off" | "same-control-input-v1";
+  contextMode: "raw" | "recent";
+  contextMaxHistoryEvents: number;
+  contextMaxInputTokens?: number;
   interactive: boolean;
 }
 
@@ -83,6 +89,15 @@ function parseArgs(argv: readonly string[]): CliOptions {
   }
   const interactive = argv.includes("--interactive");
   const planning = argv.includes("--planning");
+  const memoryValue = value("--memory") ?? "off";
+  if (memoryValue !== "off" && memoryValue !== "facts" && memoryValue !== "entities") throw new Error("--memory must be off, facts, or entities");
+  const batchingValue = value("--batching") ?? "off";
+  if (batchingValue !== "off" && batchingValue !== "same-control-input-v1") throw new Error("--batching must be off or same-control-input-v1");
+  const contextModeValue = value("--context-mode") ?? "raw";
+  if (contextModeValue !== "raw" && contextModeValue !== "recent") throw new Error("--context-mode must be raw or recent");
+  const contextMaxHistoryEvents = positiveInteger(value("--context-max-events"), 80, "--context-max-events");
+  const contextMaxInputTokensValue = value("--context-max-tokens");
+  const contextMaxInputTokens = contextMaxInputTokensValue === undefined ? undefined : positiveInteger(contextMaxInputTokensValue, 1, "--context-max-tokens");
   return {
     goal,
     model,
@@ -99,6 +114,11 @@ function parseArgs(argv: readonly string[]): CliOptions {
     ...(model === "qwen3.8-flash" ? { qwenThinking: (qwenThinkingValue ?? "low") as Qwen38ThinkingMode } : {}),
     ...(model === "qwen3.8-flash" ? { qwenOutputMode: (qwenOutputModeValue ?? "strict_json") as Qwen38OutputMode } : {}),
     planning,
+    memory: memoryValue as "off" | MemoryToolMode,
+    batching: batchingValue as "off" | "same-control-input-v1",
+    contextMode: contextModeValue as "raw" | "recent",
+    contextMaxHistoryEvents,
+    ...(contextMaxInputTokens === undefined ? {} : { contextMaxInputTokens }),
     interactive,
   };
 }
@@ -111,7 +131,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -125,6 +145,13 @@ async function main(): Promise<void> {
   if (planStoreRoot !== undefined) {
     tools.registerMany(createPlanningTools(new FilePlanStore(planStoreRoot)));
   }
+  const memoryStore = options.memory === "off" ? undefined : new FileMemoryStore(resolve(options.output, "memory-store"));
+  if (memoryStore !== undefined) tools.registerMany(createMemoryTools(memoryStore, options.memory === "off" ? "facts" : options.memory));
+  const features = {
+    planning: options.planning ? "tasks-v1" as const : "off" as const,
+    memory: options.memory === "off" ? "off" as const : options.memory === "facts" ? "facts-v1" as const : "entities-v1" as const,
+    batching: options.batching,
+  };
   const assetReader = assetStore;
   const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking, options.qwenOutputMode);
   const computer = options.computer === "cua"
@@ -143,12 +170,14 @@ async function main(): Promise<void> {
     runId,
     provider,
     computer,
-    contextCompiler: new DefaultContextCompiler(tools),
+    contextCompiler: new DefaultContextCompiler(tools, { mode: options.contextMode, maxHistoryEvents: options.contextMaxHistoryEvents, features, ...(options.contextMaxInputTokens === undefined ? {} : { maxInputTokens: options.contextMaxInputTokens }) }),
     toolRegistry: tools,
     policy: new DefaultRuntimePolicy(options.maxSteps, options.maxModelRequests),
     eventWriter,
     assetStore,
     onCleanupError: (diagnostic) => cleanupDiagnostics.push(diagnostic),
+    batching: options.batching,
+    features,
   });
   const outcome = await runWithCliControls(controller, options.goal, options.interactive);
   const events = await readRuntimeEvents(resolve(options.output, "trajectory.jsonl"));
@@ -163,6 +192,11 @@ async function main(): Promise<void> {
     outputMode: options.qwenOutputMode ?? null,
     glmThinking: process.env.GLM_THINKING === "disabled" || process.env.GLM_THINKING === "enabled" ? process.env.GLM_THINKING : "enabled",
     planning: options.planning,
+    memory: options.memory,
+    batching: options.batching,
+    contextMode: options.contextMode,
+    contextMaxHistoryEvents: options.contextMaxHistoryEvents,
+    contextMaxInputTokens: options.contextMaxInputTokens ?? null,
     tools: tools.modelTools().map((tool) => tool.name),
     planStoreRoot: planStoreRoot ?? null,
     computerSession: snapshot.computerSession ?? null,

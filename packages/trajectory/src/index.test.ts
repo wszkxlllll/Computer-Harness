@@ -122,6 +122,15 @@ describe("RunSnapshot reducer", () => {
     expect(snapshot.plan).toEqual({ runId, tasks: [{ ...task, status: "completed" }] });
   });
 
+  it("rebuilds Run Memory from its event stream", () => {
+    const snapshot = [
+      ...runningEvents(),
+      event(5, { type: "memory.updated", callId, mutation: { operation: "upsert_fact", fact: { id: "m1", subject: { type: "run" }, key: "target", value: "report.odt", sourceEventId: "source-event" as EventId, status: "active", updatedSequence: 4 } } }),
+      event(6, { type: "memory.updated", callId, mutation: { operation: "supersede_fact", factId: "m1" } }),
+    ].reduce(reduceRunEvent, initialRunSnapshot(runId));
+    expect(snapshot.memory.facts).toMatchObject([{ id: "m1", status: "superseded" }]);
+  });
+
   it("is deterministic and leaves an unresolved side effect visible", () => {
     const events: RuntimeEvent[] = [
       ...runningEvents(),
@@ -629,6 +638,7 @@ describe("readRuntimeEvents", () => {
         receipt: { actionId, status: "failed" },
       }),
       event(0, { type: "planning.task.updated", callId, mutation: { operation: "created", task: { id: "task-1", subject: "Open the app", status: "pending" } } }),
+      event(0, { type: "memory.updated", callId, mutation: { operation: "upsert_fact", fact: { id: "m1", subject: { type: "run" }, key: "target", value: "demo", sourceEventId: "event-source" as EventId, status: "active", updatedSequence: 12 } } }),
       event(0, { type: "run.paused", reason: "operator" }),
       event(0, { type: "run.resumed" }),
       event(0, { type: "approval.requested", requestId: "approval-1", callId, reason: "confirm" }),

@@ -290,6 +290,35 @@ function clickCall(callId: string): ToolCall {
   };
 }
 
+function typeCall(callId: string, text = "hello"): ToolCall {
+  return { id: callId as ToolCallId, name: "type", arguments: { text } };
+}
+
+function batchRegistry(): ToolRegistry {
+  const registry = clickRegistry();
+  registry.register({
+    name: "type",
+    description: "Type text.",
+    category: "computer",
+    inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
+    validate: (args) => {
+      if (typeof args !== "object" || args === null || Array.isArray(args) || typeof (args as { text?: unknown }).text !== "string") throw new Error("type.text must be a string");
+    },
+    toAction: (args) => ({ kind: "type", text: (args as { text: string }).text }),
+  });
+  registry.register({
+    name: "hotkey",
+    description: "Press a shortcut.",
+    category: "computer",
+    inputSchema: { type: "object", properties: { keys: { type: "array" } }, required: ["keys"], additionalProperties: false },
+    validate: (args) => {
+      if (typeof args !== "object" || args === null || Array.isArray(args) || !Array.isArray((args as { keys?: unknown }).keys)) throw new Error("hotkey.keys must be an array");
+    },
+    toAction: (args) => ({ kind: "keypress", keys: (args as { keys: string[] }).keys }),
+  });
+  return registry;
+}
+
 function invalidClickCall(callId: string): ToolCall {
   return {
     id: callId as ToolCallId,
@@ -347,6 +376,9 @@ async function makeController(
     eventWriter?: (path: string) => RunEventWriter;
     assetStore?: AssetStore;
     contextCompiler?: ContextCompiler;
+    batching?: "off" | "same-control-input-v1";
+    enabledCategories?: readonly import("./contracts.js").ToolCategory[];
+    enabledToolNames?: readonly string[];
     onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
   } = {},
 ) {
@@ -371,6 +403,9 @@ async function makeController(
     idFactory: new TestIds(),
     clock: { now: () => "2026-08-28T00:00:00.000Z" },
     ...(overrides.onCleanupError === undefined ? {} : { onCleanupError: overrides.onCleanupError }),
+    ...(overrides.batching === undefined ? {} : { batching: overrides.batching }),
+    ...(overrides.enabledCategories === undefined ? {} : { enabledCategories: overrides.enabledCategories }),
+    ...(overrides.enabledToolNames === undefined ? {} : { enabledToolNames: overrides.enabledToolNames }),
   });
   return { controller, computer: activeComputer, directory };
 }
@@ -560,6 +595,100 @@ describe("RunController S2-2 happy path", () => {
     expect(events.filter((event) => event.type === "tool.call.rejected")).toHaveLength(2);
     expect(events.some((event) => event.type === "action.proposed")).toBe(false);
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("commits a memory mutation before the tool result and exposes it in the Run snapshot", async () => {
+    const registry = clickRegistry();
+    registry.register({
+      name: "remember",
+      description: "Store a run fact.",
+      category: "side",
+      inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+      validate: (args) => { if (args !== null) throw new Error("remember accepts null"); },
+      execute: async () => ({ ok: true }),
+      memoryMutationFromResult: () => ({
+        operation: "upsert_fact",
+        fact: {
+          id: "m1",
+          subject: { type: "run" },
+          key: "target",
+          value: "report.odt",
+          sourceEventId: "placeholder" as EventId,
+          status: "active",
+          updatedSequence: 0,
+        },
+      }),
+    });
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "remember-call" as ToolCallId, name: "remember", arguments: null }] },
+      { type: "finish", summary: "done" },
+    ]);
+    const { controller, directory } = await makeController(provider, new FakeComputer(), registry);
+    await expect(controller.start("remember the target")).resolves.toBe("succeeded");
+    expect(controller.getSnapshot().memory.facts).toMatchObject([{ id: "m1", key: "target", value: "report.odt", status: "active" }]);
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    const memory = events.find((event) => event.type === "memory.updated");
+    expect(memory?.type === "memory.updated" ? memory.mutation : undefined).toMatchObject({ operation: "upsert_fact", fact: { sourceEventId: expect.any(String), updatedSequence: expect.any(Number) } });
+    expect(events.findIndex((event) => event.type === "memory.updated")).toBeLessThan(events.findIndex((event) => event.type === "tool.call.completed"));
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("executes the restricted same-control click then type batch with separate execution observations", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("batch-click"), typeCall("batch-type")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const { controller, computer, directory } = await makeController(provider, new FakeComputer(), batchRegistry(), new DefaultRuntimePolicy(), { batching: "same-control-input-v1" });
+
+    await expect(controller.start("edit the active field")).resolves.toBe("succeeded");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(3);
+    const started = controller.getEvents().filter((event): event is Extract<typeof event, { type: "action.execution.started" }> => event.type === "action.execution.started");
+    expect(started).toHaveLength(2);
+    expect(started[0]?.executionObservationId).toBe(started[0]?.action.basedOn);
+    expect(started[1]?.executionObservationId).not.toBe(started[1]?.action.basedOn);
+    expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("executes state-write prefix and GUI batch in one composite ModelTurn", async () => {
+    const registry = batchRegistry();
+    registry.register({
+      name: "remember_before_edit",
+      description: "Record a fact already known before the edit.",
+      category: "side",
+      inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+      validate: (args) => { if (args !== null) throw new Error("remember_before_edit accepts null"); },
+      execute: async () => ({ ok: true }),
+      memoryMutationFromResult: () => ({
+        operation: "upsert_fact",
+        fact: { id: "m1", subject: { type: "run" }, key: "edit_target", value: "active", sourceEventId: "placeholder" as EventId, status: "active", updatedSequence: 0 },
+      }),
+    });
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "memory-prefix" as ToolCallId, name: "remember_before_edit", arguments: null }, clickCall("composite-click"), typeCall("composite-type", "Lightspeaker")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const { controller, computer, directory } = await makeController(provider, new FakeComputer(), registry, new DefaultRuntimePolicy(), { batching: "same-control-input-v1" });
+    await expect(controller.start("record and edit")).resolves.toBe("succeeded");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    const events = controller.getEvents();
+    expect(events.some((event) => event.type === "memory.updated")).toBe(true);
+    expect(events.filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+    expect(events.findIndex((event) => event.type === "memory.updated")).toBeLessThan(events.findIndex((event) => event.type === "action.proposed"));
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects a cross-control-like click pair even when batching is enabled", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("batch-click-a"), clickCall("batch-click-b")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const { controller, computer, directory } = await makeController(provider, new FakeComputer(), batchRegistry(), new DefaultRuntimePolicy(), { batching: "same-control-input-v1" });
+    await expect(controller.start("do not batch two clicks")).resolves.toBe("succeeded");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(2);
     await rm(directory, { recursive: true, force: true });
   });
 

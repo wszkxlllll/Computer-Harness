@@ -29,6 +29,9 @@ importers:
       '@computer-harness/context':
         specifier: workspace:*
         version: link:../../packages/context
+      '@computer-harness/memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
       '@computer-harness/planning':
         specifier: workspace:*
         version: link:../../packages/planning
@@ -70,6 +73,15 @@ importers:
         version: link:../runtime
 
   packages/context:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
+  packages/memory:
     dependencies:
       '@computer-harness/protocol':
         specifier: workspace:*

@@ -9,7 +9,7 @@ import type {
   Viewport,
 } from "@computer-harness/protocol";
 import { randomUUID } from "node:crypto";
-import type { Computer, ComputerOpenOptions } from "@computer-harness/runtime";
+import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
 import { mapActionIntent, OsworldActionMappingError } from "./action-mapper.js";
 import type { OsworldBridge, OsworldBridgeCapture } from "./bridge.js";
 
@@ -92,7 +92,7 @@ export class OsworldComputer implements Computer {
     return result;
   }
 
-  public async execute(session: ComputerSessionDescriptor, action: ActionIntent, signal: AbortSignal): Promise<ActionReceipt> {
+  public async execute(session: ComputerSessionDescriptor, action: ActionIntent, signal: AbortSignal, options?: ComputerExecuteOptions): Promise<ActionReceipt> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
     if (this.pendingPostActionCapture !== undefined) {
@@ -101,8 +101,9 @@ export class OsworldComputer implements Computer {
     if (action.kind !== "wait" && this.latestObservationId === undefined) {
       return refused(action.actionId, "OBSERVATION_NOT_FOUND", `action is based on unknown observation ${String(action.basedOn)}`);
     }
-    if (action.kind !== "wait" && action.basedOn !== this.latestObservationId) {
-      return refused(action.actionId, "STALE_OBSERVATION", `action is based on stale observation ${String(action.basedOn)}`);
+    const executionObservationId = options?.executionObservationId ?? (action.kind === "wait" ? undefined : action.basedOn);
+    if (action.kind !== "wait" && executionObservationId !== this.latestObservationId) {
+      return refused(action.actionId, "STALE_OBSERVATION", `action executes against stale observation ${String(executionObservationId)}`);
     }
     let mapped;
     try {

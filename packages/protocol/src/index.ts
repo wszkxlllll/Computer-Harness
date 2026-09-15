@@ -27,6 +27,88 @@ export interface PlanState {
   tasks: PlanningTask[];
 }
 
+export type MemorySubject = { type: "run" } | { type: "entity"; entityId: string };
+
+/** A small, run-scoped fact retained after raw history is compacted. */
+export interface MemoryFact {
+  id: string;
+  /** Facts are normalized at the top level; this links one fact to an entity without nesting. */
+  subject: MemorySubject;
+  key: string;
+  value: string;
+  sourceEventId: EventId;
+  status: "active" | "needs_check" | "superseded";
+  relatedTaskIds?: string[];
+  updatedSequence: number;
+}
+
+/** Optional entity representation built on top of facts; IDs are run-local. */
+export interface MemoryEntity {
+  id: string;
+  type: string;
+  description: string;
+  sourceEventId: EventId;
+  status: "active" | "stale" | "superseded";
+  relatedTaskIds?: string[];
+  updatedSequence: number;
+}
+
+export interface MemoryState {
+  runId: RunId;
+  facts: MemoryFact[];
+  entities: MemoryEntity[];
+}
+
+export type MemoryMutation =
+  | { operation: "upsert_fact"; fact: MemoryFact }
+  | { operation: "supersede_fact"; factId: string; replacement?: MemoryFact }
+  | { operation: "mark_fact_needs_check"; factId: string }
+  | { operation: "upsert_entity"; entity: MemoryEntity }
+  | { operation: "invalidate_entity"; entityId: string };
+
+/** Pure state transition shared by the trajectory reducer and MemoryStore. */
+export function reduceMemoryMutation(state: MemoryState, mutation: MemoryMutation): MemoryState {
+  const next: MemoryState = {
+    runId: state.runId,
+    facts: state.facts.map((fact) => ({ ...fact, ...(fact.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...fact.relatedTaskIds] }) })),
+    entities: state.entities.map((entity) => ({
+      ...entity,
+      ...(entity.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...entity.relatedTaskIds] }),
+    })),
+  };
+  switch (mutation.operation) {
+    case "upsert_fact": {
+      const index = next.facts.findIndex((fact) => fact.id === mutation.fact.id);
+      if (index < 0) next.facts.push(mutation.fact); else next.facts[index] = mutation.fact;
+      return next;
+    }
+    case "supersede_fact": {
+      const index = next.facts.findIndex((fact) => fact.id === mutation.factId);
+      const existing = index >= 0 ? next.facts[index] : undefined;
+      if (existing !== undefined) next.facts[index] = { ...existing, status: "superseded" };
+      if (mutation.replacement !== undefined) next.facts.push(mutation.replacement);
+      return next;
+    }
+    case "mark_fact_needs_check": {
+      const index = next.facts.findIndex((fact) => fact.id === mutation.factId);
+      const existing = index >= 0 ? next.facts[index] : undefined;
+      if (existing !== undefined && existing.status !== "superseded") next.facts[index] = { ...existing, status: "needs_check" };
+      return next;
+    }
+    case "upsert_entity": {
+      const index = next.entities.findIndex((entity) => entity.id === mutation.entity.id);
+      if (index < 0) next.entities.push(mutation.entity); else next.entities[index] = mutation.entity;
+      return next;
+    }
+    case "invalidate_entity": {
+      const index = next.entities.findIndex((entity) => entity.id === mutation.entityId);
+      const existing = index >= 0 ? next.entities[index] : undefined;
+      if (existing !== undefined) next.entities[index] = { ...existing, status: "stale" };
+      return next;
+    }
+  }
+}
+
 export type PlanningTaskMutation =
   | { operation: "created"; task: PlanningTask }
   | { operation: "updated"; task: PlanningTask };
@@ -210,7 +292,7 @@ export type RuntimeEventData =
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
   | { type: "observation.created"; observation: ObservationFrame }
-  | { type: "model.request.started"; providerId: string }
+  | { type: "model.request.started"; providerId: string; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number } }
   | { type: "model.response.received"; turn: ModelTurn }
   | {
       type: "model.request.failed";
@@ -226,11 +308,12 @@ export type RuntimeEventData =
       type: "tool.call.failed";
       result: Extract<ToolResult, { status: "failed" }>;
     }
-  | { type: "action.proposed"; callId: ToolCallId; action: ActionIntent }
-  | { type: "action.execution.started"; action: ActionIntent }
+  | { type: "action.proposed"; callId: ToolCallId; action: ActionIntent; executionObservationId?: ObservationId }
+  | { type: "action.execution.started"; action: ActionIntent; executionObservationId?: ObservationId }
   | { type: "action.execution.completed"; receipt: ActionReceipt }
   | { type: "action.execution.failed"; receipt: ActionReceipt }
   | { type: "planning.task.updated"; callId: ToolCallId; mutation: PlanningTaskMutation }
+  | { type: "memory.updated"; callId: ToolCallId; mutation: MemoryMutation }
   | { type: "run.paused"; reason: string }
   | { type: "run.resumed" }
   | { type: "approval.requested"; requestId: string; callId: ToolCallId; reason: string }
@@ -271,6 +354,7 @@ export const runtimeEventTypes = [
   "action.execution.completed",
   "action.execution.failed",
   "planning.task.updated",
+  "memory.updated",
   "run.paused",
   "run.resumed",
   "approval.requested",

@@ -61,20 +61,22 @@ function withoutControls(value: ModelInput): ModelInput {
 }
 
 describe("Qwen3.8-Flash provider adapter", () => {
-  it("does not append a provider-specific prompt patch to the caller's system message", async () => {
+  it("adds the terminate control boundary when terminate is available", async () => {
     const client = new Client(response("terminate", { status: "success", text: "done" }));
     const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
     await adapter.generate(input(), { signal: new AbortController().signal });
     const messages = client.body?.messages as Array<Record<string, unknown>>;
-    expect(messages[0]).toEqual({ role: "system", content: "system" });
+    expect(messages[0]).toMatchObject({ role: "system", content: expect.stringContaining("control tool (terminate, interact) must be the only call in its response") });
+    expect(String(messages[0]?.content)).not.toContain("Available tools");
+    expect(String(messages[0]?.content)).not.toContain("Strict output envelope");
   });
 
-  it("uses the official strict JSON response format by default", async () => {
+  it("uses the flat strict JSON response format and ToolRegistry catalog by default", async () => {
     const client = new Client({
       choices: [{
           finish_reason: "stop",
           message: {
-          content: JSON.stringify({ kind: "tool_call", id: "q38-json-1", name: "click", arguments: { x: 400, y: 500 } }),
+          content: JSON.stringify({ calls: [{ id: "q38-json-1", name: "click", arguments: { x: 400, y: 500 } }] }),
         },
       }],
     });
@@ -87,40 +89,101 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.tool_choice).toBeUndefined();
     expect(client.body?.response_format).toMatchObject({
       type: "json_schema",
-      json_schema: { name: "qwen_model_turn", strict: true, schema: { type: "object", anyOf: expect.any(Array) } },
+      json_schema: { name: "qwen_model_turn", strict: true, schema: { type: "object", properties: { calls: { maxItems: 5 } } } },
     });
-    const variants = (client.body?.response_format as { json_schema?: { schema?: { anyOf?: Array<Record<string, unknown>> } } } | undefined)?.json_schema?.schema?.anyOf ?? [];
-    const variantName = (variant: Record<string, unknown>): string | undefined => {
-      const properties = variant.properties;
-      if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return undefined;
-      const name = (properties as Record<string, unknown>).name;
-      if (typeof name !== "object" || name === null || Array.isArray(name)) return undefined;
-      const values = (name as Record<string, unknown>).enum;
-      return Array.isArray(values) && typeof values[0] === "string" ? values[0] : undefined;
-    };
-    const variantKind = (variant: Record<string, unknown>): unknown => {
-      const properties = variant.properties;
-      if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return undefined;
-      const kind = (properties as Record<string, unknown>).kind;
-      if (typeof kind !== "object" || kind === null || Array.isArray(kind)) return undefined;
-      return (kind as Record<string, unknown>).enum;
-    };
-    expect(variants.length).toBeGreaterThan(0);
-    expect(variants.every((variant) => JSON.stringify(variantKind(variant)) === JSON.stringify(["tool_call"]))).toBe(true);
-    const clickVariant = variants.find((variant) => variantName(variant) === "click");
-    const terminateVariant = variants.find((variant) => variantName(variant) === "terminate");
-    expect(clickVariant?.properties).toMatchObject({ arguments: { properties: { x: { maximum: 1000 }, y: { maximum: 1000 } } } });
-    expect(terminateVariant?.properties).toMatchObject({ arguments: { properties: { status: { enum: ["success", "failure"] } } } });
+    const schema = (client.body?.response_format as { json_schema: { schema: { anyOf?: unknown[]; properties: { calls: { items: { properties: Record<string, unknown> } } } } } }).json_schema.schema;
+    expect(schema.anyOf).toBeUndefined();
+    expect(schema.properties.calls.items.properties).toMatchObject({
+      id: { type: "string" },
+      name: { type: "string", enum: expect.arrayContaining(["click", "terminate"]) },
+      arguments: { type: "object", additionalProperties: true },
+    });
+    const systemMessage = (client.body?.messages as Array<Record<string, unknown>>)[0];
+    expect(String(systemMessage?.content)).toContain("Available tools");
+    expect(String(systemMessage?.content)).toContain("click(x:number[0,1000], y:number[0,1000])");
+    expect(String(systemMessage?.content)).toContain("every response must be one JSON object with a non-empty calls array");
+  });
+
+  it("parses a strict JSON tool_calls envelope for a permitted short batch", async () => {
+    const client = new Client({
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({
+        calls: [
+          { id: "q38-batch-click", name: "click", arguments: { x: 400, y: 500 } },
+          { id: "q38-batch-type", name: "type", arguments: { text: "hello" } },
+        ],
+      }) } }],
+    });
+    const turn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal });
+    expect(turn.type).toBe("tool_calls");
+    if (turn.type === "tool_calls") expect(turn.calls.map((call) => call.name)).toEqual(["click", "type"]);
+  });
+
+  it("rejects duplicate ids and control calls mixed into a strict calls envelope", async () => {
+    const duplicate = new Client({
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [
+        { id: "same-id", name: "click", arguments: { x: 400, y: 500 } },
+        { id: "same-id", name: "type", arguments: { text: "hello" } },
+      ] }) } }],
+    });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: duplicate, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_DUPLICATE_TOOL_CALL" });
+
+    const mixedControl = new Client({
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [
+        { id: "write-first", name: "type", arguments: { text: "hello" } },
+        { id: "finish-too-soon", name: "terminate", arguments: { status: "success" } },
+      ] }) } }],
+    });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mixedControl, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_RESPONSE" });
+  });
+
+  it("keeps the flat response schema generic while constraining registered tool names", async () => {
+    const client = new Client({
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [
+        { id: "flat-click", name: "click", arguments: { x: 400, y: 500 } },
+        { id: "flat-type", name: "type", arguments: { text: "hello" } },
+      ] }) } }],
+    });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({
+      type: "tool_calls",
+      calls: [{ id: "flat-click", name: "click" }, { id: "flat-type", name: "type" }],
+    });
+    expect(client.body?.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: { name: "qwen_model_turn", strict: true, schema: { type: "object", properties: { calls: { maxItems: 5 } } } },
+    });
+    const schema = (client.body?.response_format as { json_schema: { schema: { anyOf?: unknown[]; properties: { calls: { items: { properties: Record<string, unknown> } } } } } }).json_schema.schema;
+    expect(schema.anyOf).toBeUndefined();
+    expect(schema.properties.calls.items.properties).toMatchObject({
+      id: { type: "string" },
+      name: { type: "string", enum: expect.arrayContaining(["click", "type", "terminate"]) },
+      arguments: { type: "object", additionalProperties: true },
+    });
+    const systemMessage = (client.body?.messages as Array<Record<string, unknown>>).find((message) => message.role === "system");
+    expect(String(systemMessage?.content)).toContain("control tool (terminate, interact) must be the only call in its response");
+  });
+
+  it("preserves reasoning continuation from a strict JSON tool-call turn", async () => {
+    const client = new Client({
+      choices: [{ finish_reason: "stop", message: {
+        content: JSON.stringify({ calls: [{ id: "strict-reasoning", name: "click", arguments: { x: 400, y: 500 } }] }),
+        reasoning_content: "locate the current target",
+      } }],
+    });
+    await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "low" }).generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({
+      type: "tool_calls",
+      continuation: { providerId: "qwen3.8-flash", kind: "reasoning_content", content: "locate the current target" },
+    });
   });
 
   it("projects strict-mode tool history as JSON content instead of native tool messages", async () => {
     const firstClient = new Client({
-      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-json-history", name: "click", arguments: { x: 10, y: 20 } }) } }],
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-json-history", name: "click", arguments: { x: 10, y: 20 } }] }) } }],
     });
     const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "disabled", outputMode: "strict_json" });
     const first = await adapter.generate(input(), { signal: new AbortController().signal });
     if (first.type !== "tool_calls") throw new Error("expected tool call");
-    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-json-finish", name: "terminate", arguments: { status: "success", text: "done" } }) } }] });
+    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-json-finish", name: "terminate", arguments: { status: "success", text: "done" } }] }) } }] });
     const secondInput: ModelInput = {
       ...input(),
       messages: [
@@ -135,21 +198,46 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(messages.some((message) => message.role === "user" && typeof message.content === "string" && message.content.includes("Tool result"))).toBe(true);
   });
 
+  it("keeps flat strict history free of legacy kind envelopes", async () => {
+    const firstClient = new Client({
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "flat-history-call", name: "click", arguments: { x: 10, y: 20 } }] }) } }],
+    });
+    const firstAdapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "disabled" });
+    const first = await firstAdapter.generate(input(), { signal: new AbortController().signal });
+    if (first.type !== "tool_calls") throw new Error("expected tool call");
+    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "flat-finish", name: "terminate", arguments: { status: "success" } }] }) } }] });
+    const secondInput: ModelInput = {
+      ...input(),
+      messages: [
+        ...input().messages,
+        { role: "assistant", content: [{ type: "tool_call", call: first.calls[0]!, viewport }] },
+        { role: "tool", content: [{ type: "tool_result", result: { callId: first.calls[0]!.id, status: "completed", output: { ok: true } } }] },
+      ],
+    };
+    await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: secondClient, thinking: "disabled" }).generate(secondInput, { signal: new AbortController().signal });
+    const messages = secondClient.body?.messages as Array<Record<string, unknown>>;
+    const assistant = messages.find((message) => message.role === "assistant");
+    expect(typeof assistant?.content).toBe("string");
+    expect(String(assistant?.content)).toContain('"calls"');
+    expect(String(assistant?.content)).not.toContain('"kind":"tool_call"');
+    expect(String(assistant?.content)).not.toContain('"kind": "tool_call"');
+  });
+
   it("maps strict controls through registry metadata and rejects unavailable or legacy envelopes", async () => {
-    const unavailable = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-no-control", name: "terminate", arguments: { status: "success" } }) } }] });
+    const unavailable = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-no-control", name: "terminate", arguments: { status: "success" } }] }) } }] });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: unavailable, thinking: "disabled" }).generate(withoutControls(input()), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_UNAVAILABLE_TOOL" });
 
     const aliasInput: ModelInput = {
       ...input(),
       tools: input().tools.map((tool) => tool.name === "terminate" ? { ...tool, name: "complete" } : tool),
     };
-    const aliasClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-alias", name: "complete", arguments: { status: "success", text: "done" } }) } }] });
+    const aliasClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-alias", name: "complete", arguments: { status: "success", text: "done" } }] }) } }] });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: aliasClient, thinking: "disabled" }).generate(aliasInput, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success" });
 
     const mismatch = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "user_input_required", id: "q38-mismatch", name: "terminate", arguments: { status: "success" } }) } }] });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mismatch, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_RESPONSE" });
 
-    const interactClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "tool_call", id: "q38-interact", name: "interact", arguments: { text: "Which window should I use?" } }) } }] });
+    const interactClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-interact", name: "interact", arguments: { text: "Which window should I use?" } }] }) } }] });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: interactClient, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "user_input_required", question: "Which window should I use?" });
   });
 

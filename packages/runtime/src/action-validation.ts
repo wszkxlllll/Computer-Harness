@@ -8,6 +8,8 @@ import type {
 export interface ActionValidationContext {
   observation?: ObservationFrame;
   capabilities: ComputerCapabilities;
+  /** Runtime-only current execution frame; action.basedOn remains the decision frame. */
+  executionObservationId?: import("@computer-harness/protocol").ObservationId;
 }
 
 /**
@@ -29,10 +31,14 @@ export function validateActionIntent(
   if (observation === undefined) {
     throw new Error(`GUI action ${action.actionId} requires a current observation`);
   }
-  if (action.basedOn !== observation.id) {
+  const executionObservationId = context.executionObservationId ?? observation.id;
+  if (action.basedOn !== observation.id && context.executionObservationId === undefined) {
     throw new Error(
       `GUI action ${action.actionId} is based on ${action.basedOn}, not current observation ${observation.id}`,
     );
+  }
+  if (executionObservationId !== observation.id) {
+    throw new Error(`execution observation ${executionObservationId} is not current observation ${observation.id}`);
   }
   if (
     !Number.isInteger(observation.viewport.width) ||

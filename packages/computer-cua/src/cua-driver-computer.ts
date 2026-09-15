@@ -14,7 +14,7 @@ import type {
   ObservationId,
   Viewport,
 } from "@computer-harness/protocol";
-import type { Computer, ComputerOpenOptions } from "@computer-harness/runtime";
+import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 
@@ -53,6 +53,7 @@ interface DriverErrorDetails {
 export class CuaDriverComputer implements Computer {
   private readonly options: Required<Pick<CuaDriverComputerOptions, "socketPath" | "screenshotDir" | "cleanupWaitMs">> & Omit<CuaDriverComputerOptions, "socketPath" | "screenshotDir" | "cleanupWaitMs">;
   private readonly observations = new Map<string, PrivateObservation>();
+  private latestObservationId: ObservationId | undefined;
   private session: PrivateSession | undefined;
 
   public constructor(options: CuaDriverComputerOptions) {
@@ -128,6 +129,7 @@ export class CuaDriverComputer implements Computer {
       }
       const data = new Uint8Array(await readFile(screenshotPath));
       this.observations.set(String(observationId), { sessionId: String(session.id) });
+      this.latestObservationId = observationId;
       return {
         capturedAt: new Date().toISOString(),
         viewport: current.descriptor.viewport,
@@ -146,6 +148,7 @@ export class CuaDriverComputer implements Computer {
     session: ComputerSessionDescriptor,
     action: ActionIntent,
     signal: AbortSignal,
+    options?: ComputerExecuteOptions,
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
@@ -153,6 +156,10 @@ export class CuaDriverComputer implements Computer {
       const observation = this.observations.get(String(action.basedOn));
       if (observation === undefined || observation.sessionId !== String(session.id)) {
         return refused(action.actionId, "OBSERVATION_NOT_FOUND", `action is based on unknown observation ${String(action.basedOn)}`);
+      }
+      const executionObservationId = options?.executionObservationId ?? action.basedOn;
+      if (executionObservationId !== this.latestObservationId) {
+        return refused(action.actionId, "STALE_OBSERVATION", `action executes against stale observation ${String(executionObservationId)}`);
       }
     }
     if (action.kind === "wait") {
@@ -193,6 +200,7 @@ export class CuaDriverComputer implements Computer {
     this.observations.forEach((_value, key) => {
       if (_value.sessionId === String(session.id)) this.observations.delete(key);
     });
+    this.latestObservationId = undefined;
     try {
       let result;
       try {

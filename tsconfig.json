@@ -4,6 +4,7 @@
     { "path": "packages/protocol" },
     { "path": "packages/trajectory" },
     { "path": "packages/runtime" },
+    { "path": "packages/memory" },
     { "path": "packages/context" },
     { "path": "packages/planning" },
     { "path": "packages/provider-glm" },

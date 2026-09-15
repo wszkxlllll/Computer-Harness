@@ -5,6 +5,7 @@ import type {
   EventId,
   JsonValue,
   ModelTurn,
+  MemoryMutation,
   ObservationFrame,
   ObservationId,
   RunId,
@@ -38,7 +39,10 @@ import type {
   ToolDefinition,
   ToolExecutionContext,
   ToolAudience,
+  ToolCategory,
   ToolPolicyDecision,
+  ComputerExecuteOptions,
+  RunFeatureConfig,
 } from "./contracts.js";
 import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
@@ -66,6 +70,14 @@ export interface RunControllerDependencies {
   computerOpenOptions?: ComputerOpenOptions;
   /** Execution audience is explicit even when only the main Run exists today. */
   toolAudience?: ToolAudience;
+  /** Runtime feature gates; omitted keeps all currently registered categories on. */
+  enabledCategories?: readonly ToolCategory[];
+  /** Optional per-run tool allow-list for independent Planning/Memory switches. */
+  enabledToolNames?: readonly string[];
+  /** One immutable source for prompt, Runtime and Registry feature semantics. */
+  features?: RunFeatureConfig;
+  /** Disabled by default so the existing one-computer-call baseline is stable. */
+  batching?: "off" | "same-control-input-v1";
   onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
 }
 
@@ -203,6 +215,8 @@ interface PendingToolTurn {
   entries: readonly PreflightEntry[];
   nextIndex: number;
   invalidated: boolean;
+  decisionObservationId?: ObservationId;
+  batch?: boolean;
 }
 
 interface CommandEffects {
@@ -223,6 +237,12 @@ export class RunController {
   private readonly computerOpenOptions: ComputerOpenOptions;
   private readonly onCleanupError: ((diagnostic: CleanupDiagnostic) => void) | undefined;
   private readonly toolAudience: ToolAudience;
+  private readonly enabledCategories: ReadonlySet<ToolCategory>;
+  private readonly enabledToolNames: ReadonlySet<string> | undefined;
+  private readonly memoryEnabled: boolean;
+  private readonly planningEnabled: boolean;
+  private readonly batching: "off" | "same-control-input-v1";
+  private readonly features: RunFeatureConfig;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
   private readonly callStates = new Map<ToolCallId, CallState>();
@@ -252,6 +272,16 @@ export class RunController {
     this.idFactory = dependencies.idFactory ?? randomIdFactory;
     this.computerOpenOptions = dependencies.computerOpenOptions ?? {};
     this.toolAudience = dependencies.toolAudience ?? "main";
+    this.enabledCategories = new Set(dependencies.enabledCategories ?? ["computer", "planning", "control", "side"]);
+    this.enabledToolNames = dependencies.enabledToolNames === undefined ? undefined : new Set(dependencies.enabledToolNames);
+    this.batching = dependencies.batching ?? "off";
+    this.features = dependencies.features ?? {
+      planning: this.enabledCategories.has("planning") ? "tasks-v1" : "off",
+      memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
+      batching: this.batching,
+    };
+    this.memoryEnabled = this.features.memory !== "off" && this.enabledCategories.has("side");
+    this.planningEnabled = this.features.planning !== "off" && this.enabledCategories.has("planning");
     this.onCleanupError = dependencies.onCleanupError;
     this.snapshot = {
       runId: this.runId,
@@ -259,6 +289,7 @@ export class RunController {
       stepCount: 0,
       modelRequestCount: 0,
       plan: { runId: this.runId, tasks: [] },
+      memory: { runId: this.runId, facts: [], entities: [] },
     };
   }
 
@@ -408,8 +439,12 @@ export class RunController {
             {
               runId: this.runId,
               goal,
-              plan: this.snapshot.plan,
               recentEvents: this.events,
+              enabledCategories: [...this.enabledCategories],
+              ...(this.planningEnabled ? { plan: this.snapshot.plan } : {}),
+              ...(this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
+              ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
+              features: this.features,
               ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
             },
             this.abortController.signal,
@@ -449,7 +484,7 @@ export class RunController {
               this.actionBudgetCloseTurnsRemaining -= 1;
               closeTurnConsumed = true;
             }
-            await this.commitEvent({ type: "model.request.started", providerId: this.provider.id });
+            await this.commitEvent({ type: "model.request.started", providerId: this.provider.id, ...(requestContext.contextBudget === undefined ? {} : { contextBudget: requestContext.contextBudget }) });
             try {
               turn = await this.provider.generate(requestContext, { signal: this.abortController.signal });
             } catch (error) {
@@ -771,6 +806,14 @@ export class RunController {
         preflight.push({ call, rejection: `tool is not available to ${this.toolAudience}: ${call.name}` });
         continue;
       }
+      if (!this.enabledCategories.has(definition.category)) {
+        preflight.push({ call, definition, rejection: `tool category ${definition.category} is disabled for this run` });
+        continue;
+      }
+      if (this.enabledToolNames !== undefined && !this.enabledToolNames.has(definition.name)) {
+        preflight.push({ call, definition, rejection: `tool ${definition.name} is disabled for this run` });
+        continue;
+      }
       try {
         definition.validate(call.arguments);
       } catch (error) {
@@ -803,17 +846,21 @@ export class RunController {
       }
     }
 
-    const computerCount = preflight.filter(
+    const computerEntries = preflight.filter(
       (entry) => entry.rejection === undefined && entry.definition?.category === "computer",
     ).length;
+    // Preserve the most specific schema/policy rejection when an entry is
+    // already invalid; ordering is checked only after individual preflight.
+    const orderRejection = preflight.some((entry) => entry.rejection !== undefined) ? undefined : validateCompositeCallOrder(preflight);
+    const batchAllowed = this.batching !== "off" && computerEntries > 1 && orderRejection === undefined && isSameControlInputBatch(calls, preflight);
     const hasApproval = preflight.some(
       (entry) => entry.rejection === undefined && entry.decision?.decision === "require_approval",
     );
-    const groupRejection =
-      computerCount > 1
-        ? "a ModelTurn may contain at most one computer ToolCall"
+    const groupRejection = orderRejection
+      ?? (computerEntries > 1 && !batchAllowed
+        ? this.batching === "off" ? "a ModelTurn may contain at most one computer ToolCall" : "computer calls do not match the same-control input batch shape"
         : preflight.find((entry) => entry.rejection !== undefined)?.rejection
-          ?? (hasApproval && calls.length > 1 ? "approval cannot be combined with other ToolCalls in one turn" : undefined);
+          ?? (hasApproval && calls.length > 1 ? "approval cannot be combined with other ToolCalls in one turn" : undefined));
 
     for (const call of calls) {
       this.callStates.set(call.id, "received");
@@ -855,6 +902,7 @@ export class RunController {
           entries: preflight,
           nextIndex: 0,
           invalidated: true,
+          ...(batchAllowed ? { batch: true, decisionObservationId: this.snapshot.latestObservationId } : {}),
         };
       } else {
         await this.rejectPendingEntries(preflight, 0, "superseded by user correction");
@@ -862,10 +910,22 @@ export class RunController {
       return effects;
     }
     if (this.snapshot.status === "paused") {
-      this.pendingToolTurn = { session, entries: preflight, nextIndex: 0, invalidated: false };
+      this.pendingToolTurn = {
+        session,
+        entries: preflight,
+        nextIndex: 0,
+        invalidated: false,
+        ...(batchAllowed ? { batch: true, decisionObservationId: this.snapshot.latestObservationId } : {}),
+      };
       return effects;
     }
-    return this.executePendingEntries({ session, entries: preflight, nextIndex: 0, invalidated: false });
+    return this.executePendingEntries({
+      session,
+      entries: preflight,
+      nextIndex: 0,
+      invalidated: false,
+      ...(batchAllowed ? { batch: true, decisionObservationId: this.snapshot.latestObservationId } : {}),
+    });
   }
 
   private async executePendingEntries(pendingTurn: PendingToolTurn): Promise<CommandEffects> {
@@ -882,7 +942,21 @@ export class RunController {
       };
       this.throwIfAborted();
       if (entry.definition.category === "computer") {
-        await this.executeComputerCall(entry.call, entry.definition, context);
+        if (pendingTurn.batch) {
+          const actionBudget = this.policy.checkActionBudget(this.snapshot);
+          if (!actionBudget.allowed) {
+            this.actionBudgetExhausted = true;
+            await this.rejectPendingEntries(pendingTurn.entries, index, actionBudget.reason ?? "computer action budget exhausted");
+            return { correction: false };
+          }
+          const decision = await this.policy.evaluateToolCall({ call: entry.call, tool: entry.definition, snapshot: this.snapshot });
+          if (decision.decision !== "allow") {
+            await this.rejectToolCall(entry.call.id, decision.decision === "deny" ? decision.reason : `approval required inside a batch: ${decision.reason}`);
+            await this.rejectPendingEntries(pendingTurn.entries, index + 1, `previous ToolCall ${entry.call.id} was not allowed; remaining calls were not executed`);
+            return { correction: false };
+          }
+        }
+        await this.executeComputerCall(entry.call, entry.definition, context, pendingTurn.decisionObservationId);
       } else if (entry.definition.category === "control") {
         await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
@@ -964,6 +1038,30 @@ export class RunController {
           }
         }
       }
+      if (definition.memoryMutationFromResult !== undefined) {
+        const proposedMutation = definition.memoryMutationFromResult(output, context);
+        const mutation = proposedMutation === undefined ? undefined : this.attachMemoryProvenance(proposedMutation, call.id);
+        if (mutation !== undefined) {
+          this.validateMemoryTaskLinks(mutation);
+          await this.commitEvent({ type: "memory.updated", callId: call.id, mutation });
+          if (definition.afterMemoryCommit !== undefined) {
+            try {
+              await definition.afterMemoryCommit(mutation, context);
+            } catch (error) {
+              const result: ToolResult = {
+                callId: call.id,
+                status: "failed",
+                error: { code: "MEMORY_MATERIALIZATION_FAILED", message: errorMessage(error) },
+              };
+              await this.commitEvent({ type: "tool.call.failed", result });
+              this.callStates.set(call.id, "failed");
+              await this.commitEvent({ type: "runtime.error", category: "memory_materialization_failed", message: errorMessage(error) });
+              await this.commitEvent({ type: "run.finished", outcome: "failed" });
+              return;
+            }
+          }
+        }
+      }
       const result: ToolResult = { callId: call.id, status: "completed", output };
       await this.commitEvent({ type: "tool.call.completed", result });
       this.callStates.set(call.id, "completed");
@@ -982,15 +1080,18 @@ export class RunController {
     call: ToolCall,
     definition: ComputerToolDefinition,
     context: ToolExecutionContext,
+    decisionObservationId: ObservationId | undefined = this.snapshot.latestObservationId,
   ): Promise<void> {
     this.throwIfAborted();
     const draft = definition.toAction(call.arguments, context);
     this.throwIfAborted();
-    const action = makeActionIntent(this.idFactory.actionId(), this.snapshot.latestObservationId, draft);
+    const executionObservationId = this.snapshot.latestObservationId;
+    const action = makeActionIntent(this.idFactory.actionId(), decisionObservationId, draft);
     try {
       validateActionIntent(action, {
         capabilities: context.session.capabilities,
         ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+        ...(executionObservationId === undefined ? {} : { executionObservationId }),
       });
     } catch (error) {
       // Deterministic GUI contract violations are a rejected ToolCall, not a
@@ -1005,19 +1106,29 @@ export class RunController {
     if (this.actionCallIds.has(action.actionId)) {
       throw new Error(`ActionId ${action.actionId} was already proposed`);
     }
-    await this.commitEvent({ type: "action.proposed", callId: call.id, action });
+    await this.commitEvent({
+      type: "action.proposed",
+      callId: call.id,
+      action,
+      ...(executionObservationId === undefined ? {} : { executionObservationId }),
+    });
     this.callStates.set(call.id, "proposed");
     this.actionCallIds.set(action.actionId, call.id);
     if (this.actionCallIds.get(action.actionId) !== call.id) {
       throw new Error(`action ${action.actionId} is not linked to ToolCall ${call.id}`);
     }
     this.throwIfAborted();
-    await this.commitEvent({ type: "action.execution.started", action });
+    await this.commitEvent({
+      type: "action.execution.started",
+      action,
+      ...(executionObservationId === undefined ? {} : { executionObservationId }),
+    });
     this.callStates.set(call.id, "executing");
 
     let receipt: import("@computer-harness/protocol").ActionReceipt;
     try {
-      receipt = await this.computer.execute(context.session, action, this.abortController.signal);
+      const executeOptions: ComputerExecuteOptions = executionObservationId === undefined ? {} : { executionObservationId };
+      receipt = await this.computer.execute(context.session, action, this.abortController.signal, executeOptions);
     } catch (error) {
       await this.commitEvent({
         type: "runtime.error",
@@ -1056,6 +1167,31 @@ export class RunController {
     // observation. If observing the post-action state fails, the Run can be
     // marked failed without leaving a completed action with a dangling call.
     await this.observeAndCommit(context.session);
+  }
+
+  private attachMemoryProvenance(mutation: MemoryMutation, callId: ToolCallId): MemoryMutation {
+    const source = [...this.events].reverse().find((event) => event.type === "tool.call.received" && event.call.id === callId);
+    const sourceEventId = source?.eventId ?? this.idFactory.eventId();
+    const updatedSequence = source?.sequence ?? this.nextSequence;
+    const stampFact = <T extends { sourceEventId: import("@computer-harness/protocol").EventId; updatedSequence: number }>(fact: T): T => ({ ...fact, sourceEventId, updatedSequence });
+    switch (mutation.operation) {
+      case "upsert_fact": return { operation: "upsert_fact", fact: stampFact(mutation.fact) };
+      case "supersede_fact": return { operation: "supersede_fact", factId: mutation.factId, ...(mutation.replacement === undefined ? {} : { replacement: stampFact(mutation.replacement) }) };
+      case "mark_fact_needs_check": return mutation;
+      case "upsert_entity": return { operation: "upsert_entity", entity: { ...mutation.entity, sourceEventId, updatedSequence } };
+      case "invalidate_entity": return mutation;
+    }
+  }
+
+  private validateMemoryTaskLinks(mutation: MemoryMutation): void {
+    const relatedTaskIds = mutation.operation === "upsert_fact"
+      ? mutation.fact.relatedTaskIds
+      : mutation.operation === "upsert_entity" ? mutation.entity.relatedTaskIds : undefined;
+    if (relatedTaskIds === undefined || relatedTaskIds.length === 0) return;
+    if (!this.planningEnabled) throw new Error("Memory relatedTaskIds require Planning to be enabled");
+    const known = new Set(this.snapshot.plan.tasks.map((task) => task.id));
+    const unknown = relatedTaskIds.filter((id) => !known.has(id));
+    if (unknown.length > 0) throw new Error(`Memory relatedTaskIds reference unknown task(s): ${unknown.join(", ")}`);
   }
 
   private async rejectToolCall(callId: ToolCallId, reason: string): Promise<void> {
@@ -1167,6 +1303,53 @@ function providerErrorDetails(error: unknown): { code?: string; retryable?: bool
       ? { retryMode: (candidate as { retryMode: "same_input" | "feedback" }).retryMode }
       : {}),
   };
+}
+
+function isSameControlInputBatch(calls: readonly ToolCall[], entries: readonly PreflightEntry[]): boolean {
+  if (entries.length !== calls.length) return false;
+  const firstComputer = entries.findIndex((entry) => entry.definition?.category === "computer");
+  if (firstComputer < 0) return false;
+  const suffixCalls = calls.slice(firstComputer);
+  const suffixEntries = entries.slice(firstComputer);
+  if (suffixCalls.length < 2 || suffixCalls.length > 3 || suffixEntries.some((entry) => entry.rejection !== undefined || entry.definition?.category !== "computer")) return false;
+  const names = suffixCalls.map((call) => call.name);
+  const isType = (name: string) => name === "type";
+  const isClick = (name: string) => name === "click";
+  const isSelectAll = (call: ToolCall): boolean => {
+    if (call.name !== "hotkey" || typeof call.arguments !== "object" || call.arguments === null || Array.isArray(call.arguments)) return false;
+    const keys = (call.arguments as { keys?: unknown }).keys;
+    return Array.isArray(keys) && keys.length === 2 && keys.every((key) => typeof key === "string") &&
+      new Set(keys.map((key) => key.toUpperCase())).has("CTRL") && new Set(keys.map((key) => key.toUpperCase())).has("A");
+  };
+  if (names.length === 2) {
+    return (isClick(names[0] ?? "") && isType(names[1] ?? "")) ||
+      (isSelectAll(suffixCalls[0] as ToolCall) && isType(names[1] ?? ""));
+  }
+
+  return isClick(names[0] ?? "") && isSelectAll(suffixCalls[1] as ToolCall) && isType(names[2] ?? "");
+}
+
+/**
+ * A composite turn is state-write prefix followed by GUI suffix. Read tools
+ * cannot be useful before a GUI action because their result is unavailable to
+ * later calls in the same model response; state writes after GUI would claim
+ * facts before the post-action observation exists.
+ */
+function validateCompositeCallOrder(entries: readonly PreflightEntry[]): string | undefined {
+  const firstComputer = entries.findIndex((entry) => entry.definition?.category === "computer");
+  if (firstComputer < 0) return undefined;
+  if (firstComputer > 2) return "a composite turn allows at most two Planning/Memory write calls before GUI actions";
+  for (let index = 0; index < firstComputer; index += 1) {
+    const definition = entries[index]?.definition;
+    if (definition === undefined || definition.category === "control" || definition.category === "computer" ||
+      (definition.planMutationFromResult === undefined && definition.memoryMutationFromResult === undefined)) {
+      return "only Planning/Memory write calls may precede a GUI action; read tools must use a later ModelTurn";
+    }
+  }
+  for (let index = firstComputer; index < entries.length; index += 1) {
+    if (entries[index]?.definition?.category !== "computer") return "Planning/Memory writes cannot appear after or between GUI actions";
+  }
+  return undefined;
 }
 
 async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number): Promise<void> {

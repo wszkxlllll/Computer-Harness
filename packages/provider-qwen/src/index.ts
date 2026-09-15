@@ -91,9 +91,9 @@ export class QwenProviderError extends Error {
 }
 
 /**
- * Provider profile for Qwen3.8-Flash's ordinary OpenAI-compatible Function
- * Calling interface. Its wire arguments stay aligned with the canonical
- * per-tool Harness schemas rather than a provider-specific coordinate format.
+ * Provider profile for Qwen3.8-Flash's OpenAI-compatible endpoint. Strict JSON
+ * is the default wire protocol; native Function Calling remains available as
+ * a compatibility mode. Both map back to canonical Harness ToolCalls.
  */
 export class Qwen38FlashAdapter implements ProviderAdapter {
   public readonly id = "qwen3.8-flash";
@@ -120,12 +120,24 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
 
   public async generate(input: ModelInput, options: { signal: AbortSignal }): Promise<ModelTurn> {
     options.signal.throwIfAborted();
-    const presentation = await this.presentMessages(input.system, input.messages, input.tools, options.signal);
+    const strictProtocol = this.outputMode === "strict_json";
+    const catalog = strictProtocol
+      ? `\n${qwenToolCatalog(input.tools, this.coordinateMode)}`
+      : "";
+    const envelopeInstruction = strictProtocol
+      ? "\nStrict output envelope for this provider: every response must be one JSON object with a non-empty calls array. Each item must contain only id, name, and arguments. A single action or control decision is still represented as calls with one item; never emit kind, a top-level tool_call, a bare array, a nested calls object, or extra call fields. Across turns, preserve this exact envelope, emit only unfinished current calls, and never reuse a ToolCall id that was already accepted. Arguments must follow the Available tools catalog; Runtime performs the final exact validation."
+      : "";
+    const controlNames = input.tools.filter((tool) => tool.control !== undefined).map((tool) => tool.name);
+    const terminateBoundary = controlNames.length > 0
+      ? `\nControl boundary: each control tool (${controlNames.join(", ")}) must be the only call in its response. Never mix a control tool with any computer, planning, memory, or other call; wait for prior tool receipts and the next observation before returning a control decision.`
+      : "";
+    const system = `${input.system}${catalog}${envelopeInstruction}${terminateBoundary}`;
+    const presentation = await this.presentMessages(system, input.messages, input.tools, options.signal);
     const body: Record<string, unknown> = {
       model: this.id,
       messages: presentation.messages,
       ...(this.outputMode === "strict_json"
-        ? { response_format: qwen38ResponseFormat(input, this.coordinateMode, presentation.latestImageSpace?.presented) }
+        ? { response_format: qwen38ResponseFormat(input) }
         : {
             tools: qwen38FunctionTools(input, this.coordinateMode, presentation.latestImageSpace?.presented),
             tool_choice: "auto",
@@ -168,7 +180,7 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
       }
       const contentParts: unknown[] = [];
       const historicalCalls: unknown[] = [];
-      const strictHistoricalCalls: string[] = [];
+      const flatHistoricalCalls: JsonValue[] = [];
       let reasoningContent: string | undefined;
       for (const block of message.content) {
         if (block.type === "text") {
@@ -189,21 +201,22 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
           const historical = formatQwen38HistoricalCall(block, this.coordinateMode, latestImageSpace, tool?.coordinate?.fields);
           historicalCalls.push(historical);
           if (this.outputMode === "strict_json") {
-            strictHistoricalCalls.push(JSON.stringify({
-              kind: "tool_call",
+            const historyCall = {
               id: block.call.id,
               name: block.call.name,
               arguments: isRecord(historical) && isRecord(historical.function) && typeof historical.function.arguments === "string"
                 ? JSON.parse(historical.function.arguments) as JsonValue
                 : block.call.arguments,
-            }));
+            };
+            flatHistoricalCalls.push(historyCall);
           }
         }
       }
+      const strictHistoryText = flatHistoricalCalls.length > 0 ? JSON.stringify({ calls: flatHistoricalCalls }) : "";
       const presented: Record<string, unknown> = {
         role: message.role,
-        content: this.outputMode === "strict_json" && strictHistoricalCalls.length > 0
-          ? [...contentParts.filter((part): part is { type: "text"; text: string } => isRecord(part) && part.type === "text" && typeof part.text === "string").map((part) => part.text), ...strictHistoricalCalls].join("\n")
+        content: this.outputMode === "strict_json" && flatHistoricalCalls.length > 0
+          ? [...contentParts.filter((part): part is { type: "text"; text: string } => isRecord(part) && part.type === "text" && typeof part.text === "string").map((part) => part.text), strictHistoryText].join("\n")
           : message.role === "assistant"
           ? contentParts.filter((part): part is { type: "text"; text: string } => isRecord(part) && part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n")
           : contentParts,
@@ -278,33 +291,31 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
     } catch (error) {
       throw new QwenProviderError(`Qwen strict JSON content is not JSON: ${error instanceof Error ? error.message : String(error)}`, "QWEN_INVALID_RESPONSE");
     }
-    if (!isRecord(envelope) || typeof envelope.kind !== "string") {
-      throw new QwenProviderError("Qwen strict JSON response must contain a string kind", "QWEN_INVALID_RESPONSE");
+    if (!isRecord(envelope) || !Array.isArray(envelope.calls) || envelope.calls.length === 0) {
+      throw new QwenProviderError("Qwen strict JSON response requires a non-empty calls array", "QWEN_INVALID_RESPONSE");
     }
-    const usage = response.usage;
-    const envelopeArguments = isRecord(envelope.arguments) ? envelope.arguments : undefined;
-    if (typeof envelope.id !== "string" || envelope.id.trim().length === 0 || typeof envelope.name !== "string" || envelopeArguments === undefined) {
-      throw new QwenProviderError("Qwen strict JSON envelope requires id, name, and object arguments", "QWEN_INVALID_RESPONSE");
-    }
-    if (envelope.kind !== "tool_call") {
-      throw new QwenProviderError(`Qwen strict JSON returned unsupported kind: ${envelope.kind}; expected tool_call`, "QWEN_INVALID_RESPONSE");
-    }
-    const call = mapQwen38ToolCall(
-      { id: envelope.id as ToolCallId, name: envelope.name, arguments: envelopeArguments as Record<string, JsonValue> },
-      input,
-      imageSpace,
-      this.coordinateMode,
-    );
-    if (call.type === "finish") {
-      return { ...call, ...(usage === undefined ? {} : { usage }) };
-    }
-    if (call.type === "user_input_required") {
-      return { ...call, ...(usage === undefined ? {} : { usage }) };
+    const rawIds = new Set<string>();
+    const mapped = envelope.calls.map((item) => {
+      const raw = readStrictEnvelopeCall(item);
+      if (rawIds.has(raw.id)) throw new QwenProviderError(`Qwen strict JSON returned duplicate ToolCall id: ${raw.id}`, "QWEN_DUPLICATE_TOOL_CALL");
+      rawIds.add(raw.id);
+      return mapQwen38ToolCall(raw, input, imageSpace, this.coordinateMode);
+    });
+    const controls = mapped.filter((item) => item.type !== "call");
+    if (controls.length > 0) {
+      if (mapped.length !== 1) throw new QwenProviderError("Qwen strict JSON control calls cannot be mixed with other calls", "QWEN_INVALID_RESPONSE");
+      const only = controls[0]!;
+      return only.type === "finish"
+        ? { ...only, ...(response.usage === undefined ? {} : { usage: response.usage }) }
+        : { type: "user_input_required", question: only.question, ...(response.usage === undefined ? {} : { usage: response.usage }) };
     }
     return {
       type: "tool_calls",
-      calls: [call.call],
-      ...(usage === undefined ? {} : { usage }),
+      calls: mapped.map((item) => item.type === "call" ? item.call : (() => { throw new QwenProviderError("Qwen strict JSON control calls cannot be mixed with other calls", "QWEN_INVALID_RESPONSE"); })()),
+      ...(response.reasoningContent === undefined ? {} : {
+        continuation: { providerId: this.id, kind: "reasoning_content" as const, content: response.reasoningContent },
+      }),
+      ...(response.usage === undefined ? {} : { usage: response.usage }),
     };
   }
 }
@@ -485,20 +496,39 @@ function qwen38FunctionTools(input: ModelInput, coordinateMode: QwenCoordinateMo
   return tools;
 }
 
-function qwen38ResponseFormat(input: ModelInput, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): Record<string, unknown> {
-  const variants = input.tools.map((tool): JsonValue => ({
-    type: "object",
-    properties: {
-      // All wire-level calls share one envelope. Control semantics are resolved
-      // from the canonical ToolRegistry metadata after name/arguments parsing.
-      kind: { type: "string", enum: ["tool_call"] },
-      id: { type: "string", minLength: 1 },
-      name: { type: "string", enum: [tool.name] },
-      arguments: qwen38ToolParameters(tool, coordinateMode, viewport),
-    },
-    required: ["kind", "id", "name", "arguments"],
-    additionalProperties: false,
-  }));
+function qwenToolCatalog(tools: readonly ModelToolSpec[], coordinateMode: QwenCoordinateMode): string {
+  const lines = ["Available tools (semantic guidance; Runtime validates exact arguments):"];
+  for (const tool of tools) {
+    const argumentsText = compactToolArguments(tool, coordinateMode);
+    const description = tool.description.replace(/\s+/gu, " ").trim().slice(0, 180);
+    lines.push(`- ${tool.name}(${argumentsText}): ${description}`);
+  }
+  return lines.join("\n");
+}
+
+function compactToolArguments(tool: ModelToolSpec, coordinateMode: QwenCoordinateMode): string {
+  const schema = tool.inputSchema;
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return "";
+  const record = schema as Record<string, JsonValue>;
+  const properties = record.properties;
+  if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return "";
+  const required = new Set(Array.isArray(record.required) ? record.required.filter((item): item is string => typeof item === "string") : []);
+  const fields: string[] = [];
+  for (const [name, raw] of Object.entries(properties as Record<string, JsonValue>)) {
+    const property = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw as Record<string, JsonValue> : {};
+    const optional = required.has(name) ? "" : "?";
+    const type = typeof property.type === "string" ? property.type : "value";
+    const enumValues = Array.isArray(property.enum) ? property.enum.filter((item): item is string => typeof item === "string") : [];
+    const enumText = enumValues.length > 0 ? `=${enumValues.join("|")}` : "";
+    const coordinate = tool.coordinate?.fields.some((field) => field === name)
+      ? coordinateMode === "normalized_1000" ? "[0,1000]" : "[pixel]"
+      : "";
+    fields.push(`${name}${optional}:${type}${enumText}${coordinate}`);
+  }
+  return fields.join(", ");
+}
+
+function qwen38ResponseFormat(input: ModelInput): Record<string, unknown> {
   return {
     type: "json_schema",
     json_schema: {
@@ -506,10 +536,37 @@ function qwen38ResponseFormat(input: ModelInput, coordinateMode: QwenCoordinateM
       strict: true,
       schema: {
         type: "object",
-        anyOf: variants,
+        properties: {
+          calls: {
+            type: "array",
+            minItems: 1,
+            // Accommodates the Runtime's largest current composite turn:
+            // two state writes followed by a three-primitive GUI batch.
+            maxItems: 5,
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", minLength: 1 },
+                name: { type: "string", enum: input.tools.map((tool) => tool.name) },
+                arguments: { type: "object", additionalProperties: true },
+              },
+              required: ["id", "name", "arguments"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["calls"],
+        additionalProperties: false,
       },
     },
   };
+}
+
+function readStrictEnvelopeCall(value: unknown): { id: ToolCallId; name: string; arguments: JsonValue } {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id.trim().length === 0 || typeof value.name !== "string" || value.name.trim().length === 0 || !isRecord(value.arguments)) {
+    throw new QwenProviderError("Qwen strict JSON call requires id, name, and object arguments", "QWEN_INVALID_RESPONSE");
+  }
+  return { id: value.id as ToolCallId, name: value.name, arguments: value.arguments as JsonValue };
 }
 
 function qwen38ToolParameters(tool: ModelToolSpec, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): JsonValue {

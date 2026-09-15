@@ -14,6 +14,7 @@
     "@computer-harness/computer-cua": "workspace:*",
     "@computer-harness/computer-osworld": "workspace:*",
     "@computer-harness/context": "workspace:*",
+    "@computer-harness/memory": "workspace:*",
     "@computer-harness/planning": "workspace:*",
     "@computer-harness/protocol": "workspace:*",
     "@computer-harness/provider-glm": "workspace:*",
