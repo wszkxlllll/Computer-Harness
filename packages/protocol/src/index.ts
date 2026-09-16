@@ -150,10 +150,29 @@ export interface ObservationCapture {
   };
 }
 
+export type DeclaredActionEffect =
+  | "observe"
+  | "navigate"
+  | "local_edit"
+  | "destructive"
+  | "financial"
+  | "external_commitment"
+  | "sensitive_disclosure"
+  | "security_change"
+  | "unknown";
+
+export interface ActionEffectDeclaration {
+  effects: DeclaredActionEffect[];
+  target: string;
+  summary: string;
+}
+
 export interface ToolCall {
   id: ToolCallId;
   name: string;
   arguments: JsonValue;
+  /** Model-declared immediate effect. It is advisory metadata, never an execution argument. */
+  declaredEffect?: ActionEffectDeclaration;
 }
 
 export type JsonValue =
@@ -240,6 +259,11 @@ export type ActionIntent =
   | (GuiActionBase & { kind: "drag"; from: Point; to: Point })
   | { actionId: ActionId; kind: "wait"; durationMs: number };
 
+/** Redacted action shape persisted by the Guard; typed text remains only in the ToolCall/action execution path. */
+export type ActionGuardActionSummary =
+  | Exclude<ActionIntent, GuiActionBase & { kind: "type" }>
+  | (GuiActionBase & { kind: "type"; textLength: number });
+
 export interface ActionReceipt {
   actionId: ActionId;
   status: "completed" | "refused" | "failed" | "cancelled";
@@ -279,6 +303,16 @@ export type RunOutcome =
   | "budget_exhausted"
   | "outcome_unknown";
 
+export type RiskCategory =
+  | "destructive"
+  | "financial"
+  | "external_commitment"
+  | "privacy_account"
+  | "intent_violation";
+
+export type ActionGuardDecision = "allow" | "require_approval" | "deny";
+export type ActionGuardPath = "local" | "model" | "fallback";
+
 export interface RuntimeEventBase {
   eventId: EventId;
   runId: RunId;
@@ -309,6 +343,23 @@ export type RuntimeEventData =
       result: Extract<ToolResult, { status: "failed" }>;
     }
   | { type: "action.proposed"; callId: ToolCallId; action: ActionIntent; executionObservationId?: ObservationId }
+  | {
+      type: "action.guard.evaluated";
+      callIds: ToolCallId[];
+      actions: ActionGuardActionSummary[];
+      decision: ActionGuardDecision;
+      categories: RiskCategory[];
+      reasonCode: string;
+      reason: string;
+      path: ActionGuardPath;
+      policyVersion: string;
+      assessorId?: string;
+      semanticEffects?: DeclaredActionEffect[];
+      alignment?: "aligned" | "conflicts" | "unclear";
+      modelRequestCount: number;
+      latencyMs?: number;
+      usage?: ModelUsage;
+    }
   | { type: "action.execution.started"; action: ActionIntent; executionObservationId?: ObservationId }
   | { type: "action.execution.completed"; receipt: ActionReceipt }
   | { type: "action.execution.failed"; receipt: ActionReceipt }
@@ -350,6 +401,7 @@ export const runtimeEventTypes = [
   "tool.call.completed",
   "tool.call.failed",
   "action.proposed",
+  "action.guard.evaluated",
   "action.execution.started",
   "action.execution.completed",
   "action.execution.failed",

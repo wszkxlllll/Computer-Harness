@@ -628,6 +628,18 @@ describe("readRuntimeEvents", () => {
         callId,
         action: { actionId, kind: "wait", durationMs: 1 },
       }),
+      event(0, {
+        type: "action.guard.evaluated",
+        callIds: [callId],
+        actions: [{ actionId, kind: "wait", durationMs: 1 }],
+        decision: "allow",
+        categories: [],
+        reasonCode: "fixture_allow",
+        reason: "fixture",
+        path: "local",
+        policyVersion: "test-v1",
+        modelRequestCount: 0,
+      }),
       event(0, { type: "action.execution.started", action: { actionId, kind: "wait", durationMs: 1 } }),
       event(0, {
         type: "action.execution.completed",

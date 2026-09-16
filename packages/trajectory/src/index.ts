@@ -24,10 +24,13 @@ import type {
 
 export interface RunSnapshot {
   runId: RunId;
+  goal?: string;
   status: RunStatus;
   outcome?: RunOutcome;
   stepCount: number;
   modelRequestCount: number;
+  guardEvaluationCount: number;
+  riskModelRequestCount: number;
   latestObservationId?: ObservationId;
   pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
@@ -45,7 +48,7 @@ export interface RunSnapshot {
 }
 
 export function initialRunSnapshot(runId: RunId): RunSnapshot {
-  return { runId, status: "created", stepCount: 0, modelRequestCount: 0, plan: { runId, tasks: [] }, memory: { runId, facts: [], entities: [] } };
+  return { runId, status: "created", stepCount: 0, modelRequestCount: 0, guardEvaluationCount: 0, riskModelRequestCount: 0, plan: { runId, tasks: [] }, memory: { runId, facts: [], entities: [] } };
 }
 
 export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunSnapshot {
@@ -66,7 +69,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       if (snapshot.createdAt !== undefined || snapshot.status !== "created") {
         throw new Error(`run ${snapshot.runId} was already created`);
       }
-      return { ...snapshot, status: "created", createdAt: event.occurredAt };
+      return { ...snapshot, status: "created", goal: event.goal, createdAt: event.occurredAt };
     case "run.started":
       if (snapshot.status !== "created") {
         throw new Error(`run.started requires created status, got ${snapshot.status}`);
@@ -137,6 +140,21 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       }
     case "runtime.error":
       return snapshot;
+    case "action.guard.evaluated":
+      if (snapshot.status !== "running") {
+        throw new Error(`action.guard.evaluated requires running status, got ${snapshot.status}`);
+      }
+      if (snapshot.unresolvedActionId !== undefined || snapshot.pendingApproval !== undefined || snapshot.pendingUserQuestion !== undefined) {
+        throw new Error("action.guard.evaluated is not allowed while another action or interaction is pending");
+      }
+      if (event.callIds.length === 0 || event.actions.length === 0) {
+        throw new Error("action.guard.evaluated requires calls and actions");
+      }
+      return {
+        ...snapshot,
+        guardEvaluationCount: snapshot.guardEvaluationCount + 1,
+        riskModelRequestCount: snapshot.riskModelRequestCount + event.modelRequestCount,
+      };
     case "action.execution.started":
       if (snapshot.status !== "running") {
         throw new Error(`action.execution.started requires running status, got ${snapshot.status}`);
@@ -625,6 +643,11 @@ const toolCallSchema = z.object({
   id: nonEmptyString,
   name: nonEmptyString,
   arguments: jsonValueSchema,
+  declaredEffect: z.object({
+    effects: z.array(z.enum(["observe", "navigate", "local_edit", "destructive", "financial", "external_commitment", "sensitive_disclosure", "security_change", "unknown"])).min(1),
+    target: nonEmptyString.max(120),
+    summary: nonEmptyString.max(240),
+  }).optional(),
 });
 const modelTurnSchema = z.union([
   z.object({
@@ -712,6 +735,16 @@ const memoryMutationSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("upsert_entity"), entity: memoryEntitySchema }),
   z.object({ operation: z.literal("invalidate_entity"), entityId: nonEmptyString }),
 ]);
+const actionGuardSummarySchema = z.discriminatedUnion("kind", [
+  z.object({ ...actionBaseSchema, kind: z.literal("click"), point: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("double_click"), point: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("right_click"), point: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("type"), textLength: z.number().int().nonnegative() }),
+  z.object({ ...actionBaseSchema, kind: z.literal("keypress"), keys: z.array(nonEmptyString).min(1) }),
+  z.object({ ...actionBaseSchema, kind: z.literal("scroll"), point: pointSchema, direction: z.enum(["up", "down", "left", "right"]), ticks: z.number().int().positive() }),
+  z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
+  z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
+]);
 const eventBaseSchema = {
   eventId: nonEmptyString,
   runId: nonEmptyString,
@@ -786,6 +819,24 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     callId: nonEmptyString,
     action: actionIntentSchema,
     executionObservationId: nonEmptyString.optional(),
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("action.guard.evaluated"),
+    callIds: z.array(nonEmptyString).min(1),
+    actions: z.array(actionGuardSummarySchema).min(1),
+    decision: z.enum(["allow", "require_approval", "deny"]),
+    categories: z.array(z.enum(["destructive", "financial", "external_commitment", "privacy_account", "intent_violation"])),
+    reasonCode: nonEmptyString,
+    reason: z.string(),
+    path: z.enum(["local", "model", "fallback"]),
+    policyVersion: nonEmptyString,
+    assessorId: nonEmptyString.optional(),
+    semanticEffects: z.array(z.enum(["observe", "navigate", "local_edit", "destructive", "financial", "external_commitment", "sensitive_disclosure", "security_change", "unknown"])).optional(),
+    alignment: z.enum(["aligned", "conflicts", "unclear"]).optional(),
+    modelRequestCount: z.number().int().nonnegative(),
+    latencyMs: z.number().finite().nonnegative().optional(),
+    usage: modelUsageSchema.optional(),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("action.execution.started"), action: actionIntentSchema, executionObservationId: nonEmptyString.optional() }),
   z.object({

@@ -15,6 +15,7 @@ import type {
   ModelToolSpec,
   ProviderAdapter,
 } from "@computer-harness/runtime";
+import { HARNESS_EFFECT_KEY, declaredActionEffects, encodeToolCallArguments, splitActionEffectArguments } from "@computer-harness/runtime";
 
 export interface QwenImagePreprocessorInput {
   bytes: Uint8Array;
@@ -198,7 +199,7 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
           reasoningContent = block.continuation.content;
         } else if (block.type === "tool_call") {
           const tool = tools.find((item) => item.name === block.call.name);
-          const historical = formatQwen38HistoricalCall(block, this.coordinateMode, latestImageSpace, tool?.coordinate?.fields);
+          const historical = formatQwen38HistoricalCall(block, this.coordinateMode, latestImageSpace, tool);
           historicalCalls.push(historical);
           if (this.outputMode === "strict_json") {
             const historyCall = {
@@ -523,7 +524,11 @@ function compactToolArguments(tool: ModelToolSpec, coordinateMode: QwenCoordinat
     const coordinate = tool.coordinate?.fields.some((field) => field === name)
       ? coordinateMode === "normalized_1000" ? "[0,1000]" : "[pixel]"
       : "";
-    fields.push(`${name}${optional}:${type}${enumText}${coordinate}`);
+    if (name === HARNESS_EFFECT_KEY) {
+      fields.push(`${name}${optional}:object{effects:array<${declaredActionEffects.join("|")}>,target:string,summary:string}`);
+    } else {
+      fields.push(`${name}${optional}:${type}${enumText}${coordinate}`);
+    }
   }
   return fields.join(", ");
 }
@@ -628,11 +633,11 @@ function formatQwen38HistoricalCall(
   block: Extract<ModelContentBlock, { type: "tool_call" }>,
   coordinateMode: QwenCoordinateMode,
   imageSpace: QwenImageSpace | undefined,
-  fields: readonly CoordinateField[] | undefined,
+  tool: ModelToolSpec | undefined,
 ): unknown {
-  const args = jsonRecord(block.call.arguments);
+  const args = jsonRecord(encodeToolCallArguments(tool, block.call));
   if (args === undefined) throw new QwenProviderError("Qwen history tool arguments must be an object", "QWEN_INVALID_HISTORY");
-  const wire = encodeQwen38Arguments(args, fields, block.viewport, presentedViewportForSource(block.viewport, imageSpace), coordinateMode);
+  const wire = encodeQwen38Arguments(args, tool?.coordinate?.fields, block.viewport, presentedViewportForSource(block.viewport, imageSpace), coordinateMode);
   return { id: block.call.id, type: "function", function: { name: block.call.name, arguments: JSON.stringify(wire) } };
 }
 
@@ -718,7 +723,23 @@ function mapQwen38ToolCall(
     if (typeof args.text !== "string" || args.text.trim().length === 0) throw new QwenProviderError(`${value.name} requires text`, "QWEN_INVALID_TOOL_CALL");
     return { type: "user_input_required", question: args.text };
   }
-  return { type: "call", call: { id: value.id, name: value.name, arguments: mapQwen38Arguments(args, tool.coordinate?.fields, value.name, imageSpace, coordinateMode) } };
+  let separated: ReturnType<typeof splitActionEffectArguments>;
+  try {
+    separated = splitActionEffectArguments(tool, args);
+  } catch (error) {
+    throw new QwenProviderError(`Qwen action effect is invalid: ${error instanceof Error ? error.message : String(error)}`, "QWEN_INVALID_TOOL_CALL");
+  }
+  const cleanArgs = jsonRecord(separated.arguments);
+  if (cleanArgs === undefined) throw new QwenProviderError("Qwen action arguments must be an object", "QWEN_INVALID_TOOL_CALL");
+  return {
+    type: "call",
+    call: {
+      id: value.id,
+      name: value.name,
+      arguments: mapQwen38Arguments(cleanArgs, tool.coordinate?.fields, value.name, imageSpace, coordinateMode),
+      ...(separated.declaredEffect === undefined ? {} : { declaredEffect: separated.declaredEffect }),
+    },
+  };
 }
 
 function mapQwen38Arguments(args: Record<string, JsonValue>, fields: readonly CoordinateField[] | undefined, toolName: string, imageSpace: QwenImageSpace | undefined, coordinateMode: QwenCoordinateMode): Record<string, JsonValue> {

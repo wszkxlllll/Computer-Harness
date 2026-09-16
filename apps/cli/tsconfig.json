@@ -12,6 +12,7 @@
     { "path": "../../packages/protocol" },
     { "path": "../../packages/trajectory" },
     { "path": "../../packages/runtime" },
+    { "path": "../../packages/risk-guard" },
     { "path": "../../packages/context" },
     { "path": "../../packages/computer-cua" },
     { "path": "../../packages/computer-osworld" },

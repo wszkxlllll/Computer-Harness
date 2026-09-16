@@ -1,5 +1,7 @@
 import type {
   ActionId,
+  ActionGuardDecision,
+  ActionGuardPath,
   ActionIntent,
   AssetId,
   AssetRef,
@@ -17,6 +19,7 @@ import type {
   PlanningTaskMutation,
   Point,
   RunId,
+  RiskCategory,
   RuntimeEvent,
   ToolCall,
   ToolCallId,
@@ -104,6 +107,7 @@ export interface RunFeatureConfig {
   planning: "off" | "tasks-v1";
   memory: "off" | "facts-v1" | "entities-v1";
   batching: "off" | "same-control-input-v1";
+  riskGuard?: "off" | "layered";
 }
 
 export interface ProviderAdapter {
@@ -233,6 +237,40 @@ export interface RuntimePolicy {
   checkBudget(snapshot: RunSnapshot): BudgetDecision;
   checkActionBudget(snapshot: RunSnapshot): BudgetDecision;
   canFinish(snapshot: RunSnapshot): FinishDecision;
+}
+
+export interface ActionCandidateGroup {
+  calls: readonly ToolCall[];
+  actions: readonly ActionIntent[];
+  decisionObservation: ObservationFrame;
+  session: ComputerSessionDescriptor;
+}
+
+export interface ActionPolicyContext {
+  runId: RunId;
+  goal: string;
+  recentUserInputs: readonly string[];
+  candidate: ActionCandidateGroup;
+  snapshot: RunSnapshot;
+}
+
+export interface ActionPolicyDecision {
+  decision: ActionGuardDecision;
+  categories: readonly RiskCategory[];
+  reasonCode: string;
+  reason: string;
+  path: ActionGuardPath;
+  policyVersion: string;
+  assessorId?: string;
+  semanticEffects?: readonly import("@computer-harness/protocol").DeclaredActionEffect[];
+  alignment?: "aligned" | "conflicts" | "unclear";
+  modelRequestCount: number;
+  latencyMs?: number;
+  usage?: import("@computer-harness/protocol").ModelUsage;
+}
+
+export interface ActionPolicy {
+  evaluate(context: ActionPolicyContext, signal: AbortSignal): Promise<ActionPolicyDecision>;
 }
 
 export interface Clock {

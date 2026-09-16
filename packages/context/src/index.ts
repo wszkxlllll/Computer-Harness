@@ -7,6 +7,7 @@ import type {
   ContextBudgetReport,
   RunFeatureConfig,
 } from "@computer-harness/runtime";
+import { decorateToolsWithActionEffects } from "@computer-harness/runtime";
 import type { PlanState, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
 import type { MemoryEntity, MemoryFact, MemoryState } from "@computer-harness/protocol";
 import { ToolRegistry } from "@computer-harness/runtime";
@@ -67,10 +68,11 @@ export class DefaultContextCompiler implements ContextCompiler {
     signal.throwIfAborted();
     const orderedEvents = [...input.recentEvents].sort((left, right) => left.sequence - right.sequence);
     const features = input.features ?? this.features;
-    const tools = this.tools.modelTools("main", {
+    const baseTools = this.tools.modelTools("main", {
       ...(input.enabledCategories === undefined ? {} : { enabledCategories: input.enabledCategories }),
       ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
     });
+    const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(baseTools) : baseTools;
     const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
     const fixedText = [
       systemPrompt,
@@ -282,6 +284,7 @@ function composeSystemPrompt(base: string, features: RunFeatureConfig): string {
   const sections = [base];
   if (features.planning !== "off") sections.push("Planning tools are optional: use them for handoff-sized phases, real blockers, or goal changes, not for every click. A planning task describes a phase goal and necessary unfinished work; completed is a declared plan state, not official task verification.");
   if (features.memory !== "off") sections.push(`Run Memory is enabled (${features.memory}). Write only durable facts or objects needed later in this Run; do not record every click or duplicate plan progress. Read details by id when the compact index is insufficient.`);
+  if (features.riskGuard === "layered") sections.push("For every Computer tool call, include _harnessEffect with non-empty effects, target, and summary. Describe this call's immediate expected effect, not the eventual goal: ordinary browsing/navigation is navigate, ordinary reversible typing is local_edit, and final payment, sending/publishing/submission, irreversible deletion/overwrite, sensitive disclosure, or security changes use their matching effect. Use unknown when uncertain. Never include secrets or private content in target/summary, and never claim that an action is approved or safe.");
   if (features.batching === "off") {
     sections.push("Return at most one Computer tool call per model turn.");
   } else {

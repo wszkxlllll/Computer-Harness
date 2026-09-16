@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AssetId, JsonValue, Viewport } from "@computer-harness/protocol";
-import type { AssetReader, ModelInput } from "@computer-harness/runtime";
+import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { Qwen38FlashAdapter, type QwenHttpClient } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
@@ -61,6 +61,19 @@ function withoutControls(value: ModelInput): ModelInput {
 }
 
 describe("Qwen3.8-Flash provider adapter", () => {
+  it("round-trips strict action effects while preserving the flat calls envelope", async () => {
+    const guarded = { ...input(), tools: decorateToolsWithActionEffects(input().tools) };
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-effect", name: "click", arguments: { x: 400, y: 500, _harnessEffect: { effects: ["navigate"], target: "Details", summary: "Open product details" } } }] }) } }] });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
+    await expect(adapter.generate(guarded, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ arguments: { x: 319.6, y: 299.5 }, declaredEffect: { effects: ["navigate"], target: "Details" } }] });
+    expect(String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content)).toContain("_harnessEffect");
+    expect(String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content)).toContain("financial|external_commitment");
+    const historyClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-finish", name: "terminate", arguments: { status: "success" } }] }) } }] });
+    const historyInput: ModelInput = { ...guarded, messages: [...guarded.messages, { role: "assistant", content: [{ type: "tool_call", call: { id: "q38-effect" as import("@computer-harness/protocol").ToolCallId, name: "click", arguments: { x: 319.6, y: 299.5 }, declaredEffect: { effects: ["navigate"], target: "Details", summary: "Open product details" } }, viewport }] }] };
+    await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: historyClient, thinking: "disabled" }).generate(historyInput, { signal: new AbortController().signal });
+    const assistant = (historyClient.body?.messages as Array<Record<string, unknown>>).find((message) => message.role === "assistant");
+    expect(String(assistant?.content)).toContain('"_harnessEffect"');
+  });
   it("adds the terminate control boundary when terminate is available", async () => {
     const client = new Client(response("terminate", { status: "success", text: "done" }));
     const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });

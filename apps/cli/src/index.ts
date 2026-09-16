@@ -10,6 +10,8 @@ import { FetchQwenHttpClient, Qwen38FlashAdapter, type Qwen38OutputMode, type Qw
 import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
 import { createMemoryTools, FileMemoryStore, type MemoryToolMode } from "@computer-harness/memory";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type CleanupDiagnostic } from "@computer-harness/runtime";
+import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
+import { runWithTuiControls } from "./tui.js";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
@@ -38,6 +40,11 @@ interface CliOptions {
   contextMaxHistoryEvents: number;
   contextMaxInputTokens?: number;
   interactive: boolean;
+  tui: boolean;
+  riskGuard: "off" | "layered";
+  riskModel: "off" | "same" | ModelName;
+  riskMaxModelRequests: number;
+  riskTimeoutMs: number;
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
@@ -87,7 +94,15 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (qwenOutputModeValue !== undefined && model !== "qwen3.8-flash") {
     throw new Error("--qwen-output-mode is only valid with qwen3.8-flash");
   }
-  const interactive = argv.includes("--interactive");
+  const tui = argv.includes("--tui");
+  const interactive = argv.includes("--interactive") || tui;
+  const riskGuardValue = value("--risk-guard") ?? "off";
+  if (riskGuardValue !== "off" && riskGuardValue !== "layered") throw new Error("--risk-guard must be off or layered");
+  const riskModelValue = value("--risk-model") ?? "off";
+  if (riskModelValue !== "off" && riskModelValue !== "same" && riskModelValue !== "glm-5.3-flash" && riskModelValue !== "qwen3.8-flash") throw new Error("--risk-model must be off, same, glm-5.3-flash, or qwen3.8-flash");
+  if (riskGuardValue === "off" && riskModelValue !== "off") throw new Error("--risk-model requires --risk-guard layered");
+  const riskMaxModelRequests = positiveInteger(value("--risk-max-model-requests"), 20, "--risk-max-model-requests");
+  const riskTimeoutMs = positiveInteger(value("--risk-timeout-ms"), 30_000, "--risk-timeout-ms");
   const planning = argv.includes("--planning");
   const memoryValue = value("--memory") ?? "off";
   if (memoryValue !== "off" && memoryValue !== "facts" && memoryValue !== "entities") throw new Error("--memory must be off, facts, or entities");
@@ -120,6 +135,11 @@ function parseArgs(argv: readonly string[]): CliOptions {
     contextMaxHistoryEvents,
     ...(contextMaxInputTokens === undefined ? {} : { contextMaxInputTokens }),
     interactive,
+    tui,
+    riskGuard: riskGuardValue,
+    riskModel: riskModelValue as "off" | "same" | ModelName,
+    riskMaxModelRequests,
+    riskTimeoutMs,
   };
 }
 
@@ -131,7 +151,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--risk-guard <off|layered>] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -151,9 +171,23 @@ async function main(): Promise<void> {
     planning: options.planning ? "tasks-v1" as const : "off" as const,
     memory: options.memory === "off" ? "off" as const : options.memory === "facts" ? "facts-v1" as const : "entities-v1" as const,
     batching: options.batching,
+    riskGuard: options.riskGuard,
   };
   const assetReader = assetStore;
   const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking, options.qwenOutputMode);
+  if (options.riskModel !== "off" && options.riskModel !== "same") await mkdir(resolve(options.output, "risk-review"), { recursive: true });
+  const riskProvider = options.riskModel === "off"
+    ? undefined
+    : options.riskModel === "same"
+      ? provider
+      : makeProvider(options.riskModel, assetReader, resolve(options.output, "risk-review"), options.riskModel === "qwen3.8-flash" ? options.qwenCoordinateMode ?? "normalized_1000" : undefined, options.riskModel === "qwen3.8-flash" ? options.qwenThinking : undefined, options.riskModel === "qwen3.8-flash" ? options.qwenOutputMode : undefined);
+  const actionPolicy = options.riskGuard === "layered"
+    ? new LayeredRiskGuard({
+        ...(riskProvider === undefined ? {} : { assessor: new ProviderRiskAssessor(riskProvider) }),
+        maxModelRequests: options.riskMaxModelRequests,
+        timeoutMs: options.riskTimeoutMs,
+      })
+    : undefined;
   const computer = options.computer === "cua"
     ? new CuaDriverComputer({
         socketPath: options.cuaSocket!,
@@ -173,13 +207,16 @@ async function main(): Promise<void> {
     contextCompiler: new DefaultContextCompiler(tools, { mode: options.contextMode, maxHistoryEvents: options.contextMaxHistoryEvents, features, ...(options.contextMaxInputTokens === undefined ? {} : { maxInputTokens: options.contextMaxInputTokens }) }),
     toolRegistry: tools,
     policy: new DefaultRuntimePolicy(options.maxSteps, options.maxModelRequests),
+    ...(actionPolicy === undefined ? {} : { actionPolicy }),
     eventWriter,
     assetStore,
     onCleanupError: (diagnostic) => cleanupDiagnostics.push(diagnostic),
     batching: options.batching,
     features,
   });
-  const outcome = await runWithCliControls(controller, options.goal, options.interactive);
+  const outcome = options.tui
+    ? await runWithTuiControls(controller, options.goal, { provider: options.model, computer: options.computer, output: options.output })
+    : await runWithCliControls(controller, options.goal, options.interactive);
   const events = await readRuntimeEvents(resolve(options.output, "trajectory.jsonl"));
   const snapshot = reduceRuntimeEvents(events, runId);
   const fixture = await readFixtureResult(options.fixtureResult);
@@ -194,6 +231,8 @@ async function main(): Promise<void> {
     planning: options.planning,
     memory: options.memory,
     batching: options.batching,
+    riskGuard: options.riskGuard,
+    riskModel: options.riskModel,
     contextMode: options.contextMode,
     contextMaxHistoryEvents: options.contextMaxHistoryEvents,
     contextMaxInputTokens: options.contextMaxInputTokens ?? null,
@@ -211,6 +250,10 @@ async function main(): Promise<void> {
     metrics: {
       steps: snapshot.stepCount,
       modelRequests: snapshot.modelRequestCount,
+      guardEvaluations: snapshot.guardEvaluationCount,
+      riskModelRequests: snapshot.riskModelRequestCount,
+      approvalsRequested: events.filter((event) => event.type === "approval.requested").length,
+      guardDecisions: events.filter((event) => event.type === "action.guard.evaluated").reduce((counts, event) => ({ ...counts, [event.decision]: (counts[event.decision] ?? 0) + 1 }), {} as Record<string, number>),
       eventCount: events.length,
       invalidToolCalls: events.filter((event) => event.type === "tool.call.rejected").length,
       rejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected").length,
@@ -401,24 +444,35 @@ async function loadEnvFile(path: string): Promise<void> {
 
 async function runWithCliControls(controller: RunController, goal: string, interactive: boolean): Promise<RunOutcome> {
   let lastQuestion: string | undefined;
+  let lastApprovalId: string | undefined;
   const monitor = setInterval(() => {
     const snapshot = controller.getSnapshot();
-    if (snapshot.status !== "waiting_user" || snapshot.pendingUserQuestion === lastQuestion) return;
-    lastQuestion = snapshot.pendingUserQuestion;
-    process.stdout.write(`User input required: ${snapshot.pendingUserQuestion}\n`);
-    if (!interactive) {
-      try {
-        controller.cancel("non-interactive CLI cannot answer user input");
-      } catch {
-        // The run may have finished between the poll and cancellation.
+    if (snapshot.status === "waiting_user" && snapshot.pendingUserQuestion !== lastQuestion) {
+      lastQuestion = snapshot.pendingUserQuestion;
+      process.stdout.write(`User input required: ${snapshot.pendingUserQuestion}\n`);
+      if (!interactive) {
+        try { controller.cancel("non-interactive CLI cannot answer user input"); } catch { /* finished concurrently */ }
       }
+    }
+    if (snapshot.status === "waiting_approval" && snapshot.pendingApproval !== undefined && snapshot.pendingApproval.requestId !== lastApprovalId) {
+      lastApprovalId = snapshot.pendingApproval.requestId;
+      process.stdout.write(`Approval required (${snapshot.pendingApproval.requestId}): ${snapshot.pendingApproval.reason}\nApprove? [y/N]\n`);
+      if (!interactive) void controller.resolveApproval(snapshot.pendingApproval.requestId, false).catch(() => undefined);
     }
   }, 100);
   const readline = interactive
     ? createInterface({ input: process.stdin, output: process.stdout })
     : undefined;
   const onLine = (line: string) => {
-    if (controller.getSnapshot().status !== "waiting_user") {
+    const snapshot = controller.getSnapshot();
+    if (snapshot.status === "waiting_approval" && snapshot.pendingApproval !== undefined) {
+      const approved = /^(?:y|yes)$/iu.test(line.trim());
+      void controller.resolveApproval(snapshot.pendingApproval.requestId, approved).catch((error: unknown) => {
+        process.stderr.write(`Could not resolve approval: ${error instanceof Error ? error.message : String(error)}\n`);
+      });
+      return;
+    }
+    if (snapshot.status !== "waiting_user") {
       process.stdout.write("Input ignored: the run is not waiting for user input.\n");
       return;
     }

@@ -44,6 +44,9 @@ importers:
       '@computer-harness/provider-qwen':
         specifier: workspace:*
         version: link:../../packages/provider-qwen
+      '@computer-harness/risk-guard':
+        specifier: workspace:*
+        version: link:../../packages/risk-guard
       '@computer-harness/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
@@ -125,6 +128,18 @@ importers:
       '@computer-harness/runtime':
         specifier: workspace:*
         version: link:../runtime
+
+  packages/risk-guard:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@computer-harness/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@computer-harness/trajectory':
+        specifier: workspace:*
+        version: link:../trajectory
 
   packages/runtime:
     dependencies:

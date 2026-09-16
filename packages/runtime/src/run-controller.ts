@@ -36,6 +36,8 @@ import type {
   ModelMessage,
   ProviderAdapter,
   RuntimePolicy,
+  ActionPolicy,
+  ActionPolicyDecision,
   ToolDefinition,
   ToolExecutionContext,
   ToolAudience,
@@ -63,6 +65,8 @@ export interface RunControllerDependencies {
   contextCompiler: ContextCompiler;
   toolRegistry: ToolRegistry;
   policy: RuntimePolicy;
+  /** Optional action-level policy. Omitted preserves the pre-Guard baseline. */
+  actionPolicy?: ActionPolicy;
   eventWriter: RunEventWriter;
   assetStore: AssetStore;
   clock?: Clock;
@@ -201,6 +205,12 @@ interface PendingApproval {
   call: ToolCall;
   definition: ToolDefinition;
   session: ComputerSession;
+  preparedAction?: PreparedComputerAction;
+}
+
+interface PreparedComputerAction {
+  action: ActionIntent;
+  decisionObservationId?: ObservationId;
 }
 
 type PreflightEntry = {
@@ -208,6 +218,7 @@ type PreflightEntry = {
   definition?: ToolDefinition;
   decision?: ToolPolicyDecision;
   rejection?: string;
+  preparedAction?: PreparedComputerAction;
 };
 
 interface PendingToolTurn {
@@ -230,6 +241,7 @@ export class RunController {
   private readonly contextCompiler: ContextCompiler;
   private readonly toolRegistry: ToolRegistry;
   private readonly policy: RuntimePolicy;
+  private readonly actionPolicy: ActionPolicy | undefined;
   private readonly eventWriter: RunEventWriter;
   private readonly assetStore: AssetStore;
   private readonly clock: Clock;
@@ -258,6 +270,7 @@ export class RunController {
   private pendingReobserve = false;
   private actionBudgetExhausted = false;
   private actionBudgetCloseTurnsRemaining = MAX_ACTION_BUDGET_CLOSE_TURNS;
+  private goal: string | undefined;
 
   public constructor(dependencies: RunControllerDependencies) {
     this.runId = dependencies.runId;
@@ -266,6 +279,7 @@ export class RunController {
     this.contextCompiler = dependencies.contextCompiler;
     this.toolRegistry = dependencies.toolRegistry;
     this.policy = dependencies.policy;
+    this.actionPolicy = dependencies.actionPolicy;
     this.eventWriter = dependencies.eventWriter;
     this.assetStore = dependencies.assetStore;
     this.clock = dependencies.clock ?? systemClock;
@@ -288,6 +302,8 @@ export class RunController {
       status: "created",
       stepCount: 0,
       modelRequestCount: 0,
+      guardEvaluationCount: 0,
+      riskModelRequestCount: 0,
       plan: { runId: this.runId, tasks: [] },
       memory: { runId: this.runId, facts: [], entities: [] },
     };
@@ -301,6 +317,7 @@ export class RunController {
       return Promise.reject(new Error(`RunController for ${this.runId} can only start once`));
     }
     this.started = true;
+    this.goal = goal;
     return this.run(goal);
   }
 
@@ -776,7 +793,14 @@ export class RunController {
       ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
     };
     if (pending.definition.category === "computer") {
-      await this.executeComputerCall(pending.call, pending.definition, context);
+      if (pending.preparedAction !== undefined) {
+        const originalId = pending.preparedAction.decisionObservationId;
+        if (originalId !== undefined && this.snapshot.latestObservationId !== originalId) {
+          await this.rejectToolCall(pending.call.id, "approval context was superseded inside the Harness; observe the current screen and propose the action again");
+          return;
+        }
+      }
+      await this.executeComputerCall(pending.call, pending.definition, context, undefined, pending.preparedAction);
     } else if (pending.definition.category === "control") {
       await this.rejectToolCall(pending.call.id, "control decisions must be mapped by the Provider, not executed as tools");
     } else {
@@ -846,6 +870,23 @@ export class RunController {
       }
     }
 
+    if (this.actionPolicy !== undefined) {
+      const preparationContext: ToolExecutionContext = {
+        runId: this.runId,
+        session,
+        signal: this.abortController.signal,
+        ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+      };
+      for (const entry of preflight) {
+        if (entry.rejection !== undefined || entry.definition?.category !== "computer") continue;
+        try {
+          entry.preparedAction = this.prepareComputerAction(entry.call, entry.definition, preparationContext, this.snapshot.latestObservationId);
+        } catch (error) {
+          entry.rejection = `invalid GUI action: ${errorMessage(error)}`;
+        }
+      }
+    }
+
     const computerEntries = preflight.filter(
       (entry) => entry.rejection === undefined && entry.definition?.category === "computer",
     ).length;
@@ -874,6 +915,60 @@ export class RunController {
       return { correction: false };
     }
 
+    const computerPreflight = preflight.filter(
+      (entry): entry is PreflightEntry & { definition: ComputerToolDefinition; preparedAction: PreparedComputerAction } =>
+        entry.rejection === undefined && entry.definition?.category === "computer" && entry.preparedAction !== undefined,
+    );
+    if (this.actionPolicy !== undefined && computerPreflight.length > 0) {
+      const decisionObservation = this.latestObservation;
+      const goal = this.goal;
+      if (decisionObservation === undefined || goal === undefined) throw new Error("action policy requires the active goal and observation");
+      const guardDecision = await this.actionPolicy.evaluate({
+        runId: this.runId,
+        goal,
+        recentUserInputs: this.events.filter((event): event is Extract<RuntimeEvent, { type: "user.input.received" }> => event.type === "user.input.received").slice(-4).map((event) => event.text),
+        candidate: {
+          calls: computerPreflight.map((entry) => entry.call),
+          actions: computerPreflight.map((entry) => entry.preparedAction.action),
+          decisionObservation,
+          session,
+        },
+        snapshot: this.getSnapshot(),
+      }, this.abortController.signal);
+      const afterGuard = await this.drainCommands();
+      if (afterGuard.correction || this.snapshot.status === "paused") {
+        if (this.snapshot.status === "paused") {
+          this.pendingToolTurn = {
+            session,
+            entries: preflight,
+            nextIndex: 0,
+            invalidated: true,
+            ...(batchAllowed ? { batch: true, decisionObservationId: this.snapshot.latestObservationId } : {}),
+          };
+        } else {
+          await this.rejectPendingEntries(preflight, 0, "superseded by user correction during risk evaluation");
+        }
+        return afterGuard;
+      }
+      await this.commitGuardDecision(computerPreflight, guardDecision);
+      if (guardDecision.decision === "deny") {
+        for (const call of calls) await this.rejectToolCall(call.id, guardDecision.reason);
+        return { correction: false };
+      }
+      if (guardDecision.decision === "require_approval") {
+        if (calls.length !== 1 || computerPreflight.length !== 1) {
+          const reason = `risk approval boundary: ${guardDecision.reason}; return the protected Computer action as the only call in the next turn`;
+          for (const call of calls) await this.rejectToolCall(call.id, reason);
+          return { correction: false };
+        }
+        const entry = computerPreflight[0]!;
+        const requestId = this.idFactory.eventId();
+        await this.commitEvent({ type: "approval.requested", requestId, callId: entry.call.id, reason: guardDecision.reason });
+        this.pendingApproval = { requestId, call: entry.call, definition: entry.definition, session, preparedAction: entry.preparedAction };
+        return { correction: false };
+      }
+    }
+
     const approvalEntry = preflight.find(
       (entry) => entry.rejection === undefined && entry.decision?.decision === "require_approval",
     );
@@ -890,6 +985,7 @@ export class RunController {
         call: approvalEntry.call,
         definition: approvalEntry.definition,
         session,
+        ...(approvalEntry.preparedAction === undefined ? {} : { preparedAction: approvalEntry.preparedAction }),
       };
       return { correction: false };
     }
@@ -956,7 +1052,7 @@ export class RunController {
             return { correction: false };
           }
         }
-        await this.executeComputerCall(entry.call, entry.definition, context, pendingTurn.decisionObservationId);
+        await this.executeComputerCall(entry.call, entry.definition, context, pendingTurn.decisionObservationId, entry.preparedAction);
       } else if (entry.definition.category === "control") {
         await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
@@ -1081,13 +1177,14 @@ export class RunController {
     definition: ComputerToolDefinition,
     context: ToolExecutionContext,
     decisionObservationId: ObservationId | undefined = this.snapshot.latestObservationId,
+    prepared?: PreparedComputerAction,
   ): Promise<void> {
     this.throwIfAborted();
-    const draft = definition.toAction(call.arguments, context);
-    this.throwIfAborted();
     const executionObservationId = this.snapshot.latestObservationId;
-    const action = makeActionIntent(this.idFactory.actionId(), decisionObservationId, draft);
+    let candidate: PreparedComputerAction;
     try {
+      candidate = prepared ?? this.prepareComputerAction(call, definition, context, decisionObservationId);
+      const action = candidate.action;
       validateActionIntent(action, {
         capabilities: context.session.capabilities,
         ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
@@ -1100,6 +1197,7 @@ export class RunController {
       await this.rejectToolCall(call.id, `invalid GUI action: ${errorMessage(error)}`);
       return;
     }
+    const action = candidate.action;
     if (this.callStates.get(call.id) !== "received") {
       throw new Error(`ToolCall ${call.id} is not available for action proposal`);
     }
@@ -1167,6 +1265,48 @@ export class RunController {
     // observation. If observing the post-action state fails, the Run can be
     // marked failed without leaving a completed action with a dangling call.
     await this.observeAndCommit(context.session);
+  }
+
+  private prepareComputerAction(
+    call: ToolCall,
+    definition: ComputerToolDefinition,
+    context: ToolExecutionContext,
+    decisionObservationId: ObservationId | undefined,
+  ): PreparedComputerAction {
+    this.throwIfAborted();
+    const draft = definition.toAction(call.arguments, context);
+    this.throwIfAborted();
+    const executionObservationId = this.snapshot.latestObservationId;
+    const action = makeActionIntent(this.idFactory.actionId(), decisionObservationId, draft);
+    validateActionIntent(action, {
+      capabilities: context.session.capabilities,
+      ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+      ...(executionObservationId === undefined ? {} : { executionObservationId }),
+    });
+    return { action, ...(decisionObservationId === undefined ? {} : { decisionObservationId }) };
+  }
+
+  private async commitGuardDecision(
+    entries: readonly (PreflightEntry & { definition: ComputerToolDefinition; preparedAction: PreparedComputerAction })[],
+    decision: ActionPolicyDecision,
+  ): Promise<void> {
+    await this.commitEvent({
+      type: "action.guard.evaluated",
+      callIds: entries.map((entry) => entry.call.id),
+      actions: entries.map((entry) => summarizeGuardAction(entry.preparedAction.action)),
+      decision: decision.decision,
+      categories: [...decision.categories],
+      reasonCode: decision.reasonCode,
+      reason: decision.reason,
+      path: decision.path,
+      policyVersion: decision.policyVersion,
+      ...(decision.assessorId === undefined ? {} : { assessorId: decision.assessorId }),
+      ...(decision.semanticEffects === undefined ? {} : { semanticEffects: [...decision.semanticEffects] }),
+      ...(decision.alignment === undefined ? {} : { alignment: decision.alignment }),
+      modelRequestCount: decision.modelRequestCount,
+      ...(decision.latencyMs === undefined ? {} : { latencyMs: decision.latencyMs }),
+      ...(decision.usage === undefined ? {} : { usage: decision.usage }),
+    });
   }
 
   private attachMemoryProvenance(mutation: MemoryMutation, callId: ToolCallId): MemoryMutation {
@@ -1305,6 +1445,12 @@ function providerErrorDetails(error: unknown): { code?: string; retryable?: bool
   };
 }
 
+function summarizeGuardAction(action: ActionIntent): import("@computer-harness/protocol").ActionGuardActionSummary {
+  return action.kind === "type"
+    ? { actionId: action.actionId, basedOn: action.basedOn, kind: "type", textLength: action.text.length }
+    : action;
+}
+
 function isSameControlInputBatch(calls: readonly ToolCall[], entries: readonly PreflightEntry[]): boolean {
   if (entries.length !== calls.length) return false;
   const firstComputer = entries.findIndex((entry) => entry.definition?.category === "computer");
@@ -1370,7 +1516,7 @@ async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number):
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });
-}
+  }
 
 function providerRetryDelayMs(retryCount: number): number {
   return Math.min(

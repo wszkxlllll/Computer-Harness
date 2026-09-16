@@ -37,6 +37,7 @@ import {
   type ModelMessage,
   type ProviderAdapter,
   type RuntimePolicy,
+  type ActionPolicy,
   type ContextCompiler,
   validateActionIntent,
 } from "./index.js";
@@ -76,6 +77,8 @@ class FakeComputer implements Computer {
   };
   private observationCount = 0;
 
+  public constructor(private readonly stableScreenshots = false) {}
+
   public async open(_options: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSession> {
     signal.throwIfAborted();
     this.calls.push("open");
@@ -93,7 +96,7 @@ class FakeComputer implements Computer {
     return {
       capturedAt: `2026-08-28T00:00:0${this.observationCount}.000Z`,
       viewport,
-      screenshot: { mediaType: "image/png" as const, data: new Uint8Array([this.observationCount]) },
+      screenshot: { mediaType: "image/png" as const, data: new Uint8Array([this.stableScreenshots ? 1 : this.observationCount]) },
     };
   }
 
@@ -380,6 +383,7 @@ async function makeController(
     enabledCategories?: readonly import("./contracts.js").ToolCategory[];
     enabledToolNames?: readonly string[];
     onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
+    actionPolicy?: ActionPolicy;
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -398,6 +402,7 @@ async function makeController(
     contextCompiler: overrides.contextCompiler ?? new TestContextCompiler(registry),
     toolRegistry: registry,
     policy,
+    ...(overrides.actionPolicy === undefined ? {} : { actionPolicy: overrides.actionPolicy }),
     eventWriter: writer,
     assetStore: overrides.assetStore ?? new FileAssetStore(join(directory, "assets")),
     idFactory: new TestIds(),
@@ -1591,6 +1596,80 @@ describe("RunController S2-4 failure boundaries", () => {
     expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(2);
     expect(events.at(-2)).toMatchObject({ message: expect.stringContaining("retry limit reached after 1 retries") });
     expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("applies the action-level guard before proposal and executes the exact approved action", async () => {
+    let guardSeenResolve: (() => void) | undefined;
+    const guardSeen = new Promise<void>((resolve) => { guardSeenResolve = resolve; });
+    const actionPolicy: ActionPolicy = {
+      async evaluate(context) {
+        expect(context.candidate.calls[0]?.declaredEffect?.effects).toEqual(["financial"]);
+        guardSeenResolve?.();
+        return { decision: "require_approval", categories: ["financial"], reasonCode: "declared_high_impact", reason: "Payment requires approval.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
+      },
+    };
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ ...clickCall("guard-payment"), declaredEffect: { effects: ["financial"], target: "Confirm payment", summary: "Pay for the order" } }] },
+      { type: "finish", summary: "done" },
+    ]);
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const running = created.controller.start("buy only after confirmation");
+    await guardSeen;
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    const before = created.controller.getEvents();
+    const guard = before.find((event) => event.type === "action.guard.evaluated");
+    expect(guard).toMatchObject({ decision: "require_approval", path: "local", modelRequestCount: 0 });
+    expect(before.some((event) => event.type === "action.proposed")).toBe(false);
+    const approvedActionId = guard?.type === "action.guard.evaluated" ? guard.actions[0]?.actionId : undefined;
+    const requestId = created.controller.getSnapshot().pendingApproval?.requestId;
+    await created.controller.resolveApproval(requestId ?? "", true);
+    await expect(running).resolves.toBe("succeeded");
+    const proposed = created.controller.getEvents().find((event) => event.type === "action.proposed");
+    expect(proposed?.type === "action.proposed" ? proposed.action.actionId : undefined).toBe(approvedActionId);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(1);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("invalidates a candidate when user correction arrives during risk evaluation", async () => {
+    let enteredResolve: (() => void) | undefined;
+    let releaseResolve: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    const actionPolicy: ActionPolicy = { async evaluate() { enteredResolve?.(); await release; return { decision: "allow", categories: [], reasonCode: "low", reason: "low", path: "local", policyVersion: "test-v1", modelRequestCount: 0 }; } };
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ ...clickCall("guard-corrected"), declaredEffect: { effects: ["navigate"], target: "Details", summary: "Open details" } }] },
+      { type: "finish", summary: "corrected" },
+    ]);
+    const created = await makeController(provider, new FakeComputer(), clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const running = created.controller.start("open details");
+    await entered;
+    const correction = created.controller.submitUserInput("Stop clicking and finish");
+    releaseResolve?.();
+    await correction;
+    await expect(running).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+    expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.reason.includes("superseded"))).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("rejects a guarded composite turn before state writes when approval is required", async () => {
+    let sideEffects = 0;
+    const registry = clickRegistry();
+    registry.register({ name: "remember", description: "write state", category: "planning", inputSchema: { type: "object", properties: {}, additionalProperties: false }, validate: () => undefined, execute: async () => { sideEffects += 1; return { ok: true }; }, planMutationFromResult: () => undefined });
+    const actionPolicy: ActionPolicy = { async evaluate() { return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "commitment", reason: "Commitment requires approval.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 }; } };
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [
+        { id: "state-before-risk" as ToolCallId, name: "remember", arguments: {} },
+        { ...clickCall("risky-click"), declaredEffect: { effects: ["external_commitment"], target: "Submit", summary: "Submit form" } },
+      ] },
+      { type: "finish", summary: "done" },
+    ]);
+    const created = await makeController(provider, new FakeComputer(), registry, new DefaultRuntimePolicy(), { actionPolicy });
+    await expect(created.controller.start("prepare and submit")).resolves.toBe("succeeded");
+    expect(sideEffects).toBe(0);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+    expect(created.controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(2);
     await rm(created.directory, { recursive: true, force: true });
   });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
-import type { AssetReader, ModelInput } from "@computer-harness/runtime";
+import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
@@ -55,6 +55,19 @@ function inputWithControls(): ModelInput {
 }
 
 describe("GLM provider adapter", () => {
+  it("round-trips action effects without leaking metadata into canonical arguments", async () => {
+    const guarded = { ...input(), tools: decorateToolsWithActionEffects(input().tools) };
+    const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "glm-effect", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, _harnessEffect: { effects: ["financial"], target: "Confirm payment", summary: "Pay for the order" } }) } }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(guarded, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ arguments: { x: 400, y: 150 }, declaredEffect: { effects: ["financial"], target: "Confirm payment" } }] });
+    expect(client.body?.tools).toMatchObject([{ function: { parameters: { required: expect.arrayContaining(["_harnessEffect"]), properties: { _harnessEffect: { type: "object" } } } } }]);
+    const historyClient = new Client({ choices: [{ message: { content: "done" } }] });
+    const historyInput: ModelInput = { ...guarded, messages: [...guarded.messages, { role: "assistant", content: [{ type: "tool_call", call: { id: "glm-effect" as ToolCallId, name: "click", arguments: { x: 400, y: 150 }, declaredEffect: { effects: ["financial"], target: "Confirm payment", summary: "Pay for the order" } }, viewport }] }] };
+    await new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: historyClient }).generate(historyInput, { signal: new AbortController().signal });
+    const historyMessages = historyClient.body?.messages as Array<Record<string, unknown>>;
+    const historyCall = (historyMessages.find((message) => Array.isArray(message.tool_calls))?.tool_calls as Array<{ function: { arguments: string } }> | undefined)?.[0];
+    expect(JSON.parse(historyCall?.function.arguments ?? "{}")).toMatchObject({ x: 500, y: 250, _harnessEffect: { effects: ["financial"] } });
+  });
   it("reads images, sends canonical tools, and maps normalized coordinates", async () => {
     const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "glm-call", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250 }) } }] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });

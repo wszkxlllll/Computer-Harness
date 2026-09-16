@@ -17,6 +17,7 @@ import type {
   ControlKind,
   CoordinateField,
 } from "@computer-harness/runtime";
+import { encodeToolCallArguments, splitActionEffectArguments } from "@computer-harness/runtime";
 
 export type GlmCoordinateMode = "normalized_1000" | "actual_pixels";
 
@@ -135,12 +136,13 @@ export class GlmAdapter implements ProviderAdapter {
           reasoningContent = block.continuation.content;
         } else if (block.type === "tool_call") {
           const tool = tools.find((item) => item.name === block.call.name);
+          const historyArguments = encodeToolCallArguments(tool, block.call);
           toolCalls.push({
             id: block.call.id,
             type: "function",
             function: {
               name: block.call.name,
-              arguments: JSON.stringify(encodeCoordinates(block.call, block.viewport, this.profile.coordinateMode, tool?.coordinate?.fields)),
+              arguments: JSON.stringify(encodeCoordinates({ ...block.call, arguments: historyArguments }, block.viewport, this.profile.coordinateMode, tool?.coordinate?.fields)),
             },
           });
         }
@@ -188,7 +190,14 @@ export class GlmAdapter implements ProviderAdapter {
             ? { ...control, ...(usage === undefined ? {} : { usage }) }
             : { ...control, ...(usage === undefined ? {} : { usage }) };
         }
-        calls.push(mapCoordinates(parsed, latestViewport(input), this.profile.coordinateMode, tool?.coordinate?.fields));
+        let separated: ReturnType<typeof splitActionEffectArguments>;
+        try {
+          separated = splitActionEffectArguments(tool, parsed.arguments);
+        } catch (error) {
+          throw new GlmProviderError(`GLM action effect is invalid: ${error instanceof Error ? error.message : String(error)}`, "GLM_INVALID_TOOL_CALL");
+        }
+        const mapped = mapCoordinates({ ...parsed, arguments: separated.arguments }, latestViewport(input), this.profile.coordinateMode, tool?.coordinate?.fields);
+        calls.push({ ...mapped, ...(separated.declaredEffect === undefined ? {} : { declaredEffect: separated.declaredEffect }) });
       }
       const assistantText = typeof message.content === "string" && message.content.trim().length > 0
         ? message.content
