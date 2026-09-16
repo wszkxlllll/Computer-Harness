@@ -48,13 +48,14 @@ Context、Planning 和 Run Memory 用于减少意图遗失；Risk Guard 在真�
 - waiting_approval、resolveApproval、Abort、用户纠正；
 - Event-first 副作用、未知结果处理和完整 Trajectory；
 - 可选 Context、Planning、Run Memory 与受限 Batch。
+- 可选逐 Computer 调用效果声明、分层 Risk Guard、Guard Event 和 CLI Approval；工程 mock 回归已通过。
 
 ### 尚未实现
 
-- DefaultRuntimePolicy 当前对 ToolCall 默认全部 allow，没有语义 Risk Guard；
+- DefaultRuntimePolicy 仍保持 ToolCall 级默认 allow；启用 `riskGuard=layered` 时由独立 ActionPolicy 在副作用前执行声明分流与按需语义复核；
 - 通用 click/type 没有自动识别支付、删除、发送等页面语义；
 - 没有在线 Monitor 向 Context 注入重复动作或低画面变化信号；
-- 没有风险标签体系、风险证据对象或 Guard 专用事件；
+- 首轮无桌面真实 Provider 协议探针已通过，但尚未通过真实 CUA 证明风险分流和审批屏幕一致性在真实任务中可靠；
 - 没有证明 Context/Planning/Memory 已降低意图偏移；
 - 没有专用 Risk Model 或 Advisory Subagent。
 
@@ -77,6 +78,12 @@ Run Memory 保存当前 Run 后续仍需要的事实、约束和对象状态。�
 三者首先帮助主 Agent做出更好的决定，不能替代执行前的风险准入。
 
 ## 五、最小 Risk Guard
+
+### 当前修订：本轮动作效果声明
+
+主模型在生成每个 Computer 调用的同一次响应中附带预期效果，经共享 GLM/Qwen 投影解析为 ToolCall.declaredEffect。该声明不增加独立模型轮次，不成为 Driver 参数或执行事实。本地策略对高危声明直接审批，对低风险声明按策略放行，对明确宿主禁令拒绝；仅本轮 unknown、矛盾或疑似高危时按需复核。Goal/Plan/Memory 只提供背景，不因 Goal 包含支付等词而检查全部导航动作。本轮没有 OCR 或 Accessibility 依赖。该链路已完成工程实现、mock 回归与首轮无桌面真实 Provider 协议探针；真实 CUA 风险效果尚未验证。
+
+声明可能错误或漏报，必须独立测量高危动作漏放；“声明驱动放行”不等于已确认安全。以下三态指的是 Runtime 最终决策；独立模型只补充效果分类。实施细节和先后门槛统一见 [Risk Guard 实施计划](./risk-guard-implementation-plan-2026-09-15.md)。
 
 ### 5.1 宿主位置
 

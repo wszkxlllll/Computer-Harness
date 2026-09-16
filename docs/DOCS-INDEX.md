@@ -16,6 +16,9 @@
 | 文件 | 用途 |
 |---|---|
 | [stage-6-convergence-and-start-state-2026-09-15.md](./stage-6-convergence-and-start-state-2026-09-15.md) | 当前收敛状态、冻结条件、P/C/B/M1/M2/N 消融顺序和停止条件 |
+| [risk-guard-implementation-plan-2026-09-15.md](./risk-guard-implementation-plan-2026-09-15.md) | 当前 Risk Guard 实施入口：action-level seam、Batch、Approval、CLI、测试与停止条件 |
+| [risk-guard-real-api-and-local-tui-plan-2026-09-16.md](./risk-guard-real-api-and-local-tui-plan-2026-09-16.md) | Risk Guard 无桌面真实 API、最小 TUI 与本机递增测试门槛 |
+| [product-tui-and-module-refactor-plan-2026-09-16.md](./product-tui-and-module-refactor-plan-2026-09-16.md) | 独立产品 TUI、共享应用组装层与单文件 package 的行为保持拆分路线 |
 | [global-design-consistency-audit-2026-09-15.md](./global-design-consistency-audit-2026-09-15.md) | 全局设计一致性审计与本轮整改记录 |
 | [qwen-flat-regression-and-integration-acceptance-2026-09-15.md](./qwen-flat-regression-and-integration-acceptance-2026-09-15.md) | Qwen flat 真实 API 回归、GLM/Qwen Composite/Memory/Planning 及双后端集成验收 |
 | [qwen-flat-source-audit-and-migration-2026-09-15.md](./qwen-flat-source-audit-and-migration-2026-09-15.md) | Qwen strict 固定 `calls[]` 源码复审、提示词边界与协议迁移证据 |

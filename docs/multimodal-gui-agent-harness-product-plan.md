@@ -306,6 +306,8 @@ Computer Adapter 消费统一 ActionIntent、返回 ActionReceipt 和 Observatio
 
 ## 九、Risk Guard 的下一阶段位置
 
+当前实现：主模型在同轮为每个 Computer 调用附带预期效果声明；GLM 原生工具和 Qwen flat calls[] 经共享参数投影携带声明，解码为 ToolCall 元数据，不能传入 Computer 执行参数。Router 按本轮声明分流：高危直接审批、低风险按策略放行、明确宿主禁令拒绝，仅高危歧义按需复核。Goal 是授权背景，不是全程复核开关；本轮不以 OCR/Accessibility 为前提。工程回归与首轮无桌面真实 GLM/Qwen 协议探针已通过；真实 CUA 安全效果和统计稳定性未验证。模型声明可能漏报，不能视为安全证明。具体协议、验证证据和限制以 [Risk Guard 实施计划](./risk-guard-implementation-plan-2026-09-15.md) 为准。
+
 最小 Risk Guard 复用现有 RuntimePolicy/Approval 主链，但当前 `evaluateToolCall` 只有 ToolCall、ToolDefinition 和 RunSnapshot，不能直接完成 GUI 语义判断。实施时需要在 canonical ActionIntent 形成后、`action.execution.started` 之前增加明确的 action-level policy context；该 context 只引用已有 Goal、最新 Observation、Plan/Memory 和 Action，不复制状态。
 
 ```text

@@ -76,7 +76,7 @@ Risk Guard 通过合同测试和受控任务后停止增加新功能，转向真
 
 `面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计.md` 的“非逐步 Verifier、按风险升级、Accessible Approval”方向正确，但需要修正：
 
-- 当前 DefaultRuntimePolicy 实际全部 `allow`，只实现接口、预算与 Approval 流程，没有语义 Risk Guard；
+- 本条是审计时点事实：DefaultRuntimePolicy 只实现接口、预算与 Approval。其后已新增默认关闭的 action-level 分层 Risk Guard；首轮无桌面真实 Provider 协议探针已通过，真实 CUA 风险效果仍未验证；
 - 当前没有在线 Monitor 向 Context 注入“重复动作、低画面变化”信号；只有离线轨迹脚本计算重复候选；
 - Context、Planning、Memory 已实现但尚未证明降低意图偏移，不能写成已建立的风险能力；
 - 当前 Memory 是 Run 内事实，不是跨 Session 风险经验；

@@ -56,7 +56,11 @@ Sandbox 后端、Subagent/Delegation、跨 Run Memory、自动逐步语义 Verif
 
 最新产品顺序允许最小 Risk Guard 在独立开关和独立测试下与 G0/Development 准备并行开发。它必须复用现有 RuntimePolicy、Approval、Inbox、Event 和 Batch 边界；关闭后保持当前基线。Risk Guard 受控验收后暂停新增功能，转向真实 CUA 稳定性、延迟、诊断和使用体验；统一后的全局设计与整改依据见[产品与架构基线](./multimodal-gui-agent-harness-product-plan.md)和[全局设计文档一致性审计](./global-design-consistency-audit-2026-09-15.md)。
 
+Risk Guard 的当前唯一施工说明为 [Risk Guard 模块实施计划](./risk-guard-implementation-plan-2026-09-15.md)。该路线可以与 G0 预检并行，但不得自行启动正式 OSWorld 评测，也不得将 Guard 结果混入 P/C/B/M1/M2/N 首轮消融。
+
 ## 6. 文档边界
+
+Risk Guard 已实现同轮逐 Computer 调用效果声明、分层策略、Approval 与按需语义复核；类型检查和 mock 回归通过。不以 Goal 关键词触发全程复核，也不依赖 OCR/Accessibility。真实 GLM/Qwen API 声明稳定性、真实 CUA 审批屏幕一致性和风险效果仍未验证，因此不改变正式 P/C/B/M1/M2/N 消融基线，也不混入现有结果。
 
 本文件是当前阶段入口；`DOCS-INDEX.md` 是唯一导航。G0 候选与预检在验证集闭合前保留在当前目录。已经完成的 Stage 4/5 施工记录、旧 Planning 计划和旧 G1–G3 审计移入 `docs/history/`，只用于追溯，不再作为实施指令。
 

@@ -5,7 +5,7 @@ Computer Harness 是一个独立的、Provider-neutral 的多模态 GUI Agent Ru
 ToolCall、GUI Action、运行状态和轨迹记录。
 
 当前仓库已完成 V1 核心运行时和 Stage 6 工程收敛：Context、canonical Computer Tools、
-GLM/Qwen Provider、CLI、可插拔 Planning/Run Memory，以及受限 Action Batch 已接入同一
+GLM/Qwen Provider、CLI、可插拔 Planning/Run Memory、受限 Action Batch，以及实验性分层 Risk Guard 已接入同一
 Runtime 与 ToolRegistry。工程集成已通过；正式效果实验仍需等待 G0 evaluator、预算和任务清单冻结：
 
 - 已建立 pnpm workspace；
@@ -22,6 +22,7 @@ Runtime 与 ToolRegistry。工程集成已通过；正式效果实验仍需等�
 - 已实现 `packages/computer-osworld`、loopback Python Bridge 和 `--computer osworld` CLI 组装；真实
   `DesktopEnv`/VM 仅由 Stage 5 脚本在专用环境启动；
 - Qwen `strict_json` 已统一为固定 `calls[]` 协议；真实 API 集成已通过，但返回矩阵仍有偶发格式偏离；
+- 实验性 Risk Guard 使用同轮逐 Computer 调用效果声明：已申报财产、隐私、外部承诺、破坏性或安全设置变更时进入 Approval，低风险声明由本地规则分流，歧义可选用独立 GLM/Qwen 复核；该能力默认关闭，mock/协议回归不代表真实安全有效性；
 - fake 契约不等于真实模型成功率；Stage 5 已有单任务真实 API/OSWorld 证据，正式批量比较须等 G0 冻结后按当前入口运行。
 
 当前产品顺序是：完成评测冻结与现有模块消融，同时以独立开关开发最小 Risk Guard；Guard 验收后暂停增加新功能，优先改善真实 CUA 的截图、焦点、动作、session、延迟、诊断与部署体验。跨 Run Memory、Advisory Subagent、Sandbox 和 Execution Subagent 仍在长期路线中，但不是当前最高优先级。
@@ -145,6 +146,14 @@ pnpm --filter @computer-harness/cli start -- --goal "create and complete a plan"
 pnpm --filter @computer-harness/cli start -- --goal "edit the active field" --model glm-5.3-flash --cua-socket "<private-socket>" --batching same-control-input-v1 --context-mode recent --memory facts --output "runs/live-glm-extensions" --env-file ".env"
 ```
 
+Risk Guard 默认关闭。开启后，主 Provider 会为每个 Computer 调用返回 `_harnessEffect`；已知高危动作等待终端 Approval。`--risk-model off` 表示歧义直接审批，`same` 表示仅对歧义动作复用当前 Provider 做一次独立分类：
+
+```text
+pnpm --filter @computer-harness/cli start -- --goal "prepare an order and ask before paying" --model glm-5.3-flash --cua-socket "<private-socket>" --risk-guard layered --risk-model off --interactive --output "runs/live-risk-guard" --env-file ".env"
+```
+
+真实敏感操作前应先使用 FakeComputer/隔离环境验证 Provider 是否稳定返回声明。主模型的低风险声明可能漏报，当前 Guard 不能替代应用权限、隔离环境或人工监督。
+
 Qwen 运行必须显式选择坐标单位；严格 JSON 实验建议同时关闭 thinking：
 
 ```text
@@ -165,6 +174,8 @@ CUA daemon socket；不会自动启动 daemon，也不会把 fixture 结果写�
 pnpm --filter @computer-harness/cli build
 pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model glm-5.3-flash --cua-socket "<CUA socket>" --output "runs/stage4-glm53" --env-file ".env"
 # 需要终端回答时才追加：--interactive
+# 内部调试全屏界面（同时启用交互，不是最终产品 TUI）：--tui
+pnpm --filter @computer-harness/cli start -- --goal "Observe the current screen and describe it without clicking or typing" --model glm-5.3-flash --computer cua --cua-socket "<CUA socket>" --risk-guard layered --risk-model off --tui --output "runs/local-observe-tui" --env-file ".env"
 ```
 
 允许的 `--model` 值为 `glm-5.3-flash` 和 `qwen3.8-flash`。GLM 使用
@@ -173,7 +184,7 @@ pnpm --filter @computer-harness/cli start -- --goal "click the input and type Ha
 `DASHSCOPE_WORKSPACE_ID` 生成已验证的 Workspace endpoint，否则使用公共 compatible-mode endpoint。
 可用 `GLM_BASE_URL` 或 `DASHSCOPE_BASE_URL` 覆盖端点；GLM 可用进程级
 `GLM_THINKING=disabled|enabled` 做 thinking 对照。可选
-`--max-steps`、`--max-model-requests`、`--fixture-result`、`--batching`、`--memory`、`--planning`、`--context-mode`、`--context-max-events`、`--context-max-tokens` 和
+`--max-steps`、`--max-model-requests`、`--fixture-result`、`--batching`、`--memory`、`--planning`、`--context-mode`、`--context-max-events`、`--context-max-tokens`、`--risk-guard`、`--risk-model`、`--risk-max-model-requests`、`--risk-timeout-ms` 和
 `--screenshot-dir` 用于隔离实验。Qwen 还支持
 `--qwen-output-mode native_tools|strict_json`；默认是 `strict_json`，
 `native_tools` 仅用于协议对照或兼容性回归。Qwen 还必须设置
