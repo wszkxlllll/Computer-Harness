@@ -1,0 +1,122 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The repository declares >=22.13.0; this is the shared PR baseline.
+          - os: ubuntu-24.04
+            node: '22.13.0'
+            arch: x64
+            role: baseline
+          - os: windows-2025
+            node: '22.13.0'
+            arch: x64
+            role: baseline
+          - os: macos-15
+            node: '22.13.0'
+            arch: arm64
+            role: baseline
+          # One additional supported Node line is checked on Linux only.
+          - os: ubuntu-24.04
+            node: '24.19.0'
+            arch: x64
+            role: compatibility
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+          architecture: ${{ matrix.arch }}
+
+      - name: Setup repository-pinned pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+          cache: true
+          cache_dependency_path: pnpm-lock.yaml
+
+      - name: Record runner and toolchain
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_NODE: ${{ matrix.node }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_ROLE: ${{ matrix.role }}
+        run: |
+          node --version
+          pnpm --version
+          node -e "const expected=process.env.MATRIX_ARCH; const runner=String(process.env.RUNNER_ARCH||'').toLowerCase(); const actual=process.arch; const record={matrixOS:process.env.MATRIX_OS,matrixNode:process.env.MATRIX_NODE,matrixRole:process.env.MATRIX_ROLE,runnerOS:process.env.RUNNER_OS,runnerArch:runner,nodeVersion:process.version,nodeArch:actual}; console.log(JSON.stringify(record)); if (runner!==expected || actual!==expected) { console.error('Runner architecture does not match the fixed matrix architecture'); process.exit(1); }"
+          git rev-parse HEAD
+
+      - name: Verify repository-pinned pnpm version
+        run: node -e "const fs=require('node:fs'); const cp=require('node:child_process'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const expected=String(pkg.packageManager||'').split('@').pop(); const actual=cp.execSync('pnpm --version',{encoding:'utf8'}).trim(); console.log(JSON.stringify({expected,actual})); if (actual!==expected) process.exit(1);"
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The current root build script delegates to typecheck, and typecheck
+      # emits the project references needed by the CLI. Run one pass only.
+      - name: Typecheck and build
+        run: pnpm run typecheck
+
+      - name: Prepare synthetic test report directory
+        run: node -e "require('node:fs').mkdirSync('.ci-reports',{recursive:true})"
+
+      - name: Unit and contract tests (offline; no live desktop or model API)
+        run: pnpm exec vitest run --reporter=default --reporter=junit --outputFile=.ci-reports/vitest.xml
+
+      - name: Built CLI help smoke test
+        run: node apps/cli/dist/index.js --help
+
+      - name: Verify dependency files were not rewritten
+        run: git diff --exit-code -- package.json pnpm-lock.yaml pnpm-workspace.yaml
+
+      - name: Upload synthetic-test report only
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vitest-${{ matrix.os }}-node-${{ matrix.node }}
+          path: .ci-reports/vitest.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+  required:
+    name: ci-required
+    if: ${{ always() }}
+    needs: [verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every matrix job to pass
+        shell: bash
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          if [ "$VERIFY_RESULT" != "success" ]; then
+            echo "Verification matrix ended with: $VERIFY_RESULT"
+            exit 1
+          fi
