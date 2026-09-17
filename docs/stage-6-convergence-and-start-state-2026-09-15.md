@@ -2,11 +2,11 @@
 
 更新：2026-09-17
 
-角色：当前执行 / 交接。基线：`39ff27f9a4ef5431450df6991793403ec890f993`。范围：DEV-0/1 修复与工程门禁，随后推进受控交互；正式评测 G0 另行收口。
+角色：当前执行 / 交接。原审计基线：`39ff27f9`；本批开发基线：合并 PR #1 后的 `0e4146327de995dc92da6367fc654b493a224665`。范围：DEV-1 剩余确定性修复，随后推进受控交互；正式评测 G0 另行收口。
 
 ## 1. 当前结论与已有基础
 
-当前可以开始 DEV-0 和 DEV-1。Runtime、两 Provider、两 Computer Adapter、Planning、Run Memory、Context、Batch 和实验性 Risk Guard 已有实现；不能把它们视为所有边界均验收通过。
+PR #1 已由用户合并，DEV-0 Hosted CI 与 DEV-1 的 R01/F08 修复已进入 main；继续 DEV-1 剩余项。Runtime、两 Provider、两 Computer Adapter、Planning、Run Memory、Context、Batch 和实验性 Risk Guard 已有实现；不能把它们视为所有边界均验收通过。
 
 2026-09-17 已在 Windows/Node 24.19.0/pnpm 11.19.0 执行类型检查及 179 项测试，另 9 项实际实现探针复现了未覆盖问题。详细证据见[归档复核](./history/2026-09-17-roadmap-consolidation/external-audit-confirmation-2026-09-17.md)。这些是历史基线，本轮文档整理没有新测试或业务修复。
 
@@ -43,9 +43,30 @@ G0 当前资料从[文档索引](./DOCS-INDEX.md)进入，校准、预算和分�
 
 DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实验；不等全部功能完成才首次验证效果，也不反复用 Validation 调参。
 
-实施结果写在所属阶段交付文档并从本入口链接。当前状态：**第一批本地实施与审查完成：R01/F08 有限范围放行，PR #1 的 CI Hosted 验收已通过；DEV-1 其他项未完成**。
+实施结果写在所属阶段交付文档并从本入口链接。当前状态：**第一批已合并；第二批 Context、Memory、CLI 诊断已通过 Sol 独立审查并分别建立本地提交，末次离线集成通过。DEV-1 其他项仍未完成。**
 
-### 当前调度批次（2026-09-17）
+### 第二批：Context / Memory 与诊断
+
+用户已授权合并后继续开发。本批从 `0e41463` 创建 `codex/dev1-context-memory-diagnostics`，不修改第一批旧分支；Luna 实施，Sol 独立只读审阅，主 Agent 组织与维护入口。
+
+| 工作线 | 独占范围 | 交付门槛 |
+|---|---|---|
+| DEV-1A，F02/F05 | Context，worker_probe 负责 | Sol 放行；17 项通过，含多-call 整组裁剪、纠正保护及 fixed 溢出时 Provider=0；提交 `0d31d01` |
+| DEV-1A，F03/F10 | Protocol / Runtime / Memory，worker_probe 负责 | Sol 放行；Memory 19 项 + Runtime 54 项独立通过；非法自定义 mutation 提交前拒绝，同值但 task links 改变正常 replacement；提交 `1af6a56` |
+| DEV-1B，F06/R02 | CLI 诊断及测试，worker_ci 负责 | Sol 放行；11 项独立通过，含 native/flat 及真实 recorder 写盘；纯提取 `1e7fb55`，行为修复 `6f0ca33` |
+| 集成审阅 | Sol 只读；共享入口由主 Agent 维护 | Sol 独立 focused 放行；Luna 末次统一 typecheck、19 文件 233 项测试、CLI help、依赖漂移和空白检查均通过 |
+
+实施证据：[Context](./dev-1-context-implementation-results.md)、[Memory](./dev-1-memory-implementation-results.md)、[CLI 诊断](./dev-1-diagnostics-implementation-results.md)。纯提取与行为修复已分别审阅、提交，不等整个 DEV-1。此批不改正式任务，不启动真实 API、桌面或 VM，不提前开发 scope、Context V2 或产品 TUI。
+
+放行边界：Context 仍使用近似文本预算，不是最终 Provider payload 的精确 token 上限；MemoryStore 校验结构，当前 task 是否存在由 Runtime 校验，未新增 scope；诊断摘要不等于可公开整个运行目录，trajectory / assets 仍为私有执行记录。未执行本批 Hosted CI；未 push，不改变远端 main。
+
+最终集成由 Luna worker_ci 在 Node 24.19.0 / pnpm 11.19.0 执行，包含 Memory 最后 producer 修复；233 项是末次全量计数，232 项及 89 项联合 focused 是中间版本，不能互相替代。Sol 独立执行了 Context 17、Memory + Runtime 73、诊断 11 项相关验证；主 Agent 负责调度和证据汇总，没有亲自实施业务代码或重跑全部测试。
+
+下一批处理 F04 实机/实验 profile 的 resolved 配置、F12 终端净化，以及 F07 有界清理。清理超时不能冒充底层动作已停止。其后才按 DEV-2 的合同冻结与文件映射进入 app-runtime、接管及目标适配；此次通过不能称为 DEV-1 全部完成。
+
+### 第一批证据（已合并，2026-09-17）
+
+下列为第一批执行与发布记录，其中“尚未提交 / 未合并”仅描述当时状态；用户现已合并 PR #1，合并提交为 `0e41463`。第二批状态以上节为准。
 
 用户已授权由 Luna 实施、Sol 审计，主 Agent 仅规划/调度与维护入口。共享当前工作树，保留已有文档归档改动；实施阶段先不提交或推送，随后按独立授权建立本地检查点并提交工作分支。
 
