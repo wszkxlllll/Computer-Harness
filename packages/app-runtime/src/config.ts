@@ -18,6 +18,7 @@ import type { RunEventWriter } from "@computer-harness/trajectory";
 import type { AssetStore } from "@computer-harness/trajectory";
 import type { ComputerBackendConfig, ComputerFactoryDependencies } from "./computers.js";
 import type { RunReport } from "./reporting.js";
+import type { RunEventFeed } from "./event-feed.js";
 
 export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash";
 export type AppRuntimeRiskModel = "off" | "same" | AppRuntimeModel;
@@ -108,6 +109,8 @@ export interface RunHandle {
   readonly runId: RunId;
   readonly config: ResolvedRunConfig;
   readonly controller: RunController;
+  /** Read-only committed events for UI/diagnostics consumers. */
+  readonly eventFeed: RunEventFeed;
   start(starter?: (controller: RunController, goal: string, markControllerStarted: () => void) => Promise<RunOutcome>): Promise<RunOutcome>;
   report(): Promise<RunReport>;
   /** Dispose before start or wait for Controller-owned cleanup after start. */

@@ -22,6 +22,7 @@ import type { AssetReader } from "@computer-harness/runtime";
 import { createComputer } from "./computers.js";
 import { createProvider } from "./providers.js";
 import { buildRunReport } from "./reporting.js";
+import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
@@ -29,11 +30,18 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   const config: ResolvedRunConfig = { ...input, runId, outputDir: resolve(input.outputDir) };
   const credentials = dependencies.credentials ?? {};
   let eventWriter: RunEventWriter | undefined;
+  let eventFeed: CommittedEventFeed | undefined;
+  let controller: RunController | undefined;
   try {
     await mkdir(config.outputDir, { recursive: true });
     const assetStore = (dependencies.createAssetStore ?? ((rootDir) => new FileAssetStore(rootDir)))(resolve(config.outputDir, "assets"));
     const assetReader = assetStore as AssetStore & AssetReader;
     eventWriter = (dependencies.createEventWriter ?? ((path, id) => new JsonlRunEventWriter(path, id)))(resolve(config.outputDir, "trajectory.jsonl"), runId);
+    eventFeed = createRunEventFeed({
+      runId,
+      readCommitted: (afterSequence, upToSequence) => (controller?.getEventsAfter(afterSequence) ?? [])
+        .filter((event) => event.sequence <= upToSequence),
+    });
     const tools = dependencies.createToolRegistry?.() ?? createDefaultToolRegistry();
     if (config.planning) {
       const planRoot = resolve(config.outputDir, "plan-store");
@@ -88,7 +96,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       },
     );
     const cleanupDiagnostics: import("@computer-harness/runtime").CleanupDiagnostic[] = [];
-    const controller = new RunController({
+    controller = new RunController({
       runId,
       provider,
       computer,
@@ -101,6 +109,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(dependencies.onCleanupError === undefined
         ? { onCleanupError: (diagnostic: import("@computer-harness/runtime").CleanupDiagnostic) => cleanupDiagnostics.push(diagnostic) }
         : { onCleanupError: (diagnostic: import("@computer-harness/runtime").CleanupDiagnostic) => { cleanupDiagnostics.push(diagnostic); dependencies.onCleanupError?.(diagnostic); } }),
+      onEventCommitted: eventFeed.publish,
       batching: config.batching,
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
@@ -108,8 +117,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
     });
     const toolNames = tools.modelTools().map((tool) => tool.name);
-    return createRunHandle(config, runId, controller, eventWriter, toolNames, cleanupDiagnostics);
+    return createRunHandle(config, runId, controller, eventWriter, eventFeed, toolNames, cleanupDiagnostics);
   } catch (error) {
+    eventFeed?.close();
     await eventWriter?.close().catch(() => undefined);
     throw error;
   }
@@ -142,6 +152,7 @@ function createRunHandle(
   runId: RunId,
   controller: RunController,
   eventWriter: RunEventWriter,
+  eventFeed: CommittedEventFeed,
   toolNames: readonly string[],
   cleanupDiagnostics: readonly import("@computer-harness/runtime").CleanupDiagnostic[],
 ): RunHandle {
@@ -150,6 +161,12 @@ function createRunHandle(
   let prestartCleanupPromise: Promise<void> | undefined;
   let controllerStarted = false;
   let closedBeforeStart = false;
+  let feedClosed = false;
+  const closeFeed = (): void => {
+    if (feedClosed) return;
+    feedClosed = true;
+    eventFeed.close();
+  };
   const closeBeforeControllerStart = (): Promise<void> => {
     prestartCleanupPromise ??= eventWriter.close();
     return prestartCleanupPromise;
@@ -158,6 +175,7 @@ function createRunHandle(
     runId,
     config,
     controller,
+    eventFeed,
     start(starter = (current, goal, mark) => {
       const started = current.start(goal);
       mark();
@@ -173,12 +191,14 @@ function createRunHandle(
       completionPromise = starterPromise.then(async (outcome) => {
         if (!controllerStarted) {
           await closeBeforeControllerStart().catch(() => undefined);
+          closeFeed();
           throw new Error(`RunHandle for ${runId} starter completed without starting its Controller`);
         }
         return outcome;
       }, async (error: unknown) => {
         if (!controllerStarted) {
           await closeBeforeControllerStart().catch(() => undefined);
+          closeFeed();
         }
         throw error;
       });
@@ -190,12 +210,20 @@ function createRunHandle(
     },
     async close() {
       if (completionPromise !== undefined) {
-        await completionPromise;
+        try {
+          await completionPromise;
+        } finally {
+          closeFeed();
+        }
         return;
       }
       if (closedBeforeStart) return;
       closedBeforeStart = true;
-      await eventWriter.close();
+      try {
+        await eventWriter.close();
+      } finally {
+        closeFeed();
+      }
     },
   };
 }

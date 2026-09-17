@@ -240,4 +240,31 @@ describe("app-runtime RunHandle", () => {
       await rm(outputDir, { recursive: true, force: true });
     }
   });
+
+  it("publishes committed events incrementally without letting a UI listener affect the Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-feed-"));
+    const calls = { open: 0, observe: 0, close: 0 };
+    try {
+      const handle = await createRun(config(outputDir), {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "feed done" }; } }),
+        createComputer: () => Promise.resolve(fakeComputer(calls)),
+      });
+      const seen: number[] = [];
+      handle.eventFeed.subscribe({
+        listener: (notification) => {
+          if (notification.type === "event") {
+            seen.push(notification.event.sequence);
+            throw new Error("TUI listener should be isolated");
+          }
+        },
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen).toEqual([...seen].sort((left, right) => left - right));
+      expect(new Set(seen).size).toBe(seen.length);
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
 });

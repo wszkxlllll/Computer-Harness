@@ -1,10 +1,10 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createRun, writeRunReport, type AppRuntimeModel, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, createRun, writeRunReport, type AppRuntimeModel, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
-import { runWithTuiControls } from "./tui.js";
+import { runApplicationTui } from "./tui.js";
 import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 
@@ -15,7 +15,7 @@ type Qwen38ThinkingMode = "disabled" | "low" | "medium" | "xhigh";
 type Qwen38OutputMode = "native_tools" | "strict_json";
 
 interface CliOptions {
-  goal: string;
+  goal?: string;
   model: ModelName;
   computer: "cua" | "osworld";
   cuaSocket?: string;
@@ -50,9 +50,10 @@ function parseArgs(argv: readonly string[]): CliOptions {
     return index >= 0 ? argv[index + 1] : undefined;
   };
   const goal = value("--goal");
+  const tui = argv.includes("--tui");
   const model = value("--model") as ModelName | undefined;
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
-  if (goal === undefined || goal.trim().length === 0) throw new Error("--goal is required");
+  if ((goal === undefined || goal.trim().length === 0) && !tui) throw new Error("--goal is required unless --tui opens the interactive home");
   if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") {
     throw new Error("--model must be glm-5.3-flash or qwen3.8-flash");
   }
@@ -91,7 +92,6 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (qwenOutputModeValue !== undefined && model !== "qwen3.8-flash") {
     throw new Error("--qwen-output-mode is only valid with qwen3.8-flash");
   }
-  const tui = argv.includes("--tui");
   const interactive = argv.includes("--interactive") || tui;
   const profileValue = value("--profile");
   const riskGuardValue = value("--risk-guard");
@@ -119,7 +119,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const contextMaxInputTokensValue = value("--context-max-tokens");
   const contextMaxInputTokens = contextMaxInputTokensValue === undefined ? undefined : positiveInteger(contextMaxInputTokensValue, 1, "--context-max-tokens");
   return {
-    goal,
+    ...(goal === undefined ? {} : { goal }),
     model,
     computer,
     ...(cuaSocket === undefined ? {} : { cuaSocket }),
@@ -157,17 +157,31 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
+    process.stdout.write("Usage: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs.\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
   if (options.envFile !== undefined) await loadEnvFile(options.envFile);
-  const config = toResolvedRunConfig(options);
+  if (options.tui) {
+    const config = toResolvedRunConfig(options, options.goal ?? "");
+    const { goal: _goal, runId: _runId, ...sessionConfig } = config;
+    const session = new ApplicationSession({
+      config: sessionConfig,
+      dependencies: { credentials: readProviderCredentials() },
+    });
+    await runApplicationTui(session, {
+      provider: options.model,
+      computer: options.computer,
+      output: options.output,
+      profile: options.risk.profile,
+      riskGuard: options.risk.riskGuard,
+    }, options.goal === undefined ? {} : { initialGoal: options.goal });
+    return;
+  }
+  const config = toResolvedRunConfig(options, options.goal!);
   const handle = await createRun(config, { credentials: readProviderCredentials() });
   try {
-    await handle.start((controller, goal, markControllerStarted) => options.tui
-      ? runWithTuiControls(controller, goal, { provider: options.model, computer: options.computer, output: options.output, profile: options.risk.profile, riskGuard: options.risk.riskGuard }, markControllerStarted)
-      : runWithCliControls(controller, goal, options.interactive, markControllerStarted));
+    await handle.start((controller, goal, markControllerStarted) => runWithCliControls(controller, goal, options.interactive, markControllerStarted));
     const report = await handle.report();
     await writeRunReport(report, config.outputDir);
     process.stdout.write(`${JSON.stringify(report.summary, null, 2)}\n`);
@@ -176,10 +190,10 @@ async function main(): Promise<void> {
   }
 }
 
-function toResolvedRunConfig(options: CliOptions): ResolvedRunConfig {
+function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConfig {
   const qwenEndpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
   return {
-    goal: options.goal,
+    goal,
     model: options.model,
     computer: options.computer === "cua"
       ? {
