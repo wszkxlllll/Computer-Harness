@@ -1,18 +1,18 @@
 import { createInterface } from "node:readline";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId } from "@computer-harness/protocol";
-import { FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmHttpClient, type GlmProfile, type GlmProfileName } from "@computer-harness/provider-glm";
-import { FetchQwenHttpClient, Qwen38FlashAdapter, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
+import { GlmAdapter, glmProfiles, type GlmProfile, type GlmProfileName } from "@computer-harness/provider-glm";
+import { Qwen38FlashAdapter, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode } from "@computer-harness/provider-qwen";
 import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
 import { createMemoryTools, FileMemoryStore, type MemoryToolMode } from "@computer-harness/memory";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type CleanupDiagnostic } from "@computer-harness/runtime";
 import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
 import { runWithTuiControls } from "./tui.js";
-import { providerToolNames, summarizeProviderResponse } from "./diagnostics/provider-summary.js";
+import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
@@ -289,78 +289,6 @@ function makeProvider(model: ModelName, assetReader: AssetReader, output: string
     thinking: configuredThinking === "disabled" ? "disabled" : "enabled",
   };
   return new GlmAdapter({ apiKey: key, profile, assetReader, httpClient: new RecordingGlmHttpClient(resolve(output, "provider-exchanges.jsonl")), ...(process.env.GLM_BASE_URL === undefined ? {} : { endpoint: process.env.GLM_BASE_URL }) });
-}
-
-class RecordingGlmHttpClient implements GlmHttpClient {
-  private readonly inner = new FetchGlmHttpClient();
-  private requestNumber = 0;
-
-  public constructor(private readonly path: string) {}
-
-  public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
-    this.requestNumber += 1;
-    const startedAt = Date.now();
-    try {
-      const response = await this.inner.post(url, body, headers, signal);
-      await appendFile(this.path, `${JSON.stringify({
-        provider: "glm",
-        request: this.requestNumber,
-        latencyMs: Date.now() - startedAt,
-        requestedModel: typeof body.model === "string" ? body.model : null,
-        toolNames: providerToolNames(body.tools),
-        response: summarizeProviderResponse(response),
-      })}\n`, "utf8");
-      return response;
-    } catch (error) {
-      await appendFile(this.path, `${JSON.stringify({
-        provider: "glm",
-        request: this.requestNumber,
-        latencyMs: Date.now() - startedAt,
-        requestedModel: typeof body.model === "string" ? body.model : null,
-        transportError: error instanceof Error ? { name: error.name, message: error.message } : { message: String(error) },
-      })}\n`, "utf8");
-      throw error;
-    }
-  }
-}
-
-class RecordingQwenHttpClient implements QwenHttpClient {
-  private readonly inner = new FetchQwenHttpClient();
-  private requestNumber = 0;
-
-  public constructor(
-    private readonly path: string,
-    private readonly coordinateMode: QwenCoordinateMode,
-    private readonly thinkingMode?: Qwen38ThinkingMode,
-    private readonly outputMode: Qwen38OutputMode = "strict_json",
-  ) {}
-
-  public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
-    this.requestNumber += 1;
-    const startedAt = Date.now();
-    try {
-      const response = await this.inner.post(url, body, headers, signal);
-      await appendFile(this.path, `${JSON.stringify({
-        request: this.requestNumber,
-        latencyMs: Date.now() - startedAt,
-        requestedModel: typeof body.model === "string" ? body.model : null,
-        coordinateMode: this.coordinateMode,
-        thinkingMode: this.thinkingMode ?? null,
-        outputMode: this.outputMode,
-        toolNames: providerToolNames(body.tools),
-        response: summarizeProviderResponse(response),
-      })}\n`, "utf8");
-      return response;
-    } catch (error) {
-      await appendFile(this.path, `${JSON.stringify({
-        request: this.requestNumber,
-        latencyMs: Date.now() - startedAt,
-        requestedModel: typeof body.model === "string" ? body.model : null,
-        transportError: error instanceof Error ? { name: error.name, message: error.message } : { message: String(error) },
-      })}\n`, "utf8");
-      throw error;
-    }
-  }
 }
 
 async function loadEnvFile(path: string): Promise<void> {
