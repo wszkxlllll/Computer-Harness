@@ -1,0 +1,128 @@
+{
+  "repository": "wszkxlllll/Computer-Harness",
+  "commit": "39ff27f9a4ef5431450df6991793403ec890f993",
+  "auditDate": "2026-09-17",
+  "scope": "Critical-path static review plus six extracted-logic reproductions; not full repository or live-desktop acceptance.",
+  "severityNote": "P0 entries block the specified sensitive live-desktop use, not all development or a proven remote exploit.",
+  "findings": [
+    {
+      "id": "F01",
+      "priority": "P0：敏感实机前",
+      "evidenceLevel": "源码确认，桌面场景待验证",
+      "title": "审批后只验证内部 Observation，没有检测外部画面/焦点变化",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F02",
+      "priority": "P1",
+      "evidenceLevel": "提取逻辑复现",
+      "title": "token 裁剪可删除用户中途纠正",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F03",
+      "priority": "P1",
+      "evidenceLevel": "提取逻辑复现",
+      "title": "supersede_fact.replacement 绕过 relatedTaskIds 校验",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F04",
+      "priority": "P0：实机默认配置",
+      "evidenceLevel": "源码确认",
+      "title": "--tui 不会自动开启 Risk Guard，与验证计划不符",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F05",
+      "priority": "P1：预算/实验",
+      "evidenceLevel": "提取逻辑与源码确认",
+      "title": "预算是近似值，单事件可越界，Provider 后处理未计入",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F06",
+      "priority": "P0：隐私实机前",
+      "evidenceLevel": "提取逻辑复现",
+      "title": "原生 ToolCall 的诊断日志保留完整 arguments",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F07",
+      "priority": "P1",
+      "evidenceLevel": "条件风险",
+      "title": "close/shutdown 的等待不是全程有界",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F08",
+      "priority": "P1：安全承诺边界",
+      "evidenceLevel": "文本分支复现",
+      "title": "风险语义依赖自报，描述词可抑制高风险关键词信号",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F09",
+      "priority": "P1：可恢复实机输入",
+      "evidenceLevel": "源码确认，焦点故障待验证",
+      "title": "micro-batch 白名单不保证目标焦点正确",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F10",
+      "priority": "P2",
+      "evidenceLevel": "源码确认",
+      "title": "Memory 生命周期和读取校验需要补强，但不是旧口述的 observationId 硬失效问题",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F11",
+      "priority": "P1：对外实验结论前",
+      "evidenceLevel": "源码确认",
+      "title": "Context 组成与真实成本归因不足",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F12",
+      "priority": "P1/P2",
+      "evidenceLevel": "源码确认，终端场景待验证",
+      "title": "TUI 全量轮询、终端文本净化和审批展示不足",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F13",
+      "priority": "P2",
+      "evidenceLevel": "源码确认",
+      "title": "组装与部分实现文件过大，协作冲突高",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F14",
+      "priority": "P1：协作前",
+      "evidenceLevel": "源码和仓库设置确认",
+      "title": "无工作流，main 未启用保护/必需检查",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F15",
+      "priority": "P1：实机产品化",
+      "evidenceLevel": "源码确认",
+      "title": "CUA 能力硬编码，缺少产品侧 health/目标绑定",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F16",
+      "priority": "P2",
+      "evidenceLevel": "源码确认，属语义澄清",
+      "title": "正常结束、模型宣称成功和外部验收成功需明确区分",
+      "status": "open_at_audited_commit"
+    },
+    {
+      "id": "F17",
+      "priority": "P2：增益优化",
+      "evidenceLevel": "源码/现有分析器确认",
+      "title": "有离线重复统计，但未见在线 Progress/Stall Monitor",
+      "status": "open_at_audited_commit"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+TAP version 13
+# Subtest: F02: a user correction is removed by the token-budget pruning stage
+ok 1 - F02: a user correction is removed by the token-budget pruning stage
+  ---
+  duration_ms: 2.070418
+  type: 'test'
+  ...
+# Subtest: F05: a single oversized event survives the advertised pruning limit
+ok 2 - F05: a single oversized event survives the advertised pruning limit
+  ---
+  duration_ms: 0.565366
+  type: 'test'
+  ...
+# Subtest: F03: unknown task link is rejected for upsert, but accepted for replacement
+ok 3 - F03: unknown task link is rejected for upsert, but accepted for replacement
+  ---
+  duration_ms: 5.988805
+  type: 'test'
+  ...
+# Subtest: F03: replacement also bypasses the Planning-disabled guard
+ok 4 - F03: replacement also bypasses the Planning-disabled guard
+  ---
+  duration_ms: 0.499379
+  type: 'test'
+  ...
+# Subtest: F08: descriptive wording suppresses a financial keyword escalation
+ok 5 - F08: descriptive wording suppresses a financial keyword escalation
+  ---
+  duration_ms: 3.333863
+  type: 'test'
+  ...
+# Subtest: F06: native-call diagnostic projection preserves synthetic private text
+ok 6 - F06: native-call diagnostic projection preserves synthetic private text
+  ---
+  duration_ms: 0.929558
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 274.96505

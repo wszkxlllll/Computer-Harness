@@ -23,7 +23,9 @@ cache/
 .stage0/
 
 # Historical planning/audit documents stay local for provenance and are not tracked.
-docs/history/
+docs/history/*
+!docs/history/2026-09-17-roadmap-consolidation/
+!docs/history/2026-09-17-roadmap-consolidation/**
 scripts/history/
 
 .stage4-qwen38-fixture-alpha

@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：审计 / 整改入口
 状态：整改完成记录
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 基线：提交 `9465649`；以当前 protocol、Runtime、ToolRegistry、Context、Planning、Memory、Provider 和 Computer Adapter 源码为事实源
 范围：全局设计文档与当前实现、实验阶段及最新产品路线的一致性；不修改业务代码
 

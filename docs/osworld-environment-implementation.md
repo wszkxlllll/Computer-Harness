@@ -17,7 +17,7 @@
   `invalidToolCalls=0`、`runtimeErrors=0`、`providerErrors=[]`、`cleanupErrors=[]`；
 - Qwen strict-json 已统一为固定 `calls[]`，不再维护 `anyOf` 对照；最新无桌面真实 API 返回矩阵为 21/24，
   说明协议可用但仍有偶发格式偏离。以上单任务和协议证据都不等于整体成功率；当前回归与放行边界见
-  [Qwen flat 回归与集成验收](./qwen-flat-regression-and-integration-acceptance-2026-09-15.md)。
+  [Qwen flat 回归与集成验收](history/2026-09-17-roadmap-consolidation/qwen-flat-regression-and-integration-acceptance-2026-09-15.md)。
 - 当前实现已完成 P0-A/B/C/D：截图尺寸变化现在形成新的当前 viewport；OSWorld 键能力来自
   `desktop_env.actions.KEYBOARD_KEYS` 并在副作用前拒绝；GLM 网络错误保留脱敏 cause 诊断；GUI action budget 与
   model request budget 分离，动作预算耗尽仍可请求一次收尾模型 Turn。

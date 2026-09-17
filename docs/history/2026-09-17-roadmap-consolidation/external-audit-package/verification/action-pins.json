@@ -1,0 +1,26 @@
+{
+  "queriedOn": "2026-09-17",
+  "method": "GitHub connector: official tag references; pnpm annotated tag dereferenced to commit",
+  "actions": {
+    "actions/checkout": {
+      "major": "v6",
+      "sha": "d23441a48e516b6c34aea4fa41551a30e30af803",
+      "source": "https://github.com/actions/checkout/commit/d23441a48e516b6c34aea4fa41551a30e30af803"
+    },
+    "actions/setup-node": {
+      "major": "v6",
+      "sha": "249970729cb0ef3589644e2896645e5dc5ba9c38",
+      "source": "https://github.com/actions/setup-node/commit/249970729cb0ef3589644e2896645e5dc5ba9c38"
+    },
+    "pnpm/action-setup": {
+      "major": "v4",
+      "sha": "b906affcce14559ad1aafd4ab0e942779e9f58b1",
+      "source": "https://github.com/pnpm/action-setup/commit/b906affcce14559ad1aafd4ab0e942779e9f58b1"
+    },
+    "actions/upload-artifact": {
+      "major": "v4",
+      "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "source": "https://github.com/actions/upload-artifact/commit/ea165f8d65b6e75b540449e92b4886f43607fa02"
+    }
+  }
+}

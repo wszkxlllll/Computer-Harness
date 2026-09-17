@@ -1,0 +1,8 @@
+# Start with the actual maintainer. Add reviewers only after they join the repo.
+* @wszkxlllll
+
+# Keep protocol, execution, driver, and workflow changes under explicit ownership.
+/packages/protocol/ @wszkxlllll
+/packages/runtime/ @wszkxlllll
+/packages/computer-cua/ @wszkxlllll
+/.github/ @wszkxlllll

@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：全局语义合同
 状态：当前有效
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 
 ## 1. 核心关系
 

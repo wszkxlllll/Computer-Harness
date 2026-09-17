@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：当前模块说明 / 长期设计
 状态：Run Memory 当前有效；长期 Memory 与 Advisory 保留但非当前最高优先级
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 
 ## 一、先区分四种状态
 

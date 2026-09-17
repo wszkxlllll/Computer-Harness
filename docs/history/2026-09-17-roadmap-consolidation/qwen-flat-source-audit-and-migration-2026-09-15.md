@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：审计 / 结果
 状态：当前证据
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 基线：当前仓库工作树
 范围：Qwen Provider schema、历史序列化、提示词注入、解析和回归；不覆盖真实桌面成功率
 结论：**通过源码门槛，已删除 `anyOf` strict 双路径；允许继续做统一 flat 协议的真实任务验证。**

@@ -1,5 +1,7 @@
 # 产品 TUI 与模块拆分计划
 
+后续审计补充：[2026-09-16 深入审计总览](audit-2026-09-16-overview.md)。实施本计划前先读其中交互/风险和架构/CI/CD 分项：补充了前台焦点冲突、审批后目标复核、RunController 内部拆分、配置一致性和先建 CI 的要求。本文件原有拆分表仍是建议，不代表已实施。
+
 ## 1. 当前判断
 
 `apps/cli --tui` 是验证 RunSnapshot、EventStream、Approval 和控制命令的调试界面，不是最终产品 TUI。Claude Code 同样由终端命令启动，但其命令进入的是持续交互应用；本项目最终也应提供独立 `apps/tui` 可执行入口，而不是在一次性 CLI Runner 上继续堆显示逻辑。
