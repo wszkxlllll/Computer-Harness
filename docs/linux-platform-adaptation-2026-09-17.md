@@ -4,7 +4,8 @@
 文档角色：结果
 状态：历史证据
 当前入口：从属于 [Stage 6 当前实施入口](./stage-6-convergence-and-start-state-2026-09-15.md)
-证据基线：成员 C 的环境与端到端结果产生于 `cf59133`；本文档 PR 基于 `0e41463`，其 Hosted CI 另列，不混用测试数量。关联修复 [PR #3](https://github.com/wszkxlllll/Computer-Harness/pull/3) 尚未合并。
+状态更新（2026-09-17）：PR #3 的 lazy CUA 加载修复（`7f85234`/`b2f0a82`）与 PR #4 的 Linux 文档修复（`1ecce58`/`5c84d38`）已合并；下文保留原作者历史证据与当时的基线表述，不重写其测试数据。
+证据基线：成员 C 的环境与端到端结果产生于 `cf59133`；本文档 PR 基于 `0e41463`，其 Hosted CI 另列，不混用测试数量。关联修复 [PR #3](https://github.com/wszkxlllll/Computer-Harness/pull/3) 在本文原始记录时尚未合并，当前状态见上方更新。
 范围：Linux 宿主机运行本仓库的适配项与验证证据：依赖安装、单测、GLM 真实 API 冒烟、OSWorld docker 链路端到端。不覆盖：macOS、真实本机桌面驱动（AGENTS.md 与 Risk Guard 门控）、Qwen 真实 API 本机实测。
 
 ## 1. 结论

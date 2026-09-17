@@ -64,6 +64,14 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 下一批处理 F04 实机/实验 profile 的 resolved 配置、F12 终端净化，以及 F07 有界清理。清理超时不能冒充底层动作已停止。其后才按 DEV-2 的合同冻结与文件映射进入 app-runtime、接管及目标适配；此次通过不能称为 DEV-1 全部完成。
 
+### 第三批：Controls cleanup（代码完成，Sol 有限范围放行）
+
+本批从第二批工作树创建 `codex/dev1-controls-cleanup`，并以 merge commit `4913fc6` 合并最新 `origin/main`（`1f9f362`）。CLI `index.ts` 冲突已保留 PR #3 的 Computer lazy loading 与第二批 diagnostics recorder；PR #3/#4 的 Linux 适配文件和测试均保留。
+
+范围为 DEV-1 的 F04/F12/F07：统一 experiment 与 `live-interactive` 的 resolved Risk 配置、让 TUI 显示实际 profile/Guard、净化模型/错误/外部文本的 ESC/CSI/OSC 等终端控制序列，以及 Runtime/Computer cleanup 的总 deadline、剩余预算和同实例未决清理阻断。F07 只承诺同一 Computer 实例/会话的进程内防复用；同环境新实例的 owner/quiesce 属于 DEV-2，跨进程持久屏障属于 DEV-6，未将 X02 后两者提前宣称完成。
+
+本批结果写入[Controls cleanup 实施记录](./dev-1-controls-cleanup-implementation-results.md)。Sol 集中复核的中间版本为 5 files/72 tests，全项通过；补齐三项高风险反例后的最终复核为 3 files/16 tests，全项通过并有限放行。worker 最终离线统一验证为 `pnpm run typecheck` 通过、`pnpm test` 22 files/251 tests 全通过、CLI help 通过。行为变更已按 CLI、Runtime/CUA、文档三笔本地提交（CLI `98bb75c`、Runtime/CUA `e0d080c`，文档提交见 Git 日志）；不启动真实 API、桌面或 VM，不 push。
+
 ### 第一批证据（已合并，2026-09-17）
 
 下列为第一批执行与发布记录，其中“尚未提交 / 未合并”仅描述当时状态；用户现已合并 PR #1，合并提交为 `0e41463`。第二批状态以上节为准。
