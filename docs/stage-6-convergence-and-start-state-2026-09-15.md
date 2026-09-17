@@ -72,6 +72,12 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 本批结果写入[Controls cleanup 实施记录](./dev-1-controls-cleanup-implementation-results.md)。Sol 集中复核的中间版本为 5 files/72 tests，全项通过；补齐三项高风险反例后的最终复核为 3 files/16 tests，全项通过并有限放行。worker 最终离线统一验证为 `pnpm run typecheck` 通过、`pnpm test` 22 files/251 tests 全通过、CLI help 通过。行为变更已按 CLI、Runtime/CUA、文档三笔本地提交（CLI `98bb75c`、Runtime/CUA `e0d080c`，文档提交见 Git 日志）；不启动真实 API、桌面或 VM，不 push。
 
+### 第四批：DEV-2 RFT2 app-runtime（代码完成，待 Sol 一轮审阅）
+
+本批从 PR #5 合并后的 `origin/main` `bc72ee5` 创建 `codex/dev2-app-runtime`。按 RFT2 将 CLI 的 Provider/Computer 工厂、诊断 recorder、run 目录/Store、Runtime Controller 组装及 summary/reporting 迁移至 `packages/app-runtime`；CLI 保留 args/env/terminal 控制。`ResolvedRunConfig` 不含凭证，凭证由 CLI 注入；`RunHandle` 保证单次 start、Controller-owned cleanup 不重复，构造失败只清理已创建的 writer。CUA 保持动态 lazy import，help/OSWorld 不解析 native binding。
+
+合同、实际文件映射、Fake 组装及限制见[DEV-2 app-runtime 实施记录](./dev-2-app-runtime-implementation-results.md)；CUA 共享底座/doctor 方向见[独立能力调研](./dev-2-cua-capability-and-extension-research.md)。本批不实现 D2-SESSION、D2-EVENT、target/focus/generation、Monitor、Memory scope、跨进程 owner 或真实 TUI 输入。当前 app-runtime focused 已通过 8 files/34 tests；新增 AST test-only 收口前 worker 最终 typecheck、full（25 files/264 tests）及 help 均通过，收口后相关 focused/typecheck 复跑通过，未重复全量；未 push，待 Sol 一轮最终放行确认。
+
 ### 第一批证据（已合并，2026-09-17）
 
 下列为第一批执行与发布记录，其中“尚未提交 / 未合并”仅描述当时状态；用户现已合并 PR #1，合并提交为 `0e41463`。第二批状态以上节为准。
