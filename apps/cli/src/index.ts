@@ -12,6 +12,8 @@ import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-g
 import { runWithTuiControls } from "./tui.js";
 import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
 import { createComputer } from "./computer-factory.js";
+import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
+import { sanitizeTerminalText } from "./terminal-output.js";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
@@ -41,10 +43,11 @@ interface CliOptions {
   contextMaxInputTokens?: number;
   interactive: boolean;
   tui: boolean;
-  riskGuard: "off" | "layered";
+  risk: ResolvedRiskConfig;
   riskModel: "off" | "same" | ModelName;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;
+  cleanupDeadlineMs: number;
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
@@ -96,13 +99,21 @@ function parseArgs(argv: readonly string[]): CliOptions {
   }
   const tui = argv.includes("--tui");
   const interactive = argv.includes("--interactive") || tui;
-  const riskGuardValue = value("--risk-guard") ?? "off";
-  if (riskGuardValue !== "off" && riskGuardValue !== "layered") throw new Error("--risk-guard must be off or layered");
+  const profileValue = value("--profile");
+  const riskGuardValue = value("--risk-guard");
+  const risk = resolveRiskConfig({
+    ...(profileValue === undefined ? {} : { profile: profileValue }),
+    ...(riskGuardValue === undefined ? {} : { riskGuard: riskGuardValue }),
+    interactive,
+    tui,
+    confirmRiskGuardOff: argv.includes("--confirm-risk-guard-off"),
+  });
   const riskModelValue = value("--risk-model") ?? "off";
   if (riskModelValue !== "off" && riskModelValue !== "same" && riskModelValue !== "glm-5.3-flash" && riskModelValue !== "qwen3.8-flash") throw new Error("--risk-model must be off, same, glm-5.3-flash, or qwen3.8-flash");
-  if (riskGuardValue === "off" && riskModelValue !== "off") throw new Error("--risk-model requires --risk-guard layered");
+  if (risk.riskGuard === "off" && riskModelValue !== "off") throw new Error("--risk-model requires --risk-guard layered");
   const riskMaxModelRequests = positiveInteger(value("--risk-max-model-requests"), 20, "--risk-max-model-requests");
   const riskTimeoutMs = positiveInteger(value("--risk-timeout-ms"), 30_000, "--risk-timeout-ms");
+  const cleanupDeadlineMs = positiveInteger(value("--cleanup-deadline-ms"), 5_000, "--cleanup-deadline-ms");
   const planning = argv.includes("--planning");
   const memoryValue = value("--memory") ?? "off";
   if (memoryValue !== "off" && memoryValue !== "facts" && memoryValue !== "entities") throw new Error("--memory must be off, facts, or entities");
@@ -136,10 +147,11 @@ function parseArgs(argv: readonly string[]): CliOptions {
     ...(contextMaxInputTokens === undefined ? {} : { contextMaxInputTokens }),
     interactive,
     tui,
-    riskGuard: riskGuardValue,
+    risk,
     riskModel: riskModelValue as "off" | "same" | ModelName,
     riskMaxModelRequests,
     riskTimeoutMs,
+    cleanupDeadlineMs,
   };
 }
 
@@ -151,7 +163,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--risk-guard <off|layered>] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
+    process.stdout.write("Usage: computer-harness --goal <text> --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -171,7 +183,7 @@ async function main(): Promise<void> {
     planning: options.planning ? "tasks-v1" as const : "off" as const,
     memory: options.memory === "off" ? "off" as const : options.memory === "facts" ? "facts-v1" as const : "entities-v1" as const,
     batching: options.batching,
-    riskGuard: options.riskGuard,
+    riskGuard: options.risk.riskGuard,
   };
   const assetReader = assetStore;
   const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking, options.qwenOutputMode);
@@ -181,7 +193,7 @@ async function main(): Promise<void> {
     : options.riskModel === "same"
       ? provider
       : makeProvider(options.riskModel, assetReader, resolve(options.output, "risk-review"), options.riskModel === "qwen3.8-flash" ? options.qwenCoordinateMode ?? "normalized_1000" : undefined, options.riskModel === "qwen3.8-flash" ? options.qwenThinking : undefined, options.riskModel === "qwen3.8-flash" ? options.qwenOutputMode : undefined);
-  const actionPolicy = options.riskGuard === "layered"
+  const actionPolicy = options.risk.riskGuard === "layered"
     ? new LayeredRiskGuard({
         ...(riskProvider === undefined ? {} : { assessor: new ProviderRiskAssessor(riskProvider) }),
         maxModelRequests: options.riskMaxModelRequests,
@@ -212,10 +224,11 @@ async function main(): Promise<void> {
     assetStore,
     onCleanupError: (diagnostic) => cleanupDiagnostics.push(diagnostic),
     batching: options.batching,
+    cleanupDeadlineMs: options.cleanupDeadlineMs,
     features,
   });
   const outcome = options.tui
-    ? await runWithTuiControls(controller, options.goal, { provider: options.model, computer: options.computer, output: options.output })
+    ? await runWithTuiControls(controller, options.goal, { provider: options.model, computer: options.computer, output: options.output, profile: options.risk.profile, riskGuard: options.risk.riskGuard })
     : await runWithCliControls(controller, options.goal, options.interactive);
   const events = await readRuntimeEvents(resolve(options.output, "trajectory.jsonl"));
   const snapshot = reduceRuntimeEvents(events, runId);
@@ -231,7 +244,9 @@ async function main(): Promise<void> {
     planning: options.planning,
     memory: options.memory,
     batching: options.batching,
-    riskGuard: options.riskGuard,
+    cleanupDeadlineMs: options.cleanupDeadlineMs,
+    riskProfile: options.risk.profile,
+    riskGuard: options.risk.riskGuard,
     riskModel: options.riskModel,
     contextMode: options.contextMode,
     contextMaxHistoryEvents: options.contextMaxHistoryEvents,
@@ -310,14 +325,14 @@ async function runWithCliControls(controller: RunController, goal: string, inter
     const snapshot = controller.getSnapshot();
     if (snapshot.status === "waiting_user" && snapshot.pendingUserQuestion !== lastQuestion) {
       lastQuestion = snapshot.pendingUserQuestion;
-      process.stdout.write(`User input required: ${snapshot.pendingUserQuestion}\n`);
+      process.stdout.write(`User input required: ${sanitizeTerminalText(snapshot.pendingUserQuestion ?? "Response required")}\n`);
       if (!interactive) {
         try { controller.cancel("non-interactive CLI cannot answer user input"); } catch { /* finished concurrently */ }
       }
     }
     if (snapshot.status === "waiting_approval" && snapshot.pendingApproval !== undefined && snapshot.pendingApproval.requestId !== lastApprovalId) {
       lastApprovalId = snapshot.pendingApproval.requestId;
-      process.stdout.write(`Approval required (${snapshot.pendingApproval.requestId}): ${snapshot.pendingApproval.reason}\nApprove? [y/N]\n`);
+      process.stdout.write(`Approval required (${sanitizeTerminalText(snapshot.pendingApproval.requestId)}): ${sanitizeTerminalText(snapshot.pendingApproval.reason)}\nApprove? [y/N]\n`);
       if (!interactive) void controller.resolveApproval(snapshot.pendingApproval.requestId, false).catch(() => undefined);
     }
   }, 100);
@@ -329,7 +344,7 @@ async function runWithCliControls(controller: RunController, goal: string, inter
     if (snapshot.status === "waiting_approval" && snapshot.pendingApproval !== undefined) {
       const approved = /^(?:y|yes)$/iu.test(line.trim());
       void controller.resolveApproval(snapshot.pendingApproval.requestId, approved).catch((error: unknown) => {
-        process.stderr.write(`Could not resolve approval: ${error instanceof Error ? error.message : String(error)}\n`);
+        process.stderr.write(`Could not resolve approval: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}\n`);
       });
       return;
     }
@@ -338,7 +353,7 @@ async function runWithCliControls(controller: RunController, goal: string, inter
       return;
     }
     void controller.submitUserInput(line).catch((error: unknown) => {
-      process.stderr.write(`Could not submit user input: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(`Could not submit user input: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}\n`);
     });
   };
   readline?.on("line", onLine);
@@ -368,6 +383,6 @@ async function readFixtureResult(path: string | undefined): Promise<{ status: "n
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  process.stderr.write(`${sanitizeTerminalText(error instanceof Error ? error.stack ?? error.message : String(error))}\n`);
   process.exitCode = 1;
 });
