@@ -1,0 +1,64 @@
+name: source-delivery-candidate
+
+# Deliberately not triggered by external pull requests or arbitrary input refs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-delivery-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout dispatched main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Setup repository-pinned pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+          cache: true
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build
+        run: pnpm run typecheck
+
+      - name: Unit and contract tests
+        run: pnpm test
+
+      - name: Built CLI help smoke test
+        run: node apps/cli/dist/index.js --help
+
+      - name: Verify dependency files were not rewritten
+        run: git diff --exit-code -- package.json pnpm-lock.yaml pnpm-workspace.yaml
+
+      # Creates a SOURCE archive, not an executable binary or portable application.
+      - name: Create source candidate and provenance
+        run: node scripts/create-source-candidate.mjs
+
+      - name: Upload source candidate only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-candidate-${{ github.sha }}
+          path: |
+            release-assets/source.tar.gz
+            release-assets/manifest.json
+            release-assets/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：入口 / 交接
 状态：工程实现及首轮无桌面真实 Provider API 已完成；真实桌面安全效果待验证
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 基线：源码核对基于 `cf59133`；实施前记录实际 HEAD 和已有修改
 范围：可插拔动作效果声明、分层 Guard、Approval、双 Provider 合同验证；不启动正式评测
 

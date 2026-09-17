@@ -1,0 +1,46 @@
+{
+  "scope": "Generated deliverables only. No repository dependency install, full typecheck/Vitest, live API, desktop, or GitHub Actions execution.",
+  "node": "v22.16.0",
+  "checks": [
+    {
+      "name": "dependabot.yml: YAML parse",
+      "result": "pass",
+      "detail": "Dependabot configuration parses."
+    },
+    {
+      "name": "ci.yml: YAML and structural checks",
+      "result": "pass",
+      "detail": "Readonly permissions, pinned actions, bounded jobs; no live runner, secrets, or raw-run upload."
+    },
+    {
+      "name": "release-candidate.yml: YAML and structural checks",
+      "result": "pass",
+      "detail": "Readonly permissions, pinned actions, bounded jobs; no live runner, secrets, or raw-run upload."
+    },
+    {
+      "name": "candidate script syntax",
+      "result": "pass",
+      "detail": "node --check passed."
+    },
+    {
+      "name": "candidate synthetic repository smoke",
+      "result": "pass",
+      "detail": "Archive contains tracked fixture source only; commit manifest and both checksums verified. No product build or install ran."
+    },
+    {
+      "name": "candidate refuses existing output",
+      "result": "pass",
+      "detail": "Second invocation failed rather than overwriting candidate."
+    },
+    {
+      "name": "candidate refuses tracked modifications",
+      "result": "pass",
+      "detail": "Dirty source was rejected before archive creation."
+    },
+    {
+      "name": "UTF-8 readback",
+      "result": "pass",
+      "detail": "19 generated text files read without replacement characters."
+    }
+  ]
+}

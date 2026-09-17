@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：结果 / 证据
 状态：当前证据
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 基线：当前仓库工作树
 范围：GLM/Qwen 无桌面 API 协议流转与历史失败样本；不覆盖真实 CUA、OSWorld VM 或正式效果评测
 
@@ -11,7 +11,7 @@
 
 当前状态（2026-09-15 源码复审后）：Qwen `strict_json` 已统一为固定 `calls[]` 协议，`anyOf` 双路径及其实验开关已删除。下文 4.2–4.4 保留迁移前的对照证据；其中“继续保留实验开关”的阶段性建议已被本次源码复审结论取代。
 
-迁移后的完整回归和统一集成验收见：[qwen-flat-regression-and-integration-acceptance-2026-09-15.md](./qwen-flat-regression-and-integration-acceptance-2026-09-15.md)。
+迁移后的完整回归和统一集成验收见：[qwen-flat-regression-and-integration-acceptance-2026-09-15.md](qwen-flat-regression-and-integration-acceptance-2026-09-15.md)。
 
 本轮只验证 Provider、ToolRegistry、Context、RunController、Planning 和 Run Memory 的真实协议流转。使用 64×64 合成图片和 Fake Computer；没有启动 CUA、OSWorld、VM，也没有执行真实 GUI 动作。API key 只从本地 `.env` 读取，报告和运行产物不保存密钥。
 
@@ -33,7 +33,7 @@ node scripts/real-memory-api-conformance.mjs --model all --mode all --env-file <
 node scripts/real-memory-api-conformance.mjs --model all --mode multi --env-file <env-file> --output <output>
 ```
 
-实现入口：[real-memory-api-conformance.mjs](../scripts/real-memory-api-conformance.mjs) 和 [real-batch-api-conformance.mjs](../scripts/real-batch-api-conformance.mjs)。它们使用正式 ToolRegistry、DefaultContextCompiler 和 RunController，不是测试专用的伪工具。
+实现入口：[real-memory-api-conformance.mjs](../../../scripts/real-memory-api-conformance.mjs) 和 [real-batch-api-conformance.mjs](../../../scripts/real-batch-api-conformance.mjs)。它们使用正式 ToolRegistry、DefaultContextCompiler 和 RunController，不是测试专用的伪工具。
 
 ## 2. 迁移前结果摘要
 
@@ -158,7 +158,7 @@ task_create → memory_write_fact → click → type
 
 ## 4.3 flat_calls 返回方式矩阵（Qwen，重复 3 次）
 
-已使用 [qwen-flat-return-matrix.mjs](../scripts/qwen-flat-return-matrix.mjs) 对不同 ModelTurn 返回形态做了 3 次重复。所有实验均使用 `flat_calls + strictToolCatalog`、Fake Computer 和同一 Runtime。
+已使用 [qwen-flat-return-matrix.mjs](../../../scripts/qwen-flat-return-matrix.mjs) 对不同 ModelTurn 返回形态做了 3 次重复。所有实验均使用 `flat_calls + strictToolCatalog`、Fake Computer 和同一 Runtime。
 
 | 场景 | 成功率 | 平均 prompt tokens | 说明 |
 |---|---:|---:|---|
@@ -304,7 +304,7 @@ message: string
 ## 7. 当前处置
 
 本报告用于保留迁移过程和历史失败样本，不再充当阶段放行入口。统一 flat 源码与最新真实 API/双后端集成结论以
-[Qwen flat 回归与统一集成验收](./qwen-flat-regression-and-integration-acceptance-2026-09-15.md) 为准；正式效果实验的唯一门槛和顺序以
-[Stage 6 收敛入口](./stage-6-convergence-and-start-state-2026-09-15.md) 为准。
+[Qwen flat 回归与统一集成验收](qwen-flat-regression-and-integration-acceptance-2026-09-15.md) 为准；正式效果实验的唯一门槛和顺序以
+[Stage 6 收敛入口](../../stage-6-convergence-and-start-state-2026-09-15.md) 为准。
 
 当前仍须把 Qwen 格式偏离、重复 ToolCall ID 和 retry 计入正式实验结果；在 G0 evaluator 校准、预算和 manifest 冻结前，不启动 20+20 Development/Validation 消融。

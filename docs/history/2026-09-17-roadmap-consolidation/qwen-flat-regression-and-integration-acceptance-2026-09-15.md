@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：结果 / 验收
 状态：当前证据
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 基线：当前仓库工作树，Qwen3.8-Flash、GLM-5.3-Flash
 范围：Provider、Runtime、Planning、Memory、Batch 和双后端 fake fixture；不覆盖真实 CUA daemon、OSWorld VM 或正式效果评测
 

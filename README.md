@@ -277,9 +277,9 @@ Stage 6 统一 flat 协议、集成验收与模块消融
 
 文档先读 [docs/DOCS-INDEX.md](./docs/DOCS-INDEX.md)。它区分当前执行、长期设计、历史证据和已废弃路线；新增或修改文档遵守 [开发文档规范](./docs/development-documentation-standard.md)。详细协议、状态机、失败语义和验收门槛见：
 
-- `docs/stage-6-convergence-and-start-state-2026-09-15.md`
-- `docs/multimodal-gui-agent-harness-product-plan.md`
-- `docs/DOCS-INDEX.md`（当前入口和历史文档边界）
+- [当前实施入口](./docs/stage-6-convergence-and-start-state-2026-09-15.md)：DEV-0/1 范围与后续门槛。
+- [完整路线 V2](./docs/full-development-roadmap-v2.md)和[验收清单](./docs/development-acceptance-v2.md)：已合并复核意见的阶段设计。
+- [文档索引](./docs/DOCS-INDEX.md)：评测资料与历史归档入口。
 
 ## 安全与隐私
 

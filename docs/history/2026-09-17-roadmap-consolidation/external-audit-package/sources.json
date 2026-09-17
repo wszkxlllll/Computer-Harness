@@ -1,0 +1,141 @@
+{
+  "repository": "wszkxlllll/Computer-Harness",
+  "commit": "39ff27f9a4ef5431450df6991793403ec890f993",
+  "cuaVersion": "0.22.2",
+  "cuaCommit": "d114f35fec05ecd37bf529e5587be86852205b64",
+  "retrievedDate": "2026-09-17",
+  "sources": {
+    "S01": {
+      "title": "Runtime 主执行路径",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/runtime/src/run-controller.ts"
+    },
+    "S02": {
+      "title": "Runtime 合同接口",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/runtime/src/contracts.ts"
+    },
+    "S03": {
+      "title": "Context 编译、裁剪与 Memory 召回",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/context/src/index.ts"
+    },
+    "S04": {
+      "title": "Memory 工具与文件存储",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/memory/src/index.ts"
+    },
+    "S05": {
+      "title": "Protocol 与 Memory 状态迁移",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/protocol/src/index.ts"
+    },
+    "S06": {
+      "title": "Trajectory Reducer / Writer / AssetStore",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/trajectory/src/index.ts"
+    },
+    "S07": {
+      "title": "CUA 产品适配器",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/computer-cua/src/cua-driver-computer.ts"
+    },
+    "S08": {
+      "title": "CLI 参数、组装与 Provider 日志",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/apps/cli/src/index.ts"
+    },
+    "S09": {
+      "title": "当前调试 TUI",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/apps/cli/src/tui.ts"
+    },
+    "S10": {
+      "title": "Risk Guard 分流与可选语义评估器",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/risk-guard/src/index.ts"
+    },
+    "S11": {
+      "title": "Planning 工具与存储",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/planning/src/index.ts"
+    },
+    "S12": {
+      "title": "Qwen Adapter",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/provider-qwen/src/index.ts"
+    },
+    "S13": {
+      "title": "GLM Adapter",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/provider-glm/src/index.ts"
+    },
+    "S14": {
+      "title": "CUA capability probe",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/spikes/cua-driver/capability-probe.ts"
+    },
+    "S15": {
+      "title": "现有 CUA 探针、fixture 与验证入口",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/spikes/cua-driver/README.md"
+    },
+    "S16": {
+      "title": "离线轨迹统计脚本",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/scripts/stage5-osworld/analyze-trajectory.mjs"
+    },
+    "S17": {
+      "title": "现有产品 TUI / 拆分计划",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/docs/product-tui-and-module-refactor-plan-2026-09-16.md"
+    },
+    "S18": {
+      "title": "现有 Risk / 本机 TUI 验证计划",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/docs/risk-guard-real-api-and-local-tui-plan-2026-09-16.md"
+    },
+    "S19": {
+      "title": "根 package.json",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/package.json"
+    },
+    "S20": {
+      "title": "pnpm workspace 与 native 依赖配置",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/pnpm-workspace.yaml"
+    },
+    "S21": {
+      "title": "Vitest 配置",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/vitest.config.ts"
+    },
+    "S22": {
+      "title": "Context 测试",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/context/src/index.test.ts"
+    },
+    "S23": {
+      "title": "CUA Adapter 测试",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/computer-cua/src/cua-driver-computer.test.ts"
+    },
+    "S24": {
+      "title": "Runtime 默认策略",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/runtime/src/defaults.ts"
+    },
+    "S25": {
+      "title": "CUA 锁定依赖",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/packages/computer-cua/package.json"
+    },
+    "S26": {
+      "title": "CLI TypeScript 构建输出",
+      "url": "https://github.com/wszkxlllll/Computer-Harness/blob/39ff27f9a4ef5431450df6991793403ec890f993/apps/cli/tsconfig.json"
+    },
+    "U01": {
+      "title": "CUA 0.22.2 说明与权限模式",
+      "url": "https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/README.md"
+    },
+    "U02": {
+      "title": "CUA 0.22.2 TypeScript SDK 合同",
+      "url": "https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/typescript/README.md"
+    },
+    "U03": {
+      "title": "CUA 0.22.2 实证动作支持矩阵",
+      "url": "https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/docs/action-support.md"
+    },
+    "U04": {
+      "title": "CUA 0.22.2 Windows 目标与投递语义",
+      "url": "https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md"
+    },
+    "G01": {
+      "title": "GitHub Actions 安全参考",
+      "url": "https://docs.github.com/en/actions/reference/security/secure-use"
+    },
+    "G02": {
+      "title": "GitHub 自托管 Runner 风险",
+      "url": "https://docs.github.com/enterprise-cloud@latest/actions/how-tos/manage-runners/self-hosted-runners/manage-access"
+    },
+    "G03": {
+      "title": "pnpm action-setup 已核对的说明",
+      "url": "https://github.com/pnpm/action-setup/blob/b906affcce14559ad1aafd4ab0e942779e9f58b1/README.md"
+    }
+  }
+}

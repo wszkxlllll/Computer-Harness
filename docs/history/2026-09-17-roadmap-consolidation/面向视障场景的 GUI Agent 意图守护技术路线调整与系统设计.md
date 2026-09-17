@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：产品研究方向 / 下一功能设计边界
 状态：方向当前有效；最小 Risk Guard 待独立实施计划
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+当前入口：[Stage 6 收敛与下一阶段起始状态](../../stage-6-convergence-and-start-state-2026-09-15.md)
 
 ## 一、研究问题
 
@@ -83,7 +83,7 @@ Run Memory 保存当前 Run 后续仍需要的事实、约束和对象状态。�
 
 主模型在生成每个 Computer 调用的同一次响应中附带预期效果，经共享 GLM/Qwen 投影解析为 ToolCall.declaredEffect。该声明不增加独立模型轮次，不成为 Driver 参数或执行事实。本地策略对高危声明直接审批，对低风险声明按策略放行，对明确宿主禁令拒绝；仅本轮 unknown、矛盾或疑似高危时按需复核。Goal/Plan/Memory 只提供背景，不因 Goal 包含支付等词而检查全部导航动作。本轮没有 OCR 或 Accessibility 依赖。该链路已完成工程实现、mock 回归与首轮无桌面真实 Provider 协议探针；真实 CUA 风险效果尚未验证。
 
-声明可能错误或漏报，必须独立测量高危动作漏放；“声明驱动放行”不等于已确认安全。以下三态指的是 Runtime 最终决策；独立模型只补充效果分类。实施细节和先后门槛统一见 [Risk Guard 实施计划](./risk-guard-implementation-plan-2026-09-15.md)。
+声明可能错误或漏报，必须独立测量高危动作漏放；“声明驱动放行”不等于已确认安全。以下三态指的是 Runtime 最终决策；独立模型只补充效果分类。实施细节和先后门槛统一见 [Risk Guard 实施计划](risk-guard-implementation-plan-2026-09-15.md)。
 
 ### 5.1 宿主位置
 
