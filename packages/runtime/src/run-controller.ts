@@ -59,6 +59,8 @@ const PROVIDER_ATTEMPT_DEADLINE_MS = 240_000;
 const MAX_PROVIDER_RETRY_WINDOW_MS = 480_000;
 /** Once GUI actions are exhausted, allow only a small number of model decisions for finish/plan closure. */
 const MAX_ACTION_BUDGET_CLOSE_TURNS = 2;
+const DEFAULT_CLEANUP_DEADLINE_MS = 5_000;
+const cleanupPendingComputers = new WeakSet<Computer>();
 export interface RunControllerDependencies {
   runId: RunId;
   provider: ProviderAdapter;
@@ -83,14 +85,18 @@ export interface RunControllerDependencies {
   features?: RunFeatureConfig;
   /** Disabled by default so the existing one-computer-call baseline is stable. */
   batching?: "off" | "same-control-input-v1";
+  /** Total wall-clock budget shared by event-writer and Computer cleanup. */
+  cleanupDeadlineMs?: number;
   onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
 }
 
 export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close";
+export type CleanupDiagnosticStatus = "timed_out";
 
 export interface CleanupDiagnostic {
   operation: CleanupOperation;
   message: string;
+  status?: CleanupDiagnosticStatus;
 }
 
 type CallState = "received" | "proposed" | "executing" | "completed" | "failed" | "rejected";
@@ -256,6 +262,7 @@ export class RunController {
   private readonly planningEnabled: boolean;
   private readonly batching: "off" | "same-control-input-v1";
   private readonly features: RunFeatureConfig;
+  private readonly cleanupDeadlineMs: number;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
   private readonly callStates = new Map<ToolCallId, CallState>();
@@ -295,6 +302,10 @@ export class RunController {
       memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
       batching: this.batching,
     };
+    this.cleanupDeadlineMs = dependencies.cleanupDeadlineMs ?? DEFAULT_CLEANUP_DEADLINE_MS;
+    if (!Number.isInteger(this.cleanupDeadlineMs) || this.cleanupDeadlineMs <= 0) {
+      throw new Error("cleanupDeadlineMs must be a positive integer");
+    }
     this.memoryEnabled = this.features.memory !== "off" && this.enabledCategories.has("side");
     this.planningEnabled = this.features.planning !== "off" && this.enabledCategories.has("planning");
     this.onCleanupError = dependencies.onCleanupError;
@@ -381,6 +392,9 @@ export class RunController {
       this.throwIfAborted();
       await this.commitEvent({ type: "run.started" });
       await this.commitEvent({ type: "computer.open.started" });
+      if (cleanupPendingComputers.has(this.computer)) {
+        throw new Error("Computer instance has unresolved cleanup from an earlier Run");
+      }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
@@ -634,23 +648,55 @@ export class RunController {
       return outcome;
     } finally {
       this.commandInbox.close();
-      try {
-        await this.eventWriter.flush();
-      } catch (error) {
-        this.reportCleanupError({ operation: "event_writer.flush", message: errorMessage(error) });
-      }
-      try {
-        await this.eventWriter.close();
-      } catch (error) {
-        this.reportCleanupError({ operation: "event_writer.close", message: errorMessage(error) });
-      }
-      if (session !== undefined) {
-        try {
-          await this.computer.close(session);
-        } catch (error) {
-          this.reportCleanupError({ operation: "computer.close", message: errorMessage(error) });
-        }
-      }
+      await this.cleanup(session);
+    }
+  }
+
+  private async cleanup(session: ComputerSession | undefined): Promise<void> {
+    const deadline = Date.now() + this.cleanupDeadlineMs;
+    await this.cleanupOperation("event_writer.flush", () => this.eventWriter.flush(), deadline);
+    await this.cleanupOperation("event_writer.close", () => this.eventWriter.close(), deadline);
+    if (session !== undefined) {
+      await this.cleanupOperation("computer.close", () => this.computer.close(session), deadline, () => {
+        cleanupPendingComputers.add(this.computer);
+      });
+    }
+  }
+
+  private async cleanupOperation(
+    operation: CleanupOperation,
+    work: () => Promise<void>,
+    deadline: number,
+    onTimeout?: () => void,
+  ): Promise<void> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      onTimeout?.();
+      this.reportCleanupError({ operation, message: `cleanup deadline exceeded before ${operation}`, status: "timed_out" });
+      return;
+    }
+    const settled = Promise.resolve().then(work).then(
+      () => ({ status: "completed" as const }),
+      (error: unknown) => ({ status: "failed" as const, error }),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<{ status: "timed_out" }>((resolve) => {
+      timer = setTimeout(() => resolve({ status: "timed_out" }), remaining);
+    });
+    const result = await Promise.race([settled, timeout]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (result.status === "completed") return;
+    if (result.status === "failed") {
+      if (operation === "computer.close") cleanupPendingComputers.add(this.computer);
+      this.reportCleanupError({ operation, message: errorMessage(result.error) });
+      return;
+    }
+    onTimeout?.();
+    this.reportCleanupError({ operation, message: `cleanup deadline exceeded during ${operation}`, status: "timed_out" });
+    if (operation === "computer.close") {
+      void settled.then((lateResult) => {
+        if (lateResult.status === "completed") cleanupPendingComputers.delete(this.computer);
+      });
     }
   }
 

@@ -17,6 +17,7 @@ import type {
 import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
+const CLEANUP_POLL_INTERVAL_MS = 50;
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
 
@@ -27,7 +28,7 @@ export interface CuaDriverComputerOptions {
   screenshotDir: string;
   /** Optional stable label; a generated label is used when omitted. */
   sessionLabel?: string;
-  /** Bound the cleanup-pending close path; no GUI action is retried. */
+  /** Total wall-clock budget for endSession/shutdown cleanup; no GUI action is retried. */
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
   driverFactory?: CuaDriverFactory;
@@ -38,6 +39,11 @@ interface PrivateSession {
   driver: CuaDriverLike;
   descriptor: ComputerSessionDescriptor;
   active: boolean;
+}
+
+interface PendingDriverCleanup {
+  label: string;
+  driver: CuaDriverLike;
 }
 
 interface PrivateObservation {
@@ -55,6 +61,7 @@ export class CuaDriverComputer implements Computer {
   private readonly observations = new Map<string, PrivateObservation>();
   private latestObservationId: ObservationId | undefined;
   private session: PrivateSession | undefined;
+  private pendingCleanup: PendingDriverCleanup | undefined;
 
   public constructor(options: CuaDriverComputerOptions) {
     if (!options.socketPath.trim()) {
@@ -72,14 +79,19 @@ export class CuaDriverComputer implements Computer {
   }
 
   public async open(options: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
+    if (this.pendingCleanup !== undefined) {
+      throw new Error(`CUA computer cleanup for session ${this.pendingCleanup.label} is pending; resolve it before opening another`);
+    }
     if (this.session !== undefined) {
       throw new Error(`computer session ${this.session.descriptor.id} is still retained; close it before opening another`);
     }
     signal.throwIfAborted();
     const driver = (this.options.driverFactory ?? ((socketPath) => CuaDriver.connect(socketPath)))(this.options.socketPath);
     const label = this.options.sessionLabel ?? `computer-harness-${Date.now()}`;
+    let sessionStarted = false;
     try {
       await driver.startSession(StartSessionInput.new({ session: label }), { signal });
+      sessionStarted = true;
       const size = await callTool(driver, "get_screen_size", { session: label }, signal);
       const dimensions = readStructuredDimensions(size);
       if (dimensions === undefined) {
@@ -100,7 +112,8 @@ export class CuaDriverComputer implements Computer {
       this.session = { label, driver, descriptor, active: true };
       return descriptor;
     } catch (error) {
-      await bestEffortCloseDriver(driver, label, this.options.cleanupWaitMs);
+      const cleanupCompleted = await bestEffortCloseDriver(driver, label, this.options.cleanupWaitMs, sessionStarted);
+      if (!cleanupCompleted) this.pendingCleanup = { label, driver };
       throw normalizeDriverError(error, "open");
     }
   }
@@ -201,35 +214,53 @@ export class CuaDriverComputer implements Computer {
       if (_value.sessionId === String(session.id)) this.observations.delete(key);
     });
     this.latestObservationId = undefined;
+    const deadline = Date.now() + this.options.cleanupWaitMs;
     try {
       let result;
       try {
-        result = await current.driver.endSession(EndSessionInput.new({ session: current.label }));
+        result = await awaitWithDeadline(
+          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          deadline,
+          "endSession",
+        );
       } catch (error) {
         const details = driverErrorDetails(error);
         if (details.errorCode !== "session_cleanup_pending" && !/session_cleanup_pending/i.test(details.message)) {
           throw error;
         }
-        await new Promise((resolve) => setTimeout(resolve, this.options.cleanupWaitMs));
-        result = await current.driver.endSession(EndSessionInput.new({ session: current.label }));
+        await waitForCleanupPoll(deadline);
+        result = await awaitWithDeadline(
+          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          deadline,
+          "endSession",
+        );
       }
-      if (!result.active) {
-        current.active = false;
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, this.options.cleanupWaitMs));
-        result = await current.driver.endSession(EndSessionInput.new({ session: current.label }));
-        current.active = result.active;
+      if (result.active) {
+        await waitForCleanupPoll(deadline);
+        result = await awaitWithDeadline(
+          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          deadline,
+          "endSession",
+        );
       }
-      if (current.active) {
+      if (result.active) {
+        await waitForCleanupPoll(deadline);
+        result = await awaitWithDeadline(
+          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          deadline,
+          "endSession",
+        );
+      }
+      if (result.active) {
         throw new Error(`CUA session ${current.label} remained active after bounded close`);
       }
+      await awaitWithDeadline(() => current.driver.shutdown(), deadline, "shutdown");
+      current.active = false;
+      this.session = undefined;
+      destroyDriver(current.driver);
     } catch (error) {
       current.active = false;
       throw normalizeDriverError(error, "close");
-    } finally {
-      try { await current.driver.shutdown(); } catch { /* preserve close diagnostic */ }
-      destroyDriver(current.driver);
-      this.session = undefined;
     }
   }
 
@@ -333,16 +364,85 @@ function normalizeDriverError(error: unknown, operation: string): Error {
   return new Error(`CUA ${operation} failed${details.errorCode ? ` [${details.errorCode}]` : ""}: ${details.message}`);
 }
 
-async function bestEffortCloseDriver(driver: CuaDriverLike, label: string, waitMs: number): Promise<void> {
+async function bestEffortCloseDriver(driver: CuaDriverLike, label: string, waitMs: number, sessionStarted: boolean): Promise<boolean> {
+  const deadline = Date.now() + waitMs;
+  let safeToDestroy = !sessionStarted;
   try {
-    let result = await driver.endSession(EndSessionInput.new({ session: label }));
-    if (result.active) {
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      await driver.endSession(EndSessionInput.new({ session: label }));
+    let result;
+    try {
+      result = await awaitWithDeadline(() => driver.endSession(EndSessionInput.new({ session: label })), deadline, "endSession");
+    } catch (error) {
+      const details = driverErrorDetails(error);
+      if (details.errorCode !== "session_cleanup_pending" && !/session_cleanup_pending/i.test(details.message)) {
+        // After startSession succeeds, a transport/unknown failure leaves the
+        // driver ownership unresolved.  Retaining it is safer than destroy().
+        if (sessionStarted) return false;
+        throw error;
+      }
+      await waitForCleanupPoll(deadline);
+      result = await awaitWithDeadline(() => driver.endSession(EndSessionInput.new({ session: label })), deadline, "endSession");
     }
-  } catch { /* open failure remains primary */ }
-  try { await driver.shutdown(); } catch { /* best effort */ }
-  destroyDriver(driver);
+    if (result.active) {
+      await waitForCleanupPoll(deadline);
+      result = await awaitWithDeadline(() => driver.endSession(EndSessionInput.new({ session: label })), deadline, "endSession");
+      if (result.active) return false;
+    }
+    safeToDestroy = true;
+  } catch (error) {
+    if (sessionStarted) return false;
+    safeToDestroy = !isCleanupDeadlineError(error);
+  }
+  if (safeToDestroy) {
+    try {
+      await awaitWithDeadline(() => driver.shutdown(), deadline, "shutdown");
+    } catch (error) {
+      // A started session is not released until shutdown is confirmed too.
+      if (sessionStarted) return false;
+      safeToDestroy = !isCleanupDeadlineError(error);
+    }
+  }
+  if (safeToDestroy) destroyDriver(driver);
+  return safeToDestroy;
+}
+
+class CleanupDeadlineError extends Error {
+  public constructor(operation: string) {
+    super(`cleanup deadline exceeded during ${operation}`);
+    this.name = "CleanupDeadlineError";
+  }
+}
+
+function isCleanupDeadlineError(error: unknown): boolean {
+  return error instanceof CleanupDeadlineError;
+}
+
+async function awaitWithDeadline<T>(work: () => Promise<T>, deadline: number, operation: string): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new CleanupDeadlineError(operation);
+  const settled = Promise.resolve().then(work).then(
+    (value) => ({ status: "completed" as const, value }),
+    (error: unknown) => ({ status: "failed" as const, error }),
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ status: "timed_out" }>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "timed_out" }), remaining);
+  });
+  const result = await Promise.race([settled, timeout]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (result.status === "timed_out") throw new CleanupDeadlineError(operation);
+  if (result.status === "failed") throw result.error;
+  return result.value;
+}
+
+function delay(durationMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+async function waitForCleanupPoll(deadline: number): Promise<void> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new CleanupDeadlineError("cleanup wait");
+  const interval = Math.min(CLEANUP_POLL_INTERVAL_MS, Math.max(1, Math.floor(remaining / 2)));
+  await awaitWithDeadline(() => delay(interval), deadline, "cleanup wait");
 }
 
 function destroyDriver(driver: CuaDriverLike): void {

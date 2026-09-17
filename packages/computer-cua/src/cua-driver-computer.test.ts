@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
@@ -212,5 +212,138 @@ describe("CuaDriverComputer", () => {
     await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/close it before opening/);
     await computer.close(session);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("bounds a hanging endSession and retains the session so a new Run cannot reuse it", async () => {
+    vi.useFakeTimers();
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-cleanup-"));
+    const fake = fakeDriver();
+    let hang = false;
+    fake.driver.endSession = async () => {
+      if (hang) return await new Promise<never>(() => undefined);
+      return { active: false, session: "test" } as never;
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, cleanupWaitMs: 25, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      hang = true;
+      const close = computer.close(session);
+      const closeResult = expect(close).rejects.toThrow(/cleanup deadline exceeded during endSession/iu);
+      await vi.advanceTimersByTimeAsync(25);
+      await closeResult;
+      await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/still retained/iu);
+    } finally {
+      vi.useRealTimers();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds a hanging shutdown after endSession without destroying the retained driver", async () => {
+    vi.useFakeTimers();
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-cleanup-"));
+    const fake = fakeDriver();
+    fake.driver.shutdown = async () => await new Promise<void>(() => undefined);
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, cleanupWaitMs: 25, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const close = computer.close(session);
+      const closeResult = expect(close).rejects.toThrow(/cleanup deadline exceeded during shutdown/iu);
+      await vi.advanceTimersByTimeAsync(25);
+      await closeResult;
+      await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/still retained/iu);
+    } finally {
+      vi.useRealTimers();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retries an active session with a bounded poll interval and completes after it becomes inactive", async () => {
+    vi.useFakeTimers();
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-cleanup-"));
+    const fake = fakeDriver();
+    let endSessionCalls = 0;
+    let shutdownCalls = 0;
+    fake.driver.endSession = async () => {
+      endSessionCalls += 1;
+      return { active: endSessionCalls === 1, session: "test" } as never;
+    };
+    fake.driver.shutdown = async () => {
+      shutdownCalls += 1;
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, cleanupWaitMs: 100, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const close = computer.close(session);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(close).resolves.toBeUndefined();
+      expect(endSessionCalls).toBe(2);
+      expect(shutdownCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retries a session_cleanup_pending response with a bounded poll interval", async () => {
+    vi.useFakeTimers();
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-cleanup-"));
+    const fake = fakeDriver();
+    let endSessionCalls = 0;
+    fake.driver.endSession = async () => {
+      endSessionCalls += 1;
+      if (endSessionCalls === 1) {
+        throw Object.assign(new Error("cleanup pending"), { inner: { errorCode: "session_cleanup_pending" } });
+      }
+      return { active: false, session: "test" } as never;
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, cleanupWaitMs: 100, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const close = computer.close(session);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(close).resolves.toBeUndefined();
+      expect(endSessionCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retains pending ownership when an already-started open cannot confirm cleanup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-cleanup-"));
+    const fake = fakeDriver();
+    let startSessionCalls = 0;
+    let endSessionCalls = 0;
+    let destroyCalls = 0;
+    fake.driver.startSession = async () => {
+      startSessionCalls += 1;
+      return { active: true, revived: false } as never;
+    };
+    fake.driver.callTool = async (name: string) => {
+      if (name === "get_screen_size") {
+        throw Object.assign(new Error("screen transport closed"), { tag: "Transport", inner: { reason: "closed" } });
+      }
+      return result();
+    };
+    fake.driver.endSession = async () => {
+      endSessionCalls += 1;
+      throw Object.assign(new Error("cleanup transport closed"), { tag: "Transport", inner: { reason: "closed" } });
+    };
+    fake.driver.shutdown = async () => undefined;
+    (fake.driver as unknown as { uniffiDestroy: () => void }).uniffiDestroy = () => {
+      destroyCalls += 1;
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, cleanupWaitMs: 25, driverFactory: () => fake.driver });
+    try {
+      await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/CUA open failed/iu);
+      expect(startSessionCalls).toBe(1);
+      expect(endSessionCalls).toBe(1);
+      expect(destroyCalls).toBe(0);
+      await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/pending/iu);
+      expect(startSessionCalls).toBe(1);
+      expect(destroyCalls).toBe(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
