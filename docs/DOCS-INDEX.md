@@ -26,6 +26,7 @@
 | [候选任务清单](./harness-development-validation-candidates-2026-09-10.json) | 既有开发/验证候选，不由本轮整理修改内容 |
 | [OSWorld 环境说明](./osworld-environment-implementation.md) | Bridge、VM、官方评分环境 |
 | [OSWorld 复现说明](./stage-5-osworld-reproducibility.md) | artifact、快照、显示及环境复现 |
+| [Linux 平台适配与验证证据](./linux-platform-adaptation-2026-09-17.md) | Linux 宿主机适配：OSWorld docker 链路两个坑、pnpm optional 原生包排查修法、单测与 D19 端到端验证 |
 
 正式实验继续采用路线第 11 节的 P/C/B/M1/M2/N 矩阵；组合与 Monitor 对照后置。G0 未闭合前不冻结正式实验，不把环境预检当模型成绩。
 
