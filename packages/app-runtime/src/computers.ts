@@ -11,7 +11,6 @@ export type ComputerBackendConfig =
   | {
       kind: "osworld";
       bridgeUrl: string;
-      token?: string;
     };
 
 interface CuaComputerModule {
@@ -20,6 +19,8 @@ interface CuaComputerModule {
 
 export interface ComputerFactoryDependencies {
   importCuaComputer?: () => Promise<CuaComputerModule>;
+  /** Injected by the application boundary; no ambient environment read here. */
+  osworldBridgeToken?: string;
 }
 
 const defaultCuaImporter = (): Promise<CuaComputerModule> => import("@computer-harness/computer-cua");
@@ -36,7 +37,7 @@ export async function createComputer(
     return new OsworldComputer({
       bridge: new OsworldBridgeClient({
         baseUrl: config.bridgeUrl,
-        ...(config.token === undefined ? {} : { token: config.token }),
+        ...(dependencies.osworldBridgeToken === undefined ? {} : { token: dependencies.osworldBridgeToken }),
       }),
     });
   }

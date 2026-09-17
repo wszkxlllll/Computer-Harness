@@ -1,24 +1,18 @@
 import { createInterface } from "node:readline";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { DefaultContextCompiler } from "@computer-harness/context";
-import type { RunId } from "@computer-harness/protocol";
-import { GlmAdapter, glmProfiles, type GlmProfile, type GlmProfileName } from "@computer-harness/provider-glm";
-import { Qwen38FlashAdapter, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode } from "@computer-harness/provider-qwen";
-import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
-import { createMemoryTools, FileMemoryStore, type MemoryToolMode } from "@computer-harness/memory";
-import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type CleanupDiagnostic } from "@computer-harness/runtime";
-import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { createRun, writeRunReport, type AppRuntimeModel, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import type { RunOutcome } from "@computer-harness/protocol";
+import type { RunController } from "@computer-harness/runtime";
 import { runWithTuiControls } from "./tui.js";
-import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
-import { createComputer } from "./computer-factory.js";
 import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
-import type { RunOutcome } from "@computer-harness/protocol";
-import type { AssetReader } from "@computer-harness/runtime";
-import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
 
-type ModelName = GlmProfileName | "qwen3.8-flash";
+type ModelName = AppRuntimeModel;
+type MemoryToolMode = "facts" | "entities";
+type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
+type Qwen38ThinkingMode = "disabled" | "low" | "medium" | "xhigh";
+type Qwen38OutputMode = "native_tools" | "strict_json";
 
 interface CliOptions {
   goal: string;
@@ -168,141 +162,70 @@ async function main(): Promise<void> {
   }
   const options = parseArgs(process.argv.slice(2));
   if (options.envFile !== undefined) await loadEnvFile(options.envFile);
-  const runId = (`run-${Date.now()}-${Math.random().toString(16).slice(2)}`) as RunId;
-  await mkdir(options.output, { recursive: true });
-  const assetStore = new FileAssetStore(resolve(options.output, "assets"));
-  const eventWriter = new JsonlRunEventWriter(resolve(options.output, "trajectory.jsonl"), runId);
-  const tools = createDefaultToolRegistry();
-  const planStoreRoot = options.planning ? resolve(options.output, "plan-store") : undefined;
-  if (planStoreRoot !== undefined) {
-    tools.registerMany(createPlanningTools(new FilePlanStore(planStoreRoot)));
+  const config = toResolvedRunConfig(options);
+  const handle = await createRun(config, { credentials: readProviderCredentials() });
+  try {
+    await handle.start((controller, goal, markControllerStarted) => options.tui
+      ? runWithTuiControls(controller, goal, { provider: options.model, computer: options.computer, output: options.output, profile: options.risk.profile, riskGuard: options.risk.riskGuard }, markControllerStarted)
+      : runWithCliControls(controller, goal, options.interactive, markControllerStarted));
+    const report = await handle.report();
+    await writeRunReport(report, config.outputDir);
+    process.stdout.write(`${JSON.stringify(report.summary, null, 2)}\n`);
+  } finally {
+    await handle.close().catch(() => undefined);
   }
-  const memoryStore = options.memory === "off" ? undefined : new FileMemoryStore(resolve(options.output, "memory-store"));
-  if (memoryStore !== undefined) tools.registerMany(createMemoryTools(memoryStore, options.memory === "off" ? "facts" : options.memory));
-  const features = {
-    planning: options.planning ? "tasks-v1" as const : "off" as const,
-    memory: options.memory === "off" ? "off" as const : options.memory === "facts" ? "facts-v1" as const : "entities-v1" as const,
-    batching: options.batching,
-    riskGuard: options.risk.riskGuard,
-  };
-  const assetReader = assetStore;
-  const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking, options.qwenOutputMode);
-  if (options.riskModel !== "off" && options.riskModel !== "same") await mkdir(resolve(options.output, "risk-review"), { recursive: true });
-  const riskProvider = options.riskModel === "off"
-    ? undefined
-    : options.riskModel === "same"
-      ? provider
-      : makeProvider(options.riskModel, assetReader, resolve(options.output, "risk-review"), options.riskModel === "qwen3.8-flash" ? options.qwenCoordinateMode ?? "normalized_1000" : undefined, options.riskModel === "qwen3.8-flash" ? options.qwenThinking : undefined, options.riskModel === "qwen3.8-flash" ? options.qwenOutputMode : undefined);
-  const actionPolicy = options.risk.riskGuard === "layered"
-    ? new LayeredRiskGuard({
-        ...(riskProvider === undefined ? {} : { assessor: new ProviderRiskAssessor(riskProvider) }),
-        maxModelRequests: options.riskMaxModelRequests,
-        timeoutMs: options.riskTimeoutMs,
-      })
-    : undefined;
-  const computer = await createComputer(options.computer === "cua"
-    ? {
-        kind: "cua",
-        socketPath: options.cuaSocket!,
-        screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
-      }
-    : {
-        kind: "osworld",
-        bridgeUrl: options.osworldBridge!,
-        ...(process.env.OSWORLD_BRIDGE_TOKEN === undefined ? {} : { token: process.env.OSWORLD_BRIDGE_TOKEN }),
-      });
-  const cleanupDiagnostics: CleanupDiagnostic[] = [];
-  const controller = new RunController({
-    runId,
-    provider,
-    computer,
-    contextCompiler: new DefaultContextCompiler(tools, { mode: options.contextMode, maxHistoryEvents: options.contextMaxHistoryEvents, features, ...(options.contextMaxInputTokens === undefined ? {} : { maxInputTokens: options.contextMaxInputTokens }) }),
-    toolRegistry: tools,
-    policy: new DefaultRuntimePolicy(options.maxSteps, options.maxModelRequests),
-    ...(actionPolicy === undefined ? {} : { actionPolicy }),
-    eventWriter,
-    assetStore,
-    onCleanupError: (diagnostic) => cleanupDiagnostics.push(diagnostic),
-    batching: options.batching,
-    cleanupDeadlineMs: options.cleanupDeadlineMs,
-    features,
-  });
-  const outcome = options.tui
-    ? await runWithTuiControls(controller, options.goal, { provider: options.model, computer: options.computer, output: options.output, profile: options.risk.profile, riskGuard: options.risk.riskGuard })
-    : await runWithCliControls(controller, options.goal, options.interactive);
-  const events = await readRuntimeEvents(resolve(options.output, "trajectory.jsonl"));
-  const snapshot = reduceRuntimeEvents(events, runId);
-  const fixture = await readFixtureResult(options.fixtureResult);
-  const summary = {
-    runId,
+}
+
+function toResolvedRunConfig(options: CliOptions): ResolvedRunConfig {
+  const qwenEndpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
+  return {
+    goal: options.goal,
     model: options.model,
-    computer: options.computer,
-    coordinateMode: options.qwenCoordinateMode ?? null,
-    thinkingMode: options.qwenThinking ?? null,
-    outputMode: options.qwenOutputMode ?? null,
-    glmThinking: process.env.GLM_THINKING === "disabled" || process.env.GLM_THINKING === "enabled" ? process.env.GLM_THINKING : "enabled",
+    computer: options.computer === "cua"
+      ? {
+          kind: "cua",
+          socketPath: options.cuaSocket!,
+          screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
+        }
+      : {
+          kind: "osworld",
+          bridgeUrl: options.osworldBridge!,
+        },
+    outputDir: options.output,
+    maxSteps: options.maxSteps,
+    maxModelRequests: options.maxModelRequests,
     planning: options.planning,
     memory: options.memory,
     batching: options.batching,
-    cleanupDeadlineMs: options.cleanupDeadlineMs,
+    contextMode: options.contextMode,
+    contextMaxHistoryEvents: options.contextMaxHistoryEvents,
+    ...(options.contextMaxInputTokens === undefined ? {} : { contextMaxInputTokens: options.contextMaxInputTokens }),
     riskProfile: options.risk.profile,
     riskGuard: options.risk.riskGuard,
     riskModel: options.riskModel,
-    contextMode: options.contextMode,
-    contextMaxHistoryEvents: options.contextMaxHistoryEvents,
-    contextMaxInputTokens: options.contextMaxInputTokens ?? null,
-    tools: tools.modelTools().map((tool) => tool.name),
-    planStoreRoot: planStoreRoot ?? null,
-    computerSession: snapshot.computerSession ?? null,
-    runtimeOutcome: outcome,
-    modelSummary: snapshot.summary ?? null,
-    modelReportedStatus: snapshot.reportedStatus ?? null,
-    modelUsage: snapshot.modelUsage ?? null,
-    cleanupDiagnostics,
-    fixture,
-    trajectory: resolve(options.output, "trajectory.jsonl"),
-    providerExchanges: resolve(options.output, "provider-exchanges.jsonl"),
-    metrics: {
-      steps: snapshot.stepCount,
-      modelRequests: snapshot.modelRequestCount,
-      guardEvaluations: snapshot.guardEvaluationCount,
-      riskModelRequests: snapshot.riskModelRequestCount,
-      approvalsRequested: events.filter((event) => event.type === "approval.requested").length,
-      guardDecisions: events.filter((event) => event.type === "action.guard.evaluated").reduce((counts, event) => ({ ...counts, [event.decision]: (counts[event.decision] ?? 0) + 1 }), {} as Record<string, number>),
-      eventCount: events.length,
-      invalidToolCalls: events.filter((event) => event.type === "tool.call.rejected").length,
-      rejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected").length,
-      budgetRejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected" && /action budget exhausted/iu.test(event.reason)).length,
-      budgetRuntimeErrors: events.filter((event) => event.type === "runtime.error" && event.category === "budget").length,
-      argumentRejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected" && /invalid arguments|invalid GUI action/iu.test(event.reason)).length,
-      toolExecutionFailed: events.filter((event) => event.type === "tool.call.failed").length,
-      providerFailed: events.filter((event) => event.type === "model.request.failed").length,
-      runtimeErrors: events.filter((event) => event.type === "runtime.error").length,
-      providerErrors: events
-        .filter((event): event is Extract<typeof event, { type: "model.request.failed" }> => event.type === "model.request.failed")
-        .map((event) => ({ category: event.category, code: event.code ?? null, retryable: event.retryable ?? null, message: event.message })),
-    },
+    riskMaxModelRequests: options.riskMaxModelRequests,
+    riskTimeoutMs: options.riskTimeoutMs,
+    cleanupDeadlineMs: options.cleanupDeadlineMs,
+    ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
+    ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
+    ...(options.qwenOutputMode === undefined ? {} : { qwenOutputMode: options.qwenOutputMode }),
+    ...(qwenEndpoint === undefined ? {} : { qwenEndpoint }),
+    ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
+    glmThinking: process.env.GLM_THINKING === "disabled" || process.env.GLM_THINKING === "enabled" ? process.env.GLM_THINKING : "enabled",
+    ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
+    ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };
-  await writeFile(resolve(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
-  process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
-function makeProvider(model: ModelName, assetReader: AssetReader, output: string, qwenCoordinateMode?: QwenCoordinateMode, qwenThinking?: Qwen38ThinkingMode, qwenOutputMode?: Qwen38OutputMode) {
-  if (model === "qwen3.8-flash") {
-    const key = process.env.DASHSCOPE_API_KEY;
-    if (key === undefined || key.trim().length === 0) throw new Error("DASHSCOPE_API_KEY is required for qwen3.8-flash");
-    const endpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
-    const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
-    return new Qwen38FlashAdapter({ apiKey: key, assetReader, httpClient: new RecordingQwenHttpClient(resolve(output, "provider-exchanges.jsonl"), qwenCoordinateMode ?? "normalized_1000", qwenThinking ?? "low", qwenOutputMode ?? "strict_json"), thinking: qwenThinking ?? "low", coordinateMode: qwenCoordinateMode ?? "normalized_1000", outputMode: qwenOutputMode ?? "strict_json", ...(endpoint === undefined ? {} : { endpoint }), ...(workspaceId === undefined ? {} : { workspaceId }) });
-  }
-  const key = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
-  if (key === undefined || key.trim().length === 0) throw new Error("ZHIPUAI_API_KEY is required for GLM profiles");
-  const configuredThinking = process.env.GLM_THINKING;
-  const profile: GlmProfile = {
-    ...glmProfiles[model],
-    thinking: configuredThinking === "disabled" ? "disabled" : "enabled",
+function readProviderCredentials(): ProviderCredentials {
+  const glmApiKey = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
+  const qwenApiKey = process.env.DASHSCOPE_API_KEY;
+  const osworldBridgeToken = process.env.OSWORLD_BRIDGE_TOKEN;
+  return {
+    ...(glmApiKey === undefined ? {} : { glmApiKey }),
+    ...(qwenApiKey === undefined ? {} : { qwenApiKey }),
+    ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
-  return new GlmAdapter({ apiKey: key, profile, assetReader, httpClient: new RecordingGlmHttpClient(resolve(output, "provider-exchanges.jsonl")), ...(process.env.GLM_BASE_URL === undefined ? {} : { endpoint: process.env.GLM_BASE_URL }) });
 }
 
 async function loadEnvFile(path: string): Promise<void> {
@@ -318,7 +241,7 @@ async function loadEnvFile(path: string): Promise<void> {
   }
 }
 
-async function runWithCliControls(controller: RunController, goal: string, interactive: boolean): Promise<RunOutcome> {
+async function runWithCliControls(controller: RunController, goal: string, interactive: boolean, markControllerStarted?: () => void): Promise<RunOutcome> {
   let lastQuestion: string | undefined;
   let lastApprovalId: string | undefined;
   const monitor = setInterval(() => {
@@ -366,20 +289,13 @@ async function runWithCliControls(controller: RunController, goal: string, inter
   };
   process.once("SIGINT", onSigint);
   try {
+    markControllerStarted?.();
     return await controller.start(goal);
   } finally {
     clearInterval(monitor);
     readline?.close();
     process.removeListener("SIGINT", onSigint);
   }
-}
-
-async function readFixtureResult(path: string | undefined): Promise<{ status: "not_configured" } | { status: "external_import"; success: boolean; reason?: string }> {
-  if (path === undefined) return { status: "not_configured" };
-  const value = JSON.parse(await readFile(path, "utf8")) as unknown;
-  if (typeof value !== "object" || value === null || typeof (value as { success?: unknown }).success !== "boolean") throw new Error("fixture result must be JSON with boolean success");
-  const reason = (value as { reason?: unknown }).reason;
-  return typeof reason === "string" ? { status: "external_import", success: (value as { success: boolean }).success, reason } : { status: "external_import", success: (value as { success: boolean }).success };
 }
 
 main().catch((error: unknown) => {

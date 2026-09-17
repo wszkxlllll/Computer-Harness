@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Computer } from "@computer-harness/runtime";
-import { createComputer } from "./computer-factory.js";
+import { createComputer } from "./computers.js";
 
 describe("createComputer", () => {
   it("does not resolve the CUA module for the OSWorld backend", async () => {

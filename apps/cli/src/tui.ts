@@ -19,6 +19,7 @@ export async function runWithTuiControls(
   controller: RunController,
   goal: string,
   metadata: TuiMetadata,
+  markControllerStarted?: () => void,
 ): Promise<RunOutcome> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error("--tui requires an interactive terminal");
@@ -77,6 +78,7 @@ export async function runWithTuiControls(
   const timer = setInterval(render, REFRESH_MS);
   render();
   try {
+    markControllerStarted?.();
     const outcome = await controller.start(goal);
     notice = `Run finished: ${outcome}`;
     render();

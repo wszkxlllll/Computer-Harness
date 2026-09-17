@@ -10,6 +10,7 @@
     { "path": "packages/planning" },
     { "path": "packages/provider-glm" },
     { "path": "packages/provider-qwen" },
+    { "path": "packages/app-runtime" },
     { "path": "apps/cli" },
     { "path": "packages/computer-cua" },
     { "path": "packages/computer-osworld" }

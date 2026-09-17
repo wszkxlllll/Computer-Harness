@@ -1,0 +1,28 @@
+{
+  "name": "@computer-harness/app-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@computer-harness/computer-cua": "workspace:*",
+    "@computer-harness/computer-osworld": "workspace:*",
+    "@computer-harness/context": "workspace:*",
+    "@computer-harness/memory": "workspace:*",
+    "@computer-harness/planning": "workspace:*",
+    "@computer-harness/protocol": "workspace:*",
+    "@computer-harness/provider-glm": "workspace:*",
+    "@computer-harness/provider-qwen": "workspace:*",
+    "@computer-harness/risk-guard": "workspace:*",
+    "@computer-harness/runtime": "workspace:*",
+    "@computer-harness/trajectory": "workspace:*"
+  }
+}
