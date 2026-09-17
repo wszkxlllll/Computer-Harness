@@ -1,7 +1,6 @@
 import { createInterface } from "node:readline";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId } from "@computer-harness/protocol";
@@ -11,7 +10,7 @@ import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
 import { createMemoryTools, FileMemoryStore, type MemoryToolMode } from "@computer-harness/memory";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type CleanupDiagnostic } from "@computer-harness/runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
-import type { AssetReader } from "@computer-harness/runtime";
+import type { AssetReader, Computer } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
 
 type ModelName = GlmProfileName | "qwen3.8-flash";
@@ -155,10 +154,7 @@ async function main(): Promise<void> {
   const assetReader = assetStore;
   const provider = makeProvider(options.model, assetReader, options.output, options.qwenCoordinateMode, options.qwenThinking, options.qwenOutputMode);
   const computer = options.computer === "cua"
-    ? new CuaDriverComputer({
-        socketPath: options.cuaSocket!,
-        screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
-      })
+    ? await createCuaComputer(options)
     : new OsworldComputer({
         bridge: new OsworldBridgeClient({
           baseUrl: options.osworldBridge!,
@@ -227,6 +223,21 @@ async function main(): Promise<void> {
   };
   await writeFile(resolve(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+}
+
+// computer-cua loads the native cua driver binding at module scope; import it
+// lazily so non-cua backends start on hosts where that binding is unavailable.
+async function createCuaComputer(options: CliOptions): Promise<Computer> {
+  try {
+    const { CuaDriverComputer } = await import("@computer-harness/computer-cua");
+    return new CuaDriverComputer({
+      socketPath: options.cuaSocket!,
+      screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
+    });
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to load @computer-harness/computer-cua. The cua backend requires the native @trycua/cua-driver platform binding to be installed and loadable. Cause: ${cause}`);
+  }
 }
 
 function makeProvider(model: ModelName, assetReader: AssetReader, output: string, qwenCoordinateMode?: QwenCoordinateMode, qwenThinking?: Qwen38ThinkingMode, qwenOutputMode?: Qwen38OutputMode) {
