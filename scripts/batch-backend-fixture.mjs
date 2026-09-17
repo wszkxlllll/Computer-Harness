@@ -3,7 +3,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
-import { CuaDriverComputer } from "../packages/computer-cua/dist/index.js";
 import { OsworldComputer } from "../packages/computer-osworld/dist/index.js";
 import { DefaultContextCompiler } from "../packages/context/dist/index.js";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry } from "../packages/runtime/dist/index.js";
@@ -102,6 +101,13 @@ function makeOsworldBridge() {
   return { bridge, calls };
 }
 
+// computer-cua loads the native cua driver binding at module scope; import it
+// lazily so the osworld fixture also runs on hosts without that binding.
+async function loadCuaDriverComputer() {
+  const module = await import("../packages/computer-cua/dist/index.js");
+  return module.CuaDriverComputer;
+}
+
 async function runBackend(name, root) {
   const output = resolve(root, name);
   await mkdir(output, { recursive: true });
@@ -113,7 +119,7 @@ async function runBackend(name, root) {
     ? makeCuaDriver()
     : makeOsworldBridge();
   const computer = name === "cua"
-    ? new CuaDriverComputer({ socketPath: "fixture-socket", screenshotDir: resolve(output, "screenshots"), sessionLabel: "fixture-cua", driverFactory: () => computerParts.driver })
+    ? new (await loadCuaDriverComputer())({ socketPath: "fixture-socket", screenshotDir: resolve(output, "screenshots"), sessionLabel: "fixture-cua", driverFactory: () => computerParts.driver })
     : new OsworldComputer({ bridge: computerParts.bridge, sessionIdFactory: () => "fixture-osworld" });
   const eventWriter = new JsonlRunEventWriter(resolve(output, "trajectory.jsonl"), runId);
   const controller = new RunController({

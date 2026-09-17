@@ -1,8 +1,6 @@
 import { createInterface } from "node:readline";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { CuaDriverComputer } from "@computer-harness/computer-cua";
-import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId } from "@computer-harness/protocol";
 import { FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmHttpClient, type GlmProfile, type GlmProfileName } from "@computer-harness/provider-glm";
@@ -12,6 +10,7 @@ import { createMemoryTools, FileMemoryStore, type MemoryToolMode } from "@comput
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type CleanupDiagnostic } from "@computer-harness/runtime";
 import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
 import { runWithTuiControls } from "./tui.js";
+import { createComputer } from "./computer-factory.js";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, reduceRuntimeEvents, readRuntimeEvents } from "@computer-harness/trajectory";
@@ -188,16 +187,16 @@ async function main(): Promise<void> {
         timeoutMs: options.riskTimeoutMs,
       })
     : undefined;
-  const computer = options.computer === "cua"
-    ? new CuaDriverComputer({
+  const computer = await createComputer(options.computer === "cua"
+    ? {
+        kind: "cua",
         socketPath: options.cuaSocket!,
         screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
-      })
-    : new OsworldComputer({
-        bridge: new OsworldBridgeClient({
-          baseUrl: options.osworldBridge!,
-          ...(process.env.OSWORLD_BRIDGE_TOKEN === undefined ? {} : { token: process.env.OSWORLD_BRIDGE_TOKEN }),
-        }),
+      }
+    : {
+        kind: "osworld",
+        bridgeUrl: options.osworldBridge!,
+        ...(process.env.OSWORLD_BRIDGE_TOKEN === undefined ? {} : { token: process.env.OSWORLD_BRIDGE_TOKEN }),
       });
   const cleanupDiagnostics: CleanupDiagnostic[] = [];
   const controller = new RunController({
