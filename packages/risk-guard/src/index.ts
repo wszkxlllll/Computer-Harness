@@ -144,14 +144,19 @@ function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<str
   const allEffects = uniqueEffects(declarations.flatMap((item) => item?.effects ?? []));
   const high = allEffects.filter((item) => highRiskEffects.has(item));
   if (high.length > 0) {
-    return { route: "require_approval", categories: categoriesForEffects(high), reasonCode: "declared_high_impact", reason: `The action declares a protected effect: ${high.join(", ")}.` };
+    const categories = categoriesForEffects(high);
+    if (hasProtectedInput(context) && !categories.includes("privacy_account")) categories.push("privacy_account");
+    return { route: "require_approval", categories, reasonCode: "declared_high_impact", reason: `The action declares a protected effect: ${high.join(", ")}.` };
   }
+  // Protected values are a local, non-negotiable execution boundary. Check
+  // them before any signal that can enter semantic review so a reviewer can
+  // never turn a mandatory approval into an allow decision.
+  if (hasProtectedInput(context)) return { route: "require_approval", categories: ["privacy_account"], reasonCode: "protected_input", reason: "The action may enter protected credentials or financial data." };
   if (allEffects.includes("unknown")) return { route: "semantic_review", categories: [], reasonCode: "declared_unknown", reason: "The immediate action effect is unknown." };
   const contradiction = findContradiction(context, declarations as ActionEffectDeclaration[]);
   if (contradiction !== undefined) return { route: "semantic_review", categories: contradiction.categories, reasonCode: contradiction.code, reason: contradiction.reason };
   const textSignal = scanDeclarationText(declarations as ActionEffectDeclaration[]);
   if (textSignal !== undefined) return { route: "semantic_review", categories: textSignal.categories, reasonCode: textSignal.code, reason: textSignal.reason };
-  if (hasProtectedInput(context)) return { route: "require_approval", categories: ["privacy_account"], reasonCode: "protected_input", reason: "The action may enter protected credentials or financial data." };
   return { route: "allow", categories: [], reasonCode: "declared_low_impact", reason: "The current action declares only low-impact effects and has no escalation signal." };
 }
 
@@ -175,13 +180,32 @@ function scanDeclarationText(declarations: ActionEffectDeclaration[]): { code: s
   ];
   const categories: RiskCategory[] = [];
   for (const declaration of declarations) {
-    const text = `${declaration.target}\n${declaration.summary}`.toLowerCase();
-    const descriptiveContext = /(view|show|inspect|history|record|help|write|type|draft|quote|mention|查看|浏览|记录|历史|帮助|写入|输入|草稿|引用|讨论)/iu.test(text);
-    if (descriptiveContext && (declaration.effects.includes("navigate") || declaration.effects.includes("local_edit"))) continue;
-    categories.push(...matches.filter((item) => item.pattern.test(text)).map((item) => item.category));
+    for (const field of [declaration.target, declaration.summary]) {
+      const text = normalizeRiskText(field);
+      const readOnlyPaymentHistory = declaration.effects.length === 1 && declaration.effects[0] === "navigate" && isReadOnlyPaymentHistoryField(text);
+      for (const match of matches) {
+        const pattern = new RegExp(match.pattern.source, `${match.pattern.flags}g`);
+        for (const result of text.matchAll(pattern)) {
+          if (readOnlyPaymentHistory && match.category === "financial") continue;
+          categories.push(match.category);
+        }
+      }
+    }
   }
   if (categories.length === 0) return undefined;
   return { code: "undeclared_high_impact_text", reason: "The declared target or summary contains an undeclared high-impact signal.", categories: [...new Set(categories)] };
+}
+
+function normalizeRiskText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+/** Payment history is an explicit complete read-only field, not a generic
+ * exemption for every declaration containing "view" or "draft". */
+function isReadOnlyPaymentHistoryField(text: string): boolean {
+  const subject = /^(?:(?:the|a)\s+)?(?:(?:payment|transaction|billing|purchase|pay(?:ment)?)[ _-]*(?:history|record(?:s)?|log(?:s)?)|(?:付款|支付|账单)[ _-]*(?:历史|记录|日志))[.!?。！？]?$/iu;
+  const viewStatement = /^(?:view|show|inspect|browse|open|查看|浏览|查阅)\s*(?:(?:the|a)\s+)?(?:(?:payment|transaction|billing|purchase|pay(?:ment)?)[ _-]*(?:history|record(?:s)?|log(?:s)?)|(?:付款|支付|账单)[ _-]*(?:历史|记录|日志))[.!?。！？]?$/iu;
+  return subject.test(text) || viewStatement.test(text);
 }
 
 function hasProtectedInput(context: ActionPolicyContext): boolean {
