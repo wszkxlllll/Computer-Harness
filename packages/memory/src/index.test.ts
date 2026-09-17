@@ -1,8 +1,48 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { RunId } from "@computer-harness/protocol";
-import { InMemoryMemoryStore, createMemoryTools } from "./index.js";
+import type { EventId, MemoryEntity, MemoryFact, MemoryState, RunId } from "@computer-harness/protocol";
+import { FileMemoryStore, InMemoryMemoryStore, createMemoryTools } from "./index.js";
 
 const runId = "memory-test" as RunId;
+
+function fact(overrides: Partial<MemoryFact> = {}): MemoryFact {
+  return {
+    id: "m1",
+    subject: { type: "run" },
+    key: "target_file",
+    value: "report.odt",
+    sourceEventId: "event-1" as EventId,
+    status: "active",
+    updatedSequence: 1,
+    ...overrides,
+  };
+}
+
+function entity(overrides: Partial<MemoryEntity> = {}): MemoryEntity {
+  return {
+    id: "e1",
+    type: "document",
+    description: "report.odt",
+    sourceEventId: "event-2" as EventId,
+    status: "active",
+    updatedSequence: 1,
+    ...overrides,
+  };
+}
+
+async function readPersistedMemory(value: unknown): Promise<MemoryState> {
+  const root = await mkdtemp(join(tmpdir(), "computer-harness-memory-schema-"));
+  const runDirectory = join(root, runId);
+  await mkdir(runDirectory, { recursive: true });
+  await writeFile(join(runDirectory, "memory.json"), JSON.stringify(value), "utf8");
+  try {
+    return await new FileMemoryStore(root).get(runId);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
 
 describe("Run memory", () => {
   it("writes, updates and rebuilds a fact without sharing state across runs", async () => {
@@ -62,5 +102,53 @@ describe("Run memory", () => {
     const duplicateOutput = await upsert.execute({ type: "document", description: "report.odt in Writer" }, context);
     await store.apply(runId, upsert.memoryMutationFromResult!(duplicateOutput, context)!);
     expect((await store.get(runId)).entities).toHaveLength(2);
+  });
+
+  it("rejects malformed persisted nested records and dangling references", async () => {
+    const base = { runId, facts: [fact()], entities: [] };
+    const cases: Array<[string, unknown]> = [
+      ["invalid fact subject", { ...base, facts: [{ ...fact(), subject: "run" }] },],
+      ["invalid fact status", { ...base, facts: [{ ...fact(), status: "corrupt" }] },],
+      ["invalid source event id", { ...base, facts: [{ ...fact(), sourceEventId: 7 }] },],
+      ["invalid sequence", { ...base, facts: [{ ...fact(), updatedSequence: -1 }] },],
+      ["duplicate fact id", { ...base, facts: [fact(), fact({ key: "other" })] },],
+      ["duplicate cross-domain id", { ...base, entities: [entity({ id: "m1" })] },],
+      ["dangling entity reference", { ...base, facts: [{ ...fact(), subject: { type: "entity", entityId: "missing" } }] },],
+      ["invalid entity status", { ...base, entities: [entity({ status: "corrupt" })] },],
+      ["invalid entity source event id", { ...base, entities: [entity({ sourceEventId: 7 as unknown as EventId })] },],
+      ["invalid entity sequence", { ...base, entities: [entity({ updatedSequence: -1 })] },],
+      ["invalid entity description", { ...base, entities: [entity({ description: 7 as unknown as string })] },],
+    ];
+    for (const [label, value] of cases) {
+      await expect(readPersistedMemory(value), label).rejects.toThrow(/memory\.json|invalid|reference/i);
+    }
+  });
+
+  it("rejects overlong memory fields and collections before persistence", async () => {
+    const base = { runId, facts: [fact()], entities: [] };
+    const cases: Array<[string, unknown]> = [
+      ["fact key", { ...base, facts: [{ ...fact(), key: "k".repeat(10_000) }] },],
+      ["fact value", { ...base, facts: [{ ...fact(), value: "v".repeat(10_000) }] },],
+      ["entity type", { ...base, facts: [], entities: [entity({ type: "t".repeat(10_000) })] },],
+      ["entity description", { ...base, facts: [], entities: [entity({ description: "d".repeat(10_000) })] },],
+      ["related task collection", { ...base, facts: [{ ...fact(), relatedTaskIds: Array.from({ length: 100 }, (_, index) => `task-${index}`) }] },],
+      ["duplicate related task", { ...base, facts: [{ ...fact(), relatedTaskIds: ["task-1", "task-1"] }] },],
+    ];
+    for (const [label, value] of cases) {
+      await expect(readPersistedMemory(value), label).rejects.toThrow(/memory\.json|length|limit|duplicate/i);
+    }
+  });
+
+  it("validates write arguments and mutation output shapes", async () => {
+    const store = new InMemoryMemoryStore();
+    const tools = createMemoryTools(store, "entities");
+    const write = tools.find((tool) => tool.name === "memory_write_fact")!;
+    const upsert = tools.find((tool) => tool.name === "memory_upsert_entity")!;
+    expect(() => write.validate({ key: "k".repeat(10_000), value: "ok" })).toThrow(/length|limit/i);
+    expect(() => write.validate({ key: "key", value: "v".repeat(10_000) })).toThrow(/length|limit/i);
+    expect(() => write.validate({ key: "key", value: "ok", relatedTaskIds: Array.from({ length: 100 }, () => "task") })).toThrow(/length|maximum|limit/i);
+    expect(() => upsert.validate({ type: "t".repeat(10_000), description: "ok" })).toThrow(/length|maximum|limit/i);
+    expect(() => upsert.validate({ type: "document", description: "d".repeat(10_000) })).toThrow(/length|maximum|limit/i);
+    expect(() => write.memoryMutationFromResult!({ operation: "upsert_fact", fact: { id: "m1", subject: { type: "entity", entityId: 1 }, key: "k", value: "v", sourceEventId: "e1", status: "active", updatedSequence: 0 } } as never, { runId, session: {} as never, signal: new AbortController().signal })).toThrow(/fact|subject|invalid/i);
   });
 });

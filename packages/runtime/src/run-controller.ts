@@ -16,6 +16,7 @@ import type {
   ToolCallId,
   ToolResult,
 } from "@computer-harness/protocol";
+import { sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
 import {
   type AssetStore,
   type RunEventWriter,
@@ -58,6 +59,8 @@ const PROVIDER_ATTEMPT_DEADLINE_MS = 240_000;
 const MAX_PROVIDER_RETRY_WINDOW_MS = 480_000;
 /** Once GUI actions are exhausted, allow only a small number of model decisions for finish/plan closure. */
 const MAX_ACTION_BUDGET_CLOSE_TURNS = 2;
+const DEFAULT_CLEANUP_DEADLINE_MS = 5_000;
+const cleanupPendingComputers = new WeakSet<Computer>();
 export interface RunControllerDependencies {
   runId: RunId;
   provider: ProviderAdapter;
@@ -82,14 +85,18 @@ export interface RunControllerDependencies {
   features?: RunFeatureConfig;
   /** Disabled by default so the existing one-computer-call baseline is stable. */
   batching?: "off" | "same-control-input-v1";
+  /** Total wall-clock budget shared by event-writer and Computer cleanup. */
+  cleanupDeadlineMs?: number;
   onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
 }
 
 export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close";
+export type CleanupDiagnosticStatus = "timed_out";
 
 export interface CleanupDiagnostic {
   operation: CleanupOperation;
   message: string;
+  status?: CleanupDiagnosticStatus;
 }
 
 type CallState = "received" | "proposed" | "executing" | "completed" | "failed" | "rejected";
@@ -255,6 +262,7 @@ export class RunController {
   private readonly planningEnabled: boolean;
   private readonly batching: "off" | "same-control-input-v1";
   private readonly features: RunFeatureConfig;
+  private readonly cleanupDeadlineMs: number;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
   private readonly callStates = new Map<ToolCallId, CallState>();
@@ -294,6 +302,10 @@ export class RunController {
       memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
       batching: this.batching,
     };
+    this.cleanupDeadlineMs = dependencies.cleanupDeadlineMs ?? DEFAULT_CLEANUP_DEADLINE_MS;
+    if (!Number.isInteger(this.cleanupDeadlineMs) || this.cleanupDeadlineMs <= 0) {
+      throw new Error("cleanupDeadlineMs must be a positive integer");
+    }
     this.memoryEnabled = this.features.memory !== "off" && this.enabledCategories.has("side");
     this.planningEnabled = this.features.planning !== "off" && this.enabledCategories.has("planning");
     this.onCleanupError = dependencies.onCleanupError;
@@ -380,6 +392,9 @@ export class RunController {
       this.throwIfAborted();
       await this.commitEvent({ type: "run.started" });
       await this.commitEvent({ type: "computer.open.started" });
+      if (cleanupPendingComputers.has(this.computer)) {
+        throw new Error("Computer instance has unresolved cleanup from an earlier Run");
+      }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
@@ -633,23 +648,55 @@ export class RunController {
       return outcome;
     } finally {
       this.commandInbox.close();
-      try {
-        await this.eventWriter.flush();
-      } catch (error) {
-        this.reportCleanupError({ operation: "event_writer.flush", message: errorMessage(error) });
-      }
-      try {
-        await this.eventWriter.close();
-      } catch (error) {
-        this.reportCleanupError({ operation: "event_writer.close", message: errorMessage(error) });
-      }
-      if (session !== undefined) {
-        try {
-          await this.computer.close(session);
-        } catch (error) {
-          this.reportCleanupError({ operation: "computer.close", message: errorMessage(error) });
-        }
-      }
+      await this.cleanup(session);
+    }
+  }
+
+  private async cleanup(session: ComputerSession | undefined): Promise<void> {
+    const deadline = Date.now() + this.cleanupDeadlineMs;
+    await this.cleanupOperation("event_writer.flush", () => this.eventWriter.flush(), deadline);
+    await this.cleanupOperation("event_writer.close", () => this.eventWriter.close(), deadline);
+    if (session !== undefined) {
+      await this.cleanupOperation("computer.close", () => this.computer.close(session), deadline, () => {
+        cleanupPendingComputers.add(this.computer);
+      });
+    }
+  }
+
+  private async cleanupOperation(
+    operation: CleanupOperation,
+    work: () => Promise<void>,
+    deadline: number,
+    onTimeout?: () => void,
+  ): Promise<void> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      onTimeout?.();
+      this.reportCleanupError({ operation, message: `cleanup deadline exceeded before ${operation}`, status: "timed_out" });
+      return;
+    }
+    const settled = Promise.resolve().then(work).then(
+      () => ({ status: "completed" as const }),
+      (error: unknown) => ({ status: "failed" as const, error }),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<{ status: "timed_out" }>((resolve) => {
+      timer = setTimeout(() => resolve({ status: "timed_out" }), remaining);
+    });
+    const result = await Promise.race([settled, timeout]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (result.status === "completed") return;
+    if (result.status === "failed") {
+      if (operation === "computer.close") cleanupPendingComputers.add(this.computer);
+      this.reportCleanupError({ operation, message: errorMessage(result.error) });
+      return;
+    }
+    onTimeout?.();
+    this.reportCleanupError({ operation, message: `cleanup deadline exceeded during ${operation}`, status: "timed_out" });
+    if (operation === "computer.close") {
+      void settled.then((lateResult) => {
+        if (lateResult.status === "completed") cleanupPendingComputers.delete(this.computer);
+      });
     }
   }
 
@@ -1136,9 +1183,12 @@ export class RunController {
       }
       if (definition.memoryMutationFromResult !== undefined) {
         const proposedMutation = definition.memoryMutationFromResult(output, context);
-        const mutation = proposedMutation === undefined ? undefined : this.attachMemoryProvenance(proposedMutation, call.id);
+        const normalizedMutation = proposedMutation === undefined ? undefined : validateMemoryMutation(proposedMutation);
+        const mutation = normalizedMutation === undefined
+          ? undefined
+          : validateMemoryMutation(this.attachMemoryProvenance(normalizedMutation, call.id));
         if (mutation !== undefined) {
-          this.validateMemoryTaskLinks(mutation);
+          this.validateMemoryMutationReferences(mutation);
           await this.commitEvent({ type: "memory.updated", callId: call.id, mutation });
           if (definition.afterMemoryCommit !== undefined) {
             try {
@@ -1323,10 +1373,58 @@ export class RunController {
     }
   }
 
-  private validateMemoryTaskLinks(mutation: MemoryMutation): void {
-    const relatedTaskIds = mutation.operation === "upsert_fact"
-      ? mutation.fact.relatedTaskIds
-      : mutation.operation === "upsert_entity" ? mutation.entity.relatedTaskIds : undefined;
+  private validateMemoryMutationReferences(mutation: MemoryMutation): void {
+    switch (mutation.operation) {
+      case "upsert_fact":
+        this.validateMemoryFact(mutation.fact);
+        return;
+      case "supersede_fact": {
+        const existing = this.snapshot.memory.facts.find((fact) => fact.id === mutation.factId);
+        if (existing === undefined || existing.status === "superseded") throw new Error(`Memory fact ${mutation.factId} does not exist or is superseded`);
+        if (mutation.replacement !== undefined) {
+          const replacement = mutation.replacement;
+          if (replacement.id === mutation.factId) throw new Error("Memory replacement must have a distinct fact id");
+          if (this.snapshot.memory.facts.some((fact) => fact.id === replacement.id) || this.snapshot.memory.entities.some((entity) => entity.id === replacement.id)) throw new Error(`Memory replacement id ${replacement.id} already exists`);
+          this.validateMemoryFact(replacement);
+        }
+        return;
+      }
+      case "mark_fact_needs_check": {
+        const existing = this.snapshot.memory.facts.find((fact) => fact.id === mutation.factId);
+        if (existing === undefined || existing.status === "superseded") throw new Error(`Memory fact ${mutation.factId} does not exist or is superseded`);
+        return;
+      }
+      case "upsert_entity": {
+        const existing = this.snapshot.memory.entities.find((entity) => entity.id === mutation.entity.id);
+        if (this.snapshot.memory.facts.some((fact) => fact.id === mutation.entity.id)) throw new Error(`Memory entity id ${mutation.entity.id} collides with a fact id`);
+        if (existing !== undefined && existing.status !== "active") throw new Error(`Memory entity ${mutation.entity.id} is not active`);
+        this.validateMemoryTaskLinks(mutation.entity.relatedTaskIds);
+        return;
+      }
+      case "invalidate_entity": {
+        const existing = this.snapshot.memory.entities.find((entity) => entity.id === mutation.entityId);
+        if (existing === undefined || existing.status !== "active") throw new Error(`Memory entity ${mutation.entityId} does not exist or is not active`);
+        return;
+      }
+    }
+  }
+
+  private validateMemoryFact(fact: import("@computer-harness/protocol").MemoryFact): void {
+    if (this.snapshot.memory.entities.some((entity) => entity.id === fact.id)) throw new Error(`Memory fact id ${fact.id} collides with an entity id`);
+    const existing = this.snapshot.memory.facts.find((item) => item.id === fact.id);
+    if (existing !== undefined && existing.status === "superseded") throw new Error(`Memory fact id ${fact.id} is superseded`);
+    if (existing !== undefined && !sameMemoryFactContent(existing, fact)) {
+      throw new Error(`Memory fact id ${fact.id} already exists; changed content requires supersede_fact`);
+    }
+    const subject = fact.subject;
+    if (subject.type === "entity") {
+      const entity = this.snapshot.memory.entities.find((item) => item.id === subject.entityId);
+      if (entity === undefined || entity.status !== "active") throw new Error(`Memory fact subject references an unknown or inactive entity ${subject.entityId}`);
+    }
+    this.validateMemoryTaskLinks(fact.relatedTaskIds);
+  }
+
+  private validateMemoryTaskLinks(relatedTaskIds: readonly string[] | undefined): void {
     if (relatedTaskIds === undefined || relatedTaskIds.length === 0) return;
     if (!this.planningEnabled) throw new Error("Memory relatedTaskIds require Planning to be enabled");
     const known = new Set(this.snapshot.plan.tasks.map((task) => task.id));

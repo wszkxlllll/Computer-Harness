@@ -2,6 +2,8 @@ import { emitKeypressEvents } from "node:readline";
 import type { RuntimeEvent, RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { RunSnapshot } from "@computer-harness/trajectory";
+import type { RiskGuardMode, RiskProfile } from "./config.js";
+import { sanitizeTerminalText } from "./terminal-output.js";
 
 const REFRESH_MS = 120;
 
@@ -9,6 +11,8 @@ export interface TuiMetadata {
   provider: string;
   computer: string;
   output: string;
+  profile: RiskProfile;
+  riskGuard: RiskGuardMode;
 }
 
 export async function runWithTuiControls(
@@ -99,11 +103,12 @@ export function buildTuiFrame(
   const lines = [
     `Computer Harness TUI  |  ${snapshot.status.toUpperCase()}${snapshot.outcome === undefined ? "" : ` / ${snapshot.outcome}`}`,
     "─".repeat(width),
-    `Provider: ${metadata.provider}   Computer: ${metadata.computer}`,
+    `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}`,
+    `Profile: ${metadata.profile}   Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${metadata.riskGuard})`,
     `Steps: ${snapshot.stepCount}   Model requests: ${snapshot.modelRequestCount}   Guard: ${snapshot.guardEvaluationCount}   Risk model: ${snapshot.riskModelRequestCount}`,
     `Plan: ${snapshot.plan.tasks.filter((task) => task.status !== "completed").length} open / ${snapshot.plan.tasks.length} total   Memory: ${snapshot.memory.facts.length} facts / ${snapshot.memory.entities.length} entities`,
     `Goal: ${clip(goal, width - 6)}`,
-    `Observation: ${latestObservation?.type === "observation.created" ? `${latestObservation.observation.id}  ${latestObservation.observation.screenshot.relativePath}` : "not available"}`,
+    `Observation: ${latestObservation?.type === "observation.created" ? clip(`${latestObservation.observation.id}  ${latestObservation.observation.screenshot.relativePath}`, width - 15) : "not available"}`,
     `Last guard: ${guard?.type === "action.guard.evaluated" ? `${guard.decision} via ${guard.path} (${guard.reasonCode})` : "not evaluated"}`,
     "─".repeat(width),
     "Recent events",
@@ -119,7 +124,7 @@ export function buildTuiFrame(
   }
   if (ui.editMode) lines.push(`> ${maskSensitiveInput(ui.input)}`);
   if (ui.notice.length > 0) lines.push(`Notice: ${clip(ui.notice, width - 8)}`);
-  lines.push(`Artifacts: ${metadata.output}`);
+  lines.push(`Artifacts: ${clip(metadata.output, width - 11)}`);
   return `${lines.join("\n")}\n`;
 }
 
@@ -144,6 +149,6 @@ function maskSensitiveInput(value: string): string {
 }
 
 function clip(value: string, max: number): string {
-  const normalized = value.replace(/\s+/gu, " ").trim();
+  const normalized = sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
   return normalized.length <= max ? normalized : `${normalized.slice(0, Math.max(0, max - 1))}…`;
 }
