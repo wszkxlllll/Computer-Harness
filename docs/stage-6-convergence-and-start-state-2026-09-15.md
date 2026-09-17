@@ -43,23 +43,23 @@ G0 当前资料从[文档索引](./DOCS-INDEX.md)进入，校准、预算和分�
 
 DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实验；不等全部功能完成才首次验证效果，也不反复用 Validation 调参。
 
-实施结果写在所属阶段交付文档并从本入口链接。当前状态：**第一批本地实施与审查完成：R01/F08 有限范围放行，CI 配置就绪但 Hosted 验收待执行；DEV-1 其他项未完成**。
+实施结果写在所属阶段交付文档并从本入口链接。当前状态：**第一批本地实施与审查完成：R01/F08 有限范围放行，PR #1 的 CI Hosted 验收已通过；DEV-1 其他项未完成**。
 
 ### 当前调度批次（2026-09-17）
 
-用户已授权由 Luna 实施、Sol 审计，主 Agent 仅规划/调度与维护入口。共享当前工作树，保留已有文档归档改动；本批不提交或推送。
+用户已授权由 Luna 实施、Sol 审计，主 Agent 仅规划/调度与维护入口。共享当前工作树，保留已有文档归档改动；实施阶段先不提交或推送，随后按独立授权建立本地检查点并提交工作分支。
 
 | 任务 | 实施者与文件范围 | 验收与状态 |
 |---|---|---|
-| DEV-0 CI | Luna worker_ci：`.github/workflows/**` 与专属实施记录 | Sol工作流设计审查通过；末次本地typecheck、15文件200项测试、CLI help与依赖漂移检查通过，见[实施记录](./dev-0-ci-implementation-results.md)第9节；Hosted及故意失败/artifact验收待做 |
+| DEV-0 CI | Luna worker_ci：`.github/workflows/**` 与专属实施记录 | Sol工作流设计审查通过；末次本地typecheck、15文件200项测试、CLI help与依赖漂移检查通过，见[实施记录](./dev-0-ci-implementation-results.md)第9节；PR [#1](https://github.com/wszkxlllll/Computer-Harness/pull/1) 的 Hosted run [35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 以 head `d57d9a8` 运行，四矩阵与 `ci-required` 均通过；B02故意失败注入未做，B06仅代码兼容，DEV-1其他项未完成 |
 | DEV-1B R01/F08 | Luna worker_probe：`packages/risk-guard/src/**`；新增装配测试归入Risk包，不让Runtime反向依赖Risk | 多轮整改后Sol有限范围放行；删除否定/引用短路，收窄只读history豁免，强制审批不被reviewer降级；见[实施记录](./dev-1-risk-implementation-results.md) |
 | 独立复核 | Sol reviewer_sol_probe，只读 | 最终无阻塞项；独立focused复跑22项Risk+4项装配+54项Runtime=80/80；只关闭具体缺陷，不证明开放域语义或视觉目标安全 |
 
-本批只运行离线测试/构建；CI worker先独占全类型构建，Risk worker运行focused测试，避免重复重构建。真实API测试在后续开始前另行说明模型/预算/数据范围，本批不操作桌面或VM。DEV-1A、其余诊断/配置/终端净化、DEV-1C仍待后续批次，不能将这一批通过称为DEV-1全部完成。
+实施阶段先运行离线测试/构建；CI worker先独占全类型构建，Risk worker运行focused测试，避免重复重构建。提交后 PR #1 的 Hosted run 已补充验证四个矩阵与聚合门禁；真实API测试在后续开始前另行说明模型/预算/数据范围，本批不操作桌面或VM。DEV-1A、其余诊断/配置/终端净化、DEV-1C仍待后续批次，不能将这一批通过称为DEV-1全部完成。
 
 第一批收口后下一批优先DEV-1A Context/Memory与独立的诊断整改，继续先反例、后修复、Sol审计；共享Runtime合同不并发修改。190/194/198项均为整改中间版本，最终本地全量结果为200项。主Agent未实施或审查业务代码，仅记录Luna执行和Sol独立审查结论。第一批实现收口时尚未提交；当前Git检查点见下，不能据此宣称远端CI或分支保护已生效。
 
-本地Git留痕已建立：用户要求的本地检查点分为三笔提交。前两批已在 `codex/dev0-dev1-checkpoint` 完成：Risk修复 `8d9f430`、CI配置 `4f131a5`；第三笔记录剩余文档/归档整理（本段随第三笔提交，故无需在此填写自身hash）。提交由Luna执行，Sol已检查敏感内容；不将此授权扩展为push或合并main。后续按[开发文档规范第8节](./development-documentation-standard.md#8-本地检查点与远端交付)实行每工单commit、小批次分支PR交付，具体提交结果见Git日志与交接。
+本地Git留痕已建立：用户要求的本地检查点分为三笔提交。前两批已在 `codex/dev0-dev1-checkpoint` 完成：Risk修复 `8d9f430`、CI配置 `4f131a5`；第三笔记录剩余文档/归档整理（本段随第三笔提交，故无需在此填写自身hash）。提交由Luna执行，Sol已检查敏感内容；随后仅按用户授权push工作分支并创建 PR #1，未合并main。Hosted run [35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 对应 head `d57d9a8c`，四矩阵和 `ci-required` 均通过；本次补充证据随新的独立文档提交落盘，具体 hash见Git日志，无需在此填写自身hash。后续按[开发文档规范第8节](./development-documentation-standard.md#8-本地检查点与远端交付)实行每工单commit、小批次分支PR交付，具体提交结果见Git日志与交接。
 
 ## 6. 分块重构复核（2026-09-17）
 

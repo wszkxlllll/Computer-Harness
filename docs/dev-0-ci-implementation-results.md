@@ -75,27 +75,27 @@ DEV-0 的 CI 工作流已经写入 [.github/workflows/ci.yml](../.github/workflo
 
 ## 4. Hosted 与本地结果的区别
 
-本次没有提交、push、调用 GitHub Actions、设置分支保护或修改远端。因而以下 B 项仍待真实 PR/手动 Hosted 运行，不得把本地通过写成 Hosted 通过：
+实施阶段最初没有提交、push 或调用 GitHub Actions；随后用户授权建立本地检查点、push 工作分支并创建 PR #1。以下 B 项按该 PR 的真实 Hosted run 更新，仍需区分 Hosted 证据与本地验证：
 
-- B01：四个矩阵项的干净 checkout、跨平台安装和完整测试。
-- B02：故意失败合同测试后 `ci-required` 的真实失败展示。
-- B03：真实 JUnit artifact 内容检查；当前工作流路径约束只允许 `.ci-reports/vitest.xml`。
-- B05：Linux Node `24.19.0` Hosted 兼容性结果。
-- B06：macOS Hosted 代码兼容与真实 Mac 桌面能力的明确区分。
+- B01：通过。PR [#1](https://github.com/wszkxlllll/Computer-Harness/pull/1) 的 [Hosted run 35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 以 head `d57d9a8c7864c521b5ccfbb9ece7e45f2611e0c1` 触发；Ubuntu 24.04/Node 22.13.0、Windows 2025/Node 22.13.0、macOS 15/Node 22.13.0、Ubuntu 24.04/Node 24.19.0 四个 verify 与 `ci-required` 均成功，每个矩阵实际通过 15 个文件、200 项测试。
+- B02：未做故意失败合同测试；`ci-required` 的 fail-closed 逻辑随本次真实成功 run 执行，但尚无注入失败后的独立失败记录。
+- B03：通过 artifact 范围检查，但不等于完成完整注入验收。Sol 独立核验四个 artifact 均只含对应的 `vitest.xml`，未发现敏感数据；本次没有向私有 `runs/` 写入 synthetic marker，因此“合成敏感标记注入”仍未执行。
+- B05：通过。Linux Node `24.19.0` 兼容性矩阵成功。
+- B06：仅证明所测 macOS Hosted 镜像上的代码/构建兼容；真实 Mac 的截图、辅助功能权限、焦点、点击和键盘输入仍未验证，也不推及其他架构。
 
-本地验证不能证明 Hosted runner 上的可用性，也不能证明真实 Mac 的截图、辅助功能授权、焦点、点击或键盘输入。macOS CI 成功后仍只能说明所测 Hosted 镜像上的代码与构建兼容；真实桌面必须另行授权验收，不能推及 Intel 或其他 Apple Silicon 架构。
+本地验证不能替代 Hosted runner 证据，也不能证明真实 Mac 的截图、辅助功能授权、焦点、点击或键盘输入。上述 macOS CI 成功仍只说明所测 Hosted 镜像上的代码与构建兼容；真实桌面必须另行授权验收，不能推及 Intel 或其他 Apple Silicon 架构。
 
 ## 5. 风险、回滚与下一步
 
-- 首次 Hosted 运行可能暴露 optional native package 在某平台的安装差异；应根据真实日志修复可移植性，不能通过跳过测试放行。
+- 首次 Hosted run 已完成并通过；后续 workflow 修改仍需新 run 验证 optional native package 的平台差异，不能通过跳过测试放行。
 - runner image 的补丁内容仍由 GitHub Hosted 管理；工作流固定标签和架构并打印实际运行信息，首次运行应把日志中的镜像版本补入阶段结果。
 - `ci-required` 已建立但尚未配置为分支保护必需检查；是否设置规则须由仓库所有者另行授权和核实套餐能力。
 - 回滚只需删除 `.github/workflows/ci.yml` 以及本结果文档，不涉及业务源码、依赖或远端状态。
-- 下一步由协调 Agent 审阅 diff 后，在一个真实 PR 或手动运行中验证完整矩阵；再根据实际结果更新本文件，不把模板或静态解析称作 CI 通过。
+- 后续修改按同一工作流在真实 PR 或手动运行中重跑；本文件的 Hosted 结论只对应 PR #1 的 head，不把模板或静态解析替代新提交的 CI 结果。
 
 ## 6. 操作边界
 
-本轮只修改 `.github/workflows/ci.yml` 和本结果文档；未修改业务代码、package 脚本、锁文件或远端设置。未消费模型 API 额度，未操作真实桌面、VM、截图或私密 runs，也未 commit/push。
+CI 实施阶段只修改 `.github/workflows/ci.yml` 和本结果文档；未修改业务代码、package 脚本或锁文件。随后仅按用户授权建立本地 checkpoint、push 工作分支并创建 PR；未 merge、未设置分支保护，未消费模型 API 额度，未操作真实桌面、VM、截图或私密 runs。
 
 ## 7. Risk 第一轮返工后的中间复核（已过时）
 
@@ -134,4 +134,18 @@ DEV-0 的 CI 工作流已经写入 [.github/workflows/ci.yml](../.github/workflo
 | `node apps/cli/dist/index.js --help` | 通过，退出码 0 | 输出 `Usage: computer-harness ...` |
 | `git diff --exit-code -- package.json pnpm-lock.yaml pnpm-workspace.yaml` | 通过，退出码 0 | 末次复核后依赖文件仍未漂移 |
 
-第 9 节仍是本地 Node/pnpm 集成证据，不是 GitHub-hosted 运行；Hosted 矩阵及 B01/B02/B03/B05/B06 的状态不因本地 `200` 项通过而改变。
+第 9 节仍是本地 Node/pnpm 集成证据；真实 Hosted 状态见第 10 节，不能用本地 `200` 项通过替代其他 head 的 Hosted 结果。
+
+## 10. PR #1 的真实 Hosted 验证
+
+PR [#1](https://github.com/wszkxlllll/Computer-Harness/pull/1) 的 head 为 `d57d9a8c7864c521b5ccfbb9ece7e45f2611e0c1`，base `main` 为 `39ff27f9a4ef5431450df6991793403ec890f993`。其 [pull_request run 35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 已完成，事件为 `pull_request`，结论为 `success`：
+
+| Hosted job | 结果 | 实际链接 |
+|---|---|---|
+| `verify (ubuntu-24.04, Node 22.13.0)` | success；15 files / 200 tests | [job 105152693220](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326/job/105152693220) |
+| `verify (windows-2025, Node 22.13.0)` | success；15 files / 200 tests | [job 105152693341](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326/job/105152693341) |
+| `verify (macos-15, Node 22.13.0)` | success；15 files / 200 tests | [job 105152693091](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326/job/105152693091) |
+| `verify (ubuntu-24.04, Node 24.19.0)` | success；15 files / 200 tests | [job 105152693408](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326/job/105152693408) |
+| `ci-required` | success | [job 105153001728](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326/job/105153001728) |
+
+Sol 独立检查 run artifacts：四个 artifact 分别为 `vitest-macos-15-node-22.13.0`、`vitest-ubuntu-24.04-node-22.13.0`、`vitest-ubuntu-24.04-node-24.19.0`、`vitest-windows-2025-node-22.13.0`，各自只含 `vitest.xml`，未发现敏感数据。该检查不等于 B02 的失败注入，也不等于真实桌面验收。
