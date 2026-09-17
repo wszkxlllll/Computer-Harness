@@ -66,6 +66,182 @@ export type MemoryMutation =
   | { operation: "upsert_entity"; entity: MemoryEntity }
   | { operation: "invalidate_entity"; entityId: string };
 
+/**
+ * Bounds for the serialized, run-scoped Memory contract.  Runtime validates
+ * tool-produced mutations with this contract before writing a
+ * `memory.updated` event; MemoryStore reuses the same validator at its own
+ * persistence boundary.
+ */
+export const MEMORY_LIMITS = {
+  runId: 128,
+  id: 128,
+  key: 256,
+  value: 4_096,
+  entityType: 128,
+  description: 4_096,
+  sourceEventId: 256,
+  relatedTaskId: 128,
+  relatedTaskIds: 32,
+} as const;
+
+/**
+ * Parse and normalize an untrusted Memory mutation without changing any
+ * state.  This intentionally owns only the shape/length contract; callers
+ * still validate run-local references and Planning task links before commit.
+ */
+export function validateMemoryMutation(value: unknown): MemoryMutation {
+  const record = memoryObject(value, "memory mutation");
+  if (typeof record.operation !== "string") throw new Error("memory mutation.operation must be a string");
+  switch (record.operation) {
+    case "upsert_fact":
+      memoryExactKeys(record, ["operation", "fact"], [], "memory mutation");
+      return { operation: "upsert_fact", fact: validateMemoryFactShape(record.fact, "memory mutation.fact") };
+    case "supersede_fact":
+      memoryExactKeys(record, ["operation", "factId"], ["replacement"], "memory mutation");
+      return {
+        operation: "supersede_fact",
+        factId: memoryString(record.factId, "memory mutation.factId", MEMORY_LIMITS.id),
+        ...(memoryHasOwn(record, "replacement")
+          ? { replacement: validateMemoryFactShape(record.replacement, "memory mutation.replacement") }
+          : {}),
+      };
+    case "mark_fact_needs_check":
+      memoryExactKeys(record, ["operation", "factId"], [], "memory mutation");
+      return {
+        operation: "mark_fact_needs_check",
+        factId: memoryString(record.factId, "memory mutation.factId", MEMORY_LIMITS.id),
+      };
+    case "upsert_entity":
+      memoryExactKeys(record, ["operation", "entity"], [], "memory mutation");
+      return { operation: "upsert_entity", entity: validateMemoryEntityShape(record.entity, "memory mutation.entity") };
+    case "invalidate_entity":
+      memoryExactKeys(record, ["operation", "entityId"], [], "memory mutation");
+      return {
+        operation: "invalidate_entity",
+        entityId: memoryString(record.entityId, "memory mutation.entityId", MEMORY_LIMITS.id),
+      };
+    default:
+      throw new Error(`memory mutation operation is invalid: ${record.operation}`);
+  }
+}
+
+/**
+ * Compare the semantic content of two facts.  Event provenance is deliberately
+ * excluded because Runtime re-stamps sourceEventId and updatedSequence when a
+ * tool result becomes a committed mutation.
+ */
+export function sameMemoryFactContent(left: MemoryFact, right: MemoryFact): boolean {
+  if (left.id !== right.id || left.key !== right.key || left.value !== right.value || left.status !== right.status || left.subject.type !== right.subject.type) return false;
+  if (left.subject.type === "entity" && right.subject.type === "entity" && left.subject.entityId !== right.subject.entityId) return false;
+  if (left.relatedTaskIds === undefined || right.relatedTaskIds === undefined) return left.relatedTaskIds === right.relatedTaskIds;
+  return left.relatedTaskIds.length === right.relatedTaskIds.length && left.relatedTaskIds.every((id, index) => id === right.relatedTaskIds?.[index]);
+}
+
+function validateMemoryFactShape(value: unknown, label: string): MemoryFact {
+  const record = memoryObject(value, label);
+  memoryExactKeys(
+    record,
+    ["id", "subject", "key", "value", "sourceEventId", "status", "updatedSequence"],
+    ["relatedTaskIds"],
+    label,
+  );
+  return {
+    id: memoryString(record.id, `${label}.id`, MEMORY_LIMITS.id),
+    subject: validateMemorySubjectShape(record.subject, `${label}.subject`),
+    key: memoryString(record.key, `${label}.key`, MEMORY_LIMITS.key),
+    value: memoryString(record.value, `${label}.value`, MEMORY_LIMITS.value, true),
+    sourceEventId: memoryString(record.sourceEventId, `${label}.sourceEventId`, MEMORY_LIMITS.sourceEventId) as EventId,
+    status: validateMemoryFactStatus(record.status, `${label}.status`),
+    ...(memoryHasOwn(record, "relatedTaskIds")
+      ? { relatedTaskIds: validateMemoryRelatedTaskIds(record.relatedTaskIds, `${label}.relatedTaskIds`) }
+      : {}),
+    updatedSequence: validateMemorySequence(record.updatedSequence, `${label}.updatedSequence`),
+  };
+}
+
+function validateMemoryEntityShape(value: unknown, label: string): MemoryEntity {
+  const record = memoryObject(value, label);
+  memoryExactKeys(record, ["id", "type", "description", "sourceEventId", "status", "updatedSequence"], ["relatedTaskIds"], label);
+  return {
+    id: memoryString(record.id, `${label}.id`, MEMORY_LIMITS.id),
+    type: memoryString(record.type, `${label}.type`, MEMORY_LIMITS.entityType),
+    description: memoryString(record.description, `${label}.description`, MEMORY_LIMITS.description),
+    sourceEventId: memoryString(record.sourceEventId, `${label}.sourceEventId`, MEMORY_LIMITS.sourceEventId) as EventId,
+    status: validateMemoryEntityStatus(record.status, `${label}.status`),
+    ...(memoryHasOwn(record, "relatedTaskIds")
+      ? { relatedTaskIds: validateMemoryRelatedTaskIds(record.relatedTaskIds, `${label}.relatedTaskIds`) }
+      : {}),
+    updatedSequence: validateMemorySequence(record.updatedSequence, `${label}.updatedSequence`),
+  };
+}
+
+function validateMemorySubjectShape(value: unknown, label: string): MemorySubject {
+  const record = memoryObject(value, label);
+  if (record.type === "run") {
+    memoryExactKeys(record, ["type"], [], label);
+    return { type: "run" };
+  }
+  if (record.type === "entity") {
+    memoryExactKeys(record, ["type", "entityId"], [], label);
+    return { type: "entity", entityId: memoryString(record.entityId, `${label}.entityId`, MEMORY_LIMITS.id) };
+  }
+  throw new Error(`${label}.type must be run or entity`);
+}
+
+function validateMemoryRelatedTaskIds(value: unknown, label: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.length > MEMORY_LIMITS.relatedTaskIds) {
+    throw new Error(`${label} exceeds the maximum of ${MEMORY_LIMITS.relatedTaskIds} items`);
+  }
+  const ids: string[] = [];
+  for (const [index, item] of value.entries()) {
+    const id = memoryString(item, `${label}[${index}]`, MEMORY_LIMITS.relatedTaskId);
+    if (ids.includes(id)) throw new Error(`${label} contains duplicate task id ${id}`);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function validateMemoryFactStatus(value: unknown, label: string): MemoryFact["status"] {
+  if (value === "active" || value === "needs_check" || value === "superseded") return value;
+  throw new Error(`${label} is invalid`);
+}
+
+function validateMemoryEntityStatus(value: unknown, label: string): MemoryEntity["status"] {
+  if (value === "active" || value === "stale" || value === "superseded") return value;
+  throw new Error(`${label} is invalid`);
+}
+
+function validateMemorySequence(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function memoryString(value: unknown, label: string, maxLength: number, allowEmpty = false): string {
+  if (typeof value !== "string" || (!allowEmpty && value.trim().length === 0)) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  if (value.length > maxLength) throw new Error(`${label} exceeds the maximum length of ${maxLength}`);
+  return value;
+}
+
+function memoryObject(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+function memoryHasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function memoryExactKeys(record: Record<string, unknown>, required: readonly string[], optional: readonly string[], label: string): void {
+  const allowed = new Set([...required, ...optional]);
+  for (const key of Object.keys(record)) if (!allowed.has(key)) throw new Error(`${label} contains unknown field ${key}`);
+  for (const key of required) if (!memoryHasOwn(record, key)) throw new Error(`${label}.${key} is required`);
+}
+
 /** Pure state transition shared by the trajectory reducer and MemoryStore. */
 export function reduceMemoryMutation(state: MemoryState, mutation: MemoryMutation): MemoryState {
   const next: MemoryState = {

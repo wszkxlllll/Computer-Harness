@@ -16,6 +16,7 @@ import type {
   ToolCallId,
   ToolResult,
 } from "@computer-harness/protocol";
+import { sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
 import {
   type AssetStore,
   type RunEventWriter,
@@ -1136,9 +1137,12 @@ export class RunController {
       }
       if (definition.memoryMutationFromResult !== undefined) {
         const proposedMutation = definition.memoryMutationFromResult(output, context);
-        const mutation = proposedMutation === undefined ? undefined : this.attachMemoryProvenance(proposedMutation, call.id);
+        const normalizedMutation = proposedMutation === undefined ? undefined : validateMemoryMutation(proposedMutation);
+        const mutation = normalizedMutation === undefined
+          ? undefined
+          : validateMemoryMutation(this.attachMemoryProvenance(normalizedMutation, call.id));
         if (mutation !== undefined) {
-          this.validateMemoryTaskLinks(mutation);
+          this.validateMemoryMutationReferences(mutation);
           await this.commitEvent({ type: "memory.updated", callId: call.id, mutation });
           if (definition.afterMemoryCommit !== undefined) {
             try {
@@ -1323,10 +1327,58 @@ export class RunController {
     }
   }
 
-  private validateMemoryTaskLinks(mutation: MemoryMutation): void {
-    const relatedTaskIds = mutation.operation === "upsert_fact"
-      ? mutation.fact.relatedTaskIds
-      : mutation.operation === "upsert_entity" ? mutation.entity.relatedTaskIds : undefined;
+  private validateMemoryMutationReferences(mutation: MemoryMutation): void {
+    switch (mutation.operation) {
+      case "upsert_fact":
+        this.validateMemoryFact(mutation.fact);
+        return;
+      case "supersede_fact": {
+        const existing = this.snapshot.memory.facts.find((fact) => fact.id === mutation.factId);
+        if (existing === undefined || existing.status === "superseded") throw new Error(`Memory fact ${mutation.factId} does not exist or is superseded`);
+        if (mutation.replacement !== undefined) {
+          const replacement = mutation.replacement;
+          if (replacement.id === mutation.factId) throw new Error("Memory replacement must have a distinct fact id");
+          if (this.snapshot.memory.facts.some((fact) => fact.id === replacement.id) || this.snapshot.memory.entities.some((entity) => entity.id === replacement.id)) throw new Error(`Memory replacement id ${replacement.id} already exists`);
+          this.validateMemoryFact(replacement);
+        }
+        return;
+      }
+      case "mark_fact_needs_check": {
+        const existing = this.snapshot.memory.facts.find((fact) => fact.id === mutation.factId);
+        if (existing === undefined || existing.status === "superseded") throw new Error(`Memory fact ${mutation.factId} does not exist or is superseded`);
+        return;
+      }
+      case "upsert_entity": {
+        const existing = this.snapshot.memory.entities.find((entity) => entity.id === mutation.entity.id);
+        if (this.snapshot.memory.facts.some((fact) => fact.id === mutation.entity.id)) throw new Error(`Memory entity id ${mutation.entity.id} collides with a fact id`);
+        if (existing !== undefined && existing.status !== "active") throw new Error(`Memory entity ${mutation.entity.id} is not active`);
+        this.validateMemoryTaskLinks(mutation.entity.relatedTaskIds);
+        return;
+      }
+      case "invalidate_entity": {
+        const existing = this.snapshot.memory.entities.find((entity) => entity.id === mutation.entityId);
+        if (existing === undefined || existing.status !== "active") throw new Error(`Memory entity ${mutation.entityId} does not exist or is not active`);
+        return;
+      }
+    }
+  }
+
+  private validateMemoryFact(fact: import("@computer-harness/protocol").MemoryFact): void {
+    if (this.snapshot.memory.entities.some((entity) => entity.id === fact.id)) throw new Error(`Memory fact id ${fact.id} collides with an entity id`);
+    const existing = this.snapshot.memory.facts.find((item) => item.id === fact.id);
+    if (existing !== undefined && existing.status === "superseded") throw new Error(`Memory fact id ${fact.id} is superseded`);
+    if (existing !== undefined && !sameMemoryFactContent(existing, fact)) {
+      throw new Error(`Memory fact id ${fact.id} already exists; changed content requires supersede_fact`);
+    }
+    const subject = fact.subject;
+    if (subject.type === "entity") {
+      const entity = this.snapshot.memory.entities.find((item) => item.id === subject.entityId);
+      if (entity === undefined || entity.status !== "active") throw new Error(`Memory fact subject references an unknown or inactive entity ${subject.entityId}`);
+    }
+    this.validateMemoryTaskLinks(fact.relatedTaskIds);
+  }
+
+  private validateMemoryTaskLinks(relatedTaskIds: readonly string[] | undefined): void {
     if (relatedTaskIds === undefined || relatedTaskIds.length === 0) return;
     if (!this.planningEnabled) throw new Error("Memory relatedTaskIds require Planning to be enabled");
     const known = new Set(this.snapshot.plan.tasks.map((task) => task.id));
