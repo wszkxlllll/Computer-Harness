@@ -86,8 +86,8 @@ export class DefaultContextCompiler implements ContextCompiler {
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
     if (maxInputTokens !== undefined) {
       const historyBudget = maxInputTokens - estimatedFixedTextTokens;
-      if (historyBudget < 1 && selectedEvents.length > 0) throw new Error("Context fixed blocks exceed maxInputTokens");
-      selectedEvents = fitEventsToTokenBudget(selectedEvents, Math.max(1, historyBudget));
+      if (historyBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
+      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
     }
     const latestEventObservation = findLatestObservation(orderedEvents);
     if (input.latestObservation !== undefined &&
@@ -195,9 +195,13 @@ export class DefaultContextCompiler implements ContextCompiler {
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
     const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents);
+    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens;
+    if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
+      throw new Error("Context history exceeds maxInputTokens after selection");
+    }
     const budget: ContextBudgetReport = {
       mode: input.context?.mode ?? this.mode,
-      estimatedInputTokens: estimatedFixedTextTokens + estimatedHistoryTextTokens,
+      estimatedInputTokens,
       estimatedFixedTextTokens,
       estimatedHistoryTextTokens,
       estimatedToolSchemaTokens,
@@ -236,18 +240,81 @@ function selectHistoryEvents(events: readonly RuntimeEvent[], mode: "raw" | "rec
 }
 
 function fitEventsToTokenBudget(events: readonly RuntimeEvent[], maxTokens: number): RuntimeEvent[] {
-  const retained = [...events];
-  while (retained.length > 1 && estimateEventTokens(retained) > maxTokens) {
-    const firstResponse = retained.findIndex((event) => event.type === "model.response.received");
-    if (firstResponse < 0) {
-      retained.shift();
-      continue;
-    }
-    const nextResponse = retained.slice(firstResponse + 1).findIndex((event) => event.type === "model.response.received");
-    const end = nextResponse < 0 ? retained.length : firstResponse + 1 + nextResponse;
-    retained.splice(0, end);
+  const authoritativeInputs = events.filter((event) => event.type === "user.input.received");
+  if (estimateEventTokens(authoritativeInputs) > maxTokens) {
+    throw new Error("Authoritative user inputs exceed maxInputTokens");
+  }
+  let retained = [...events];
+  while (estimateEventTokens(retained) > maxTokens) {
+    const group = findOldestEvictableHistoryGroup(retained);
+    if (group.length === 0) throw new Error("Context history cannot fit maxInputTokens");
+    const discarded = new Set(group);
+    const next = retained.filter((event) => !discarded.has(event));
+    if (next.length === retained.length) throw new Error("Context history cannot fit maxInputTokens");
+    retained = next;
   }
   return retained;
+}
+
+function findOldestEvictableHistoryGroup(events: readonly RuntimeEvent[]): RuntimeEvent[] {
+  for (const event of events) {
+    if (event.type === "user.input.received") continue;
+    if (event.type === "model.response.received") {
+      const callIds = event.turn.type === "tool_calls" ? event.turn.calls.map((call) => call.id) : [];
+      return [event, ...historyEventsForCalls(events, callIds)];
+    }
+    const callId = historyCallId(event);
+    if (callId !== undefined) return historyEventsForCalls(events, [callId]);
+    const actionIds = historyActionIds(event);
+    if (actionIds.length > 0) return historyEventsForActions(events, actionIds);
+    return [event];
+  }
+  return [];
+}
+
+function historyEventsForCalls(events: readonly RuntimeEvent[], callIds: readonly ToolCallId[]): RuntimeEvent[] {
+  const callIdSet = new Set(callIds);
+  const actionIds = new Set<string>();
+  for (const event of events) {
+    if (event.type === "action.proposed" && callIdSet.has(event.callId)) actionIds.add(event.action.actionId);
+    if (event.type === "action.guard.evaluated" && event.callIds.some((id) => callIdSet.has(id))) {
+      for (const action of event.actions) actionIds.add(action.actionId);
+    }
+  }
+  return events.filter((event) => {
+    const callId = historyCallId(event);
+    if (callId !== undefined && callIdSet.has(callId)) return true;
+    return historyActionIds(event).some((id) => actionIds.has(id));
+  });
+}
+
+function historyEventsForActions(events: readonly RuntimeEvent[], actionIds: readonly string[]): RuntimeEvent[] {
+  const actionIdSet = new Set(actionIds);
+  return events.filter((event) => {
+    return historyActionIds(event).some((id) => actionIdSet.has(id));
+  });
+}
+
+function historyCallId(event: RuntimeEvent): ToolCallId | undefined {
+  switch (event.type) {
+    case "tool.call.received": return event.call.id;
+    case "tool.call.completed":
+    case "tool.call.failed": return event.result.callId;
+    case "tool.call.rejected": return event.callId;
+    case "action.proposed": return event.callId;
+    default: return undefined;
+  }
+}
+
+function historyActionIds(event: RuntimeEvent): readonly string[] {
+  switch (event.type) {
+    case "action.proposed":
+    case "action.execution.started": return [event.action.actionId];
+    case "action.execution.completed":
+    case "action.execution.failed": return [event.receipt.actionId];
+    case "action.guard.evaluated": return event.actions.map((action) => action.actionId);
+    default: return [];
+  }
 }
 
 function estimateEventTokens(events: readonly RuntimeEvent[]): number {

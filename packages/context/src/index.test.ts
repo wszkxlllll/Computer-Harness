@@ -178,6 +178,112 @@ describe("DefaultContextCompiler", () => {
     expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId))).toBe(true);
   });
 
+  it("keeps authoritative user corrections while evicting a complete older call group", async () => {
+    const latest = observation("obs-correction");
+    const oldCall = { id: "call-old-correction" as ToolCallId, name: "click", arguments: { x: 10, y: 20 } };
+    const newCall = { id: "call-new-correction" as ToolCallId, name: "click", arguments: { x: 30, y: 40 } };
+    const events: RuntimeEvent[] = [
+      event(0, { type: "observation.created", observation: latest }),
+      event(1, { type: "model.response.received", turn: { type: "tool_calls", calls: [oldCall], assistantText: "x".repeat(5_000) } }),
+      event(2, { type: "tool.call.received", call: oldCall }),
+      event(3, { type: "user.input.received", text: "Do not send the order" }),
+      event(4, { type: "tool.call.completed", result: { callId: oldCall.id, status: "completed", output: { ok: true } } }),
+      event(5, { type: "model.response.received", turn: { type: "tool_calls", calls: [newCall] } }),
+      event(6, { type: "tool.call.received", call: newCall }),
+      event(7, { type: "tool.call.completed", result: { callId: newCall.id, status: "completed", output: { ok: true } } }),
+    ];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { mode: "recent", maxHistoryEvents: 20 });
+    const base = await compiler.compile({ runId, goal: "Submit a form", recentEvents: [] }, new AbortController().signal);
+    const maxInputTokens = base.contextBudget!.estimatedFixedTextTokens! + 250;
+    const input = await compiler.compile({
+      runId,
+      goal: "Submit a form",
+      recentEvents: events,
+      context: { mode: "recent", maxHistoryEvents: 20, maxInputTokens: maxInputTokens },
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const serialized = JSON.stringify(input.messages);
+    expect(serialized).toContain("Do not send the order");
+    expect(serialized).toContain(newCall.id);
+    expect(serialized).not.toContain(oldCall.id);
+    expect(input.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(maxInputTokens);
+  });
+
+  it("evicts a multi-call response as one complete group while retaining correction and the newer group", async () => {
+    const latest = observation("obs-multi-call-correction");
+    const oldCallOne = { id: "call-old-one" as ToolCallId, name: "click", arguments: { x: 10, y: 20 } };
+    const oldCallTwo = { id: "call-old-two" as ToolCallId, name: "type", arguments: { text: "old" } };
+    const newCall = { id: "call-new-complete" as ToolCallId, name: "click", arguments: { x: 30, y: 40 } };
+    const events: RuntimeEvent[] = [
+      event(0, { type: "observation.created", observation: latest }),
+      event(1, { type: "model.response.received", turn: { type: "tool_calls", calls: [oldCallOne, oldCallTwo], assistantText: "x".repeat(5_000) } }),
+      event(2, { type: "tool.call.received", call: oldCallOne }),
+      event(3, { type: "user.input.received", text: "Keep the revised destination and do not send the old order" }),
+      event(4, { type: "tool.call.received", call: oldCallTwo }),
+      event(5, { type: "tool.call.completed", result: { callId: oldCallOne.id, status: "completed", output: { ok: true } } }),
+      event(6, { type: "tool.call.completed", result: { callId: oldCallTwo.id, status: "completed", output: { ok: true } } }),
+      event(7, { type: "model.response.received", turn: { type: "tool_calls", calls: [newCall] } }),
+      event(8, { type: "tool.call.received", call: newCall }),
+      event(9, { type: "tool.call.completed", result: { callId: newCall.id, status: "completed", output: { ok: true } } }),
+    ];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { mode: "recent", maxHistoryEvents: 20 });
+    const base = await compiler.compile({ runId, goal: "Submit the revised form", recentEvents: [] }, new AbortController().signal);
+    const maxInputTokens = base.contextBudget!.estimatedFixedTextTokens! + 250;
+    const input = await compiler.compile({
+      runId,
+      goal: "Submit the revised form",
+      recentEvents: events,
+      context: { mode: "recent", maxHistoryEvents: 20, maxInputTokens },
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const serialized = JSON.stringify(input.messages);
+    expect(serialized).toContain("Keep the revised destination and do not send the old order");
+    expect(serialized).toContain(newCall.id);
+    expect(serialized).not.toContain(oldCallOne.id);
+    expect(serialized).not.toContain(oldCallTwo.id);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_result" && block.result.callId === oldCallOne.id))).toBe(false);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_result" && block.result.callId === oldCallTwo.id))).toBe(false);
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "tool_result" && block.result.callId === newCall.id))).toBe(true);
+    expect(input.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(maxInputTokens);
+  });
+
+  it("rejects one oversized authoritative history event instead of passing it through", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const base = await compiler.compile({ runId, goal: "small goal", recentEvents: [] }, new AbortController().signal);
+    const maxInputTokens = base.contextBudget!.estimatedFixedTextTokens! + 100;
+    await expect(compiler.compile({
+      runId,
+      goal: "small goal",
+      recentEvents: [event(0, { type: "user.input.received", text: "x".repeat(8_000) })],
+      context: { maxInputTokens },
+    }, new AbortController().signal)).rejects.toThrow(/authoritative|budget/i);
+  });
+
+  it("evicts one oversized optional model event as a complete group", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const base = await compiler.compile({ runId, goal: "small goal", recentEvents: [] }, new AbortController().signal);
+    const maxInputTokens = base.contextBudget!.estimatedFixedTextTokens! + 100;
+    const input = await compiler.compile({
+      runId,
+      goal: "small goal",
+      recentEvents: [event(0, { type: "model.response.received", turn: { type: "finish", summary: "x".repeat(8_000) } })],
+      context: { maxInputTokens },
+    }, new AbortController().signal);
+    expect(JSON.stringify(input.messages)).not.toContain("x".repeat(100));
+    expect(input.contextBudget?.omittedHistoryEvents).toBe(1);
+    expect(input.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(maxInputTokens);
+  });
+
+  it("rejects an oversized fixed block even when history is empty", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    await expect(compiler.compile({
+      runId,
+      goal: "x".repeat(8_000),
+      recentEvents: [],
+      context: { maxInputTokens: 100 },
+    }, new AbortController().signal)).rejects.toThrow(/fixed.*exceed|maxInputTokens/i);
+  });
+
   it("injects only active Run Memory facts and keeps memory absent when empty", async () => {
     const latest = observation("obs-memory");
     const compiler = new DefaultContextCompiler(createDefaultComputerTools());
