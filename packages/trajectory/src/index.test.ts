@@ -698,6 +698,18 @@ describe("readRuntimeEvents", () => {
   });
 
   it("rejects cross-field ownership and receipt mismatches at the schema boundary", () => {
+    const lifecycleMemoryEvent = {
+      eventId: "event-lifecycle",
+      runId,
+      sequence: 0,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "memory.updated" as const,
+      source: "lifecycle" as const,
+      mutation: { operation: "mark_fact_needs_check" as const, factId: "fact-1", reason: "scope_ended" as const },
+    };
+    expect(runtimeEventSchema.parse(lifecycleMemoryEvent)).toEqual(lifecycleMemoryEvent);
+    expect(runtimeEventSchema.safeParse({ ...lifecycleMemoryEvent, callId }).success).toBe(false);
+
     const observation = {
       eventId: "event-0",
       runId,

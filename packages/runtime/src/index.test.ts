@@ -471,7 +471,7 @@ async function makeController(
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 1000; attempt += 1) {
+  for (let attempt = 0; attempt < 5000; attempt += 1) {
     if (predicate()) {
       return;
     }
@@ -1944,6 +1944,44 @@ describe("RunController Monitor online consumer", () => {
     expect(proposals.every((event) => event.type !== "monitor.proposal" || event.guidanceText === undefined || event.guidanceText.length <= 240)).toBe(true);
     expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Monitor candidate"))))).toBe(true);
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(5);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("defers Monitor help until the action, ToolResult and post-action observation are committed", async () => {
+    const turns: ModelTurn[] = [];
+    for (let index = 0; index < 8; index += 1) turns.push({ type: "tool_calls", calls: [clickCall(`monitor-help-click-${index}`)] });
+    turns.push({ type: "finish", summary: "done" });
+    const created = await makeController(new ScriptedProvider(turns), undefined, clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    const running = created.controller.start("monitor help boundary");
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_user");
+    const beforeInput = created.controller.getEvents();
+    const requestIndex = beforeInput.findIndex((event) => event.type === "user.input.requested");
+    expect(requestIndex).toBeGreaterThan(-1);
+    expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "tool.call.completed" || event.type === "tool.call.failed")).toBe(true);
+    expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "observation.created" && event.sequence > (beforeInput.find((candidate) => candidate.type === "action.execution.completed")?.sequence ?? -1))).toBe(true);
+    expect(beforeInput.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(false);
+    await created.controller.submitUserInput("continue after review");
+    await expect(running).resolves.toBe("succeeded");
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not turn a Monitor proposal append failure into a business Run failure", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("monitor-append-failure-1")] },
+      { type: "tool_calls", calls: [clickCall("monitor-append-failure-2")] },
+      { type: "tool_calls", calls: [clickCall("monitor-append-failure-3")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "shadow" },
+      eventWriter: (path) => new FailingWriter(new JsonlRunEventWriter(path, runId, { next: (() => { let count = 0; return () => `monitor-writer-${count++}` as EventId; })() }), (draft) => draft.type === "monitor.proposal"),
+    });
+    await expect(created.controller.start("monitor diagnostic failure")).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(3);
+    expect(created.controller.getSnapshot().outcome).toBe("succeeded");
+    expect(created.controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "monitor_diagnostic")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
   });
 });

@@ -786,6 +786,9 @@ const contextTraceSchema = z.object({
   memorySelection: z.object({
     admittedFactIds: z.array(nonEmptyString),
     revalidationFactIds: z.array(nonEmptyString),
+    selectedAdmittedFactIds: z.array(nonEmptyString).optional(),
+    selectedRevalidationFactIds: z.array(nonEmptyString).optional(),
+    omitted: z.array(z.object({ id: nonEmptyString, class: z.enum(["admitted", "revalidation"]), reason: z.enum(["budget", "not_rendered"]) })).optional(),
     excluded: z.array(z.object({ kind: z.enum(["fact", "entity"]), id: nonEmptyString, reason: z.enum(["superseded", "scope_mismatch", "entity_stale", "entity_missing"]) })),
   }).optional(),
   observationIncluded: z.boolean(),
@@ -929,7 +932,8 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     ...eventBaseSchema,
     type: z.literal("memory.updated"),
-    callId: nonEmptyString,
+    callId: nonEmptyString.optional(),
+    source: z.enum(["tool", "lifecycle"]).optional(),
     mutation: memoryMutationSchema,
   }),
   z.object({
@@ -979,6 +983,14 @@ export const runtimeEventSchema = runtimeEventUnionSchema.superRefine((event, co
       path: ["observation", "runId"],
       message: "observation.runId must match event.runId",
     });
+  }
+  if (event.type === "memory.updated") {
+    if (event.source === "lifecycle" && event.callId !== undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["callId"], message: "lifecycle memory.updated must not masquerade as a ToolCall" });
+    }
+    if (event.source !== "lifecycle" && event.callId === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["callId"], message: "tool memory.updated requires callId" });
+    }
   }
 });
 

@@ -463,6 +463,30 @@ describe("DefaultContextCompiler", () => {
     expect(tiny.contextBudget?.trace?.memoryTruncated).toBe(true);
     expect(tiny.contextBudget?.estimatedMemoryTokens).toBe(0);
     expect(JSON.stringify(tiny.messages)).not.toContain("fact-0");
+    expect(tiny.contextBudget?.trace?.memorySelection?.selectedAdmittedFactIds?.length).toBeGreaterThan(0);
+    expect(tiny.contextBudget?.trace?.memorySelection?.admittedFactIds).toEqual([]);
+    expect(tiny.contextBudget?.trace?.memorySelection?.omitted?.length).toBeGreaterThan(0);
+  });
+
+  it("keeps Memory ToolResult partitions visible to the next Provider context", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const toolResult = {
+      admittedFacts: [{ id: "stable-fact", key: "target", value: "current" }],
+      revalidationCandidates: [{ fact: { id: "last-known-fact", key: "target", value: "old" }, reason: "short_lived_last_known" }],
+      entities: [],
+    };
+    const compiled = await compiler.compile({
+      runId,
+      goal: "inspect memory",
+      recentEvents: [
+        event(0, { type: "model.response.received", turn: { type: "tool_calls", calls: [{ id: "memory-call" as ToolCallId, name: "memory_get", arguments: { id: "last-known-fact" } }] } }),
+        event(1, { type: "tool.call.completed", result: { callId: "memory-call" as ToolCallId, status: "completed", output: toolResult } }),
+      ],
+    }, new AbortController().signal);
+    const serializedMessages = JSON.stringify(compiled.messages);
+    expect(serializedMessages).toContain("admittedFacts");
+    expect(serializedMessages).toContain("revalidationCandidates");
+    expect(serializedMessages).not.toContain('"facts"');
   });
 
   it("does not charge non-projected Trace metadata to the model history budget", async () => {

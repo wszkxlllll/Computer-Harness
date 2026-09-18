@@ -175,6 +175,37 @@ export function isMemoryFactApplicable(state: MemoryState, fact: MemoryFact, ses
   return state.entities.some((entity) => entity.id === entityId && entity.status === "active");
 }
 
+export type MemoryFactAdmission =
+  | { kind: "admitted" }
+  | { kind: "revalidation"; reason: "needs_check" | "short_lived_last_known" }
+  | { kind: "excluded"; reason: "superseded" | "scope_mismatch" | "entity_stale" | "entity_missing" };
+
+/**
+ * The single current-view gate shared by Context and Memory read tools.  It
+ * separates ordinary facts from last-known/revalidation candidates before a
+ * caller projects values into a model-facing structure.
+ */
+export function classifyMemoryFactAdmission(
+  state: MemoryState,
+  fact: MemoryFact,
+  context: { runId?: RunId; computerSessionId?: ComputerSessionId } = {},
+): MemoryFactAdmission {
+  if (fact.status === "superseded") return { kind: "excluded", reason: "superseded" };
+  if ((context.runId !== undefined && state.runId !== context.runId) || !isMemoryFactScopeApplicable(fact, context.computerSessionId)) {
+    return { kind: "excluded", reason: "scope_mismatch" };
+  }
+  if (!isMemoryFactApplicable(state, fact, context.computerSessionId)) {
+    const subject = fact.subject;
+    const entity = subject.type === "entity"
+      ? state.entities.find((candidate) => candidate.id === subject.entityId)
+      : undefined;
+    return { kind: "excluded", reason: entity === undefined ? "entity_missing" : "entity_stale" };
+  }
+  if (fact.status === "needs_check") return { kind: "revalidation", reason: "needs_check" };
+  if (memoryFactRetentionClass(fact) === "short_lived") return { kind: "revalidation", reason: "short_lived_last_known" };
+  return { kind: "admitted" };
+}
+
 function normalizeMemoryFactForState(fact: MemoryFact): MemoryFact {
   return {
     ...fact,
@@ -579,8 +610,13 @@ export type ContextTraceDiscardReason = "history_limit" | "input_budget";
 export type MemoryRecallExclusionReason = "superseded" | "scope_mismatch" | "entity_stale" | "entity_missing";
 
 export interface ContextMemorySelectionTrace {
+  /** IDs actually represented in the rendered memory text. */
   admittedFactIds: readonly string[];
   revalidationFactIds: readonly string[];
+  /** Candidate IDs selected before the shared memory text budget was applied. */
+  selectedAdmittedFactIds?: readonly string[];
+  selectedRevalidationFactIds?: readonly string[];
+  omitted?: readonly { id: string; class: "admitted" | "revalidation"; reason: "budget" | "not_rendered" }[];
   excluded: readonly { kind: "fact" | "entity"; id: string; reason: MemoryRecallExclusionReason }[];
 }
 
@@ -674,7 +710,7 @@ export type RuntimeEventData =
   | { type: "action.execution.completed"; receipt: ActionReceipt }
   | { type: "action.execution.failed"; receipt: ActionReceipt }
   | { type: "planning.task.updated"; callId: ToolCallId; mutation: PlanningTaskMutation }
-  | { type: "memory.updated"; callId: ToolCallId; mutation: MemoryMutation }
+  | { type: "memory.updated"; callId?: ToolCallId; source?: "tool" | "lifecycle"; mutation: MemoryMutation }
   | {
       type: "monitor.proposal";
       mode: "shadow" | "guidance";

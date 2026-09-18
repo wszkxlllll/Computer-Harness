@@ -141,6 +141,7 @@ function makeController(
   planning: "off" | "tasks-v1",
   turns: ModelTurn[],
   registry: ToolRegistry,
+  overrides: { memoryMutationApplier?: (targetRunId: RunId, mutation: MemoryMutation) => Promise<void> } = {},
 ): { controller: RunController; writer: MemoryEventWriter } {
   const writer = new MemoryEventWriter();
   const controller = new RunController({
@@ -155,7 +156,7 @@ function makeController(
     idFactory: idFactory(),
     clock: { now: () => "2026-09-17T00:00:00.000Z" },
     features: { planning, memory: "facts-v1", batching: "off" },
-    memoryMutationApplier: async (targetRunId, mutation) => { await store.apply(targetRunId, mutation); },
+    memoryMutationApplier: overrides.memoryMutationApplier ?? (async (targetRunId, mutation) => { await store.apply(targetRunId, mutation); }),
   });
   return { controller, writer };
 }
@@ -356,6 +357,31 @@ describe("Memory mutations through RunController", () => {
     await expect(created.controller.start("close session memory")).resolves.toBe("succeeded");
     const state = await store.get(runId);
     expect(state.facts).toMatchObject([{ scope: { kind: "computer_session", sessionId }, status: "needs_check", statusReason: "scope_ended" }]);
-    expect(created.writer.events.some((event) => event.type === "memory.updated" && event.callId === "runtime:scope-ended" && event.mutation.operation === "mark_fact_needs_check")).toBe(true);
+    expect(created.writer.events.some((event) => event.type === "memory.updated" && event.source === "lifecycle" && event.callId === undefined && event.mutation.operation === "mark_fact_needs_check")).toBe(true);
+  });
+
+  it("commits every lifecycle mutation and reports a partial Store materialization failure", async () => {
+    const store = new InMemoryMemoryStore();
+    const registry = new ToolRegistry();
+    registry.registerMany(createMemoryTools(store));
+    let lifecycleApplyCalls = 0;
+    const created = makeController(store, "off", [
+      { type: "tool_calls", calls: [{ id: "session-fact-one" as ToolCallId, name: "memory_write_fact", arguments: { key: "first", value: "one", scope: "computer_session", retentionClass: "short_lived" } }] },
+      { type: "tool_calls", calls: [{ id: "session-fact-two" as ToolCallId, name: "memory_write_fact", arguments: { key: "second", value: "two", scope: "computer_session", retentionClass: "short_lived" } }] },
+      { type: "finish", summary: "done" },
+    ], registry, {
+      memoryMutationApplier: async (targetRunId, mutation) => {
+        lifecycleApplyCalls += 1;
+        if (lifecycleApplyCalls === 2) throw new Error("injected lifecycle Store failure");
+        await store.apply(targetRunId, mutation);
+      },
+    });
+
+    await expect(created.controller.start("close two session facts")).resolves.toBe("failed");
+    const lifecycleEvents = created.writer.events.filter((event) => event.type === "memory.updated" && event.source === "lifecycle");
+    expect(lifecycleEvents).toHaveLength(2);
+    expect(lifecycleEvents.every((event) => event.callId === undefined && event.mutation.operation === "mark_fact_needs_check")).toBe(true);
+    expect(created.writer.events.some((event) => event.type === "runtime.error" && event.category === "memory_materialization_failed")).toBe(true);
+    expect((await store.get(runId)).facts.filter((fact) => fact.status === "active")).toHaveLength(1);
   });
 });

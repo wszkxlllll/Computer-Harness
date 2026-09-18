@@ -301,7 +301,9 @@ export class RunController {
   private monitorPolicyState: MonitorPolicyState | undefined;
   private monitorWorkClock: MonitorWorkClock = { modelDecisionCount: 0, guiActionCount: 0 };
   private monitorPendingGuidance: MonitorGuidance | undefined;
+  private monitorPendingHelp: Extract<MonitorPolicyProposal, { kind: "help_requested" }> | undefined;
   private monitorProcessing = false;
+  private monitorDiagnosticRecording = false;
   private monitorProposalCount = 0;
   private monitorLastPersistedKey: string | undefined;
   private monitorLastPartitionKey: string | undefined;
@@ -713,7 +715,7 @@ export class RunController {
             break;
           }
           outcome = turn.reportedStatus === "failure" ? "failed" : "succeeded";
-          await this.commitRunFinished({
+          outcome = await this.commitRunFinished({
             outcome,
             summary: turn.summary,
             ...(turn.reportedStatus === undefined ? {} : { reportedStatus: turn.reportedStatus }),
@@ -736,7 +738,7 @@ export class RunController {
       }
 
       if (this.snapshot.status !== "finished") {
-        await this.commitRunFinished({ outcome });
+        outcome = await this.commitRunFinished({ outcome });
       }
       return outcome;
     } catch (error) {
@@ -763,7 +765,7 @@ export class RunController {
           });
           outcome = "failed";
         }
-        await this.commitRunFinished({ outcome });
+        outcome = await this.commitRunFinished({ outcome });
       }
       return outcome;
     } finally {
@@ -887,6 +889,11 @@ export class RunController {
   }
 
   private async applyCommand(command: RuntimeCommand): Promise<CommandEffects> {
+    // A correction/approval/explicit pause-resume changes the control
+    // boundary.  Never carry a guidance or deferred-help proposal across it.
+    if (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause" || command.kind === "resume") {
+      this.clearMonitorPendingRecommendations();
+    }
     switch (command.kind) {
       case "user_input":
         if (this.approvedPendingApproval !== undefined) {
@@ -1243,6 +1250,11 @@ export class RunController {
       } else {
         await this.executeNonComputerCall(entry.call, entry.definition, context);
       }
+      // Monitor help is deferred until the complete tool/action boundary has
+      // settled.  In particular, an action receipt is followed by its
+      // terminal ToolResult and post-action observation before status changes
+      // to waiting_user.
+      await this.flushDeferredMonitorHelp();
       const callState = this.callStates.get(entry.call.id);
       if (callState === "failed" || callState === "rejected") {
         if (this.snapshot.status === "finished") return { correction: false };
@@ -1327,7 +1339,7 @@ export class RunController {
           : validateMemoryMutation(this.attachMemoryProvenance(normalizedMutation, call.id));
         if (mutation !== undefined) {
           this.validateMemoryMutationReferences(mutation);
-          await this.commitEvent({ type: "memory.updated", callId: call.id, mutation });
+          await this.commitEvent({ type: "memory.updated", source: "tool", callId: call.id, mutation });
           if (definition.afterMemoryCommit !== undefined) {
             try {
               await definition.afterMemoryCommit(mutation, context);
@@ -1620,29 +1632,54 @@ export class RunController {
     return persisted.observation;
   }
 
-  private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<void> {
-    await this.markSessionMemoryScopeEnded();
+  private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
+    let outcome = data.outcome;
+    try {
+      await this.markSessionMemoryScopeEnded();
+    } catch (error) {
+      // Lifecycle events remain the replay authority, while Store failures
+      // are explicit and do not masquerade as a fully materialized close.
+      if (this.snapshot.status !== "finished") {
+        await this.commitEvent({ type: "runtime.error", category: "memory_materialization_failed", message: `Memory scope cleanup incomplete: ${errorMessage(error)}` });
+      }
+      if (outcome === "succeeded") outcome = "failed";
+    }
     await this.commitEvent({
       type: "run.finished",
-      outcome: data.outcome,
+      outcome,
       ...(data.summary === undefined ? {} : { summary: data.summary }),
       ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
     });
+    return outcome;
   }
 
   private async markSessionMemoryScopeEnded(): Promise<void> {
     if (this.sessionMemoryScopeEnded || !this.memoryEnabled || this.snapshot.computerSession === undefined) return;
-    this.sessionMemoryScopeEnded = true;
     const sessionId = this.snapshot.computerSession.id;
     const facts = this.snapshot.memory.facts.filter((fact) => {
       const scope = memoryFactScope(fact);
       return scope.kind === "computer_session" && scope.sessionId === sessionId && fact.status !== "superseded";
     });
+    let firstError: unknown;
     for (const fact of facts) {
       const mutation: MemoryMutation = { operation: "mark_fact_needs_check", factId: fact.id, reason: "scope_ended" };
-      await this.commitEvent({ type: "memory.updated", callId: "runtime:scope-ended" as ToolCallId, mutation });
-      await this.memoryMutationApplier?.(this.runId, mutation);
+      const existingLifecycleEvent = [...this.events].reverse().find((event) => event.type === "memory.updated"
+        && (event.source === "lifecycle" || event.callId === ("runtime:scope-ended" as ToolCallId))
+        && event.mutation.operation === "mark_fact_needs_check"
+        && event.mutation.factId === fact.id);
+      try {
+        if (existingLifecycleEvent === undefined) {
+          await this.commitEvent({ type: "memory.updated", source: "lifecycle", mutation });
+        }
+        await this.memoryMutationApplier?.(this.runId, mutation);
+      } catch (error) {
+        firstError ??= error;
+      }
     }
+    if (firstError !== undefined) {
+      throw firstError;
+    }
+    this.sessionMemoryScopeEnded = true;
   }
 
   private async commitEvent(data: RuntimeEventData): Promise<RuntimeEvent> {
@@ -1675,7 +1712,15 @@ export class RunController {
       // is already durable and reduced, so observer failure is isolated from
       // the Controller's scheduling path.
     }
-    await this.processMonitorCommittedEvent(persisted);
+    try {
+      await this.processMonitorCommittedEvent(persisted);
+    } catch (error) {
+      // Monitor is diagnostic/control assistance, never the authority for a
+      // durable business event.  A failed proposal append or policy callback
+      // must not turn the already-committed action/tool event into a failed
+      // Run.  Best-effort recording is itself isolated below.
+      await this.recordMonitorDiagnosticFailure(error);
+    }
     return persisted;
   }
 
@@ -1692,10 +1737,13 @@ export class RunController {
       const progress = reduceProgressMonitor(this.monitorState, event);
       this.monitorState = progress.state;
       const executionBarrier = this.monitorExecutionBarrier();
+      if (this.monitorBarrierClearsPendingRecommendations() || this.snapshot.status === "finished") {
+        this.clearMonitorPendingRecommendations();
+      }
       const partitionKey = this.monitorPartitionKey();
       if (this.monitorLastPartitionKey !== undefined && this.monitorLastPartitionKey !== partitionKey) {
         this.monitorLastPersistedKey = undefined;
-        this.monitorPendingGuidance = undefined;
+        this.clearMonitorPendingRecommendations();
       }
       this.monitorLastPartitionKey = partitionKey;
       const policy = reduceMonitorPolicy(this.monitorPolicyState, {
@@ -1717,10 +1765,56 @@ export class RunController {
       if (policy.proposal.kind === "guidance") {
         this.monitorPendingGuidance = { text: policy.proposal.text, fingerprint: policy.proposal.fingerprint };
       } else if (policy.proposal.kind === "help_requested" && this.snapshot.status === "running" && this.monitorExecutionBarrier() === undefined) {
-        await this.commitEvent({ type: "user.input.requested", question: `Monitor requests human review (${policy.proposal.reason}); confirm the current state before continuing.` });
+        // Do not transition status from inside action.execution.completed or
+        // before the matching ToolResult/post-observation has been committed.
+        // The owning tool-turn loop flushes this deferred request at its
+        // atomic boundary.
+        this.monitorPendingHelp = policy.proposal;
       }
     } finally {
       this.monitorProcessing = false;
+    }
+  }
+
+  private async flushDeferredMonitorHelp(): Promise<void> {
+    const pending = this.monitorPendingHelp;
+    if (pending === undefined || this.snapshot.status !== "running" || this.monitorExecutionBarrier() !== undefined) return;
+    this.monitorPendingHelp = undefined;
+    try {
+      await this.commitEvent({ type: "user.input.requested", question: `Monitor requests human review (${pending.reason}); confirm the current state before continuing.` });
+    } catch (error) {
+      // A diagnostic request is best effort.  If its own event cannot be
+      // committed, leave the already-completed action outcome untouched.
+      await this.recordMonitorDiagnosticFailure(error);
+    }
+  }
+
+  private clearMonitorPendingRecommendations(): void {
+    this.monitorPendingGuidance = undefined;
+    this.monitorPendingHelp = undefined;
+  }
+
+  private monitorBarrierClearsPendingRecommendations(): boolean {
+    return this.snapshot.outcome === "outcome_unknown"
+      || this.isAborted()
+      || this.snapshot.pendingApproval !== undefined
+      || this.snapshot.pendingUserQuestion !== undefined;
+  }
+
+  private async recordMonitorDiagnosticFailure(error: unknown): Promise<void> {
+    if (this.monitorDiagnosticRecording) return;
+    this.monitorDiagnosticRecording = true;
+    try {
+      await this.commitEvent({
+        type: "runtime.error",
+        category: "monitor_diagnostic",
+        message: `Monitor diagnostic unavailable: ${errorMessage(error)}`,
+      });
+    } catch {
+      // A broken event writer cannot accept its own diagnostic; retaining the
+      // committed business event is still the required fail-open boundary.
+    } finally {
+      this.monitorDiagnosticRecording = false;
     }
   }
 

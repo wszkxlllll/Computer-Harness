@@ -68,7 +68,7 @@ describe("Run memory", () => {
     expect((await store.get("other-run" as RunId)).facts).toHaveLength(0);
     const get = createMemoryTools(store).find((tool) => tool.name === "memory_get");
     const details = await get!.execute({ id: "m1" }, { runId, session: {} as never, signal: new AbortController().signal });
-    expect(details).toMatchObject({ facts: [{ id: "m1", value: "report.odt" }] });
+    expect(details).toMatchObject({ admittedFacts: [{ id: "m1", value: "report.odt" }], revalidationCandidates: [] });
   });
 
   it("adds entity tools only in entities mode", () => {
@@ -92,7 +92,8 @@ describe("Run memory", () => {
     const get = tools.find((tool) => tool.name === "memory_get")!;
     await expect(get.execute({ id: entityId }, context)).resolves.toMatchObject({
       entities: [{ id: entityId, description: "report.odt in Writer" }],
-      facts: [{ subject: { type: "entity", entityId }, key: "saved", value: "false" }],
+      admittedFacts: [{ subject: { type: "entity", entityId }, key: "saved", value: "false" }],
+      revalidationCandidates: [],
     });
     expect(() => get.validate({ id: entityId, key: "saved" })).toThrow("exactly one");
     const mark = tools.find((tool) => tool.name === "memory_mark_fact_needs_check")!;
@@ -142,8 +143,8 @@ describe("Run memory", () => {
     await store.apply(runId, write.memoryMutationFromResult!(output, contextA)!);
     const get = tools.find((tool) => tool.name === "memory_get")!;
     await expect(get.execute({ key: "last_seen" }, contextA)).resolves.toMatchObject({
-      facts: [{ scope: { kind: "computer_session", sessionId: sessionA }, retentionClass: "short_lived" }],
-      factAdmission: [{ id: "m1", class: "revalidation", reason: "short_lived_last_known" }],
+      admittedFacts: [],
+      revalidationCandidates: [{ fact: { scope: { kind: "computer_session", sessionId: sessionA }, retentionClass: "short_lived" }, reason: "short_lived_last_known" }],
     });
     await expect(get.execute({ key: "last_seen" }, contextB)).rejects.toThrow("no matching");
     await expect(get.execute({ key: "last_seen", view: "history" }, contextB)).resolves.toMatchObject({
@@ -159,11 +160,32 @@ describe("Run memory", () => {
     await store.rebuild(runId, [{ operation: "upsert_fact", fact: oldFact }, { operation: "supersede_fact", factId: "old", replacement: newFact }]);
     const get = createMemoryTools(store).find((tool) => tool.name === "memory_get")!;
     const context = { runId, session: {} as never, signal: new AbortController().signal };
-    await expect(get.execute({ key: "state" }, context)).resolves.toMatchObject({ facts: [{ id: "new", value: "new" }] });
+    await expect(get.execute({ key: "state" }, context)).resolves.toMatchObject({ admittedFacts: [{ id: "new", value: "new" }], revalidationCandidates: [] });
     const history = await get.execute({ key: "state", view: "history" }, context);
     const historyFacts = (history as { facts: MemoryFact[] }).facts;
     expect(historyFacts.some((item) => item.id === "old" && item.status === "superseded")).toBe(true);
     expect(historyFacts.some((item) => item.id === "new" && item.status === "active")).toBe(true);
+  });
+
+  it("projects memory_list current values into admitted and revalidation partitions", async () => {
+    const store = new InMemoryMemoryStore();
+    await store.rebuild(runId, [
+      { operation: "upsert_fact", fact: fact({ id: "stable-list", key: "stable", value: "current", retentionClass: "stable" }) },
+      { operation: "upsert_fact", fact: fact({ id: "last-known-list", key: "last_known", value: "old", retentionClass: "short_lived" }) },
+      { operation: "mark_fact_needs_check", factId: "stable-list", reason: "manual_review" },
+    ]);
+    const list = createMemoryTools(store, "entities").find((tool) => tool.name === "memory_list")!;
+    const result = await list.execute({}, { runId, session: {} as never, signal: new AbortController().signal }) as unknown as {
+      admittedFacts: MemoryFact[];
+      revalidationCandidates: Array<{ fact: MemoryFact; reason: string }>;
+      facts?: unknown;
+    };
+    expect(result.facts).toBeUndefined();
+    expect(result.admittedFacts).toHaveLength(0);
+    expect(result.revalidationCandidates.map((candidate) => [candidate.fact.id, candidate.reason])).toEqual([
+      ["stable-list", "needs_check"],
+      ["last-known-list", "short_lived_last_known"],
+    ]);
   });
 
   it("rejects overlong memory fields and collections before persistence", async () => {

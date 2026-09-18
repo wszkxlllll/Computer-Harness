@@ -32,6 +32,12 @@ describe("MonitorPolicy", () => {
     expect(first.proposal).toEqual({ kind: "none", reason: "shadow" });
     expect(second.proposal).toEqual({ kind: "none", reason: "shadow" });
     expect(second.state.guidanceCount).toBe(0);
+    let agedShadow = first.state;
+    for (let sequence = 2; sequence < 12; sequence += 1) {
+      agedShadow = reduceMonitorPolicy(agedShadow, input(sequence, { modelDecisionCount: sequence, guiActionCount: 0 })).state;
+    }
+    expect(agedShadow.candidateFingerprint).toBeUndefined();
+    expect(reduceMonitorPolicy(agedShadow, input(12, { modelDecisionCount: 12, guiActionCount: 0 }, candidate())).proposal.kind).toBe("none");
   });
 
   it("proposes bounded guidance by work counters, not event sequence noise", () => {
@@ -57,7 +63,7 @@ describe("MonitorPolicy", () => {
     expect(secondGuidance.proposal.kind).toBe("guidance");
   });
 
-  it("requests help after candidate age or guidance budget without stop/retry", () => {
+  it("requests help only after guidance budget, never because an old candidate aged out", () => {
     let state = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 2, maxGuidanceCount: 1, cooldownWorkUnits: 1 });
     state = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate())).state;
     const guidance = reduceMonitorPolicy(state, input(2, { modelDecisionCount: 2, guiActionCount: 0 }, candidate()));
@@ -69,7 +75,8 @@ describe("MonitorPolicy", () => {
     const staleState = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 1 });
     const staleCandidate = reduceMonitorPolicy(staleState, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate()));
     const stale = reduceMonitorPolicy(staleCandidate.state, input(2, { modelDecisionCount: 3, guiActionCount: 0 }));
-    expect(stale.proposal).toEqual(expect.objectContaining({ kind: "help_requested", reason: "candidate_expired" }));
+    expect(stale.proposal).toEqual({ kind: "none", reason: "no_candidate" });
+    expect(stale.state.candidateFingerprint).toBeUndefined();
   });
 
   it("lets execution barriers suppress monitor proposals and never turns unknown into waiting_user", () => {

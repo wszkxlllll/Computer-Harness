@@ -1,6 +1,5 @@
 import {
-  isMemoryFactApplicable,
-  isMemoryFactScopeApplicable,
+  classifyMemoryFactAdmission,
   memoryFactRetentionClass,
   type ComputerSessionId,
   type MemoryEntity,
@@ -81,23 +80,14 @@ export function selectMemoryForContext(
   }
 
   for (const fact of memory.facts) {
-    if (fact.status === "superseded") {
-      excluded.push({ kind: "fact", id: fact.id, reason: "superseded" });
-      continue;
-    }
-    if (!memoryRunApplicable || !isMemoryFactScopeApplicable(fact, context.computerSessionId)) {
-      excluded.push({ kind: "fact", id: fact.id, reason: "scope_mismatch" });
-      continue;
-    }
-    if (!isMemoryFactApplicable(memory, fact, context.computerSessionId)) {
-      const entity = fact.subject.type === "entity" ? entityById.get(fact.subject.entityId) : undefined;
-      excluded.push({ kind: "fact", id: fact.id, reason: entity === undefined ? "entity_missing" : "entity_stale" });
-      continue;
-    }
-    if (fact.status === "needs_check") {
-      revalidationCandidates.push({ fact, reason: "needs_check" });
-    } else if (memoryFactRetentionClass(fact) === "short_lived") {
-      revalidationCandidates.push({ fact, reason: "short_lived_last_known" });
+    const admission = classifyMemoryFactAdmission(memory, fact, {
+      ...(context.runId === undefined ? {} : { runId: context.runId }),
+      ...(context.computerSessionId === undefined ? {} : { computerSessionId: context.computerSessionId }),
+    });
+    if (admission.kind === "excluded") {
+      excluded.push({ kind: "fact", id: fact.id, reason: admission.reason });
+    } else if (admission.kind === "revalidation") {
+      revalidationCandidates.push({ fact, reason: admission.reason });
     } else {
       admittedFacts.push(fact);
     }

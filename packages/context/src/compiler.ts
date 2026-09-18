@@ -248,8 +248,11 @@ export class DefaultContextCompiler implements ContextCompiler {
         memoryEstimatedTokens,
         memoryTruncated: memoryProjection.truncated,
         memorySelection: {
-          admittedFactIds: memoryProjection.selection.admittedFacts.map((fact) => fact.id),
-          revalidationFactIds: memoryProjection.selection.revalidationCandidates.map((candidate) => candidate.fact.id),
+          admittedFactIds: memoryProjection.rendered.admittedFactIds,
+          revalidationFactIds: memoryProjection.rendered.revalidationFactIds,
+          selectedAdmittedFactIds: memoryProjection.selection.admittedFacts.map((fact) => fact.id),
+          selectedRevalidationFactIds: memoryProjection.selection.revalidationCandidates.map((candidate) => candidate.fact.id),
+          omitted: memoryProjection.rendered.omitted,
           excluded: memoryProjection.selection.excluded,
         },
       }),

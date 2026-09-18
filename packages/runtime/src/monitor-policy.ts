@@ -55,7 +55,7 @@ export type MonitorPolicyNoneReason =
 export type MonitorPolicyProposal =
   | { kind: "none"; reason: MonitorPolicyNoneReason }
   | { kind: "guidance"; text: string; fingerprint: string }
-  | { kind: "help_requested"; reason: "candidate_expired" | "guidance_budget_exhausted"; fingerprint: string };
+  | { kind: "help_requested"; reason: "guidance_budget_exhausted"; fingerprint: string };
 
 export interface MonitorPolicyState {
   readonly runId?: RunId | undefined;
@@ -113,12 +113,14 @@ export function reduceMonitorPolicy(state: MonitorPolicyState, input: MonitorPol
     return { state: clearCandidate(sequenceState), proposal: { kind: "none", reason: "terminal" } };
   }
   if (!input.monitor.candidate) {
-    const expired = candidateExpired(sequenceState, currentClock);
-    if (expired !== undefined) {
-      return {
-        state: markHelpRequested(clearCandidate(sequenceState), expired),
-        proposal: { kind: "help_requested", reason: "candidate_expired", fingerprint: expired },
-      };
+    const candidateAge = sequenceState.candidateClock === undefined
+      ? 0
+      : workDistance(sequenceState.candidateClock, currentClock);
+    if (sequenceState.candidateFingerprint !== undefined && candidateAge > options.maxCandidateAgeWorkUnits) {
+      // Ordinary events may sit between two candidate observations, so retain
+      // a young candidate for correlation.  Once it is stale, clear it only;
+      // age alone is never a reason to enter waiting_user.
+      return { state: clearCandidate(sequenceState), proposal: { kind: "none", reason: "no_candidate" } };
     }
     return { state: sequenceState, proposal: { kind: "none", reason: "no_candidate" } };
   }
@@ -136,10 +138,10 @@ export function reduceMonitorPolicy(state: MonitorPolicyState, input: MonitorPol
     return { state: candidateState, proposal: { kind: "none", reason: "help_already_requested" } };
   }
   if (candidateState.candidateClock !== undefined && workDistance(candidateState.candidateClock, currentClock) > options.maxCandidateAgeWorkUnits) {
-    return {
-      state: markHelpRequested(clearCandidate(candidateState), fingerprint),
-      proposal: { kind: "help_requested", reason: "candidate_expired", fingerprint },
-    };
+    // Requiring a fresh candidate observation prevents an old fingerprint
+    // from escalating solely because the work clock advanced.  Guidance/help
+    // budget is consumed only by a currently observed, sustained candidate.
+    return { state: clearCandidate(candidateState), proposal: { kind: "none", reason: "no_candidate" } };
   }
   if (candidateState.candidateClock?.modelDecisionCount === currentClock.modelDecisionCount
     && candidateState.candidateClock.guiActionCount === currentClock.guiActionCount) {
@@ -205,13 +207,6 @@ function clearCandidate(state: MonitorPolicyState): MonitorPolicyState {
 
 function markHelpRequested(state: MonitorPolicyState, fingerprint: string): MonitorPolicyState {
   return { ...state, lastHelpFingerprint: fingerprint };
-}
-
-function candidateExpired(state: MonitorPolicyState, clock: MonitorWorkClock): string | undefined {
-  if (state.candidateFingerprint === undefined || state.candidateClock === undefined) return undefined;
-  return workDistance(state.candidateClock, clock) > state.options.maxCandidateAgeWorkUnits
-    ? state.candidateFingerprint
-    : undefined;
 }
 
 function candidateFingerprint(output: ProgressMonitorOutput): string {

@@ -35,6 +35,11 @@ export interface MemoryProjection {
   estimatedTokens: number;
   truncated: boolean;
   selection: MemoryContextSelection;
+  rendered: {
+    admittedFactIds: readonly string[];
+    revalidationFactIds: readonly string[];
+    omitted: readonly { id: string; class: "admitted" | "revalidation"; reason: "budget" | "not_rendered" }[];
+  };
 }
 
 export function formatMemory(
@@ -47,17 +52,18 @@ export function formatMemory(
   if (selection.indexFacts.length === 0 && selection.indexEntities.length === 0 && selection.revalidationCandidates.length === 0 && selection.excluded.length === 0) return undefined;
   const hotFactIds = new Set(selection.hotFacts.map((fact) => fact.id));
   const hotEntityIds = new Set(selection.hotEntities.map((entity) => entity.id));
+  type RenderRecord = { text: string; id?: string; class?: "admitted" | "revalidation" };
   const indexRecords = [
-    ...selection.indexFacts.filter((fact) => !hotFactIds.has(fact.id)).map((fact) => `- fact ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} [${fact.status}]`),
-    ...selection.indexEntities.filter((entity) => !hotEntityIds.has(entity.id)).map((entity) => `- entity ${entity.id} (${entity.type}): ${boundedPreview(entity.description)}`),
+    ...selection.indexFacts.filter((fact) => !hotFactIds.has(fact.id)).map((fact): RenderRecord => ({ id: fact.id, class: "admitted", text: `- fact ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} [${fact.status}]` })),
+    ...selection.indexEntities.filter((entity) => !hotEntityIds.has(entity.id)).map((entity): RenderRecord => ({ id: entity.id, text: `- entity ${entity.id} (${entity.type}): ${boundedPreview(entity.description)}` })),
   ];
   const hotRecords = [
-    ...selection.hotFacts.map((fact) => `- ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} = ${boundedValue(fact.value)}${fact.status === "needs_check" ? " [needs_check]" : ""}`),
-    ...selection.hotEntities.map((entity) => `- ${entity.id}: ${boundedPreview(entity.description)}`),
+    ...selection.hotFacts.map((fact): RenderRecord => ({ id: fact.id, class: "admitted", text: `- ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} = ${boundedValue(fact.value)}${fact.status === "needs_check" ? " [needs_check]" : ""}` })),
+    ...selection.hotEntities.map((entity): RenderRecord => ({ id: entity.id, text: `- ${entity.id}: ${boundedPreview(entity.description)}` })),
   ];
   const revalidationRecords = selection.revalidationCandidates.map((candidate) => {
     const fact = candidate.fact;
-    return `- ${fact.id}: ${fact.key} [${candidate.reason}] old=${boundedValue(fact.value)} source=${fact.sourceEventId}`;
+    return { id: fact.id, class: "revalidation" as const, text: `- ${fact.id}: ${fact.key} [${candidate.reason}] old=${boundedValue(fact.value)} source=${fact.sourceEventId}` };
   });
   const header = "Current run memory index / packets (scoped; not proof of current GUI state):";
   const headerTokens = estimateTextTokens(header);
@@ -65,16 +71,25 @@ export function formatMemory(
   let remaining = finiteBudget ? Math.max(0, maxTokens - headerTokens) : Number.POSITIVE_INFINITY;
   let omitted = false;
   const renderedGroups: string[][] = [];
-  const renderGroup = (title: string, records: readonly string[], allowance: number): void => {
+  const renderedAdmittedFactIds = new Set<string>();
+  const renderedRevalidationFactIds = new Set<string>();
+  const omittedFactIds = new Map<string, { id: string; class: "admitted" | "revalidation"; reason: "budget" | "not_rendered" }>();
+  const rememberOmitted = (record: RenderRecord, reason: "budget" | "not_rendered"): void => {
+    if (record.id === undefined || record.class === undefined || !omittedFactIds.has(record.id)) omittedFactIds.set(record.id ?? "", { id: record.id ?? "", class: record.class ?? "admitted", reason });
+  };
+  const renderGroup = (title: string, records: readonly RenderRecord[], allowance: number): void => {
     if (records.length === 0) return;
     const chosen: string[] = [];
     for (const record of records) {
-      const candidate = [title, ...chosen, record];
+      const candidate = [title, ...chosen, record.text];
       if (estimateTextTokens(candidate.join("\n")) > allowance) {
         omitted = true;
+        rememberOmitted(record, "budget");
         continue;
       }
-      chosen.push(record);
+      chosen.push(record.text);
+      if (record.class === "admitted" && record.id !== undefined) renderedAdmittedFactIds.add(record.id);
+      if (record.class === "revalidation" && record.id !== undefined) renderedRevalidationFactIds.add(record.id);
     }
     if (chosen.length === 0) {
       omitted = true;
@@ -90,11 +105,22 @@ export function formatMemory(
   const revalidationAllowance = finiteBudget ? Math.floor(remaining * 0.55) : Number.POSITIVE_INFINITY;
   renderGroup("Revalidation candidates (last-known only; use current observation, then revise or query by id):", revalidationRecords, revalidationAllowance);
   renderGroup("Memory index (IDs/keys only; not current-value proof):", indexRecords, remaining);
+  for (const fact of selection.admittedFacts) {
+    if (!renderedAdmittedFactIds.has(fact.id)) rememberOmitted({ id: fact.id, class: "admitted", text: "" }, omitted ? "budget" : "not_rendered");
+  }
+  for (const candidate of selection.revalidationCandidates) {
+    if (!renderedRevalidationFactIds.has(candidate.fact.id)) rememberOmitted({ id: candidate.fact.id, class: "revalidation", text: "" }, omitted ? "budget" : "not_rendered");
+  }
+  const rendered = {
+    admittedFactIds: [...renderedAdmittedFactIds],
+    revalidationFactIds: [...renderedRevalidationFactIds],
+    omitted: [...omittedFactIds.values()].filter((item) => item.id.length > 0),
+  } as const;
   if (renderedGroups.length === 0) {
     const marker = "[…memory truncated; query by id; packets omitted]";
     const minimal = `${header}\n${marker}`;
-    if (!finiteBudget || estimateTextTokens(minimal) <= maxTokens) return { text: minimal, estimatedTokens: estimateTextTokens(minimal), truncated: true, selection };
-    return { text: "", estimatedTokens: 0, truncated: true, selection };
+    if (!finiteBudget || estimateTextTokens(minimal) <= maxTokens) return { text: minimal, estimatedTokens: estimateTextTokens(minimal), truncated: true, selection, rendered };
+    return { text: "", estimatedTokens: 0, truncated: true, selection, rendered };
   }
   const lines = [header, ...renderedGroups.flat()];
   let text = lines.join("\n");
@@ -103,7 +129,7 @@ export function formatMemory(
     if (!finiteBudget || estimateTextTokens(`${text}\n${marker}`) <= maxTokens) text = `${text}\n${marker}`;
     else omitted = true;
   }
-  return { text, estimatedTokens: estimateTextTokens(text), truncated: omitted || selection.excluded.length > 0, selection };
+  return { text, estimatedTokens: estimateTextTokens(text), truncated: omitted || selection.excluded.length > 0, selection, rendered };
 }
 
 const MEMORY_VALUE_PREVIEW_LIMIT = 160;

@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  isMemoryFactApplicable,
-  memoryFactRetentionClass,
+  classifyMemoryFactAdmission,
   memoryFactScope,
   sameMemoryFactContent,
   type JsonValue,
@@ -69,21 +68,26 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         const query = args as { id?: string; key?: string; view?: "current" | "history" };
         const state = await store.get(context.runId);
         const view = query.view ?? "current";
-        const includeFact = (fact: MemoryFact): boolean => view === "history"
-          ? true
-          : (fact.status === "active" || fact.status === "needs_check") && isMemoryFactApplicable(state, fact, context.session?.id);
         const entities = query.id === undefined ? [] : state.entities.filter((entity) => entity.id === query.id);
         const matchedFacts = query.id !== undefined
           ? state.facts.filter((fact) => fact.id === query.id || (entities.some((entity) => entity.id === query.id) && fact.subject.type === "entity" && fact.subject.entityId === query.id))
           : state.facts.filter((fact) => fact.key === query.key);
-        const facts = matchedFacts.filter(includeFact);
-        if (facts.length === 0 && entities.length === 0) throw new Error("memory_get found no matching record");
+        const admittedFacts: MemoryFact[] = [];
+        const revalidationCandidates: Array<{ fact: MemoryFact; reason: "needs_check" | "short_lived_last_known" }> = [];
+        for (const fact of matchedFacts) {
+          if (view === "history") continue;
+          const admission = classifyMemoryFactAdmission(state, fact, { runId: context.runId, ...(context.session?.id === undefined ? {} : { computerSessionId: context.session.id }) });
+          if (admission.kind === "admitted") admittedFacts.push(fact);
+          else if (admission.kind === "revalidation") revalidationCandidates.push({ fact, reason: admission.reason });
+        }
+        if (view === "current" && admittedFacts.length === 0 && revalidationCandidates.length === 0 && entities.length === 0) throw new Error("memory_get found no matching record");
+        if (view === "history" && matchedFacts.length === 0 && entities.length === 0) throw new Error("memory_get found no matching record");
         return {
-          facts,
+          ...(view === "history" ? { facts: matchedFacts } : { admittedFacts, revalidationCandidates }),
           entities: view === "history" ? entities : entities.filter((entity) => entity.status === "active"),
           ...(view === "history"
-            ? { factApplicability: matchedFacts.map((fact) => ({ id: fact.id, applicable: isMemoryFactApplicable(state, fact, context.session?.id) })) }
-            : { factAdmission: facts.map((fact) => factAdmission(fact)) }),
+            ? { factApplicability: matchedFacts.map((fact) => ({ id: fact.id, applicable: classifyMemoryFactAdmission(state, fact, { runId: context.runId, ...(context.session?.id === undefined ? {} : { computerSessionId: context.session.id }) }).kind !== "excluded" })) }
+            : {}),
         } as unknown as JsonValue;
       },
     },
@@ -215,13 +219,17 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
       validate: (args) => { if (!isRecord(args) || Object.keys(args).length !== 0) throw new Error("memory_list accepts an empty object"); },
       execute: async (_args, context) => {
         const state = await store.get(context.runId);
+        const admittedFacts: MemoryFact[] = [];
+        const revalidationCandidates: Array<{ fact: MemoryFact; reason: "needs_check" | "short_lived_last_known" }> = [];
+        for (const fact of state.facts) {
+          const admission = classifyMemoryFactAdmission(state, fact, { runId: context.runId, ...(context.session?.id === undefined ? {} : { computerSessionId: context.session.id }) });
+          if (admission.kind === "admitted") admittedFacts.push(fact);
+          else if (admission.kind === "revalidation") revalidationCandidates.push({ fact, reason: admission.reason });
+        }
         return {
-          facts: state.facts.filter((fact) => (fact.status === "active" || fact.status === "needs_check") && isMemoryFactApplicable(state, fact, context.session?.id)),
+          admittedFacts,
+          revalidationCandidates,
           entities: state.entities.filter((entity) => entity.status === "active"),
-          factAdmission: state.facts
-            .filter((fact) => (fact.status === "active" || fact.status === "needs_check") && isMemoryFactApplicable(state, fact, context.session?.id))
-            .slice(0, 32)
-            .map((fact) => factAdmission(fact)),
         } as unknown as JsonValue;
       },
     });
@@ -260,10 +268,4 @@ function sameScope(fact: MemoryFact, scope: MemoryFact["scope"]): boolean {
   const existing = memoryFactScope(fact);
   if (scope === undefined || existing.kind !== scope.kind) return false;
   return existing.kind === "run" || (scope.kind === "computer_session" && existing.sessionId === scope.sessionId);
-}
-
-function factAdmission(fact: MemoryFact): { id: string; class: "admitted" | "revalidation"; reason?: "needs_check" | "short_lived_last_known" } {
-  if (fact.status === "needs_check") return { id: fact.id, class: "revalidation", reason: "needs_check" };
-  if (memoryFactRetentionClass(fact) === "short_lived") return { id: fact.id, class: "revalidation", reason: "short_lived_last_known" };
-  return { id: fact.id, class: "admitted" };
 }
