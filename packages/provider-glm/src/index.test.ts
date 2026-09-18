@@ -16,9 +16,11 @@ class Reader implements AssetReader {
 
 class Client implements GlmHttpClient {
   public body: Record<string, unknown> | undefined;
+  public postCount = 0;
   public constructor(private readonly response: unknown) {}
   public async post(_url: string, body: Record<string, unknown>, _headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
     signal.throwIfAborted();
+    this.postCount += 1;
     this.body = body;
     return this.response;
   }
@@ -55,6 +57,44 @@ function inputWithControls(): ModelInput {
 }
 
 describe("GLM provider adapter", () => {
+  it("keeps prepared wire state private to the creating adapter", async () => {
+    const client = new Client({ choices: [{ message: { content: "prepared" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    const signal = new AbortController().signal;
+    const prepared = await adapter.prepare(input(), { signal });
+    expect(prepared).toMatchObject({ providerId: "test-normalized", payloadHash: expect.any(String), estimate: { imageCount: 1, estimationMethod: "provider_projection" } });
+    expect(prepared.estimate?.estimatedTextTokens).toBeGreaterThan(0);
+    expect(Object.isFrozen(prepared)).toBe(true);
+    await expect(adapter.generatePrepared(prepared, { signal })).resolves.toMatchObject({ type: "finish", summary: "prepared" });
+    const postsBeforeAbort = client.postCount;
+    const cancelled = new AbortController();
+    cancelled.abort(new Error("cancelled before prepared send"));
+    await expect(adapter.generatePrepared(prepared, { signal: cancelled.signal })).rejects.toThrow("cancelled before prepared send");
+    expect(client.postCount).toBe(postsBeforeAbort);
+    const forged = Object.freeze({ ...prepared });
+    await expect(adapter.generatePrepared(forged, { signal })).rejects.toMatchObject({ code: "GLM_INVALID_PREPARED_REQUEST" });
+  });
+
+  it("uses an immutable input snapshot when parsing a prepared response", async () => {
+    const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "snapshot-call", function: { name: "click", arguments: JSON.stringify({ x: 400, y: 300 }) } }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    const mutableInput = input();
+    const prepared = await adapter.prepare(mutableInput, { signal: new AbortController().signal });
+    mutableInput.tools = [];
+    mutableInput.messages = [];
+    await expect(adapter.generatePrepared(prepared, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 320, y: 180 } }] });
+  });
+
+  it("does not infer cache reads from an unverified GLM usage extension", async () => {
+    const client = new Client({
+      choices: [{ message: { content: "done" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, prompt_tokens_details: { cached_tokens: 6 } },
+    });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    const turn = await adapter.generate(input(), { signal: new AbortController().signal });
+    expect(turn.usage).toEqual({ inputTokens: 10, outputTokens: 2, totalTokens: 12 });
+  });
+
   it("round-trips action effects without leaking metadata into canonical arguments", async () => {
     const guarded = { ...input(), tools: decorateToolsWithActionEffects(input().tools) };
     const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "glm-effect", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, _harnessEffect: { effects: ["financial"], target: "Confirm payment", summary: "Pay for the order" } }) } }] } }] });
@@ -290,7 +330,7 @@ describe("GLM provider adapter", () => {
       const request = adapter.generate(input(), { signal: controller.signal });
       controller.abort(new Error("user cancelled"));
       await expect(request).rejects.toThrow("user cancelled");
-      expect(observedSignal?.aborted).toBe(true);
+      expect(observedSignal).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }

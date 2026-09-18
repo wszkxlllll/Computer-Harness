@@ -68,6 +68,8 @@ describe("DefaultContextCompiler", () => {
     expect(input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text === "Please continue"))).toBe(true);
     expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId))).toBe(true);
     expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === first.screenshot.assetId))).toBe(false);
+    expect(input.contextBudget?.trace?.projectedEventIds).toContain("event-7");
+    expect(input.contextBudget?.trace?.projectedEventIds).not.toContain("event-1");
   });
 
   it("rejects a shortcut that disagrees with the latest observation event and honors cancellation", async () => {
@@ -365,5 +367,102 @@ describe("DefaultContextCompiler", () => {
     }, undefined, { maxIndexFacts: 1, maxIndexEntities: 1, maxHotFacts: 1, maxHotEntities: 1 });
     expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["f-hot"]);
     expect(selection.indexEntities.map((entity) => entity.id)).toEqual(["e-hot"]);
+  });
+
+  it("emits a safe trace for partitions, authority, stable prefix, and history裁剪", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { mode: "recent", maxHistoryEvents: 2 });
+    const events = [
+      event(0, { type: "run.started" }),
+      event(1, { type: "user.input.received", text: "不要上传文件" }),
+      event(2, { type: "model.response.received", turn: { type: "finish", summary: "old" } }),
+      event(3, { type: "user.input.received", text: "继续查看" }),
+    ];
+    const first = await compiler.compile({ runId, goal: "goal one", recentEvents: events }, new AbortController().signal);
+    const second = await compiler.compile({ runId, goal: "goal two", recentEvents: events }, new AbortController().signal);
+    const trace = first.contextBudget?.trace;
+    expect(trace).toMatchObject({ compilerVersion: "context-v2-rft4", runId, observationIncluded: false });
+    expect(trace?.authoritativeUserEventIds).toEqual(["event-1", "event-3"]);
+    expect(trace?.selectedEventIds).toContain("event-1");
+    expect(trace?.projectedEventIds).toEqual(expect.arrayContaining(["event-1", "event-2", "event-3"]));
+    expect(trace?.projectedEventIds).not.toContain("event-0");
+    expect(trace?.discardedEvents).toEqual(expect.arrayContaining([{ eventId: "event-0", reason: "history_limit" }]));
+    expect(trace?.stablePrefixHash).toBe(second.contextBudget?.trace?.stablePrefixHash);
+    expect(trace?.stablePrefixHash).not.toContain("goal one");
+  });
+
+  it("keeps Memory under its soft quota while retaining authoritative input", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { memoryMaxTokens: 32 });
+    const memory = {
+      runId,
+      facts: Array.from({ length: 12 }, (_, index) => ({
+        id: `fact-${index}`,
+        subject: { type: "run" as const },
+        key: `key-${index}`,
+        value: "值".repeat(20),
+        sourceEventId: `event-${index}` as EventId,
+        status: "active" as const,
+        updatedSequence: index,
+      })),
+      entities: [],
+    };
+    const input = await compiler.compile({
+      runId,
+      goal: "continue",
+      recentEvents: [event(0, { type: "user.input.received", text: "不要上传文件" })],
+      memory,
+      context: { memoryMaxTokens: 32 },
+    }, new AbortController().signal);
+    const memoryMessage = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("Current run memory index")));
+    expect(memoryMessage).toBeDefined();
+    expect(JSON.stringify(memoryMessage)).toContain("memory truncated; query by id");
+    expect(input.contextBudget?.estimatedMemoryTokens).toBeLessThanOrEqual(32);
+    expect(JSON.stringify(input.messages)).toContain("不要上传文件");
+    expect(input.contextBudget?.trace?.authoritativeUserEventIds).toEqual(["event-0"]);
+
+    const tiny = await compiler.compile({
+      runId,
+      goal: "continue",
+      recentEvents: [],
+      memory,
+      context: { memoryMaxTokens: 1 },
+    }, new AbortController().signal);
+    expect(tiny.contextBudget?.trace?.memoryTruncated).toBe(true);
+    expect(tiny.contextBudget?.estimatedMemoryTokens).toBe(0);
+    expect(JSON.stringify(tiny.messages)).not.toContain("fact-0");
+  });
+
+  it("does not charge non-projected Trace metadata to the model history budget", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const base = await compiler.compile({ runId, goal: "budget", recentEvents: [] }, new AbortController().signal);
+    const input = await compiler.compile({
+      runId,
+      goal: "budget",
+      recentEvents: [event(0, {
+        type: "model.request.started",
+        providerId: "provider-test",
+        preparedRequest: { payloadHash: "x".repeat(10_000) },
+        contextBudget: {
+          mode: "raw",
+          estimatedInputTokens: 99_999,
+          selectedHistoryEvents: 0,
+          omittedHistoryEvents: 0,
+          trace: {
+            compilerVersion: "test",
+            runId,
+            stablePrefixHash: "trace-only".repeat(2_000),
+            fixedBlocks: [],
+            selectedEventIds: [],
+            projectedEventIds: [],
+            discardedEvents: [],
+            authoritativeUserEventIds: [],
+            historyEstimatedTokens: 0,
+            observationIncluded: false,
+          },
+        },
+      })],
+      context: { maxInputTokens: base.contextBudget!.estimatedFixedTextTokens! + 1 },
+    }, new AbortController().signal);
+    expect(input.contextBudget?.estimatedHistoryTextTokens).toBe(0);
+    expect(input.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(base.contextBudget!.estimatedFixedTextTokens! + 1);
   });
 });

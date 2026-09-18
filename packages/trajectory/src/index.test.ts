@@ -131,6 +131,22 @@ describe("RunSnapshot reducer", () => {
     expect(snapshot.memory.facts).toMatchObject([{ id: "m1", status: "superseded" }]);
   });
 
+  it("does not turn partial provider cache observations into a false run total", () => {
+    const cachedResponse = event(5, {
+      type: "model.response.received",
+      turn: { type: "finish", summary: "first", usage: { inputTokens: 10, cacheReadTokens: 6 } },
+    });
+    const uncachedResponse = event(6, {
+      type: "model.response.received",
+      turn: { type: "finish", summary: "second", usage: { inputTokens: 8 } },
+    });
+    const events = [...runningEvents(), cachedResponse, uncachedResponse];
+    const snapshot = events.reduce(reduceRunEvent, initialRunSnapshot(runId));
+    expect(cachedResponse).toMatchObject({ turn: { usage: { cacheReadTokens: 6 } } });
+    expect(snapshot.modelUsage).toEqual({ inputTokens: 18 });
+    expect(snapshot.modelUsage?.cacheReadTokens).toBeUndefined();
+  });
+
   it("is deterministic and leaves an unresolved side effect visible", () => {
     const events: RuntimeEvent[] = [
       ...runningEvents(),

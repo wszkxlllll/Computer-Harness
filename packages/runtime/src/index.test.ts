@@ -36,6 +36,7 @@ import {
   type ModelInput,
   type ModelMessage,
   type ProviderAdapter,
+  type PreparedProviderRequest,
   type RuntimePolicy,
   type ActionPolicy,
   type ContextCompiler,
@@ -291,6 +292,54 @@ function clickCall(callId: string): ToolCall {
     name: "click",
     arguments: { x: 40, y: 50 },
   };
+}
+
+class PreparedScriptedProvider implements ProviderAdapter {
+  public readonly id = "prepared-test-provider";
+  public readonly preparedInputs: ModelInput[] = [];
+  public readonly preparedRequests: PreparedProviderRequest[] = [];
+  public generatedRequests: PreparedProviderRequest[] = [];
+  public prepareCalls = 0;
+  public generateCalls = 0;
+
+  public constructor(
+    private readonly mode: "success" | "same_input_retry" | "feedback_retry" | "prepare_failure",
+    private readonly onPrepare?: (count: number) => void,
+  ) {}
+
+  public async prepare(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest> {
+    options.signal.throwIfAborted();
+    this.prepareCalls += 1;
+    this.onPrepare?.(this.prepareCalls);
+    if (this.mode === "prepare_failure") throw new Error("prepare failed before network");
+    this.preparedInputs.push(input);
+    const request = Object.freeze({
+      providerId: this.id,
+      payloadHash: `prepared-${this.prepareCalls}`,
+      estimate: { estimatedTextTokens: 1, imageCount: 0, estimationMethod: "context_report" as const },
+    });
+    this.preparedRequests.push(request);
+    return request;
+  }
+
+  public async generate(input: ModelInput, _options: { signal: AbortSignal }): Promise<ModelTurn> {
+    throw new Error(`unexpected direct generate for ${input.system}`);
+  }
+
+  public async generatePrepared(request: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    options.signal.throwIfAborted();
+    this.generateCalls += 1;
+    this.generatedRequests.push(request);
+    if ((this.mode === "same_input_retry" || this.mode === "feedback_retry") && this.generateCalls === 1) {
+      const retryMode = this.mode === "same_input_retry" ? "same_input" : "feedback";
+      throw Object.assign(new Error("synthetic transient provider failure"), {
+        code: "TEST_RETRYABLE",
+        retryable: true,
+        retryMode,
+      });
+    }
+    return { type: "finish", summary: "prepared success", reportedStatus: "success" };
+  }
 }
 
 function typeCall(callId: string, text = "hello"): ToolCall {
@@ -1787,6 +1836,79 @@ describe("RunController S2-4 failure boundaries", () => {
     const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
     expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "cancelled")).toBe(true);
     expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("prepares once and records one-to-one decision and attempt metadata", async () => {
+    const provider = new PreparedScriptedProvider("success");
+    const created = await makeController(provider);
+
+    await expect(created.controller.start("prepared request")).resolves.toBe("succeeded");
+    expect(provider.prepareCalls).toBe(1);
+    expect(provider.generateCalls).toBe(1);
+    expect(provider.generatedRequests[0]).toBe(provider.preparedRequests[0]);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    const started = events.find((event) => event.type === "model.request.started");
+    const received = events.find((event) => event.type === "model.response.received");
+    expect(started).toMatchObject({ attempt: 1, decisionId: expect.any(String), requestId: expect.any(String), preparedRequest: { payloadHash: "prepared-1", estimate: { estimatedTextTokens: 1, imageCount: 0 } } });
+    expect(received).toMatchObject({ attempt: 1, decisionId: started && started.type === "model.request.started" ? started.decisionId : undefined, requestId: started && started.type === "model.request.started" ? started.requestId : undefined });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("discards a prepared request when a correction arrives at the preparation barrier", async () => {
+    let controller: RunController | undefined;
+    let injected = false;
+    const provider = new PreparedScriptedProvider("success", () => {
+      if (!injected) {
+        injected = true;
+        void controller?.submitUserInput("use the corrected goal");
+      }
+    });
+    const created = await makeController(provider);
+    controller = created.controller;
+    await expect(created.controller.start("stale goal")).resolves.toBe("succeeded");
+    expect(provider.generateCalls).toBe(1);
+    expect(provider.prepareCalls).toBe(2);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(1);
+    expect(events.some((event) => event.type === "user.input.received" && event.text === "use the corrected goal")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("reuses the prepared payload for same-input retries and re-prepares feedback retries", async () => {
+    const sameInputProvider = new PreparedScriptedProvider("same_input_retry");
+    const sameInputRun = await makeController(sameInputProvider);
+    await expect(sameInputRun.controller.start("same input retry")).resolves.toBe("succeeded");
+    expect(sameInputProvider.prepareCalls).toBe(1);
+    expect(sameInputProvider.generateCalls).toBe(2);
+    expect(sameInputProvider.generatedRequests[1]).toBe(sameInputProvider.generatedRequests[0]);
+    const sameInputEvents = await readRuntimeEvents(join(sameInputRun.directory, "trajectory.jsonl"));
+    const sameInputAttempts = sameInputEvents.filter((event) => event.type === "model.request.started");
+    expect(sameInputAttempts.map((event) => event.type === "model.request.started" ? event.attempt : undefined)).toEqual([1, 2]);
+    expect(sameInputAttempts[0]).toMatchObject({ decisionId: sameInputAttempts[1] && sameInputAttempts[1].type === "model.request.started" ? sameInputAttempts[1].decisionId : undefined });
+    expect(sameInputAttempts[0]?.type === "model.request.started" && sameInputAttempts[1]?.type === "model.request.started" ? sameInputAttempts[0].requestId : undefined).not.toBe(
+      sameInputAttempts[0]?.type === "model.request.started" && sameInputAttempts[1]?.type === "model.request.started" ? sameInputAttempts[1].requestId : undefined,
+    );
+
+    const feedbackProvider = new PreparedScriptedProvider("feedback_retry");
+    const feedbackRun = await makeController(feedbackProvider);
+    await expect(feedbackRun.controller.start("feedback retry")).resolves.toBe("succeeded");
+    expect(feedbackProvider.prepareCalls).toBe(2);
+    expect(feedbackProvider.generateCalls).toBe(2);
+    expect(feedbackProvider.preparedInputs[1]?.messages.length).toBeGreaterThan(feedbackProvider.preparedInputs[0]?.messages.length ?? 0);
+    expect(feedbackProvider.generatedRequests[1]).not.toBe(feedbackProvider.generatedRequests[0]);
+    await rm(sameInputRun.directory, { recursive: true, force: true });
+    await rm(feedbackRun.directory, { recursive: true, force: true });
+  });
+
+  it("fails before model.request.started when preparation fails", async () => {
+    const provider = new PreparedScriptedProvider("prepare_failure");
+    const created = await makeController(provider);
+    await expect(created.controller.start("preparation failure")).resolves.toBe("failed");
+    expect(provider.generateCalls).toBe(0);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "model.request.started")).toBe(false);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
   });
 });

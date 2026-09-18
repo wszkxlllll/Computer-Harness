@@ -30,7 +30,13 @@ export function composeSystemPrompt(base: string, features: RunFeatureConfig): s
   return sections.join(" ");
 }
 
-export function formatMemory(memory: MemoryState, plan: PlanState | undefined): string | undefined {
+export interface MemoryProjection {
+  text: string;
+  estimatedTokens: number;
+  truncated: boolean;
+}
+
+export function formatMemory(memory: MemoryState, plan: PlanState | undefined, maxTokens = Number.POSITIVE_INFINITY): MemoryProjection | undefined {
   const selection = selectMemoryForContext(memory, plan);
   if (selection.indexFacts.length === 0 && selection.indexEntities.length === 0) return undefined;
   const hotFactIds = new Set(selection.hotFacts.map((fact) => fact.id));
@@ -46,5 +52,23 @@ export function formatMemory(memory: MemoryState, plan: PlanState | undefined): 
     lines.push("Hot entities:");
     for (const entity of selection.hotEntities) lines.push(`- ${entity.id}: ${entity.description}`);
   }
-  return lines.join("\n");
+  const text = lines.join("\n");
+  if (estimateTextTokens(text) <= maxTokens) return { text, estimatedTokens: estimateTextTokens(text), truncated: false };
+  const marker = "[…memory truncated; query by id]";
+  if (estimateTextTokens(marker) > maxTokens) {
+    return { text: "", estimatedTokens: 0, truncated: true };
+  }
+  if (estimateTextTokens(`${lines[0]}\n${marker}`) > maxTokens) return { text: marker, estimatedTokens: estimateTextTokens(marker), truncated: true };
+  const selected: string[] = [lines[0]!];
+  for (const line of lines.slice(1)) {
+    const candidate = `${selected.join("\n")}\n${line}`;
+    if (estimateTextTokens(`${candidate}\n${marker}`) > maxTokens) break;
+    selected.push(line);
+  }
+  const truncated = `${selected.join("\n")}\n${marker}`;
+  return { text: truncated, estimatedTokens: estimateTextTokens(truncated), truncated: true };
+}
+
+function estimateTextTokens(value: string): number {
+  return Math.ceil(value.length / 4);
 }

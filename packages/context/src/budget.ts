@@ -1,4 +1,3 @@
-import type { ModelMessage } from "@computer-harness/runtime";
 import type { RuntimeEvent } from "@computer-harness/protocol";
 import { findOldestEvictableHistoryGroup } from "./history.js";
 
@@ -19,16 +18,42 @@ export function fitEventsToTokenBudget(events: readonly RuntimeEvent[], maxToken
   return retained;
 }
 export function estimateEventTokens(events: readonly RuntimeEvent[]): number {
-  return Math.ceil(events.reduce((total, event) => total + JSON.stringify(event).length, 0) / 4);
+  return Math.ceil(events.reduce((total, event) => total + estimateProjectedEventCharacters(event), 0) / 4);
 }
 
-function estimateTokens(messages: readonly ModelMessage[]): number {
-  let characters = 0;
-  for (const message of messages) for (const content of message.content) {
-    if (content.type === "text") characters += content.text.length;
-    else if (content.type === "tool_call") characters += JSON.stringify(content.call).length;
-    else if (content.type === "tool_result") characters += JSON.stringify(content.result).length;
-    else if (content.type === "provider_continuation") characters += content.continuation.content.length;
+export function isProjectableHistoryEvent(event: RuntimeEvent): boolean {
+  switch (event.type) {
+    case "model.response.received":
+    case "tool.call.completed":
+    case "tool.call.failed":
+    case "tool.call.rejected":
+    case "user.input.received":
+      return true;
+    default:
+      return false;
   }
-  return Math.ceil(characters / 4);
+}
+
+function estimateProjectedEventCharacters(event: RuntimeEvent): number {
+  switch (event.type) {
+    case "model.response.received":
+      if (event.turn.type === "tool_calls") {
+        return (event.turn.assistantText?.length ?? 0)
+          + event.turn.calls.reduce((total, call) => total + JSON.stringify(call).length, 0)
+          + (event.turn.continuation?.content.length ?? 0);
+      }
+      return event.turn.type === "finish" ? event.turn.summary.length : event.turn.question.length;
+    case "tool.call.completed":
+    case "tool.call.failed":
+      return JSON.stringify(event.result).length;
+    case "tool.call.rejected":
+      return JSON.stringify({ callId: event.callId, status: "rejected", error: { code: "TOOL_REJECTED", message: event.reason } }).length;
+    case "user.input.received":
+      return event.text.length;
+    default:
+      // run/control/observation/request/diagnostic events are not serialized
+      // as ModelMessages by the Context compiler. In particular, Trace and
+      // prepared metadata must not consume model history budget.
+      return 0;
+  }
 }

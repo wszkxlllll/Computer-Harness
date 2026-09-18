@@ -380,6 +380,8 @@ export interface ModelUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** Provider-reported prompt cache reads; absent means unknown, not zero. */
+  cacheReadTokens?: number;
 }
 
 /**
@@ -496,20 +498,65 @@ export interface RuntimeEventBase {
   occurredAt: string;
 }
 
+export type ContextTraceDiscardReason = "history_limit" | "input_budget";
+
+/** Private diagnostic metadata emitted alongside a prepared Provider request;
+ * it contains no body/path, and its hash is not an anonymity guarantee. */
+export interface PreparedRequestEstimate {
+  readonly estimatedTextTokens: number;
+  readonly imageCount: number;
+  readonly estimationMethod: "context_report" | "provider_projection";
+}
+
+export interface PreparedRequestMetadata {
+  readonly payloadHash: string;
+  readonly estimate?: PreparedRequestEstimate;
+}
+
+/**
+ * Private diagnostic explanation of one Context projection. It contains
+ * identifiers, counts, reasons and hashes only; it never carries prompt text,
+ * asset bytes or local paths. Hashes are not an anonymity guarantee.
+ */
+export interface ContextTrace {
+  compilerVersion: string;
+  runId: RunId;
+  stablePrefixHash: string;
+  fixedBlocks: readonly {
+    name: "system" | "goal" | "tools" | "plan" | "memory";
+    estimatedTokens: number;
+    included: boolean;
+  }[];
+  selectedEventIds: readonly EventId[];
+  /** Events actually represented in ModelInput history or latest image. */
+  projectedEventIds?: readonly EventId[];
+  discardedEvents: readonly { eventId: EventId; reason: ContextTraceDiscardReason }[];
+  authoritativeUserEventIds: readonly EventId[];
+  historyEstimatedTokens: number;
+  historyBudgetTokens?: number;
+  memoryEstimatedTokens?: number;
+  memoryTruncated?: boolean;
+  observationIncluded: boolean;
+  preparedRequest?: PreparedRequestMetadata;
+}
+
 export type RuntimeEventData =
   | { type: "run.created"; goal: string }
   | { type: "run.started" }
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
   | { type: "observation.created"; observation: ObservationFrame }
-  | { type: "model.request.started"; providerId: string; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number } }
-  | { type: "model.response.received"; turn: ModelTurn }
+  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; trace?: ContextTrace } }
+  | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
       type: "model.request.failed";
       category: string;
       message: string;
       code?: string;
       retryable?: boolean;
+      requestId?: string;
+      decisionId?: string;
+      attempt?: number;
     }
   | { type: "tool.call.received"; call: ToolCall }
   | { type: "tool.call.rejected"; callId: ToolCallId; reason: string }

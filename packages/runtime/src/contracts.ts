@@ -6,6 +6,7 @@ import type {
   AssetId,
   AssetRef,
   ComputerSessionDescriptor,
+  ContextTrace,
   EventId,
   JsonValue,
   ModelTurn,
@@ -18,6 +19,8 @@ import type {
   PlanState,
   PlanningTaskMutation,
   Point,
+  PreparedRequestEstimate as ProtocolPreparedRequestEstimate,
+  PreparedRequestMetadata,
   RunId,
   RiskCategory,
   RuntimeEvent,
@@ -100,6 +103,9 @@ export interface ContextBudgetReport {
   omittedHistoryEvents: number;
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  estimatedMemoryTokens?: number;
+  memoryMaxTokens?: number;
+  trace?: ContextTrace;
 }
 
 /** Immutable Run-level switches shared by Registry projection, Runtime and Context. */
@@ -116,6 +122,16 @@ export interface ProviderAdapter {
     input: ModelInput,
     options: { signal: AbortSignal },
   ): Promise<ModelTurn>;
+  prepare?(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest>;
+  generatePrepared?(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn>;
+}
+
+/** Provider-owned wire preparation metadata. The actual request body stays in
+ * the adapter's private identity-keyed state and is never serialized. */
+export type PreparedRequestEstimate = ProtocolPreparedRequestEstimate;
+
+export interface PreparedProviderRequest extends PreparedRequestMetadata {
+  readonly providerId: string;
 }
 
 export interface ContextCompileInput {
@@ -136,6 +152,8 @@ export interface ContextOptions {
   maxHistoryEvents?: number;
   /** Approximate text/tool budget; image cost is reported by the Provider when available. */
   maxInputTokens?: number;
+  /** Soft cap for memory text inside the Context fixed blocks. */
+  memoryMaxTokens?: number;
 }
 
 export interface ContextCompiler {

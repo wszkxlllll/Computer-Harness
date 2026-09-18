@@ -6,11 +6,12 @@ import type {
   ContextBudgetReport,
   RunFeatureConfig,
 } from "@computer-harness/runtime";
+import { createHash } from "node:crypto";
 import { decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
 import type { RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
 import { composeSystemPrompt, formatMemory, formatPlan } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
-import { estimateEventTokens, fitEventsToTokenBudget } from "./budget.js";
+import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
 import { selectHistoryEvents } from "./history.js";
 
 export interface DefaultContextCompilerOptions {
@@ -18,6 +19,7 @@ export interface DefaultContextCompilerOptions {
   mode?: "raw" | "recent";
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  memoryMaxTokens?: number;
   features?: RunFeatureConfig;
 }
 export class DefaultContextCompiler implements ContextCompiler {
@@ -25,6 +27,7 @@ export class DefaultContextCompiler implements ContextCompiler {
   private readonly mode: "raw" | "recent";
   private readonly maxHistoryEvents: number;
   private readonly maxInputTokens: number | undefined;
+  private readonly memoryMaxTokens: number;
   private readonly features: RunFeatureConfig;
 
   public constructor(
@@ -42,6 +45,10 @@ export class DefaultContextCompiler implements ContextCompiler {
     if (this.maxInputTokens !== undefined && (!Number.isInteger(this.maxInputTokens) || this.maxInputTokens < 1)) {
       throw new Error("maxInputTokens must be a positive integer");
     }
+    this.memoryMaxTokens = options.memoryMaxTokens ?? 256;
+    if (!Number.isInteger(this.memoryMaxTokens) || this.memoryMaxTokens < 1) {
+      throw new Error("memoryMaxTokens must be a positive integer");
+    }
     this.features = options.features ?? { planning: "tasks-v1", memory: "facts-v1", batching: "off" };
   }
 
@@ -55,19 +62,27 @@ export class DefaultContextCompiler implements ContextCompiler {
     });
     const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(baseTools) : baseTools;
     const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
-    const fixedText = [
-      systemPrompt,
-      input.goal,
-      JSON.stringify(tools),
-      ...(features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? [formatPlan(input.plan)] : []),
-      ...(features.memory !== "off" && input.memory !== undefined ? [formatMemory(input.memory, input.plan) ?? ""] : []),
-    ].join("\n");
+    const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
+    const memoryProjection = features.memory !== "off" && input.memory !== undefined
+      ? formatMemory(input.memory, input.plan, input.context?.memoryMaxTokens ?? this.memoryMaxTokens)
+      : undefined;
+    const memoryText = memoryProjection?.text;
+    const toolText = JSON.stringify(tools);
+    const fixedBlocks = [
+      { name: "system" as const, text: systemPrompt, included: true },
+      { name: "goal" as const, text: input.goal, included: true },
+      { name: "tools" as const, text: toolText, included: true },
+      { name: "plan" as const, text: planText ?? "", included: planText !== undefined },
+      { name: "memory" as const, text: memoryText ?? "", included: memoryText !== undefined && memoryText.length > 0 },
+    ];
+    const fixedText = fixedBlocks.map((block) => block.text).join("\n");
     const estimatedFixedTextTokens = Math.ceil(fixedText.length / 4);
-    let selectedEvents = selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents);
+    const historyCandidates = selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents);
+    let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
+    const historyBudget = maxInputTokens === undefined ? undefined : maxInputTokens - estimatedFixedTextTokens;
     if (maxInputTokens !== undefined) {
-      const historyBudget = maxInputTokens - estimatedFixedTextTokens;
-      if (historyBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
+      if (historyBudget === undefined || historyBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
       selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
     }
     const latestEventObservation = findLatestObservation(orderedEvents);
@@ -157,9 +172,8 @@ export class DefaultContextCompiler implements ContextCompiler {
     }
 
     if (features.memory !== "off" && input.memory !== undefined) {
-      const memoryText = formatMemory(input.memory, input.plan);
-      if (memoryText !== undefined) {
-        messages.push({ role: "user", content: [{ type: "text", text: memoryText }] });
+      if (memoryProjection !== undefined && memoryProjection.text.length > 0) {
+        messages.push({ role: "user", content: [{ type: "text", text: memoryProjection.text }] });
       }
     }
 
@@ -180,6 +194,34 @@ export class DefaultContextCompiler implements ContextCompiler {
     if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
       throw new Error("Context history exceeds maxInputTokens after selection");
     }
+    const selectedIds = new Set(selectedEvents.map((event) => event.eventId));
+    const candidateIds = new Set(historyCandidates.map((event) => event.eventId));
+    const latestObservationEventId = latestObservation === undefined
+      ? undefined
+      : orderedEvents.find((event) => event.type === "observation.created" && event.observation.id === latestObservation.id)?.eventId;
+    const projectedEventIds = [
+      ...selectedEvents.filter(isProjectableHistoryEvent).map((event) => event.eventId),
+      ...(latestObservationEventId === undefined ? [] : [latestObservationEventId]),
+    ];
+    const discardedEvents = [
+      ...orderedEvents.filter((event) => !candidateIds.has(event.eventId)).map((event) => ({ eventId: event.eventId, reason: "history_limit" as const })),
+      ...historyCandidates.filter((event) => !selectedIds.has(event.eventId)).map((event) => ({ eventId: event.eventId, reason: "input_budget" as const })),
+    ];
+    const memoryEstimatedTokens = memoryProjection?.estimatedTokens ?? 0;
+    const trace = {
+      compilerVersion: "context-v2-rft4",
+      runId: input.runId,
+      stablePrefixHash: createHash("sha256").update(JSON.stringify({ system: systemPrompt, tools })).digest("hex"),
+      fixedBlocks: fixedBlocks.map((block) => ({ name: block.name, estimatedTokens: estimateTextTokens(block.text), included: block.included })),
+      selectedEventIds: selectedEvents.map((event) => event.eventId),
+      projectedEventIds,
+      discardedEvents,
+      authoritativeUserEventIds: orderedEvents.filter((event) => event.type === "user.input.received").map((event) => event.eventId),
+      historyEstimatedTokens: estimatedHistoryTextTokens,
+      ...(historyBudget === undefined || historyBudget < 0 ? {} : { historyBudgetTokens: historyBudget }),
+      ...(memoryProjection === undefined ? {} : { memoryEstimatedTokens, memoryTruncated: memoryProjection.truncated }),
+      observationIncluded: latestObservation !== undefined,
+    };
     const budget: ContextBudgetReport = {
       mode: input.context?.mode ?? this.mode,
       estimatedInputTokens,
@@ -191,6 +233,8 @@ export class DefaultContextCompiler implements ContextCompiler {
       omittedHistoryEvents: Math.max(0, orderedEvents.length - selectedEvents.length),
       ...(input.context?.maxHistoryEvents === undefined && this.mode === "raw" ? {} : { maxHistoryEvents: input.context?.maxHistoryEvents ?? this.maxHistoryEvents }),
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(memoryText === undefined ? {} : { estimatedMemoryTokens: memoryEstimatedTokens, memoryMaxTokens: input.context?.memoryMaxTokens ?? this.memoryMaxTokens }),
+      trace,
     };
     return {
       system: systemPrompt,
@@ -199,4 +243,8 @@ export class DefaultContextCompiler implements ContextCompiler {
       contextBudget: budget,
     };
   }
+}
+
+function estimateTextTokens(value: string): number {
+  return Math.ceil(value.length / 4);
 }

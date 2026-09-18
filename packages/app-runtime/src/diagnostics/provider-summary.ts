@@ -40,6 +40,11 @@ export interface ProviderSummaryOptions {
   trustedModel?: string;
 }
 
+export interface ProviderUsageOptions {
+  /** Only this verified Provider owns prompt_tokens_details.cached_tokens. */
+  providerId?: "qwen3.8-flash";
+}
+
 interface SafeIdentifier {
   value: string | null;
   length: number;
@@ -169,7 +174,7 @@ export function summarizeProviderResponse(value: unknown, options: ProviderSumma
     toolCalls: calls,
     toolCallCount: calls.length,
     structuredContent: structured,
-    usage: summarizeProviderUsage(value.usage),
+    usage: summarizeProviderUsage(value.usage, trustedModel === "qwen3.8-flash" ? { providerId: trustedModel } : {}),
     diagnosticCodes: [...diagnostics].sort(),
   };
 }
@@ -252,10 +257,11 @@ export function summarizeProviderArguments(value: unknown): ProviderArgumentSumm
     : { ...summary, diagnosticCodes: [...summary.diagnosticCodes, "native_arguments_not_object"] };
 }
 
-export function summarizeProviderUsage(value: unknown): Record<string, unknown> | null {
+export function summarizeProviderUsage(value: unknown, options: ProviderUsageOptions = {}): Record<string, unknown> | null {
   if (value === undefined) return null;
   if (!isPlainRecord(value)) return { shape: shapeOf(value), diagnosticCodes: ["usage_not_object"] };
-  const knownKeys = new Set(["prompt_tokens", "completion_tokens", "total_tokens"]);
+  const qwenCacheUsage = options.providerId === "qwen3.8-flash";
+  const knownKeys = new Set(["prompt_tokens", "completion_tokens", "total_tokens", ...(qwenCacheUsage ? ["prompt_tokens_details"] : [])]);
   const sourceKeys = Object.keys(value);
   const result: Record<string, unknown> = {
     shape: "object",
@@ -267,8 +273,19 @@ export function summarizeProviderUsage(value: unknown): Record<string, unknown> 
     if (typeof item === "number" && Number.isInteger(item) && item >= 0) result[target] = item;
   }
   const diagnosticCodes = new Set<string>();
+  const promptDetails = qwenCacheUsage ? value.prompt_tokens_details : undefined;
+  if (qwenCacheUsage && promptDetails !== undefined) {
+    if (isPlainRecord(promptDetails)) {
+      const cachedTokens = promptDetails.cached_tokens;
+      if (typeof cachedTokens === "number" && Number.isInteger(cachedTokens) && cachedTokens >= 0) result.cachedReadTokens = cachedTokens;
+      else if (cachedTokens !== undefined) diagnosticCodes.add("usage_invalid_fields_omitted");
+    } else {
+      diagnosticCodes.add("usage_invalid_fields_omitted");
+    }
+  }
   if (sourceKeys.some((key) => !knownKeys.has(key))) diagnosticCodes.add("usage_unknown_fields_omitted");
-  if (sourceKeys.some((key) => knownKeys.has(key) && !(typeof value[key] === "number" && Number.isInteger(value[key]) && value[key] >= 0))) {
+  const scalarKeys = new Set(["prompt_tokens", "completion_tokens", "total_tokens"]);
+  if (sourceKeys.some((key) => scalarKeys.has(key) && !(typeof value[key] === "number" && Number.isInteger(value[key]) && value[key] >= 0))) {
     diagnosticCodes.add("usage_invalid_fields_omitted");
   }
   if (diagnosticCodes.size > 0) result.diagnosticCodes = [...diagnosticCodes].sort();

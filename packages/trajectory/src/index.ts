@@ -355,6 +355,9 @@ function assertNever(value: never): never {
 }
 
 function addUsage(previous: ModelUsage | undefined, next: ModelUsage): ModelUsage {
+  // Cache reads remain on each ModelTurn. A run-level sum would silently
+  // treat a response that omitted provider cache details as a zero, so the
+  // normalized snapshot intentionally does not claim aggregate coverage.
   return {
     ...(previous?.inputTokens === undefined && next.inputTokens === undefined ? {} : { inputTokens: (previous?.inputTokens ?? 0) + (next.inputTokens ?? 0) }),
     ...(previous?.outputTokens === undefined && next.outputTokens === undefined ? {} : { outputTokens: (previous?.outputTokens ?? 0) + (next.outputTokens ?? 0) }),
@@ -633,6 +636,7 @@ const modelUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative().optional(),
   outputTokens: z.number().int().nonnegative().optional(),
   totalTokens: z.number().int().nonnegative().optional(),
+  cacheReadTokens: z.number().int().nonnegative().optional(),
 });
 const modelContinuationSchema = z.object({
   providerId: nonEmptyString,
@@ -751,6 +755,33 @@ const eventBaseSchema = {
   sequence: z.number().int().nonnegative(),
   occurredAt: nonEmptyString,
 };
+const contextTraceSchema = z.object({
+  compilerVersion: nonEmptyString,
+  runId: nonEmptyString,
+  stablePrefixHash: nonEmptyString,
+  fixedBlocks: z.array(z.object({
+    name: z.enum(["system", "goal", "tools", "plan", "memory"]),
+    estimatedTokens: z.number().int().nonnegative(),
+    included: z.boolean(),
+  })),
+  selectedEventIds: z.array(nonEmptyString),
+  projectedEventIds: z.array(nonEmptyString).optional(),
+  discardedEvents: z.array(z.object({ eventId: nonEmptyString, reason: z.enum(["history_limit", "input_budget"]) })),
+  authoritativeUserEventIds: z.array(nonEmptyString),
+  historyEstimatedTokens: z.number().int().nonnegative(),
+  historyBudgetTokens: z.number().int().nonnegative().optional(),
+  memoryEstimatedTokens: z.number().int().nonnegative().optional(),
+  memoryTruncated: z.boolean().optional(),
+  observationIncluded: z.boolean(),
+  preparedRequest: z.object({
+    payloadHash: nonEmptyString,
+    estimate: z.object({
+      estimatedTextTokens: z.number().int().nonnegative(),
+      imageCount: z.number().int().nonnegative(),
+      estimationMethod: z.enum(["context_report", "provider_projection"]),
+    }).optional(),
+  }).optional(),
+});
 
 const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ ...eventBaseSchema, type: z.literal("run.created"), goal: nonEmptyString }),
@@ -766,6 +797,17 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     ...eventBaseSchema,
     type: z.literal("model.request.started"),
     providerId: nonEmptyString,
+    requestId: nonEmptyString.optional(),
+    decisionId: nonEmptyString.optional(),
+    attempt: z.number().int().positive().optional(),
+    preparedRequest: z.object({
+      payloadHash: nonEmptyString,
+      estimate: z.object({
+        estimatedTextTokens: z.number().int().nonnegative(),
+        imageCount: z.number().int().nonnegative(),
+        estimationMethod: z.enum(["context_report", "provider_projection"]),
+      }).optional(),
+    }).optional(),
     contextBudget: z.object({
       mode: z.enum(["raw", "recent"]),
       estimatedInputTokens: z.number().int().nonnegative(),
@@ -777,9 +819,12 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       omittedHistoryEvents: z.number().int().nonnegative(),
       maxHistoryEvents: z.number().int().positive().optional(),
       maxInputTokens: z.number().int().positive().optional(),
+      estimatedMemoryTokens: z.number().int().nonnegative().optional(),
+      memoryMaxTokens: z.number().int().positive().optional(),
+      trace: contextTraceSchema.optional(),
     }).optional(),
   }),
-  z.object({ ...eventBaseSchema, type: z.literal("model.response.received"), turn: modelTurnSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("model.response.received"), requestId: nonEmptyString.optional(), decisionId: nonEmptyString.optional(), attempt: z.number().int().positive().optional(), turn: modelTurnSchema }),
   z.object({
     ...eventBaseSchema,
     type: z.literal("model.request.failed"),
@@ -787,6 +832,9 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     message: z.string(),
     code: nonEmptyString.optional(),
     retryable: z.boolean().optional(),
+    requestId: nonEmptyString.optional(),
+    decisionId: nonEmptyString.optional(),
+    attempt: z.number().int().positive().optional(),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("tool.call.received"), call: toolCallSchema }),
   z.object({

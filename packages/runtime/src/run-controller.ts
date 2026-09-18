@@ -36,6 +36,7 @@ import type {
   ModelInput,
   ModelMessage,
   ProviderAdapter,
+  PreparedProviderRequest,
   RuntimePolicy,
   ActionPolicy,
   ActionPolicyDecision,
@@ -521,12 +522,29 @@ export class RunController {
             continue;
           }
           let requestContext = context;
+          const decisionId = this.idFactory.eventId();
+          const prepareProvider = this.provider.prepare?.bind(this.provider);
+          const generatePrepared = this.provider.generatePrepared?.bind(this.provider);
+          const canPrepareProvider = prepareProvider !== undefined && generatePrepared !== undefined;
+          let prepared: PreparedProviderRequest | undefined;
           let retryCount = 0;
           let providerFailed = false;
+          let decisionInvalidated = false;
+          let requestIdForResponse: string | undefined;
           const retryWindowStartedAt = Date.now();
           let closeTurnConsumed = false;
+          if (canPrepareProvider) {
+            prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+            // Preparation may read assets or otherwise await provider-local
+            // work.  Re-check the command barrier before any network attempt.
+            const afterPrepare = await this.drainCommands();
+            if ((this.snapshot.status as string) === "paused" || afterPrepare.correction) {
+              if (afterPrepare.correction) await this.refreshAfterUserInput(session);
+              decisionInvalidated = true;
+            }
+          }
           turn = undefined;
-          while (turn === undefined) {
+          while (turn === undefined && !decisionInvalidated) {
             if (retryCount > 0) {
               const retryBudget = this.policy.checkBudget(this.snapshot);
               if (!retryBudget.allowed) {
@@ -545,9 +563,32 @@ export class RunController {
               this.actionBudgetCloseTurnsRemaining -= 1;
               closeTurnConsumed = true;
             }
-            await this.commitEvent({ type: "model.request.started", providerId: this.provider.id, ...(requestContext.contextBudget === undefined ? {} : { contextBudget: requestContext.contextBudget }) });
+            const attempt = retryCount + 1;
+            const requestId = this.idFactory.eventId();
+            requestIdForResponse = requestId;
+            const preparedRequest = prepared === undefined ? undefined : {
+              payloadHash: prepared.payloadHash,
+              ...(prepared.estimate === undefined ? {} : { estimate: prepared.estimate }),
+            };
+            const contextBudget = requestContext.contextBudget === undefined || preparedRequest === undefined || requestContext.contextBudget.trace === undefined
+              ? requestContext.contextBudget
+              : {
+                  ...requestContext.contextBudget,
+                  trace: { ...requestContext.contextBudget.trace, preparedRequest },
+                };
+            await this.commitEvent({
+              type: "model.request.started",
+              providerId: this.provider.id,
+              requestId,
+              decisionId,
+              attempt,
+              ...(preparedRequest === undefined ? {} : { preparedRequest }),
+              ...(contextBudget === undefined ? {} : { contextBudget }),
+            });
             try {
-              turn = await this.provider.generate(requestContext, { signal: this.abortController.signal });
+              turn = prepared !== undefined && generatePrepared !== undefined
+                ? await generatePrepared(prepared, { signal: this.abortController.signal })
+                : await this.provider.generate(requestContext, { signal: this.abortController.signal });
             } catch (error) {
               const details = providerErrorDetails(error);
               const nextRetryCount = retryCount + 1;
@@ -561,6 +602,9 @@ export class RunController {
                 type: "model.request.failed",
                 category: this.isAborted() ? "cancelled" : "provider",
                 message: providerFailureMessage(error, retry, retryCount + 1),
+                requestId,
+                decisionId,
+                attempt,
                 ...details,
               });
               if (!retry) {
@@ -570,17 +614,41 @@ export class RunController {
               }
               retryCount = nextRetryCount;
               await waitBeforeProviderRetry(this.abortController.signal, retryCount);
+              const retryEffects = await this.drainCommands();
+              if ((this.snapshot.status as string) === "paused" || retryEffects.correction) {
+                if (retryEffects.correction) await this.refreshAfterUserInput(session);
+                decisionInvalidated = true;
+                break;
+              }
               if (providerErrorDetails(error).retryMode !== "same_input") {
                 requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
+                if (canPrepareProvider) {
+                  prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+                  const afterRetryPrepare = await this.drainCommands();
+                  if ((this.snapshot.status as string) === "paused" || afterRetryPrepare.correction) {
+                    if (afterRetryPrepare.correction) await this.refreshAfterUserInput(session);
+                    decisionInvalidated = true;
+                    break;
+                  }
+                }
               }
             }
+          }
+          if (decisionInvalidated) {
+            continue;
           }
           if (providerFailed || turn === undefined) {
             break;
           }
 
           this.throwIfAborted();
-          await this.commitEvent({ type: "model.response.received", turn });
+          await this.commitEvent({
+            type: "model.response.received",
+            turn,
+            ...(requestIdForResponse === undefined ? {} : { requestId: requestIdForResponse }),
+            decisionId,
+            attempt: retryCount + 1,
+          });
           this.throwIfAborted();
           const afterResponse = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused") {
