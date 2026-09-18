@@ -166,11 +166,11 @@ FM09 的 action precondition/dependency 语义保留为后续合同问题；DEV-
 
 ### 5.1 Shadow 输入与签名
 
-Monitor 只读 Runtime committed events/Observation/receipt/Plan/Memory snapshot，不拥有 GUI 执行权。每一步生成脱敏、稳定的 action signature（tool/action kind、规范化参数 shape、基于 Observation 与现有 target/session ref 的关联、结果状态），不把 typed text、URL、截图正文或 secret 放入可分享摘要。
+Monitor 只读 Runtime committed events/Observation/receipt/Plan/Memory snapshot，不拥有 GUI 执行权。每一步生成脱敏、稳定的 action signature：按可比较的 session/target/geometry 分区，组合 tool/action kind 与规范化参数值后在本地私有散列，并附结果状态；不要把每步变化的 `observationId` 放进 equality signature，Observation 只做溯源。typed text、URL、截图正文或 secret 不进入可分享摘要。
 
 可选 screenshot feature 只有在真实 image bytes 可读、相同 target/session binding、viewport/geometry 可比较时生产；若后端没有公开 generation/稳定 binding 则返回 unknown/insufficient。截图 ID 只是引用，不是相似度特征。特征缺失、capture 失败、resize、target 切换、动画等不猜页面循环。
 
-Progress evidence 分层：动作/receipt、同目标局部视觉特征、状态回访、错误/拒绝、Plan/Memory delta、模型自报。Plan/Memory 缺失是缺信号，不是 stalled；Memory 写入也不能自动清除 stalled 候选。
+Progress evidence 分层：动作/receipt、同目标局部视觉特征、状态回访、错误/拒绝、Plan/Memory delta、模型自报。重复 type 或相同坐标 click 只能形成 stalled candidate，不能直接判无效；Plan/Memory 缺失是缺信号，不是 stalled；Memory 写入也不能自动清除 stalled 候选。
 
 ### 5.2 有界状态机与消费者
 
@@ -180,7 +180,7 @@ shadow -> candidate(uncertain) -> guidance_eligible
 ```
 
 - shadow 默认不改模型输入、不改执行规则，只记录候选、证据 source、阈值版本、成本和 unknown。
-- guidance 默认是下一轮正常请求中的短安全摘要，不额外调用模型；设置 cooldown、最大 guidance 次数、总时/请求/字符预算。
+- guidance 默认是下一轮正常请求中的短安全摘要，不额外调用模型；设置 cooldown、最大 guidance 次数、总时/请求/字符预算。guidance 不解除 approval、Host deny 或 unknown side-effect barrier。
 - 持续不确定时转 `user_input_required`/求助或停止；Monitor 不触发重试、绕过 approval、重放 unknown side effect 或释放未确认 owner。
 - Monitor 的输出由 Runtime 消费为诊断/控制事件；任何真正改变调度的 guidance 必须有显式开关和 feature version，不能只写事件没人读。
 
