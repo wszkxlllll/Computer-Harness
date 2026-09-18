@@ -1,7 +1,7 @@
 # DEV-4 Memory model API validation
 
 日期：2026-09-18
-状态：已完成有界真实协议探针；未形成完整 Provider→Memory→回答/finish 绿证据。
+状态：窄范围真实协议探针通过；不等于完整 DEV-4 或真实桌面验收。
 范围：仅合成 Memory、Planning off、lexical retrieval、无真实桌面/VM/截图/用户数据；没有自动重试。
 ## 1. 实际验证链路
 
@@ -11,24 +11,24 @@
 
 探针以 `memory_write_fact` 写入两个合成事实：
 
-- `current_task_fact=ADMITTED_SYNTHETIC_FACT`，`stable`，run scope；
-- `old_task_fact=RECHECK_ONLY_OLD_FACT`，`short_lived`，作为待复核候选。
+- `current_task_fact=ADMITTED_SYNTHETIC_FACT ORCHID`，`stable`，run scope；
+- `old_task_fact=RECHECK_ONLY_OLD_FACT ORCHID`，`short_lived`，作为待复核候选。
 
-目标明确关闭 Planning，先要求模型调用 `memory_search("task fact")`，再只依据 admitted 事实回答并结束；没有 Computer action。所有输出只保存脱敏请求形状、工具名、usage、错误码和轨迹元数据，不保存 key、原始 Provider body 或私密路径。
+目标明确关闭 Planning，先要求模型调用 `memory_search("ORCHID")`，再只依据 admitted 事实调用 `terminate`；没有 Computer action。所有输出只保存脱敏请求形状、工具名、usage、错误码和轨迹元数据，不保存 key、原始 Provider body 或私密路径。
 
 ## 2. 请求账本与结果
 
-每个 chat provider 的总上限为 3 次 HTTP；脚本把模型协议错误标成不可重试，避免 Runtime 自动重试扩大额度。
+首轮每个 chat provider 上限为 3 次 HTTP；修正 fixture 后的第二轮独立上限为每 provider 2 次。脚本把模型协议错误标成不可重试，避免 Runtime 自动重试扩大额度。
 
 | 链路 | HTTP | 结果 |
 | --- | ---: | --- |
 | 历史 Qwen `text-embedding-v4` pilot | 4 | 0 失败/重试，usage 合计 64 tokens；不是本次 chat 集成证据 |
-| GLM `glm-5.3-flash` | 3/3 | 第 1 次因旧合成图像得到 HTTP 400/1210；修正尺寸后两次实际完成 `memory_search`、`memory_get`，但预算耗尽前没有最终 finish |
-| Qwen `qwen3.8-flash` | 3/3 | 第 1 次旧图像格式 HTTP 400；第 2 次 1×1 图像被拒绝（最小边需大于 10）；第 3 次使用 Node/zlib 验证的 16×16 PNG，真实调用 `memory_search`，但没有最终 finish |
+| GLM `glm-5.3-flash` | 首轮 3 + 第二轮 2 | 首轮第 1 次因旧合成图像得到 HTTP 400/1210，后两次完成 search/get 但无 finish；第二轮 2 次完成 `memory_search`→admitted/revalidation 分区→仅 admitted 的 `terminate` |
+| Qwen `qwen3.8-flash` | 首轮 3 + 第二轮 2 | 首轮依次遇到旧图像格式、1×1 尺寸限制和无 finish；第二轮 2 次完成同一 search→admitted/revalidation→terminate 路径 |
 
-GLM 两次成功响应 usage 分别为 1,642 和 3,618 tokens（第二次含 1,536 cached tokens）；Qwen 最后一次 usage 为 prompt 1,311、completion 65、total 1,376，其中 image tokens 66。两 provider 合计 chat HTTP 6 次，未发生自动重试或 GUI action。
+首轮 GLM 两次成功响应 usage 为 1,642 和 3,618 tokens（第二次含 1,536 cached tokens）；首轮 Qwen 最后一次响应为 prompt 1,311、completion 65、total 1,376，其中 image tokens 66，但未完成。第二轮 GLM 两次 usage 为 2,102 和 2,869 tokens（第二次含 1,152 cached tokens）；Qwen 两次为 1,540 和 2,140 tokens（分别含 256/1,024 cached tokens，均含 66 image tokens）。两轮 chat 合计 HTTP 10 次，未发生自动重试或 GUI action。
 
-GLM 的 `memory_get` 返回了 admitted 的 `current_task_fact`，证明真实 provider 响应可以进入生产 Memory tool 执行路径；但其前一步 `memory_search("task fact")` 的 lexical 命中为 0，不能宣称已证明搜索结果正确区分 admitted/revalidation。Qwen 的同一 lexical 查询也返回 admitted/revalidation 均为空，随后因本 provider 预算耗尽而结束为 failed。因而本探针是客观的部分通过/部分失败记录，不是完整模型质量或端到端回答验收。
+首轮的 `task fact` fixture 与词法分词边界不匹配，导致 search 为空；这不是扩大产品 tokenizer 的理由。第二轮先离线确认 `ORCHID` 同时返回 1 个 admitted 和 1 个 revalidation，再由两个真实 provider 各用两次 HTTP 完成 search 与 terminate：GLM 的最终摘要只复述 admitted 值并明确不把旧值当 current，Qwen 的最终摘要也只包含 admitted 值。该结果证明窄范围真实 provider→Memory tool→分区消费→finish 链路；不证明语义检索、长任务质量或真实用户数据。
 
 ## 3. 本批修复与离线证据
 
@@ -45,10 +45,12 @@ pnpm run typecheck
 exit 0
 node --check scripts/real-memory-model-api-validation.mjs
 pass
+offline lexical fixture check: `ORCHID` → 1 admitted + 1 revalidation
+second real round: GLM 2/2 and Qwen 2/2 succeeded; no GUI action
 ```
 
 合成 PNG 在发出最后 Qwen 请求前由 Node 内置 zlib 解压检查：PNG signature 正确，IHDR/IDAT/IEND 完整，16×16、75 bytes；本机没有安装 `sharp`，没有把缺失的第三方解码器冒充成功。
 
 ## 4. 边界与后续
 
-本批没有证明：完整 search→get/回答→finish、语义 embedding 质量、真实用户 Memory、跨 Run 继承、真实截图/桌面、Provider 重试策略或 Hosted CI。剩余 API 预算为零，不能通过再次请求补写成功结论。`ignoredruns/` 下的原始探针结果仅作本地审计留痕，不应暂存或提交；提交内容不包含 `.env`、原始请求 body、截图或凭据。
+本批仍没有证明：语义 embedding 质量、真实用户 Memory、跨 Run 继承、真实截图/桌面、Provider 重试策略或 Hosted CI；成功只覆盖 Planning off、lexical、两个合成事实和两轮有界 tool protocol。累计 API 预算已用尽，不能通过再次请求扩写结论。`ignoredruns/` 下的两轮原始探针结果仅作本地审计留痕，不应暂存或提交；提交内容不包含 `.env`、原始请求 body、截图或凭据。

@@ -181,8 +181,8 @@ class SeedThenNoRetryProvider {
       return {
         type: "tool_calls",
         calls: [
-          { id: "synthetic-seed-admitted", name: "memory_write_fact", arguments: { key: "current_task_fact", value: "ADMITTED_SYNTHETIC_FACT", retentionClass: "stable" } },
-          { id: "synthetic-seed-recheck", name: "memory_write_fact", arguments: { key: "old_task_fact", value: "RECHECK_ONLY_OLD_FACT", retentionClass: "short_lived" } },
+          { id: "synthetic-seed-admitted", name: "memory_write_fact", arguments: { key: "current_task_fact", value: "ADMITTED_SYNTHETIC_FACT ORCHID", retentionClass: "stable" } },
+          { id: "synthetic-seed-recheck", name: "memory_write_fact", arguments: { key: "old_task_fact", value: "RECHECK_ONLY_OLD_FACT ORCHID", retentionClass: "short_lived" } },
         ],
       };
     }
@@ -325,7 +325,7 @@ async function runProvider(providerName, envFile, outputRoot, maxRequests) {
     eventWriter: writer,
     assetStore: assets,
   });
-  const goal = "Synthetic Memory protocol validation with Planning disabled. There is no current Plan or GUI task. First call memory_search with query `task fact` for a non-current task. The search result must distinguish admitted current facts from the old revalidation candidate. On the next turn, answer and finish using only an admitted fact; never state the revalidation old value as a current fact. Do not call computer tools. Do not call memory_get unless the search result is insufficient.";
+  const goal = "Synthetic Memory protocol validation with Planning disabled. There is no current Plan or GUI task. First model turn: call only memory_search with query `ORCHID`; do not call memory_get, computer tools, or terminate in that turn. The search result must distinguish the admitted current fact from the old revalidation candidate. Second model turn: use only the admitted value ADMITTED_SYNTHETIC_FACT ORCHID, never state RECHECK_ONLY_OLD_FACT ORCHID as current, and call only terminate with status success and a short answer. Do not call memory_get.";
   let outcome = "threw";
   let harnessError;
   const startedAt = Date.now();
@@ -342,7 +342,7 @@ async function runProvider(providerName, envFile, outputRoot, maxRequests) {
     ...(harnessError === undefined ? {} : { harnessError }),
     ...summarizeEvents(events, client.requestCount, client.attempts, maxRequests),
     runFinished: events.filter((event) => event.type === "run.finished").map((event) => ({ outcome: event.outcome, summary: event.summary ?? null })),
-    syntheticSeed: { admittedKey: "current_task_fact", revalidationKey: "old_task_fact", revalidationClass: "short_lived" },
+    syntheticSeed: { admittedKey: "current_task_fact", admittedValue: "ADMITTED_SYNTHETIC_FACT ORCHID", revalidationKey: "old_task_fact", revalidationValue: "RECHECK_ONLY_OLD_FACT ORCHID", revalidationClass: "short_lived" },
     noRealDesktop: true,
   };
   await writeFile(resolve(providerDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
