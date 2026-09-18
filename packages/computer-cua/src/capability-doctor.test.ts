@@ -259,13 +259,13 @@ describe("CUA capability doctor", () => {
     expect(permissionReport.verified.permissions).toEqual({ status: "unknown", reasonCode: "transport" });
   });
 
-  it("does not call an unknown desktop unlock field locked", async () => {
+  it("does not interpret desktop capture authorization as physical lock state", async () => {
     const malformed = fakeDriver({ sessionState: { desktopUnlocked: null } });
     const malformedReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => malformed.driver });
     expect(malformedReport.verified.session).toEqual({ status: "unknown", reasonCode: "session_state_schema" });
 
     const locked = fakeDriver({ sessionState: { desktopUnlocked: false } });
     const lockedReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => locked.driver });
-    expect(lockedReport.verified.session).toEqual({ status: "unknown", reasonCode: "desktop_locked" });
+    expect(lockedReport.verified.session).toEqual({ status: "unknown", reasonCode: "desktop_capture_scope_unconfirmed" });
   });
 });

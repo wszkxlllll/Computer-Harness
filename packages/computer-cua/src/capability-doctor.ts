@@ -340,7 +340,7 @@ function validateSessionView(value: unknown, sessionLabel: string): CuaDoctorChe
 
 function validateSessionState(value: unknown, sessionLabel: string): CuaDoctorCheck {
   if (!isRecord(value) || value.session !== sessionLabel || typeof value.captureScope !== "number" || typeof value.effectiveScope !== "number" || typeof value.desktopUnlocked !== "boolean") return unknownCheck("session_state_schema");
-  if (value.desktopUnlocked !== true) return unknownCheck("desktop_locked");
+  if (value.desktopUnlocked !== true) return unknownCheck("desktop_capture_scope_unconfirmed");
   return supportedCheck();
 }
 
