@@ -36,6 +36,7 @@ import type {
   NonComputerToolDefinition,
   ModelInput,
   ModelMessage,
+  MonitorGuidance,
   ProviderAdapter,
   PreparedProviderRequest,
   RuntimePolicy,
@@ -53,6 +54,8 @@ import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
 import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.js";
 import type { CommittedEventListener } from "./committed-events.js";
+import { createProgressMonitorState, reduceProgressMonitor, type ProgressMonitorState } from "./progress-monitor.js";
+import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -274,6 +277,7 @@ export class RunController {
   private readonly memoryMutationApplier: ((runId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
   private readonly batching: "off" | "same-control-input-v1";
   private readonly features: RunFeatureConfig;
+  private readonly monitorMode: MonitorPolicyMode;
   private readonly cleanupDeadlineMs: number;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
@@ -293,6 +297,14 @@ export class RunController {
   private actionBudgetExhausted = false;
   private actionBudgetCloseTurnsRemaining = MAX_ACTION_BUDGET_CLOSE_TURNS;
   private goal: string | undefined;
+  private monitorState: ProgressMonitorState | undefined;
+  private monitorPolicyState: MonitorPolicyState | undefined;
+  private monitorWorkClock: MonitorWorkClock = { modelDecisionCount: 0, guiActionCount: 0 };
+  private monitorPendingGuidance: MonitorGuidance | undefined;
+  private monitorProcessing = false;
+  private monitorProposalCount = 0;
+  private monitorLastPersistedKey: string | undefined;
+  private monitorLastPartitionKey: string | undefined;
   private sessionMemoryScopeEnded = false;
 
   public constructor(dependencies: RunControllerDependencies) {
@@ -318,6 +330,11 @@ export class RunController {
       memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
       batching: this.batching,
     };
+    this.monitorMode = this.features.monitor ?? "off";
+    if (this.monitorMode !== "off") {
+      this.monitorState = createProgressMonitorState(this.runId);
+      this.monitorPolicyState = createMonitorPolicyState({ mode: this.monitorMode });
+    }
     this.cleanupDeadlineMs = dependencies.cleanupDeadlineMs ?? DEFAULT_CLEANUP_DEADLINE_MS;
     if (!Number.isInteger(this.cleanupDeadlineMs) || this.cleanupDeadlineMs <= 0) {
       throw new Error("cleanupDeadlineMs must be a positive integer");
@@ -513,6 +530,7 @@ export class RunController {
               ...(this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
               ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
               features: this.features,
+              ...(this.monitorPendingGuidance === undefined ? {} : { monitorGuidance: this.monitorPendingGuidance }),
               ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
             },
             this.abortController.signal,
@@ -1657,7 +1675,103 @@ export class RunController {
       // is already durable and reduced, so observer failure is isolated from
       // the Controller's scheduling path.
     }
+    await this.processMonitorCommittedEvent(persisted);
     return persisted;
+  }
+
+  private async processMonitorCommittedEvent(event: RuntimeEvent): Promise<void> {
+    if (this.monitorMode === "off" || this.monitorProcessing || event.type === "monitor.proposal" || this.monitorState === undefined || this.monitorPolicyState === undefined) return;
+    this.monitorProcessing = true;
+    try {
+      if (event.type === "model.request.started" && event.attempt === 1) {
+        this.monitorWorkClock = { ...this.monitorWorkClock, modelDecisionCount: this.monitorWorkClock.modelDecisionCount + 1 };
+        this.monitorPendingGuidance = undefined;
+      } else if (event.type === "action.execution.completed" || event.type === "action.execution.failed") {
+        this.monitorWorkClock = { ...this.monitorWorkClock, guiActionCount: this.monitorWorkClock.guiActionCount + 1 };
+      }
+      const progress = reduceProgressMonitor(this.monitorState, event);
+      this.monitorState = progress.state;
+      const executionBarrier = this.monitorExecutionBarrier();
+      const partitionKey = this.monitorPartitionKey();
+      if (this.monitorLastPartitionKey !== undefined && this.monitorLastPartitionKey !== partitionKey) {
+        this.monitorLastPersistedKey = undefined;
+        this.monitorPendingGuidance = undefined;
+      }
+      this.monitorLastPartitionKey = partitionKey;
+      const policy = reduceMonitorPolicy(this.monitorPolicyState, {
+        runId: this.runId,
+        partitionKey,
+        sequence: event.sequence,
+        clock: this.monitorWorkClock,
+        monitor: progress.output,
+        ...(executionBarrier === undefined ? {} : { executionBarrier }),
+        ...(this.snapshot.status === "finished" ? { terminal: true } : {}),
+      });
+      this.monitorPolicyState = policy.state;
+      if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
+      const proposalEvent = this.monitorProposalEvent(policy.proposal, progress.output, event.eventId);
+      if (proposalEvent === undefined || this.monitorProposalCount >= 64 || this.snapshot.status === "finished") return;
+      this.monitorProposalCount += 1;
+      this.monitorLastPersistedKey = this.monitorProposalKey(policy.proposal, progress.output);
+      await this.commitEvent(proposalEvent);
+      if (policy.proposal.kind === "guidance") {
+        this.monitorPendingGuidance = { text: policy.proposal.text, fingerprint: policy.proposal.fingerprint };
+      } else if (policy.proposal.kind === "help_requested" && this.snapshot.status === "running" && this.monitorExecutionBarrier() === undefined) {
+        await this.commitEvent({ type: "user.input.requested", question: `Monitor requests human review (${policy.proposal.reason}); confirm the current state before continuing.` });
+      }
+    } finally {
+      this.monitorProcessing = false;
+    }
+  }
+
+  private monitorPartitionKey(): string {
+    const session = this.snapshot.computerSession;
+    const viewport = this.latestObservation?.viewport ?? session?.viewport;
+    return session === undefined || viewport === undefined
+      ? `run:${String(this.runId)}`
+      : `session:${String(session.id)}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
+  }
+
+  private monitorExecutionBarrier(): "unknown_outcome" | "pending_side_effect" | undefined {
+    if (this.snapshot.outcome === "outcome_unknown") return "unknown_outcome";
+    if (this.isAborted() || this.snapshot.pendingApproval !== undefined || this.snapshot.pendingUserQuestion !== undefined || this.snapshot.unresolvedActionId !== undefined) return "pending_side_effect";
+    return undefined;
+  }
+
+  private shouldPersistMonitorProposal(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): boolean {
+    if (proposal.kind === "guidance" || proposal.kind === "help_requested") return true;
+    if (!output.candidate) return proposal.reason === "suppressed_by_execution_barrier";
+    return proposal.reason === "candidate_observed" || proposal.reason === "shadow" || proposal.reason === "suppressed_by_execution_barrier";
+  }
+
+  private monitorProposalKey(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): string {
+    const fingerprint = proposal.kind === "none" ? this.monitorPolicyState?.candidateFingerprint ?? output.eventIds.join(",") : proposal.fingerprint;
+    const reason = proposal.kind === "none" ? proposal.reason : proposal.kind === "guidance" ? "guidance" : proposal.reason;
+    return `${proposal.kind}:${reason}:${fingerprint}`;
+  }
+
+  private monitorProposalEvent(
+    proposal: MonitorPolicyProposal,
+    output: import("./progress-monitor.js").ProgressMonitorOutput,
+    sourceEventId: EventId,
+  ): Extract<RuntimeEventData, { type: "monitor.proposal" }> | undefined {
+    const key = this.monitorProposalKey(proposal, output);
+    if (key === this.monitorLastPersistedKey) return undefined;
+    const fingerprint = proposal.kind === "none" ? this.monitorPolicyState?.candidateFingerprint ?? `event-${String(sourceEventId)}` : proposal.fingerprint;
+    return {
+      type: "monitor.proposal",
+      mode: this.monitorMode === "guidance" ? "guidance" : "shadow",
+      proposal: proposal.kind === "none"
+        ? proposal.reason === "suppressed_by_execution_barrier" ? "suppressed_by_execution_barrier" : output.candidate ? "candidate" : "suppressed_by_execution_barrier"
+        : proposal.kind,
+      fingerprint,
+      sourceEventIds: [...new Set([sourceEventId, ...output.eventIds])].slice(-12),
+      reasonCodes: output.reasons.map((reason) => reason.code).slice(-8),
+      evidenceKinds: output.evidence.map((item) => item.kind).slice(-8),
+      modelDecisionCount: this.monitorWorkClock.modelDecisionCount,
+      guiActionCount: this.monitorWorkClock.guiActionCount,
+      ...(proposal.kind === "guidance" ? { guidanceText: proposal.text } : {}),
+    };
   }
 
   private throwIfAborted(): void {

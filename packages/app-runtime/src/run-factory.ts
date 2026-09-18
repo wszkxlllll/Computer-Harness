@@ -148,6 +148,7 @@ function featureConfig(config: ResolvedRunConfig): RunFeatureConfig {
     memory: config.memory === "off" ? "off" : config.memory === "facts" ? "facts-v1" : "entities-v1",
     batching: config.batching,
     riskGuard: config.riskGuard,
+    monitor: config.monitor ?? "off",
   };
 }
 

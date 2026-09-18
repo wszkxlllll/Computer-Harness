@@ -30,6 +30,7 @@ import type {
   Viewport,
 } from "@computer-harness/protocol";
 import type { RunSnapshot } from "@computer-harness/trajectory";
+import type { MonitorPolicyMode } from "./monitor-policy.js";
 
 /** Runtime uses the serializable protocol description; adapter handles stay private. */
 export type ComputerSession = ComputerSessionDescriptor;
@@ -105,6 +106,8 @@ export interface ContextBudgetReport {
   maxInputTokens?: number;
   estimatedMemoryTokens?: number;
   memoryMaxTokens?: number;
+  estimatedMonitorGuidanceTokens?: number;
+  monitorGuidanceIncluded?: boolean;
   trace?: ContextTrace;
 }
 
@@ -114,6 +117,7 @@ export interface RunFeatureConfig {
   memory: "off" | "facts-v1" | "entities-v1";
   batching: "off" | "same-control-input-v1";
   riskGuard?: "off" | "layered";
+  monitor?: MonitorPolicyMode;
 }
 
 export interface ProviderAdapter {
@@ -145,6 +149,12 @@ export interface ContextCompileInput {
   enabledToolNames?: readonly string[];
   memory?: MemoryState;
   features?: RunFeatureConfig;
+  monitorGuidance?: MonitorGuidance;
+}
+
+export interface MonitorGuidance {
+  readonly text: string;
+  readonly fingerprint: string;
 }
 
 export interface ContextOptions {

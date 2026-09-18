@@ -35,3 +35,14 @@ pnpm run typecheck
 ## 未完成
 
 本批没有在线状态回访、Runtime event 持久化、Controller/app-runtime consumer、guidance 注入 Context、help UI、停止策略、效果对照或误报/漏报评测；这些属于后续 DEV-5 集成与验证批次。
+
+## Online integration foundation（本批）
+
+本批已把上述纯 policy 接入同一 Runtime 提交路径，但仍不声称 Monitor 效果验收：
+
+- `RunController.commitEvent` 在原事件 append/reduce/feed 通知后旁路推进 foundation/policy；`monitor.proposal` 自身被过滤，避免递归。默认 `monitor=off` 不创建 state、不写 event、不改变 Context。
+- 新 `monitor.proposal` 只持久脱敏 mode/proposal/fingerprint/source IDs/reason/evidence/work clock 与有界 guidance 文本；Trajectory reducer no-op，旧事件 schema 继续可读。shadow 只记录有界候选提议。
+- 首次 model attempt 与 terminal action receipt 推进 work clock；retry、trace、monitor event 不推进。guidance 进入下一次正常 Context 的 dynamic user block，不进入 system/tools/stable prefix；预算不足时省略并在 Trace/ContextBudget 标记 `monitorGuidanceOmittedReason=budget`。
+- `help_requested` 由 Controller 通过既有 `user.input.requested`/`waiting_user`/Inbox 消费；unknown/abort/approval/unresolved action barrier 优先，Monitor 不 retry、approve、execute 或重开终态。
+
+离线验证：runtime/context/trajectory/CLI focused 共 5 files / 123 tests passed，`pnpm run typecheck` passed；CLI `--help` 展示 `--monitor off|shadow|guidance`。未调用真实 API/桌面/VM，未运行 full suite。

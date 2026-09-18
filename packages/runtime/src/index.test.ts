@@ -38,6 +38,7 @@ import {
   type ProviderAdapter,
   type PreparedProviderRequest,
   type RuntimePolicy,
+  type RunFeatureConfig,
   type ActionPolicy,
   type ContextCompiler,
   validateActionIntent,
@@ -202,6 +203,9 @@ class TestContextCompiler implements ContextCompiler {
     flushPending();
     if (input.latestObservation !== undefined) {
       messages.push({ role: "user", content: [{ type: "image", asset: input.latestObservation.screenshot, viewport: input.latestObservation.viewport }] });
+    }
+    if (input.monitorGuidance !== undefined) {
+      messages.push({ role: "user", content: [{ type: "text", text: input.monitorGuidance.text }] });
     }
     return { system: "runtime test context", messages, tools: this.registry.modelTools() };
   }
@@ -433,6 +437,7 @@ async function makeController(
     enabledToolNames?: readonly string[];
     onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
     actionPolicy?: ActionPolicy;
+    features?: RunFeatureConfig;
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -452,6 +457,7 @@ async function makeController(
     toolRegistry: registry,
     policy,
     ...(overrides.actionPolicy === undefined ? {} : { actionPolicy: overrides.actionPolicy }),
+    ...(overrides.features === undefined ? {} : { features: overrides.features }),
     eventWriter: writer,
     assetStore: overrides.assetStore ?? new FileAssetStore(join(directory, "assets")),
     idFactory: new TestIds(),
@@ -1909,6 +1915,35 @@ describe("RunController S2-4 failure boundaries", () => {
     const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
     expect(events.some((event) => event.type === "model.request.started")).toBe(false);
     expect(events.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+});
+
+describe("RunController Monitor online consumer", () => {
+  it("keeps Monitor fully absent when the feature is off", async () => {
+    const created = await makeController(new ScriptedProvider([{ type: "finish", summary: "done" }]));
+    await expect(created.controller.start("monitor off")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "monitor.proposal")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("Monitor candidate");
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("persists a bounded guidance proposal and consumes it in the next normal Context request", async () => {
+    const turns: ModelTurn[] = [];
+    for (let index = 0; index < 5; index += 1) turns.push({ type: "tool_calls", calls: [clickCall(`monitor-click-${index}`)] });
+    turns.push({ type: "finish", summary: "done" });
+    const provider = new ScriptedProvider(turns);
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    await expect(created.controller.start("monitor guidance")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    const proposals = events.filter((event) => event.type === "monitor.proposal");
+    expect(proposals.some((event) => event.type === "monitor.proposal" && event.proposal === "guidance")).toBe(true);
+    expect(proposals.every((event) => event.type !== "monitor.proposal" || event.guidanceText === undefined || event.guidanceText.length <= 240)).toBe(true);
+    expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Monitor candidate"))))).toBe(true);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(5);
     await rm(created.directory, { recursive: true, force: true });
   });
 });

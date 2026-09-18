@@ -622,6 +622,8 @@ export interface ContextTrace {
   memoryTruncated?: boolean;
   memorySelection?: ContextMemorySelectionTrace;
   observationIncluded: boolean;
+  monitorGuidanceIncluded?: boolean;
+  monitorGuidanceOmittedReason?: "budget";
   preparedRequest?: PreparedRequestMetadata;
 }
 
@@ -631,7 +633,7 @@ export type RuntimeEventData =
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
   | { type: "observation.created"; observation: ObservationFrame }
-  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; trace?: ContextTrace } }
+  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
       type: "model.request.failed";
@@ -673,6 +675,18 @@ export type RuntimeEventData =
   | { type: "action.execution.failed"; receipt: ActionReceipt }
   | { type: "planning.task.updated"; callId: ToolCallId; mutation: PlanningTaskMutation }
   | { type: "memory.updated"; callId: ToolCallId; mutation: MemoryMutation }
+  | {
+      type: "monitor.proposal";
+      mode: "shadow" | "guidance";
+      proposal: "candidate" | "guidance" | "help_requested" | "suppressed_by_execution_barrier";
+      fingerprint: string;
+      sourceEventIds: EventId[];
+      reasonCodes: string[];
+      evidenceKinds: string[];
+      modelDecisionCount: number;
+      guiActionCount: number;
+      guidanceText?: string;
+    }
   | { type: "run.paused"; reason: string }
   | { type: "run.resumed" }
   | { type: "approval.requested"; requestId: string; callId: ToolCallId; reason: string }
@@ -715,6 +729,7 @@ export const runtimeEventTypes = [
   "action.execution.failed",
   "planning.task.updated",
   "memory.updated",
+  "monitor.proposal",
   "run.paused",
   "run.resumed",
   "approval.requested",

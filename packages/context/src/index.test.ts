@@ -499,4 +499,31 @@ describe("DefaultContextCompiler", () => {
     expect(input.contextBudget?.estimatedHistoryTextTokens).toBe(0);
     expect(input.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(base.contextBudget!.estimatedFixedTextTokens! + 1);
   });
+
+  it("keeps Monitor guidance dynamic and omits it when the input budget cannot admit it", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" } });
+    const guidance = { text: "Review the current state before continuing.", fingerprint: "monitor-fingerprint" };
+    const withGuidance = await compiler.compile({
+      runId,
+      goal: "goal",
+      recentEvents: [],
+      features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" },
+      monitorGuidance: guidance,
+    }, new AbortController().signal);
+    expect(JSON.stringify(withGuidance.messages)).toContain("Review the current state before continuing.");
+    expect(withGuidance.contextBudget?.monitorGuidanceIncluded).toBe(true);
+    expect(withGuidance.contextBudget?.trace?.monitorGuidanceIncluded).toBe(true);
+    const base = await compiler.compile({ runId, goal: "goal", recentEvents: [], features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" } }, new AbortController().signal);
+    const omitted = await compiler.compile({
+      runId,
+      goal: "goal",
+      recentEvents: [],
+      features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" },
+      monitorGuidance: guidance,
+      context: { maxInputTokens: base.contextBudget!.estimatedFixedTextTokens! + 1 },
+    }, new AbortController().signal);
+    expect(JSON.stringify(omitted.messages)).not.toContain("Review the current state before continuing.");
+    expect(omitted.contextBudget?.monitorGuidanceIncluded).toBe(false);
+    expect(omitted.contextBudget?.trace?.monitorGuidanceOmittedReason).toBe("budget");
+  });
 });

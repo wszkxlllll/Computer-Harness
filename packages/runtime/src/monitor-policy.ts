@@ -215,9 +215,12 @@ function candidateExpired(state: MonitorPolicyState, clock: MonitorWorkClock): s
 }
 
 function candidateFingerprint(output: ProgressMonitorOutput): string {
-  const reasons = [...new Set(output.reasons.map((reason) => reason.code))].sort();
-  const evidence = [...new Set(output.evidence.map((item) => item.kind))].sort();
-  return createHash("sha256").update(JSON.stringify({ reasons, evidence }), "utf8").digest("hex").slice(0, 24);
+  const reasons = [...new Set(output.reasons.map((reason) => {
+    if (reason.code === "repeated_proposal" || reason.code === "repeated_action" || reason.code === "action_cycle") return "action_stall";
+    if (reason.code === "repeated_refusal" || reason.code === "repeated_failure") return "execution_failure";
+    return reason.code;
+  }))].sort();
+  return createHash("sha256").update(JSON.stringify({ reasons }), "utf8").digest("hex").slice(0, 24);
 }
 
 function guidanceText(output: ProgressMonitorOutput, maxChars: number): string {

@@ -83,11 +83,29 @@ export class DefaultContextCompiler implements ContextCompiler {
     const historyCandidates = selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents);
     let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
-    const historyBudget = maxInputTokens === undefined ? undefined : maxInputTokens - estimatedFixedTextTokens;
+    const rawMonitorGuidanceText = features.monitor === "guidance" && input.monitorGuidance !== undefined
+      ? `Low-confidence Monitor note; verify the current state before acting: ${input.monitorGuidance.text.slice(0, 240)}`
+      : undefined;
+    const rawMonitorGuidanceTokens = rawMonitorGuidanceText === undefined ? 0 : estimateTextTokens(rawMonitorGuidanceText);
+    let monitorGuidanceText = rawMonitorGuidanceText;
+    let monitorGuidanceIncluded = rawMonitorGuidanceText !== undefined;
+    let monitorGuidanceOmittedReason: "budget" | undefined;
+    let historyBudget = maxInputTokens === undefined ? undefined : maxInputTokens - estimatedFixedTextTokens - rawMonitorGuidanceTokens;
     if (maxInputTokens !== undefined) {
+      const fixedBudget = maxInputTokens - estimatedFixedTextTokens;
+      if (fixedBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
+      if (rawMonitorGuidanceTokens > fixedBudget) {
+        monitorGuidanceText = undefined;
+        monitorGuidanceIncluded = false;
+        monitorGuidanceOmittedReason = "budget";
+        historyBudget = fixedBudget;
+      }
       if (historyBudget === undefined || historyBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
       selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
     }
+    const monitorGuidanceTokens = monitorGuidanceIncluded && monitorGuidanceText !== undefined
+      ? estimateTextTokens(monitorGuidanceText)
+      : 0;
     const latestEventObservation = findLatestObservation(orderedEvents);
     if (input.latestObservation !== undefined &&
       (latestEventObservation === undefined || input.latestObservation.id !== latestEventObservation.id)) {
@@ -180,6 +198,10 @@ export class DefaultContextCompiler implements ContextCompiler {
       }
     }
 
+    if (monitorGuidanceText !== undefined && monitorGuidanceIncluded) {
+      messages.push({ role: "user", content: [{ type: "text", text: monitorGuidanceText }] });
+    }
+
     if (latestObservation !== undefined) {
       messages.push({
         role: "user",
@@ -193,7 +215,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
     const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents);
-    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens;
+    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + monitorGuidanceTokens;
     if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
       throw new Error("Context history exceeds maxInputTokens after selection");
     }
@@ -232,6 +254,10 @@ export class DefaultContextCompiler implements ContextCompiler {
         },
       }),
       observationIncluded: latestObservation !== undefined,
+      ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? {
+        monitorGuidanceIncluded,
+        ...(monitorGuidanceOmittedReason === undefined ? {} : { monitorGuidanceOmittedReason }),
+      } : {}),
     };
     const budget: ContextBudgetReport = {
       mode: input.context?.mode ?? this.mode,
@@ -245,6 +271,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       ...(input.context?.maxHistoryEvents === undefined && this.mode === "raw" ? {} : { maxHistoryEvents: input.context?.maxHistoryEvents ?? this.maxHistoryEvents }),
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
       ...(memoryText === undefined ? {} : { estimatedMemoryTokens: memoryEstimatedTokens, memoryMaxTokens: input.context?.memoryMaxTokens ?? this.memoryMaxTokens }),
+      ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? { estimatedMonitorGuidanceTokens: monitorGuidanceTokens, monitorGuidanceIncluded } : {}),
       trace,
     };
     return {

@@ -10,6 +10,7 @@ import type {
   ProviderAdapter,
   RunController,
   RunFeatureConfig,
+  MonitorPolicyMode,
   RuntimePolicy,
   ToolRegistry,
 } from "@computer-harness/runtime";
@@ -52,6 +53,7 @@ export interface ResolvedRunConfig {
   glmThinking?: "disabled" | "enabled";
   glmEndpoint?: string;
   fixtureResult?: string;
+  monitor?: MonitorPolicyMode;
 }
 
 /** Credentials are injected at the application boundary and never serialized. */

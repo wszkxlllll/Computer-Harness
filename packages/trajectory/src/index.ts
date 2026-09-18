@@ -247,6 +247,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         throw new Error(`memory.updated requires running status, got ${snapshot.status}`);
       }
       return { ...snapshot, memory: reduceMemoryMutation(snapshot.memory, event.mutation) };
+    case "monitor.proposal":
+      if (snapshot.status !== "running") {
+        throw new Error(`monitor.proposal requires running status, got ${snapshot.status}`);
+      }
+      return snapshot;
     case "run.paused":
       if (snapshot.status !== "running") {
         throw new Error(`run.paused requires running status, got ${snapshot.status}`);
@@ -784,6 +789,8 @@ const contextTraceSchema = z.object({
     excluded: z.array(z.object({ kind: z.enum(["fact", "entity"]), id: nonEmptyString, reason: z.enum(["superseded", "scope_mismatch", "entity_stale", "entity_missing"]) })),
   }).optional(),
   observationIncluded: z.boolean(),
+  monitorGuidanceIncluded: z.boolean().optional(),
+  monitorGuidanceOmittedReason: z.literal("budget").optional(),
   preparedRequest: z.object({
     payloadHash: nonEmptyString,
     estimate: z.object({
@@ -832,6 +839,8 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       maxInputTokens: z.number().int().positive().optional(),
       estimatedMemoryTokens: z.number().int().nonnegative().optional(),
       memoryMaxTokens: z.number().int().positive().optional(),
+      estimatedMonitorGuidanceTokens: z.number().int().nonnegative().optional(),
+      monitorGuidanceIncluded: z.boolean().optional(),
       trace: contextTraceSchema.optional(),
     }).optional(),
   }),
@@ -922,6 +931,19 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("memory.updated"),
     callId: nonEmptyString,
     mutation: memoryMutationSchema,
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("monitor.proposal"),
+    mode: z.enum(["shadow", "guidance"]),
+    proposal: z.enum(["candidate", "guidance", "help_requested", "suppressed_by_execution_barrier"]),
+    fingerprint: nonEmptyString,
+    sourceEventIds: z.array(nonEmptyString).max(12),
+    reasonCodes: z.array(nonEmptyString).max(8),
+    evidenceKinds: z.array(nonEmptyString).max(8),
+    modelDecisionCount: z.number().int().nonnegative(),
+    guiActionCount: z.number().int().nonnegative(),
+    guidanceText: z.string().max(240).optional(),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("run.paused"), reason: z.string() }),
   z.object({ ...eventBaseSchema, type: z.literal("run.resumed") }),
