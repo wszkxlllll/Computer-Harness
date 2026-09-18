@@ -19,7 +19,7 @@ Monitor 保持 DEV-5，不与 Risk Guard 调换编号。Guard 的规则优先级
 
 ### 2.1 DEV-3 当前基础
 
-`packages/context/src/index.ts` 的 `DefaultContextCompiler` 当前按 Runtime events、Plan、Memory、最新 Observation 组装 `ModelInput`；`raw/recent` 和 `maxHistoryEvents` 已存在，预算以 `Math.ceil(characters / 4)` 估算，能保护用户输入并按完整 tool-call 组裁剪。`ContextBudgetReport` 只有估算数量与选择/省略计数，没有分区裁剪原因、最终 Provider payload 或 request attempt。
+`packages/context/src/compiler.ts` 的 `DefaultContextCompiler` 当前按 Runtime events、Plan、Memory、最新 Observation 组装 `ModelInput`；`packages/context/src/index.ts` 只重导出 compiler/recall 公共入口。`raw/recent` 和 `maxHistoryEvents` 已存在，预算以 `Math.ceil(characters / 4)` 估算，能保护用户输入并按完整 tool-call 组裁剪。`ContextBudgetReport` 只有估算数量与选择/省略计数，没有分区裁剪原因、最终 Provider payload 或 request attempt。
 
 `packages/runtime/src/run-controller.ts` 当前在每次 Provider `generate` 前调用 Compiler、记录 `model.request.started`、消费响应并执行工具；已有用户输入/暂停/纠正屏障，但没有独立 `InstructionState`、`CurrentInstructionView`、`instructionRevision` 或 `ContextTrace`。Provider 的 `generate` 是唯一公开主入口，没有统一的 preparation/estimation contract。
 
