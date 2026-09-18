@@ -1,4 +1,4 @@
-import type { JsonValue } from "@computer-harness/protocol";
+import type { ComputerCapabilities, JsonValue } from "@computer-harness/protocol";
 import type { ModelToolSpec, ToolAudience, ToolCategory, ToolDefinition } from "./contracts.js";
 
 export class ToolRegistry {
@@ -50,6 +50,32 @@ export class ToolRegistry {
     });
   }
 }
+
+/**
+ * Apply backend capabilities to the model-visible tool set after a Computer
+ * session is opened. Runtime still validates every action, but unavailable
+ * built-in primitives should not be offered to the Provider in the first
+ * place (for example, a window opt-in without verified keyboard focus).
+ */
+export function restrictToolNamesForCapabilities(
+  registry: ToolRegistry,
+  capabilities: ComputerCapabilities,
+  enabledToolNames: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (capabilities.pointer && capabilities.keyboard) return enabledToolNames;
+  const enabled = enabledToolNames === undefined ? undefined : new Set(enabledToolNames);
+  const disabled = new Set<string>();
+  if (!capabilities.pointer) {
+    for (const name of ["click", "double_click", "right_click", "scroll", "drag"]) disabled.add(name);
+  }
+  if (!capabilities.keyboard) {
+    for (const name of ["type", "keypress", "hotkey"]) disabled.add(name);
+  }
+  return registry.list()
+    .map((definition) => definition.name)
+    .filter((name) => (enabled === undefined || enabled.has(name)) && !disabled.has(name));
+}
+
 
 function isVisibleTo(definition: ToolDefinition, audience: ToolAudience): boolean {
   return definition.audiences === undefined ? audience === "main" : definition.audiences.includes(audience);

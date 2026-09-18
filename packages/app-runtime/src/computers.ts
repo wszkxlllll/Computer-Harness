@@ -7,11 +7,12 @@ export type ComputerBackendConfig =
       kind: "cua";
       socketPath: string;
       screenshotDir: string;
+      /** Explicit host-only opt-in; omitted keeps primary desktop behavior. */
+      windowTarget?: { pid: number; windowId: number };
     }
   | {
       kind: "osworld";
       bridgeUrl: string;
-      token?: string;
     };
 
 interface CuaComputerModule {
@@ -20,6 +21,8 @@ interface CuaComputerModule {
 
 export interface ComputerFactoryDependencies {
   importCuaComputer?: () => Promise<CuaComputerModule>;
+  /** Injected by the application boundary; no ambient environment read here. */
+  osworldBridgeToken?: string;
 }
 
 const defaultCuaImporter = (): Promise<CuaComputerModule> => import("@computer-harness/computer-cua");
@@ -36,7 +39,7 @@ export async function createComputer(
     return new OsworldComputer({
       bridge: new OsworldBridgeClient({
         baseUrl: config.bridgeUrl,
-        ...(config.token === undefined ? {} : { token: config.token }),
+        ...(dependencies.osworldBridgeToken === undefined ? {} : { token: dependencies.osworldBridgeToken }),
       }),
     });
   }
@@ -55,5 +58,6 @@ export async function createComputer(
   return new cuaModule.CuaDriverComputer({
     socketPath: config.socketPath,
     screenshotDir: config.screenshotDir,
+    ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
   });
 }

@@ -1,290 +1,189 @@
 # Computer Harness
 
-Computer Harness 是一个独立的、Provider-neutral 的多模态 GUI Agent Runtime
-实验仓库。它位于多模态模型和 Computer Driver 之间，负责统一 Observation、
-ToolCall、GUI Action、运行状态和轨迹记录。
+Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：它把模型 Provider、屏幕/窗口观察、Computer Tool、风险决策、运行状态和轨迹记录放在同一条可测试的运行链中。
 
-当前仓库已完成 V1 核心运行时和 Stage 6 工程收敛：Context、canonical Computer Tools、
-GLM/Qwen Provider、CLI、可插拔 Planning/Run Memory、受限 Action Batch，以及实验性分层 Risk Guard 已接入同一
-Runtime 与 ToolRegistry。工程集成已通过；正式效果实验仍需等待 G0 evaluator、预算和任务清单冻结：
+当前仓库面向试用和贡献者，不是托管服务，也不是“任意桌面都安全可控”的成品。真实模型、桌面权限、焦点、窗口几何和 OSWorld VM 都必须单独预检；仓库内的 Fake、协议测试和受控 fixture 不能替代这些验证。
 
-- 已建立 pnpm workspace；
-- 已固定 TypeScript、Vitest 工程基线和 CUA Driver 0.22.2；外部输入需要 Schema 校验时再按包引入 Zod；
-- 已实现核心 protocol 类型；
-- 已实现 JSONL RuntimeEvent Writer、最小 FileAssetStore 和纯函数 RunSnapshot Reducer；
-- 已加入 CUA 0.22.2 的安全技术探针和真实 `packages/computer-cua` 适配器；
-- 已实现 `packages/runtime` 的 FakeProvider/FakeComputer RunController、命令 Inbox、
-  失败注入和统一 Action/Capability/Viewport 校验；
-- 已实现 `packages/context` 的时序投影、`packages/provider-glm` 的 profile 抽象（当前生产 profile 为 `glm-5.3-flash`）、
-  `packages/provider-qwen` 的 Qwen3.8-Flash strict-json/native-tools 双路径适配，以及 `apps/cli` 组合入口；
-- 已实现 `packages/context` 的 raw/recent 历史策略与近似预算报告、`packages/memory` 的 Run 内事实/轻实体 Store，
-  以及 Runtime 的同控件输入 Batch（默认关闭）；CUA 与 OSWorld fake backend seam 的受控 fixture 已通过；
-- 已实现 `packages/computer-osworld`、loopback Python Bridge 和 `--computer osworld` CLI 组装；真实
-  `DesktopEnv`/VM 仅由 Stage 5 脚本在专用环境启动；
-- Qwen `strict_json` 已统一为固定 `calls[]` 协议；真实 API 集成已通过，但返回矩阵仍有偶发格式偏离；
-- 实验性 Risk Guard 使用同轮逐 Computer 调用效果声明：已申报财产、隐私、外部承诺、破坏性或安全设置变更时进入 Approval，低风险声明由本地规则分流，歧义可选用独立 GLM/Qwen 复核；实验 profile 默认关闭，交互 profile 默认开启并要求显式确认才能关闭，mock/协议回归不代表真实安全有效性；
-- fake 契约不等于真实模型成功率；Stage 5 已有单任务真实 API/OSWorld 证据，正式批量比较须等 G0 冻结后按当前入口运行。
+## 当前能力
 
-当前产品顺序是：完成评测冻结与现有模块消融，同时以独立开关开发最小 Risk Guard；Guard 验收后暂停增加新功能，优先改善真实 CUA 的截图、焦点、动作、session、延迟、诊断与部署体验。跨 Run Memory、Advisory Subagent、Sandbox 和 Execution Subagent 仍在长期路线中，但不是当前最高优先级。
+| 能力 | 当前状态 |
+| --- | --- |
+| Provider | GLM 与 Qwen 适配器，共用 ToolRegistry、Runtime 和轨迹协议 |
+| Computer | CUA 0.22.2 连接层、OSWorld loopback Bridge、FakeComputer |
+| Runtime | 单 Run Controller、事件提交后 feed、Context、Planning、Run 内 Memory、受限 Batch |
+| Risk Guard | 实验性 layered Guard；交互 profile 默认开启，实验 profile 默认关闭 |
+| TUI | 无 goal 首页、中文粘贴、暂停/恢复、纠正、审批、Abort、分页回复、退出清理 |
+| CUA window opt-in | 仅显式 PID + window ID；当前只开放已验证的窗口观察/单击/wait 路径，keyboard 不开放 |
+| 诊断 | `--doctor` 无模型、无截图/输入窗口动作且脱敏；会建立并结束临时诊断 session，cleanup 未确认时返回 `unknown` |
 
-## 环境
+## 快速开始
 
-- Node.js 22.13 或更高版本（pnpm 11 的最低运行版本）；
-- pnpm 11.19.0；
-- Windows、macOS、Linux 均可参与代码开发；
-- 真实 CUA 探针需要对应平台的原生权限和桌面会话。
+要求：Node.js `>=22.13.0`、pnpm `11.19.0`。开发、测试和文档工作不需要 API key、桌面权限或 CUA daemon。
 
-依赖只安装在本仓库的 workspace 中，不修改其他 OpenClaw 或 LightSpeaker 环境。
-
-## 安装与检查
-
-从 GitHub 获取仓库后，依赖会安装在本仓库的 pnpm workspace 中，不会改动其他项目的
-Node.js、OpenClaw 或 LightSpeaker 环境。推荐使用仓库声明的 pnpm 版本：
+本 README 描述的是开发预览分支的能力。若默认分支尚未包含对应提交，请先 checkout 提供该功能的开发分支或待审 PR；不要把未发布功能当作远端 main 的稳定接口。
 
 ```text
 git clone https://github.com/wszkxlllll/Computer-Harness.git
 cd Computer-Harness
+# 选择包含本 README 对应提交的开发分支/PR 后再继续
 corepack enable
 corepack install --global pnpm@11.19.0
 pnpm install --frozen-lockfile
+
+# 根 workspace 构建/类型检查，而不是只构建 CLI
+pnpm run build
+pnpm test
+
+# 构建后查看真实 CLI 入口；--help 不读取 .env，不调用 Provider
+node apps/cli/dist/index.js --help
 ```
 
-安装前先确认版本：
+更完整的安装、PowerShell、CUA daemon、OSWorld 和故障排查见[开发者上手指南](./docs/getting-started.md)。
+
+## 运行一个本地任务
+
+普通 Run 必须显式提供 `--goal`、`--model` 和 Computer 连接。下面是当前验证过的 direct Node 入口，可减少 shell/pnpm wrapper 的参数差异；这与 CUA socket 是否可连接是两件事。Provider 请求只会在 Run 真正开始后发生。
 
 ```text
-node --version
-corepack --version
-pnpm --version
+node apps/cli/dist/index.js --goal "describe the current screen" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
 ```
 
-`node --version` 应为 `v22.13.0` 或更高，`pnpm --version` 应为 `11.19.0`。
-如果 Node 自带的 Corepack 过旧或无法启动，可在升级 Node 后执行
-`npm install --global corepack@latest`，再重新执行 `corepack enable` 和
-`corepack install --global pnpm@11.19.0`。不要在 Node 18 上强行运行 pnpm 11；如必须使用
-Node 18，需要另行固定 pnpm 10 并重新验证仓库，不能混用本 README 的 pnpm 11 lockfile 流程。
-
-`pnpm install` 会安装 `@computer-harness/computer-cua` 所需的
-`@trycua/cua-driver@0.22.2` 及当前平台的原生 Node 绑定。可以用下面的命令确认 CUA
-依赖已经进入对应 workspace package：
+OSWorld 需要一个已经通过无模型 Gate 2 的 loopback Bridge；VM、快照和 Python 环境不在本仓库中：
 
 ```text
-pnpm --filter @computer-harness/computer-cua list @trycua/cua-driver --depth 0
-pnpm --filter @computer-harness/cli build
-pnpm run typecheck
+node apps/cli/dist/index.js --goal "<instruction returned by reset>" --model glm-5.3-flash --computer osworld --osworld-bridge "http://127.0.0.1:<port>" --output "runs/osworld-glm" --env-file ".env"
+```
+
+入口参数以 `node apps/cli/dist/index.js --help` 为准。`--interactive` 是行式审批/用户输入入口；`--tui` 是需要真实 TTY 的持续终端界面，两者都不改变 Controller 的调度责任。
+
+## 默认值与显式开关
+
+| 配置 | 默认/约束 | 说明 |
+| --- | --- | --- |
+| `--model` | 普通 Run 必填：`glm-5.3-flash` 或 `qwen3.8-flash` | `--doctor` 使用内部占位值，不调用模型 |
+| `--computer` | `cua` | CUA 仍必须提供 `--cua-socket`；OSWorld 必须提供 `--osworld-bridge` |
+| `--profile` | 非交互为 `experiment`；`--interactive`/`--tui` 为 `live-interactive` | 也接受源码兼容别名 `fixture`/`evaluation`/`live` |
+| `--risk-guard` | 非交互/experiment=`off`；`--interactive` 或 `--tui`/live-interactive=`layered` | 交互模式关闭时必须显式 `--confirm-risk-guard-off` |
+| `--risk-model` | `off` | 只有 layered Guard 可选择 `same`、GLM 或 Qwen 复核 |
+| `--max-steps` / `--max-model-requests` | 各 `30` | 正整数预算 |
+| `--planning` / `--memory` / `--batching` | `off` / `off` / `off` | Memory 可选 `facts`/`entities`；Batch 可选 `same-control-input-v1` |
+| `--context-mode` | `raw` | 可选 `recent`；历史事件默认上限 `80` |
+| Qwen 坐标 | 必须显式 `--qwen-coordinate-mode` | `normalized_1000` 或 `actual_pixels`；默认 thinking=`low`、output=`strict_json` |
+| 输出目录 | `runs/live-cli` | CUA screenshot 默认在输出目录下的 `driver-screenshots` |
+| Cleanup / Risk timeout | `5000ms` / `30000ms` | 可分别用 `--cleanup-deadline-ms`、`--risk-timeout-ms` 调整 |
+| Window target | 关闭 | 必须同时提供 `--cua-window-pid` 和 `--cua-window-id` |
+
+默认组合是 `--planning`/Memory/Batch=`off`、Context=`raw`；非交互 `experiment` profile 的 Guard 默认 `off`，`--interactive`/`--tui` 的 `live-interactive` profile 默认 `layered`。需要改变这些默认值时使用对应开关并记录配置。
+
+## TUI 预览
+
+TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首页，输入目标并按 Enter 开始新 Run；使用时仍需提供 `--model` 和 Computer 连接：
+
+```text
+node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/tui" --env-file ".env"
+```
+
+快捷键只作用于当前 TTY，不是全局热键：
+
+| 按键 | 作用 |
+| --- | --- |
+| `I` | 进入 goal/correction 编辑；Run 正在执行时先请求 pause/quiescence，不能用编辑态绕过未决动作 |
+| `Enter` | 首页开始 Run；Run 中提交 correction。提交经过 Controller Inbox，旧决策失效；pause barrier 未完成时会排队 |
+| `P` / `R` | 通过 Controller 暂停 / 恢复当前 Run |
+| `A` / `Ctrl-C` | Abort 当前 Run；退出时保留未确认 cleanup，不把停止请求冒称底层已停止 |
+| `Y` / `N` | waiting approval 时批准 / 拒绝 |
+| `PageUp` / `PageDown` | 查看长 reply、question 或 approval 的分页 |
+| `Esc` / `Q` | 取消编辑或退出；退出会恢复 raw mode 和 cursor |
+
+编辑态中的 `A`、`Q` 是正文，不是快捷键。必须把焦点放在当前终端；TUI 不注册全局热键，也不会把其他应用收到的按键冒称为输入。输入会显示在本地终端，可能留在 terminal scrollback、录屏或终端日志中；共享 diagnostics/report 仍不写入原始输入。真实 no-goal WinPTY 只证明终端生命周期、中文/resize、尾部可见、500 上限和退出清理，不证明完整 model Run、跨 Run 的真实纠正或通用焦点；另有一次 T10 synthetic fixture GLM 闭环，见“当前证据与限制”。
+
+`--interactive` 不启动 TUI：它提供行式用户输入和审批；`P`/`R`/`I` 是 TUI 控制，不适用于行式入口。
+
+## CUA daemon 与桌面边界
+
+workspace 安装的是 TypeScript 客户端和平台 binding；它**不会自动启动 daemon**，也不把官方 daemon 可执行文件打包进本仓库。锁定版本为 `@trycua/cua-driver@0.22.2`，官方固定版本发布页提供 Windows x64/arm64、macOS universal/arm64/x86_64 和 Linux x86_64/arm64 资产、安装脚本及 `checksums.txt`：
+
+- [CUA Driver 0.22.2 官方 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)
+- [官方 daemon 生命周期说明（main 分支可变参考；固定版本以 release 为准）](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/keep-running.mdx)
+
+下载与启动原则：
+
+1. 只从上面的固定 release 选择当前 OS/架构资产，并用 release 内的 `checksums.txt` 校验；不要把 `latest` 或其他版本 daemon 与本仓库的 0.22.2 client 混用。
+2. 本项目 Windows/CUA 0.22.2 窄路径实测的 daemon 入口形态是 `cua-driver serve --socket "<private-socket>"`；其他平台仍按对应 release 的安装/权限说明准备 daemon。release 页用于固定资产和 checksum，不把 main 文档或 release 描述当作本项目所有平台的 flag 证据。
+3. Windows 使用登录用户的真实桌面会话；macOS 需要按系统提示处理 Accessibility/Screen Recording；Linux 的 X11/Wayland、窗口管理器和权限范围不同，代码可运行不等于真实桌面能力已验证。
+4. 为 daemon 建立私有 socket，再将完全相同的值传给 `--cua-socket`。没有 daemon 时仍可运行 build、tests、fake path 和静态 CLI 检查。
+
+无模型诊断优先使用 direct Node 入口：
+
+```text
+node apps/cli/dist/index.js --doctor --computer cua --cua-socket "<private-socket>"
+```
+
+`--doctor` 不读取 `--env-file` 或 Provider credentials，不截图、不输入窗口、不调用模型；它会访问 metadata/inventory，并为 session/health/permissions 建立、检查和结束临时诊断 session。cleanup 不能确认时仍报告 `unknown` 并返回非零退出码。它不是无副作用承诺，也不是完整桌面验收；不接受 `--tui`、`--interactive` 或 window target flags。
+
+### 显式 window opt-in
+
+默认 desktop CUA 路径不变。只有在用户明确选择 PID 和 window ID 时才启用 host-only window target：
+
+```text
+node apps/cli/dist/index.js --goal "observe the selected window" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --cua-window-pid <pid> --cua-window-id <windowId> --output "runs/window-preview" --env-file ".env"
+```
+
+当前只开放已验证的 window-local observation、single-click 和 `wait`；keyboard、其他 pointer primitive、自动发现窗口、通用 focus/AX 和 silent desktop fallback 都不开放。窗口移动/resize、关闭或 identity 变化会使旧 observation/action 失效；preflight 与 driver action 不是原子事务，不能宣称业务动作一定成功。OSWorld 不接受这些 CUA window flags。
+
+## Provider 与环境变量
+
+`.env` 只放在本地，不提交。Provider key、endpoint 和兼容 aliases 的完整表见[开发者上手指南](./docs/getting-started.md)；不需要 API key 的路径包括 `pnpm test`、`pnpm run build`、`--help`、`--doctor` 和 Fake/协议回归。截图会随选定的 GLM/Qwen 请求发送；`runs/` 不公开上传不等于没有网络传输。
+
+## OSWorld
+
+OSWorld 是独立的 Python/VM 实验环境，不由 TypeScript workspace 安装或启动。先阅读：
+
+- [OSWorld upstream](https://github.com/xlang-ai/OSWorld)
+- [仓库 Bridge 说明](./integrations/osworld/README.md)
+- [Stage 5 可复现说明](./docs/stage-5-osworld-reproducibility.md)
+
+必须先准备固定 OSWorld checkout、Python 环境、VMX 和已验证快照，再通过无模型 Gate 2；不要把 `.vmx`、VM 磁盘、快照名称或 Windows 本机路径当作仓库依赖。
+
+## 架构与目录
+
+```text
+apps/cli / SDK callers
+          │
+          ▼
+packages/app-runtime  ── assembly / RunHandle / ApplicationSession / reports
+          │
+          ▼
+packages/runtime      ── Controller / ToolRegistry / Guard / action routing
+          │
+          ├── Provider abstraction ── provider-glm / provider-qwen
+          ├── Computer abstraction ── computer-cua / computer-osworld
+          ├── context / memory / planning
+          └── trajectory          ── events / assets / snapshot
+```
+
+CLI/SDK 负责组装和注入依赖，Provider 不反向依赖 CLI；贡献时优先保持公共 protocol、Runtime、app-runtime 和 adapter 边界清楚。不要为未消费的未来能力添加字段或入口，生产代码不应跨包导入另一个包的私有 `src` 路径。
+
+## 当前证据与限制
+
+- 离线基线：`pnpm test` 32 files / 320 tests，`pnpm run typecheck` 通过；测试不代表真实模型效果。
+- 实机窄证据：Windows + CUA 0.22.2 专用 fixture 的 adapter window observe/single-click/wait；另有一次 T10 synthetic fixture GLM 闭环（4 requests/responses、3 primitive actions、4 fixture observations）。这与 no-goal WinPTY rapid/slow × ESC→Q/Ctrl-C 四场景分别记录，不能外推通用桌面、focus/AX、所有平台或完整业务 Run。
+- `--doctor` 是无模型、无截图/输入窗口动作的诊断，但会建立/结束临时 session，仍可能 cleanup `unknown`；不能把 metadata/inventory 支持误读成 session、权限或 cleanup 全部通过。
+- Provider transport failure、CUA refusal、真实焦点和 OSWorld 业务结果需按独立验证记录解释；本 README 不把它们包装成已解决或成熟安全保证。
+
+## 继续阅读与贡献
+
+- [开发者上手指南](./docs/getting-started.md)：安装、平台排查、daemon/OSWorld 准备。
+- [CUA 探针说明](./spikes/cua-driver/README.md)：只读探针、显式输入探针和隐私边界。
+- [文档唯一入口](./docs/DOCS-INDEX.md)：当前阶段、验证边界和历史证据索引。
+- [完整开发路线 V2](./docs/full-development-roadmap-v2.md)
+- [验收清单 V2](./docs/development-acceptance-v2.md)
+
+提交改动前至少运行：
+
+```text
+pnpm run build
 pnpm test
 ```
 
-### Windows PowerShell 的 `.ps1` shim
-
-pnpm 在 Windows 下会同时生成 `.cmd` 和 `.ps1` wrapper。`.ps1` 文件可能同时包含
-Windows 分支和 POSIX/WSL 分支，因此看到 `/mnt/e/...` 这一行本身不代表损坏；原生
-PowerShell 会在 `$IsWindows -eq $true` 时走 Windows 分支。可以这样检查当前 shell 和入口：
-
-```text
-$IsWindows
-where.exe node
-where.exe pnpm.*
-pnpm --version
-```
-
-原生 PowerShell 中 `$IsWindows` 应为 `True`，`where.exe pnpm.*` 不应指向 WSL/Git Bash
-脚本。如果 Windows 分支的实际路径仍是 `/mnt/...`，说明依赖曾在 WSL/Unix shell 中生成，
-或当前 PATH 混用了另一套 pnpm。请关闭 WSL/Git Bash 终端，在仓库根目录的原生 PowerShell
-中仅清理本仓库的 `node_modules` 后重新安装（不要删除 `pnpm-lock.yaml`）：
-
-```text
-Remove-Item -LiteralPath .\node_modules -Recurse -Force
-pnpm.cmd install --frozen-lockfile
-```
-
-如果 PowerShell 的执行策略阻止 `.ps1`，可暂时使用 `pnpm.cmd` 执行所有 pnpm 命令；这与
-路径转换问题是两件独立的事。重新安装后再运行 `pnpm --filter @computer-harness/cli build`、
-`pnpm run typecheck` 和 `pnpm test`。
-
-### 环境变量
-
-真实模型运行需要本地 `.env`（不要提交到 Git）。CLI 会在 `--env-file` 指定的文件中读取：
-
-```dotenv
-# GLM-5.3-Flash
-ZHIPUAI_API_KEY=replace-with-your-key
-# 可选：兼容 OpenAI 协议的自定义端点
-GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
-# 可选：GLM thinking 档位；默认 enabled，可用 disabled 做延迟对照
-GLM_THINKING=enabled
-
-# Qwen3.8-Flash
-DASHSCOPE_API_KEY=replace-with-your-key
-# 可选：工作空间或自定义端点，未设置时使用公共 compatible-mode 端点
-DASHSCOPE_WORKSPACE_ID=replace-with-your-workspace-id
-# 与 WORKSPACE_ID 二选一；同时设置时以 BASE_URL 为准
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-```
-
-只需要测试 fake provider、协议或类型检查时不需要 API key。API key 只从进程环境或
-`--env-file` 读取，轨迹和 `summary.json` 不会写入密钥。
-
-### CUA 依赖与 daemon 的边界
-
-仓库安装的是 CUA 的 TypeScript/Node 客户端和平台绑定；`@computer-harness/computer-cua`
-是连接层，不会自动启动 CUA daemon，也不包含可直接分发的 `cua-driver` 可执行文件。
-因此真实桌面运行还需要单独准备与启动官方 CUA daemon，并把同一个私有 socket 传给 CLI：
-
-```text
-# 在已经准备好的隔离桌面上启动 daemon（示例；替换为实际二进制路径）
-<path-to-cua-driver> serve --socket "<private-socket>" --no-overlay
-
-# 在另一个终端运行 Harness
-pnpm --filter @computer-harness/cli build
-pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model glm-5.3-flash --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
-```
-
-Planning、Memory、Batch 和 Context 策略均在同一 CLI/Registry 上显式选择；省略对应参数即关闭扩展或使用 raw baseline：
-
-```text
-pnpm --filter @computer-harness/cli start -- --goal "create and complete a plan" --model glm-5.3-flash --cua-socket "<private-socket>" --planning --output "runs/live-glm-planning" --env-file ".env"
-pnpm --filter @computer-harness/cli start -- --goal "edit the active field" --model glm-5.3-flash --cua-socket "<private-socket>" --batching same-control-input-v1 --context-mode recent --memory facts --output "runs/live-glm-extensions" --env-file ".env"
-```
-
-实验/非交互 profile 的 Risk Guard 默认关闭；`--tui` 或 `--interactive` 默认解析为 `live-interactive` profile 并开启 layered Guard。交互 profile 若要关闭保护，必须显式加入 `--confirm-risk-guard-off`；TUI 和 `summary.json` 显示同一个 resolved profile/Guard 状态。开启后，主 Provider 会为每个 Computer 调用返回 `_harnessEffect`；已知高危动作等待终端 Approval。`--risk-model off` 表示歧义直接审批，`same` 表示仅对歧义动作复用当前 Provider 做一次独立分类：
-
-```text
-pnpm --filter @computer-harness/cli start -- --goal "prepare an order and ask before paying" --model glm-5.3-flash --cua-socket "<private-socket>" --risk-guard layered --risk-model off --interactive --output "runs/live-risk-guard" --env-file ".env"
-```
-
-真实敏感操作前应先使用 FakeComputer/隔离环境验证 Provider 是否稳定返回声明。主模型的低风险声明可能漏报，当前 Guard 不能替代应用权限、隔离环境或人工监督。
-
-Qwen 运行必须显式选择坐标单位；严格 JSON 实验建议同时关闭 thinking：
-
-```text
-pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model qwen3.8-flash --cua-socket "<private-socket>" --qwen-coordinate-mode normalized_1000 --qwen-thinking disabled --qwen-output-mode strict_json --output "runs/live-qwen" --env-file ".env"
-```
-
-Windows named pipe、macOS/Linux socket 路径必须与 daemon 完全一致。daemon 的安装、路径和
-桌面权限属于运行环境准备，不由 `pnpm install` 或本仓库自动完成；没有 daemon 时仍可运行
-类型检查、单元测试和 fake/静态 API 探针。
-
-## 本地 CUA CLI（隔离真实运行）
-
-CLI 只从环境变量读取密钥，并把完整 Event 与截图资产写入指定输出目录。需要一个已经运行的
-CUA daemon socket；不会自动启动 daemon，也不会把 fixture 结果写成模型结果。`summary.json` 同时展示
-实际 Computer session 的 backend、viewport 与 capabilities，便于确认运行时能力。
-
-```text
-pnpm --filter @computer-harness/cli build
-pnpm --filter @computer-harness/cli start -- --goal "click the input and type Harness" --model glm-5.3-flash --cua-socket "<CUA socket>" --output "runs/stage4-glm53" --env-file ".env"
-# 需要终端回答时才追加：--interactive
-# 内部调试全屏界面（同时启用交互，不是最终产品 TUI）：--tui
-pnpm --filter @computer-harness/cli start -- --goal "Observe the current screen and describe it without clicking or typing" --model glm-5.3-flash --computer cua --cua-socket "<CUA socket>" --risk-guard layered --risk-model off --tui --output "runs/local-observe-tui" --env-file ".env"
-```
-
-允许的 `--model` 值为 `glm-5.3-flash` 和 `qwen3.8-flash`。GLM 使用
-`ZHIPUAI_API_KEY`，Qwen 使用
-`DASHSCOPE_API_KEY`；Qwen 若未提供 `DASHSCOPE_BASE_URL/ENDPOINT`，会由
-`DASHSCOPE_WORKSPACE_ID` 生成已验证的 Workspace endpoint，否则使用公共 compatible-mode endpoint。
-可用 `GLM_BASE_URL` 或 `DASHSCOPE_BASE_URL` 覆盖端点；GLM 可用进程级
-`GLM_THINKING=disabled|enabled` 做 thinking 对照。可选
-`--max-steps`、`--max-model-requests`、`--fixture-result`、`--batching`、`--memory`、`--planning`、`--context-mode`、`--context-max-events`、`--context-max-tokens`、`--profile`、`--risk-guard`、`--confirm-risk-guard-off`、`--risk-model`、`--risk-max-model-requests`、`--risk-timeout-ms`、`--cleanup-deadline-ms` 和
-`--screenshot-dir` 用于隔离实验。Qwen 还支持
-`--qwen-output-mode native_tools|strict_json`；默认是 `strict_json`，
-`native_tools` 仅用于协议对照或兼容性回归。Qwen 还必须设置
-`--qwen-coordinate-mode normalized_1000|actual_pixels`。
-
-Stage 5 OSWorld 路径由外层 runner 先调用 Bridge 的 `environment.reset`，再把返回的 instruction
-交给同一个 CLI。无模型的 Gate 2 连接测试命令和 Python 环境要求见
-[`integrations/osworld/README.md`](./integrations/osworld/README.md)；CLI 只需指定：
-
-OSWorld 的 VMware 虚拟机和快照是实验外部 artifact，不会随 Git 仓库下载。队友若要复现实验，必须获取完整 VM
-目录及快照 manifest，或自行创建等价的 1920×1080 基线快照；不能只复制 `.vmx` 或填写一个不存在的快照名。
-完整的获取、校准、Gate 2 和模型运行步骤见
-[`docs/stage-5-osworld-reproducibility.md`](./docs/stage-5-osworld-reproducibility.md)。
-
-```text
-pnpm --filter @computer-harness/cli build
-pnpm --filter @computer-harness/cli start -- --goal "<reset 返回的 instruction>" --model glm-5.3-flash --computer osworld --osworld-bridge "http://127.0.0.1:<port>" --output "runs/stage5-osworld" --env-file ".env"
-```
-
-## 阶段 0：CUA 安全探针
-
-默认只读取屏幕，不执行鼠标或键盘输入：
-
-```text
-pnpm probe:cua
-```
-
-输出位于 `spikes/cua-driver/runs/<session>/`，其中可能包含当前桌面截图，
-该目录已加入 `.gitignore`，不得提交或上传隐私截图。
-
-只有在准备好专门测试桌面后，才显式执行输入探针：
-
-```text
-pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-x 300 --click-y 200
-pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --type "probe text"
-```
-
-这两个命令不是默认测试，也不会自动判断点击是否符合用户目标。它们只验证
-Driver 的底层输入和前后观察链路。
-
-## 代码边界
-
-```text
-packages/protocol       公共运行协议，不依赖 CUA 或 Provider
-packages/trajectory     Event 落盘、资产引用和 Snapshot 投影
-packages/runtime        RunController、Policy、Tool Registry 和 GUI Action 路由
-packages/context        默认时序 Context 编译器
-packages/memory         Run 内 Memory Store 与 Memory 工具
-packages/provider-glm   GLM-5.3 profile
-packages/provider-qwen  Qwen3.8-Flash Adapter
-packages/computer-cua   trycua/cua-driver 适配器
-packages/computer-osworld OSWorld DesktopEnv Bridge 适配器
-apps/cli                组合依赖、运行展示和轨迹输出
-spikes/cua-driver       可删除的底层 CUA 探针
-```
-
-每个包必须有当前生产者、消费者和测试，不为未来能力提前加入空接口。当前首版已包含可关闭的
-Memory、Context 和受限 Batch；Verifier、RL、后台 Job、Subagent、Dashboard 或第三个 Provider 仍未实现。GLM 使用原生 Function Calling；
-Qwen3.8 默认使用固定 `calls[]` 的 strict-json，并保留 native-tools 作为兼容性对照。两条路径都从本轮
-ToolRegistry 投影工具；strict-json 由紧凑 Catalog 提供工具语义，并以动态工具名枚举约束 wire envelope。
-Qwen3.8 在 Adapter 边界使用 canonical 的 click/scroll/drag/wait 参数和显式坐标模式；Schema
-和 Parser 都不会让未知工具或缺失字段进入 Runtime。Qwen 官方 text `computer_use` 协议仅作为历史兼容错误检测，
-不是当前生产请求格式。
-
-## 施工顺序
-
-```text
-CUA 探针与平台事实
-        ↓
-Protocol + EventWriter + Reducer
-        ↓
-FakeProvider/FakeComputer + RunController（Stage 2 已完成）
-        ↓
-CUA 能力矩阵与协议决策（Stage 3 已关闭）
-        ↓
-S4-0 Context/Asset/预算合同
-        ↓
-S4-1 canonical Computer Tools
-        ↓
-S4-2 GLM/Qwen Adapter
-        ↓
-S4-3 CLI 与隔离真实短任务
-        ↓
-S5-0 OSWorld Bridge/Computer 合同
-        ↓
-S5-1 OSWorld 无模型 Gate 2 与单题门
-        ↓
-Stage 6 统一 flat 协议、集成验收与模块消融
-```
-
-文档先读 [docs/DOCS-INDEX.md](./docs/DOCS-INDEX.md)。它区分当前执行、长期设计、历史证据和已废弃路线；新增或修改文档遵守 [开发文档规范](./docs/development-documentation-standard.md)。详细协议、状态机、失败语义和验收门槛见：
-
-- [当前实施入口](./docs/stage-6-convergence-and-start-state-2026-09-15.md)：DEV-0/1 范围与后续门槛。
-- [完整路线 V2](./docs/full-development-roadmap-v2.md)和[验收清单](./docs/development-acceptance-v2.md)：已合并复核意见的阶段设计。
-- [文档索引](./docs/DOCS-INDEX.md)：评测资料与历史归档入口。
-
-## 安全与隐私
-
-- API Key 使用环境变量或本地 Secret 管理，不写入 Event；
-- 截图只保存在本地 ignored 目录；
-- 未确认的 GUI 副作用不能自动重复执行；
-- Event 中的 `action.execution.started` 缺少终态时表示 `outcome_unknown`，
-  恢复默认先重新观察。
+默认贡献流程不调用真实 API、桌面或 VM；若要扩展这些路径，请单独记录平台、daemon/VM、权限、预算、隐私和 cleanup 证据，不要用 Fake 或截图替代真实边界。

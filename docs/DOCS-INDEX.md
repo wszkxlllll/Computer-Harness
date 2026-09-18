@@ -1,12 +1,12 @@
 # Computer Harness 文档索引
 
-日期：2026-09-17
+日期：2026-09-18
 
-角色：唯一导航入口。状态：当前执行。原审计基线：`39ff27f9`；当前开发基线：PR #1 合并提交 `0e41463`。修复状态以 Stage 6 和对应实施报告为准。
+角色：唯一导航入口。状态：当前执行。原审计基线：`39ff27f9`；当前开发基线：`a8580ea`（分支 `codex/dev2-tui-preview`）。DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为、CUA doctor 与显式 host-only window opt-in 已由 Sol 有限放行；本轮 TUI bounded UX 收口已获 Sol 定点有限放行（独立 18 项通过）。本批最终离线全量为 32 files/320 tests，root typecheck 通过；worker 本轮未调用 model API、桌面或 VM。收口内容包括 uppercase-I、可见 goal/correction、pause pending、waiting/failure/final-reply 呈现、长正文 PageUp/PageDown 分页、Unicode terminal-cell 宽度、快速粘贴有界绘制、输入 tail viewport/上限提示与 terminal-only 输入提示，详见[TUI 预览实施记录](./dev-2-tui-preview-implementation-results.md)。worker_ci 固定 build 已实测 no-goal Windows winpty PTY rapid/slow × ESC→Q/Ctrl-C 四场景通过，含中文、tail/500、resize/footer、cursor restore、exit 0、无 force-close；这不等于完整 model Run、跨 Run 实际 I 或 CUA 业务动作。真实 direct CLI doctor 仅确认 metadata/inventory（57 tools）可读，session 的 desktop capture scope 未确认，health/permissions 与 cleanup 保持 unknown、退出码 1；正式 pnpm wrapper 仍有 transport unknown 限制，不能把 doctor 写成整体通过。worker_ci 独立实机只证明 production adapter 的窄 `open/observe/background single-click/resize stale refusal/close` 链路；窗口模式仅开放 `click` 与 `wait`，keyboard、其他 pointer primitive、通用 focus/AX 和模型自由选窗仍禁用，默认 desktop/OSWorld 路径不变。目标丢失会锁定到 close 后新 session 才能恢复；preflight 与 driver click 非原子，不能宣称通用目标成功或 REL-1。此前用户真实请求中的 Provider transport failure 与 CUA action refusal 仅作诊断记录，本批未修复根因。证据见[窗口目标实施记录](./dev-2-window-target-implementation-results.md)、[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)、[受控预览验证记录第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)；修复状态以 Stage 6 和对应实施报告为准。
 
 ## 下一阶段开发必读
 
-按顺序阅读以下三份文件即可继续 DEV-1，不需要拼接历史审计：
+按顺序阅读以下三份文件即可继续 DEV-1/DEV-2，不需要拼接历史审计：
 
 1. [Stage 6 当前实施入口](./stage-6-convergence-and-start-state-2026-09-15.md)：当前范围、顺序、已有证据及停止条件。
 2. [完整开发路线 V2](./full-development-roadmap-v2.md)：已并入复核修订的 DEV-0..8 设计、合同与依赖。
@@ -34,6 +34,7 @@
 
 - 第二批确定性修复：[Context 实施记录](./dev-1-context-implementation-results.md)、[Memory 实施记录](./dev-1-memory-implementation-results.md)、[CLI 诊断实施记录](./dev-1-diagnostics-implementation-results.md)。提交、审查与最终集成状态统一见 Stage 6。
 - 第三批 DEV-1 控制收口：[F04/F12/F07 实施记录](./dev-1-controls-cleanup-implementation-results.md)。包含 resolved Risk profile、终端净化和有界 cleanup 的离线证据；实机/跨进程 owner 仍按记录边界处理。
+- DEV-2 RFT2 与窗口 opt-in：[app-runtime 实施记录](./dev-2-app-runtime-implementation-results.md)、[显式窗口目标实施记录](./dev-2-window-target-implementation-results.md)；CUA 能力与扩展调研见[独立研究记录](./dev-2-cua-capability-and-extension-research.md)，窗口能力边界与 doctor 接入见[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)。通用模板为 `pnpm --filter @computer-harness/cli start -- --goal "<goal>" --model glm-5.3-flash --computer cua --cua-socket "<socket>" --cua-window-pid <pid> --cua-window-id <windowId>`；窗口 opt-in 仅开放 single-click/wait，keyboard 与未验证 pointer primitive 拒绝，默认 desktop/OSWorld 不变。最小 TUI 预览与 D2-EVENT/D2-SESSION 行为批次见[TUI 预览实施记录](./dev-2-tui-preview-implementation-results.md)，不声称完整 model Run、通用 focus/AX、跨进程 owner 或 REL-1。
 - [历史归档目录](./history/2026-09-17-roadmap-consolidation/README.md)：旧设计、审计、实验结论、原始外部审计包和 CI 模板。
 - [已确认问题与生产路径证据](./history/2026-09-17-roadmap-consolidation/external-audit-confirmation-2026-09-17.md)：F/R 问题详情，不作为第二套施工顺序。
 - [本地缺陷复现探针](./verification/audit-39ff27f9-local-probes.mjs)：DEV-1 可复用；当前 pass 表示缺陷被复现，修复验收应断言正确行为。

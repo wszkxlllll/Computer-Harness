@@ -1,6 +1,6 @@
 # 分块重构施工表
 
-更新：2026-09-17。状态：待实施；本轮只读核对当前源码，未搬代码或运行测试。
+更新：2026-09-18。状态：按 RFT-2 完成 app-runtime 迁移；D2-EVENT/D2-SESSION 最小离线行为批次已实施，代码 focused/full 自审通过并经 Sol 有限放行；其余工单按路线冻结。
 
 配套：[完整路线](./full-development-roadmap-v2.md)、[阶段验收](./development-acceptance-v2.md)、[实施入口](./stage-6-convergence-and-start-state-2026-09-15.md)。本文件只细化文件职责和迁移，不改变 DEV 顺序或提前实现后续功能。
 
@@ -19,7 +19,7 @@
 | 工单/阶段 | 当前来源与符号 | 目标文件及职责 | 保持的边界、主要验证 |
 |---|---|---|---|
 | RFT-1 / DEV-1 | `apps/cli/src/index.ts` 的 summarizeProviderResponse/StructuredContent/Arguments、Recording*HttpClient | 先提取 `apps/cli/src/diagnostics/provider-summary.ts`，记录客户端可随后放 `diagnostics/recording-clients.ts` | 纯摘要 import 不启动 CLI、不读 env、不发请求；L01/L02 与 Mock HTTP 记录测试。R02/F06 修复另批，不在搬迁时悄悄改输出 |
-| RFT-2 / DEV-2 | CLI parseArgs/main/makeProvider/loadEnvFile/runWithCliControls/summary 组装 | CLI 保留 `args.ts`、`env.ts`、`controls.ts`、薄 `index.ts`；新增 `packages/app-runtime/src/{config,providers,computers,run-factory,reporting,index}.ts` | 纯组装迁移：配置解析留应用入口，原参数/已修复默认值/摘要语义不变；验证CLI等价、help、import无副作用、启动失败资源清理。多Run/owner不属于本工单 |
+| RFT-2 / DEV-2 | CLI parseArgs/main/makeProvider/loadEnvFile/runWithCliControls/summary 组装 | CLI 保留 `args.ts`、`env.ts`、`controls.ts`、薄 `index.ts`；新增 `packages/app-runtime/src/{config,providers,computers,run-factory,reporting,index}.ts` | **已完成有界迁移（待 Sol 最终审阅）**：配置解析留应用入口，Provider/Computer 工厂、诊断、reporting 与 Controller 组装归 app-runtime；保留原参数/已修复默认值/摘要语义。CLI 等价、help、lazy CUA、import/依赖边界、启动失败资源清理已覆盖；D2-EVENT/D2-SESSION 行为见下一批，不倒填为 RFT-2 纯迁移结论，见 [DEV-2 实施记录](./dev-2-app-runtime-implementation-results.md) |
 | RFT-3 / DEV-2，DEV-1仅按需提取 | `packages/runtime/src/run-controller.ts` 的 CommandInbox、批次判定、重试辅助函数 | 同目录 `command-inbox.ts`、`turn-preflight.ts`、`provider-retry.ts`；Controller 保留唯一主循环、状态、事件提交与副作用调度 | 现有 contracts/tool-registry/action-validation 不重建。模块通过参数/结果交流，不传整个 Controller，不起第二条调度循环。Inbox 顺序、Abort、批次中断、unknown、事件顺序回归 |
 | RFT-4 / DEV-3 | `packages/context/src/index.ts` 的 DefaultContextCompiler、selectHistoryEvents/fitEventsToTokenBudget、formatPlan/Memory、selectMemoryForContext、modelTurnMessage | `compiler.ts` 组合；`history.ts` 完整历史组选择；`budget.ts` 估算/分配；`memory-recall.ts` 召回；`projections.ts` Plan/Memory 文本；`messages.ts` 历史消息/continuation | 保留 DefaultContextCompiler、selectMemoryForContext 及现有 options/selection 类型根导出。Context 只读输入，不写 Memory/Plan、不调用模型。C01..03、CT01..06；新 Trace/分区预算另批 |
 | RFT-5 / DEV-4，DEV-1可先提校验 | `packages/memory/src/index.ts` 的 MemoryStore、InMemory/FileMemoryStore、createMemoryTools、参数/文件校验和 mutation 读取 | `store.ts` Store 合同；`stores/{in-memory,file}.ts`；`tools.ts` 注册；`validation.ts` 参数/文件校验；`mutations.ts` 提议构造与结果解析 | 保留 MemoryStore、InMemoryMemoryStore、FileMemoryStore、MemoryToolMode、createMemoryTools 根导出。reduceMemoryMutation 仍归 protocol，Context 召回仍归 context。M01/M02、FM01..15 分别区分搬迁与生命周期新增 |
@@ -45,8 +45,8 @@ RFT-2 迁移诊断记录客户端时从 CLI 移到 app-runtime，不能两处复
 
 | 工单 | 归属与新增接口 | 前置及验收 |
 |---|---|---|
-| D2-EVENT | Runtime `committed-events.ts` 定义提交后只读通知合同；app-runtime `event-feed.ts` 提供 `subscribe({ afterSequence, listener }) → unsubscribe` 与 `resync(afterSequence)`，RunHandle 暴露该 feed；类型从各自包根导出 | RFT-2完成、涉及Controller的RFT-3迁移批次落稳后，由一个worker接commitEvent通知点；T07与第4.2节慢消费者/丢失/重放/清理测试 |
-| D2-SESSION | app-runtime `application-session.ts` 管一个活动Run，`environment-owner.ts` 管同进程桌面所有权；CLI/TUI只提交应用命令 | RFT-2及DEV-2 quiesce/目标合同冻结后实施；T09/T11/T12/T13覆盖新Run、历史显式导入边界、审批竞态与owner，禁止算作RFT-2已通过 |
+| D2-EVENT | Runtime `committed-events.ts` 定义提交后只读通知合同；app-runtime `event-feed.ts` 提供 `subscribe({ afterSequence, listener }) → unsubscribe` 与 `resync(afterSequence)`，RunHandle 暴露该 feed；类型从各自包根导出 | **最小离线批次已实施，focused/full 自审通过，Sol 已有限放行**：Runtime append+reduce 后通知，feed 每订阅者有界异步队列、去重/水位补读/`resync_required`，覆盖 T07 监听异常、慢/丢失窗口、同订阅者补读竞态和清理；不承担第二调度器 |
+| D2-SESSION | app-runtime `application-session.ts` 管一个活动Run，`environment-owner.ts` 管同进程桌面所有权；CLI/TUI只提交应用命令 | **最小离线批次已实施，focused/full 自审通过，Sol 已有限放行**：T09 新 Run/新目录、T11 不静默跨 Run、T12 Controller Inbox 纠正/审批竞态、T13 同 route owner 阻塞/不同 route 独立；运行中纠正先 pause/quiescence，退出清理有界且未决 owner 保留；跨进程 owner/quiesce/持久恢复仍待 DEV-6 |
 
 D2-EVENT 的 Runtime 通知只是可选提交后观察者，不承担磁盘补读和 UI 队列。app-runtime 注入只读已提交事件读取器，维护有界队列及 sequence 水位；resync 先补到捕获的水位，再接增量并按序去重，测试订阅注册与历史读取期间发生新事件的竞态。UI 落后时发出独立传输状态 `resync_required`，不伪造一条业务 RuntimeEvent；读取器只能提供已提交序列。该能力启用前先冻结类型与关闭/异常语义，再接产品 TUI。
 
@@ -109,4 +109,4 @@ Runtime 回归覆盖 correction/approval/Abort竞态、批次中途失败与采�
 
 每个 RFT 工单报告：实际源→目标映射、根 exports 对照、是否存在有意行为变化、依赖检查、focused/full 测试结果、Provider/事件序列对照、未验证项、回退边界。reviewer 核对运行路径而不是文件数。施工表完成不表示上述重构已经完成。
 
-文档审阅记录：reviewer_sol 独立审阅后指出纯迁移与多Run验收混用、事件订阅缺工单归属；本版已分别移交 D2-SESSION 和 D2-EVENT，并补接口/迁移顺序。源码实施与测试均未开始。
+文档审阅记录：reviewer_sol 独立审阅后指出纯迁移与多Run验收混用、事件订阅缺工单归属；本版已分别移交 D2-SESSION 和 D2-EVENT，并补接口/迁移顺序。当前最小离线行为批次已按新增工单实施，真实 CUA/跨进程 owner/完整 quiesce 仍未验收。

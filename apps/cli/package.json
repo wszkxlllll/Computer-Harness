@@ -11,16 +11,10 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@computer-harness/computer-cua": "workspace:*",
-    "@computer-harness/computer-osworld": "workspace:*",
-    "@computer-harness/context": "workspace:*",
-    "@computer-harness/memory": "workspace:*",
-    "@computer-harness/planning": "workspace:*",
+    "@computer-harness/app-runtime": "workspace:*",
     "@computer-harness/protocol": "workspace:*",
-    "@computer-harness/provider-glm": "workspace:*",
-    "@computer-harness/provider-qwen": "workspace:*",
     "@computer-harness/runtime": "workspace:*",
-    "@computer-harness/risk-guard": "workspace:*",
-    "@computer-harness/trajectory": "workspace:*"
+    "@computer-harness/trajectory": "workspace:*",
+    "string-width": "7.2.0"
   }
 }

@@ -22,6 +22,49 @@ function result(overrides: Partial<ToolResult> = {}): ToolResult {
   };
 }
 
+function pngWithDimensions(width: number, height: number): string {
+  const bytes = Buffer.from(ONE_BY_ONE_PNG);
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes.toString("base64");
+}
+
+function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 }, initialImage = { width: 958, height: 678 }) {
+  const calls: Array<{ name: string; input?: Record<string, unknown> }> = [];
+  let bounds = { ...initialBounds };
+  let image = { ...initialImage };
+  let missing = false;
+  const target = { pid: 1234, windowId: 5678 };
+  const driver = {
+    async startSession() { calls.push({ name: "startSession" }); return { active: true, revived: false } as never; },
+    async endSession() { calls.push({ name: "endSession" }); return { active: false, session: "window-test" } as never; },
+    async shutdown() { calls.push({ name: "shutdown" }); },
+    async verifyState() {
+      calls.push({ name: "verifyState" });
+      return result({
+        images: [{ mimeType: "image/png", dataBase64: pngWithDimensions(image.width, image.height) }],
+        verification: { status: 0, stable: true, elapsedMs: 0n, samples: 1n, predicates: [] },
+      });
+    },
+    async callTool(name: string, inputJson: string) {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      calls.push({ name, input });
+      if (name === "list_windows") {
+        return result({ structuredJson: JSON.stringify({ windows: missing ? [] : [{ pid: target.pid, window_id: target.windowId, bounds }] }) });
+      }
+      return result();
+    },
+    uniffiDestroy() { calls.push({ name: "uniffiDestroy" }); },
+  } as unknown as CuaDriverLike;
+  return {
+    driver,
+    target,
+    calls,
+    setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
+    setMissing(value: boolean) { missing = value; },
+  };
+}
+
 function fakeDriver() {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
   const driver = {
@@ -342,6 +385,156 @@ describe("CuaDriverComputer", () => {
       await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/pending/iu);
       expect(startSessionCalls).toBe(1);
       expect(destroyCalls).toBe(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses an explicit window target and the actual PNG viewport without desktop fallback", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      expect(session.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+      expect(session.capabilities).toMatchObject({ screenshot: true, pointer: true, keyboard: false });
+      const observation = await computer.observe(session, "window-observation" as ObservationId, new AbortController().signal);
+      expect(observation.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+      const receipt = await computer.execute(session, {
+        actionId: "window-click" as ActionId,
+        basedOn: "window-observation" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(receipt.status).toBe("completed");
+      const click = fake.calls.find((call) => call.name === "click");
+      expect(click?.input).toMatchObject({ target: { kind: "window", pid: 1234, window_id: 5678 }, x: 10, y: 20, delivery_mode: "background" });
+      expect(fake.calls.some((call) => call.name === "get_screen_size" || call.name === "get_desktop_state")).toBe(false);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an old window action after resize and reobserves the new image viewport", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const oldObservation = await computer.observe(session, "window-old" as ObservationId, new AbortController().signal);
+      fake.setBounds({ x: 200, y: 160, width: 1040, height: 720 }, { width: 1038, height: 718 });
+      const stale = await computer.execute(session, {
+        actionId: "window-stale" as ActionId,
+        basedOn: "window-old" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(stale).toMatchObject({ status: "refused", driverCode: "WINDOW_GEOMETRY_CHANGED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+
+      const fresh = await computer.observe(session, "window-fresh" as ObservationId, new AbortController().signal);
+      expect(fresh.viewport).toEqual({ width: 1038, height: 718, coordinateSpace: "physical" });
+      const current = await computer.execute(session, {
+        actionId: "window-current" as ActionId,
+        basedOn: "window-fresh" as ObservationId,
+        kind: "click",
+        point: { x: 20, y: 30 },
+      }, new AbortController().signal);
+      expect(current.status).toBe("completed");
+      expect(oldObservation.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not expose unverified window keyboard input or silently fall back when a target closes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      await computer.observe(session, "window-input" as ObservationId, new AbortController().signal);
+      const keyboard = await computer.execute(session, {
+        actionId: "window-type" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "type",
+        text: "not-dispatched",
+      }, new AbortController().signal);
+      expect(keyboard).toMatchObject({ status: "refused", driverCode: "WINDOW_INPUT_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+
+      const unsupported = await computer.execute(session, {
+        actionId: "window-scroll" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "scroll",
+        point: { x: 1, y: 1 },
+        direction: "down",
+        ticks: 1,
+      }, new AbortController().signal);
+      expect(unsupported).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTION_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "scroll")).toHaveLength(0);
+
+      fake.setMissing(true);
+      const closed = await computer.execute(session, {
+        actionId: "window-closed" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "click",
+        point: { x: 1, y: 1 },
+      }, new AbortController().signal);
+      expect(closed).toMatchObject({ status: "refused", driverCode: "WINDOW_TARGET_NOT_FOUND" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      expect(fake.calls.some((call) => call.name === "get_desktop_state")).toBe(false);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("latches a missing window identity and does not revive when the same ids reappear", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, driverFactory: () => fake.driver });
+    try {
+      let session = await computer.open({}, new AbortController().signal);
+      await computer.observe(session, "window-latch-old" as ObservationId, new AbortController().signal);
+      fake.setMissing(true);
+      const first = await computer.execute(session, {
+        actionId: "window-latch-first" as ActionId,
+        basedOn: "window-latch-old" as ObservationId,
+        kind: "click",
+        point: { x: 1, y: 1 },
+      }, new AbortController().signal);
+      expect(first).toMatchObject({ status: "refused", driverCode: "WINDOW_TARGET_NOT_FOUND" });
+      fake.setMissing(false);
+      await expect(computer.observe(session, "window-latch-reappear" as ObservationId, new AbortController().signal)).rejects.toThrow(/identity was invalidated/iu);
+      const oldAfterReappear = await computer.execute(session, {
+        actionId: "window-latch-old-after-reappear" as ActionId,
+        basedOn: "window-latch-old" as ObservationId,
+        kind: "click",
+        point: { x: 1, y: 1 },
+      }, new AbortController().signal);
+      expect(oldAfterReappear).toMatchObject({ status: "refused", driverCode: "WINDOW_TARGET_INVALIDATED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+
+      await computer.close(session);
+      session = await computer.open({}, new AbortController().signal);
+      await computer.observe(session, "window-latch-new" as ObservationId, new AbortController().signal);
+      const afterNewSession = await computer.execute(session, {
+        actionId: "window-latch-new-click" as ActionId,
+        basedOn: "window-latch-new" as ObservationId,
+        kind: "click",
+        point: { x: 1, y: 1 },
+      }, new AbortController().signal);
+      expect(afterNewSession.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

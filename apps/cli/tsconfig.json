@@ -9,14 +9,9 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
+    { "path": "../../packages/app-runtime" },
     { "path": "../../packages/protocol" },
-    { "path": "../../packages/trajectory" },
     { "path": "../../packages/runtime" },
-    { "path": "../../packages/risk-guard" },
-    { "path": "../../packages/context" },
-    { "path": "../../packages/computer-cua" },
-    { "path": "../../packages/computer-osworld" },
-    { "path": "../../packages/provider-glm" },
-    { "path": "../../packages/provider-qwen" }
+    { "path": "../../packages/trajectory" }
   ]
 }

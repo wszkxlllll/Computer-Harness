@@ -15,6 +15,17 @@ import type {
   Viewport,
 } from "@computer-harness/protocol";
 import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
+import {
+  captureWindow,
+  discoverWindow,
+  sameWindowGeometry,
+  validateWindowTarget,
+  windowActionTarget,
+  type CuaWindowBinding,
+  type CuaWindowGeometry,
+  type CuaWindowTarget,
+  WindowContractError,
+} from "./window-contract.js";
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 const CLEANUP_POLL_INTERVAL_MS = 50;
@@ -28,6 +39,8 @@ export interface CuaDriverComputerOptions {
   screenshotDir: string;
   /** Optional stable label; a generated label is used when omitted. */
   sessionLabel?: string;
+  /** Explicit host-owned window opt-in; omitted means the existing desktop path. */
+  windowTarget?: CuaWindowTarget;
   /** Total wall-clock budget for endSession/shutdown cleanup; no GUI action is retried. */
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
@@ -39,6 +52,8 @@ interface PrivateSession {
   driver: CuaDriverLike;
   descriptor: ComputerSessionDescriptor;
   active: boolean;
+  windowBinding?: CuaWindowBinding;
+  windowIdentityInvalidated: boolean;
 }
 
 interface PendingDriverCleanup {
@@ -48,6 +63,7 @@ interface PendingDriverCleanup {
 
 interface PrivateObservation {
   sessionId: string;
+  geometry?: CuaWindowGeometry;
 }
 
 interface DriverErrorDetails {
@@ -76,6 +92,7 @@ export class CuaDriverComputer implements Computer {
     if (!Number.isInteger(this.options.cleanupWaitMs) || this.options.cleanupWaitMs <= 0) {
       throw new Error("cleanupWaitMs must be a positive integer");
     }
+    if (this.options.windowTarget !== undefined) validateWindowTarget(this.options.windowTarget);
   }
 
   public async open(options: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
@@ -92,24 +109,40 @@ export class CuaDriverComputer implements Computer {
     try {
       await driver.startSession(StartSessionInput.new({ session: label }), { signal });
       sessionStarted = true;
-      const size = await callTool(driver, "get_screen_size", { session: label }, signal);
-      const dimensions = readStructuredDimensions(size);
-      if (dimensions === undefined) {
-        throw new Error("CUA get_screen_size did not return width/height");
+      let viewport: Viewport;
+      let windowBinding: CuaWindowBinding | undefined;
+      if (this.options.windowTarget === undefined) {
+        const size = await callTool(driver, "get_screen_size", { session: label }, signal);
+        const dimensions = readStructuredDimensions(size);
+        if (dimensions === undefined) {
+          throw new Error("CUA get_screen_size did not return width/height");
+        }
+        viewport = { ...dimensions, coordinateSpace: "physical" };
+      } else {
+        windowBinding = await discoverWindow(driver, label, this.options.windowTarget, signal);
+        // Capture once during open so the public session viewport describes the
+        // actual image coordinates. No outer-frame correction is hard-coded.
+        viewport = (await captureWindow(driver, label, windowBinding, signal)).viewport;
       }
-      const viewport: Viewport = { ...dimensions, coordinateSpace: "physical" };
       if (options.viewport !== undefined &&
           (options.viewport.width !== viewport.width || options.viewport.height !== viewport.height || options.viewport.coordinateSpace !== viewport.coordinateSpace)) {
-        throw new Error(`requested viewport ${options.viewport.width}x${options.viewport.height}/${options.viewport.coordinateSpace} does not match CUA primary desktop ${viewport.width}x${viewport.height}/${viewport.coordinateSpace}`);
+        throw new Error(`requested viewport ${options.viewport.width}x${options.viewport.height}/${options.viewport.coordinateSpace} does not match CUA viewport ${viewport.width}x${viewport.height}/${viewport.coordinateSpace}`);
       }
       const descriptor: ComputerSessionDescriptor = {
         id: label as ComputerSessionDescriptor["id"],
         backend: "cua-driver-daemon",
         viewport,
-        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        capabilities: { screenshot: true, pointer: true, keyboard: windowBinding === undefined, accessibility: false },
         openedAt: new Date().toISOString(),
       };
-      this.session = { label, driver, descriptor, active: true };
+      this.session = {
+        label,
+        driver,
+        descriptor,
+        active: true,
+        windowIdentityInvalidated: false,
+        ...(windowBinding === undefined ? {} : { windowBinding }),
+      };
       return descriptor;
     } catch (error) {
       const cleanupCompleted = await bestEffortCloseDriver(driver, label, this.options.cleanupWaitMs, sessionStarted);
@@ -125,6 +158,29 @@ export class CuaDriverComputer implements Computer {
   ): Promise<ObservationCapture> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
+    if (current.windowBinding !== undefined) {
+      if (current.windowIdentityInvalidated) {
+        throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session"), "observe");
+      }
+      try {
+        const liveBinding = await discoverWindow(current.driver, current.label, current.windowBinding.target, signal);
+        const capture = await captureWindow(current.driver, current.label, liveBinding, signal);
+        current.windowBinding = liveBinding;
+        current.descriptor = { ...current.descriptor, viewport: capture.viewport };
+        this.observations.set(String(observationId), { sessionId: String(session.id), geometry: liveBinding.bounds });
+        this.latestObservationId = observationId;
+        return {
+          capturedAt: new Date().toISOString(),
+          viewport: capture.viewport,
+          screenshot: { mediaType: "image/png", data: capture.data },
+        };
+      } catch (error) {
+        const details = driverErrorDetails(error);
+        if (error instanceof WindowContractError && error.code === "WINDOW_TARGET_NOT_FOUND") current.windowIdentityInvalidated = true;
+        if (details.tag === "Transport") current.active = false;
+        throw normalizeDriverError(error, "observe");
+      }
+    }
     await mkdir(this.options.screenshotDir, { recursive: true });
     const fileName = `${safeId(String(observationId))}.png`;
     const screenshotPath = join(this.options.screenshotDir, fileName);
@@ -179,7 +235,37 @@ export class CuaDriverComputer implements Computer {
       await waitWithAbort(action.durationMs, signal);
       return { actionId: action.actionId, status: "completed" };
     }
-    const request = actionRequest(action, current.label);
+    if (current.windowBinding !== undefined) {
+      if (current.windowIdentityInvalidated) {
+        return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session");
+      }
+      if (action.kind === "type" || action.kind === "keypress") {
+        return refused(action.actionId, "WINDOW_INPUT_UNSUPPORTED", "window keyboard input is disabled until focus delivery is independently verified");
+      }
+      if (action.kind !== "click") {
+        return refused(action.actionId, "WINDOW_ACTION_UNSUPPORTED", "this window-target primitive is not enabled by the verified coordinate contract");
+      }
+      const observation = this.observations.get(String(action.basedOn));
+      if (observation?.geometry === undefined) {
+        return refused(action.actionId, "WINDOW_GEOMETRY_UNKNOWN", "window action is not bound to verified window geometry");
+      }
+      try {
+        const liveBinding = await discoverWindow(current.driver, current.label, current.windowBinding.target, signal);
+        if (!sameWindowGeometry(liveBinding.bounds, observation.geometry)) {
+          return refused(action.actionId, "WINDOW_GEOMETRY_CHANGED", "window geometry changed since the action observation");
+        }
+        current.windowBinding = liveBinding;
+      } catch (error) {
+        const details = driverErrorDetails(error);
+        if (details.tag === "Transport") current.active = false;
+        if (error instanceof WindowContractError) {
+          if (error.code === "WINDOW_TARGET_NOT_FOUND") current.windowIdentityInvalidated = true;
+          return refused(action.actionId, error.code, error.message);
+        }
+        return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
+      }
+    }
+    const request = actionRequest(action, current.label, current.windowBinding);
     try {
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
@@ -276,24 +362,26 @@ export class CuaDriverComputer implements Computer {
   }
 }
 
-function actionRequest(action: Exclude<ActionIntent, { kind: "wait" }>, session: string): { name: string; arguments: Record<string, unknown> } {
+function actionRequest(action: Exclude<ActionIntent, { kind: "wait" }>, session: string, windowBinding?: CuaWindowBinding): { name: string; arguments: Record<string, unknown> } {
+  const target = windowBinding === undefined ? PRIMARY_DESKTOP : windowActionTarget(windowBinding);
+  const deliveryMode = windowBinding === undefined ? "foreground" : "background";
   switch (action.kind) {
     case "click":
-      return { name: "click", arguments: { session, target: PRIMARY_DESKTOP, x: action.point.x, y: action.point.y, delivery_mode: "foreground" } };
+      return { name: "click", arguments: { session, target, x: action.point.x, y: action.point.y, delivery_mode: deliveryMode } };
     case "double_click":
-      return { name: "click", arguments: { session, target: PRIMARY_DESKTOP, x: action.point.x, y: action.point.y, count: 2, delivery_mode: "foreground" } };
+      return { name: "click", arguments: { session, target, x: action.point.x, y: action.point.y, count: 2, delivery_mode: deliveryMode } };
     case "right_click":
-      return { name: "click", arguments: { session, target: PRIMARY_DESKTOP, x: action.point.x, y: action.point.y, button: "right", delivery_mode: "foreground" } };
+      return { name: "click", arguments: { session, target, x: action.point.x, y: action.point.y, button: "right", delivery_mode: deliveryMode } };
     case "type":
-      return { name: "type_text", arguments: { session, target: PRIMARY_DESKTOP, text: action.text, delivery_mode: "foreground" } };
+      return { name: "type_text", arguments: { session, target, text: action.text, delivery_mode: deliveryMode } };
     case "keypress":
       return action.keys.length === 1
-        ? { name: "press_key", arguments: { session, target: PRIMARY_DESKTOP, key: action.keys[0], delivery_mode: "foreground" } }
-        : { name: "hotkey", arguments: { session, target: PRIMARY_DESKTOP, keys: action.keys, delivery_mode: "foreground" } };
+        ? { name: "press_key", arguments: { session, target, key: action.keys[0], delivery_mode: deliveryMode } }
+        : { name: "hotkey", arguments: { session, target, keys: action.keys, delivery_mode: deliveryMode } };
     case "scroll":
-      return { name: "scroll", arguments: { session, target: PRIMARY_DESKTOP, x: action.point.x, y: action.point.y, direction: action.direction, by: "line", amount: action.ticks, delivery_mode: "foreground" } };
+      return { name: "scroll", arguments: { session, target, x: action.point.x, y: action.point.y, direction: action.direction, by: "line", amount: action.ticks, delivery_mode: deliveryMode } };
     case "drag":
-      return { name: "drag", arguments: { session, target: PRIMARY_DESKTOP, from_x: action.from.x, from_y: action.from.y, to_x: action.to.x, to_y: action.to.y, delivery_mode: "foreground" } };
+      return { name: "drag", arguments: { session, target, from_x: action.from.x, from_y: action.from.y, to_x: action.to.x, to_y: action.to.y, delivery_mode: deliveryMode } };
     default:
       return assertNever(action);
   }

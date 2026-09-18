@@ -1,12 +1,12 @@
 # Stage 6：当前实施入口
 
-更新：2026-09-17
+更新：2026-09-18
 
-角色：当前执行 / 交接。原审计基线：`39ff27f9`；本批开发基线：合并 PR #1 后的 `0e4146327de995dc92da6367fc654b493a224665`。范围：DEV-1 剩余确定性修复，随后推进受控交互；正式评测 G0 另行收口。
+角色：当前执行 / 交接。原审计基线：`39ff27f9`；当前开发基线：`a8580ea`（分支 `codex/dev2-tui-preview`）。DEV-1 已合并结果与 DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为、CUA capability doctor 和显式 host-only window opt-in 已完成并获 Sol 有限放行；本轮 TUI bounded UX 收口已获 Sol 定点有限放行（独立 18 项通过）。本批最终离线全量为 32 files/320 tests，root typecheck 通过，内容包括 uppercase-I、可见 goal/correction、pause pending、waiting/failure/final-reply 呈现、长正文分页、terminal-cell 宽度、快速粘贴有界绘制、输入 tail viewport/上限提示与 terminal-only 输入提示。worker_ci 固定 build 已实测 no-goal Windows winpty PTY rapid/slow × ESC→Q/Ctrl-C 四场景通过，含中文、tail/500、resize/footer、cursor restore、exit 0、无 force-close；这不等于完整 model Run、跨 Run 实际 I 或 CUA 业务动作。真实 direct doctor 仅读到 metadata/inventory（57 tools），session 的 desktop capture scope 未确认，health/permissions/cleanup 保持 unknown，正式 pnpm wrapper 仍有 transport unknown 限制，doctor 不整体通过；worker_ci 独立实机仅证明 production adapter 的窄 `open/observe/background single-click/resize stale refusal/close` 链路。窗口模式只开放 click/wait，不开放 keyboard、其他未验证 pointer primitive、通用 focus/AX 或模型自由选窗；默认 desktop/OSWorld 不变，正式评测 G0/REL-1 另行收口。此前用户真实请求中的 Provider transport failure 与 CUA action refusal 仅作诊断记录，本批未修复根因。
 
 ## 1. 当前结论与已有基础
 
-PR #1 已由用户合并，DEV-0 Hosted CI 与 DEV-1 的 R01/F08 修复已进入 main；继续 DEV-1 剩余项。Runtime、两 Provider、两 Computer Adapter、Planning、Run Memory、Context、Batch 和实验性 Risk Guard 已有实现；不能把它们视为所有边界均验收通过。
+PR #1 已由用户合并，DEV-0 Hosted CI 与 DEV-1 的确定性修复已进入 main。当前批次在 `a8580ea` 基线上完成最小受控 TUI、提交后事件 feed、单活跃 Run/session、同进程环境 owner，以及显式 host-only CUA window observe/click 适配；Sol 已对本批有限放行。Runtime、两 Provider、两 Computer Adapter、Planning、Run Memory、Context、Batch 和实验性 Risk Guard 已有实现；不能把它们视为所有边界均验收通过。
 
 2026-09-17 已在 Windows/Node 24.19.0/pnpm 11.19.0 执行类型检查及 179 项测试，另 9 项实际实现探针复现了未覆盖问题。详细证据见[归档复核](./history/2026-09-17-roadmap-consolidation/external-audit-confirmation-2026-09-17.md)。这些是历史基线，本轮文档整理没有新测试或业务修复。
 
@@ -14,18 +14,17 @@ PR #1 已由用户合并，DEV-0 Hosted CI 与 DEV-1 的 R01/F08 修复已进入
 
 2026-09-17 合同状态复查已补入路线 3.1：Memory scope、目标/focus/generation、InstructionState、ContextTrace/prepared request、在线图片/停滞特征及持久恢复均不能视为当前已完成。scope 保留为 DEV-4 新增能力，含绑定、召回、失效、迁移和 FM12..15 测试；当前 DEV-0/1 顺序不变。本次仅核对源码与修订文档，没有运行这些新增验收测试。
 
-## 2. 本轮目标与顺序
+## 2. 路线背景与后续顺序
 
-1. **DEV-0 CI**：Linux/Windows/macOS Hosted Runner 必跑锁文件安装、构建/类型检查、离线测试、CLI help，统一聚合检查；Linux 补充一档 Node 兼容检查。首次 runner 成绩如实记录，真实 Mac 桌面权限、截图与输入另行验收，不能由 CI 代替。
-2. **DEV-1A Context/Memory**：保护用户纠正；处理超大单记录及固定区预算溢出；统一 mutation 引用与文件 schema 校验，非法 replacement 不改旧状态。
-3. **DEV-1B Risk/诊断**：修描述词豁免及 R01 强制规则优先级；统一 native/flat 诊断；明确实机配置；净化终端输出。
-4. **DEV-1C 清理**：所有 awaited 清理步骤有期限；超时不伪装底层停止，不清除未知副作用或错误释放控制权。
+1. **已完成的 DEV-0/DEV-1 基础**：Hosted CI、Context/Memory、Risk/诊断和清理的已合并结果以历史批次及各实施记录为准。
+2. **当前 DEV-2 小批**：最小 TUI、提交后事件 feed、单活跃 Run/session、同进程 owner 与显式 host-only window single-click/wait 已有限放行；完整 model Run、通用 focus/AX、跨进程 owner/quiesce、keyboard/其他 pointer primitive 仍是后续闸门。
+3. **后续路线**：按 V2 继续收口 D2-SESSION/target/接管与 DEV-3..8；不把 no-goal winpty home 或专用 fixture 结果写成 REL-1/T01..T14 全部通过。
 
 DEV-0 与 DEV-1 可以并行；同一 Runtime 合同变更由一个集成负责人协调。先新增真实路径反例，再修复，行为修改与纯文件迁移分开提交。
 
 ## 3. 后续推进条件
 
-DEV-2 可先做共享 app-runtime、事件订阅、Fake TUI 与只读 doctor。接真实输入前落实 V2 第 6 节的应用会话/Run、人工接管、环境所有权、目标/审批合同，通过专用 fixture 的正常与故障路径。
+DEV-2 后续先补完整 model Run 与真实受控路径的独立闸门，再推进通用 target/focus/人工接管和更广环境 owner；本批的 no-goal winpty home 与专用 CUA fixture/adapter 窄链路结果不能替代这些验收。窗口 preflight 与 driver click 非原子，目标丢失后须 close 并新建 session 才能恢复，不能作为通用桌面安全保证。
 
 REL-1 通过即可持续低风险体验，不必等 Context V2、Memory 生命周期、Monitor 和恢复全部完成；可以先暂停扩张优化体验。后续按 DEV-3..8 顺序和依赖推进，详见 V2。
 
@@ -43,9 +42,11 @@ G0 当前资料从[文档索引](./DOCS-INDEX.md)进入，校准、预算和分�
 
 DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实验；不等全部功能完成才首次验证效果，也不反复用 Validation 调参。
 
-实施结果写在所属阶段交付文档并从本入口链接。当前状态：**第一批已合并；第二批 Context、Memory、CLI 诊断已通过 Sol 独立审查并分别建立本地提交，末次离线集成通过。DEV-1 其他项仍未完成。**
+实施结果写在所属阶段交付文档并从本入口链接。当前状态：**DEV-1 已合并结果按历史批次记录；DEV-2 RFT2、最小 TUI/D2-EVENT/D2-SESSION、CUA doctor 与显式 host-only window opt-in 已分别完成并获 Sol 有限放行。本轮 TUI bounded UX 收口已获 Sol 定点有限放行（独立 18 项通过）；本批最终离线全量 32 files/320 tests，root typecheck 通过；worker 本轮未调用 model API、桌面或 VM。TUI bounded UX 详见[TUI 预览实施记录](./dev-2-tui-preview-implementation-results.md)：输入可见且经 terminal sanitizer，uppercase-I 先请求 pause/quiescence，waiting/question/approval/failure/final reply 有本地呈现，长正文可分页，terminal-cell 宽度和快速粘贴有界绘制已回归，terminal-only scope 不冒称 global hotkey。worker_ci 固定 build 已实测 no-goal Windows winpty PTY rapid/slow × ESC→Q/Ctrl-C 四场景通过，含中文、tail/500、resize/footer、cursor restore、exit 0、无 force-close；这不等于完整 model Run、跨 Run 实际 I 或 CUA 业务动作。真实 direct doctor 仅确认 metadata/inventory（57 tools），session 的 desktop capture scope 未确认，health/permissions/cleanup 为 unknown、退出码 1；正式 pnpm wrapper 的 transport unknown 仍未解决，不能把 doctor 整体写成通过。worker_ci 独立实机只证明 production adapter 的窄 `open/observe/background single-click/resize stale refusal/close` 链路；窗口仅开放 click/wait，keyboard、其他未验证 pointer primitive、通用 focus/AX、模型自由选窗仍未开放，默认 desktop/OSWorld 不变。目标丢失会锁定到 close 后新 session 才能恢复；preflight 与 driver click 非原子，不等通用目标成功或 REL-1。此前用户真实请求中的 Provider transport failure 与 CUA action refusal 仅作诊断记录，本批未修复根因。详见[窗口目标实施记录](./dev-2-window-target-implementation-results.md)、[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)、验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。**
 
-### 第二批：Context / Memory 与诊断
+### 历史批次记录（保留当时状态，不代表当前入口）
+
+#### 第二批：Context / Memory 与诊断
 
 用户已授权合并后继续开发。本批从 `0e41463` 创建 `codex/dev1-context-memory-diagnostics`，不修改第一批旧分支；Luna 实施，Sol 独立只读审阅，主 Agent 组织与维护入口。
 
@@ -64,13 +65,31 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 下一批处理 F04 实机/实验 profile 的 resolved 配置、F12 终端净化，以及 F07 有界清理。清理超时不能冒充底层动作已停止。其后才按 DEV-2 的合同冻结与文件映射进入 app-runtime、接管及目标适配；此次通过不能称为 DEV-1 全部完成。
 
-### 第三批：Controls cleanup（代码完成，Sol 有限范围放行）
+#### 第三批：Controls cleanup（历史记录；代码完成，Sol 有限范围放行）
 
 本批从第二批工作树创建 `codex/dev1-controls-cleanup`，并以 merge commit `4913fc6` 合并最新 `origin/main`（`1f9f362`）。CLI `index.ts` 冲突已保留 PR #3 的 Computer lazy loading 与第二批 diagnostics recorder；PR #3/#4 的 Linux 适配文件和测试均保留。
 
 范围为 DEV-1 的 F04/F12/F07：统一 experiment 与 `live-interactive` 的 resolved Risk 配置、让 TUI 显示实际 profile/Guard、净化模型/错误/外部文本的 ESC/CSI/OSC 等终端控制序列，以及 Runtime/Computer cleanup 的总 deadline、剩余预算和同实例未决清理阻断。F07 只承诺同一 Computer 实例/会话的进程内防复用；同环境新实例的 owner/quiesce 属于 DEV-2，跨进程持久屏障属于 DEV-6，未将 X02 后两者提前宣称完成。
 
 本批结果写入[Controls cleanup 实施记录](./dev-1-controls-cleanup-implementation-results.md)。Sol 集中复核的中间版本为 5 files/72 tests，全项通过；补齐三项高风险反例后的最终复核为 3 files/16 tests，全项通过并有限放行。worker 最终离线统一验证为 `pnpm run typecheck` 通过、`pnpm test` 22 files/251 tests 全通过、CLI help 通过。行为变更已按 CLI、Runtime/CUA、文档三笔本地提交（CLI `98bb75c`、Runtime/CUA `e0d080c`，文档提交见 Git 日志）；不启动真实 API、桌面或 VM，不 push。
+
+#### 第四批：DEV-2 RFT2 app-runtime（历史记录；代码与审查已完成，Sol 已有限放行）
+
+本批从 PR #5 合并后的 `origin/main` `bc72ee5` 创建 `codex/dev2-app-runtime`。按 RFT2 将 CLI 的 Provider/Computer 工厂、诊断 recorder、run 目录/Store、Runtime Controller 组装及 summary/reporting 迁移至 `packages/app-runtime`；CLI 保留 args/env/terminal 控制。`ResolvedRunConfig` 不含凭证，凭证由 CLI 注入；`RunHandle` 保证单次 start、Controller-owned cleanup 不重复，构造失败只清理已创建的 writer。CUA 保持动态 lazy import，help/OSWorld 不解析 native binding。
+
+合同、实际文件映射、Fake 组装及限制见[DEV-2 app-runtime 实施记录](./dev-2-app-runtime-implementation-results.md)；CUA 共享底座/doctor 方向见[独立能力调研](./dev-2-cua-capability-and-extension-research.md)。本批不实现 D2-SESSION、D2-EVENT、target/focus/generation、Monitor、Memory scope、跨进程 owner 或真实 TUI 输入。当前 app-runtime focused 已通过 8 files/34 tests；新增 AST test-only 收口前 worker 最终 typecheck、full（25 files/264 tests）及 help 均通过，收口后相关 focused/typecheck 复跑通过，未重复全量；未 push，Sol 已有限放行。
+
+### 第五批：DEV-2 最小 TUI 预览与事件/会话行为（代码完成，Sol 已有限放行）
+
+本批从第四批 `fa89f24` 创建 `codex/dev2-tui-preview`。Luna 实施，worker_ci 独立负责 CUA preflight/fixture 记录；本批不操作真实 API、桌面或 VM。范围为：Runtime `committed-events.ts` 的 append+reduce 后只读通知与增量读取；app-runtime 有界 `event-feed.ts` 的 sequence 去重、补读水位和 `resync_required`；`ApplicationSession` 单活跃 Run、新目录/新 Controller/审批/Memory Store 以及同进程保守 `EnvironmentOwner`；CLI `--tui` 无 goal 首页、中文粘贴、状态/审批/暂停/恢复/Abort/纠正/退出、resize/EOF raw/cursor 恢复。
+
+实际纠正交由 Controller Inbox 线性化：审批等待中的纠正先撤销旧审批并拒绝旧 ToolCall，Provider 迟到或待消费决策按既有失效屏障处理；TUI 只呈现 snapshot 与 committed feed，不新建调度器，不以文案冒充 target/focus/generation 或桌面接管。CUA 本地 physical desktop 或相同 OSWorld bridge 的 active/unknown/未确认 cleanup 会保留进程内 owner；不同 bridge 不互相阻塞。跨进程 owner、quiesce、target/focus/generation、Memory scope、Monitor、完整 model Run 及 REL-1 仍未完成。
+
+合同、文件映射、生产者/消费者/清理责任和限制见[TUI 预览实施记录](./dev-2-tui-preview-implementation-results.md)。集中复核指出的事件队列/resync、同桌面 owner、纠正/审批竞态、退出清理和 Escape `undefined` 输入边界已补回归并修复；本批离线 focused 为 6 files/29 tests 全通过，最后 `pnpm run typecheck`、`pnpm test`（28 files/282 tests）和 CLI help 均通过，Sol 已有限放行。worker_ci 文件不纳入本 worker 暂存范围。独立 winpty 仅验证 no-goal home 的中文/resize/ESC→Q/Ctrl-C 恢复；完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1/T01..T14 全验收仍未通过本批证明。
+
+### 第六批增量：CUA capability doctor 与显式窗口目标（代码完成，Sol 有限放行；真实结果有限且保守）
+
+本批在 `f7f7357` 上增加脱敏、只读的 `--doctor` 入口，并在当前 `a8580ea` 基线上加入显式 host-only CUA window opt-in：`computer-cua` 读取 metadata、tool inventory、session、health 和 permission 的结构化状态，app-runtime 保持 native CUA 动态加载，CLI 在无 goal、无 model、无 `.env`/provider credentials 时可运行。错误、缺失、超时和未确认 cleanup 统一标为 `unknown`；SDK/daemon 声明与 fixture 实证分离。CI 的 direct CLI 复核确认 metadata/inventory（57 tools）可读，但 session 的 desktop capture scope 未确认，health/permissions 与 cleanup 保持 unknown，整体退出码为 1；正式 pnpm wrapper 另有 transport unknown 限制。窗口模式只在 `--cua-window-pid <pid> --cua-window-id <windowId>` 成对显式提供时启用，生产 adapter 只开放 window-local PNG observe、background single-click 与 wait，keyboard、其他 pointer primitive、模型自由选窗及默认 desktop/OSWorld 路径不变。目标丢失后 identity latch 只允许 close 后新 session 恢复；preflight 与 driver click 非原子，不能写成通用 focus/安全或业务成功证明。通用 CLI 模板见 [DOCS-INDEX](./DOCS-INDEX.md)；合同、fake 测试和限制见[窗口目标实施记录](./dev-2-window-target-implementation-results.md)、[TUI bounded UX 实施记录](./dev-2-tui-preview-implementation-results.md)与[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)；真实窄证据与边界见 worker_ci 验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。本批最终离线全量为 32 files/320 tests，root typecheck 通过；worker 本轮未调用 model API、桌面或 VM；这些结果不等 doctor 整体通过、完整 model Run 或 REL-1。
 
 ### 第一批证据（已合并，2026-09-17）
 

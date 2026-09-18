@@ -49,7 +49,8 @@ import type {
 } from "./contracts.js";
 import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
-import { ToolRegistry } from "./tool-registry.js";
+import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.js";
+import type { CommittedEventListener } from "./committed-events.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -88,6 +89,11 @@ export interface RunControllerDependencies {
   /** Total wall-clock budget shared by event-writer and Computer cleanup. */
   cleanupDeadlineMs?: number;
   onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
+  /**
+   * Optional append-after-reduce notification. Observers are read-only and
+   * are isolated from the run when their callback throws.
+   */
+  onEventCommitted?: CommittedEventListener;
 }
 
 export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close";
@@ -255,9 +261,10 @@ export class RunController {
   private readonly idFactory: IdFactory;
   private readonly computerOpenOptions: ComputerOpenOptions;
   private readonly onCleanupError: ((diagnostic: CleanupDiagnostic) => void) | undefined;
+  private readonly onEventCommitted: CommittedEventListener | undefined;
   private readonly toolAudience: ToolAudience;
   private readonly enabledCategories: ReadonlySet<ToolCategory>;
-  private readonly enabledToolNames: ReadonlySet<string> | undefined;
+  private enabledToolNames: ReadonlySet<string> | undefined;
   private readonly memoryEnabled: boolean;
   private readonly planningEnabled: boolean;
   private readonly batching: "off" | "same-control-input-v1";
@@ -273,6 +280,8 @@ export class RunController {
   private nextSequence = 0;
   private started = false;
   private pendingApproval: PendingApproval | undefined;
+  /** Approval accepted by the Inbox but not yet dispatched. */
+  private approvedPendingApproval: PendingApproval | undefined;
   private pendingToolTurn: PendingToolTurn | undefined;
   private pendingModelTurn: { turn: ModelTurn; invalidated?: boolean } | undefined;
   private pendingReobserve = false;
@@ -309,6 +318,7 @@ export class RunController {
     this.memoryEnabled = this.features.memory !== "off" && this.enabledCategories.has("side");
     this.planningEnabled = this.features.planning !== "off" && this.enabledCategories.has("planning");
     this.onCleanupError = dependencies.onCleanupError;
+    this.onEventCommitted = dependencies.onEventCommitted;
     this.snapshot = {
       runId: this.runId,
       status: "created",
@@ -384,6 +394,19 @@ export class RunController {
     return this.events.map((event) => structuredClone(event));
   }
 
+  /** Return only committed events after a sequence watermark. */
+  public getEventsAfter(sequence: number): readonly RuntimeEvent[] {
+    return this.events.filter((event) => event.sequence > sequence).map((event) => structuredClone(event));
+  }
+
+  /** Return the same model-tool projection used by ContextCompiler. */
+  public getEffectiveToolNames(): readonly string[] {
+    return this.toolRegistry.modelTools(this.toolAudience, {
+      enabledCategories: [...this.enabledCategories],
+      ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
+    }).map((tool) => tool.name);
+  }
+
   private async run(goal: string): Promise<RunOutcome> {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
@@ -396,6 +419,8 @@ export class RunController {
         throw new Error("Computer instance has unresolved cleanup from an earlier Run");
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
+      const restrictedToolNames = restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, this.enabledToolNames === undefined ? undefined : [...this.enabledToolNames]);
+      this.enabledToolNames = restrictedToolNames === undefined ? undefined : new Set(restrictedToolNames);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 
@@ -406,12 +431,16 @@ export class RunController {
             // A resume can release the waiter before a correction enqueued in
             // the same user turn is drained.  Apply queued control commands
             // before consuming any deferred decision or tool turn.
-            await this.drainCommands();
+            const controlEffects = await this.drainCommands();
+            this.throwIfAborted();
             await this.refreshAfterUserInput(session);
+            if (controlEffects.correction) {
+              this.approvedPendingApproval = undefined;
+            }
           }
-          if (this.pendingApproval !== undefined) {
-            const pending = this.pendingApproval;
-            this.pendingApproval = undefined;
+          if (this.approvedPendingApproval !== undefined && (this.snapshot.status as string) === "running") {
+            const pending = this.approvedPendingApproval;
+            this.approvedPendingApproval = undefined;
             await this.executeApprovedCall(pending);
           }
           if ((this.snapshot.status as string) === "running" && this.pendingToolTurn !== undefined) {
@@ -769,8 +798,23 @@ export class RunController {
   private async applyCommand(command: RuntimeCommand): Promise<CommandEffects> {
     switch (command.kind) {
       case "user_input":
+        if (this.approvedPendingApproval !== undefined) {
+          const approved = this.approvedPendingApproval;
+          this.approvedPendingApproval = undefined;
+          await this.rejectToolCall(approved.call.id, "superseded by user correction after approval");
+        }
         if (this.snapshot.status === "waiting_approval") {
-          throw new Error("user input cannot bypass pending approval");
+          const pending = this.pendingApproval;
+          if (pending === undefined || this.snapshot.pendingApproval?.requestId !== pending.requestId) {
+            throw new Error("pending approval has no executable ToolCall");
+          }
+          // A correction is a user decision, not an approval shortcut.
+          // Linearize it at the Inbox point by revoking the candidate and
+          // recording its rejection before accepting the new input. No GUI
+          // action can start from the stale candidate after this point.
+          await this.commitEvent({ type: "approval.resolved", requestId: pending.requestId, approved: false });
+          this.pendingApproval = undefined;
+          await this.rejectToolCall(pending.call.id, "superseded by user correction");
         }
         if (
           this.snapshot.status !== "waiting_user" &&
@@ -812,6 +856,9 @@ export class RunController {
         if (!command.approved) {
           this.pendingApproval = undefined;
           await this.rejectToolCall(pending.call.id, "approval denied");
+        } else {
+          this.pendingApproval = undefined;
+          this.approvedPendingApproval = pending;
         }
         return { correction: false };
       case "pause":
@@ -1492,6 +1539,13 @@ export class RunController {
     this.snapshot = nextSnapshot;
     this.events.push(persisted);
     this.nextSequence = persisted.sequence + 1;
+    try {
+      this.onEventCommitted?.(structuredClone(persisted));
+    } catch {
+      // A UI/feed observer is never part of the execution result. The event
+      // is already durable and reduced, so observer failure is isolated from
+      // the Controller's scheduling path.
+    }
     return persisted;
   }
 

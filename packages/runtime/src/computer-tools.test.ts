@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultComputerTools } from "./computer-tools.js";
 import { createDefaultToolRegistry } from "./control-tools.js";
+import { restrictToolNamesForCapabilities } from "./tool-registry.js";
 
 describe("default Computer tools", () => {
   it("exposes one canonical definition for each V1 action", () => {
@@ -68,4 +69,14 @@ describe("default Computer tools", () => {
     expect(registry.modelTools().find((tool) => tool.name === "click")).toMatchObject({ category: "computer", coordinate: { fields: ["x", "y"] } });
     expect(registry.modelTools().find((tool) => tool.name === "terminate")).toMatchObject({ category: "control", control: "finish" });
   });
+
+  it("does not offer keyboard primitives when keyboard focus is not verified", () => {
+    const registry = createDefaultToolRegistry();
+    const names = restrictToolNamesForCapabilities(registry, { screenshot: true, pointer: true, keyboard: false, accessibility: false }, undefined);
+    expect(names).toContain("click");
+    expect(names).not.toContain("type");
+    expect(names).not.toContain("keypress");
+    expect(names).not.toContain("hotkey");
+  });
+
 });
