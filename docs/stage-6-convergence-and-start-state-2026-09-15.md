@@ -14,6 +14,8 @@ PR #1 已由用户合并，DEV-0 Hosted CI 与 DEV-1 的确定性修复已进入
 
 2026-09-17 合同状态复查已补入路线 3.1：Memory scope、目标/focus/generation、InstructionState、ContextTrace/prepared request、在线图片/停滞特征及持久恢复均不能视为当前已完成。scope 保留为 DEV-4 新增能力，含绑定、召回、失效、迁移和 FM12..15 测试；当前 DEV-0/1 顺序不变。本次仅核对源码与修订文档，没有运行这些新增验收测试。
 
+本阶段后续共享施工合同见[DEV-3/4/5 实施计划](./dev-3-5-implementation-plan.md)：DEV-3 为 Instruction/ContextTrace/preparation，DEV-4 为 Memory applicability/reconciliation，DEV-5 保持 Monitor 的 shadow→bounded guidance→help/stop，DEV-6 继续承接 Risk Guard 与执行隔离。计划中的 scope/retention/Trace/Monitor/Guard 字段均需实际 producer、consumer、持久化/失效/清理和回归，不能由文档字段名倒填为现状。
+
 ## 2. 路线背景与后续顺序
 
 1. **已完成的 DEV-0/DEV-1 基础**：Hosted CI、Context/Memory、Risk/诊断和清理的已合并结果以历史批次及各实施记录为准。

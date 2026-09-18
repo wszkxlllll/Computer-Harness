@@ -14,6 +14,8 @@
 
 涉及文件拆分时再读[分块重构施工表](./module-refactoring-work-plan.md)：RFT-1..7 的源文件映射、目标职责、公共接口、先后顺序与测试，不是另一套阶段路线。
 
+DEV-3 Context、DEV-4 Memory、DEV-5 Monitor 的实施合同、DEV-6 Risk 承接、Provider 适配与公开安全评测边界统一见[DEV-3/4/5 实施计划](./dev-3-5-implementation-plan.md)。本文保持“规划合同/来源缓存”角色，不表示这些阶段已经实现。
+
 编写结果遵守[开发文档规范](./development-documentation-standard.md)。产品里程碑使用 REL-1/2/3；开发阶段 DEV；实机门槛 LIVE；评测准备仍称 G0。实验组 M1/M2 只表示 Fact/Entity Memory。
 
 ## 尚在使用的评测资料
