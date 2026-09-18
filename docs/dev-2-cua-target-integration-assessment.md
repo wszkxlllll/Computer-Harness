@@ -1,0 +1,87 @@
+# DEV-2 CUA 窗口能力接入盘点
+
+日期：2026-09-18  
+仓库基线：`f7f7357`（分支 `codex/dev2-tui-preview`）  
+依赖：`@trycua/cua-driver@0.22.2`  
+文档角色：CUA doctor 实施与窗口能力边界记录；Sol 定向复核已有限放行，不是通用窗口安全能力的完成报告。
+
+## 1. 结论
+
+本批只有限放行只读 capability doctor，并把“host 明确选择的精确窗口”保留为 Adapter 内部的 opt-in 预检合同；现有 primary desktop 全屏观察和默认 foreground 动作不变。受控 fixture 的窗口级 `verify_state(include_screenshot)` probe 已通过，但由于 frame/client 存在约 2px 边界差异、目标身份与权限闭环尚未产品化，窗口级 capture 仍暂不接入，也不把 `bring_to_front` 或窗口置顶返回值写成持续焦点证明。
+
+worker_ci 的独立记录证明了以下受控链路：Windows + 官方 CUA 0.22.2 daemon + 本 probe 启动的 WinForms fixture，`list_windows` 能返回精确 PID/window_id/bounds，`bring_to_front` 返回 `landed_on_target`，fixture 自有状态能确认 `focused=true`；`verify_state(include_screenshot)` 对 960x680 与 1040x720 fixture frame 分别观察到 958x678 与 1038x718，显示约 2px non-client/frame 边界；现有 `CuaDriverComputer` 随后完成全桌面 physical capture，以及使用 primary desktop target 的 click/type，fixture-owned state 发生预期变化。能力目录为 57 tools，metadata/session/health/permission 预检 errors 为 0。
+
+上述证据不证明：任意应用的焦点、通用 AX、PID/window_id 的永久身份、跨平台支持、可直接消费的窗口级 screenshot、业务目标成功或完整 model Run。`accessibility=false`，且本轮真实 GLM 因整屏隐私闸门中止。
+
+## 2. 当前生产边界
+
+`packages/computer-cua/src/cua-driver-computer.ts` 当前只做：
+
+- `open` 连接显式 daemon、启动 session、读取 primary desktop physical viewport；
+- `observe` 调用 `get_desktop_state`，将全桌面 PNG 写入 adapter 私有 screenshot 目录，再由 Runtime 持久化；
+- `execute` 将非 wait 动作路由到 `{ kind: "desktop", display_id: "primary" }` 与 foreground delivery；
+- 以 `ObservationId` 绑定当前 session，并在 transport/cleanup unknown 时 fail closed。
+
+现有 `ComputerSessionDescriptor.capabilities.accessibility=false` 是诚实状态。Runtime 的 model-facing `ToolRegistry` 仍只有通用屏幕坐标/键盘动作；不应因为 CUA SDK 类型中存在 `ActionTarget.Window` 就让模型直接提交 PID/window_id。
+
+## 3. 建议的最小合同
+
+### 3.1 只读 capability doctor（先行项）
+
+归属 `packages/computer-cua`，不改变 `Computer` 接口和默认 Run 路径。doctor 只接受显式 socket/driver factory 与 `AbortSignal`，读取并归一化：
+
+- driver metadata 与版本/平台摘要；
+- `listToolsJson` 的工具名和数量；
+- session lifecycle、health report、permission report 的结构化状态。
+
+输出只允许 `supported | unsupported | unknown | degraded` 等状态、能力名、受限原因和版本摘要；不得保存原始窗口标题、路径、截图、clipboard、token 或任意 daemon 文本。Transport/permission/shape 失败必须保持 `unknown`，不能把缺失工具当成支持，也不能让 doctor 的错误改变 Run outcome。doctor 不调用 click/type/keypress、window mutation 或 capture。
+
+### 3.2 host-only 精确窗口预检（条件接入）
+
+先定义 adapter 私有/host-facing 类型，不进入 protocol、Memory 或 model tool schema：
+
+```ts
+type CuaWindowTarget = {
+  pid: number;
+  windowId: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  coordinateSpace: "physical";
+};
+```
+
+生产动作只有在调用者显式提供该 target 时才可走 target opt-in；默认仍使用 primary desktop。每次敏感动作前应重新读取并比较精确 PID/window_id/bounds/viewport，窗口不存在、PID 不符、bounds/scale 不一致或 transport 错误都拒绝/返回 unknown，不静默降级到 desktop，也不由 socket/session label 充当身份。即使这些检查通过，也不能把敏感输入视为安全；没有独立、短生命周期的 focus readback 时，通用 target action 继续不接入。`bring_to_front` 只能是一次性 preflight 辅助步骤，不得返回“焦点已证明”。
+
+当前 worker_ci 实证只支持把这条合同用于专用 fixture/明确 host target；在通用应用上仍应标 `unsupported` 或 `unknown`。target generation、geometry revision、审批绑定和 Runtime 消费者属于下一步合同，不能用 ObservationId 自增冒充。
+
+### 3.3 窗口级 capture 暂不接入
+
+worker_ci 已在专用 fixture 上验证 `verify_state(include_screenshot)` 能返回窗口观察帧；当前记录到的 frame/client 约 2px 差异、目标变化、遮挡/权限与 cleanup 后失效语义仍未形成 Harness 生产合同。因此不添加 `observeWindow`，不把全桌面裁剪冒充窗口截图，不在窗口级能力未闭环时回退为“看起来成功”的 desktop capture。
+
+只有后续另批将 PID/window_id 绑定、bounds/scale/frame validity、遮挡/权限和 cleanup 后失效固化为生产合同，才可设计 `windowCaptureRef` 与 Observation/审批消费；本次 probe 不直接授权这些接入。
+
+## 4. 实施顺序与验收
+
+1. 先实现 doctor 的纯 fake 合同测试：metadata/inventory/health/permission 正常、缺工具、malformed JSON、permission denied、transport unknown、Abort；断言不发生 GUI action、不写 screenshot、不泄露原始文本。
+2. 基于 worker_ci 已给出的受控 probe，另批实现 host-only target discovery/preflight fake：精确 PID/window_id、窗口消失、PID reuse/changed window_id、bounds/scale/viewport 变化、`bring_to_front` structured refusal、focus unknown、daemon 断连；默认 desktop 路径的请求形状必须保持不变。
+3. 在 2px frame/client 边界、遮挡/权限和 cleanup 语义未闭环前，维持 window capture unsupported；不要为填工具目录暴露 57 个工具，不新增 Memory scope、Monitor、跨进程 owner 或通用 target lock。
+
+代码所有权限于 `packages/computer-cua` 及其测试和本实施记录；除非 Runtime/Protocol 已有消费者合同无法表达，否则不修改 Runtime、Provider、Memory 或 TUI。任何真实 daemon、桌面、截图或模型验证由 worker_ci 独占，本 worker 不执行。
+
+## 5. 当前放行矩阵
+
+| 能力 | 当前结论 | 可否本批生产接入 |
+|---|---|---|
+| metadata/tool inventory/session/health/permission doctor | Sol 定向复核有限放行；结构化 fake 合同通过，CLI 真实 daemon 结果仍由 worker_ci 核验 | 可以，先只读、显式调用 |
+| 精确 window discovery (`pid/window_id/bounds`) | 专用 fixture 通过；不是永久身份 | 仅 host-only opt-in 预检 |
+| `bring_to_front` | 专用 fixture + fixture-owned focus 状态通过 | 只能作一次性辅助，不能宣称通用 focus |
+| fixture 上的 primary-desktop click/type | 专用 fixture action/state 链路通过；不是 CUA Window-target 动作 | 不改变默认；不据此接入通用 target action |
+| window-level screenshot/state | 受控 fixture `verify_state(include_screenshot)` probe 通过，但存在约 2px frame/client 边界，生产合同与通用安全语义未闭合 | 不接入，明确 unsupported |
+| generic focus/AX、跨平台 target | 未验证/不统一 | 不接入 |
+
+## 6. Doctor 实施结果（Sol 定向复核有限放行；真实 daemon 仍待 worker_ci 核验）
+
+已在 `packages/computer-cua` 实现 `inspectCuaCapabilities`，并由 `packages/app-runtime` 保持 native binding lazy 后提供给 CLI；`apps/cli --doctor --computer cua --cua-socket <socket>` 是无 goal、无 model、无 `.env`/provider credentials 的真实入口。报告只包含 schema/status/reasonCode、工具数量和声明能力，不输出 socket、session label、daemon 原文、窗口标题、路径、截图或凭证。
+
+fake focused 证据：doctor 正常路径、metadata contract/schema、tools-list schema mismatch、malformed inventory、permission error、连接构造失败、metadata/start timeout、abort race、独立 cleanup signal、health contradiction/version check、settled transport reason、desktop unlock shape 和 error-code 脱敏回归通过；联合 `computer-cua` doctor 14 tests、CLI doctor/model seam 2 tests、config 3 tests 共 4 files / 29 tests。`pnpm exec tsc -b packages/computer-cua packages/app-runtime apps/cli --force`、pnpm wrapper 的 `start -- --doctor` 参数归一化和 CLI `--help` 通过；根 `pnpm run typecheck` 当前被 worker_ci 未跟踪 spike `spikes/cua-driver/dev2-window-contract.ts:211` 的 exactOptionalPropertyTypes 错误阻塞，非本批文件；全量 `pnpm test` 已通过 30 files / 298 tests。尚未连接真实 daemon；worker_ci 需使用其已校验的私有 pipe 独立运行 CLI doctor 并记录真实状态，不能把本节 fake 结果写成 daemon 通过。
+
+窗口 capture/target 尚未被该实现触发；worker_ci 的受控 window probe 不改变当前生产默认 desktop observation/action。doctor inventory 中即使声明 `list_windows`/`bring_to_front`，也只记录 declaration status，不提升为 fixtureVerified、focus proof 或敏感输入授权；约 2px frame/client 边界与目标失效语义留待后续合同批次。

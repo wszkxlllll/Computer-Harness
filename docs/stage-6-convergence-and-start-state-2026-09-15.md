@@ -2,7 +2,7 @@
 
 更新：2026-09-18
 
-角色：当前执行 / 交接。原审计基线：`39ff27f9`；当前开发基线：`fa89f24`（分支 `codex/dev2-tui-preview`）。DEV-1 已合并结果与 DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为已完成，Sol 已有限放行；正式评测 G0/REL-1 另行收口。
+角色：当前执行 / 交接。原审计基线：`39ff27f9`；当前开发基线：`f7f7357`（分支 `codex/dev2-tui-preview`）。DEV-1 已合并结果与 DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为、CUA capability doctor 已完成并获 Sol 有限放行；当前真实 daemon doctor 仍待 worker_ci 核验；受控 window probe 已通过但约 2px frame/client 边界尚未生产集成；正式评测 G0/REL-1 另行收口。
 
 ## 1. 当前结论与已有基础
 
@@ -42,7 +42,7 @@ G0 当前资料从[文档索引](./DOCS-INDEX.md)进入，校准、预算和分�
 
 DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实验；不等全部功能完成才首次验证效果，也不反复用 Validation 调参。
 
-实施结果写在所属阶段交付文档并从本入口链接。当前状态：**DEV-1 已合并结果按历史批次记录；DEV-2 RFT2 与最小 TUI/D2-EVENT/D2-SESSION 已分别完成，Sol 已有限放行。focused 6/29、全量 28/282、typecheck 与 CLI help 通过；完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1 全验收仍未完成。**
+实施结果写在所属阶段交付文档并从本入口链接。当前状态：**DEV-1 已合并结果按历史批次记录；DEV-2 RFT2、最小 TUI/D2-EVENT/D2-SESSION 与本批 CUA doctor 已分别完成并获 Sol 有限放行。本轮 doctor focused 4 files/29 tests、全量 30/298、CLI help 与 pnpm wrapper 参数归一化通过；受控 window probe 已通过但约 2px frame/client 边界尚未生产集成；根 typecheck 当前只被 worker_ci 未跟踪 spike 的独立 exactOptionalPropertyTypes 错误阻塞。真实 daemon doctor、完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1 全验收仍未完成。**
 
 ### 历史批次记录（保留当时状态，不代表当前入口）
 
@@ -73,11 +73,11 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 本批结果写入[Controls cleanup 实施记录](./dev-1-controls-cleanup-implementation-results.md)。Sol 集中复核的中间版本为 5 files/72 tests，全项通过；补齐三项高风险反例后的最终复核为 3 files/16 tests，全项通过并有限放行。worker 最终离线统一验证为 `pnpm run typecheck` 通过、`pnpm test` 22 files/251 tests 全通过、CLI help 通过。行为变更已按 CLI、Runtime/CUA、文档三笔本地提交（CLI `98bb75c`、Runtime/CUA `e0d080c`，文档提交见 Git 日志）；不启动真实 API、桌面或 VM，不 push。
 
-#### 第四批：DEV-2 RFT2 app-runtime（历史记录；代码完成，待 Sol 一轮审阅）
+#### 第四批：DEV-2 RFT2 app-runtime（历史记录；代码与审查已完成，Sol 已有限放行）
 
 本批从 PR #5 合并后的 `origin/main` `bc72ee5` 创建 `codex/dev2-app-runtime`。按 RFT2 将 CLI 的 Provider/Computer 工厂、诊断 recorder、run 目录/Store、Runtime Controller 组装及 summary/reporting 迁移至 `packages/app-runtime`；CLI 保留 args/env/terminal 控制。`ResolvedRunConfig` 不含凭证，凭证由 CLI 注入；`RunHandle` 保证单次 start、Controller-owned cleanup 不重复，构造失败只清理已创建的 writer。CUA 保持动态 lazy import，help/OSWorld 不解析 native binding。
 
-合同、实际文件映射、Fake 组装及限制见[DEV-2 app-runtime 实施记录](./dev-2-app-runtime-implementation-results.md)；CUA 共享底座/doctor 方向见[独立能力调研](./dev-2-cua-capability-and-extension-research.md)。本批不实现 D2-SESSION、D2-EVENT、target/focus/generation、Monitor、Memory scope、跨进程 owner 或真实 TUI 输入。当前 app-runtime focused 已通过 8 files/34 tests；新增 AST test-only 收口前 worker 最终 typecheck、full（25 files/264 tests）及 help 均通过，收口后相关 focused/typecheck 复跑通过，未重复全量；未 push，待 Sol 一轮最终放行确认。
+合同、实际文件映射、Fake 组装及限制见[DEV-2 app-runtime 实施记录](./dev-2-app-runtime-implementation-results.md)；CUA 共享底座/doctor 方向见[独立能力调研](./dev-2-cua-capability-and-extension-research.md)。本批不实现 D2-SESSION、D2-EVENT、target/focus/generation、Monitor、Memory scope、跨进程 owner 或真实 TUI 输入。当前 app-runtime focused 已通过 8 files/34 tests；新增 AST test-only 收口前 worker 最终 typecheck、full（25 files/264 tests）及 help 均通过，收口后相关 focused/typecheck 复跑通过，未重复全量；未 push，Sol 已有限放行。
 
 ### 第五批：DEV-2 最小 TUI 预览与事件/会话行为（代码完成，Sol 已有限放行）
 
@@ -86,6 +86,10 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 实际纠正交由 Controller Inbox 线性化：审批等待中的纠正先撤销旧审批并拒绝旧 ToolCall，Provider 迟到或待消费决策按既有失效屏障处理；TUI 只呈现 snapshot 与 committed feed，不新建调度器，不以文案冒充 target/focus/generation 或桌面接管。CUA 本地 physical desktop 或相同 OSWorld bridge 的 active/unknown/未确认 cleanup 会保留进程内 owner；不同 bridge 不互相阻塞。跨进程 owner、quiesce、target/focus/generation、Memory scope、Monitor、完整 model Run 及 REL-1 仍未完成。
 
 合同、文件映射、生产者/消费者/清理责任和限制见[TUI 预览实施记录](./dev-2-tui-preview-implementation-results.md)。集中复核指出的事件队列/resync、同桌面 owner、纠正/审批竞态、退出清理和 Escape `undefined` 输入边界已补回归并修复；本批离线 focused 为 6 files/29 tests 全通过，最后 `pnpm run typecheck`、`pnpm test`（28 files/282 tests）和 CLI help 均通过，Sol 已有限放行。worker_ci 文件不纳入本 worker 暂存范围。独立 winpty 仅验证 no-goal home 的中文/resize/ESC→Q/Ctrl-C 恢复；完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1/T01..T14 全验收仍未通过本批证明。
+
+### 第六批增量：CUA capability doctor（代码完成，Sol 有限放行；待 worker_ci 真实核验）
+
+本批在 `f7f7357` 上只增加脱敏、只读的 `--doctor` 入口：`computer-cua` 读取 metadata、tool inventory、session、health 和 permission 的结构化状态，app-runtime 保持 native CUA 动态加载，CLI 在无 goal、无 model、无 `.env`/provider credentials 时可运行。错误、缺失、超时和未确认 cleanup 统一标为 `unknown`；SDK/daemon 声明与 fixture 实证分离。窗口 capture、通用 target/focus/AX、PID/window_id 安全锁和默认 desktop 动作均未接入。合同、fake 测试和未验证矩阵见[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)；worker_ci 尚未完成真实 doctor 命令核验，不能把 doctor 代码测试写成 daemon 通过。
 
 ### 第一批证据（已合并，2026-09-17）
 

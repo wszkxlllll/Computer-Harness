@@ -6,5 +6,6 @@ export * from "./run-factory.js";
 export * from "./event-feed.js";
 export * from "./environment-owner.js";
 export * from "./application-session.js";
+export * from "./cua-doctor.js";
 export * from "./diagnostics/provider-summary.js";
 export * from "./diagnostics/recording-clients.js";

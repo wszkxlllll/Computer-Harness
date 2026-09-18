@@ -5,6 +5,8 @@ import { ApplicationSession, createRun, writeRunReport, type AppRuntimeModel, ty
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import { runApplicationTui } from "./tui.js";
+import { runCuaDoctor } from "./doctor-command.js";
+import { resolveCliModel } from "./cli-model.js";
 import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 
@@ -15,6 +17,7 @@ type Qwen38ThinkingMode = "disabled" | "low" | "medium" | "xhigh";
 type Qwen38OutputMode = "native_tools" | "strict_json";
 
 interface CliOptions {
+  doctor: boolean;
   goal?: string;
   model: ModelName;
   computer: "cua" | "osworld";
@@ -42,22 +45,28 @@ interface CliOptions {
   riskMaxModelRequests: number;
   riskTimeoutMs: number;
   cleanupDeadlineMs: number;
+  doctorTimeoutMs: number;
 }
 
-function parseArgs(argv: readonly string[]): CliOptions {
+function parseArgs(rawArgv: readonly string[]): CliOptions {
+  // pnpm's `start -- ...` forwards the separator as a literal argv entry;
+  // treat it as transport syntax, not as a CLI option.
+  const argv = rawArgv[0] === "--" ? rawArgv.slice(1) : rawArgv;
   const value = (name: string): string | undefined => {
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] : undefined;
   };
+  const doctor = argv.includes("--doctor");
   const goal = value("--goal");
   const tui = argv.includes("--tui");
-  const model = value("--model") as ModelName | undefined;
+  const modelValue = value("--model");
+  const model = resolveCliModel(modelValue, doctor) as ModelName;
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
-  if ((goal === undefined || goal.trim().length === 0) && !tui) throw new Error("--goal is required unless --tui opens the interactive home");
-  if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") {
-    throw new Error("--model must be glm-5.3-flash or qwen3.8-flash");
-  }
+  if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor) throw new Error("--goal is required unless --tui opens the interactive home or --doctor runs a read-only CUA diagnostic");
+  if (doctor && goal !== undefined) throw new Error("--doctor cannot be combined with --goal");
+  if (doctor && (tui || argv.includes("--interactive"))) throw new Error("--doctor cannot be combined with --tui or --interactive");
   if (computer !== "cua" && computer !== "osworld") throw new Error("--computer must be cua or osworld");
+  if (doctor && computer !== "cua") throw new Error("--doctor currently supports only --computer cua");
   const cuaSocket = value("--cua-socket") ?? value("--socket");
   const osworldBridge = value("--osworld-bridge");
   if (computer === "cua" && (cuaSocket === undefined || cuaSocket.trim().length === 0)) throw new Error("--cua-socket is required when --computer cua");
@@ -67,6 +76,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const maxModelRequests = positiveInteger(value("--max-model-requests"), 30, "--max-model-requests");
   const fixtureResult = value("--fixture-result");
   const envFile = value("--env-file");
+  if (doctor && envFile !== undefined) throw new Error("--doctor does not read --env-file or provider credentials");
   const screenshotDir = value("--screenshot-dir");
   const qwenCoordinateModeValue = value("--qwen-coordinate-mode");
   if (qwenCoordinateModeValue !== undefined && qwenCoordinateModeValue !== "normalized_1000" && qwenCoordinateModeValue !== "actual_pixels") {
@@ -108,6 +118,8 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const riskMaxModelRequests = positiveInteger(value("--risk-max-model-requests"), 20, "--risk-max-model-requests");
   const riskTimeoutMs = positiveInteger(value("--risk-timeout-ms"), 30_000, "--risk-timeout-ms");
   const cleanupDeadlineMs = positiveInteger(value("--cleanup-deadline-ms"), 5_000, "--cleanup-deadline-ms");
+  const doctorTimeoutMs = positiveInteger(value("--doctor-timeout-ms"), 2_000, "--doctor-timeout-ms");
+  if (!doctor && argv.includes("--doctor-timeout-ms")) throw new Error("--doctor-timeout-ms requires --doctor");
   const planning = argv.includes("--planning");
   const memoryValue = value("--memory") ?? "off";
   if (memoryValue !== "off" && memoryValue !== "facts" && memoryValue !== "entities") throw new Error("--memory must be off, facts, or entities");
@@ -119,6 +131,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
   const contextMaxInputTokensValue = value("--context-max-tokens");
   const contextMaxInputTokens = contextMaxInputTokensValue === undefined ? undefined : positiveInteger(contextMaxInputTokensValue, 1, "--context-max-tokens");
   return {
+    doctor,
     ...(goal === undefined ? {} : { goal }),
     model,
     computer,
@@ -146,6 +159,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     riskMaxModelRequests,
     riskTimeoutMs,
     cleanupDeadlineMs,
+    doctorTimeoutMs,
   };
 }
 
@@ -157,10 +171,16 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. --doctor performs only redacted CUA daemon checks and never reads provider credentials.\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
+  if (options.doctor) {
+    const report = await runCuaDoctor({ socketPath: options.cuaSocket!, timeoutMs: options.doctorTimeoutMs });
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    if (report.status !== "supported") process.exitCode = 1;
+    return;
+  }
   if (options.envFile !== undefined) await loadEnvFile(options.envFile);
   if (options.tui) {
     const config = toResolvedRunConfig(options, options.goal ?? "");
