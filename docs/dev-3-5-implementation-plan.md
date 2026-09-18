@@ -2,7 +2,14 @@
 
 日期：2026-09-18
 
-状态：共享规划与合同草案，未实现、未运行模型/API/桌面、未下载攻击数据。本文是 DEV-3 Context、DEV-4 Memory、DEV-5 Monitor 的唯一新增施工入口；DEV-6 承接 Risk Guard 与执行边界加固。路线、验收编号和重构映射仍分别以 [完整开发路线 V2](./full-development-roadmap-v2.md)、[验收清单 V2](./development-acceptance-v2.md) 和 [分块重构施工表](./module-refactoring-work-plan.md) 为权威，本文不另造阶段编号。
+状态：共享规划与合同入口；本批已形成 Context/Trace/prepared-provider foundation、Memory 首批 scope/recall/lifecycle handoff 与 Monitor policy/online consumer，本地 focused/typecheck 已有证据，但未运行真实模型/API/桌面，未下载攻击数据，DEV-3/4/5 仍未整体完成。本文是 DEV-3 Context、DEV-4 Memory、DEV-5 Monitor 的唯一新增施工入口；DEV-6 承接 Risk Guard 与执行边界加固。路线、验收编号和重构映射仍分别以 [完整开发路线 V2](./full-development-roadmap-v2.md)、[验收清单 V2](./development-acceptance-v2.md) 和 [分块重构施工表](./module-refactoring-work-plan.md) 为权威，本文不另造阶段编号。
+
+### 当前实现交接（2026-09-18）
+
+- DEV-3 Context/Trace/prepared-provider/cache foundation 对应本地提交 `dee64fb`、`638d131`；InstructionState/revision、最终 wire budget enforcement、真实 cache hit 与集中审查仍待后续批次。`01a6d47` 是 DEV-4 Memory 首批 scope、current/history applicability、revalidation 与 lifecycle handoff；`ba97878` 补齐 current read 分区、lifecycle source、Store 失败诊断和 Trace 实际渲染 IDs。语义召回排序、跨 Run/target/generation 验证和独立审查仍待完成。
+- DEV-5 policy foundation `294cdf5`、online consumer `adea8d7` 与边界修复 `ba97878`/`eec591c` 采用 `off|shadow|guidance`，默认 `off`。连续 3 次相同 action、2 次拒绝/失败、A-B-A 与 3 次 Plan/Memory churn 只产生候选，当前无视觉特征；shadow 不干预，过时候选 clear。guidance 只进入下一轮动态 Context block，help 仅在完整 action→ToolResult→post-observation 后走 Runtime `waiting_user`/Inbox；unknown、审批和在途副作用屏障优先，不自动执行或审批。`ba97878` 后 147 项、`eec591c` 后 149 项 focused/typecheck 证据均通过，最终 full、Sol 定点复核和真实 API/桌面/VM 验证仍待完成。
+- `9820851` semantic retrieval pilot 仅是隔离模块/独立服务，未接入 Memory/Context/Runtime exports、`memory_search` 或 app configuration；不计入共享 DEV-4 完成。
+- 通用离线入口：`pnpm --filter @computer-harness/cli start -- --goal "<goal>" --model glm-5.3-flash --computer cua --cua-socket "<socket>" --monitor off`；明确试验时可改为 `--monitor shadow` 或 `--monitor guidance`。示例不带凭证或本机路径，默认行为保持 `off`。
 
 ## 1. 本次对齐结论
 
@@ -36,11 +43,11 @@ GLM Adapter 保留 native `tool_calls`、JSON-string arguments、reasoning conti
 3. **当前有效性**：沿用 `active | needs_check | superseded` 与实体 stale；needs_check 仍可查，但必须展示原因和证据等级。
 4. **本次是否召回**：由 Context 结合 task relevance、scope applicability、状态与预算决定，不把存储存在等同于注入 Hot Memory。
 
-`task` 完成只降低相关性，不自动删除仍可复用事实；`stable` 也不代表永久正确；短期记忆按显式适用窗口/依赖/验证序列失效，不因每个 frame ID 或普通重截图自动全部过期。
+`task` 完成只降低相关性，不自动删除仍可复用事实；`stable` 也不代表永久正确。用户已明确否决按动作数量、事件数量或截图 ID 自动判定事实过期：它们至多反映新旧，不能证明事实失效。只有真实生命周期变化、显式失效或修订等可解释信号才能改变相应有效状态；缺乏信号时不得声称已自动检测页面语义变化。
 
 ### 2.3 DEV-5 当前基础
 
-当前有 Runtime event/trajectory、Observation、Action receipt、Plan/Memory snapshot，可作为离线分析输入；没有在线 progress/stall 状态、动作签名 comparator、同目标/几何约束下的截图特征、候选状态机、guidance cooldown 或求助/停止消费者。Monitor 不能只读取“Plan 缺失”或“Memory 没写”作为停滞证据。
+当前有 Runtime event/trajectory、Observation、Action receipt、Plan/Memory snapshot，以及 `294cdf5`/`adea8d7`/`ba97878` 提供的有界 progress/stall candidate、work-clock policy 和 online consumer；仍没有可证明的视觉特征或通用页面语义。当前阈值只把连续 3 次相同 action、2 次拒绝/失败、A-B-A、3 次 Plan/Memory churn 作为候选，不能只读取“Plan 缺失”或“Memory 没写”作为停滞证据；shadow 不干预，过时候选只清理，默认 off。
 
 ### 2.4 DEV-6 当前 Risk 基础
 
@@ -142,8 +149,30 @@ verification?: {source:"runtime_event"|"observation"|"host_readback", sourceEven
 - 召回排序分离 task relevance、scope applicability、status、retentionClass、recent change 和预算；stable/task/short_lived 不构成授权。
 - 已有公共合同能证明的目标销毁/session close/绑定变化才产生可重放的 `memory.invalidate`/`mark_needs_check` 事件；当前没有真实 generation producer 时保持 unsupported/unknown。切焦点、重截图、普通动画不自动失效。
 - target 暂非当前目标不进 Hot Memory，但显式查询可返回 `applicable=false`；无关稳定事实不因页面/目标变化删除。
-- task 完成降低任务相关性，不全量删除；short_lived 仅在明确适用窗口/依赖/验证序列结束时失效。
+- task 完成降低任务相关性，不全量删除；short_lived 不配置按动作数、事件数或帧数推断真值的 TTL。其内容按 last-known 线索呈现，不能不加区分地宣称为当前 GUI 状态。
 - Memory off 时不注册工具、不写 schema/prompt、不启监听器；已实现的 Run/session/target close 监听与临时缓存必须有界清理，未有真实 producer 的 target/session scope 不创建监听器。
+
+#### 待核实区：准入与更新闭环
+
+`memory_get` 与 Context 使用共同的适用性判定。已替代、显式失效、实体失效或会话不匹配的记录不得进入普通 Hot Memory；历史查询可返回，但须标明原因。动态 last-known 线索与当前可用事实分区，不能仅增加标签后仍按确定事实拼接。
+
+待核实候选按当前 Task/Entity 相关性挑选，和普通 Memory 共用总预算，不全量反复注入。提供记录 ID、来源、旧值及核实原因；优先复用本轮已有 Observation，由主模型通过正常工具调用修订，不为每条记忆增设一次模型或截图请求。来源 ID 只证明来源，模型修订也不等于宿主独立验证。
+
+旧记录被修订或替代后退出未决清单；新的短期记录仍保持 last-known 语义，但不得因为下一帧 ID 改变就无限重复同一个核实事项。沿用现有多工具 Turn Policy，允许合法的 Memory/Plan 更新与 GUI 调用同轮提出；依赖前一个调用结果的更新仍需等待结果，Control 独占规则不变。
+
+#### 首批召回排序基线与无 Plan 限制
+
+首批召回采用可解释的有界启发式，而不是把排序分数当作事实真值。先过滤 scope 不适用、跨 Run/会话不匹配、`superseded`/显式失效记录；`needs_check` 可保留但必须带状态和证据。剩余候选按以下顺序稳定排序：
+
+1. 当前 Task 的显式 `relatedTaskIds`/任务键匹配；无匹配时不因缺 Plan 直接淘汰。
+2. 当前 Entity 的显式引用或稳定 key/subject 匹配。
+3. `active` 优先于 `needs_check`；后者作为带标记的 last-known/revalidation 候选，不冒充当前 GUI 真值。
+4. `retentionClass` 只作为召回偏好（`task`/`stable`/`short_lived`），不作为授权或永久正确性证明。
+5. `updatedSequence`/可解释的最近变更作确定性 tie-break，最后用记录 ID 稳定排序。
+
+所有分区共用一个软预算，先按上述顺序选取，再限制数量/估算 token；不全量注入、不为单条记忆单独调用模型或截图。没有 Plan 时，Task relevance 取中性分（仍可按 scope、Entity、status、key 和 recency 召回），不伪造计划、不把 Memory 关闭，也不阻断普通任务；显式 ID/key 查询仍遵守同一 scope/status gate。该启发式是待独立语义验证的召回基线，不是页面真值判定。
+
+验收至少包含“写入事实 → 裁剪原始历史 → 按需召回 → 实体/会话失效后阻止普通召回 → 显式修订 → 后续只消费新状态”。分类错误和环境变化无信号仍是明确边界，不以这些机制承诺零过期记忆或自动视觉真值。
 
 ### 4.3 Store/迁移/重放
 
@@ -194,6 +223,14 @@ PM01–PM08：正常连续 GUI、慢加载、重复无变化、A-B-A、无 Plan 
 - commit D：fixture/trajectory replay 与 development-vs-validation report。
 
 若效果无益，可以默认 off，但仍需交付实现、对照和失败结论；不能用“shadow 已接入”冒充自动纠偏有效。
+
+### 5.4 当前 online checkpoint（`294cdf5` + `adea8d7`）
+
+本批（`294cdf5`/`adea8d7`/`ba97878`/`eec591c`）只落地有界的 `off | shadow | guidance` consumer，默认 `off`；没有 `stop_required` 执行消费者，也没有自动重试、审批或副作用执行。当前连续 3 次相同 action、2 次拒绝/失败、A-B-A、3 次 Plan/Memory churn 只是候选，视觉特征缺失时不补猜测；shadow 不干预，候选过时只 clear。Runtime 在提交事件并完成 reducer/feed 后推进 Monitor，Monitor proposal 自身不递归触发；work clock 只取实际首轮 model decision 与 action completion，trace/重试/Monitor event 不冒充进度。`outcome_unknown`、abort、pending approval/user question、未决 action 或其他 side-effect barrier 优先产生 suppression/none，不改写终态。
+
+proposal 只含脱敏 fingerprint、source event IDs、reason/evidence kind、有限计数和可选短 guidance，不含正文、typed text、URL、截图或 secret。`guidance` 进入下一轮动态 Context block，并受共同预算约束；预算不足时省略并记录原因。`help_requested` 只在完整 action→ToolResult→post-observation 边界后复用 Runtime `waiting_user`/Inbox，由 Controller 唯一消费，不由模型文本冒充；Monitor proposal append/diagnostic failure 不改变已提交业务 outcome。partition/run/session 变化会清理本地去重状态；状态机和 online consumer 当前有 `ba97878` 后 147、`eec591c` 后 149 项 focused/typecheck 证据，但集中审查、最终 full、真实 API/桌面/VM 与效果评估仍待完成。
+
+通用离线命令为：`pnpm --filter @computer-harness/cli start -- --goal "<goal>" --model glm-5.3-flash --computer cua --cua-socket "<socket>" --monitor off`。明确做离线对照时可把最后一项改为 `--monitor shadow` 或 `--monitor guidance`；示例不携带凭证或本机路径，其他默认 profile/Guard/Memory/Planning 行为不因该开关改变。
 
 ## 6. DEV-6 Guard 与执行边界承接
 
@@ -256,3 +293,7 @@ Provider preparation 必须分别记录 profile、wire shape、reasoning continu
 - 本计划不实现 OCR、通用页面语义真值、完美 prompt-injection detector、跨 Run Memory、任意应用 focus/AX、真实用户桌面或完整 benchmark 运行。
 - 稳定/task/short-lived 不提供权限；scope 不提供真值；Trace/hash 不提供可分享原文；Monitor 不提供执行权；Risk reviewer 不提供最终否决权。
 - 本次只更新文档路线与合同，未改 `packages/**`/`apps/**` 业务代码，未调用真实 Provider/API、GUI、VM，未下载公开攻击数据，也未提交/推送。
+
+## 11. DEV-4 semantic retrieval independent checkpoint (2026-09-18)
+
+详见独立施工计划：[DEV-4 Memory semantic retrieval plan](./dev-4-memory-retrieval-plan.md)。`9820851` 仅保留 `packages/memory/src/retrieval/` 隔离模块：Qwen embedding HTTP adapter、gate-first hybrid recall、revision/late-result barrier 和 mock tests；尚未接入 Memory/Context/Runtime exports、`memory_search` tool 或 app configuration。focused tests 当前为 14/14；真实 API、凭证、私有 Memory、OCR、桌面和 Hosted 验证均未运行。`ba97878` 已修复共享 admission helper/lifecycle/Trace 边界，但不把该 pilot 计作 DEV-4 整体完成。

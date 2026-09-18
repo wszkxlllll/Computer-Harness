@@ -2,7 +2,15 @@
 
 更新：2026-09-18
 
-角色：当前执行 / 交接。原审计基线：`39ff27f9`；当前开发基线：`a8580ea`（分支 `codex/dev2-tui-preview`）。DEV-1 已合并结果与 DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为、CUA capability doctor 和显式 host-only window opt-in 已完成并获 Sol 有限放行；本轮 TUI bounded UX 收口已获 Sol 定点有限放行（独立 18 项通过）。本批最终离线全量为 32 files/320 tests，root typecheck 通过，内容包括 uppercase-I、可见 goal/correction、pause pending、waiting/failure/final-reply 呈现、长正文分页、terminal-cell 宽度、快速粘贴有界绘制、输入 tail viewport/上限提示与 terminal-only 输入提示。worker_ci 固定 build 已实测 no-goal Windows winpty PTY rapid/slow × ESC→Q/Ctrl-C 四场景通过，含中文、tail/500、resize/footer、cursor restore、exit 0、无 force-close；这不等于完整 model Run、跨 Run 实际 I 或 CUA 业务动作。真实 direct doctor 仅读到 metadata/inventory（57 tools），session 的 desktop capture scope 未确认，health/permissions/cleanup 保持 unknown，正式 pnpm wrapper 仍有 transport unknown 限制，doctor 不整体通过；worker_ci 独立实机仅证明 production adapter 的窄 `open/observe/background single-click/resize stale refusal/close` 链路。窗口模式只开放 click/wait，不开放 keyboard、其他未验证 pointer primitive、通用 focus/AX 或模型自由选窗；默认 desktop/OSWorld 不变，正式评测 G0/REL-1 另行收口。此前用户真实请求中的 Provider transport failure 与 CUA action refusal 仅作诊断记录，本批未修复根因。
+角色：当前执行 / 交接。原审计基线：`39ff27f9`；上一阶段开发基线：`a8580ea`（分支 `codex/dev2-tui-preview`）。当前 DEV-3/4/5 交接基线：`adea8d7`（分支 `codex/dev3-context-memory-guard`）；`01a6d47` 的 Memory 首批交接与 `adea8d7` 的 Monitor online consumer 已落在本地提交中。DEV-1 已合并结果与 DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为、CUA capability doctor 和显式 host-only window opt-in 已完成并获 Sol 有限放行；本轮 TUI bounded UX 收口已获 Sol 定点有限放行（独立 18 项通过）。本批最终离线全量为 32 files/320 tests，root typecheck 通过，内容包括 uppercase-I、可见 goal/correction、pause pending、waiting/failure/final-reply 呈现、长正文分页、terminal-cell 宽度、快速粘贴有界绘制、输入 tail viewport/上限提示与 terminal-only 输入提示。worker_ci 固定 build 已实测 no-goal Windows winpty PTY rapid/slow × ESC→Q/Ctrl-C 四场景通过，含中文、tail/500、resize/footer、cursor restore、exit 0、无 force-close；这不等于完整 model Run、跨 Run 实际 I 或 CUA 业务动作。真实 direct doctor 仅读到 metadata/inventory（57 tools），session 的 desktop capture scope 未确认，health/permissions/cleanup 保持 unknown，正式 pnpm wrapper 仍有 transport unknown 限制，doctor 不整体通过；worker_ci 独立实机仅证明 production adapter 的窄 `open/observe/background single-click/resize stale refusal/close` 链路。窗口模式只开放 click/wait，不开放 keyboard、其他未验证 pointer primitive、通用 focus/AX 或模型自由选窗；默认 desktop/OSWorld 不变，正式评测 G0/REL-1 另行收口。此前用户真实请求中的 Provider transport failure 与 CUA action refusal 仅作诊断记录，本批未修复根因。
+
+### 当前 DEV-3/DEV-4/DEV-5 交接状态（2026-09-18）
+
+- DEV-3 的 Context/Trace/prepared-provider/cache foundation 已在 `dee64fb`、`638d131` 等本地提交中；InstructionState/revision、最终 wire budget enforcement、真实 cache hit 与集中审查仍待后续收口。
+- DEV-4 的 `01a6d47` 是首批 Memory scope、current/history applicability、revalidation 与 lifecycle handoff；`ba97878` 补齐 current read 分区、lifecycle source、Store 失败诊断和 Trace 实际渲染 IDs。语义召回排序、跨 Run/target/generation 的独立验证和集中审查仍待完成；无 Plan 时只降低 task relevance，不伪造 Plan，也不阻断普通事实查询；没有 action/event/frame ID TTL。
+- DEV-5 的 `294cdf5` policy foundation、`adea8d7` online consumer 与 `ba97878`/`eec591c` 边界修复采用 `off|shadow|guidance`；默认 `off`。连续 3 次相同 action、2 次拒绝/失败、A-B-A 与 3 次 Plan/Memory churn 只产生候选，当前无视觉特征；shadow 不干预，过时候选 clear。guidance 是预算内的下一轮动态 Context block，help 仅在完整 action→ToolResult→post-observation 后由 Runtime `waiting_user`/Inbox 消费，unknown/审批/在途副作用屏障优先，不触发自动执行或审批。`ba97878` 后 147 项、`eec591c` 后 149 项 focused/typecheck 证据均通过，最终 full、Sol 定点复核和真实 API/桌面/VM 验证仍待完成，不能写成 DEV-3/4/5 或 REL-2 完成。
+- `9820851` semantic retrieval pilot 仍是隔离模块/独立服务，未接入共享 Memory/Context/Runtime，不计入 DEV-4 完成。
+- 通用离线命令：`pnpm --filter @computer-harness/cli start -- --goal "<goal>" --model glm-5.3-flash --computer cua --cua-socket "<socket>" --monitor off`；显式试验模式可替换为 `--monitor shadow` 或 `--monitor guidance`。示例不包含凭证或本机路径，默认行为保持 `off`。
 
 ## 1. 当前结论与已有基础
 
@@ -50,7 +58,7 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 本地 commit `01a6d47` 已实现 DEV-4 首批 Fact scope/retention classification、current/history applicability gate、Context admitted/revalidation/excluded 分区、legacy replay/Store normalization，以及 Runtime 在 Run 完成前对真实 session-scope Fact 的 `scope_ended` mutation。`stable/task/short_lived` 仅为召回策略分类；没有 TTL、action/event age、按 frame ID 自动失效或 target/generation producer。`memory_get` 与 Context 共用 scope/entity/status gate，short-lived 只作为 last-known revalidation 线索，不是 current GUI truth。
 
-本 checkpoint 的 focused 实际证据为 Memory 8、Context 20、Runtime 58、Trajectory 33 项，root typecheck 通过；此前共享工作树 34 files/357 tests 属于行为收口前历史证据，不能称为 `01a6d47` 之后的最终 full。仍待 Sol 审查、最终 full、跨 Run 策略、独立 verification/视觉真值与 Monitor online consumer；不包含真实模型 API、桌面、VM 或 Hosted CI。
+本 checkpoint 的 focused 实际证据为 Memory 8、Context 20、Runtime 58、Trajectory 33 项，root typecheck 通过；`ba97878` 之后针对 Monitor/Memory/Trace 的定点复核为 6 files/147 tests，`eec591c` 后加入 multi-call/entity Trace 回归为 6 files/149 tests，均不能称为最终 full。此前共享工作树 34 files/357 tests 属于行为收口前历史证据，不能称为 `01a6d47` 之后的最终 full。Memory 语义召回排序、跨 Run/target/generation 策略和独立 verification 仍待审查；Monitor online consumer 已在 `adea8d7` 接入并由 `ba97878`/`eec591c` 修复边界，但最终 full、Sol 定点复核/效果验证仍待完成。不包含真实模型 API、桌面、VM 或 Hosted CI。
 
 ### 历史批次记录（保留当时状态，不代表当前入口）
 
