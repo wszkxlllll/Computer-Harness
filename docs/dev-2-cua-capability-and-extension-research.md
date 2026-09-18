@@ -1,9 +1,13 @@
 # DEV-2 CUA 能力、Memory/Monitor 信号与扩展调研
 
-日期：2026-09-17  
-仓库基线：`bc72ee543197510fce8d3943b0251d2fb51d33bb`  
-当前锁定依赖：`@trycua/cua-driver@0.22.2`，上游固定提交 `d114f35fec05ecd37bf529e5587be86852205b64`  
-最新稳定候选：`@trycua/cua-driver@0.28.2`，上游固定提交 `fc188250b4ca8549b8e61f937fdb1fb560770e86`  
+日期：2026-09-17
+
+仓库基线：`bc72ee543197510fce8d3943b0251d2fb51d33bb`
+
+当前锁定依赖：`@trycua/cua-driver@0.22.2`，上游固定提交 `d114f35fec05ecd37bf529e5587be86852205b64`
+
+最新稳定候选：`@trycua/cua-driver@0.28.2`，上游固定提交 `fc188250b4ca8549b8e61f937fdb1fb560770e86`
+
 文档角色：DEV-2/4/5/6 的 CUA 事实边界与合同输入，不是实施完成报告。
 
 ## 1. 结论先行

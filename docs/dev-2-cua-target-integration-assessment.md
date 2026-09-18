@@ -1,8 +1,11 @@
 # DEV-2 CUA 窗口能力接入盘点
 
-日期：2026-09-18  
-仓库基线：`f7f7357`（分支 `codex/dev2-tui-preview`）  
-依赖：`@trycua/cua-driver@0.22.2`  
+日期：2026-09-18
+
+仓库基线：`f7f7357`（分支 `codex/dev2-tui-preview`）
+
+依赖：`@trycua/cua-driver@0.22.2`
+
 文档角色：CUA doctor 实施与窗口能力边界记录；Sol 定向复核已有限放行，不是通用窗口安全能力的完成报告。
 
 ## 1. 结论
