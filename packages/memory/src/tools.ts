@@ -20,6 +20,7 @@ import {
   MAX_RELATED_TASK_IDS,
 } from "./constants.js";
 import type { MemoryStore } from "./store.js";
+import type { HybridMemoryRecallService } from "./retrieval/hybrid-recall.js";
 import {
   assertExactKeys,
   isRecord,
@@ -36,8 +37,13 @@ import {
 
 export type MemoryToolMode = "facts" | "entities";
 
+export interface MemoryToolOptions {
+  /** When present, exposes the bounded model-facing memory_search tool. */
+  readonly retrieval?: HybridMemoryRecallService;
+}
+
 /** Model proposes semantic changes; Runtime supplies IDs and event provenance. */
-export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "facts"): readonly NonComputerToolDefinition[] {
+export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "facts", options: MemoryToolOptions = {}): readonly NonComputerToolDefinition[] {
   const tools: NonComputerToolDefinition[] = [
     {
       name: "memory_get",
@@ -166,6 +172,44 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
       afterMemoryCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
     },
   ];
+  if (options.retrieval !== undefined) {
+    tools.push({
+      name: "memory_search",
+      description: "Search current applicable Memory by a bounded query. Results are ranked hints, not proof or authorization; superseded and out-of-scope facts are excluded before retrieval.",
+      category: "side",
+      audiences: ["main", "advisor"],
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", minLength: 1, maxLength: 512, description: "Short retrieval query; this cannot change run/session scope or action authorization." },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      validate: (args) => {
+        if (!isRecord(args)) throw new Error("memory_search requires an object");
+        assertExactKeys(args, ["query"], [], "memory_search");
+        validateBoundedString(args.query, "memory_search.query", 512);
+      },
+      execute: async (args, context) => {
+        const searchQuery = (args as { query: string }).query;
+        const state = await store.get(context.runId);
+        const result = await options.retrieval!.search(state, {
+          runId: context.runId,
+          originalGoal: "",
+          explicitQuery: searchQuery,
+          ...(context.session?.id === undefined ? {} : { computerSessionId: context.session.id }),
+        }, context.signal);
+        return {
+          admittedFacts: result.admittedFacts.map((item) => ({ fact: item.fact, score: item.score, match: item.match })),
+          revalidationCandidates: result.revalidationCandidates.map((item) => ({ fact: item.fact, score: item.score, match: item.match, reason: item.reason })),
+          excluded: result.excluded,
+          diagnostics: result.diagnostics,
+          trace: result.trace,
+        } as unknown as JsonValue;
+      },
+    });
+  }
   if (mode === "entities") {
     // Entity mutation is intentionally opt-in; facts are the V1 default.
     tools.push({

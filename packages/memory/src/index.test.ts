@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ComputerSessionId, EventId, MemoryEntity, MemoryFact, MemoryState, RunId } from "@computer-harness/protocol";
-import { FileMemoryStore, InMemoryMemoryStore, createMemoryTools } from "./index.js";
+import { FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, createMemoryTools } from "./index.js";
 
 const runId = "memory-test" as RunId;
 
@@ -74,6 +74,21 @@ describe("Run memory", () => {
   it("adds entity tools only in entities mode", () => {
     expect(createMemoryTools(new InMemoryMemoryStore(), "facts").map((tool) => tool.name)).toEqual(["memory_get", "memory_write_fact", "memory_mark_fact_needs_check"]);
     expect(createMemoryTools(new InMemoryMemoryStore(), "entities").map((tool) => tool.name)).toContain("memory_upsert_entity");
+  });
+
+  it("registers memory_search only when an injected retrieval service is enabled", async () => {
+    const store = new InMemoryMemoryStore();
+    await store.rebuild(runId, [{ operation: "upsert_fact", fact: fact({ id: "search-fact", key: "invoice_record", value: "utility bill" }) }]);
+    expect(createMemoryTools(store).some((tool) => tool.name === "memory_search")).toBe(false);
+    const tools = createMemoryTools(store, "facts", { retrieval: new HybridMemoryRecallService() });
+    const search = tools.find((tool) => tool.name === "memory_search");
+    expect(search).toBeDefined();
+    const result = await search!.execute({ query: "find the bill" }, { runId, session: {} as never, signal: new AbortController().signal }) as unknown as {
+      admittedFacts: Array<{ fact: MemoryFact; match: string }>;
+      trace: { method: string; semanticStatus: string };
+    };
+    expect(result.admittedFacts[0]).toMatchObject({ fact: { id: "search-fact" }, match: "lexical" });
+    expect(result.trace).toMatchObject({ method: "lexical", semanticStatus: "disabled" });
   });
 
   it("keeps entity identity separate from normalized entity-scoped facts", async () => {
