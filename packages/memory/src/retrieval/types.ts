@@ -47,11 +47,13 @@ export interface MemoryRetrievalLimits {
   readonly maxQueryCharacters?: number;
   readonly maxEmbeddingBatchSize?: number;
   readonly maxCachedVectors?: number;
+  /** Maximum embedding HTTP attempts for this service/run. */
+  readonly maxEmbeddingRequestsPerRun?: number;
   /** A bounded deadline for one provider call. No retry is performed. */
   readonly deadlineMs?: number;
 }
 
-export type MemoryRetrievalMatch = "exact" | "semantic";
+export type MemoryRetrievalMatch = "exact" | "lexical" | "semantic";
 
 export interface RetrievedMemoryFact {
   readonly fact: MemoryFact;
@@ -80,7 +82,29 @@ export interface MemoryRetrievalExcluded {
 
 export type MemorySemanticStatus = "used" | "disabled" | "not_needed" | "unavailable" | "timed_out";
 
+export type MemoryRetrievalMethod = "lexical" | "hybrid";
+
+export interface MemoryRetrievalTraceEntry {
+  readonly id: string;
+  readonly score: number;
+  readonly match: MemoryRetrievalMatch;
+  readonly reason?: MemoryRevalidationReason;
+}
+
+/** Safe retrieval trace: IDs, ranking metadata and bounded counters only. */
+export interface MemoryRetrievalTrace {
+  readonly method: MemoryRetrievalMethod;
+  readonly semanticStatus: MemorySemanticStatus;
+  readonly stateStable: boolean;
+  readonly embeddingBudgetUsed: number;
+  readonly embeddingBudgetLimit: number;
+  readonly admitted: readonly MemoryRetrievalTraceEntry[];
+  readonly revalidation: readonly MemoryRetrievalTraceEntry[];
+  readonly excluded: readonly MemoryRetrievalExcluded[];
+}
+
 export interface MemoryRetrievalDiagnostics {
+  readonly actualMethod: MemoryRetrievalMethod;
   readonly semanticStatus: MemorySemanticStatus;
   readonly querySources: {
     readonly originalGoal: boolean;
@@ -95,6 +119,9 @@ export interface MemoryRetrievalDiagnostics {
   readonly omittedCandidateCount: number;
   readonly embeddingRequestCount: number;
   readonly embeddingCacheHits: number;
+  readonly embeddingBudgetUsed: number;
+  readonly embeddingBudgetLimit: number;
+  readonly stateStable: boolean;
   readonly semanticErrorCode?: string;
 }
 
@@ -103,4 +130,5 @@ export interface MemoryRetrievalResult {
   readonly revalidationCandidates: readonly RetrievedMemoryRevalidationCandidate[];
   readonly excluded: readonly MemoryRetrievalExcluded[];
   readonly diagnostics: MemoryRetrievalDiagnostics;
+  readonly trace: MemoryRetrievalTrace;
 }

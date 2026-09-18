@@ -13,9 +13,9 @@
 - `packages/memory/src/retrieval/types.ts`：`CurrentRecallQuery`、provider-neutral embedding contract、bounded result/diagnostic 类型。
 - `packages/memory/src/retrieval/qwen-embedding.ts`：显式 endpoint/API key 注入的 Qwen `text-embedding-v4` HTTP adapter；不读取环境变量、不复用 chat endpoint。
 - `packages/memory/src/retrieval/hybrid-recall.ts`：gate-first exact identifier + dense cosine retrieval、admitted/revalidation 分区、bounded in-memory revision cache、迟到结果屏障和 deadline fallback。
-- `packages/memory/src/retrieval/index.test.ts`：14 个 mock/adapter/service focused tests；没有真实 API、凭证、模型或截图。
+- `packages/memory/src/retrieval/index.test.ts`：17 个 mock/adapter/service focused tests；没有真实 API、凭证、模型或截图。
 
-由于集中审查正在修复现有 `packages/memory/src/tools.ts` 对尚未合入的 `classifyMemoryFactAdmission` 导入，本批 package build 仍被该共享文件阻塞；新增 retrieval 文件本身没有新增 TypeScript 错误。独立 focused 测试：14/14 通过。
+由于集中审查正在修复现有 `packages/memory/src/tools.ts` 对尚未合入的 `classifyMemoryFactAdmission` 导入，本批 package build 仍被该共享文件阻塞；新增 retrieval 文件本身没有新增 TypeScript 错误。独立 focused 测试：17/17 通过。
 
 ## 2. 查询合同
 
@@ -36,7 +36,7 @@
 检索顺序固定为：
 
 1. 依据 `runId`、computer session scope、fact status 和 entity status 过滤候选；superseded、scope mismatch、stale/missing entity 在 embedding/topK 前排除，不外发给远程 provider。
-2. 对 fact key/id/source event/entity id 做 exact identifier 匹配。此路径是 lexical，不把 hash、ngram 或 BM25 称为 semantic。
+2. 对 fact key/id/source event/entity id 做 exact identifier 匹配，并对 key/value 做有界 Unicode lexical token overlap。两条路径都标记为 lexical，不把 hash、ngram 或 BM25 称为 semantic。
 3. 对剩余有界候选调用真正的 dense embedding cosine；分数只用于相关性排序，不代表事实真值、验证等级或动作授权。
 4. `admittedFacts` 与 `revalidationCandidates` 分开输出；`needs_check`、`short_lived` 不进入正常 current/hot 事实，也不与 admitted 重复。
 
@@ -77,6 +77,7 @@ GLM Embedding-3 是 provider-neutral 接口的后续可选实现：官方 endpoi
 - 写入/替换/显式失效后旧 vector 立即不可用；迟到 provider response、timeout、abort 都不能污染新 cache。
 - Qwen response 的 batch 数量、乱序 index、重复/缺失 index、维度、非有限值、零向量均拒绝；每批不超过 10 条。
 - provider/model/dimension/query revision 改变时缓存隔离；诊断只记录计数、状态、错误码和安全 ID，不记录原 query、原文或向量。
+- 每 Run 的 embedding request budget、canonical state revision 变化和 timeout/abort 都可在 safe trace 中观察；状态变化中的 recall 不返回旧 snapshot 的事实。
 
 本批只完成独立模块及 mock evidence；真实 API、公共 tool/export、Context/Runtime 集成和 Hosted/桌面验证均未完成。
 

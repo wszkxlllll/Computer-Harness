@@ -139,6 +139,19 @@ describe("HybridMemoryRecallService", () => {
     expect(result.diagnostics.querySources.explicitQuery).toBe(true);
   });
 
+  it("provides bounded English and Chinese lexical retrieval without a provider", async () => {
+    const invoice = fact("invoice", "payment_note", "utility bill deadline next week", 1);
+    const meeting = fact("meeting", "location_note", "会议地点在东侧教室", 2);
+    const service = new HybridMemoryRecallService();
+    const english = await service.search(state([invoice, meeting]), query({ originalGoal: "find the bill deadline" }), new AbortController().signal);
+    const chinese = await service.search(state([invoice, meeting]), query({ originalGoal: "查找会议地点" }), new AbortController().signal);
+    expect(english.admittedFacts[0]).toMatchObject({ fact: { id: "invoice" }, match: "lexical" });
+    expect(chinese.admittedFacts[0]).toMatchObject({ fact: { id: "meeting" }, match: "lexical" });
+    expect(english.diagnostics.actualMethod).toBe("lexical");
+    expect(english.trace).toMatchObject({ method: "lexical", semanticStatus: "disabled", stateStable: true });
+    expect(JSON.stringify(english.trace)).not.toContain("bill");
+  });
+
   it("gates before semantic retrieval and separates revalidation candidates", async () => {
     const staleEntity = { id: "stale", type: "window", description: "old", sourceEventId: "entity-stale" as EventId, status: "stale" as const, updatedSequence: 1 };
     const active = fact("active", "active_fact", "账单", 1);
@@ -173,6 +186,21 @@ describe("HybridMemoryRecallService", () => {
     expect(second.admittedFacts[0]?.fact.id).toBe("invoice");
     expect(second.diagnostics.embeddingRequestCount).toBe(0);
     expect(provider.calls).toHaveLength(callCount);
+  });
+
+  it("stops embedding after the per-run budget and keeps lexical fallback", async () => {
+    const provider = new FakeEmbeddingProvider();
+    const service = new HybridMemoryRecallService(provider, { maxEmbeddingRequestsPerRun: 1 });
+    const memory = state([fact("invoice", "invoice_record", "invoice record", 1)]);
+    const first = await service.search(memory, query({ originalGoal: "find the invoice" }), new AbortController().signal);
+    const second = await service.search(memory, query({ originalGoal: "find the invoice" }), new AbortController().signal);
+    expect(first.admittedFacts[0]?.fact.id).toBe("invoice");
+    expect(first.diagnostics.embeddingRequestCount).toBe(1);
+    expect(first.diagnostics.embeddingBudgetUsed).toBe(1);
+    expect(first.diagnostics.semanticErrorCode).toBe("EMBEDDING_BUDGET_EXHAUSTED");
+    expect(second.diagnostics.embeddingRequestCount).toBe(0);
+    expect(second.diagnostics.embeddingBudgetUsed).toBe(1);
+    expect(provider.calls).toHaveLength(1);
   });
 
   it("separates cached vectors when the provider model or dimensions change", async () => {
@@ -216,6 +244,32 @@ describe("HybridMemoryRecallService", () => {
     const next = await service.search(state([changed]), query({ originalGoal: "find a recipe" }), new AbortController().signal);
     expect(next.admittedFacts[0]?.fact.id).toBe("fact");
     expect(calls).toBeGreaterThanOrEqual(4);
+  });
+
+  it("rejects a late result when an entity invalidates the canonical snapshot", async () => {
+    let release: (() => void) | undefined;
+    const provider: MemoryEmbeddingProvider = {
+      id: "entity-deferred",
+      model: "entity-deferred-v1",
+      dimensions: 2,
+      embed: async (input) => {
+        if (input.kind === "query") return { vectors: [[1, 0]] };
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { vectors: input.texts.map(() => [1, 0]) };
+      },
+    };
+    const entity = { id: "window", type: "window", description: "synthetic", sourceEventId: "entity" as EventId, status: "active" as const, updatedSequence: 1 };
+    const factWithEntity = fact("entity-fact", "note", "invoice", 1, { subject: { type: "entity", entityId: "window" } });
+    const staleEntity = { ...entity, status: "stale" as const, updatedSequence: 2 };
+    const service = new HybridMemoryRecallService(provider, { deadlineMs: 500 });
+    const pending = service.search(state([factWithEntity], [entity]), query({ originalGoal: "find a bill" }), new AbortController().signal);
+    await Promise.resolve();
+    service.syncState(state([factWithEntity], [staleEntity]));
+    release?.();
+    const late = await pending;
+    expect(late.admittedFacts).toHaveLength(0);
+    expect(late.trace.stateStable).toBe(false);
+    expect(late.diagnostics.semanticErrorCode).toBe("STATE_CHANGED_DURING_RECALL");
   });
 
   it("falls back to lexical results on a deadline and does not cache a non-cooperative response", async () => {

@@ -14,6 +14,7 @@ import type {
   MemoryRetrievalExcluded,
   MemoryRetrievalLimits,
   MemoryRetrievalResult,
+  MemoryRetrievalTraceEntry,
   MemoryRevalidationReason,
   RetrievedMemoryFact,
   RetrievedMemoryRevalidationCandidate,
@@ -27,6 +28,7 @@ const DEFAULT_LIMITS: Required<MemoryRetrievalLimits> = {
   maxQueryCharacters: 512,
   maxEmbeddingBatchSize: 10,
   maxCachedVectors: 256,
+  maxEmbeddingRequestsPerRun: 6,
   deadlineMs: 750,
 };
 
@@ -40,6 +42,8 @@ interface RunIndex {
   readonly vectors: Map<string, CachedVector>;
   readonly queryVectors: Map<string, readonly number[]>;
   readonly revisions: Map<string, string>;
+  stateRevision: string;
+  embeddingRequests: number;
 }
 
 interface GatedFact {
@@ -67,7 +71,7 @@ export class HybridMemoryRecallService {
     if (this.limits.maxCandidates < 1 || this.limits.maxAdmittedFacts < 1 || this.limits.maxRevalidationFacts < 0 || this.limits.maxExcluded < 0) {
       throw new Error("Memory retrieval limits must be non-negative and bounded");
     }
-    if (this.limits.maxQueryCharacters < 1 || this.limits.maxEmbeddingBatchSize < 1 || this.limits.maxEmbeddingBatchSize > 10 || this.limits.maxCachedVectors < 1 || this.limits.deadlineMs < 1) {
+    if (this.limits.maxQueryCharacters < 1 || this.limits.maxEmbeddingBatchSize < 1 || this.limits.maxEmbeddingBatchSize > 10 || this.limits.maxCachedVectors < 1 || this.limits.maxEmbeddingRequestsPerRun < 0 || this.limits.deadlineMs < 1) {
       throw new Error("Memory retrieval limits must be positive");
     }
   }
@@ -89,6 +93,7 @@ export class HybridMemoryRecallService {
     }
     index.revisions.clear();
     for (const [factId, revision] of revisions) index.revisions.set(factId, revision);
+    index.stateRevision = stateRevision(state);
     this.boundVectorCache(index);
   }
 
@@ -100,19 +105,30 @@ export class HybridMemoryRecallService {
     signal.throwIfAborted();
     this.syncState(state);
     const index = this.indexFor(state.runId);
+    const snapshotRevision = index.stateRevision;
     const queryParts = buildQueryParts(query, this.limits.maxQueryCharacters);
     const gated = gateFacts(state, query);
     const excluded = gated.excluded.slice(0, this.limits.maxExcluded);
     const admitted = gated.admitted;
     const revalidation = gated.revalidation;
-    const exactAdmitted = new Set(admitted.filter((item) => hasExactIdentifier(item.fact, queryParts.text)).map((item) => item.fact.id));
-    const exactRevalidation = new Set(revalidation.filter((item) => hasExactIdentifier(item.fact, queryParts.text)).map((item) => item.fact.id));
-    const lexicalHitCount = exactAdmitted.size + exactRevalidation.size;
+    const lexicalScores = new Map<string, number>();
+    const exactAdmitted = new Set<string>();
+    const exactRevalidation = new Set<string>();
+    for (const item of [...admitted, ...revalidation]) {
+      const score = lexicalScore(item.fact, queryParts.text);
+      if (score <= 0) continue;
+      lexicalScores.set(item.fact.id, score);
+      if (hasExactIdentifier(item.fact, queryParts.text)) {
+        if (item.revalidationReason === undefined) exactAdmitted.add(item.fact.id);
+        else exactRevalidation.add(item.fact.id);
+      }
+    }
+    const lexicalHitCount = lexicalScores.size;
     const candidateFacts = [...admitted, ...revalidation]
       .sort((left, right) => {
-        const leftExact = exactAdmitted.has(left.fact.id) || exactRevalidation.has(left.fact.id) ? 1 : 0;
-        const rightExact = exactAdmitted.has(right.fact.id) || exactRevalidation.has(right.fact.id) ? 1 : 0;
-        return rightExact - leftExact || right.fact.updatedSequence - left.fact.updatedSequence;
+        const leftScore = lexicalScores.get(left.fact.id) ?? 0;
+        const rightScore = lexicalScores.get(right.fact.id) ?? 0;
+        return rightScore - leftScore || right.fact.updatedSequence - left.fact.updatedSequence;
       });
     const semanticCandidates = candidateFacts.slice(0, this.limits.maxCandidates);
     const omittedCandidateCount = Math.max(0, candidateFacts.length - semanticCandidates.length);
@@ -127,6 +143,18 @@ export class HybridMemoryRecallService {
     let semanticStatus: MemoryRetrievalDiagnostics["semanticStatus"] = "not_needed";
     let semanticErrorCode: string | undefined;
     let queryVector: readonly number[] | undefined;
+    let budgetExhausted = false;
+    const consumeEmbeddingBudget = (): boolean => {
+      if (index.embeddingRequests >= this.limits.maxEmbeddingRequestsPerRun) {
+        budgetExhausted = true;
+        semanticStatus = "unavailable";
+        semanticErrorCode = "EMBEDDING_BUDGET_EXHAUSTED";
+        return false;
+      }
+      index.embeddingRequests += 1;
+      embeddingRequestCount += 1;
+      return true;
+    };
     if (this.provider === undefined) {
       semanticStatus = queryParts.text.length === 0 || semanticCandidates.length === 0 ? "not_needed" : "disabled";
     } else if (queryParts.text.length === 0 || semanticCandidates.length === 0) {
@@ -144,25 +172,26 @@ export class HybridMemoryRecallService {
       if (queryVector !== undefined) {
         embeddingCacheHits += 1;
       } else {
-        embeddingRequestCount += 1;
-        const attempt = await this.requestEmbedding({ kind: "query", texts: [queryParts.text] }, signal);
-        if (attempt.status === "ok") {
-          queryVector = checkedVector(attempt.batch.vectors[0], this.provider.dimensions);
-          if (queryVector !== undefined) index.queryVectors.set(queryCacheKey, queryVector);
-          else {
-            semanticStatus = "unavailable";
-            semanticErrorCode = "EMBEDDING_VECTOR_INVALID";
+        if (consumeEmbeddingBudget()) {
+          const attempt = await this.requestEmbedding({ kind: "query", texts: [queryParts.text] }, signal);
+          if (attempt.status === "ok") {
+            queryVector = checkedVector(attempt.batch.vectors[0], this.provider.dimensions);
+            if (queryVector !== undefined) index.queryVectors.set(queryCacheKey, queryVector);
+            else {
+              semanticStatus = "unavailable";
+              semanticErrorCode = "EMBEDDING_VECTOR_INVALID";
+            }
+          } else {
+            semanticStatus = attempt.status === "timed_out" ? "timed_out" : "unavailable";
+            semanticErrorCode = attempt.status === "unavailable" ? attempt.code : "EMBEDDING_DEADLINE";
           }
-        } else {
-          semanticStatus = attempt.status === "timed_out" ? "timed_out" : "unavailable";
-          semanticErrorCode = attempt.status === "unavailable" ? attempt.code : "EMBEDDING_DEADLINE";
         }
       }
-      if (queryVector !== undefined) {
+      if (queryVector !== undefined && !budgetExhausted) {
         const missing = semanticCandidates.filter((candidate) => !vectors.has(candidate.fact.id));
         for (let offset = 0; offset < missing.length; offset += this.limits.maxEmbeddingBatchSize) {
           const batch = missing.slice(offset, offset + this.limits.maxEmbeddingBatchSize);
-          embeddingRequestCount += 1;
+          if (!consumeEmbeddingBudget()) break;
           const attempt = await this.requestEmbedding({ kind: "document", texts: batch.map((item) => documentText(item.fact)) }, signal);
           if (attempt.status !== "ok") {
             semanticStatus = attempt.status === "timed_out" ? "timed_out" : "unavailable";
@@ -198,13 +227,21 @@ export class HybridMemoryRecallService {
       }
     }
 
-    const rankedAdmitted = rankFacts(admitted, vectors, queryVector, exactAdmitted)
+    const stateStable = index.stateRevision === snapshotRevision;
+    if (!stateStable) {
+      vectors.clear();
+      queryVector = undefined;
+      semanticStatus = "unavailable";
+      semanticErrorCode = "STATE_CHANGED_DURING_RECALL";
+    }
+    const rankedAdmitted = rankFacts(stateStable ? admitted : [], vectors, queryVector, exactAdmitted, lexicalScores)
       .slice(0, this.limits.maxAdmittedFacts);
-    const rankedRevalidation = rankFacts(revalidation, vectors, queryVector, exactRevalidation)
+    const rankedRevalidation = rankFacts(stateStable ? revalidation : [], vectors, queryVector, exactRevalidation, lexicalScores)
       .slice(0, this.limits.maxRevalidationFacts)
       .map((item) => ({ ...item, reason: revalidation.find((candidate) => candidate.fact.id === item.fact.id)?.revalidationReason ?? "needs_check" }));
     this.boundVectorCache(index);
     const diagnostics: MemoryRetrievalDiagnostics = {
+      actualMethod: this.provider === undefined ? "lexical" : "hybrid",
       semanticStatus,
       querySources: queryParts.sources,
       lexicalHitCount,
@@ -214,13 +251,27 @@ export class HybridMemoryRecallService {
       omittedCandidateCount,
       embeddingRequestCount,
       embeddingCacheHits,
+      embeddingBudgetUsed: index.embeddingRequests,
+      embeddingBudgetLimit: this.limits.maxEmbeddingRequestsPerRun,
+      stateStable,
       ...(semanticErrorCode === undefined ? {} : { semanticErrorCode }),
     };
+    const trace = {
+      method: this.provider === undefined ? "lexical" : "hybrid",
+      semanticStatus,
+      stateStable,
+      embeddingBudgetUsed: index.embeddingRequests,
+      embeddingBudgetLimit: this.limits.maxEmbeddingRequestsPerRun,
+      admitted: rankedAdmitted.map(traceEntry),
+      revalidation: rankedRevalidation.map(traceEntry),
+      excluded,
+    } as const;
     return {
       admittedFacts: rankedAdmitted,
       revalidationCandidates: rankedRevalidation,
       excluded,
       diagnostics,
+      trace,
     };
   }
 
@@ -261,7 +312,7 @@ export class HybridMemoryRecallService {
   private indexFor(runId: string): RunIndex {
     const current = this.indexes.get(runId);
     if (current !== undefined) return current;
-    const created: RunIndex = { vectors: new Map(), queryVectors: new Map(), revisions: new Map() };
+    const created: RunIndex = { vectors: new Map(), queryVectors: new Map(), revisions: new Map(), stateRevision: "", embeddingRequests: 0 };
     this.indexes.set(runId, created);
     return created;
   }
@@ -343,14 +394,26 @@ function rankFacts(
   vectors: ReadonlyMap<string, readonly number[]>,
   queryVector: readonly number[] | undefined,
   exactIds: ReadonlySet<string>,
+  lexicalScores: ReadonlyMap<string, number>,
 ): RetrievedMemoryFact[] {
   return facts.map((candidate) => {
     const exact = exactIds.has(candidate.fact.id);
     const similarity = queryVector === undefined ? undefined : cosineSimilarity(queryVector, vectors.get(candidate.fact.id));
-    if (!exact && similarity === undefined) return undefined;
-    const score = exact ? 2 + (similarity ?? 0) : similarity!;
-    return { fact: candidate.fact, score, match: exact ? "exact" : "semantic" } satisfies RetrievedMemoryFact;
+    const lexical = lexicalScores.get(candidate.fact.id) ?? 0;
+    if (!exact && similarity === undefined && lexical <= 0) return undefined;
+    const score = exact ? 2 + (similarity ?? lexical) : similarity ?? lexical;
+    const match: RetrievedMemoryFact["match"] = exact ? "exact" : similarity === undefined ? "lexical" : "semantic";
+    return { fact: candidate.fact, score, match } satisfies RetrievedMemoryFact;
   }).filter((item): item is RetrievedMemoryFact => item !== undefined).sort((left, right) => right.score - left.score || right.fact.updatedSequence - left.fact.updatedSequence);
+}
+
+function traceEntry(item: RetrievedMemoryFact | RetrievedMemoryRevalidationCandidate): MemoryRetrievalTraceEntry {
+  return {
+    id: item.fact.id,
+    score: item.score,
+    match: item.match,
+    ...("reason" in item ? { reason: item.reason } : {}),
+  };
 }
 
 function cosineSimilarity(left: readonly number[], right: readonly number[] | undefined): number | undefined {
@@ -392,6 +455,25 @@ function hasExactIdentifier(fact: MemoryFact, queryText: string): boolean {
   return identifiers.some((identifier) => identifier.length >= 2 && normalizedQuery.includes(identifier));
 }
 
+function lexicalScore(fact: MemoryFact, queryText: string): number {
+  const queryTokens = new Set(tokenizeLexical(queryText));
+  if (queryTokens.size === 0) return 0;
+  const factTokens = new Set(tokenizeLexical(`${fact.key} ${fact.value}`));
+  let overlap = 0;
+  for (const token of queryTokens) if (factTokens.has(token)) overlap += 1;
+  return overlap === 0 ? 0 : overlap / queryTokens.size;
+}
+
+function tokenizeLexical(value: string): readonly string[] {
+  const normalized = normalize(value);
+  const tokens: string[] = [];
+  const ascii = normalized.match(/[a-z0-9][a-z0-9._:/-]*/gu) ?? [];
+  tokens.push(...ascii);
+  const cjk = normalized.match(/[\u3400-\u9fff]/gu) ?? [];
+  tokens.push(...cjk);
+  return [...new Set(tokens.filter((token) => token.length > 0))];
+}
+
 function factRevision(fact: MemoryFact): string {
   return digest(JSON.stringify({
     id: fact.id,
@@ -404,6 +486,14 @@ function factRevision(fact: MemoryFact): string {
     retentionClass: fact.retentionClass,
     statusReason: fact.statusReason,
     updatedSequence: fact.updatedSequence,
+  }));
+}
+
+function stateRevision(state: MemoryState): string {
+  return digest(JSON.stringify({
+    runId: state.runId,
+    facts: state.facts,
+    entities: state.entities,
   }));
 }
 
