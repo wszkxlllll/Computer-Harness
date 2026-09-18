@@ -47,40 +47,75 @@ export function formatMemory(
   if (selection.indexFacts.length === 0 && selection.indexEntities.length === 0 && selection.revalidationCandidates.length === 0 && selection.excluded.length === 0) return undefined;
   const hotFactIds = new Set(selection.hotFacts.map((fact) => fact.id));
   const hotEntityIds = new Set(selection.hotEntities.map((entity) => entity.id));
-  const lines: string[] = [];
-  if (selection.indexFacts.length > 0 || selection.indexEntities.length > 0) lines.push("Current run memory index (applicable facts, not proof of GUI state):");
-  for (const fact of selection.indexFacts) lines.push(`- fact ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} [${fact.status}]${hotFactIds.has(fact.id) ? " [hot]" : ""}`);
-  for (const entity of selection.indexEntities) lines.push(`- entity ${entity.id} (${entity.type}): ${entity.description} [${entity.status}]${hotEntityIds.has(entity.id) ? " [hot]" : ""}`);
-  if (selection.hotFacts.length > 0) {
-    lines.push("Hot facts:");
-    for (const fact of selection.hotFacts) lines.push(`- ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} = ${fact.value}${fact.status === "needs_check" ? " [needs_check]" : ""}`);
-  }
-  if (selection.hotEntities.length > 0) {
-    lines.push("Hot entities:");
-    for (const entity of selection.hotEntities) lines.push(`- ${entity.id}: ${entity.description}`);
-  }
-  if (selection.revalidationCandidates.length > 0) {
-    lines.push("Revalidation candidates (last-known hints, not current facts; use the current observation before acting):");
-    for (const candidate of selection.revalidationCandidates) {
-      lines.push(`- ${candidate.fact.id}: ${candidate.fact.key} [${candidate.reason}] source=${candidate.fact.sourceEventId}`);
+  const indexRecords = [
+    ...selection.indexFacts.filter((fact) => !hotFactIds.has(fact.id)).map((fact) => `- fact ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} [${fact.status}]`),
+    ...selection.indexEntities.filter((entity) => !hotEntityIds.has(entity.id)).map((entity) => `- entity ${entity.id} (${entity.type}): ${boundedPreview(entity.description)}`),
+  ];
+  const hotRecords = [
+    ...selection.hotFacts.map((fact) => `- ${fact.id}${fact.subject.type === "entity" ? ` (entity ${fact.subject.entityId})` : ""}: ${fact.key} = ${boundedValue(fact.value)}${fact.status === "needs_check" ? " [needs_check]" : ""}`),
+    ...selection.hotEntities.map((entity) => `- ${entity.id}: ${boundedPreview(entity.description)}`),
+  ];
+  const revalidationRecords = selection.revalidationCandidates.map((candidate) => {
+    const fact = candidate.fact;
+    return `- ${fact.id}: ${fact.key} [${candidate.reason}] old=${boundedValue(fact.value)} source=${fact.sourceEventId}`;
+  });
+  const header = "Current run memory index / packets (scoped; not proof of current GUI state):";
+  const headerTokens = estimateTextTokens(header);
+  const finiteBudget = Number.isFinite(maxTokens);
+  let remaining = finiteBudget ? Math.max(0, maxTokens - headerTokens) : Number.POSITIVE_INFINITY;
+  let omitted = false;
+  const renderedGroups: string[][] = [];
+  const renderGroup = (title: string, records: readonly string[], allowance: number): void => {
+    if (records.length === 0) return;
+    const chosen: string[] = [];
+    for (const record of records) {
+      const candidate = [title, ...chosen, record];
+      if (estimateTextTokens(candidate.join("\n")) > allowance) {
+        omitted = true;
+        continue;
+      }
+      chosen.push(record);
     }
-  }
-  if (lines.length === 0) return { text: "", estimatedTokens: 0, truncated: false, selection };
-  const text = lines.join("\n");
-  if (estimateTextTokens(text) <= maxTokens) return { text, estimatedTokens: estimateTextTokens(text), truncated: false, selection };
-  const marker = "[…memory truncated; query by id]";
-  if (estimateTextTokens(marker) > maxTokens) {
+    if (chosen.length === 0) {
+      omitted = true;
+      return;
+    }
+    const group = [title, ...chosen];
+    renderedGroups.push(group);
+    remaining -= estimateTextTokens(group.join("\n"));
+    if (chosen.length < records.length) omitted = true;
+  };
+  const hotAllowance = finiteBudget ? Math.floor(remaining * 0.45) : Number.POSITIVE_INFINITY;
+  renderGroup("Current admitted values (hot; verify GUI state before side effects):", hotRecords, hotAllowance);
+  const revalidationAllowance = finiteBudget ? Math.floor(remaining * 0.55) : Number.POSITIVE_INFINITY;
+  renderGroup("Revalidation candidates (last-known only; use current observation, then revise or query by id):", revalidationRecords, revalidationAllowance);
+  renderGroup("Memory index (IDs/keys only; not current-value proof):", indexRecords, remaining);
+  if (renderedGroups.length === 0) {
+    const marker = "[…memory truncated; query by id; packets omitted]";
+    const minimal = `${header}\n${marker}`;
+    if (!finiteBudget || estimateTextTokens(minimal) <= maxTokens) return { text: minimal, estimatedTokens: estimateTextTokens(minimal), truncated: true, selection };
     return { text: "", estimatedTokens: 0, truncated: true, selection };
   }
-  if (estimateTextTokens(`${lines[0]}\n${marker}`) > maxTokens) return { text: marker, estimatedTokens: estimateTextTokens(marker), truncated: true, selection };
-  const selected: string[] = [lines[0]!];
-  for (const line of lines.slice(1)) {
-    const candidate = `${selected.join("\n")}\n${line}`;
-    if (estimateTextTokens(`${candidate}\n${marker}`) > maxTokens) break;
-    selected.push(line);
+  const lines = [header, ...renderedGroups.flat()];
+  let text = lines.join("\n");
+  if (omitted || selection.excluded.length > 0) {
+    const marker = "[…memory truncated; query by id; packets omitted]";
+    if (!finiteBudget || estimateTextTokens(`${text}\n${marker}`) <= maxTokens) text = `${text}\n${marker}`;
+    else omitted = true;
   }
-  const truncated = `${selected.join("\n")}\n${marker}`;
-  return { text: truncated, estimatedTokens: estimateTextTokens(truncated), truncated: true, selection };
+  return { text, estimatedTokens: estimateTextTokens(text), truncated: omitted || selection.excluded.length > 0, selection };
+}
+
+const MEMORY_VALUE_PREVIEW_LIMIT = 160;
+
+function boundedValue(value: string): string {
+  if (value.length > MEMORY_VALUE_PREVIEW_LIMIT) return `[value omitted; query by id; length=${value.length}]`;
+  return JSON.stringify(value);
+}
+
+function boundedPreview(value: string): string {
+  if (value.length > MEMORY_VALUE_PREVIEW_LIMIT) return `[description omitted; query by id; length=${value.length}]`;
+  return JSON.stringify(value);
 }
 
 function estimateTextTokens(value: string): number {
