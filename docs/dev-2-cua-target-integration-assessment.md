@@ -71,17 +71,17 @@ worker_ci 已在专用 fixture 上验证 `verify_state(include_screenshot)` 能�
 
 | 能力 | 当前结论 | 可否本批生产接入 |
 |---|---|---|
-| metadata/tool inventory/session/health/permission doctor | Sol 定向复核有限放行；结构化 fake 合同通过，CLI 真实 daemon 结果仍由 worker_ci 核验 | 可以，先只读、显式调用 |
+| metadata/tool inventory/session/health/permission doctor | Sol 定向复核有限放行；direct CLI 真实结果为 metadata/inventory supported（57 tools），session desktop capture scope 未确认，health/permissions/cleanup unknown、退出码 1；pnpm wrapper 另有 transport unknown | 仅只读、显式诊断；不视为整体通过 |
 | 精确 window discovery (`pid/window_id/bounds`) | 专用 fixture 通过；不是永久身份 | 仅 host-only opt-in 预检 |
 | `bring_to_front` | 专用 fixture + fixture-owned focus 状态通过 | 只能作一次性辅助，不能宣称通用 focus |
 | fixture 上的 primary-desktop click/type | 专用 fixture action/state 链路通过；不是 CUA Window-target 动作 | 不改变默认；不据此接入通用 target action |
 | window-level screenshot/state | 受控 fixture `verify_state(include_screenshot)` probe 通过，但存在约 2px frame/client 边界，生产合同与通用安全语义未闭合 | 不接入，明确 unsupported |
 | generic focus/AX、跨平台 target | 未验证/不统一 | 不接入 |
 
-## 6. Doctor 实施结果（Sol 定向复核有限放行；真实 daemon 仍待 worker_ci 核验）
+## 6. Doctor 实施结果（Sol 定向复核有限放行；真实结果为有限诊断且不整体通过）
 
 已在 `packages/computer-cua` 实现 `inspectCuaCapabilities`，并由 `packages/app-runtime` 保持 native binding lazy 后提供给 CLI；`apps/cli --doctor --computer cua --cua-socket <socket>` 是无 goal、无 model、无 `.env`/provider credentials 的真实入口。报告只包含 schema/status/reasonCode、工具数量和声明能力，不输出 socket、session label、daemon 原文、窗口标题、路径、截图或凭证。
 
-fake focused 证据：doctor 正常路径、metadata contract/schema、tools-list schema mismatch、malformed inventory、permission error、连接构造失败、metadata/start timeout、abort race、独立 cleanup signal、health contradiction/version check、settled transport reason、desktop capture scope 未确认（不等同物理锁屏）和 error-code 脱敏回归通过；联合 `computer-cua` doctor 14 tests、CLI doctor/model seam 2 tests、config 3 tests 共 4 files / 29 tests。`pnpm exec tsc -b packages/computer-cua packages/app-runtime apps/cli --force`、pnpm wrapper 的 `start -- --doctor` 参数归一化和 CLI `--help` 通过；根 `pnpm run typecheck` 当前被 worker_ci 未跟踪 spike `spikes/cua-driver/dev2-window-contract.ts:211` 的 exactOptionalPropertyTypes 错误阻塞，非本批文件；全量 `pnpm test` 已通过 30 files / 298 tests。尚未连接真实 daemon；worker_ci 需使用其已校验的私有 pipe 独立运行 CLI doctor 并记录真实状态，不能把本节 fake 结果写成 daemon 通过。
+fake focused 证据：doctor 正常路径、metadata contract/schema、tools-list schema mismatch、malformed inventory、permission error、连接构造失败、metadata/start timeout、abort race、独立 cleanup signal、health contradiction/version check、settled transport reason、desktop capture scope 未确认（不等同物理锁屏）和 error-code 脱敏回归通过；联合 `computer-cua` doctor 14 tests、CLI doctor/model seam 2 tests、config 3 tests 共 4 files / 29 tests。`pnpm exec tsc -b packages/computer-cua packages/app-runtime apps/cli --force`、CLI `--help` 通过；CI commit `5ba1373` 的 root `pnpm run typecheck` 通过。真实 direct CLI doctor 的 metadata/inventory 为 supported（57 tools），但 session=`unknown/desktop_capture_scope_unconfirmed`、health/permissions=`unknown/session_start_invalid`、cleanup=`unknown/session_start_unknown`，总状态 unknown、退出码 1；正式 pnpm wrapper 的 transport unknown 仍未解决，因此不把 doctor 写成整体通过。T10 synthetic fixture、window probe 与 doctor 真实边界分别见验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。T10 的原始运行资产已清理，报告中的 JSON 仅为当时脱敏转录，不能从原始资产独立重算；T10 不等 REL-1。完整 model Run、通用 focus/AX 和产品化 window target/capture 仍未完成。
 
 窗口 capture/target 尚未被该实现触发；worker_ci 的受控 window probe 不改变当前生产默认 desktop observation/action。doctor inventory 中即使声明 `list_windows`/`bring_to_front`，也只记录 declaration status，不提升为 fixtureVerified、focus proof 或敏感输入授权；约 2px frame/client 边界与目标失效语义留待后续合同批次。

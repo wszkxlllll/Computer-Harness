@@ -2,7 +2,7 @@
 
 日期：2026-09-18
 
-角色：唯一导航入口。状态：当前执行。原审计基线：`39ff27f9`；当前开发基线：`f7f7357`（分支 `codex/dev2-tui-preview`）。DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为与本批 CUA doctor 已由 Sol 有限放行；本轮 doctor 增量 focused 4 files/29 tests、全量 30/298、CLI help 与 pnpm wrapper 参数归一化通过；根 typecheck 当前被 worker_ci 未跟踪 spike 的独立 exactOptionalPropertyTypes 错误阻塞。当前增量的真实 daemon doctor 仍由 worker_ci 核验；受控 window probe 已通过但约 2px frame/client 边界使其未生产集成；完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1 全验收仍未完成；修复状态以 Stage 6 和对应实施报告为准。
+角色：唯一导航入口。状态：当前执行。原审计基线：`39ff27f9`；当前开发基线：`f7f7357`（分支 `codex/dev2-tui-preview`）。DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为与本批 CUA doctor 已由 Sol 有限放行；本轮 doctor 增量 focused 4 files/29 tests、全量 30/298，root typecheck 在 CI commit `5ba1373` 通过。真实 direct CLI doctor 仅确认 metadata/inventory（57 tools）可读，session 的 desktop capture scope 未确认，health/permissions 与 cleanup 保持 unknown、退出码 1；正式 pnpm wrapper 仍有 transport unknown 限制，不能把 doctor 写成整体通过。受控 window probe 已通过但约 2px frame/client 边界使其未生产集成；T10 仅为 synthetic fixture 窄链路，不等 REL-1；完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1 全验收仍未完成。证据见[受控预览验证记录第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)；修复状态以 Stage 6 和对应实施报告为准。
 
 ## 下一阶段开发必读
 

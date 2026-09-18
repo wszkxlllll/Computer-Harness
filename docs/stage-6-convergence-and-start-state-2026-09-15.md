@@ -2,7 +2,7 @@
 
 更新：2026-09-18
 
-角色：当前执行 / 交接。原审计基线：`39ff27f9`；当前开发基线：`f7f7357`（分支 `codex/dev2-tui-preview`）。DEV-1 已合并结果与 DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为、CUA capability doctor 已完成并获 Sol 有限放行；当前真实 daemon doctor 仍待 worker_ci 核验；受控 window probe 已通过但约 2px frame/client 边界尚未生产集成；正式评测 G0/REL-1 另行收口。
+角色：当前执行 / 交接。原审计基线：`39ff27f9`；当前开发基线：`f7f7357`（分支 `codex/dev2-tui-preview`）。DEV-1 已合并结果与 DEV-2 最小 TUI、D2-EVENT/D2-SESSION 离线行为、CUA capability doctor 已完成并获 Sol 有限放行；CI commit `5ba1373` 的 root typecheck 已通过。真实 direct doctor 仅读到 metadata/inventory（57 tools），session 的 desktop capture scope 未确认，health/permissions/cleanup 保持 unknown，正式 pnpm wrapper 仍有 transport unknown 限制，doctor 不整体通过；受控 window probe 已通过但约 2px frame/client 边界尚未生产集成；正式评测 G0/REL-1 另行收口。
 
 ## 1. 当前结论与已有基础
 
@@ -42,7 +42,7 @@ G0 当前资料从[文档索引](./DOCS-INDEX.md)进入，校准、预算和分�
 
 DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实验；不等全部功能完成才首次验证效果，也不反复用 Validation 调参。
 
-实施结果写在所属阶段交付文档并从本入口链接。当前状态：**DEV-1 已合并结果按历史批次记录；DEV-2 RFT2、最小 TUI/D2-EVENT/D2-SESSION 与本批 CUA doctor 已分别完成并获 Sol 有限放行。本轮 doctor focused 4 files/29 tests、全量 30/298、CLI help 与 pnpm wrapper 参数归一化通过；受控 window probe 已通过但约 2px frame/client 边界尚未生产集成；根 typecheck 当前只被 worker_ci 未跟踪 spike 的独立 exactOptionalPropertyTypes 错误阻塞。真实 daemon doctor、完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1 全验收仍未完成。**
+实施结果写在所属阶段交付文档并从本入口链接。当前状态：**DEV-1 已合并结果按历史批次记录；DEV-2 RFT2、最小 TUI/D2-EVENT/D2-SESSION 与本批 CUA doctor 已分别完成并获 Sol 有限放行。本轮 doctor focused 4 files/29 tests、全量 30/298；CI commit `5ba1373` 的 root typecheck 通过。真实 direct doctor 仅确认 metadata/inventory（57 tools），session 的 desktop capture scope 未确认，health/permissions/cleanup 为 unknown、退出码 1；正式 pnpm wrapper 的 transport unknown 仍未解决，不能把 doctor 整体写成通过。受控 window probe 已通过但约 2px frame/client 边界尚未生产集成；T10 synthetic fixture 结果见验证记录第11节，不等 REL-1；完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1 全验收仍未完成。详见验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。**
 
 ### 历史批次记录（保留当时状态，不代表当前入口）
 
@@ -87,9 +87,9 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 合同、文件映射、生产者/消费者/清理责任和限制见[TUI 预览实施记录](./dev-2-tui-preview-implementation-results.md)。集中复核指出的事件队列/resync、同桌面 owner、纠正/审批竞态、退出清理和 Escape `undefined` 输入边界已补回归并修复；本批离线 focused 为 6 files/29 tests 全通过，最后 `pnpm run typecheck`、`pnpm test`（28 files/282 tests）和 CLI help 均通过，Sol 已有限放行。worker_ci 文件不纳入本 worker 暂存范围。独立 winpty 仅验证 no-goal home 的中文/resize/ESC→Q/Ctrl-C 恢复；完整 model Run、通用 focus/AX、跨进程 owner 和 REL-1/T01..T14 全验收仍未通过本批证明。
 
-### 第六批增量：CUA capability doctor（代码完成，Sol 有限放行；待 worker_ci 真实核验）
+### 第六批增量：CUA capability doctor（代码完成，Sol 有限放行；真实结果有限且保守）
 
-本批在 `f7f7357` 上只增加脱敏、只读的 `--doctor` 入口：`computer-cua` 读取 metadata、tool inventory、session、health 和 permission 的结构化状态，app-runtime 保持 native CUA 动态加载，CLI 在无 goal、无 model、无 `.env`/provider credentials 时可运行。错误、缺失、超时和未确认 cleanup 统一标为 `unknown`；SDK/daemon 声明与 fixture 实证分离。窗口 capture、通用 target/focus/AX、PID/window_id 安全锁和默认 desktop 动作均未接入。合同、fake 测试和未验证矩阵见[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)；worker_ci 尚未完成真实 doctor 命令核验，不能把 doctor 代码测试写成 daemon 通过。
+本批在 `f7f7357` 上只增加脱敏、只读的 `--doctor` 入口：`computer-cua` 读取 metadata、tool inventory、session、health 和 permission 的结构化状态，app-runtime 保持 native CUA 动态加载，CLI 在无 goal、无 model、无 `.env`/provider credentials 时可运行。错误、缺失、超时和未确认 cleanup 统一标为 `unknown`；SDK/daemon 声明与 fixture 实证分离。CI 的 direct CLI 复核确认 metadata/inventory（57 tools）可读，但 session 的 desktop capture scope 未确认，health/permissions 与 cleanup 保持 unknown，整体退出码为 1；正式 pnpm wrapper 另有 transport unknown 限制。窗口 capture、通用 target/focus/AX、PID/window_id 安全锁和默认 desktop 动作均未接入。合同、fake 测试和限制见[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)；真实窄证据与边界见验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。这些结果不等 doctor 整体通过、完整 model Run 或 REL-1。
 
 ### 第一批证据（已合并，2026-09-17）
 
