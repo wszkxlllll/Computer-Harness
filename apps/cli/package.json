@@ -14,6 +14,7 @@
     "@computer-harness/app-runtime": "workspace:*",
     "@computer-harness/protocol": "workspace:*",
     "@computer-harness/runtime": "workspace:*",
-    "@computer-harness/trajectory": "workspace:*"
+    "@computer-harness/trajectory": "workspace:*",
+    "string-width": "7.2.0"
   }
 }

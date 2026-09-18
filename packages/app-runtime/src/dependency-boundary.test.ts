@@ -39,7 +39,7 @@ describe("app-runtime dependency boundaries", () => {
         label: "cli",
         files: cliFiles,
         root: cliRoot,
-        allowed: new Set(["@computer-harness/app-runtime", "@computer-harness/protocol", "@computer-harness/runtime", "@computer-harness/trajectory"]),
+        allowed: new Set(["@computer-harness/app-runtime", "@computer-harness/protocol", "@computer-harness/runtime", "@computer-harness/trajectory", "string-width"]),
       },
       {
         label: "runtime",
