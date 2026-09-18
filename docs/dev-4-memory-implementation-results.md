@@ -2,8 +2,8 @@
 
 日期：2026-09-18
 文档角色：结果
-状态：纯拆分 focused 回归通过；已建立独立本地 commit（见 Git 历史）
-范围：仅 `packages/memory/src/**` 的保行为模块拆分；本轮不实现 Memory scope、retention、recall 或跨 Run 语义。
+状态：RFT-5 拆分已提交；DEV-4 首批 scope/recall 行为在当前工作树 focused 回归通过
+范围：RFT-5 的 Memory 拆分 commit，以及随后 DEV-4 首批 Fact scope/retention classification、current/history gate、revalidation recall 与 Runtime session lifecycle 行为。
 
 ## 1. 本检查点结论
 
@@ -38,10 +38,21 @@ pnpm exec vitest run packages/memory/src/index.test.ts packages/memory/src/runti
 
 ## 3. 与 DEV-4 合同的边界
 
-本检查点只建立可审阅的代码职责边界，不宣称 Memory 语义合同已经落地。后续 DEV-4 行为实施仍需明确并验证稳定/task/短期记忆的 scope、保留与召回优先级、适用性和失效规则；当前模型已有 `MemoryFact`/`MemoryEntity` 结构不能被解释为这些能力已经存在。首批不加入 `dependencies.requiredFor` 等会把记忆提升为执行前置权威的字段，也不伪造当前 CUA 尚未公开生产的 session/target generation。验证字段必须来自真实 runtime event、observation 或 host readback 证据。
+RFT-5 部分只建立可审阅的代码职责边界；其历史“不实现语义”结论不适用于下面的 DEV-4 行为批次。当前实现仍不加入 `dependencies.requiredFor` 等会把记忆提升为执行前置权威的字段，也不伪造当前 CUA 尚未公开生产的 target/generation 或独立 verification claim。
 
-本结果是 RFT-5 纯拆分检查点，不关闭 DEV-4 后续行为、跨 Run、生命周期或缓存实现任务。
+RFT-5 的历史拆分检查点不关闭 DEV-4 后续行为；当前行为批次的剩余边界见第 5 节。
 
 ## 4. 留痕
 
-代码与本报告已以一笔独立本地 commit 留痕；repo-local author/committer 和 staged 文件范围已核对。按当前授权不 push、不建 PR、不 merge。
+RFT-5 代码与本报告的历史拆分 commit 已留痕；本次行为代码由独立 commit `01a6d47` 留痕。两笔均只在本地，未 push、未建 PR、未 merge。
+
+## 5. DEV-4 首批行为（`01a6d47`，本地已提交）
+
+- Fact 可带 `scope={kind:"run"|"computer_session"}` 与 `retentionClass="stable"|"task"|"short_lived"`；session id 只由 Runtime 当前 `ComputerSessionDescriptor.id` 盖章，target scope 明确 unsupported。Entity 保留既有 stale 生命周期，不复制 Fact 字段。
+- Fact `statusReason` 只允许真实路径 `manual_review`（显式人工工具）和 `scope_ended`（Runtime 在 Run 完成前提交的 session-scope lifecycle mutation）；没有 TTL、action/event age 或按 frame ID 自动失效。
+- 旧 JSON、旧 `memory.updated` replay 与 Store parser 都把缺省字段规范化为 run/stable；事件仍先 commit、Snapshot reducer 再由 app-runtime Store callback materialize。
+- Memory `current` 与 Context 共用 applicability gate：superseded、scope mismatch、stale/missing entity 不进入普通/Hot；`memory_get` current 附 bounded `factAdmission`（admitted/revalidation），显式 `history` 返回并附安全 `factApplicability`。`needs_check` 与 active `short_lived` 只进入有界 revalidation 区；short-lived 是 last-known 线索，不是 current truth。
+- Context trace 只记录 admitted/revalidation/excluded 的 ID 与 reason；revalidation 按 task/entity relevance 取少量候选，与 memory soft quota 共用文本预算，不新增模型维护调用。
+- 当前 focused 结果：Memory 8 tests、Context 20 tests、Runtime 58 tests、Trajectory 33 tests 通过；root typecheck 通过。此前共享工作树的 34 files/357 tests 是行为收口前的历史证据，不宣称为本 commit 后的最终 full count；本批没有 Hosted/API/桌面/VM 证据。
+
+仍未完成：跨 Run 记忆继承策略、target/generation producer、独立 verification/视觉真值、自动 retention TTL、Monitor online consumer，以及 Sol 对本行为批次的最终审查。

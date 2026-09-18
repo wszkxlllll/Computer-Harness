@@ -46,6 +46,12 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 实施结果写在所属阶段交付文档并从本入口链接。当前状态：**DEV-1 已合并结果按历史批次记录；DEV-2 RFT2、最小 TUI/D2-EVENT/D2-SESSION、CUA doctor 与显式 host-only window opt-in 已分别完成并获 Sol 有限放行。本轮 TUI bounded UX 收口已获 Sol 定点有限放行（独立 18 项通过）；本批最终离线全量 32 files/320 tests，root typecheck 通过；worker 本轮未调用 model API、桌面或 VM。TUI bounded UX 详见[TUI 预览实施记录](./dev-2-tui-preview-implementation-results.md)：输入可见且经 terminal sanitizer，uppercase-I 先请求 pause/quiescence，waiting/question/approval/failure/final reply 有本地呈现，长正文可分页，terminal-cell 宽度和快速粘贴有界绘制已回归，terminal-only scope 不冒称 global hotkey。worker_ci 固定 build 已实测 no-goal Windows winpty PTY rapid/slow × ESC→Q/Ctrl-C 四场景通过，含中文、tail/500、resize/footer、cursor restore、exit 0、无 force-close；这不等于完整 model Run、跨 Run 实际 I 或 CUA 业务动作。真实 direct doctor 仅确认 metadata/inventory（57 tools），session 的 desktop capture scope 未确认，health/permissions/cleanup 为 unknown、退出码 1；正式 pnpm wrapper 的 transport unknown 仍未解决，不能把 doctor 整体写成通过。worker_ci 独立实机只证明 production adapter 的窄 `open/observe/background single-click/resize stale refusal/close` 链路；窗口仅开放 click/wait，keyboard、其他未验证 pointer primitive、通用 focus/AX、模型自由选窗仍未开放，默认 desktop/OSWorld 不变。目标丢失会锁定到 close 后新 session 才能恢复；preflight 与 driver click 非原子，不等通用目标成功或 REL-1。此前用户真实请求中的 Provider transport failure 与 CUA action refusal 仅作诊断记录，本批未修复根因。详见[窗口目标实施记录](./dev-2-window-target-implementation-results.md)、[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)、验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。**
 
+### 当前 DEV-4 Memory 行为 checkpoint（2026-09-18）
+
+本地 commit `01a6d47` 已实现 DEV-4 首批 Fact scope/retention classification、current/history applicability gate、Context admitted/revalidation/excluded 分区、legacy replay/Store normalization，以及 Runtime 在 Run 完成前对真实 session-scope Fact 的 `scope_ended` mutation。`stable/task/short_lived` 仅为召回策略分类；没有 TTL、action/event age、按 frame ID 自动失效或 target/generation producer。`memory_get` 与 Context 共用 scope/entity/status gate，short-lived 只作为 last-known revalidation 线索，不是 current GUI truth。
+
+本 checkpoint 的 focused 实际证据为 Memory 8、Context 20、Runtime 58、Trajectory 33 项，root typecheck 通过；此前共享工作树 34 files/357 tests 属于行为收口前历史证据，不能称为 `01a6d47` 之后的最终 full。仍待 Sol 审查、最终 full、跨 Run 策略、独立 verification/视觉真值与 Monitor online consumer；不包含真实模型 API、桌面、VM 或 Hosted CI。
+
 ### 历史批次记录（保留当时状态，不代表当前入口）
 
 #### 第二批：Context / Memory 与诊断
