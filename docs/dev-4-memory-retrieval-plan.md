@@ -2,20 +2,20 @@
 
 日期：2026-09-18
 
-状态：独立检索基础模块已实现，等待 Memory/Context/Runtime 交接；本文件不替代 [DEV-3/4/5 共享施工入口](./dev-3-5-implementation-plan.md)，也不声明 DEV-4 整体完成。
+状态：检索基础模块及离线生产接入已实现；本文件不替代 [DEV-3/4/5 共享施工入口](./dev-3-5-implementation-plan.md)，也不声明 DEV-4 整体完成。当前接入已覆盖 `memory_search`、Context 自动召回和实际 ModelInput 排序；未宣称 Hosted CI 或集成后的真实生产模型运行已完成。
 
 ## 1. 当前事实
 
-当前源码没有 `memory_search(query)`、embedding provider、向量索引或 semantic retrieval。`memory_get` 仅按事实 `id/key` 读取；现有 Context 召回主要使用 task 关联、状态和 `updatedSequence`。现有 GLM/Qwen adapter 也只有 chat-completions 路径。
+当前源码已有 bounded `memory_search(query)`、显式注入的 embedding provider 和进程内 revision-keyed semantic cache。`memory_get` 仍按事实 `id/key` 读取；Context 自动召回通过同一个 `HybridMemoryRecallService` 取得有界排序，再把实际排序传入 ModelInput。现有 GLM/Qwen chat adapter 不负责 Memory embedding；embedding 使用独立 provider/endpoint/key 配置。
 
-本批新增但未接入公共 exports 的独立文件：
+本批新增并已接入公共 exports/生产消费路径的文件：
 
 - `packages/memory/src/retrieval/types.ts`：`CurrentRecallQuery`、provider-neutral embedding contract、bounded result/diagnostic 类型。
 - `packages/memory/src/retrieval/qwen-embedding.ts`：显式 endpoint/API key 注入的 Qwen `text-embedding-v4` HTTP adapter；不读取环境变量、不复用 chat endpoint。
 - `packages/memory/src/retrieval/hybrid-recall.ts`：gate-first exact identifier + dense cosine retrieval、admitted/revalidation 分区、bounded in-memory revision cache、迟到结果屏障和 deadline fallback。
-- `packages/memory/src/retrieval/index.test.ts`：17 个 mock/adapter/service focused tests；没有真实 API、凭证、模型或截图。
+- `packages/memory/src/retrieval/index.test.ts`：17 个 mock/adapter/service focused tests；没有在测试中使用真实凭证、模型或截图。
 
-由于集中审查正在修复现有 `packages/memory/src/tools.ts` 对尚未合入的 `classifyMemoryFactAdmission` 导入，本批 package build 仍被该共享文件阻塞；新增 retrieval 文件本身没有新增 TypeScript 错误。独立 focused 测试：17/17 通过。
+集成后离线验证已通过：retrieval focused 17/17；Memory focused 42/42；Context/trajectory/app-runtime focused 通过；全仓 `pnpm test` 为 36 files / 389 tests，`pnpm run typecheck` 退出码 0。上述是当前工作树证据，不等同于 Hosted CI 或集成后的真实生产 embedding run。
 
 ## 2. 查询合同
 
@@ -29,7 +29,7 @@
 | 最近 action hint | 低信任辅助 | 只作弱提示，不使用 OCR，不把 action 自报当事实 |
 | Plan | 可选排序辅助 | Plan 缺失时检索仍必须工作，Memory 不依赖 Planning |
 
-首批不会引入独立 LLM query-generation，也不会从截图 OCR 产生查询。后续 `memory_search(query)` 工具和自动 Context recall 应调用同一个 `HybridMemoryRecallService`，避免两个 applicability 规则。
+首批不会引入独立 LLM query-generation，也不会从截图 OCR 产生查询。`memory_search(query)` 工具和自动 Context recall 已调用同一个 `HybridMemoryRecallService`，避免两个 applicability 规则；自动 Context 只从原始 goal 与最近真实 user correction 组装查询，不从 tool result 伪造 user input。显式 model query（若未来由调用方提供）只改变召回相关性，不能改变授权、scope、session 或 status gate。
 
 ## 3. Gate-first hybrid 设计
 
@@ -62,12 +62,13 @@ GLM Embedding-3 是 provider-neutral 接口的后续可选实现：官方 endpoi
 
 隐私硬约束场景可后续评估本地 `intfloat/multilingual-e5-small` + `onnxruntime-node`：模型卡标注 MIT、384 维、多语种，并要求 query/passage 前缀；ONNX Runtime Node 提供 Windows/Linux/macOS CPU 预构建包，但模型权重、tokenizer、Node24 实机兼容和内存占用仍需单独批准与验证。本批不下载、不增加该依赖。[E5 模型卡](https://huggingface.co/intfloat/multilingual-e5-small) 、[ONNX Runtime Node.js](https://onnxruntime.ai/docs/get-started/with-javascript/node.html)
 
-## 6. 后续集成顺序
+## 6. 集成状态与后续顺序
 
-1. Sol/worker_probe 完成现有 Memory/Context 修复后，将本 service 接到共同 `MemoryState` applicability helper；不复制第二套 gate。
-2. 增加 `memory_search(query)` 的 bounded tool consumer，并把自动 Context recall 接到同一 service；保持 `memory=off` 零 embedding 调用。
-3. app-runtime 仅增加显式 provider 注入配置；Qwen/GLM chat adapter 不知道 Memory，Memory 也不绑定 Planning。
-4. 在公共 Context 预算中把检索结果与现有 index/hot/recheck 共用预算，不能重复注入或让 index 截断 recheck。
+1. 已完成：接入共同 `MemoryState` applicability helper；不复制第二套 gate（`f22f96b`、`67542c7`）。
+2. 已完成：增加 bounded `memory_search(query)` consumer，并把自动 Context recall 接到同一 service；`memory=off`/retrieval `off` 不创建 retrieval service、不发 embedding 请求、不注入 retrieval prompt（`f22f96b`、`6cd7ddb`）。
+3. 已完成：app-runtime 通过显式 provider 注入配置；Qwen/GLM chat adapter 不知道 Memory，Memory 也不绑定 Planning。`hybrid` 必须同时显式配置独立 endpoint 与 `MEMORY_EMBEDDING_API_KEY`，不会隐式复用 chat 凭证。
+4. 已完成：检索排序实际进入 Context ModelInput，并与 index/hot/recheck 的 admission 分区共同使用有界 projection；safe trace 只记录 method/status/计数/稳定 ID，不记录 query/value/vector。Context 集成提交为 `6cd7ddb`。
+5. 后续：Hosted CI、集成后真实生产 embedding run、以及更大规模语义质量评估仍未完成；不把本地离线测试或受控 pilot 当作这些验收的替代。
 
 ## 7. 必测矩阵
 
@@ -79,8 +80,8 @@ GLM Embedding-3 是 provider-neutral 接口的后续可选实现：官方 endpoi
 - provider/model/dimension/query revision 改变时缓存隔离；诊断只记录计数、状态、错误码和安全 ID，不记录原 query、原文或向量。
 - 每 Run 的 embedding request budget、canonical state revision 变化和 timeout/abort 都可在 safe trace 中观察；状态变化中的 recall 不返回旧 snapshot 的事实。
 
-本批只完成独立模块及 mock evidence；真实 API、公共 tool/export、Context/Runtime 集成和 Hosted/桌面验证均未完成。
+本批已完成独立模块、bounded tool/Context/Runtime 离线接入和 mock evidence；Hosted CI、桌面验证、以及集成后真实生产 API 运行仍未完成。`memoryRetrieval=off` 与 `memory=off` 的零 retrieval-call 行为有回归测试；默认启用 Memory 时 retrieval mode 为 lexical（无网络），hybrid 只能显式 opt-in。
 
 ## 8. 真实 synthetic pilot checkpoint
 
-root 已宣布受控 pilot 后，使用 [Qwen synthetic pilot script](../scripts/dev4-memory-retrieval-qwen-pilot.mjs) 完成 4 次真实 embedding HTTP attempts（0 failure、0 retry、197 input characters、provider usage 5/46/9/4 tokens）。结果与安全边界见 [pilot results](./dev-4-memory-retrieval-qwen-pilot-results.md)。该 pilot 只调用独立 adapter/service/ranker，未接入公共 Memory tool/Context/Runtime；没有发送真实用户 Memory、截图、路径或桌面数据。
+root 已宣布受控 pilot 后，使用 [Qwen synthetic pilot script](../scripts/dev4-memory-retrieval-qwen-pilot.mjs) 完成 4 次真实 embedding HTTP attempts（0 failure、0 retry、197 input characters、provider usage 5/46/9/4 tokens）。结果与安全边界见 [pilot results](./dev-4-memory-retrieval-qwen-pilot-results.md)。该 pilot 在集成前直接调用 adapter/service/ranker，未验证生产 CLI/Context/Runtime wiring；随后离线接入已由 `f22f96b`、`67542c7`、`6cd7ddb` 完成。没有发送真实用户 Memory、截图、路径或桌面数据；没有在集成后再次调用真实 API。

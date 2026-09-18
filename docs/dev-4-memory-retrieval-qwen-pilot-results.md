@@ -2,7 +2,7 @@
 
 日期：2026-09-18
 
-状态：受控真实 embedding pilot 已完成；这是独立 retrieval service 的证据，不是正式 `memory_search`/Context/Runtime 集成，也不是完整 DEV-4 完成证明。
+状态：受控真实 embedding pilot 已完成；它证明了 synthetic 数据上的 Qwen adapter/service/ranker 链路，但不是集成后生产 CLI/Context/Runtime 的真实运行，也不是完整 DEV-4 完成证明。离线公共接入随后在 `f22f96b`、`67542c7`、`6cd7ddb` 完成。
 
 ## 实际执行
 
@@ -14,7 +14,7 @@
 
 实际使用的是 Qwen 北京区域官方 OpenAI-compatible embeddings endpoint，由进程内读取原 `.env` 的 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_WORKSPACE_ID` 组成官方 workspace endpoint；没有输出或复制 key、workspace、endpoint 实值。模型为 `text-embedding-v4`，维度 256。脚本没有 fallback、retry、endpoint rotation，也没有读取截图、桌面、VM 或真实用户 Memory。
 
-由于当前 Memory package 整体 build 仍被其他 worker 尚未合入的 `classifyMemoryFactAdmission` 导入阻塞，本次用 Node24 对 retrieval 四个源码文件做了独立 TypeScript 编译后运行；调用链仍是真实 Qwen adapter → `HybridMemoryRecallService` → gate/ranker，不是 curl 或仅 mock。
+当时公共 Memory package 尚未完成交接，本次用 Node24 对 retrieval 源码做了独立 TypeScript 编译后运行；调用链仍是真实 Qwen adapter → `HybridMemoryRecallService` → gate/ranker，不是 curl 或仅 mock。该 pilot 的运行方式不能替代后来生产 wiring 的离线测试。
 
 ## 安全边界与计数
 
@@ -43,5 +43,5 @@
 ## 限制与下一步
 
 - 本次只验证 synthetic facts 的真实 embedding、exact identifier、中文/英文 paraphrase、superseded gate 和实际 usage；没有发送用户 Memory、文件路径、截图或桌面状态。
-- 本次直接调用独立 service，尚未接入公共 exports、`memory_search` tool、Context projection、app config 或 Runtime mutation hook。
-- 没有宣称 Qwen embedding 的语义质量、成本、免费额度或 Hosted CI 状态；正式接入前仍需 mock 回归、late revision/timeout、跨 session gate 和共享 Memory 修复交接。
+- 本次直接调用独立 service；它没有覆盖公共 `memory_search` tool、Context projection、app config 或 Runtime mutation hook 的生产 wiring。上述 wiring 后续已通过离线 focused/full tests 接入，但本 pilot 本身不应被回写成生产端到端运行。
+- 没有宣称 Qwen embedding 的语义质量、成本、免费额度或 Hosted CI 状态；集成后的离线测试覆盖 late revision/timeout、跨 session gate、off/noPlan 和共享 Memory 修复，但仍不替代 Hosted 或新的真实 API 验收。
