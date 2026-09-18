@@ -53,4 +53,4 @@ second real round: GLM 2/2 and Qwen 2/2 succeeded; no GUI action
 
 ## 4. 边界与后续
 
-本批仍没有证明：语义 embedding 质量、真实用户 Memory、跨 Run 继承、真实截图/桌面、Provider 重试策略或 Hosted CI；成功只覆盖 Planning off、lexical、两个合成事实和两轮有界 tool protocol。累计 API 预算已用尽，不能通过再次请求扩写结论。`ignoredruns/` 下的两轮原始探针结果仅作本地审计留痕，不应暂存或提交；提交内容不包含 `.env`、原始请求 body、截图或凭据。
+本批仍没有证明：语义 embedding 质量、真实用户 Memory、跨 Run 继承、真实截图/桌面、Provider 重试策略或 Hosted CI；成功只覆盖 Planning off、lexical、两个合成事实和两轮有界 tool protocol。累计 API 预算已用尽，不能通过再次请求扩写结论。`runs/dev4-memory-model-api-validation*` 下的原始探针结果仅作本地审计留痕，目录由 `.gitignore` 忽略，不应暂存或提交；提交内容不包含 `.env`、原始请求 body、截图或凭据。

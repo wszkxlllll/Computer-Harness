@@ -1,14 +1,14 @@
 # DEV-3 / DEV-4 / DEV-5 implementation plan
 
-日期：2026-09-18
+日期：2026-09-19
 
-状态：共享规划与合同入口；本批已形成 Context/Trace/prepared-provider foundation、Memory 首批 scope/recall/lifecycle handoff 与 Monitor policy/online consumer，本地 focused/typecheck 已有证据，但未运行真实模型/API/桌面，未下载攻击数据，DEV-3/4/5 仍未整体完成。本文是 DEV-3 Context、DEV-4 Memory、DEV-5 Monitor 的唯一新增施工入口；DEV-6 承接 Risk Guard 与执行边界加固。路线、验收编号和重构映射仍分别以 [完整开发路线 V2](./full-development-roadmap-v2.md)、[验收清单 V2](./development-acceptance-v2.md) 和 [分块重构施工表](./module-refactoring-work-plan.md) 为权威，本文不另造阶段编号。
+状态：共享规划与合同入口；本批已形成 Context/Trace/prepared-provider foundation、Memory scope/recall/lifecycle、Monitor policy/online consumer，以及 bounded semantic retrieval 的 Memory/Context 离线接入。修复 retrieval integration review 三项 finding 后，Node 24/pnpm 11.19 独立 full 为 36 files/393 tests，typecheck、CLI help、锁文件安装和 diff-check 通过；此前 389 项属于修复前历史计数。另有合成 Qwen embedding pilot 4 次 HTTP、usage 合计 64 tokens，以及 GLM/Qwen 各 2/2 的 synthetic ORCHID Memory tool protocol probe。上述不是 Hosted CI、真实桌面或 DEV-3/4/5 整体效果验收；DEV-3/4/5 仍未整体完成。本文是 DEV-3 Context、DEV-4 Memory、DEV-5 Monitor 的唯一新增施工入口；DEV-6 承接 Risk Guard 与执行边界加固。路线、验收编号和重构映射仍分别以 [完整开发路线 V2](./full-development-roadmap-v2.md)、[验收清单 V2](./development-acceptance-v2.md) 和 [分块重构施工表](./module-refactoring-work-plan.md) 为权威，本文不另造阶段编号。
 
 ### 当前实现交接（2026-09-18）
 
-- DEV-3 Context/Trace/prepared-provider/cache foundation 对应本地提交 `dee64fb`、`638d131`；InstructionState/revision、最终 wire budget enforcement、真实 cache hit 与集中审查仍待后续批次。`01a6d47` 是 DEV-4 Memory 首批 scope、current/history applicability、revalidation 与 lifecycle handoff；`ba97878` 补齐 current read 分区、lifecycle source、Store 失败诊断和 Trace 实际渲染 IDs。语义召回排序、跨 Run/target/generation 验证和独立审查仍待完成。
+- DEV-3 Context/Trace/prepared-provider/cache foundation 对应本地提交 `dee64fb`、`638d131`；`6cd7ddb` 进一步把 Memory recall selection 接入 Context 的实际 ModelInput。InstructionState/revision、最终 wire budget enforcement、集成后的真实 cache hit 与集中审查仍待后续批次；现有 Trace/prepared/cacheRead 字段不能扩大解释为这些未完成项。`01a6d47` 是 DEV-4 Memory 首批 scope、current/history applicability、revalidation 与 lifecycle handoff；`ba97878` 补齐 current read 分区、lifecycle source、Store 失败诊断和 Trace 实际渲染 IDs；`2e72f99`/`f22f96b`/`67542c7`/`6cd7ddb` 完成 bounded lexical/hybrid retrieval、`memory_search`、Runtime mutation sync 和 Context 自动召回离线接入。语义质量、跨 Run/target/generation 验证、完整生产任务与独立最终审查仍待完成；窄 synthetic provider protocol probe 不扩大这些结论。
 - DEV-5 policy foundation `294cdf5`、online consumer `adea8d7` 与边界修复 `ba97878`/`eec591c` 采用 `off|shadow|guidance`，默认 `off`。连续 3 次相同 action、2 次拒绝/失败、A-B-A 与 3 次 Plan/Memory churn 只产生候选，当前无视觉特征；shadow 不干预，过时候选 clear。guidance 只进入下一轮动态 Context block，help 仅在完整 action→ToolResult→post-observation 后走 Runtime `waiting_user`/Inbox；unknown、审批和在途副作用屏障优先，不自动执行或审批。`ba97878` 后 147 项、`eec591c` 后 149 项 focused/typecheck 证据均通过，最终 full、Sol 定点复核和真实 API/桌面/VM 验证仍待完成。
-- `9820851` semantic retrieval pilot 仅是隔离模块/独立服务，未接入 Memory/Context/Runtime exports、`memory_search` 或 app configuration；不计入共享 DEV-4 完成。
+- `9820851` 是 semantic retrieval pilot 的隔离起点；后续 `2e72f99`/`f22f96b`/`67542c7`/`6cd7ddb` 已接入 Memory exports、`memory_search`、app configuration、Runtime mutation sync 和 Context ModelInput。pilot 的 4 次合成 Qwen HTTP 不等同于集成后的真实生产 API；默认 lexical 不联网，hybrid 必须显式独立 endpoint/凭据。
 - 通用离线入口：`pnpm --filter @computer-harness/cli start -- --goal "<goal>" --model glm-5.3-flash --computer cua --cua-socket "<socket>" --monitor off`；明确试验时可改为 `--monitor shadow` 或 `--monitor guidance`。示例不带凭证或本机路径，默认行为保持 `off`。
 
 ## 1. 本次对齐结论
@@ -26,15 +26,15 @@ Monitor 保持 DEV-5，不与 Risk Guard 调换编号。Guard 的规则优先级
 
 ### 2.1 DEV-3 当前基础
 
-`packages/context/src/compiler.ts` 的 `DefaultContextCompiler` 当前按 Runtime events、Plan、Memory、最新 Observation 组装 `ModelInput`；`packages/context/src/index.ts` 只重导出 compiler/recall 公共入口。`raw/recent` 和 `maxHistoryEvents` 已存在，预算以 `Math.ceil(characters / 4)` 估算，能保护用户输入并按完整 tool-call 组裁剪。`ContextBudgetReport` 只有估算数量与选择/省略计数，没有分区裁剪原因、最终 Provider payload 或 request attempt。
+`packages/context/src/compiler.ts` 的 `DefaultContextCompiler` 当前按 Runtime events、Plan、Memory、最新 Observation 组装 `ModelInput`，并可通过 DI 使用 Memory recall selection；`packages/context/src/index.ts` 重导出 compiler/recall 公共入口。`raw/recent` 和 `maxHistoryEvents` 已存在，预算以 `Math.ceil(characters / 4)` 估算，能保护用户输入并按完整 tool-call 组裁剪；Memory retrieval 的 safe trace 只记录 method/status/计数/稳定 ID，实际排序已进入 ModelInput。当前仍没有 Provider tokenizer 精确的最终 wire budget enforcement，估算不能冒充真实 usage。
 
-`packages/runtime/src/run-controller.ts` 当前在每次 Provider `generate` 前调用 Compiler、记录 `model.request.started`、消费响应并执行工具；已有用户输入/暂停/纠正屏障，但没有独立 `InstructionState`、`CurrentInstructionView`、`instructionRevision` 或 `ContextTrace`。Provider 的 `generate` 是唯一公开主入口，没有统一的 preparation/estimation contract。
+`packages/runtime/src/run-controller.ts` 当前在每次 Provider `generate` 前调用 Compiler、记录 `model.request.started`、消费响应并执行工具；已有用户输入/暂停/纠正屏障，当前工作树已有 `ContextTrace`、prepared request metadata、request/decision/attempt 关联和取消屏障。仍没有完整独立 `InstructionState`、`CurrentInstructionView`、`instructionRevision` 语义视图或最终 Provider wire budget enforcement；Provider 的兼容 `generate` 入口仍保留，prepared 合同只在已接入的 GLM/Qwen 路径生效。
 
 GLM Adapter 保留 native `tool_calls`、JSON-string arguments、reasoning continuation、coordinate profile；Qwen Adapter 明确保留 native 与 strict flat JSON 两种模式。DEV-3 必须在语义合同上统一追踪，不得把两种 wire format 强行改成一种内部伪格式。
 
 ### 2.2 DEV-4 当前基础
 
-当前 `MemoryFact`/`MemoryEntity` 只有 `runId` 外层归属、subject、key/value/description、source event、status、related task IDs 和 sequence 等字段；`InMemoryMemoryStore`/`FileMemoryStore` 按 Run 读写，Runtime 在事件提交后调用 `afterMemoryCommit` 物化。当前没有 `scope`、`retentionClass`、dependency refs、最近独立验证引用或自动失效生产者。
+当前 `MemoryFact` 支持 `scope={run|computer_session}`、`retentionClass={stable|task|short_lived}`、status reason 与共同 applicability gate；`target` scope 和 target/generation producer 仍明确 unsupported。`InMemoryMemoryStore`/`FileMemoryStore` 按 Run 读写，Runtime 在事件提交后调用 `afterMemoryCommit` 物化，retrieval service 在工具/lifecycle mutation 后同步并在 recall 时复核 canonical state。当前仍没有 dependency refs、独立 verification producer 或自动 retention TTL；short-lived 只是 last-known/recheck 线索，不按动作、事件或 frame ID 自动过期。
 
 必须分开四件事：
 
@@ -261,7 +261,7 @@ Provider preparation 必须分别记录 profile、wire shape、reasoning continu
 - [Alibaba Model Studio Context Cache](https://www.alibabacloud.com/help/en/model-studio/context-cache) 说明 implicit cache 自动开启、prefix 命中不保证；一般 Model Studio 模型的技术门槛为共同前缀至少 1024 tokens，Zhipu-deployed GLM 的门槛为 512。显式 cache 使用 `cache_control: { type: "ephemeral" }`，cache block 通常 5 分钟并可由命中刷新；implicit cache 没有固定 TTL。
 - 同一官方页的 OpenAI-compatible/DashScope response 示例把命中数放在 `usage.prompt_tokens_details.cached_tokens`；`input_tokens`/`prompt_tokens` 仍是总输入口径。缓存命中只能由 provider usage 证明，稳定前缀、prefix hash 或请求相似度不能写成 hit。
 - [Alibaba GLM model page](https://help.aliyun.com/zh/model-studio/glm-zhipu) 明列 ZHIPU/GLM-5.3 与 Flash 支持 function calling、上下文缓存和思考控制，且该托管路径写明 implicit cache/512-token 门槛；这不能自动外推到当前仓库直连的智谱 endpoint，直连 cache 字段/TTL 目前记为 **unknown**。
-- 当前仓库 `ModelUsage` 只有 input/output/total 三个 normalized 字段；首批不把 `cached_tokens` 塞进 normalized usage、不填假零值。若真实 API 获授权后需要计费诊断，新增 provider-specific optional usage metadata（如 `cacheReadTokens`, `cacheWriteTokens`, `cacheMode`, `cacheHitObserved`）并由 response parser 生产、diagnostics/Trace 消费；缺失保持 unknown。
+- 当前仓库 `ModelUsage` 保留 input/output/total 三个基础 normalized 字段，并允许由已验证的 Qwen response parser 产生可选 `cacheReadTokens`；缺失、非法或 GLM 未验证的同名字段不填假值。`cacheWriteTokens`、`cacheMode`、`cacheHitObserved` 尚无生产者/消费者，不能预填。若真实 API 获授权后需要更多计费诊断，必须由对应 response parser 生产、diagnostics/Trace 消费，缺失保持 unknown。
 - 当前 preparation 只记录 `cachePolicy: unknown|implicit|explicit`、稳定前缀布局/版本和 provider profile metadata，不存原始 body；若未来显式 cache 适配，cache marker 必须由对应 Adapter 私有 WeakMap/body 产生，Runtime 只见 metadata。GLM/Qwen 的自动/显式支持、字段名、最小前缀和 TTL 必须按真实 endpoint golden/官方响应再次确认后才能启用。
 
 ## 8. 公开安全评测来源（仅适配研究，不下载运行攻击集）
@@ -292,8 +292,8 @@ Provider preparation 必须分别记录 profile、wire shape、reasoning continu
 
 - 本计划不实现 OCR、通用页面语义真值、完美 prompt-injection detector、跨 Run Memory、任意应用 focus/AX、真实用户桌面或完整 benchmark 运行。
 - 稳定/task/short-lived 不提供权限；scope 不提供真值；Trace/hash 不提供可分享原文；Monitor 不提供执行权；Risk reviewer 不提供最终否决权。
-- 本次只更新文档路线与合同，未改 `packages/**`/`apps/**` 业务代码，未调用真实 Provider/API、GUI、VM，未下载公开攻击数据，也未提交/推送。
+- 本计划本次只更新文档路线与合同；前序实现提交已改动 `packages/**`/`apps/**` 并通过当前离线验证。本次文字整理本身未调用 Provider/API、GUI、VM，未下载公开攻击数据，也未推送；本轮独立 synthetic Memory protocol probe 的 10 次 chat HTTP 已由专属报告记录。此前受控 Qwen embedding pilot 的 4 次 HTTP/64 tokens 与本轮 chat probe 均不等同于完整生产任务、真实桌面或 DEV-3/4/5 整体效果。
 
 ## 11. DEV-4 semantic retrieval independent checkpoint (2026-09-18)
 
-详见独立施工计划：[DEV-4 Memory semantic retrieval plan](./dev-4-memory-retrieval-plan.md)。`9820851` 仅保留 `packages/memory/src/retrieval/` 隔离模块：Qwen embedding HTTP adapter、gate-first hybrid recall、revision/late-result barrier 和 mock tests；尚未接入 Memory/Context/Runtime exports、`memory_search` tool 或 app configuration。focused tests 当前为 14/14；真实 API、凭证、私有 Memory、OCR、桌面和 Hosted 验证均未运行。`ba97878` 已修复共享 admission helper/lifecycle/Trace 边界，但不把该 pilot 计作 DEV-4 整体完成。
+详见独立施工计划：[DEV-4 Memory semantic retrieval plan](./dev-4-memory-retrieval-plan.md)。`9820851` 是 `packages/memory/src/retrieval/` 隔离模块的起点；`2e72f99`/`f22f96b`/`67542c7`/`6cd7ddb`/`61c6aff` 已完成 retrieval service 的公共 export、bounded `memory_search`、app configuration、Runtime mutation sync、Context 实际 ModelInput 接入及三项 integration review 回归。检索 focused 19/19，Memory focused 42/42；当前全仓为 36 files/393 tests、typecheck 通过。受控 pilot 仅合成数据真实 Qwen embedding 4 次 HTTP、usage 合计 64 tokens；后续 synthetic ORCHID 协议 probe 由 GLM/Qwen 各 2/2 完成，无 GUI action。未发送真实 Memory/截图/桌面数据；Hosted、真实桌面任务、语义质量总体证明及 DEV-4 整体完成仍未宣称。
