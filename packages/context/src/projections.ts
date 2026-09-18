@@ -75,7 +75,11 @@ export function formatMemory(
   const renderedRevalidationFactIds = new Set<string>();
   const omittedFactIds = new Map<string, { id: string; class: "admitted" | "revalidation"; reason: "budget" | "not_rendered" }>();
   const rememberOmitted = (record: RenderRecord, reason: "budget" | "not_rendered"): void => {
-    if (record.id === undefined || record.class === undefined || !omittedFactIds.has(record.id)) omittedFactIds.set(record.id ?? "", { id: record.id ?? "", class: record.class ?? "admitted", reason });
+    // Entity/index records may have an id but are not fact candidates.  Keep
+    // the Trace fact omission set strictly fact-typed rather than silently
+    // reporting an entity id as an omitted admitted fact.
+    if (record.id === undefined || record.class === undefined || omittedFactIds.has(record.id)) return;
+    omittedFactIds.set(record.id, { id: record.id, class: record.class, reason });
   };
   const renderGroup = (title: string, records: readonly RenderRecord[], allowance: number): void => {
     if (records.length === 0) return;

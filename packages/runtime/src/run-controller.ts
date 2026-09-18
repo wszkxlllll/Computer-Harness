@@ -998,6 +998,7 @@ export class RunController {
     } else {
       await this.executeNonComputerCall(pending.call, pending.definition, context);
     }
+    await this.flushDeferredMonitorHelp();
   }
 
   private async processToolCalls(session: ComputerSession, calls: readonly ToolCall[]): Promise<CommandEffects> {
@@ -1255,6 +1256,13 @@ export class RunController {
       // terminal ToolResult and post-action observation before status changes
       // to waiting_user.
       await this.flushDeferredMonitorHelp();
+      if (this.snapshot.status === "waiting_user") {
+        // Stop a multi-tool turn at the Inbox boundary.  The completed entry
+        // is not replayed; remaining entries resume from this watermark or
+        // are invalidated by the subsequent user correction.
+        this.pendingToolTurn = { ...pendingTurn, nextIndex: index + 1 };
+        return { correction: false };
+      }
       const callState = this.callStates.get(entry.call.id);
       if (callState === "failed" || callState === "rejected") {
         if (this.snapshot.status === "finished") return { correction: false };

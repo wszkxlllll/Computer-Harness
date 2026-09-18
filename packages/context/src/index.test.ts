@@ -468,6 +468,24 @@ describe("DefaultContextCompiler", () => {
     expect(tiny.contextBudget?.trace?.memorySelection?.omitted?.length).toBeGreaterThan(0);
   });
 
+  it("does not report entity-only tiny-budget omissions as fact IDs", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const tiny = await compiler.compile({
+      runId,
+      goal: "entity only",
+      recentEvents: [],
+      memory: {
+        runId,
+        facts: [],
+        entities: [{ id: "entity-only", type: "window", description: "fixture", sourceEventId: "entity-source" as EventId, status: "active", updatedSequence: 1 }],
+      },
+      context: { memoryMaxTokens: 1 },
+    }, new AbortController().signal);
+    expect(tiny.contextBudget?.trace?.memorySelection?.omitted ?? []).toEqual([]);
+    expect(tiny.contextBudget?.trace?.memorySelection?.selectedAdmittedFactIds ?? []).toEqual([]);
+    expect(JSON.stringify(tiny.contextBudget?.trace?.memorySelection)).not.toContain("entity-only");
+  });
+
   it("keeps Memory ToolResult partitions visible to the next Provider context", async () => {
     const compiler = new DefaultContextCompiler(createDefaultComputerTools());
     const toolResult = {

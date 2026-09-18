@@ -436,6 +436,7 @@ async function makeController(
     enabledCategories?: readonly import("./contracts.js").ToolCategory[];
     enabledToolNames?: readonly string[];
     onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
+    onEventCommitted?: (event: import("@computer-harness/protocol").RuntimeEvent) => void;
     actionPolicy?: ActionPolicy;
     features?: RunFeatureConfig;
   } = {},
@@ -463,6 +464,7 @@ async function makeController(
     idFactory: new TestIds(),
     clock: { now: () => "2026-08-28T00:00:00.000Z" },
     ...(overrides.onCleanupError === undefined ? {} : { onCleanupError: overrides.onCleanupError }),
+    ...(overrides.onEventCommitted === undefined ? {} : { onEventCommitted: overrides.onEventCommitted }),
     ...(overrides.batching === undefined ? {} : { batching: overrides.batching }),
     ...(overrides.enabledCategories === undefined ? {} : { enabledCategories: overrides.enabledCategories }),
     ...(overrides.enabledToolNames === undefined ? {} : { enabledToolNames: overrides.enabledToolNames }),
@@ -1964,6 +1966,52 @@ describe("RunController Monitor online consumer", () => {
     expect(beforeInput.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(false);
     await created.controller.submitUserInput("continue after review");
     await expect(running).resolves.toBe("succeeded");
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("stops a legal Plan/Memory-before-GUI multi-call turn at the Inbox boundary", async () => {
+    const registry = clickRegistry();
+    registry.register({
+      name: "remember",
+      description: "Record a synthetic planning note.",
+      category: "planning",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      validate: () => undefined,
+      execute: async () => ({ ok: true }),
+      planMutationFromResult: () => undefined,
+    });
+    let controller: RunController | undefined;
+    let injected = false;
+    const created = await makeController(new ScriptedProvider([
+      { type: "tool_calls", calls: [
+        { id: "plan-before-help" as ToolCallId, name: "remember", arguments: {} },
+        clickCall("gui-after-help"),
+      ] },
+      { type: "finish", summary: "corrected" },
+    ]), undefined, registry, new DefaultRuntimePolicy(), {
+      features: { planning: "tasks-v1", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+      onEventCommitted: (event) => {
+        if (!injected && event.type === "tool.call.completed" && event.result.callId === "plan-before-help") {
+          injected = true;
+          (controller as unknown as { monitorPendingHelp: { kind: "help_requested"; reason: "guidance_budget_exhausted"; fingerprint: string } }).monitorPendingHelp = {
+            kind: "help_requested",
+            reason: "guidance_budget_exhausted",
+            fingerprint: "synthetic-deferred-help",
+          };
+        }
+      },
+    });
+    controller = created.controller;
+    const activeController = created.controller;
+    const running = activeController.start("stop the remaining GUI call at review");
+    await waitUntil(() => activeController.getSnapshot().status === "waiting_user");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(activeController.getEvents().some((event) => event.type === "action.proposed" && event.callId === "gui-after-help")).toBe(false);
+    expect(activeController.getEvents().some((event) => event.type === "user.input.requested")).toBe(true);
+    await activeController.submitUserInput("cancel the remaining click");
+    await expect(running).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(activeController.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "gui-after-help")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
   });
 
