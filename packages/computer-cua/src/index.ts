@@ -11,3 +11,4 @@ export {
   type CuaDeclaredToolCapabilities,
   type CuaDoctorCheck,
 } from "./capability-doctor.js";
+export type { CuaWindowTarget } from "./window-contract.js";

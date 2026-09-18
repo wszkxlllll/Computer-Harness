@@ -9,6 +9,7 @@ import { runCuaDoctor } from "./doctor-command.js";
 import { resolveCliModel } from "./cli-model.js";
 import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
+import { resolveCuaWindowTargetOptions } from "./window-target-options.js";
 
 type ModelName = AppRuntimeModel;
 type MemoryToolMode = "facts" | "entities";
@@ -22,6 +23,7 @@ interface CliOptions {
   model: ModelName;
   computer: "cua" | "osworld";
   cuaSocket?: string;
+  cuaWindowTarget?: { pid: number; windowId: number };
   osworldBridge?: string;
   output: string;
   maxSteps: number;
@@ -71,6 +73,9 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const osworldBridge = value("--osworld-bridge");
   if (computer === "cua" && (cuaSocket === undefined || cuaSocket.trim().length === 0)) throw new Error("--cua-socket is required when --computer cua");
   if (computer === "osworld" && (osworldBridge === undefined || osworldBridge.trim().length === 0)) throw new Error("--osworld-bridge is required when --computer osworld");
+  const cuaWindowPidValue = value("--cua-window-pid");
+  const cuaWindowIdValue = value("--cua-window-id");
+  const cuaWindowTarget = resolveCuaWindowTargetOptions({ pid: cuaWindowPidValue, windowId: cuaWindowIdValue, computer, doctor });
   const output = resolve(value("--output") ?? "runs/live-cli");
   const maxSteps = positiveInteger(value("--max-steps"), 30, "--max-steps");
   const maxModelRequests = positiveInteger(value("--max-model-requests"), 30, "--max-model-requests");
@@ -136,6 +141,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     model,
     computer,
     ...(cuaSocket === undefined ? {} : { cuaSocket }),
+    ...(cuaWindowTarget === undefined ? {} : { cuaWindowTarget }),
     ...(osworldBridge === undefined ? {} : { osworldBridge }),
     output,
     maxSteps,
@@ -171,7 +177,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. --doctor performs only redacted CUA daemon checks and never reads provider credentials.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. --doctor performs only redacted CUA daemon checks and never reads provider credentials. CUA window flags are explicit host opt-in; keyboard input remains disabled until focus delivery is independently verified.\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -220,6 +226,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
           kind: "cua",
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
+          ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
         }
       : {
           kind: "osworld",

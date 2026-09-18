@@ -96,6 +96,11 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       },
     );
     const cleanupDiagnostics: import("@computer-harness/runtime").CleanupDiagnostic[] = [];
+    const windowTargetToolNames = config.computer.kind === "cua" && config.computer.windowTarget !== undefined
+      ? tools.list()
+        .filter((definition) => definition.category !== "computer" || definition.name === "click" || definition.name === "wait")
+        .map((definition) => definition.name)
+      : undefined;
     controller = new RunController({
       runId,
       provider,
@@ -113,11 +118,11 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       batching: config.batching,
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
+      ...(windowTargetToolNames === undefined ? {} : { enabledToolNames: windowTargetToolNames }),
       ...(dependencies.clock === undefined ? {} : { clock: dependencies.clock }),
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
     });
-    const toolNames = tools.modelTools().map((tool) => tool.name);
-    return createRunHandle(config, runId, controller, eventWriter, eventFeed, toolNames, cleanupDiagnostics);
+    return createRunHandle(config, runId, controller, eventWriter, eventFeed, cleanupDiagnostics);
   } catch (error) {
     eventFeed?.close();
     await eventWriter?.close().catch(() => undefined);
@@ -153,7 +158,6 @@ function createRunHandle(
   controller: RunController,
   eventWriter: RunEventWriter,
   eventFeed: CommittedEventFeed,
-  toolNames: readonly string[],
   cleanupDiagnostics: readonly import("@computer-harness/runtime").CleanupDiagnostic[],
 ): RunHandle {
   let startPromise: Promise<RunOutcome> | undefined;
@@ -206,7 +210,7 @@ function createRunHandle(
     },
     report() {
       if (completionPromise === undefined) return Promise.reject(new Error(`RunHandle for ${runId} has not started`));
-      return completionPromise.then(() => buildRunReport(config, runId, cleanupDiagnostics, toolNames));
+      return completionPromise.then(() => buildRunReport(config, runId, cleanupDiagnostics, controller.getEffectiveToolNames()));
     },
     async close() {
       if (completionPromise !== undefined) {

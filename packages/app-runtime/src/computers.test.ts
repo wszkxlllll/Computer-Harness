@@ -42,4 +42,20 @@ describe("createComputer", () => {
       { importCuaComputer: async () => ({ CuaDriverComputer: FailingComputer as unknown as new () => Computer }) },
     )).rejects.toBe(constructorError);
   });
+
+  it("passes an explicit CUA window target without changing the default backend path", async () => {
+    let received: Record<string, unknown> | undefined;
+    class CapturingComputer {
+      public constructor(options: Record<string, unknown>) {
+        received = options;
+      }
+    }
+
+    await createComputer(
+      { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } },
+      { importCuaComputer: async () => ({ CuaDriverComputer: CapturingComputer as unknown as new (options: Record<string, unknown>) => Computer }) },
+    );
+
+    expect(received).toMatchObject({ socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } });
+  });
 });

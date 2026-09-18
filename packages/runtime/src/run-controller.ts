@@ -49,7 +49,7 @@ import type {
 } from "./contracts.js";
 import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
-import { ToolRegistry } from "./tool-registry.js";
+import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.js";
 import type { CommittedEventListener } from "./committed-events.js";
 
 const MAX_PROVIDER_RETRIES = 1;
@@ -264,7 +264,7 @@ export class RunController {
   private readonly onEventCommitted: CommittedEventListener | undefined;
   private readonly toolAudience: ToolAudience;
   private readonly enabledCategories: ReadonlySet<ToolCategory>;
-  private readonly enabledToolNames: ReadonlySet<string> | undefined;
+  private enabledToolNames: ReadonlySet<string> | undefined;
   private readonly memoryEnabled: boolean;
   private readonly planningEnabled: boolean;
   private readonly batching: "off" | "same-control-input-v1";
@@ -399,6 +399,14 @@ export class RunController {
     return this.events.filter((event) => event.sequence > sequence).map((event) => structuredClone(event));
   }
 
+  /** Return the same model-tool projection used by ContextCompiler. */
+  public getEffectiveToolNames(): readonly string[] {
+    return this.toolRegistry.modelTools(this.toolAudience, {
+      enabledCategories: [...this.enabledCategories],
+      ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
+    }).map((tool) => tool.name);
+  }
+
   private async run(goal: string): Promise<RunOutcome> {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
@@ -411,6 +419,8 @@ export class RunController {
         throw new Error("Computer instance has unresolved cleanup from an earlier Run");
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
+      const restrictedToolNames = restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, this.enabledToolNames === undefined ? undefined : [...this.enabledToolNames]);
+      this.enabledToolNames = restrictedToolNames === undefined ? undefined : new Set(restrictedToolNames);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 

@@ -7,6 +7,8 @@ export type ComputerBackendConfig =
       kind: "cua";
       socketPath: string;
       screenshotDir: string;
+      /** Explicit host-only opt-in; omitted keeps primary desktop behavior. */
+      windowTarget?: { pid: number; windowId: number };
     }
   | {
       kind: "osworld";
@@ -56,5 +58,6 @@ export async function createComputer(
   return new cuaModule.CuaDriverComputer({
     socketPath: config.socketPath,
     screenshotDir: config.screenshotDir,
+    ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
   });
 }

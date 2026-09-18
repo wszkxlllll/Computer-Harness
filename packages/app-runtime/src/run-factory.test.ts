@@ -109,6 +109,29 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("reports the effective click-only tool allowlist for an explicit window target", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-window-tools-"));
+    const calls = { open: 0, observe: 0, close: 0 };
+    const windowConfig: ResolvedRunConfig = {
+      ...config(outputDir),
+      computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } },
+    };
+    try {
+      const handle = await createRun(windowConfig, {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "window done" }; } }),
+        createComputer: () => Promise.resolve(fakeComputer(calls)),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(report.summary.tools).toEqual(expect.arrayContaining(["click", "wait"]));
+      expect(report.summary.tools).not.toContain("type");
+      expect(report.summary.tools).not.toContain("scroll");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("closes only the created writer when later computer construction fails", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-failure-"));
     const close = vi.fn(async () => undefined);
