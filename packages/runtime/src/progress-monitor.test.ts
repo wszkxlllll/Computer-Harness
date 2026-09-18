@@ -47,6 +47,11 @@ function typed(runId: RunId, id: string, basedOn: string, text: string): Runtime
   return eventForRun(runId, { type: "action.proposed", callId: `call-${id}` as ToolCallId, action });
 }
 
+function keypress(runId: RunId, id: string, basedOn: string, keys: string[]): RuntimeEvent {
+  const action: ActionIntent = { actionId: id as ActionId, kind: "keypress", basedOn: basedOn as ObservationId, keys };
+  return eventForRun(runId, { type: "action.proposed", callId: `call-${id}` as ToolCallId, action });
+}
+
 function receipt(runId: RunId, actionId: string, status: "completed" | "refused" | "failed" | "cancelled"): RuntimeEvent {
   return eventForRun(runId, {
     type: "action.execution.completed",
@@ -77,26 +82,30 @@ describe("progress monitor foundation", () => {
     let state = createProgressMonitorState(runId, { repeatThreshold: 3 });
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
     const first = reduceProgressMonitor(state, typed(runId, "type-1", "observation-1", "PRIVATE_TYPED_TEXT"));
-    state = first.state;
+    state = reduceProgressMonitor(first.state, receipt(runId, "type-1", "completed")).state;
     const second = reduceProgressMonitor(state, typed(runId, "type-2", "observation-1", "PRIVATE_TYPED_TEXT"));
-    state = second.state;
+    state = reduceProgressMonitor(second.state, receipt(runId, "type-2", "completed")).state;
     const third = reduceProgressMonitor(state, typed(runId, "type-3", "observation-1", "PRIVATE_TYPED_TEXT"));
+    const thirdReceipt = reduceProgressMonitor(third.state, receipt(runId, "type-3", "completed"));
 
     expect(first.output.candidate).toBe(false);
     expect(second.output.candidate).toBe(false);
-    expect(third.output.candidate).toBe(true);
-    expect(third.output.reasons.map((reason) => reason.code)).toContain("repeated_action");
-    expect(JSON.stringify(third.output)).not.toContain("PRIVATE_TYPED_TEXT");
-    expect(JSON.stringify(third.state)).not.toContain("PRIVATE_TYPED_TEXT");
-    expect("stop" in third.output).toBe(false);
+    expect(thirdReceipt.output.candidate).toBe(true);
+    expect(thirdReceipt.output.reasons.map((reason) => reason.code)).toContain("repeated_action");
+    expect(JSON.stringify(thirdReceipt.output)).not.toContain("PRIVATE_TYPED_TEXT");
+    expect(JSON.stringify(thirdReceipt.state)).not.toContain("PRIVATE_TYPED_TEXT");
+    expect("stop" in thirdReceipt.output).toBe(false);
   });
 
   it("detects A-B-A only inside one comparable session and viewport partition", () => {
     let state = createProgressMonitorState(runId);
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
     state = reduceProgressMonitor(state, click(runId, "a-1", "observation-1", 1, 1)).state;
+    state = reduceProgressMonitor(state, receipt(runId, "a-1", "completed")).state;
     state = reduceProgressMonitor(state, click(runId, "b-1", "observation-1", 2, 2)).state;
-    const cycle = reduceProgressMonitor(state, click(runId, "a-2", "observation-1", 1, 1));
+    state = reduceProgressMonitor(state, receipt(runId, "b-1", "completed")).state;
+    const cycleProposal = reduceProgressMonitor(state, click(runId, "a-2", "observation-1", 1, 1));
+    const cycle = reduceProgressMonitor(cycleProposal.state, receipt(runId, "a-2", "completed"));
     expect(cycle.output.candidate).toBe(true);
     expect(cycle.output.reasons.map((reason) => reason.code)).toContain("action_cycle");
 
@@ -116,6 +125,43 @@ describe("progress monitor foundation", () => {
 
     expect(secondRefusal.output.candidate).toBe(true);
     expect(secondRefusal.output.reasons.map((reason) => reason.code)).toContain("repeated_refusal");
+  });
+
+  it("does not equate same-length text or keys, and separates proposal repetition from execution repetition", () => {
+    let state = createProgressMonitorState(runId, { repeatThreshold: 2 });
+    state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
+    state = reduceProgressMonitor(state, typed(runId, "text-a", "observation-1", "AA")).state;
+    const differentText = reduceProgressMonitor(state, typed(runId, "text-b", "observation-1", "BB"));
+    expect(differentText.output.candidate).toBe(false);
+
+    state = reduceProgressMonitor(createProgressMonitorState(runId, { repeatThreshold: 2 }), observation(runId, "observation-2")).state;
+    state = reduceProgressMonitor(state, keypress(runId, "key-a", "observation-2", ["A"])).state;
+    const differentKey = reduceProgressMonitor(state, keypress(runId, "key-b", "observation-2", ["B"]));
+    expect(differentKey.output.candidate).toBe(false);
+
+    state = reduceProgressMonitor(createProgressMonitorState(runId, { repeatThreshold: 2 }), observation(runId, "observation-3")).state;
+    state = reduceProgressMonitor(state, click(runId, "proposal-1", "observation-3")).state;
+    const proposalRepeat = reduceProgressMonitor(state, click(runId, "proposal-2", "observation-3"));
+    expect(proposalRepeat.output.reasons.map((reason) => reason.code)).toContain("repeated_proposal");
+    expect(proposalRepeat.output.reasons.map((reason) => reason.code)).not.toContain("repeated_action");
+
+    state = reduceProgressMonitor(createProgressMonitorState(runId, { repeatThreshold: 2 }), observation(runId, "observation-4")).state;
+    state = reduceProgressMonitor(state, click(runId, "executed-1", "observation-4")).state;
+    state = reduceProgressMonitor(state, receipt(runId, "executed-1", "completed")).state;
+    state = reduceProgressMonitor(state, click(runId, "executed-2", "observation-4")).state;
+    const executedRepeat = reduceProgressMonitor(state, receipt(runId, "executed-2", "completed"));
+    expect(executedRepeat.output.reasons.map((reason) => reason.code)).toContain("repeated_action");
+  });
+
+  it("requires a consecutive signature tail rather than all-history frequency", () => {
+    let state = createProgressMonitorState(runId, { repeatThreshold: 2 });
+    state = reduceProgressMonitor(state, observation(runId, "observation-window")).state;
+    state = reduceProgressMonitor(state, click(runId, "window-a1", "observation-window", 1, 1)).state;
+    state = reduceProgressMonitor(state, click(runId, "window-b", "observation-window", 2, 2)).state;
+    state = reduceProgressMonitor(state, click(runId, "window-c", "observation-window", 3, 3)).state;
+    const separatedRepeat = reduceProgressMonitor(state, click(runId, "window-a2", "observation-window", 1, 1));
+    expect(separatedRepeat.output.reasons.map((reason) => reason.code)).not.toContain("repeated_proposal");
+    expect(separatedRepeat.output.reasons.map((reason) => reason.code)).not.toContain("repeated_action");
   });
 
   it("reports plan churn but does not infer a stall from a short task with no plan events", () => {
@@ -143,14 +189,17 @@ describe("progress monitor foundation", () => {
   });
 
   it("bounds observation/action history and resets it when the run changes", () => {
-    let state = createProgressMonitorState(runId, { maxObservations: 2, maxActionHistory: 2 });
+    let state = createProgressMonitorState(undefined, { maxObservations: 2, maxActionHistory: 2 });
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
+    expect(state.runId).toBe(runId);
     state = reduceProgressMonitor(state, observation(runId, "observation-2")).state;
     state = reduceProgressMonitor(state, observation(runId, "observation-3")).state;
     expect(state.observations.size).toBe(2);
     state = reduceProgressMonitor(state, click(runId, "old-1", "observation-3")).state;
     state = reduceProgressMonitor(state, click(runId, "old-2", "observation-3")).state;
+    state = reduceProgressMonitor(state, click(runId, "old-3", "observation-3")).state;
     expect(state.recentActions).toHaveLength(2);
+    expect(state.actionRecords.size).toBe(2);
 
     const nextRun = "monitor-next-run" as RunId;
     const reset = reduceProgressMonitor(state, eventForRun(nextRun, { type: "run.created", goal: "synthetic" }));

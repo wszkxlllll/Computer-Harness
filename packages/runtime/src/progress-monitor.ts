@@ -24,6 +24,7 @@ export interface ProgressMonitorOptions {
 type MonitorLimits = Readonly<Required<ProgressMonitorOptions>>;
 
 export type ProgressMonitorReasonCode =
+  | "repeated_proposal"
   | "repeated_action"
   | "action_cycle"
   | "repeated_refusal"
@@ -112,9 +113,11 @@ export function createProgressMonitorState(runId?: RunId, options?: ProgressMoni
 
 /** Apply one committed RuntimeEvent without executing or scheduling anything. */
 export function reduceProgressMonitor(state: ProgressMonitorState, event: RuntimeEvent): ProgressMonitorUpdate {
-  const current = state.runId === undefined || state.runId === event.runId
-    ? state
-    : createProgressMonitorState(event.runId, state.limits);
+  const current = state.runId === undefined
+    ? { ...state, runId: event.runId }
+    : state.runId === event.runId
+      ? state
+      : createProgressMonitorState(event.runId, state.limits);
 
   switch (event.type) {
     case "observation.created":
@@ -186,15 +189,19 @@ function onActionProposed(
     evidence.push({ kind: "action_binding_unavailable", eventIds: [event.eventId] });
   } else {
     const comparable = recentActions.filter((item) => item.partitionKey === partitionKey && item.signature !== undefined);
-    const repeated = comparable.filter((item) => item.signature === signature);
+    const repeated = trailingSignature(comparable, signature);
     if (repeated.length >= state.limits.repeatThreshold) {
-      reasons.push({ code: "repeated_action", eventIds: repeated.map((item) => item.eventId) });
+      reasons.push({
+        code: repeated.every((item) => item.status === "completed") ? "repeated_action" : "repeated_proposal",
+        eventIds: repeated.map((item) => item.eventId),
+      });
     }
     const lastThree = comparable.slice(-3);
     if (
       lastThree.length === 3
       && lastThree[0]?.signature === lastThree[2]?.signature
       && lastThree[0]?.signature !== lastThree[1]?.signature
+      && lastThree.every((item) => item.status === "completed")
     ) {
       reasons.push({ code: "action_cycle", eventIds: lastThree.map((item) => item.eventId) });
     }
@@ -232,17 +239,19 @@ function onActionReceipt(
   const evidence: ProgressMonitorEvidence[] = [{ kind: "action_receipt", eventIds: [previous.eventId, event.eventId] }];
   const reasons: ProgressMonitorReason[] = [];
   if (updated.signature !== undefined && updated.partitionKey !== undefined) {
-    const comparable = recentActions.filter((item) => item.partitionKey === updated.partitionKey && item.signature === updated.signature);
+    const comparable = recentActions.filter((item) => item.partitionKey === updated.partitionKey && item.signature !== undefined);
     if (updated.status === "refused") {
-      const refused = comparable.filter((item) => item.status === "refused");
+      const refused = trailingStatus(comparable, updated.signature, "refused");
       if (refused.length >= state.limits.refusalThreshold) {
         reasons.push({ code: "repeated_refusal", eventIds: refused.map((item) => item.eventId).concat(event.eventId) });
       }
     } else if (updated.status === "failed" || updated.status === "cancelled") {
-      const failed = comparable.filter((item) => item.status === "failed" || item.status === "cancelled");
+      const failed = trailingStatus(comparable, updated.signature, "failed", "cancelled");
       if (failed.length >= state.limits.refusalThreshold) {
         reasons.push({ code: "repeated_failure", eventIds: failed.map((item) => item.eventId).concat(event.eventId) });
       }
+    } else if (updated.status === "completed") {
+      reasons.push(...completedActionReasons(recentActions, updated, state.limits));
     }
   }
 
@@ -308,6 +317,7 @@ function actionSignature(action: ActionIntent, partitionKey: string): string {
   return opaqueHash(JSON.stringify({ partitionKey, action: normalizedAction(action) }));
 }
 
+/** The returned object is serialized immediately and never retained or emitted. */
 function normalizedAction(action: ActionIntent): unknown {
   switch (action.kind) {
     case "click":
@@ -319,12 +329,57 @@ function normalizedAction(action: ActionIntent): unknown {
     case "drag":
       return { kind: action.kind, fromX: action.from.x, fromY: action.from.y, toX: action.to.x, toY: action.to.y };
     case "type":
-      return { kind: action.kind, textLength: action.text.length };
+      return { kind: action.kind, text: action.text };
     case "keypress":
-      return { kind: action.kind, keyCount: action.keys.length, keyLengths: action.keys.map((key) => key.length) };
+      return { kind: action.kind, keys: [...action.keys] };
     case "wait":
       return { kind: action.kind, durationMs: action.durationMs };
   }
+}
+
+function trailingSignature(records: readonly ActionRecord[], signature: string): readonly ActionRecord[] {
+  const result: ActionRecord[] = [];
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const item = records[index];
+    if (item?.signature !== signature) break;
+    result.unshift(item);
+  }
+  return result;
+}
+
+function trailingStatus(records: readonly ActionRecord[], signature: string, ...statuses: readonly ActionStatus[]): readonly ActionRecord[] {
+  const accepted = new Set(statuses);
+  const result: ActionRecord[] = [];
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const item = records[index];
+    if (item === undefined || item.signature !== signature || !accepted.has(item.status)) break;
+    result.unshift(item);
+  }
+  return result;
+}
+
+function completedActionReasons(
+  records: readonly ActionRecord[],
+  updated: ActionRecord,
+  limits: MonitorLimits,
+): ProgressMonitorReason[] {
+  if (updated.partitionKey === undefined || updated.signature === undefined) return [];
+  const comparable = records.filter((item) => item.partitionKey === updated.partitionKey && item.signature !== undefined);
+  const reasons: ProgressMonitorReason[] = [];
+  const repeated = trailingSignature(comparable, updated.signature);
+  if (repeated.length >= limits.repeatThreshold && repeated.every((item) => item.status === "completed")) {
+    reasons.push({ code: "repeated_action", eventIds: repeated.map((item) => item.eventId) });
+  }
+  const lastThree = comparable.slice(-3);
+  if (
+    lastThree.length === 3
+    && lastThree[0]?.signature === lastThree[2]?.signature
+    && lastThree[0]?.signature !== lastThree[1]?.signature
+    && lastThree.every((item) => item.status === "completed")
+  ) {
+    reasons.push({ code: "action_cycle", eventIds: lastThree.map((item) => item.eventId) });
+  }
+  return reasons;
 }
 
 function observationPartition(sessionId: string, viewport: Viewport): string {
