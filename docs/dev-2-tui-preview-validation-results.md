@@ -2,12 +2,12 @@
 
 日期：2026-09-18（含 2026-09-17 历史记录）
 文档角色：独立验证记录
-状态：Windows 专用 fixture 与 winpty PTY home（中文粘贴、resize、ESC→q、Ctrl-C）通过；真实 GLM 因整屏隐私闸门发现系统通知而未执行；完整 TUI Run、独立 ConPTY、跨平台与模型 API 仍未验证
-范围：Windows CUA 能力盘点、现有 probe 入口、受控 fixture 与真实 PTY home 验证
+状态：Windows 专用 fixture 与 winpty PTY home（中文粘贴、resize、ESC→q、Ctrl-C）通过；T10 一次真实 GLM→winpty TUI→CUA synthetic fixture 闭环已完成（preflight 视觉闸门与运行时 PID/bounds/focus 闸门通过，逐请求人工截图闸门未实现）；独立 ConPTY、跨平台、真实用户桌面与通用模型验收仍未验证
+范围：Windows CUA 能力盘点、现有 probe 入口、受控 fixture、真实 PTY home 与一次 T10 synthetic fixture 闭环
 
 ## 1. 当前结论
 
-在本轮 preflight 开始时，工作树没有可直接启动的 `cua-driver.exe`、CUA daemon 进程或相关 named pipe；pnpm store 中只有锁定的 Node SDK/native package。随后按授权下载并校验官方 daemon、启动私有 pipe 并完成一次 Windows fixture 窄链路；这仍不能外推为通用窗口发现、DPI、焦点、完整 TUI Run 或跨平台能力通过。
+在本轮 preflight 开始时，工作树没有可直接启动的 `cua-driver.exe`、CUA daemon 进程或相关 named pipe；pnpm store 中只有锁定的 Node SDK/native package。随后按授权下载并校验官方 daemon、启动私有 pipe 并完成 Windows fixture 窄链路，以及一次受预算与隐私闸门约束的 T10 真实模型闭环；这仍不能外推为通用窗口发现、DPI、焦点、真实用户桌面、独立 ConPTY 或跨平台能力通过。
 
 Windows host 为 x64；preflight 计划要求使用外部提供且版本来源明确的官方 `@trycua/cua-driver@0.22.2` 对应 daemon binary，配合专用 pipe 和只由本 probe 编译/启动的 `ProbeWindow.cs` fixture。该计划已在本轮按授权执行；后续批次仍不得复用本 daemon/fixture 或在未获具体 target 许可前启动、截图、输入。
 
@@ -43,7 +43,7 @@ Windows host 为 x64；preflight 计划要求使用外部提供且版本来源�
 1. 主协调提供外部官方 binary 的已验证路径、专用 pipe 名、ignored output 目录和目标能力；本轮不升级 lockfile。
 2. 只编译并启动 `ProbeWindow.cs` disposable fixture，确认 PID/窗口来自本 probe；先执行 capability inventory，记录 metadata、tools、session、health、permissions 的安全摘要。
 3. 通过主协调明确许可后，才做一次 fixture-only observe → click/type → observe；记录 viewport、DPI/显示尺寸、capture size、session lifecycle、action receipt、fixture-owned state change，并把截图/raw logs 留在 ignored `runs/`，不提交。
-4. 若要验证 TUI PTY，单独记录真实 PTY/交互终端事实；fake input 或普通 CLI help 不能冒充真人 TUI 验收。以上 1–3 已在本轮执行；第 4 的 no-goal home 已在第 8、9 节以 pywinpty/winpty 实测，完整 TUI Run 仍待另行许可。
+4. 若要验证 TUI PTY，单独记录真实 PTY/交互终端事实；fake input 或普通 CLI help 不能冒充真人 TUI 验收。以上 1–3 已在本轮执行；第 4 的 no-goal home 已在第 8、9 节以 pywinpty/winpty 实测；一次受限 T10 Run 见第 11 节，通用 TUI Run 仍待另行许可。
 
 在 daemon binary、permission、window identity、focus readback 或 fixture state 任一环节无法证明时，结果标为 `unknown`/`unsupported`，不把 driver accepted、截图变化或 action completed 解释为业务成功。lazy CUA、Linux platform adaptation、真实模型 API 与产品化 DEV-2 owner/target/TUI 仍不在本只读 preflight 的通过范围内。
 
@@ -63,15 +63,15 @@ fixture 使用仓库 `spikes/cua-driver/fixture/ProbeWindow.cs`，以 Windows Fr
 - click 与 type receipt 均为 `completed`，但报告同时要求 fixture-owned state 证明：fixture state 的 text length 从 `6` 变为 `31`，固定输入长度 `25`，`typedByFixture=true`，`focusConfirmed=true`。
 - 输入字符串仅为本轮授权的 synthetic `LightSpeaker harness test`；未操作私人窗口、用户文件、剪贴板、真实任务或模型。
 
-这只证明当前 Windows host、0.22.2 daemon、当前 WinForms fixture 与全桌面 foreground adapter 的窄链路。`accessibility=false`，没有通用 AX/window focus producer；fixture 自有 focus state 与 `bring_to_front` 不是跨应用焦点保证。它不证明任意窗口 target、DPI 变更、PID reuse、Wayland/macOS、完整 TUI Run 或业务目标成功；driver receipt 仍不等于业务成功。no-goal TUI home 的 winpty PTY 结果见第 9 节，完整 TUI Run 仍未执行。
+这只证明当前 Windows host、0.22.2 daemon、当前 WinForms fixture 与全桌面 foreground adapter 的窄链路。`accessibility=false`，没有通用 AX/window focus producer；fixture 自有 focus state 与 `bring_to_front` 不是跨应用焦点保证。它不证明任意窗口 target、DPI 变更、PID reuse、Wayland/macOS、通用 TUI Run 或业务目标成功；driver receipt 仍不等于业务成功。no-goal TUI home 的 winpty PTY 结果见第 9 节；一次受限 T10 Run 见第 11 节，不能扩展为通用模型/桌面验收。
 
 ## 6. 下一步闸门
 
-保留本轮 binary zip、提取文件、fixture、PNG 和去正文 JSON 摘要于 ignored `runs/dev2-tui-preview-validation/`，不纳入 Git。no-goal 的真实 winpty PTY home 结果见第 8、9 节；若继续完整 TUI Run，仍只使用专用真实终端会话记录交互事实。若继续 target/AX，先解决 `accessibility=false` 与平台 profile 的 producer/permission。任何模型 API 实验仍需单独给出模型、最多请求数、synthetic 数据和费用边界；本轮没有 API 证据。
+binary zip、提取文件、fixture、PNG 和去正文 JSON 摘要只保留于 ignored `runs/dev2-tui-preview-validation/` 或本次自有临时目录，不纳入 Git。no-goal 的真实 winpty PTY home 结果见第 8、9 节；T10 的一次真实模型闭环见第 11 节。若继续 target/AX，先解决 `accessibility=false` 与平台 profile 的 producer/permission。任何后续模型 API 实验仍需单独给出模型、最多请求数、synthetic 数据和费用边界；本次没有真实用户桌面或通用模型验收证据。
 
 ## 7. TUI 与真实模型的两层待验方案
 
-本节是下一阶段的执行门槛，不是已完成的完整 TUI Run 验收证据。当前 `apps/cli/src/tui.test.ts` 使用带 `isTTY`/`setRawMode` 模拟面的 `PassThrough`，已覆盖 home、中文粘贴、修正、resize、退出和 raw-mode 恢复的离线行为；它不是 Windows ConPTY/Windows Terminal/WinPTY，也不能单独证明真实 PTY 的字节流、焦点、粘贴或退出语义。此前未启动 Windows Terminal 或 winpty-agent；本机只读确认存在相应工具，但未把本机安装路径写入通用命令。第 8 节历史记录与第 9 节当前记录使用 pywinpty/winpty 启动了真实 no-goal TUI home，但仍未执行 TUI Run 或模型请求。
+本节是下一阶段的执行门槛，不是通用 TUI Run 验收证据。当前 `apps/cli/src/tui.test.ts` 使用带 `isTTY`/`setRawMode` 模拟面的 `PassThrough`，已覆盖 home、中文粘贴、修正、resize、退出和 raw-mode 恢复的离线行为；它不是 Windows ConPTY/Windows Terminal/WinPTY，也不能单独证明真实 PTY 的字节流、焦点、粘贴或退出语义。此前未启动 Windows Terminal 或 winpty-agent；本机只读确认存在相应工具，但未把本机安装路径写入通用命令。第 8 节历史记录与第 9 节当前记录使用 pywinpty/winpty 启动了真实 no-goal TUI home；第 11 节补充一次受限 T10 Run，不扩展为通用 TUI/桌面验收。
 
 ### 7.1 真实 PTY 离线闸门
 
@@ -99,7 +99,7 @@ pnpm --dir $repo --filter @computer-harness/cli start -- --tui --model glm-5.3-f
 
 真实模型层必须在 TUI 实现审查和单独许可后进行，最多 `6` 次主 GLM 请求、最多 `4` 个 primitive actions/steps，`--risk-model off`（不额外消耗风险模型请求），`--risk-max-model-requests 1` 仅作为配置上限而不宣称已调用。任务应只描述由本 probe 启动、PMv2、固定 title、PID 明确且覆盖 primary physical viewport 的专用 fixture；若无法证明整幅画面仅含 fixture，则改用合成 fixture 图/协议测试，绝不裁剪包含其他桌面的历史 PNG 来冒充新坐标或上传。建议目标是一次观察后对 fixture 的单次受控 click/type，并以 fixture-owned state、request/step 计数和安全摘要作为结果；模型完成、driver receipt 或画面变化都不能单独证明业务成功。
 
-该层需分别记录：provider 实际请求数与响应数、run/step 上限是否触发、CUA target/focus/PID 校验、fixture state 变化、cleanup/owner 结果，以及费用/API/桌面边界。当前 `.env` 中仅确认存在 `ZHIPU_API_KEY` key 名，值仍是私密凭据；本轮未调用 GLM、未发送屏幕或 fixture 图、未访问私人窗口，故真实模型层仍为 `pending`。若实机 PTY 或整屏 fixture 任何一项不能证明，唯一可接受的替代是合成 fixture 图协议测试，不能把替代结果记为真人 TUI 或真实桌面验收。
+该层需分别记录：provider 实际请求数与响应数、run/step 上限是否触发、CUA target/focus/PID 校验、fixture state 变化、cleanup/owner 结果，以及费用/API/桌面边界。第 10 节记录了第一次因整屏通知中止的尝试；第 11 节记录了随后通过隐私闸门的 T10 synthetic fixture Run。`.env` 中的私密凭据只由本次进程读取，未写入报告；本次结果仍不能扩展为真人用户桌面验收。若实机 PTY 或整屏 fixture 后续任何一项不能证明，唯一可接受的替代是合成 fixture 图协议测试，不能把替代结果记为真人 TUI 或真实桌面验收。
 
 ## 8. 真实 no-goal winpty PTY home 实测（2026-09-17 历史记录）
 
@@ -130,8 +130,6 @@ pnpm --dir $repo --filter @computer-harness/cli start -- --tui --model glm-5.3-f
 - `esc-q`：`probe_exit=0`、child `exit_status=0`、escape write=true、q write=true、forced=false、`passed=true`。
 - `ctrl-c`：`probe_exit=0`、child `exit_status=0`、Ctrl-C write=true、forced=false、`passed=true`。
 
-`PtyProcess` 外层 socket 的 `isatty=false` 是 wrapper 自身属性，不作为 child TTY 结论；child 能通过应用自身 `process.stdin.isTTY`/`process.stdout.isTTY` 检查并进入 HOME。cursor restore 与 exit 证据证明本次两种受测退出路径的可观测清理结果，但不扩展为未测试的完整 TUI Run 或独立 ConPTY 结论。运行后的已知 daemon、fixture、PTY helper 进程数均为 `0`；本次没有新增提交或推送。
-`PtyProcess` 外层 socket 的 `isatty=false` 是 wrapper 自身属性，不作为 child TTY 结论；child 能通过应用自身 `process.stdin.isTTY`/`process.stdout.isTTY` 检查并进入 HOME。cursor restore 与 exit 证据证明本次两种受测退出路径的可观测清理结果，但不扩展为未测试的完整 TUI Run 或独立 ConPTY 结论。运行后的已知 daemon、fixture、PTY helper 进程数均为 `0`；`dev2-pty-host.cs` 仅是诊断实验 helper，不是产品运行时依赖；本次没有新增提交或推送。
 `PtyProcess` 外层 socket 的 `isatty=false` 是 wrapper 自身属性，不作为 child TTY 结论；child 能通过应用自身 `process.stdin.isTTY`/`process.stdout.isTTY` 检查并进入 HOME。cursor restore 与 exit 证据证明本次两种受测退出路径的可观测清理结果，但不扩展为未测试的完整 TUI Run 或独立 ConPTY 结论。运行后的已知 daemon、fixture、PTY helper 进程数均为 `0`；失败的独立 ConPTY helper 未作为产品依赖保留；本次没有新增提交或推送。
 
 ## 10. 2026-09-18 真实 GLM 闸门中止
@@ -140,4 +138,69 @@ pnpm --dir $repo --filter @computer-harness/cli start -- --tui --model glm-5.3-f
 
 本地视觉检查发现 primary 画面右下角仍有 Windows 安全中心通知 toast，故截图不能证明“仅 synthetic fixture 完整覆盖”。立即停止并未创建 go marker，未启动 TUI child、未加载 `<envfile>`、未发送 screenshot/fixture 图给 GLM，provider/API 请求数为 `0`，也未执行任何 click/type/keypress。该 PNG 及临时 daemon/fixture 输出随后已删除，不上传、不入 Git；PNG 是本次临时生成的运行资产，删除后不能从仓库恢复，若需重新取证只能在新的隐私闸门下重新生成；本次中止不计为真实模型或真实桌面验收。
 
-cleanup：只清理由本 probe 创建的 daemon/fixture/编排进程；已知自有 daemon、fixture、helper 进程均为 `0`。因此真实 GLM 任务、provider diagnostics、run/events 与 fixture action 结果本轮均为 `not run`；只有第 9 节 winpty no-goal home 与本节隐私闸门失败可报告。`dev2-fullscreen-fixture.cs`、`dev2-glm-pty.py`、`dev2-glm-tui-run.ts` 均为本轮诊断脚本，不表示产品依赖。
+cleanup：只清理由本 probe 创建的 daemon/fixture/编排进程；已知自有 daemon、fixture、helper 进程均为 `0`。因此第 10 节那次中止尝试的真实 GLM 任务、provider diagnostics、run/events 与 fixture action 结果均为 `not run`；第 11 节是随后单独通过 preflight gate 的 T10 记录。`dev2-fullscreen-fixture.cs`、`dev2-glm-pty.py`、`dev2-glm-tui-run.ts` 均为本轮诊断脚本，不表示产品依赖。
+
+## 11. 2026-09-18 T10 真实 TUI → GLM → CUA synthetic fixture 闭环
+
+第 10 节的整屏隐私闸门中止后，按主协调的最后一次授权等待通知消失，重新启动本 probe 自有的官方 `cua-driver-rs` `0.22.2` daemon、独立 PMv2 borderless/topmost fixture 和真实 winpty TUI。模型发送前的 preflight 再次确认：backend=`cua-driver-daemon`、physical viewport=`2560×1600`、screenshot/pointer/keyboard 均为 `true`、accessibility=`false`；fixture PID/window identity 由本 probe 持有，bounds 覆盖 primary，DPI=`144`，`formActive=true`。go marker 只在该 preflight PNG 本地视觉检查确认无 Windows 通知或私人窗口后创建。随后实际发送给 GLM 的是同一自有 full-screen synthetic fixture 的截图；没有把截图提交 Git 或公开上传。四张运行后生成的截图只在本地复核，均为该 synthetic fixture；本记录不把事后复核写成逐请求发送前的人工视觉检查：后续发送前依赖的是固定 PID/window bounds/formActive monitor 与 preflight gate，未实现每个 provider request 的独立人工截图闸门。截图、trajectory 和 provider 摘要在清理前仅存在本机临时运行目录，随后清理由本 probe 创建的 daemon、fixture、编排进程和临时资产。
+
+本次是 T10 最小正常 fixture 任务，不是 REL1 或真实用户桌面验收。运行配置为 `glm-5.3-flash`、`computer=cua`、`profile=live-interactive`、`risk-guard=layered`、`risk-model=off`，主模型最多 6 次请求、primitive 最多 4 步；实际没有关闭 layered guard，也没有使用风险模型。真实 winpty child 的 `run_marker`、`run_finished_marker` 均存在，`exit_status=0`，`cursor_restore=true`，未强制终止，approval count=`0`。
+
+实际请求与动作计数如下：
+
+- 主模型请求 `4`，响应 `4`，重试 `0`，provider failure=`0`，未触及 `6` 请求上限；四次响应 `finishReason=tool_calls`。
+- provider usage 合计：prompt=`35,610`、completion=`979`、total=`36,589` tokens。provider exchange 没有返回 cost 字段，因此本次只记录 token usage，不臆造金额。
+- primitive actions=`3`（click button、click input、type），guard evaluations/allow=`3/3`，risk-model requests=`0`，invalid/rejected/tool execution failures/runtime errors 均为 `0`。
+- 事件摘要：`observation.created=4`、`model.request.started=4`、`model.response.received=4`、`tool.call.received/completed=3/3`、`run.finished=1`；没有 retry 或 provider error。
+
+业务结果由 fixture-owned state 证明，而非仅凭截图或 driver receipt：`buttonClicked=true`、`containsExpected=true`、`textLength=15`、`text=Harness preview`、`inputFocused=true`、`formActive=true`、`eventSequence=52`；primary/window bounds 均为 `0,0,2560,1600`、`topMost=true`、`borderless=true`。TUI child 与 fixture 均由本 probe 创建并在结束时清理，结束后自有 daemon、fixture、helper 进程数为 `0`。模型报告成功与 fixture-owned state 相互吻合，但这只证明本次固定 synthetic fixture 的窄链路；不外推为任意窗口 target、通用焦点、私有桌面、跨平台或产品化 CUA 通过。
+
+可复核入口是本轮新增的 `spikes/cua-driver/dev2-glm-tui-run.ts`（隔离 daemon/fixture、preflight gate、PID/bounds/focus monitor）与 `spikes/cua-driver/dev2-glm-pty.py`（真实 `pywinpty` winpty child）；后者启动正式 `apps/cli/dist/index.js`，不是 PassThrough fake terminal。发送配置实际为 `--tui --model glm-5.3-flash --computer cua --profile live-interactive --risk-guard layered --risk-model off --max-steps 4 --max-model-requests 6`，原仓库 `.env` 只由该进程加载，值未输出。原始临时运行资产已清理，下面的脱敏 JSON 摘要与本地脚本保留可复核计数：
+
+```json
+{
+  "runClass": "T10-synthetic-fixture",
+  "provider": { "model": "glm-5.3-flash", "requests": 4, "responses": 4, "retries": 0, "riskModelRequests": 0, "promptTokens": 35610, "completionTokens": 979, "totalTokens": 36589, "costField": null },
+  "tui": { "backend": "pywinpty-winpty", "exitStatus": 0, "runFinished": true, "cursorRestored": true, "forcedTermination": false },
+  "cua": { "daemon": "0.22.2", "viewport": "2560x1600 physical", "accessibility": false, "guardAllows": 3, "primitiveActions": 3 },
+  "fixture": { "buttonClicked": true, "containsExpected": true, "textLength": 15, "formActive": true, "fullScreen": true, "eventSequence": 52 },
+  "privacy": { "preflightVisualGatePassed": true, "perRequestHumanVisualGate": false, "privateTarget": false, "rawArtifactsCommitted": false }
+}
+```
+
+## 12. 2026-09-18 0.22.2 窗口发现、frame、focus、局部 capture 与关闭拒绝
+
+本轮使用 `spikes/cua-driver/dev2-window-contract.ts` 与 `spikes/cua-driver/dev2-window-fixture.cs`，只启动两个本 probe 编译的 synthetic WinForms 窗口（target/witness），没有模型请求、没有读取 `.env`、没有发送截图给模型，也没有操作用户窗口。脚本运行前从真实 daemon `listToolsJson` 读取 inventory，并保存脱敏 schema 摘要；57 个工具中确认 `list_windows`、`bring_to_front`、`set_window_frame`、`launch_app`、`verify_state` 存在。`verify_state` 的真实 schema required 为 `pid/window_id/expect`，并暴露 `include_screenshot`；`set_window_frame` required 为 `pid/window_id/x/y/width/height`，没有猜测不存在的接口。
+
+实际 safe JSON 证据写入 ignored `runs/dev2-tui-window-contract/window-contract-summary.json`（不含窗口标题、路径或原始工具正文），运行结束后 daemon 与两个 fixture 均清理：
+
+- `list_windows` 按本 probe 返回的 PID 找到两个 window id，两个初始 origin 均非零；随后 target 的请求 frame `240,180,960×680`、`360,260,1040×720` 均由 `set_window_frame` 返回成功，`list_windows` 读回请求 frame，fixture PMv2 状态同时报告 DPI=`144`。
+- `bring_to_front` 在两个自有窗口间交替执行；target/witness 的独立 state 文件分别读到 active/inactive 的互斥变化，target 最后重新 active，证明不是只信 driver receipt。
+- `verify_state(include_screenshot=true)` 返回的 PNG 分别为 `958×678` 与 `1038×718`，即请求 frame 减去 WinForms 2px non-client border；脚本只把这种 exact client 尺寸视为 window-local capture，桌面尺寸图不会落盘。witness 移到 `640,460,760×480` 覆盖 target 后置前景，target 仍返回相同 `1038×718` 尺寸且 SHA-256 与遮挡前相同，表明该窗口 capture 不随自有遮挡窗口变化。
+- 关闭 witness 后，`list_windows` 不再返回其 PID；对同一已关闭 `pid/window_id` 的 `verify_state` 返回稳定失败（无截图），`set_window_frame` 返回 `isError=true`，没有向关闭 target 发送输入动作。target 最终也由本 probe 清理。
+
+这证明的是当前 Windows host/0.22.2 daemon 对本 probe 自有窗口的发现、移动/resize、window-local verify capture、焦点 readback 与 stale-target 拒绝窄链路；不证明通用窗口语义、跨平台、AX/accessibility 或产品化 target producer。
+
+## 13. 2026-09-18 CLI CUA doctor 最终实机验收
+
+在最终 doctor dist 更新后，使用 Node 24、独立 Hidden `cua-driver` `0.22.2` daemon/private pipe，未读取 `.env`、未调用 provider/API、未启动 fixture、未截图、未执行窗口输入。正式入口命令（socket 由本次会话临时生成）为：
+
+```powershell
+pnpm --filter @computer-harness/cli start -- --doctor --computer cua --cua-socket <private-pipe> --doctor-timeout-ms 15000
+```
+
+该正式 pnpm wrapper 实际退出码为 `1`；safe report 的 `metadata` 为 `unknown/transport`，其余 inventory/session/health/permissions 为 `unknown/metadata_invalid`，cleanup 为 `supported`，总 status=`unknown`。pnpm 输出仍展示了 literal separator `--`，CLI 源码已在入口剥离该 transport syntax；本次事实记录为该 wrapper 路径在当前 Windows host 的 transport unknown，不把它伪称为 green。
+
+为区分 wrapper transport 与 doctor 本身，使用同一最终 `apps/cli/dist/index.js`、同一 daemon 合同和同一 timeout 做了不经 pnpm wrapper 的 CLI 复核：退出码仍为 `1`，但 metadata=`supported`（driver=`0.22.2`、contract=`0.7.0`、tools schema=`1`、capability=`1`、MCP protocol=`2025-06-18`、`embedded=false`），inventory=`supported`、toolCount=`57`；声明的 window discovery/foreground/capture 仅是 inventory capability declaration，不是 live fixture 验收。session=`unknown/desktop_capture_scope_unconfirmed`，health=`unknown/session_start_invalid`，permissions=`unknown/session_start_invalid`，cleanup=`unknown/session_start_unknown`，总 status=`unknown`。
+
+同一 daemon 的 content-free session state 复核得到：`start.active=true`、`revived=false`，`captureScope=0`、`effectiveScope=0`、`desktopUnlocked=false`；随后 `end.active=false`，daemon stop exit=`0`。`desktop_capture_scope_unconfirmed` 是当前 doctor 对该安全布尔/枚举 readback 的保守诊断码，不表示 Windows 锁屏，也不把 CUA live 能力臆判为失败；doctor 保守地不继续 health/permissions 断言，也不把 cleanup unknown 隐藏。结束后自有 daemon/fixture 进程数为 `0`，没有残留桌面动作或凭证读取。
+
+有界 argv 定位确认：direct Node、direct app-cwd 与 `pnpm exec` 收到的 socket 参数 JSON/字符码完全相同，长度均为 `44`，形状为 `\\\\.\\pipe\\computer-harness-dev2-...`；cwd 均为 CLI package 目录。正式 `pnpm start` 额外打印 literal separator `--`，但入口已先剥离它，不能解释 metadata transport；因此没有证据表明反斜杠被 PowerShell/pnpm 消耗。可交接的成功 metadata/inventory 路径是（`<node24-bin>` 置于 PATH）：
+
+```powershell
+node <repo>/apps/cli/dist/index.js --doctor --computer cua --cua-socket <private-pipe> --doctor-timeout-ms 15000
+```
+
+该 direct 命令仍会如实以 `session=unknown/desktop_capture_scope_unconfirmed` 退出 `1`，而不是假称 live doctor green；pnpm wrapper 的 transport limitation 保留在上文。
+
+最终验证：窗口 probe `exactOptionalPropertyTypes` noEmit=`0`，Node 24 root `pnpm run typecheck`=`0`（`tsc -b` 与 spikes tsconfig）。本节结果仅证明 doctor 的真实无副作用诊断边界：metadata/inventory 可在 direct CLI 路径核验，当前 session 的 desktop capture scope 未确认则后续健康/权限与 live desktop 仍为 unknown；不证明完整模型运行、真实用户桌面或通用 CUA 通过。
