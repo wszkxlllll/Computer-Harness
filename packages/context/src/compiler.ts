@@ -4,6 +4,7 @@ import type {
   ContextCompileInput,
   ContextCompiler,
   ContextBudgetReport,
+  MemoryRecallService,
   RunFeatureConfig,
 } from "@computer-harness/runtime";
 import { createHash } from "node:crypto";
@@ -20,6 +21,7 @@ export interface DefaultContextCompilerOptions {
   maxHistoryEvents?: number;
   maxInputTokens?: number;
   memoryMaxTokens?: number;
+  memoryRecall?: MemoryRecallService;
   features?: RunFeatureConfig;
 }
 export class DefaultContextCompiler implements ContextCompiler {
@@ -28,6 +30,7 @@ export class DefaultContextCompiler implements ContextCompiler {
   private readonly maxHistoryEvents: number;
   private readonly maxInputTokens: number | undefined;
   private readonly memoryMaxTokens: number;
+  private readonly memoryRecall: MemoryRecallService | undefined;
   private readonly features: RunFeatureConfig;
 
   public constructor(
@@ -49,6 +52,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     if (!Number.isInteger(this.memoryMaxTokens) || this.memoryMaxTokens < 1) {
       throw new Error("memoryMaxTokens must be a positive integer");
     }
+    this.memoryRecall = options.memoryRecall;
     this.features = options.features ?? { planning: "tasks-v1", memory: "facts-v1", batching: "off" };
   }
 
@@ -63,10 +67,22 @@ export class DefaultContextCompiler implements ContextCompiler {
     const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(baseTools) : baseTools;
     const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
+    const recallSelection = features.memory !== "off" && input.memory !== undefined && this.memoryRecall !== undefined
+      ? await this.memoryRecall.search(input.memory, {
+          runId: input.runId,
+          originalGoal: input.goal,
+          latestUserCorrections: orderedEvents
+            .filter((event): event is Extract<RuntimeEvent, { type: "user.input.received" }> => event.type === "user.input.received")
+            .slice(-4)
+            .map((event) => event.text),
+          ...(input.latestObservation === undefined ? {} : { computerSessionId: input.latestObservation.computerSessionId }),
+        }, signal)
+      : undefined;
     const memoryProjection = features.memory !== "off" && input.memory !== undefined
       ? formatMemory(input.memory, input.plan, input.context?.memoryMaxTokens ?? this.memoryMaxTokens, {
           runId: input.runId,
           ...(input.latestObservation === undefined ? {} : { computerSessionId: input.latestObservation.computerSessionId }),
+          ...(recallSelection === undefined ? {} : { recall: recallSelection }),
         })
       : undefined;
     const memoryText = memoryProjection?.text;
@@ -254,6 +270,17 @@ export class DefaultContextCompiler implements ContextCompiler {
           selectedRevalidationFactIds: memoryProjection.selection.revalidationCandidates.map((candidate) => candidate.fact.id),
           omitted: memoryProjection.rendered.omitted,
           excluded: memoryProjection.selection.excluded,
+        },
+      }),
+      ...(memoryProjection?.recall === undefined ? {} : {
+        memoryRetrieval: {
+          method: memoryProjection.recall.method,
+          semanticStatus: memoryProjection.recall.semanticStatus,
+          stateStable: memoryProjection.recall.stateStable,
+          embeddingBudgetUsed: memoryProjection.recall.embeddingBudgetUsed,
+          embeddingBudgetLimit: memoryProjection.recall.embeddingBudgetLimit,
+          admitted: memoryProjection.recall.admitted,
+          revalidation: memoryProjection.recall.revalidation,
         },
       }),
       observationIncluded: latestObservation !== undefined,

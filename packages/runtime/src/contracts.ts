@@ -6,6 +6,7 @@ import type {
   AssetId,
   AssetRef,
   ComputerSessionDescriptor,
+  ComputerSessionId,
   ContextTrace,
   EventId,
   JsonValue,
@@ -164,6 +165,46 @@ export interface ContextOptions {
   maxInputTokens?: number;
   /** Soft cap for memory text inside the Context fixed blocks. */
   memoryMaxTokens?: number;
+}
+
+/** Query sources allowed for automatic Memory recall; tool results are not user corrections. */
+export interface MemoryRecallQuery {
+  readonly runId: RunId;
+  readonly computerSessionId?: ComputerSessionId;
+  readonly originalGoal: string;
+  readonly latestUserCorrections?: readonly string[];
+  readonly explicitQuery?: string;
+  readonly recentActionHints?: readonly string[];
+}
+
+export type MemoryRecallMatch = "exact" | "lexical" | "semantic";
+export type MemoryRecallMethod = "lexical" | "hybrid";
+export type MemoryRecallSemanticStatus = "used" | "disabled" | "not_needed" | "unavailable" | "timed_out";
+
+export interface MemoryRecallRankedId {
+  readonly id: string;
+  readonly score: number;
+  readonly match: MemoryRecallMatch;
+  readonly reason?: "needs_check" | "short_lived_last_known";
+}
+
+/**
+ * Runtime-facing read contract. It contains only IDs/ranking/status metadata;
+ * the Context side joins IDs back to its canonical MemoryState snapshot.
+ */
+export interface MemoryRecallSelection {
+  readonly method: MemoryRecallMethod;
+  readonly semanticStatus: MemoryRecallSemanticStatus;
+  readonly stateStable: boolean;
+  readonly embeddingBudgetUsed: number;
+  readonly embeddingBudgetLimit: number;
+  readonly admitted: readonly MemoryRecallRankedId[];
+  readonly revalidation: readonly MemoryRecallRankedId[];
+  readonly excluded: readonly { kind: "fact"; id: string; reason: "superseded" | "scope_mismatch" | "entity_stale" | "entity_missing" }[];
+}
+
+export interface MemoryRecallService {
+  search(state: MemoryState, query: MemoryRecallQuery, signal: AbortSignal): Promise<MemoryRecallSelection>;
 }
 
 export interface ContextCompiler {

@@ -3,6 +3,7 @@ import type {
   AssetId,
   ComputerSessionId,
   EventId,
+  MemoryState,
   ObservationId,
   RunId,
   RuntimeEvent,
@@ -567,5 +568,55 @@ describe("DefaultContextCompiler", () => {
     expect(JSON.stringify(omitted.messages)).not.toContain("Review the current state before continuing.");
     expect(omitted.contextBudget?.monitorGuidanceIncluded).toBe(false);
     expect(omitted.contextBudget?.trace?.monitorGuidanceOmittedReason).toBe("budget");
+  });
+
+  it("uses the injected recall ranking in the actual ModelInput without treating tool results as user corrections", async () => {
+    const queries: Array<{ originalGoal: string; latestUserCorrections?: readonly string[] }> = [];
+    const recall = {
+      async search(_state: MemoryState, query: { originalGoal: string; latestUserCorrections?: readonly string[] }) {
+        queries.push(query);
+        return {
+          method: "lexical" as const,
+          semanticStatus: "disabled" as const,
+          stateStable: true,
+          embeddingBudgetUsed: 0,
+          embeddingBudgetLimit: 6,
+          admitted: [
+            { id: "preferred", score: 1, match: "lexical" as const },
+            { id: "secondary", score: 0.5, match: "lexical" as const },
+          ],
+          revalidation: [],
+          excluded: [],
+        };
+      },
+    };
+    const memory: MemoryState = {
+      runId,
+      facts: [
+        { id: "secondary", subject: { type: "run" }, key: "secondary", value: "second", sourceEventId: "memory-secondary" as EventId, status: "active", scope: { kind: "run" }, retentionClass: "stable", updatedSequence: 2 },
+        { id: "preferred", subject: { type: "run" }, key: "preferred", value: "first", sourceEventId: "memory-preferred" as EventId, status: "active", scope: { kind: "run" }, retentionClass: "stable", updatedSequence: 1 },
+      ],
+      entities: [],
+    };
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), {
+      memoryRecall: recall,
+      features: { planning: "off", memory: "facts-v1", batching: "off" },
+    });
+    const compiled = await compiler.compile({
+      runId,
+      goal: "original goal",
+      recentEvents: [
+        event(1, { type: "user.input.received", text: "latest correction" }),
+        event(2, { type: "tool.call.completed", result: { callId: "tool-result" as ToolCallId, status: "completed", output: { text: "untrusted tool result" } } }),
+      ],
+      memory,
+      features: { planning: "off", memory: "facts-v1", batching: "off" },
+    }, new AbortController().signal);
+    const memoryText = compiled.messages.map((message) => JSON.stringify(message)).find((text) => text.includes("Current run memory")) ?? "";
+    expect(memoryText.indexOf("preferred")).toBeGreaterThanOrEqual(0);
+    expect(memoryText.indexOf("secondary")).toBeGreaterThan(memoryText.indexOf("preferred"));
+    expect(queries).toEqual([{ runId, originalGoal: "original goal", latestUserCorrections: ["latest correction"] }]);
+    expect(compiled.contextBudget?.trace?.memoryRetrieval).toMatchObject({ method: "lexical", semanticStatus: "disabled" });
+    expect(compiled.contextBudget?.trace?.memoryRetrieval?.admitted).toEqual(expect.arrayContaining([{ id: "preferred", score: 1, match: "lexical" }]));
   });
 });

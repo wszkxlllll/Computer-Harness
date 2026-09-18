@@ -12,6 +12,7 @@ import {
   createDefaultToolRegistry,
   type ActionPolicy,
   type ContextCompiler,
+  type MemoryRecallService,
   type ProviderAdapter,
   type RunFeatureConfig,
   type RuntimePolicy,
@@ -98,10 +99,12 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ? createActionPolicy(config, riskProvider)
       : dependencies.createActionPolicy(config, riskProvider);
     const features = featureConfig(config);
-    const contextCompiler = dependencies.createContextCompiler?.(tools, features, config) ?? new DefaultContextCompiler(tools, {
+    const contextMemoryRecall = memoryRetrievalService === undefined ? undefined : createContextMemoryRecall(memoryRetrievalService);
+    const contextCompiler = dependencies.createContextCompiler?.(tools, features, config, contextMemoryRecall) ?? new DefaultContextCompiler(tools, {
       mode: config.contextMode,
       maxHistoryEvents: config.contextMaxHistoryEvents,
       features,
+      ...(contextMemoryRecall === undefined ? {} : { memoryRecall: contextMemoryRecall }),
       ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
     });
@@ -147,6 +150,24 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     await eventWriter?.close().catch(() => undefined);
     throw error;
   }
+}
+
+function createContextMemoryRecall(service: HybridMemoryRecallService): MemoryRecallService {
+  return {
+    async search(state, query, signal) {
+      const result = await service.search(state, query, signal);
+      return {
+        method: result.trace.method,
+        semanticStatus: result.trace.semanticStatus,
+        stateStable: result.trace.stateStable,
+        embeddingBudgetUsed: result.trace.embeddingBudgetUsed,
+        embeddingBudgetLimit: result.trace.embeddingBudgetLimit,
+        admitted: result.trace.admitted,
+        revalidation: result.trace.revalidation,
+        excluded: result.trace.excluded,
+      };
+    },
+  };
 }
 
 function resolveMemoryRetrievalMode(config: ResolvedRunConfig): MemoryRetrievalMode {

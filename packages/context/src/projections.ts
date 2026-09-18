@@ -1,5 +1,5 @@
 import type { ComputerSessionId, PlanState, MemoryState } from "@computer-harness/protocol";
-import type { RunFeatureConfig } from "@computer-harness/runtime";
+import type { MemoryRecallSelection, RunFeatureConfig } from "@computer-harness/runtime";
 import { selectMemoryForContext, type MemoryContextSelection } from "./memory-recall.js";
 
 export function formatPlan(plan: PlanState): string {
@@ -40,16 +40,27 @@ export interface MemoryProjection {
     revalidationFactIds: readonly string[];
     omitted: readonly { id: string; class: "admitted" | "revalidation"; reason: "budget" | "not_rendered" }[];
   };
+  recall?: MemoryRecallSelection;
 }
 
 export function formatMemory(
   memory: MemoryState,
   plan: PlanState | undefined,
   maxTokens = Number.POSITIVE_INFINITY,
-  context: { runId?: import("@computer-harness/protocol").RunId; computerSessionId?: ComputerSessionId } = {},
+  context: { runId?: import("@computer-harness/protocol").RunId; computerSessionId?: ComputerSessionId; recall?: MemoryRecallSelection } = {},
 ): MemoryProjection | undefined {
   const selection = selectMemoryForContext(memory, plan, {}, context);
-  if (selection.indexFacts.length === 0 && selection.indexEntities.length === 0 && selection.revalidationCandidates.length === 0 && selection.excluded.length === 0) return undefined;
+  if (selection.indexFacts.length === 0 && selection.indexEntities.length === 0 && selection.revalidationCandidates.length === 0 && selection.excluded.length === 0) {
+    if (context.recall === undefined) return undefined;
+    return {
+      text: "",
+      estimatedTokens: 0,
+      truncated: false,
+      selection,
+      rendered: { admittedFactIds: [], revalidationFactIds: [], omitted: [] },
+      recall: context.recall,
+    };
+  }
   const hotFactIds = new Set(selection.hotFacts.map((fact) => fact.id));
   const hotEntityIds = new Set(selection.hotEntities.map((entity) => entity.id));
   type RenderRecord = { text: string; id?: string; class?: "admitted" | "revalidation" };
@@ -123,8 +134,8 @@ export function formatMemory(
   if (renderedGroups.length === 0) {
     const marker = "[…memory truncated; query by id; packets omitted]";
     const minimal = `${header}\n${marker}`;
-    if (!finiteBudget || estimateTextTokens(minimal) <= maxTokens) return { text: minimal, estimatedTokens: estimateTextTokens(minimal), truncated: true, selection, rendered };
-    return { text: "", estimatedTokens: 0, truncated: true, selection, rendered };
+    if (!finiteBudget || estimateTextTokens(minimal) <= maxTokens) return { text: minimal, estimatedTokens: estimateTextTokens(minimal), truncated: true, selection, rendered, ...(context.recall === undefined ? {} : { recall: context.recall }) };
+    return { text: "", estimatedTokens: 0, truncated: true, selection, rendered, ...(context.recall === undefined ? {} : { recall: context.recall }) };
   }
   const lines = [header, ...renderedGroups.flat()];
   let text = lines.join("\n");
@@ -133,7 +144,7 @@ export function formatMemory(
     if (!finiteBudget || estimateTextTokens(`${text}\n${marker}`) <= maxTokens) text = `${text}\n${marker}`;
     else omitted = true;
   }
-  return { text, estimatedTokens: estimateTextTokens(text), truncated: omitted || selection.excluded.length > 0, selection, rendered };
+  return { text, estimatedTokens: estimateTextTokens(text), truncated: omitted || selection.excluded.length > 0, selection, rendered, ...(context.recall === undefined ? {} : { recall: context.recall }) };
 }
 
 const MEMORY_VALUE_PREVIEW_LIMIT = 160;

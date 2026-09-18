@@ -8,6 +8,7 @@ import {
   type PlanState,
   type RunId,
 } from "@computer-harness/protocol";
+import type { MemoryRecallSelection } from "@computer-harness/runtime";
 
 export interface MemoryRecallLimits {
   maxIndexFacts?: number;
@@ -21,6 +22,7 @@ export interface MemoryRecallLimits {
 export interface MemoryRecallContext {
   runId?: RunId;
   computerSessionId?: ComputerSessionId;
+  recall?: MemoryRecallSelection;
 }
 
 export type MemoryRevalidationReason = "needs_check" | "short_lived_last_known";
@@ -68,8 +70,8 @@ export function selectMemoryForContext(
   const relevance = (ids: readonly string[] | undefined): number => Math.max(0, ...(ids ?? []).map((id) => taskPriority.get(id) ?? 0));
   const entityById = new Map(memory.entities.map((entity) => [entity.id, entity]));
   const excluded: MemoryExcludedRecord[] = [];
-  const revalidationCandidates: MemoryRevalidationCandidate[] = [];
-  const admittedFacts: MemoryFact[] = [];
+  let revalidationCandidates: MemoryRevalidationCandidate[] = [];
+  let admittedFacts: MemoryFact[] = [];
   const activeEntities: MemoryEntity[] = [];
   const memoryRunApplicable = context.runId === undefined || memory.runId === context.runId;
 
@@ -93,6 +95,38 @@ export function selectMemoryForContext(
     }
   }
 
+  if (context.recall !== undefined) {
+    const admittedById = new Map(admittedFacts.map((fact) => [fact.id, fact]));
+    const revalidationById = new Map(revalidationCandidates.map((candidate) => [candidate.fact.id, candidate]));
+    const rankedAdmitted: MemoryFact[] = [];
+    const rankedRevalidation: MemoryRevalidationCandidate[] = [];
+    for (const ranked of context.recall.admitted) {
+      const fact = admittedById.get(ranked.id);
+      if (fact !== undefined) rankedAdmitted.push(fact);
+    }
+    for (const ranked of context.recall.revalidation) {
+      const candidate = revalidationById.get(ranked.id);
+      if (candidate !== undefined) rankedRevalidation.push({ fact: candidate.fact, reason: ranked.reason ?? candidate.reason });
+    }
+    admittedFacts = rankedAdmitted;
+    revalidationCandidates = rankedRevalidation;
+    const excludedIds = new Set(excluded.map((item) => `${item.kind}:${item.id}`));
+    for (const item of context.recall.excluded) {
+      const key = `${item.kind}:${item.id}`;
+      if (!excludedIds.has(key)) {
+        excluded.push(item);
+        excludedIds.add(key);
+      }
+    }
+    const selectedEntityIds = new Set(
+      [...admittedFacts, ...revalidationCandidates.map((candidate) => candidate.fact)]
+        .flatMap((fact) => fact.subject.type === "entity" ? [fact.subject.entityId] : []),
+    );
+    for (let index = activeEntities.length - 1; index >= 0; index -= 1) {
+      if (!selectedEntityIds.has(activeEntities[index]!.id)) activeEntities.splice(index, 1);
+    }
+  }
+
   const boundedExcluded = excluded.slice(0, maxExcluded);
   const revalidationScore = (candidate: MemoryRevalidationCandidate): readonly number[] => [
     Math.max(relevance(candidate.fact.relatedTaskIds), candidate.fact.subject.type === "entity" ? relevance(entityById.get(candidate.fact.subject.entityId)?.relatedTaskIds) : 0),
@@ -113,8 +147,12 @@ export function selectMemoryForContext(
     }
     return 0;
   };
-  const boundedRevalidation = revalidationCandidates.sort((left, right) => compare(revalidationScore(left), revalidationScore(right))).slice(0, maxRevalidationFacts);
-  const candidateFacts = admittedFacts.sort((left, right) => compare(factScore(left), factScore(right))).slice(0, maxIndexFacts);
+  const boundedRevalidation = context.recall === undefined
+    ? revalidationCandidates.sort((left, right) => compare(revalidationScore(left), revalidationScore(right))).slice(0, maxRevalidationFacts)
+    : revalidationCandidates.slice(0, maxRevalidationFacts);
+  const candidateFacts = context.recall === undefined
+    ? admittedFacts.sort((left, right) => compare(factScore(left), factScore(right))).slice(0, maxIndexFacts)
+    : admittedFacts.slice(0, maxIndexFacts);
   const sortedEntities = activeEntities.sort((left, right) => compare(entityScore(left), entityScore(right)));
   const requiredEntityIds = [...new Set(candidateFacts.flatMap((fact) => fact.subject.type === "entity" ? [fact.subject.entityId] : []))];
   const indexEntities: MemoryEntity[] = [];

@@ -620,6 +620,17 @@ export interface ContextMemorySelectionTrace {
   excluded: readonly { kind: "fact" | "entity"; id: string; reason: MemoryRecallExclusionReason }[];
 }
 
+/** Safe automatic Memory retrieval metadata; never includes query/value/vector text. */
+export interface ContextMemoryRetrievalTrace {
+  method: "lexical" | "hybrid";
+  semanticStatus: "used" | "disabled" | "not_needed" | "unavailable" | "timed_out";
+  stateStable: boolean;
+  embeddingBudgetUsed: number;
+  embeddingBudgetLimit: number;
+  admitted: readonly { id: string; score: number; match: "exact" | "lexical" | "semantic" }[];
+  revalidation: readonly { id: string; score: number; match: "exact" | "lexical" | "semantic"; reason?: "needs_check" | "short_lived_last_known" }[];
+}
+
 /** Private diagnostic metadata emitted alongside a prepared Provider request;
  * it contains no body/path, and its hash is not an anonymity guarantee. */
 export interface PreparedRequestEstimate {
@@ -657,6 +668,7 @@ export interface ContextTrace {
   memoryEstimatedTokens?: number;
   memoryTruncated?: boolean;
   memorySelection?: ContextMemorySelectionTrace;
+  memoryRetrieval?: ContextMemoryRetrievalTrace;
   observationIncluded: boolean;
   monitorGuidanceIncluded?: boolean;
   monitorGuidanceOmittedReason?: "budget";

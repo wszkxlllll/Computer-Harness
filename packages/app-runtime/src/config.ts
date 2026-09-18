@@ -11,6 +11,7 @@ import type {
   RunController,
   RunFeatureConfig,
   MonitorPolicyMode,
+  MemoryRecallService,
   RuntimePolicy,
   ToolRegistry,
 } from "@computer-harness/runtime";
@@ -118,7 +119,7 @@ export interface RunDependencies {
     provider?: MemoryEmbeddingProvider;
   }) => HybridMemoryRecallService | undefined;
   createToolRegistry?: () => ToolRegistry;
-  createContextCompiler?: (tools: ToolRegistry, features: RunFeatureConfig, config: ResolvedRunConfig) => ContextCompiler;
+  createContextCompiler?: (tools: ToolRegistry, features: RunFeatureConfig, config: ResolvedRunConfig, memoryRecall?: MemoryRecallService) => ContextCompiler;
   createPolicy?: (config: ResolvedRunConfig) => RuntimePolicy;
   createActionPolicy?: (config: ResolvedRunConfig, provider: ProviderAdapter | undefined) => ActionPolicy | undefined;
   clock?: Clock;
