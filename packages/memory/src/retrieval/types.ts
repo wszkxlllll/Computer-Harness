@@ -111,6 +111,11 @@ export interface MemoryRetrievalDiagnostics {
     readonly correctionCount: number;
     readonly explicitQuery: boolean;
     readonly actionHintCount: number;
+    readonly includedOriginalGoal: boolean;
+    readonly includedCorrectionCount: number;
+    readonly includedExplicitQuery: boolean;
+    readonly includedActionHintCount: number;
+    readonly queryCharacterCount: number;
   };
   readonly lexicalHitCount: number;
   readonly candidateCount: number;

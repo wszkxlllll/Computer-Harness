@@ -105,7 +105,6 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       maxHistoryEvents: config.contextMaxHistoryEvents,
       features,
       ...(contextMemoryRecall === undefined ? {} : { memoryRecall: contextMemoryRecall }),
-      ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
     });
     const computer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {
@@ -140,6 +139,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       batching: config.batching,
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
+      ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),
       ...(windowTargetToolNames === undefined ? {} : { enabledToolNames: windowTargetToolNames }),
       ...(dependencies.clock === undefined ? {} : { clock: dependencies.clock }),
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),

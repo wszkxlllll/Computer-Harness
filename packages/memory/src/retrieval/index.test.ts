@@ -139,6 +139,35 @@ describe("HybridMemoryRecallService", () => {
     expect(result.diagnostics.querySources.explicitQuery).toBe(true);
   });
 
+  it("preserves explicit query and newest correction when the goal exhausts the query budget", async () => {
+    const explicit = fact("explicit-fact", "explicit_identifier", "explicit value", 1);
+    const corrected = fact("correction-fact", "latest_correction_identifier", "corrected value", 2);
+    const service = new HybridMemoryRecallService(undefined, { maxQueryCharacters: 64 });
+    const result = await service.search(state([explicit, corrected]), query({
+      originalGoal: "goal-noise-".repeat(80),
+      explicitQuery: "explicit_identifier",
+      latestUserCorrections: ["latest_correction_identifier"],
+    }), new AbortController().signal);
+    expect(result.admittedFacts.map((item) => item.fact.id)).toEqual(expect.arrayContaining(["explicit-fact", "correction-fact"]));
+    expect(result.diagnostics.querySources).toMatchObject({
+      explicitQuery: true,
+      includedExplicitQuery: true,
+      correctionCount: 1,
+      includedCorrectionCount: 1,
+      includedOriginalGoal: true,
+    });
+    expect(result.diagnostics.querySources.queryCharacterCount).toBeLessThanOrEqual(64);
+  });
+
+  it("matches exact fact identifiers without substring false positives", async () => {
+    const target = fact("invoice-fact-42", "unrelated_key", "opaque value", 1);
+    const service = new HybridMemoryRecallService();
+    const exact = await service.search(state([target]), query({ originalGoal: "no lexical overlap", explicitQuery: "invoice-fact-42" }), new AbortController().signal);
+    expect(exact.admittedFacts[0]).toMatchObject({ fact: { id: "invoice-fact-42" }, match: "exact" });
+    const substring = await service.search(state([target]), query({ originalGoal: "no lexical overlap", explicitQuery: "invoice-fact-4" }), new AbortController().signal);
+    expect(substring.admittedFacts).toHaveLength(0);
+  });
+
   it("provides bounded English and Chinese lexical retrieval without a provider", async () => {
     const invoice = fact("invoice", "payment_note", "utility bill deadline next week", 1);
     const meeting = fact("meeting", "location_note", "会议地点在东侧教室", 2);

@@ -116,9 +116,10 @@ export class HybridMemoryRecallService {
     const exactRevalidation = new Set<string>();
     for (const item of [...admitted, ...revalidation]) {
       const score = lexicalScore(item.fact, queryParts.text);
-      if (score <= 0) continue;
-      lexicalScores.set(item.fact.id, score);
-      if (hasExactIdentifier(item.fact, queryParts.text)) {
+      const exactIdentifier = hasExactIdentifier(item.fact, queryParts.text);
+      if (score <= 0 && !exactIdentifier) continue;
+      if (score > 0) lexicalScores.set(item.fact.id, score);
+      if (exactIdentifier) {
         if (item.revalidationReason === undefined) exactAdmitted.add(item.fact.id);
         else exactRevalidation.add(item.fact.id);
       }
@@ -377,7 +378,33 @@ function buildQueryParts(query: CurrentRecallQuery, maxCharacters: number): {
   const actionHints = (query.recentActionHints ?? []).map((value) => value.trim()).filter((value) => value.length > 0).slice(-2);
   const explicit = query.explicitQuery?.trim() ?? "";
   const goal = query.originalGoal.trim();
-  const text = [explicit, goal, ...corrections, ...actionHints].filter((value) => value.length > 0).join("\n").slice(0, maxCharacters);
+  const latestCorrection = corrections.at(-1) ?? "";
+  const olderCorrections = corrections.slice(0, -1).reverse();
+  const explicitBudget = explicit.length === 0 ? 0 : Math.max(1, Math.floor(maxCharacters * 0.45));
+  const explicitReservation = Math.min(explicit.length, explicitBudget);
+  const correctionBudget = latestCorrection.length === 0 ? 0 : Math.min(latestCorrection.length, Math.max(1, maxCharacters - explicitReservation - 1));
+  const selected: Array<{ source: "explicit" | "goal" | "correction" | "action"; text: string }> = [];
+  let remaining = maxCharacters;
+  const append = (source: "explicit" | "goal" | "correction" | "action", value: string, budget = remaining): void => {
+    if (value.length === 0 || remaining <= 0) return;
+    const available = Math.min(remaining, Math.max(1, budget));
+    const text = boundedQueryPart(value, available);
+    if (text.length === 0) return;
+    const separator = selected.length === 0 ? 0 : 1;
+    const fitted = separator + text.length > remaining ? boundedQueryPart(text, Math.max(0, remaining - separator)) : text;
+    if (fitted.length === 0) return;
+    selected.push({ source, text: fitted });
+    remaining -= separator + fitted.length;
+  };
+  // Reserve space for the explicit query and newest correction before the
+  // long original goal can consume the bounded retrieval input.
+  append("explicit", explicit, explicitBudget);
+  append("correction", latestCorrection, correctionBudget);
+  append("goal", goal);
+  for (const correction of olderCorrections) append("correction", correction);
+  for (const hint of actionHints) append("action", hint);
+  const text = selected.map((part) => part.text).join("\n");
+  const included = (source: "explicit" | "goal" | "correction" | "action"): number => selected.filter((part) => part.source === source).length;
   return {
     text,
     sources: {
@@ -385,8 +412,22 @@ function buildQueryParts(query: CurrentRecallQuery, maxCharacters: number): {
       correctionCount: corrections.length,
       explicitQuery: explicit.length > 0,
       actionHintCount: actionHints.length,
+      includedOriginalGoal: included("goal") > 0,
+      includedCorrectionCount: included("correction"),
+      includedExplicitQuery: included("explicit") > 0,
+      includedActionHintCount: included("action"),
+      queryCharacterCount: text.length,
     },
   };
+}
+
+function boundedQueryPart(value: string, maxCharacters: number): string {
+  if (maxCharacters <= 0) return "";
+  if (value.length <= maxCharacters) return value;
+  if (maxCharacters === 1) return value.slice(-1);
+  const tailLength = Math.max(1, Math.floor((maxCharacters - 1) / 2));
+  const headLength = maxCharacters - 1 - tailLength;
+  return `${value.slice(0, headLength)}…${value.slice(-tailLength)}`;
 }
 
 function rankFacts(
@@ -448,11 +489,11 @@ function documentText(fact: MemoryFact): string {
 }
 
 function hasExactIdentifier(fact: MemoryFact, queryText: string): boolean {
-  const normalizedQuery = normalize(queryText);
+  const queryTokens = new Set(tokenizeLexical(queryText));
   const identifiers = [fact.id, fact.key, fact.sourceEventId, fact.subject.type === "entity" ? fact.subject.entityId : undefined]
     .filter((value): value is string => value !== undefined && value.trim().length >= 2)
     .map(normalize);
-  return identifiers.some((identifier) => identifier.length >= 2 && normalizedQuery.includes(identifier));
+  return identifiers.some((identifier) => identifier.length >= 2 && queryTokens.has(identifier));
 }
 
 function lexicalScore(fact: MemoryFact, queryText: string): number {
