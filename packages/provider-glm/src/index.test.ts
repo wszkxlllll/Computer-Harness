@@ -8,9 +8,11 @@ const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-
 const normalizedProfile: GlmProfile = { name: "test-normalized", thinking: "disabled", coordinateMode: "normalized_1000" };
 
 class Reader implements AssetReader {
+  public constructor(private readonly bytes = new Uint8Array([1, 2, 3])) {}
+
   public async read(_ref: typeof asset, signal: AbortSignal): Promise<Uint8Array> {
     signal.throwIfAborted();
-    return new Uint8Array([1, 2, 3]);
+    return this.bytes;
   }
 }
 
@@ -56,6 +58,16 @@ function inputWithControls(): ModelInput {
   };
 }
 
+function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelInput {
+  return {
+    ...input(),
+    messages: [
+      { role: "user", content: [{ type: "text", text: "stable user goal" }] },
+      { role: "user", content: [{ type: "text", text: planAndMemory }, { type: "image", asset, viewport: dynamicViewport }] },
+    ],
+  };
+}
+
 describe("GLM provider adapter", () => {
   it("keeps prepared wire state private to the creating adapter", async () => {
     const client = new Client({ choices: [{ message: { content: "prepared" } }] });
@@ -83,6 +95,44 @@ describe("GLM provider adapter", () => {
     mutableInput.tools = [];
     mutableInput.messages = [];
     await expect(adapter.generatePrepared(prepared, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 320, y: 180 } }] });
+  });
+
+  it("keeps the stable wire prefix separate from dynamic history, images, and final payload identity", async () => {
+    const capture = async (value: ModelInput, bytes = new Uint8Array([1, 2, 3]), profile: GlmProfile = normalizedProfile) => {
+      const client = new Client({ choices: [{ message: { content: "done" } }] });
+      const adapter = new GlmAdapter({ apiKey: "key", profile, assetReader: new Reader(bytes), httpClient: client });
+      const prepared = await adapter.prepare(value, { signal: new AbortController().signal });
+      await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+      return { body: client.body!, prepared };
+    };
+    const first = await capture(dynamicInput("plan A / memory A"));
+    const second = await capture(dynamicInput("plan B / memory B"), new Uint8Array([9, 8, 7, 6]));
+    expect((first.body.messages as unknown[])[0]).toEqual((second.body.messages as unknown[])[0]);
+    expect(first.body.tools).toEqual(second.body.tools);
+    expect(first.body.messages).not.toEqual(second.body.messages);
+    expect(first.prepared.payloadHash).not.toBe(second.prepared.payloadHash);
+    expect(first.prepared.estimate?.imageCount).toBe(1);
+    expect(first.prepared.estimate?.estimatedTextTokens).toBe(second.prepared.estimate?.estimatedTextTokens);
+
+    const schemaInput = {
+      ...dynamicInput("same plan"),
+      tools: [{ ...input().tools[0]!, inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false } }],
+    };
+    const pixelProfile: GlmProfile = { name: "pixel-test", thinking: "disabled", coordinateMode: "actual_pixels" };
+    const pixelA = await capture(schemaInput, new Uint8Array([1]), pixelProfile);
+    const pixelB = await capture({ ...schemaInput, messages: [{ role: "user", content: [{ type: "image", asset, viewport: { width: 1024, height: 768, coordinateSpace: "physical" } }] }] }, new Uint8Array([1]), pixelProfile);
+    expect(pixelA.body.tools).not.toEqual(pixelB.body.tools);
+    expect(pixelA.prepared.payloadHash).not.toBe(pixelB.prepared.payloadHash);
+
+    const continuationInput = {
+      ...dynamicInput("continuation"),
+      messages: [
+        ...dynamicInput("continuation").messages,
+        { role: "assistant" as const, content: [{ type: "provider_continuation" as const, continuation: { providerId: "test-normalized", kind: "reasoning_content" as const, content: "retain this reasoning" } }] },
+      ],
+    };
+    const continuation = await capture(continuationInput);
+    expect(continuation.prepared.estimate!.estimatedTextTokens).toBeGreaterThan(first.prepared.estimate!.estimatedTextTokens);
   });
 
   it("does not infer cache reads from an unverified GLM usage extension", async () => {

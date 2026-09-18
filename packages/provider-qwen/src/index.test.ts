@@ -10,6 +10,10 @@ const reader: AssetReader = {
   async read(_ref, signal) { signal.throwIfAborted(); return new Uint8Array([7, 8]); },
 };
 
+function readerWithBytes(bytes: Uint8Array): AssetReader {
+  return { async read(_ref, signal) { signal.throwIfAborted(); return bytes; } };
+}
+
 class Client implements QwenHttpClient {
   public body: Record<string, unknown> | undefined;
   public url: string | undefined;
@@ -51,6 +55,22 @@ function input(): ModelInput {
   return { system: "system", messages: [{ role: "user", content: [{ type: "image", asset, viewport }] }], tools };
 }
 
+function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelInput {
+  return {
+    ...input(),
+    messages: [
+      { role: "user", content: [{ type: "text", text: "stable user goal" }] },
+      { role: "user", content: [{ type: "text", text: planAndMemory }, { type: "image", asset, viewport: dynamicViewport }] },
+    ],
+  };
+}
+
+function strictFinishResponse(): unknown {
+  return {
+    choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-finish", name: "terminate", arguments: { status: "success", text: "done" } }] }) } }],
+  };
+}
+
 function response(name: string, argumentsValue: Record<string, unknown>, usage?: Record<string, unknown>): unknown {
   return {
     choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "native-call-1", type: "function", function: { name, arguments: JSON.stringify(argumentsValue) } }] } }],
@@ -89,6 +109,53 @@ describe("Qwen3.8-Flash provider adapter", () => {
     mutableInput.tools = [];
     mutableInput.messages = [];
     await expect(adapter.generatePrepared(prepared, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 319.6, y: 299.5 } }] });
+  });
+
+  it("keeps the stable strict prefix separate from dynamic history, images, catalog, and payload identity", async () => {
+    const captureStrict = async (value: ModelInput, bytes = new Uint8Array([7, 8])) => {
+      const client = new Client(strictFinishResponse());
+      const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: readerWithBytes(bytes), httpClient: client, thinking: "disabled", outputMode: "strict_json" });
+      const prepared = await adapter.prepare(value, { signal: new AbortController().signal });
+      await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+      return { body: client.body!, prepared };
+    };
+    const first = await captureStrict(dynamicInput("plan A / memory A"));
+    const second = await captureStrict(dynamicInput("plan B / memory B"), new Uint8Array([8, 7, 6, 5]));
+    const firstMessages = first.body.messages as unknown[];
+    const secondMessages = second.body.messages as unknown[];
+    expect(firstMessages[0]).toEqual(secondMessages[0]);
+    expect(first.body.response_format).toEqual(second.body.response_format);
+    expect(firstMessages).not.toEqual(secondMessages);
+    expect(first.prepared.payloadHash).not.toBe(second.prepared.payloadHash);
+    expect(first.prepared.estimate?.imageCount).toBe(1);
+    expect(first.prepared.estimate?.estimatedTextTokens).toBe(second.prepared.estimate?.estimatedTextTokens);
+
+    const changedCatalog = await captureStrict({ ...dynamicInput("same plan"), tools: dynamicInput("same plan").tools.filter((tool) => tool.name !== "drag") });
+    expect(String((firstMessages[0] as Record<string, unknown>).content)).toContain("drag(");
+    expect(String(((changedCatalog.body.messages as unknown[])[0] as Record<string, unknown>).content)).not.toContain("drag(");
+    expect(first.prepared.payloadHash).not.toBe(changedCatalog.prepared.payloadHash);
+
+    const captureNative = async (value: ModelInput, dynamicViewport: Viewport) => {
+      const client = new Client(response("terminate", { status: "success" }));
+      const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels" });
+      const prepared = await adapter.prepare({ ...value, messages: [{ role: "user", content: [{ type: "image", asset, viewport: dynamicViewport }] }] }, { signal: new AbortController().signal });
+      await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+      return { body: client.body!, prepared };
+    };
+    const nativeA = await captureNative(input(), viewport);
+    const nativeB = await captureNative(input(), { width: 1024, height: 768, coordinateSpace: "physical" });
+    expect(nativeA.body.tools).not.toEqual(nativeB.body.tools);
+    expect(nativeA.prepared.payloadHash).not.toBe(nativeB.prepared.payloadHash);
+
+    const continuationInput = {
+      ...dynamicInput("continuation"),
+      messages: [
+        ...dynamicInput("continuation").messages,
+        { role: "assistant" as const, content: [{ type: "provider_continuation" as const, continuation: { providerId: "qwen3.8-flash", kind: "reasoning_content" as const, content: "retain this reasoning" } }] },
+      ],
+    };
+    const continuation = await captureStrict(continuationInput);
+    expect(continuation.prepared.estimate!.estimatedTextTokens).toBeGreaterThan(first.prepared.estimate!.estimatedTextTokens);
   });
 
   it("preserves Qwen prompt cache reads only when the provider reports a valid field", async () => {

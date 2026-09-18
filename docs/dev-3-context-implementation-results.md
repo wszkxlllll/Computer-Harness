@@ -65,7 +65,7 @@ pnpm --filter @computer-harness/provider-glm build
 pnpm --filter @computer-harness/provider-qwen build
 
 pnpm exec vitest run packages/provider-glm/src/index.test.ts packages/provider-qwen/src/index.test.ts packages/runtime/src/index.test.ts
-  GLM 18/18, Qwen 22/22, Runtime 58/58 passed
+  GLM 19/19, Qwen 23/23, Runtime 58/58 passed
 
 pnpm exec vitest run packages/context/src/index.test.ts packages/context/src/runtime-regression.test.ts packages/trajectory/src/index.test.ts packages/app-runtime/src/diagnostics/provider-summary.test.ts
   Context 18+1、Trajectory 33、provider summary 8 passed
@@ -93,3 +93,12 @@ pnpm run typecheck
 - 本批没有实现完整 `InstructionState`/revision、跨 Run cache 生命周期、Memory scope/replay、Monitor、模型侧目标/Focus 合同或新的调度器。
 - `PreparedRequestEstimate` 是基于实际 serialized body 的有界近似，不等于 Provider tokenizer；本批没有用它强制最终 Provider budget，也没有证明 stable prefix hash 与实际 Provider cache prefix 完全相同。GLM/Qwen 之外的 adapter 继续走原 `generate` 兼容路径，除非后续批次明确接入 prepared 合同。
 - `payloadHash` 仅用于 adapter/runtime 内部关联与诊断，不应被解释为匿名化或安全凭证；实际请求 body 始终留在 adapter 私有状态。
+
+## Provider wire prefix / estimate mock evidence
+
+本轮只补 GLM/Qwen Mock HTTP 回归，没有改 shared metadata，也没有调用真实 API：
+
+- GLM 19/19、Qwen 23/23 focused 通过。两轮相同 system/tool policy、不同 plan/memory/current image 证明实际 wire 的首个 system message 与 tool/catalog 前缀保持相同，而动态 history/image 及 `payloadHash` 变化。
+- 不同 tool catalog、coordinate profile 和 actual-pixel viewport 会改变对应 tool schema/catalog 或 wire hash；这些动态约束没有被错误冻结进稳定前缀。Qwen strict catalog 只从本轮传入 `ModelInput.tools` 生成，没有第二份工具清单。
+- 估算回归确认 image base64 变化不改变 `estimatedTextTokens`，但 `imageCount` 单独保留；tool/schema/catalog、history continuation 文本会进入估算。reasoning continuation 保持为完整 provider message，不被拆掉。
+- 当前没有公开/持久化“真实 Provider prefix hash”字段；`ContextTrace.stablePrefixHash` 只代表 Context system+tools 结构，不能冒充 GLM/Qwen 实际 cache prefix。真实 cache hit/write/TTL 仍 unknown，直连 GLM 不套用 Alibaba cache 规则。
