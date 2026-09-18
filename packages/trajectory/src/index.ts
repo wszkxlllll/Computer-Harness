@@ -720,6 +720,12 @@ const memoryFactSchema = z.object({
   value: z.string(),
   sourceEventId: nonEmptyString,
   status: z.enum(["active", "needs_check", "superseded"]),
+  scope: z.union([
+    z.object({ kind: z.literal("run") }),
+    z.object({ kind: z.literal("computer_session"), sessionId: nonEmptyString }),
+  ]).optional(),
+  retentionClass: z.enum(["stable", "task", "short_lived"]).optional(),
+  statusReason: z.enum(["manual_review", "scope_ended"]).optional(),
   relatedTaskIds: z.array(nonEmptyString).optional(),
   updatedSequence: z.number().int().nonnegative(),
 });
@@ -735,7 +741,7 @@ const memoryEntitySchema = z.object({
 const memoryMutationSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("upsert_fact"), fact: memoryFactSchema }),
   z.object({ operation: z.literal("supersede_fact"), factId: nonEmptyString, replacement: memoryFactSchema.optional() }),
-  z.object({ operation: z.literal("mark_fact_needs_check"), factId: nonEmptyString }),
+  z.object({ operation: z.literal("mark_fact_needs_check"), factId: nonEmptyString, reason: z.enum(["manual_review", "scope_ended"]).optional() }),
   z.object({ operation: z.literal("upsert_entity"), entity: memoryEntitySchema }),
   z.object({ operation: z.literal("invalidate_entity"), entityId: nonEmptyString }),
 ]);
@@ -772,6 +778,11 @@ const contextTraceSchema = z.object({
   historyBudgetTokens: z.number().int().nonnegative().optional(),
   memoryEstimatedTokens: z.number().int().nonnegative().optional(),
   memoryTruncated: z.boolean().optional(),
+  memorySelection: z.object({
+    admittedFactIds: z.array(nonEmptyString),
+    revalidationFactIds: z.array(nonEmptyString),
+    excluded: z.array(z.object({ kind: z.enum(["fact", "entity"]), id: nonEmptyString, reason: z.enum(["superseded", "scope_mismatch", "entity_stale", "entity_missing"]) })),
+  }).optional(),
   observationIncluded: z.boolean(),
   preparedRequest: z.object({
     payloadHash: nonEmptyString,

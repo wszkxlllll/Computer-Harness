@@ -155,6 +155,7 @@ function makeController(
     idFactory: idFactory(),
     clock: { now: () => "2026-09-17T00:00:00.000Z" },
     features: { planning, memory: "facts-v1", batching: "off" },
+    memoryMutationApplier: async (targetRunId, mutation) => { await store.apply(targetRunId, mutation); },
   });
   return { controller, writer };
 }
@@ -334,5 +335,27 @@ describe("Memory mutations through RunController", () => {
       { id: "m1", value: "old", status: "superseded", relatedTaskIds: ["task-one"] },
       { id: "m2", value: "old", status: "active", relatedTaskIds: ["task-two"] },
     ]);
+  });
+
+  it("marks session-scoped facts needs_check on Runtime-owned run completion", async () => {
+    const store = new InMemoryMemoryStore();
+    const registry = new ToolRegistry();
+    registry.registerMany(createMemoryTools(store));
+    const created = makeController(store, "off", [
+      {
+        type: "tool_calls",
+        calls: [{
+          id: "session-fact" as ToolCallId,
+          name: "memory_write_fact",
+          arguments: { key: "window_state", value: "last-known", scope: "computer_session", retentionClass: "short_lived" },
+        }],
+      },
+      { type: "finish", summary: "done" },
+    ], registry);
+
+    await expect(created.controller.start("close session memory")).resolves.toBe("succeeded");
+    const state = await store.get(runId);
+    expect(state.facts).toMatchObject([{ scope: { kind: "computer_session", sessionId }, status: "needs_check", statusReason: "scope_ended" }]);
+    expect(created.writer.events.some((event) => event.type === "memory.updated" && event.callId === "runtime:scope-ended" && event.mutation.operation === "mark_fact_needs_check")).toBe(true);
   });
 });

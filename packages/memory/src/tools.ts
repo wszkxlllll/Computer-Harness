@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
+  isMemoryFactApplicable,
+  memoryFactRetentionClass,
+  memoryFactScope,
   sameMemoryFactContent,
   type JsonValue,
   type MemoryEntity,
@@ -47,28 +50,41 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         properties: {
           id: { type: "string", minLength: 1, maxLength: MAX_MEMORY_ID_LENGTH, description: "Fact or entity id from the memory index." },
           key: { type: "string", minLength: 1, maxLength: MAX_MEMORY_KEY_LENGTH, description: "Fact key when an id is not available." },
+          view: { type: "string", enum: ["current", "history"], description: "Current applicable records by default; history is explicit and marks scope applicability." },
         },
         oneOf: [{ required: ["id"] }, { required: ["key"] }],
         additionalProperties: false,
       },
       validate: (args) => {
         if (!isRecord(args)) throw new Error("memory_get requires exactly one of id or key");
-        assertExactKeys(args, [], ["id", "key"], "memory_get");
+        assertExactKeys(args, [], ["id", "key", "view"], "memory_get");
         if (args.id !== undefined) validateBoundedString(args.id, "memory_get.id", MAX_MEMORY_ID_LENGTH);
         if (args.key !== undefined) validateBoundedString(args.key, "memory_get.key", MAX_MEMORY_KEY_LENGTH);
+        if (args.view !== undefined && args.view !== "current" && args.view !== "history") throw new Error("memory_get.view must be current or history");
         const hasId = typeof args.id === "string" && args.id.trim().length > 0;
         const hasKey = typeof args.key === "string" && args.key.trim().length > 0;
         if (hasId === hasKey || (args.id !== undefined && !hasId) || (args.key !== undefined && !hasKey)) throw new Error("memory_get requires exactly one of id or key");
       },
       execute: async (args, context) => {
-        const query = args as { id?: string; key?: string };
+        const query = args as { id?: string; key?: string; view?: "current" | "history" };
         const state = await store.get(context.runId);
+        const view = query.view ?? "current";
+        const includeFact = (fact: MemoryFact): boolean => view === "history"
+          ? true
+          : (fact.status === "active" || fact.status === "needs_check") && isMemoryFactApplicable(state, fact, context.session?.id);
         const entities = query.id === undefined ? [] : state.entities.filter((entity) => entity.id === query.id);
-        const facts = query.id !== undefined
+        const matchedFacts = query.id !== undefined
           ? state.facts.filter((fact) => fact.id === query.id || (entities.some((entity) => entity.id === query.id) && fact.subject.type === "entity" && fact.subject.entityId === query.id))
           : state.facts.filter((fact) => fact.key === query.key);
+        const facts = matchedFacts.filter(includeFact);
         if (facts.length === 0 && entities.length === 0) throw new Error("memory_get found no matching record");
-        return { facts, entities } as unknown as JsonValue;
+        return {
+          facts,
+          entities: view === "history" ? entities : entities.filter((entity) => entity.status === "active"),
+          ...(view === "history"
+            ? { factApplicability: matchedFacts.map((fact) => ({ id: fact.id, applicable: isMemoryFactApplicable(state, fact, context.session?.id) })) }
+            : { factAdmission: facts.map((fact) => factAdmission(fact)) }),
+        } as unknown as JsonValue;
       },
     },
     {
@@ -80,6 +96,8 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         properties: {
           key: { type: "string", minLength: 1, maxLength: MAX_MEMORY_KEY_LENGTH, description: "Stable fact key, such as target_file or saved." },
           value: { type: "string", maxLength: MAX_MEMORY_VALUE_LENGTH, description: "Short factual value." },
+          scope: { type: "string", enum: ["run", "computer_session"], description: "Applicability scope; Runtime supplies the real session id." },
+          retentionClass: { type: "string", enum: ["stable", "task", "short_lived"], description: "Recall policy classification, not truth or authorization." },
           entityId: { type: "string", minLength: 1, maxLength: MAX_MEMORY_ID_LENGTH, description: "Optional entity id; omit for a run-level fact." },
           relatedTaskIds: { type: "array", maxItems: MAX_RELATED_TASK_IDS, items: { type: "string", minLength: 1, maxLength: MAX_RELATED_TASK_ID_LENGTH } },
         },
@@ -90,9 +108,12 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
       execute: async (args, context) => {
         const input = writeFactArgs(args);
         const current = await store.get(context.runId);
+        if (input.scope === "computer_session" && context.session?.id === undefined) throw new Error("memory computer_session scope is unsupported without a live session");
+        if (input.retentionClass === "task" && (input.relatedTaskIds === undefined || input.relatedTaskIds.length === 0)) throw new Error("task retention requires relatedTaskIds");
         if (input.entityId !== undefined && !current.entities.some((entity) => entity.id === input.entityId && entity.status === "active")) throw new Error(`memory entity ${input.entityId} does not exist`);
         const subject: MemorySubject = input.entityId === undefined ? { type: "run" } : { type: "entity", entityId: input.entityId };
-        const existing = current.facts.find((fact) => fact.key === input.key && sameSubject(fact.subject, subject) && fact.status !== "superseded");
+        const scope = input.scope === "computer_session" ? { kind: "computer_session" as const, sessionId: context.session.id } : { kind: "run" as const };
+        const existing = current.facts.find((fact) => fact.key === input.key && sameSubject(fact.subject, subject) && fact.status !== "superseded" && sameScope(fact, scope));
         const fact: MemoryFact = {
           id: nextMemoryId(current.facts.map((item) => item.id), "m"),
           subject,
@@ -100,6 +121,8 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
           value: input.value,
           sourceEventId: `pending:${randomUUID()}` as import("@computer-harness/protocol").EventId,
           status: "active",
+          scope,
+          retentionClass: input.retentionClass ?? "stable",
           ...(input.relatedTaskIds === undefined ? {} : { relatedTaskIds: input.relatedTaskIds }),
           updatedSequence: current.facts.length,
         };
@@ -117,19 +140,23 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
       category: "side",
       inputSchema: {
         type: "object",
-        properties: { factId: { type: "string", minLength: 1, maxLength: MAX_MEMORY_ID_LENGTH } },
+        properties: {
+          factId: { type: "string", minLength: 1, maxLength: MAX_MEMORY_ID_LENGTH },
+          reason: { type: "string", enum: ["manual_review"] },
+        },
         required: ["factId"],
         additionalProperties: false,
       },
       validate: (args) => {
         if (!isRecord(args)) throw new Error("memory_mark_fact_needs_check requires an object");
-        assertExactKeys(args, ["factId"], [], "memory_mark_fact_needs_check");
+        assertExactKeys(args, ["factId"], ["reason"], "memory_mark_fact_needs_check");
         validateBoundedString(args.factId, "memory_mark_fact_needs_check.factId", MAX_MEMORY_ID_LENGTH);
+        if (args.reason !== undefined && args.reason !== "manual_review") throw new Error("memory_mark_fact_needs_check.reason is invalid");
       },
       execute: async (args, context) => {
         const factId = (args as { factId: string }).factId;
         if (!(await store.get(context.runId)).facts.some((fact) => fact.id === factId && fact.status !== "superseded")) throw new Error(`memory fact ${factId} does not exist`);
-        return { operation: "mark_fact_needs_check", factId } as unknown as JsonValue;
+        return { operation: "mark_fact_needs_check", factId, reason: "manual_review" } as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readFactMutation(output),
       afterMemoryCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
@@ -186,7 +213,17 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
       audiences: ["main", "advisor"],
       inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
       validate: (args) => { if (!isRecord(args) || Object.keys(args).length !== 0) throw new Error("memory_list accepts an empty object"); },
-      execute: async (_args, context) => await store.get(context.runId) as unknown as JsonValue,
+      execute: async (_args, context) => {
+        const state = await store.get(context.runId);
+        return {
+          facts: state.facts.filter((fact) => (fact.status === "active" || fact.status === "needs_check") && isMemoryFactApplicable(state, fact, context.session?.id)),
+          entities: state.entities.filter((entity) => entity.status === "active"),
+          factAdmission: state.facts
+            .filter((fact) => (fact.status === "active" || fact.status === "needs_check") && isMemoryFactApplicable(state, fact, context.session?.id))
+            .slice(0, 32)
+            .map((fact) => factAdmission(fact)),
+        } as unknown as JsonValue;
+      },
     });
     tools.push({
       name: "memory_invalidate_entity",
@@ -217,4 +254,16 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
     });
   }
   return tools;
+}
+
+function sameScope(fact: MemoryFact, scope: MemoryFact["scope"]): boolean {
+  const existing = memoryFactScope(fact);
+  if (scope === undefined || existing.kind !== scope.kind) return false;
+  return existing.kind === "run" || (scope.kind === "computer_session" && existing.sessionId === scope.sessionId);
+}
+
+function factAdmission(fact: MemoryFact): { id: string; class: "admitted" | "revalidation"; reason?: "needs_check" | "short_lived_last_known" } {
+  if (fact.status === "needs_check") return { id: fact.id, class: "revalidation", reason: "needs_check" };
+  if (memoryFactRetentionClass(fact) === "short_lived") return { id: fact.id, class: "revalidation", reason: "short_lived_last_known" };
+  return { id: fact.id, class: "admitted" };
 }

@@ -29,7 +29,15 @@ export interface PlanState {
 
 export type MemorySubject = { type: "run" } | { type: "entity"; entityId: string };
 
-/** A small, run-scoped fact retained after raw history is compacted. */
+export type MemoryScope =
+  | { kind: "run" }
+  | { kind: "computer_session"; sessionId: ComputerSessionId };
+
+export type MemoryRetentionClass = "stable" | "task" | "short_lived";
+
+export type MemoryStatusReason = "manual_review" | "scope_ended";
+
+/** A small fact retained after raw history is compacted; scope gates applicability within its Run. */
 export interface MemoryFact {
   id: string;
   /** Facts are normalized at the top level; this links one fact to an entity without nesting. */
@@ -38,6 +46,11 @@ export interface MemoryFact {
   value: string;
   sourceEventId: EventId;
   status: "active" | "needs_check" | "superseded";
+  /** Omitted only by legacy records; readers normalize omission to run scope. */
+  scope?: MemoryScope;
+  /** Omitted only by legacy records; readers normalize omission to stable. */
+  retentionClass?: MemoryRetentionClass;
+  statusReason?: MemoryStatusReason;
   relatedTaskIds?: string[];
   updatedSequence: number;
 }
@@ -62,7 +75,7 @@ export interface MemoryState {
 export type MemoryMutation =
   | { operation: "upsert_fact"; fact: MemoryFact }
   | { operation: "supersede_fact"; factId: string; replacement?: MemoryFact }
-  | { operation: "mark_fact_needs_check"; factId: string }
+  | { operation: "mark_fact_needs_check"; factId: string; reason?: MemoryStatusReason }
   | { operation: "upsert_entity"; entity: MemoryEntity }
   | { operation: "invalidate_entity"; entityId: string };
 
@@ -106,10 +119,11 @@ export function validateMemoryMutation(value: unknown): MemoryMutation {
           : {}),
       };
     case "mark_fact_needs_check":
-      memoryExactKeys(record, ["operation", "factId"], [], "memory mutation");
+      memoryExactKeys(record, ["operation", "factId"], ["reason"], "memory mutation");
       return {
         operation: "mark_fact_needs_check",
         factId: memoryString(record.factId, "memory mutation.factId", MEMORY_LIMITS.id),
+        ...(record.reason === undefined ? {} : { reason: validateMemoryStatusReason(record.reason, "memory mutation.reason") }),
       };
     case "upsert_entity":
       memoryExactKeys(record, ["operation", "entity"], [], "memory mutation");
@@ -133,8 +147,41 @@ export function validateMemoryMutation(value: unknown): MemoryMutation {
 export function sameMemoryFactContent(left: MemoryFact, right: MemoryFact): boolean {
   if (left.id !== right.id || left.key !== right.key || left.value !== right.value || left.status !== right.status || left.subject.type !== right.subject.type) return false;
   if (left.subject.type === "entity" && right.subject.type === "entity" && left.subject.entityId !== right.subject.entityId) return false;
+  const leftScope = left.scope ?? { kind: "run" as const };
+  const rightScope = right.scope ?? { kind: "run" as const };
+  if (leftScope.kind !== rightScope.kind || (leftScope.kind === "computer_session" && rightScope.kind === "computer_session" && leftScope.sessionId !== rightScope.sessionId)) return false;
+  if ((left.retentionClass ?? "stable") !== (right.retentionClass ?? "stable") || left.statusReason !== right.statusReason) return false;
   if (left.relatedTaskIds === undefined || right.relatedTaskIds === undefined) return left.relatedTaskIds === right.relatedTaskIds;
   return left.relatedTaskIds.length === right.relatedTaskIds.length && left.relatedTaskIds.every((id, index) => id === right.relatedTaskIds?.[index]);
+}
+
+export function memoryFactScope(fact: MemoryFact): MemoryScope {
+  return fact.scope ?? { kind: "run" };
+}
+
+export function memoryFactRetentionClass(fact: MemoryFact): MemoryRetentionClass {
+  return fact.retentionClass ?? "stable";
+}
+
+export function isMemoryFactScopeApplicable(fact: MemoryFact, sessionId: ComputerSessionId | undefined): boolean {
+  const scope = memoryFactScope(fact);
+  return scope.kind === "run" || scope.sessionId === sessionId;
+}
+
+export function isMemoryFactApplicable(state: MemoryState, fact: MemoryFact, sessionId: ComputerSessionId | undefined): boolean {
+  if (fact.status === "superseded" || !isMemoryFactScopeApplicable(fact, sessionId)) return false;
+  if (fact.subject.type !== "entity") return true;
+  const entityId = fact.subject.entityId;
+  return state.entities.some((entity) => entity.id === entityId && entity.status === "active");
+}
+
+function normalizeMemoryFactForState(fact: MemoryFact): MemoryFact {
+  return {
+    ...fact,
+    scope: memoryFactScope(fact),
+    retentionClass: memoryFactRetentionClass(fact),
+    ...(fact.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...fact.relatedTaskIds] }),
+  };
 }
 
 function validateMemoryFactShape(value: unknown, label: string): MemoryFact {
@@ -142,21 +189,49 @@ function validateMemoryFactShape(value: unknown, label: string): MemoryFact {
   memoryExactKeys(
     record,
     ["id", "subject", "key", "value", "sourceEventId", "status", "updatedSequence"],
-    ["relatedTaskIds"],
+    ["scope", "retentionClass", "statusReason", "relatedTaskIds"],
     label,
   );
+  const status = validateMemoryFactStatus(record.status, `${label}.status`);
+  const statusReason = record.statusReason === undefined ? undefined : validateMemoryStatusReason(record.statusReason, `${label}.statusReason`);
   return {
     id: memoryString(record.id, `${label}.id`, MEMORY_LIMITS.id),
     subject: validateMemorySubjectShape(record.subject, `${label}.subject`),
     key: memoryString(record.key, `${label}.key`, MEMORY_LIMITS.key),
     value: memoryString(record.value, `${label}.value`, MEMORY_LIMITS.value, true),
     sourceEventId: memoryString(record.sourceEventId, `${label}.sourceEventId`, MEMORY_LIMITS.sourceEventId) as EventId,
-    status: validateMemoryFactStatus(record.status, `${label}.status`),
+    status,
+    scope: record.scope === undefined ? { kind: "run" } : validateMemoryScopeShape(record.scope, `${label}.scope`),
+    retentionClass: record.retentionClass === undefined ? "stable" : validateMemoryRetentionClass(record.retentionClass, `${label}.retentionClass`),
+    ...(statusReason === undefined ? {} : { statusReason }),
     ...(memoryHasOwn(record, "relatedTaskIds")
       ? { relatedTaskIds: validateMemoryRelatedTaskIds(record.relatedTaskIds, `${label}.relatedTaskIds`) }
       : {}),
     updatedSequence: validateMemorySequence(record.updatedSequence, `${label}.updatedSequence`),
   };
+}
+
+function validateMemoryScopeShape(value: unknown, label: string): MemoryScope {
+  const record = memoryObject(value, label);
+  if (record.kind === "run") {
+    memoryExactKeys(record, ["kind"], [], label);
+    return { kind: "run" };
+  }
+  if (record.kind === "computer_session") {
+    memoryExactKeys(record, ["kind", "sessionId"], [], label);
+    return { kind: "computer_session", sessionId: memoryString(record.sessionId, `${label}.sessionId`, MEMORY_LIMITS.id) as ComputerSessionId };
+  }
+  throw new Error(`${label}.kind must be run or computer_session`);
+}
+
+function validateMemoryRetentionClass(value: unknown, label: string): MemoryRetentionClass {
+  if (value === "stable" || value === "task" || value === "short_lived") return value;
+  throw new Error(`${label} is invalid`);
+}
+
+function validateMemoryStatusReason(value: unknown, label: string): MemoryStatusReason {
+  if (value === "manual_review" || value === "scope_ended") return value;
+  throw new Error(`${label} is invalid`);
 }
 
 function validateMemoryEntityShape(value: unknown, label: string): MemoryEntity {
@@ -246,7 +321,7 @@ function memoryExactKeys(record: Record<string, unknown>, required: readonly str
 export function reduceMemoryMutation(state: MemoryState, mutation: MemoryMutation): MemoryState {
   const next: MemoryState = {
     runId: state.runId,
-    facts: state.facts.map((fact) => ({ ...fact, ...(fact.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...fact.relatedTaskIds] }) })),
+    facts: state.facts.map(normalizeMemoryFactForState),
     entities: state.entities.map((entity) => ({
       ...entity,
       ...(entity.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...entity.relatedTaskIds] }),
@@ -255,20 +330,21 @@ export function reduceMemoryMutation(state: MemoryState, mutation: MemoryMutatio
   switch (mutation.operation) {
     case "upsert_fact": {
       const index = next.facts.findIndex((fact) => fact.id === mutation.fact.id);
-      if (index < 0) next.facts.push(mutation.fact); else next.facts[index] = mutation.fact;
+      const fact = normalizeMemoryFactForState(mutation.fact);
+      if (index < 0) next.facts.push(fact); else next.facts[index] = fact;
       return next;
     }
     case "supersede_fact": {
       const index = next.facts.findIndex((fact) => fact.id === mutation.factId);
       const existing = index >= 0 ? next.facts[index] : undefined;
       if (existing !== undefined) next.facts[index] = { ...existing, status: "superseded" };
-      if (mutation.replacement !== undefined) next.facts.push(mutation.replacement);
+      if (mutation.replacement !== undefined) next.facts.push(normalizeMemoryFactForState(mutation.replacement));
       return next;
     }
     case "mark_fact_needs_check": {
       const index = next.facts.findIndex((fact) => fact.id === mutation.factId);
       const existing = index >= 0 ? next.facts[index] : undefined;
-      if (existing !== undefined && existing.status !== "superseded") next.facts[index] = { ...existing, status: "needs_check" };
+      if (existing !== undefined && existing.status !== "superseded") next.facts[index] = { ...existing, status: "needs_check", statusReason: mutation.reason ?? "manual_review" };
       return next;
     }
     case "upsert_entity": {
@@ -500,6 +576,14 @@ export interface RuntimeEventBase {
 
 export type ContextTraceDiscardReason = "history_limit" | "input_budget";
 
+export type MemoryRecallExclusionReason = "superseded" | "scope_mismatch" | "entity_stale" | "entity_missing";
+
+export interface ContextMemorySelectionTrace {
+  admittedFactIds: readonly string[];
+  revalidationFactIds: readonly string[];
+  excluded: readonly { kind: "fact" | "entity"; id: string; reason: MemoryRecallExclusionReason }[];
+}
+
 /** Private diagnostic metadata emitted alongside a prepared Provider request;
  * it contains no body/path, and its hash is not an anonymity guarantee. */
 export interface PreparedRequestEstimate {
@@ -536,6 +620,7 @@ export interface ContextTrace {
   historyBudgetTokens?: number;
   memoryEstimatedTokens?: number;
   memoryTruncated?: boolean;
+  memorySelection?: ContextMemorySelectionTrace;
   observationIncluded: boolean;
   preparedRequest?: PreparedRequestMetadata;
 }

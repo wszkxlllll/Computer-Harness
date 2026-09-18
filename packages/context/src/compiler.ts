@@ -64,7 +64,10 @@ export class DefaultContextCompiler implements ContextCompiler {
     const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const memoryProjection = features.memory !== "off" && input.memory !== undefined
-      ? formatMemory(input.memory, input.plan, input.context?.memoryMaxTokens ?? this.memoryMaxTokens)
+      ? formatMemory(input.memory, input.plan, input.context?.memoryMaxTokens ?? this.memoryMaxTokens, {
+          runId: input.runId,
+          ...(input.latestObservation === undefined ? {} : { computerSessionId: input.latestObservation.computerSessionId }),
+        })
       : undefined;
     const memoryText = memoryProjection?.text;
     const toolText = JSON.stringify(tools);
@@ -219,7 +222,15 @@ export class DefaultContextCompiler implements ContextCompiler {
       authoritativeUserEventIds: orderedEvents.filter((event) => event.type === "user.input.received").map((event) => event.eventId),
       historyEstimatedTokens: estimatedHistoryTextTokens,
       ...(historyBudget === undefined || historyBudget < 0 ? {} : { historyBudgetTokens: historyBudget }),
-      ...(memoryProjection === undefined ? {} : { memoryEstimatedTokens, memoryTruncated: memoryProjection.truncated }),
+      ...(memoryProjection === undefined ? {} : {
+        memoryEstimatedTokens,
+        memoryTruncated: memoryProjection.truncated,
+        memorySelection: {
+          admittedFactIds: memoryProjection.selection.admittedFacts.map((fact) => fact.id),
+          revalidationFactIds: memoryProjection.selection.revalidationCandidates.map((candidate) => candidate.fact.id),
+          excluded: memoryProjection.selection.excluded,
+        },
+      }),
       observationIncluded: latestObservation !== undefined,
     };
     const budget: ContextBudgetReport = {

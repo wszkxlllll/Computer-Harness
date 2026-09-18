@@ -129,6 +129,7 @@ describe("RunSnapshot reducer", () => {
       event(6, { type: "memory.updated", callId, mutation: { operation: "supersede_fact", factId: "m1" } }),
     ].reduce(reduceRunEvent, initialRunSnapshot(runId));
     expect(snapshot.memory.facts).toMatchObject([{ id: "m1", status: "superseded" }]);
+    expect(snapshot.memory.facts[0]).toMatchObject({ scope: { kind: "run" }, retentionClass: "stable" });
   });
 
   it("does not turn partial provider cache observations into a false run total", () => {

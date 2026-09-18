@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { createMemoryTools, FileMemoryStore } from "@computer-harness/memory";
 import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
-import type { RunId, RunOutcome } from "@computer-harness/protocol";
+import type { MemoryMutation, RunId, RunOutcome } from "@computer-harness/protocol";
 import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
 import {
   DefaultRuntimePolicy,
@@ -43,6 +43,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         .filter((event) => event.sequence <= upToSequence),
     });
     const tools = dependencies.createToolRegistry?.() ?? createDefaultToolRegistry();
+    let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     if (config.planning) {
       const planRoot = resolve(config.outputDir, "plan-store");
       const planStore = (dependencies.createPlanStore ?? ((rootDir) => new FilePlanStore(rootDir)))(planRoot);
@@ -52,6 +53,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       const memoryRoot = resolve(config.outputDir, "memory-store");
       const memoryStore = (dependencies.createMemoryStore ?? ((rootDir) => new FileMemoryStore(rootDir)))(memoryRoot);
       tools.registerMany(createMemoryTools(memoryStore, config.memory));
+      memoryMutationApplier = async (targetRunId, mutation) => { await memoryStore.apply(targetRunId, mutation); };
     }
 
     const providerFactory = dependencies.createProvider ?? createProvider;
@@ -84,6 +86,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       mode: config.contextMode,
       maxHistoryEvents: config.contextMaxHistoryEvents,
       features,
+      ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
     });
     const computer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {

@@ -1,10 +1,14 @@
 import {
   sameMemoryFactContent,
   validateMemoryMutation,
+  type ComputerSessionId,
   type JsonValue,
   type MemoryEntity,
   type MemoryFact,
   type MemoryMutation,
+  type MemoryRetentionClass,
+  type MemoryScope,
+  type MemoryStatusReason,
   type MemoryState,
   type MemorySubject,
   type RunId,
@@ -36,7 +40,13 @@ export function cloneMemory(state: MemoryState): MemoryState {
 }
 
 function cloneFact(fact: MemoryFact): MemoryFact {
-  return { ...fact, subject: fact.subject ?? { type: "run" }, ...(fact.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...fact.relatedTaskIds] }) };
+  return {
+    ...fact,
+    subject: fact.subject ?? { type: "run" },
+    scope: fact.scope === undefined ? { kind: "run" } : { ...fact.scope },
+    retentionClass: fact.retentionClass ?? "stable",
+    ...(fact.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...fact.relatedTaskIds] }),
+  };
 }
 
 export function parseMemoryState(value: unknown, expectedRunId?: RunId): MemoryState {
@@ -65,10 +75,13 @@ export function normalizeMemoryMutation(value: unknown): MemoryMutation {
 
 function parseMemoryFact(value: unknown, label: string, allowLegacySubject: boolean): MemoryFact {
   const record = asObjectRecord(value, label);
-  assertExactKeys(record, ["id", "key", "value", "sourceEventId", "status", "updatedSequence"], ["subject", "relatedTaskIds"], label);
+  assertExactKeys(record, ["id", "key", "value", "sourceEventId", "status", "updatedSequence"], ["subject", "scope", "retentionClass", "statusReason", "relatedTaskIds"], label);
   const subject = parseMemorySubject(record.subject, `${label}.subject`, allowLegacySubject);
   const valueText = boundedString(record.value, `${label}.value`, MAX_MEMORY_VALUE_LENGTH, true);
   const status = parseFactStatus(record.status, `${label}.status`);
+  const scope = record.scope === undefined ? { kind: "run" as const } : parseMemoryScope(record.scope, `${label}.scope`);
+  const retentionClass = record.retentionClass === undefined ? "stable" as const : parseRetentionClass(record.retentionClass, `${label}.retentionClass`);
+  const statusReason = record.statusReason === undefined ? undefined : parseStatusReason(record.statusReason, `${label}.statusReason`);
   const updatedSequence = nonNegativeSequence(record.updatedSequence, `${label}.updatedSequence`);
   return {
     id: boundedString(record.id, `${label}.id`, MAX_MEMORY_ID_LENGTH),
@@ -77,9 +90,35 @@ function parseMemoryFact(value: unknown, label: string, allowLegacySubject: bool
     value: valueText,
     sourceEventId: boundedString(record.sourceEventId, `${label}.sourceEventId`, MAX_MEMORY_SOURCE_EVENT_ID_LENGTH) as import("@computer-harness/protocol").EventId,
     status,
+    scope,
+    retentionClass,
+    ...(statusReason === undefined ? {} : { statusReason }),
     ...(record.relatedTaskIds === undefined ? {} : { relatedTaskIds: parseRelatedTaskIds(record.relatedTaskIds, `${label}.relatedTaskIds`) }),
     updatedSequence,
   };
+}
+
+function parseMemoryScope(value: unknown, label: string): MemoryScope {
+  const record = asObjectRecord(value, label);
+  if (record.kind === "run") {
+    assertExactKeys(record, ["kind"], [], label);
+    return { kind: "run" };
+  }
+  if (record.kind === "computer_session") {
+    assertExactKeys(record, ["kind", "sessionId"], [], label);
+    return { kind: "computer_session", sessionId: boundedString(record.sessionId, `${label}.sessionId`, MAX_MEMORY_ID_LENGTH) as ComputerSessionId };
+  }
+  throw new Error(`${label}.kind must be run or computer_session`);
+}
+
+function parseRetentionClass(value: unknown, label: string): MemoryRetentionClass {
+  if (value === "stable" || value === "task" || value === "short_lived") return value;
+  throw new Error(`${label} is invalid`);
+}
+
+function parseStatusReason(value: unknown, label: string): MemoryStatusReason {
+  if (value === "manual_review" || value === "scope_ended") return value;
+  throw new Error(`${label} is invalid`);
 }
 
 function parseMemoryEntity(value: unknown, label: string, allowLegacySource: boolean): MemoryEntity {
@@ -227,15 +266,24 @@ export function validateWriteFact(args: JsonValue): void {
   if (value.key.trim().length === 0) throw new Error("memory_write_fact.key must be non-empty");
 }
 
-export function writeFactArgs(args: JsonValue): { key: string; value: string; entityId?: string; relatedTaskIds?: string[] } {
+export function writeFactArgs(args: JsonValue): { key: string; value: string; scope?: "run" | "computer_session"; retentionClass?: "stable" | "task" | "short_lived"; entityId?: string; relatedTaskIds?: string[] } {
   if (!isRecord(args)) throw new Error("memory_write_fact requires an object");
-  assertExactKeys(args, ["key", "value"], ["entityId", "relatedTaskIds"], "memory_write_fact");
+  assertExactKeys(args, ["key", "value"], ["scope", "retentionClass", "entityId", "relatedTaskIds"], "memory_write_fact");
   if (typeof args.key !== "string" || typeof args.value !== "string") throw new Error("memory_write_fact requires key and value");
   validateBoundedString(args.key, "memory_write_fact.key", MAX_MEMORY_KEY_LENGTH);
   validateBoundedString(args.value, "memory_write_fact.value", MAX_MEMORY_VALUE_LENGTH, true);
+  if (args.scope !== undefined && args.scope !== "run" && args.scope !== "computer_session") throw new Error("memory_write_fact.scope is invalid");
+  if (args.retentionClass !== undefined && args.retentionClass !== "stable" && args.retentionClass !== "task" && args.retentionClass !== "short_lived") throw new Error("memory_write_fact.retentionClass is invalid");
   if (args.entityId !== undefined) validateBoundedString(args.entityId, "memory_write_fact.entityId", MAX_MEMORY_ID_LENGTH);
   if (args.relatedTaskIds !== undefined) validateRelatedTaskIds(args.relatedTaskIds, "memory_write_fact.relatedTaskIds");
-  return { key: args.key, value: args.value, ...(args.entityId === undefined ? {} : { entityId: args.entityId }), ...(args.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...args.relatedTaskIds] as string[] }) };
+  return {
+    key: args.key,
+    value: args.value,
+    ...(args.scope === undefined ? {} : { scope: args.scope }),
+    ...(args.retentionClass === undefined ? {} : { retentionClass: args.retentionClass }),
+    ...(args.entityId === undefined ? {} : { entityId: args.entityId }),
+    ...(args.relatedTaskIds === undefined ? {} : { relatedTaskIds: [...args.relatedTaskIds] as string[] }),
+  };
 }
 
 export function readFactMutation(value: JsonValue): MemoryMutation {

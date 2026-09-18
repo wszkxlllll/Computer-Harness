@@ -6,6 +6,7 @@ import type {
   JsonValue,
   ModelTurn,
   MemoryMutation,
+  MemoryFact,
   ObservationFrame,
   ObservationId,
   RunId,
@@ -16,7 +17,7 @@ import type {
   ToolCallId,
   ToolResult,
 } from "@computer-harness/protocol";
-import { sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
+import { memoryFactRetentionClass, memoryFactScope, sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
 import {
   type AssetStore,
   type RunEventWriter,
@@ -83,6 +84,8 @@ export interface RunControllerDependencies {
   enabledCategories?: readonly ToolCategory[];
   /** Optional per-run tool allow-list for independent Planning/Memory switches. */
   enabledToolNames?: readonly string[];
+  /** Event-first Memory materialization for Runtime-owned lifecycle mutations. */
+  memoryMutationApplier?: (runId: RunId, mutation: MemoryMutation) => Promise<void>;
   /** One immutable source for prompt, Runtime and Registry feature semantics. */
   features?: RunFeatureConfig;
   /** Disabled by default so the existing one-computer-call baseline is stable. */
@@ -268,6 +271,7 @@ export class RunController {
   private enabledToolNames: ReadonlySet<string> | undefined;
   private readonly memoryEnabled: boolean;
   private readonly planningEnabled: boolean;
+  private readonly memoryMutationApplier: ((runId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
   private readonly batching: "off" | "same-control-input-v1";
   private readonly features: RunFeatureConfig;
   private readonly cleanupDeadlineMs: number;
@@ -289,6 +293,7 @@ export class RunController {
   private actionBudgetExhausted = false;
   private actionBudgetCloseTurnsRemaining = MAX_ACTION_BUDGET_CLOSE_TURNS;
   private goal: string | undefined;
+  private sessionMemoryScopeEnded = false;
 
   public constructor(dependencies: RunControllerDependencies) {
     this.runId = dependencies.runId;
@@ -306,6 +311,7 @@ export class RunController {
     this.toolAudience = dependencies.toolAudience ?? "main";
     this.enabledCategories = new Set(dependencies.enabledCategories ?? ["computer", "planning", "control", "side"]);
     this.enabledToolNames = dependencies.enabledToolNames === undefined ? undefined : new Set(dependencies.enabledToolNames);
+    this.memoryMutationApplier = dependencies.memoryMutationApplier;
     this.batching = dependencies.batching ?? "off";
     this.features = dependencies.features ?? {
       planning: this.enabledCategories.has("planning") ? "tasks-v1" : "off",
@@ -689,8 +695,7 @@ export class RunController {
             break;
           }
           outcome = turn.reportedStatus === "failure" ? "failed" : "succeeded";
-          await this.commitEvent({
-            type: "run.finished",
+          await this.commitRunFinished({
             outcome,
             summary: turn.summary,
             ...(turn.reportedStatus === undefined ? {} : { reportedStatus: turn.reportedStatus }),
@@ -713,7 +718,7 @@ export class RunController {
       }
 
       if (this.snapshot.status !== "finished") {
-        await this.commitEvent({ type: "run.finished", outcome });
+        await this.commitRunFinished({ outcome });
       }
       return outcome;
     } catch (error) {
@@ -740,7 +745,7 @@ export class RunController {
           });
           outcome = "failed";
         }
-        await this.commitEvent({ type: "run.finished", outcome });
+        await this.commitRunFinished({ outcome });
       }
       return outcome;
     } finally {
@@ -1290,7 +1295,7 @@ export class RunController {
                 category: "planning_materialization_failed",
                 message: errorMessage(error),
               });
-              await this.commitEvent({ type: "run.finished", outcome: "failed" });
+              await this.commitRunFinished({ outcome: "failed" });
               return;
             }
           }
@@ -1317,7 +1322,7 @@ export class RunController {
               await this.commitEvent({ type: "tool.call.failed", result });
               this.callStates.set(call.id, "failed");
               await this.commitEvent({ type: "runtime.error", category: "memory_materialization_failed", message: errorMessage(error) });
-              await this.commitEvent({ type: "run.finished", outcome: "failed" });
+              await this.commitRunFinished({ outcome: "failed" });
               return;
             }
           }
@@ -1398,7 +1403,7 @@ export class RunController {
         category: "unknown_side_effect",
         message: errorMessage(error),
       });
-      await this.commitEvent({ type: "run.finished", outcome: "outcome_unknown" });
+      await this.commitRunFinished({ outcome: "outcome_unknown" });
       this.callStates.set(call.id, "executing");
       return;
     }
@@ -1478,7 +1483,13 @@ export class RunController {
     const source = [...this.events].reverse().find((event) => event.type === "tool.call.received" && event.call.id === callId);
     const sourceEventId = source?.eventId ?? this.idFactory.eventId();
     const updatedSequence = source?.sequence ?? this.nextSequence;
-    const stampFact = <T extends { sourceEventId: import("@computer-harness/protocol").EventId; updatedSequence: number }>(fact: T): T => ({ ...fact, sourceEventId, updatedSequence });
+    const stampFact = <T extends Pick<MemoryFact, "sourceEventId" | "updatedSequence"> & Partial<Pick<MemoryFact, "scope" | "retentionClass" | "statusReason">>>(fact: T): T => ({
+      ...fact,
+      scope: fact.scope ?? { kind: "run" },
+      retentionClass: fact.retentionClass ?? "stable",
+      sourceEventId,
+      updatedSequence,
+    });
     switch (mutation.operation) {
       case "upsert_fact": return { operation: "upsert_fact", fact: stampFact(mutation.fact) };
       case "supersede_fact": return { operation: "supersede_fact", factId: mutation.factId, ...(mutation.replacement === undefined ? {} : { replacement: stampFact(mutation.replacement) }) };
@@ -1532,6 +1543,13 @@ export class RunController {
       throw new Error(`Memory fact id ${fact.id} already exists; changed content requires supersede_fact`);
     }
     const subject = fact.subject;
+    const scope = memoryFactScope(fact);
+    if (scope.kind === "computer_session" && (this.snapshot.computerSession === undefined || scope.sessionId !== this.snapshot.computerSession.id)) {
+      throw new Error("Memory computer_session scope does not match the current Computer session");
+    }
+    if (memoryFactRetentionClass(fact) === "task" && (!this.planningEnabled || fact.relatedTaskIds === undefined || fact.relatedTaskIds.length === 0)) {
+      throw new Error("Memory task retention requires Planning and relatedTaskIds");
+    }
     if (subject.type === "entity") {
       const entity = this.snapshot.memory.entities.find((item) => item.id === subject.entityId);
       if (entity === undefined || entity.status !== "active") throw new Error(`Memory fact subject references an unknown or inactive entity ${subject.entityId}`);
@@ -1582,6 +1600,31 @@ export class RunController {
     }
     this.latestObservation = persisted.observation;
     return persisted.observation;
+  }
+
+  private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<void> {
+    await this.markSessionMemoryScopeEnded();
+    await this.commitEvent({
+      type: "run.finished",
+      outcome: data.outcome,
+      ...(data.summary === undefined ? {} : { summary: data.summary }),
+      ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
+    });
+  }
+
+  private async markSessionMemoryScopeEnded(): Promise<void> {
+    if (this.sessionMemoryScopeEnded || !this.memoryEnabled || this.snapshot.computerSession === undefined) return;
+    this.sessionMemoryScopeEnded = true;
+    const sessionId = this.snapshot.computerSession.id;
+    const facts = this.snapshot.memory.facts.filter((fact) => {
+      const scope = memoryFactScope(fact);
+      return scope.kind === "computer_session" && scope.sessionId === sessionId && fact.status !== "superseded";
+    });
+    for (const fact of facts) {
+      const mutation: MemoryMutation = { operation: "mark_fact_needs_check", factId: fact.id, reason: "scope_ended" };
+      await this.commitEvent({ type: "memory.updated", callId: "runtime:scope-ended" as ToolCallId, mutation });
+      await this.memoryMutationApplier?.(this.runId, mutation);
+    }
   }
 
   private async commitEvent(data: RuntimeEventData): Promise<RuntimeEvent> {

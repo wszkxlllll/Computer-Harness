@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { EventId, MemoryEntity, MemoryFact, MemoryState, RunId } from "@computer-harness/protocol";
+import type { ComputerSessionId, EventId, MemoryEntity, MemoryFact, MemoryState, RunId } from "@computer-harness/protocol";
 import { FileMemoryStore, InMemoryMemoryStore, createMemoryTools } from "./index.js";
 
 const runId = "memory-test" as RunId;
@@ -62,6 +62,8 @@ describe("Run memory", () => {
     expect(mutation?.operation).toBe("upsert_fact");
     await store.apply(runId, mutation!);
     expect((await store.get(runId)).facts[0]?.value).toBe("report.odt");
+    expect((await store.get(runId)).facts[0]?.scope).toEqual({ kind: "run" });
+    expect((await store.get(runId)).facts[0]?.retentionClass).toBe("stable");
     await store.rebuild(runId, [mutation!]);
     expect((await store.get("other-run" as RunId)).facts).toHaveLength(0);
     const get = createMemoryTools(store).find((tool) => tool.name === "memory_get");
@@ -98,6 +100,7 @@ describe("Run memory", () => {
     const markOutput = await mark.execute({ factId }, context);
     await store.apply(runId, mark.memoryMutationFromResult!(markOutput, context)!);
     expect((await store.get(runId)).facts[0]!.status).toBe("needs_check");
+    expect((await store.get(runId)).facts[0]!.statusReason).toBe("manual_review");
 
     const duplicateOutput = await upsert.execute({ type: "document", description: "report.odt in Writer" }, context);
     await store.apply(runId, upsert.memoryMutationFromResult!(duplicateOutput, context)!);
@@ -122,6 +125,45 @@ describe("Run memory", () => {
     for (const [label, value] of cases) {
       await expect(readPersistedMemory(value), label).rejects.toThrow(/memory\.json|invalid|reference/i);
     }
+  });
+
+  it("migrates legacy facts and keeps current/history scope gates identical", async () => {
+    const legacy = await readPersistedMemory({ runId, facts: [fact()], entities: [] });
+    expect(legacy.facts[0]).toMatchObject({ scope: { kind: "run" }, retentionClass: "stable" });
+
+    const store = new InMemoryMemoryStore();
+    const tools = createMemoryTools(store);
+    const sessionA = "session-a" as ComputerSessionId;
+    const sessionB = "session-b" as ComputerSessionId;
+    const contextA = { runId, session: { id: sessionA } as never, signal: new AbortController().signal };
+    const contextB = { runId, session: { id: sessionB } as never, signal: new AbortController().signal };
+    const write = tools.find((tool) => tool.name === "memory_write_fact")!;
+    const output = await write.execute({ key: "last_seen", value: "synthetic", scope: "computer_session", retentionClass: "short_lived" }, contextA);
+    await store.apply(runId, write.memoryMutationFromResult!(output, contextA)!);
+    const get = tools.find((tool) => tool.name === "memory_get")!;
+    await expect(get.execute({ key: "last_seen" }, contextA)).resolves.toMatchObject({
+      facts: [{ scope: { kind: "computer_session", sessionId: sessionA }, retentionClass: "short_lived" }],
+      factAdmission: [{ id: "m1", class: "revalidation", reason: "short_lived_last_known" }],
+    });
+    await expect(get.execute({ key: "last_seen" }, contextB)).rejects.toThrow("no matching");
+    await expect(get.execute({ key: "last_seen", view: "history" }, contextB)).resolves.toMatchObject({
+      facts: [{ id: "m1" }],
+      factApplicability: [{ id: "m1", applicable: false }],
+    });
+  });
+
+  it("keeps superseded facts in explicit history but not current", async () => {
+    const store = new InMemoryMemoryStore();
+    const oldFact = fact({ id: "old", key: "state", value: "old", scope: { kind: "run" }, retentionClass: "stable" });
+    const newFact = fact({ id: "new", key: "state", value: "new", scope: { kind: "run" }, retentionClass: "stable" });
+    await store.rebuild(runId, [{ operation: "upsert_fact", fact: oldFact }, { operation: "supersede_fact", factId: "old", replacement: newFact }]);
+    const get = createMemoryTools(store).find((tool) => tool.name === "memory_get")!;
+    const context = { runId, session: {} as never, signal: new AbortController().signal };
+    await expect(get.execute({ key: "state" }, context)).resolves.toMatchObject({ facts: [{ id: "new", value: "new" }] });
+    const history = await get.execute({ key: "state", view: "history" }, context);
+    const historyFacts = (history as { facts: MemoryFact[] }).facts;
+    expect(historyFacts.some((item) => item.id === "old" && item.status === "superseded")).toBe(true);
+    expect(historyFacts.some((item) => item.id === "new" && item.status === "active")).toBe(true);
   });
 
   it("rejects overlong memory fields and collections before persistence", async () => {

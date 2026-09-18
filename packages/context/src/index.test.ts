@@ -318,8 +318,9 @@ describe("DefaultContextCompiler", () => {
       entities: [],
     };
     const selection = selectMemoryForContext(memory, { runId, tasks: [{ id: "t1", subject: "active phase", status: "in_progress" }] }, { maxIndexFacts: 2, maxHotFacts: 1 });
-    expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["task", "check"]);
+    expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["task", "old"]);
     expect(selection.hotFacts.map((fact) => fact.id)).toEqual(["task"]);
+    expect(selection.revalidationCandidates.map((candidate) => candidate.fact.id)).toEqual(["check"]);
   });
 
   it("composes feature-specific instructions without leaking disabled planning or batch semantics", async () => {
@@ -354,6 +355,39 @@ describe("DefaultContextCompiler", () => {
     }, undefined);
     expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["f1"]);
     expect(selection.indexEntities.map((entity) => entity.id)).toEqual(["e1"]);
+  });
+
+  it("separates admitted, revalidation and excluded facts by scope/status", async () => {
+    const selection = selectMemoryForContext({
+      runId,
+      entities: [{ id: "stale", type: "window", description: "old", sourceEventId: "entity-source" as EventId, status: "stale", updatedSequence: 1 }],
+      facts: [
+        { id: "stable", subject: { type: "run" }, key: "stable", value: "ok", sourceEventId: "stable-source" as EventId, status: "active", retentionClass: "stable", updatedSequence: 1 },
+        { id: "short", subject: { type: "run" }, key: "short", value: "last", sourceEventId: "short-source" as EventId, status: "active", retentionClass: "short_lived", updatedSequence: 2 },
+        { id: "check", subject: { type: "run" }, key: "check", value: "recheck", sourceEventId: "check-source" as EventId, status: "needs_check", statusReason: "manual_review", updatedSequence: 3 },
+        { id: "wrong-session", subject: { type: "run" }, key: "wrong", value: "old", sourceEventId: "wrong-source" as EventId, status: "active", scope: { kind: "computer_session", sessionId: "other-session" as ComputerSessionId }, updatedSequence: 4 },
+        { id: "stale-fact", subject: { type: "entity", entityId: "stale" }, key: "state", value: "old", sourceEventId: "stale-source" as EventId, status: "active", updatedSequence: 5 },
+      ],
+    }, undefined, {}, { runId, computerSessionId: sessionId });
+    expect(selection.admittedFacts.map((fact) => fact.id)).toEqual(["stable"]);
+    expect(selection.revalidationCandidates.map((candidate) => [candidate.fact.id, candidate.reason])).toEqual([["check", "needs_check"], ["short", "short_lived_last_known"]]);
+    expect(selection.hotFacts.map((fact) => fact.id)).toEqual(["stable"]);
+    expect(selection.excluded).toEqual(expect.arrayContaining([
+      { kind: "fact", id: "wrong-session", reason: "scope_mismatch" },
+      { kind: "fact", id: "stale-fact", reason: "entity_stale" },
+      { kind: "entity", id: "stale", reason: "entity_stale" },
+    ]));
+
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const compiled = await compiler.compile({
+      runId,
+      goal: "recheck",
+      recentEvents: [event(0, { type: "observation.created", observation: observation("scope-observation") })],
+      latestObservation: observation("scope-observation"),
+      memory: { runId, facts: [...selection.admittedFacts, ...selection.revalidationCandidates.map((candidate) => candidate.fact)], entities: [], },
+    }, new AbortController().signal);
+    expect(compiled.contextBudget?.trace?.memorySelection).toMatchObject({ admittedFactIds: ["stable"], revalidationFactIds: ["check", "short"] });
+    expect(compiled.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Revalidation candidates")))).toBe(true);
   });
 
   it("keeps the compact entity index closed over selected entity facts", () => {
