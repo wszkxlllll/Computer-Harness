@@ -142,7 +142,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
           : { operation: "supersede_fact", factId: existing.id, replacement: fact }) as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readFactMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
     },
     {
       name: "memory_mark_fact_needs_check",
@@ -169,7 +169,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         return { operation: "mark_fact_needs_check", factId, reason: "manual_review" } as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readFactMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
     },
   ];
   if (options.retrieval !== undefined) {
@@ -252,7 +252,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         return { operation: "upsert_entity", entity } as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readEntityMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
     });
     tools.push({
       name: "memory_list",
@@ -302,10 +302,15 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         if (mutation.operation !== "invalidate_entity") throw new Error("memory entity invalidation has invalid mutation");
         return mutation;
       },
-      afterMemoryCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
     });
   }
   return tools;
+}
+
+async function applyMemoryMutation(store: MemoryStore, retrieval: HybridMemoryRecallService | undefined, runId: import("@computer-harness/protocol").RunId, mutation: MemoryMutation): Promise<void> {
+  const next = await store.apply(runId, mutation);
+  retrieval?.syncState(next);
 }
 
 function sameScope(fact: MemoryFact, scope: MemoryFact["scope"]): boolean {
