@@ -16,6 +16,21 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 | CUA window opt-in | 仅显式 PID + window ID；当前只开放已验证的窗口观察/单击/wait 路径，keyboard 不开放 |
 | 诊断 | `--doctor` 无模型、无截图/输入窗口动作且脱敏；会建立并结束临时诊断 session，cleanup 未确认时返回 `unknown` |
 
+## 开发进度（2026-09-19）
+
+当前仓库已形成可运行的 V1 开发基线。Context、Run Memory、Monitor、Planning、受限 Action Batch、Risk Guard、双 Provider、CUA/OSWorld Adapter 和 TUI 均已接入统一 Runtime；TUI 还支持按 Run 选择这些实验功能，本地 Windows 有隔离启动器。
+
+当前基线由 [PR #7](https://github.com/wszkxlllll/Computer-Harness/pull/7) 收敛，合并前后都应以对应 CI 和提交记录为准。当前本地源码证据包括：
+
+- Node 24 下 `pnpm run typecheck` 通过；
+- `pnpm test`：36 个测试文件、394 项测试通过；
+- GitHub CI：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 均通过；
+- GLM/Qwen 合成 Memory 协议探针均完成 `search → admitted/revalidation → admitted-only terminate`，没有真实桌面动作。
+
+这些证据证明的是工程链路和协议边界，不是完整产品效果。首次本机真实 Run 已暴露高 Context/token 成本、Planning/Memory 未产生实际调用、Monitor 候选未形成有效干预、Risk Guard 未触发审批以及 CUA 前台失配恢复等问题，详见[本机真实体验审计](./docs/local-experience-audit-2026-09-19.md)。
+
+下一阶段不是继续无条件增加模块，而是冻结 20 个真实开发场景（简单、中等、困难均包含），用可验证结果、模型轮次、GUI 动作、重复动作、tokens、延迟、人工接管、审批和恢复率驱动 Context、Planning、Memory、Monitor、Guard 与 CUA 体验优化。跨 Run 长期 Memory、Subagent、Sandbox、后台异步任务、语音和更广 Accessibility 能力仍属于后续阶段。
+
 ## 快速开始
 
 要求：Node.js `>=22.13.0`、pnpm `11.19.0`。开发、测试和文档工作不需要 API key、桌面权限或 CUA daemon。
@@ -193,10 +208,12 @@ CLI/SDK 负责组装和注入依赖，Provider 不反向依赖 CLI；贡献时�
 
 ## 当前证据与限制
 
-- 离线基线：`pnpm test` 32 files / 320 tests，`pnpm run typecheck` 通过；测试不代表真实模型效果。
-- 实机窄证据：Windows + CUA 0.22.2 专用 fixture 的 adapter window observe/single-click/wait；另有一次 T10 synthetic fixture GLM 闭环（4 requests/responses、3 primitive actions、4 fixture observations）。这与 no-goal WinPTY rapid/slow × ESC→Q/Ctrl-C 四场景分别记录，不能外推通用桌面、focus/AX、所有平台或完整业务 Run。
+- 离线基线：Node 24 下 `pnpm test` 36 files / 394 tests，`pnpm run typecheck` 通过；测试不代表真实模型效果。
+- CI 矩阵：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 已通过；CI 通过只证明构建和协议测试跨平台可运行，不等于真实 Mac/Linux 桌面已验收。
+- 真实 API 窄证据：GLM/Qwen 各完成两轮合成 Memory 协议消费，无 GUI action；这不证明语义检索质量、长任务质量或真实用户数据安全。
+- 本机真实体验：一次 CUA/TUI Run 正常结束，但累计 27 次模型请求、约 40.8 万输入/输出 tokens，发生两次前台失配拒绝；这说明产品体验仍需优化，不能把 `runtimeOutcome=succeeded` 当作任务成功。
 - `--doctor` 是无模型、无截图/输入窗口动作的诊断，但会建立/结束临时 session，仍可能 cleanup `unknown`；不能把 metadata/inventory 支持误读成 session、权限或 cleanup 全部通过。
-- Provider transport failure、CUA refusal、真实焦点和 OSWorld 业务结果需按独立验证记录解释；本 README 不把它们包装成已解决或成熟安全保证。
+- Provider transport failure、CUA refusal、真实焦点、登录/OTP 审批和 OSWorld 业务结果需按独立验证记录解释；本 README 不把它们包装成已解决或成熟安全保证。
 
 ## 继续阅读与贡献
 
