@@ -108,8 +108,17 @@ function Assert-CuaBinary {
 }
 
 function Test-CuaReady {
-  & $cuaBinary status --socket $cuaSocket *> $null
-  return $LASTEXITCODE -eq 0
+  # Windows PowerShell 5 turns native stderr into an ErrorRecord. With the
+  # launcher's strict ErrorActionPreference, the expected "not running"
+  # status would otherwise abort before we can start the daemon.
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $cuaBinary status --socket $cuaSocket 1>$null 2>$null
+    return $LASTEXITCODE -eq 0
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
 }
 
 function Show-Check {
