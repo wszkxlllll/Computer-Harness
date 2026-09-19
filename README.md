@@ -40,6 +40,16 @@ node apps/cli/dist/index.js --help
 
 更完整的安装、PowerShell、CUA daemon、OSWorld 和故障排查见[开发者上手指南](./docs/getting-started.md)。
 
+### Windows 一键本地启动
+
+本机运行不需要配置系统级 Node、CUA 或 API Key 环境变量。把机器路径写入被 Git 忽略的 `.harness.local.psd1`，密钥保留在 `.env`，然后在仓库根目录执行：
+
+```powershell
+.\scripts\harness.ps1 start
+```
+
+它会使用隔离 Node，启动本地 CUA daemon 并打开 TUI；退出后清理自己启动的 daemon。首页按 `F` 选择下一次 Run 的 Planning、Memory、Batch、Context 与 Monitor。详细配置、预设和排查命令见[本地启动器说明](./docs/local-launcher.md)。
+
 ## 运行一个本地任务
 
 普通 Run 必须显式提供 `--goal`、`--model` 和 Computer 连接。下面是当前验证过的 direct Node 入口，可减少 shell/pnpm wrapper 的参数差异；这与 CUA socket 是否可连接是两件事。Provider 请求只会在 Run 真正开始后发生。
