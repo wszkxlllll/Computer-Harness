@@ -83,6 +83,8 @@ TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首�
 node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/tui" --env-file ".env"
 ```
 
+上面的直接 `node` 命令从仓库根目录执行，因此 `.env` 指向根目录文件；如果使用 `pnpm --filter @computer-harness/cli start`，进程工作目录是 `apps/cli`，请改用仓库根目录 `.env` 的绝对路径，或传 `..\..\.env`，避免被解析成 `apps/cli/.env`。
+
 快捷键只作用于当前 TTY，不是全局热键：
 
 | 按键 | 作用 |
