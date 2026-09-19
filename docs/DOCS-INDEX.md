@@ -13,6 +13,8 @@
 
 ## 下一阶段开发必读
 
+下一轮生活服务评测与优化见[三人评测实施方案](./scenario-evaluation-and-three-person-plan-2026-09-19.md)：六类生活目标×原生App/微信小程序/Web/跨应用入口，目标120个受控实例、72开发/48验证、18真实迁移任务；三人各负责两域及一个横向优化方向。当前为调研后建议，未冻结代码/题库、未启动评测；取代原办公分类、小规模及仅三领域Web偏重建议，不修改既有OSWorld清单。
+
 TUI 功能选择页与 Memory embedding 配置说明见 [TUI 功能选择与 embedding 记录](./tui-feature-selection-and-memory-embedding-2026-09-19.md)。它补充当前 CLI 参数说明，不改变 Runtime/Provider 合同。
 
 按顺序阅读以下三份文件即可继续 DEV-1/DEV-2，不需要拼接历史审计：
