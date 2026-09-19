@@ -1,6 +1,6 @@
 # 首次本机真实体验审计
 
-日期：2026-09-19  
+日期：2026-09-19
 范围：最新本机 CUA/TUI Run 的脱敏 `summary.json`、`trajectory.jsonl` 与 provider exchange 摘要。未查看、展示或提交截图，不复述用户目标或输入文本，未调用模型或操作桌面。
 
 ## 1. 结论
