@@ -21,6 +21,8 @@ TUI 功能选择页与 Memory embedding 配置说明见 [TUI 功能选择与 emb
 2. [完整开发路线 V2](./full-development-roadmap-v2.md)：已并入复核修订的 DEV-0..8 设计、合同与依赖。
 3. [配套验收清单](./development-acceptance-v2.md)：反例、正常路径和阶段交付要求。
 
+最新本机真实体验暴露的成本、验证语义、Monitor、Guard 与 CUA 恢复问题见[首次本机真实体验审计](./local-experience-audit-2026-09-19.md)。该报告是当前体验优化入口，不替代长期路线。
+
 涉及文件拆分时再读[分块重构施工表](./module-refactoring-work-plan.md)：RFT-1..7 的源文件映射、目标职责、公共接口、先后顺序与测试，不是另一套阶段路线。
 
 DEV-3 Context、DEV-4 Memory、DEV-5 Monitor 的实施合同、DEV-6 Risk 承接、Provider 适配与公开安全评测边界统一见[DEV-3/4/5 实施计划](./dev-3-5-implementation-plan.md)。本文保持“规划合同/来源缓存”角色，不表示这些阶段已经实现。
