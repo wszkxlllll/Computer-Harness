@@ -77,7 +77,7 @@ node apps/cli/dist/index.js --goal "<instruction returned by reset>" --model glm
 
 ## TUI 预览
 
-TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首页，输入目标并按 Enter 开始新 Run；使用时仍需提供 `--model` 和 Computer 连接：
+TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首页，按大写 `F` 打开本次 Run 的功能选择页，再输入目标并按 Enter 开始；使用时仍需提供 `--model` 和 Computer 连接：
 
 ```text
 node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/tui" --env-file ".env"
@@ -89,6 +89,7 @@ node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-soc
 | --- | --- |
 | `I` | 进入 goal/correction 编辑；Run 正在执行时先请求 pause/quiescence，不能用编辑态绕过未决动作 |
 | `Enter` | 首页开始 Run；Run 中提交 correction。提交经过 Controller Inbox，旧决策失效；pause barrier 未完成时会排队 |
+| `F` | 首页打开功能选择页；用方向键或 `J/K` 移动，Space 切换布尔项，Left/Right 切换枚举，Enter 保存，Esc 取消 |
 | `P` / `R` | 通过 Controller 暂停 / 恢复当前 Run |
 | `A` / `Ctrl-C` | Abort 当前 Run；退出时保留未确认 cleanup，不把停止请求冒称底层已停止 |
 | `Y` / `N` | waiting approval 时批准 / 拒绝 |
@@ -98,6 +99,20 @@ node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-soc
 编辑态中的 `A`、`Q` 是正文，不是快捷键。必须把焦点放在当前终端；TUI 不注册全局热键，也不会把其他应用收到的按键冒称为输入。输入会显示在本地终端，可能留在 terminal scrollback、录屏或终端日志中；共享 diagnostics/report 仍不写入原始输入。真实 no-goal WinPTY 只证明终端生命周期、中文/resize、尾部可见、500 上限和退出清理，不证明完整 model Run、跨 Run 的真实纠正或通用焦点；另有一次 T10 synthetic fixture GLM 闭环，见“当前证据与限制”。
 
 `--interactive` 不启动 TUI：它提供行式用户输入和审批；`P`/`R`/`I` 是 TUI 控制，不适用于行式入口。
+
+功能选择页只覆盖下一次 Run 的 Planning、Memory、Memory retrieval、Action batching、Context history 和 Progress Monitor。每次 Run 仍创建新的工具注册表、Context、Memory store 和 Monitor 状态；Provider、Computer、Risk Guard 仍由启动参数和 profile 决定。Hybrid retrieval 只有在 Memory 开启且配置了独立 embedding endpoint/key 时才可用；页面会提示这一前置条件。
+
+### Memory embedding 配置
+
+Memory 的 `lexical` 检索是本地、无网络的默认路径；只要选择 `--memory facts` 或 `--memory entities`，就可以直接使用。`hybrid` 才会调用 embedding 服务，并且必须显式提供独立的 endpoint 与凭据：
+
+```text
+node apps/cli/dist/index.js --goal "<approved-goal>" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --memory facts --memory-retrieval hybrid --memory-embedding-endpoint "<embedding-endpoint>" --env-file ".env"
+```
+
+`.env` 中使用 `MEMORY_EMBEDDING_API_KEY`，不要复用聊天模型的 key。当前内置适配器是 Qwen `text-embedding-v4` 兼容接口；它只接收经过 scope/status gate 的候选文本，向量仅用于相关性排序，不代表事实已验证，也不改变审批或工具权限。未配置 embedding key、endpoint 超时或服务不可用时，Hybrid 会返回受控的 lexical/exact fallback；不会自动切换供应商或无限重试。TUI 的 Memory retrieval 选择不会替你填写 endpoint 或读取并显示密钥。
+
+Qwen 北京兼容接口的 endpoint 形状为 `https://<workspace-id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings`；把完整的 `/embeddings` URL 作为 `--memory-embedding-endpoint` 传入。仓库当前默认维度由适配器固定为 `1024`，没有额外的 CLI 维度开关；若更换 embedding 厂商，需要实现新的 `MemoryEmbeddingProvider`，不能只替换聊天模型 endpoint。
 
 ## CUA daemon 与桌面边界
 

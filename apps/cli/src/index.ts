@@ -5,7 +5,7 @@ import { ApplicationSession, createRun, writeRunReport, type AppRuntimeModel, ty
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
-import { runApplicationTui } from "./tui.js";
+import { runApplicationTui, type TuiFeatureSelection } from "./tui.js";
 import { runCuaDoctor } from "./doctor-command.js";
 import { resolveCliModel } from "./cli-model.js";
 import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
@@ -216,6 +216,14 @@ async function main(): Promise<void> {
       output: options.output,
       profile: options.risk.profile,
       riskGuard: options.risk.riskGuard,
+      features: {
+        planning: options.planning,
+        memory: options.memory,
+        memoryRetrieval: options.memoryRetrieval,
+        batching: options.batching,
+        contextMode: options.contextMode,
+        monitor: options.monitor,
+      } satisfies TuiFeatureSelection,
     }, options.goal === undefined ? {} : { initialGoal: options.goal });
     return;
   }

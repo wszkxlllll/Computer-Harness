@@ -13,6 +13,8 @@
 
 ## 下一阶段开发必读
 
+TUI 功能选择页与 Memory embedding 配置说明见 [TUI 功能选择与 embedding 记录](./tui-feature-selection-and-memory-embedding-2026-09-19.md)。它补充当前 CLI 参数说明，不改变 Runtime/Provider 合同。
+
 按顺序阅读以下三份文件即可继续 DEV-1/DEV-2，不需要拼接历史审计：
 
 1. [Stage 6 当前实施入口](./stage-6-convergence-and-start-state-2026-09-15.md)：当前范围、顺序、已有证据及停止条件。
