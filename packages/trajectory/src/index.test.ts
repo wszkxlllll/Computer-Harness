@@ -129,6 +129,23 @@ describe("RunSnapshot reducer", () => {
       event(6, { type: "memory.updated", callId, mutation: { operation: "supersede_fact", factId: "m1" } }),
     ].reduce(reduceRunEvent, initialRunSnapshot(runId));
     expect(snapshot.memory.facts).toMatchObject([{ id: "m1", status: "superseded" }]);
+    expect(snapshot.memory.facts[0]).toMatchObject({ scope: { kind: "run" }, retentionClass: "stable" });
+  });
+
+  it("does not turn partial provider cache observations into a false run total", () => {
+    const cachedResponse = event(5, {
+      type: "model.response.received",
+      turn: { type: "finish", summary: "first", usage: { inputTokens: 10, cacheReadTokens: 6 } },
+    });
+    const uncachedResponse = event(6, {
+      type: "model.response.received",
+      turn: { type: "finish", summary: "second", usage: { inputTokens: 8 } },
+    });
+    const events = [...runningEvents(), cachedResponse, uncachedResponse];
+    const snapshot = events.reduce(reduceRunEvent, initialRunSnapshot(runId));
+    expect(cachedResponse).toMatchObject({ turn: { usage: { cacheReadTokens: 6 } } });
+    expect(snapshot.modelUsage).toEqual({ inputTokens: 18 });
+    expect(snapshot.modelUsage?.cacheReadTokens).toBeUndefined();
   });
 
   it("is deterministic and leaves an unresolved side effect visible", () => {
@@ -651,6 +668,18 @@ describe("readRuntimeEvents", () => {
       }),
       event(0, { type: "planning.task.updated", callId, mutation: { operation: "created", task: { id: "task-1", subject: "Open the app", status: "pending" } } }),
       event(0, { type: "memory.updated", callId, mutation: { operation: "upsert_fact", fact: { id: "m1", subject: { type: "run" }, key: "target", value: "demo", sourceEventId: "event-source" as EventId, status: "active", updatedSequence: 12 } } }),
+      event(0, {
+        type: "monitor.proposal",
+        mode: "guidance",
+        proposal: "guidance",
+        fingerprint: "monitor-fingerprint",
+        sourceEventIds: ["event-source" as EventId],
+        reasonCodes: ["repeated_action"],
+        evidenceKinds: ["action_receipt"],
+        modelDecisionCount: 1,
+        guiActionCount: 2,
+        guidanceText: "Review current state before continuing.",
+      }),
       event(0, { type: "run.paused", reason: "operator" }),
       event(0, { type: "run.resumed" }),
       event(0, { type: "approval.requested", requestId: "approval-1", callId, reason: "confirm" }),
@@ -669,6 +698,18 @@ describe("readRuntimeEvents", () => {
   });
 
   it("rejects cross-field ownership and receipt mismatches at the schema boundary", () => {
+    const lifecycleMemoryEvent = {
+      eventId: "event-lifecycle",
+      runId,
+      sequence: 0,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "memory.updated" as const,
+      source: "lifecycle" as const,
+      mutation: { operation: "mark_fact_needs_check" as const, factId: "fact-1", reason: "scope_ended" as const },
+    };
+    expect(runtimeEventSchema.parse(lifecycleMemoryEvent)).toEqual(lifecycleMemoryEvent);
+    expect(runtimeEventSchema.safeParse({ ...lifecycleMemoryEvent, callId }).success).toBe(false);
+
     const observation = {
       eventId: "event-0",
       runId,

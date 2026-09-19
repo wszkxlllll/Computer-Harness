@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import { createMemoryTools, FileMemoryStore } from "@computer-harness/memory";
+import { createMemoryTools, FileMemoryStore, HybridMemoryRecallService, QwenTextEmbeddingProvider, type MemoryEmbeddingProvider } from "@computer-harness/memory";
 import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
-import type { RunId, RunOutcome } from "@computer-harness/protocol";
+import type { MemoryMutation, RunId, RunOutcome } from "@computer-harness/protocol";
 import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
 import {
   DefaultRuntimePolicy,
@@ -12,6 +12,7 @@ import {
   createDefaultToolRegistry,
   type ActionPolicy,
   type ContextCompiler,
+  type MemoryRecallService,
   type ProviderAdapter,
   type RunFeatureConfig,
   type RuntimePolicy,
@@ -23,7 +24,7 @@ import { createComputer } from "./computers.js";
 import { createProvider } from "./providers.js";
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
-import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
+import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
   const runId = input.runId ?? generatedRunId();
@@ -43,6 +44,18 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         .filter((event) => event.sequence <= upToSequence),
     });
     const tools = dependencies.createToolRegistry?.() ?? createDefaultToolRegistry();
+    let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
+    const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
+    const configuredEmbeddingProvider = memoryRetrievalMode === "hybrid"
+      ? dependencies.createMemoryEmbeddingProvider?.({ config, credentials })
+      : undefined;
+    const memoryRetrievalService = config.memory === "off" || memoryRetrievalMode === "off"
+      ? undefined
+      : (dependencies.createMemoryRecallService?.({
+          config,
+          credentials,
+          ...(configuredEmbeddingProvider === undefined ? {} : { provider: configuredEmbeddingProvider }),
+        }) ?? createMemoryRecallService(config, credentials, configuredEmbeddingProvider));
     if (config.planning) {
       const planRoot = resolve(config.outputDir, "plan-store");
       const planStore = (dependencies.createPlanStore ?? ((rootDir) => new FilePlanStore(rootDir)))(planRoot);
@@ -51,7 +64,13 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     if (config.memory !== "off") {
       const memoryRoot = resolve(config.outputDir, "memory-store");
       const memoryStore = (dependencies.createMemoryStore ?? ((rootDir) => new FileMemoryStore(rootDir)))(memoryRoot);
-      tools.registerMany(createMemoryTools(memoryStore, config.memory));
+      tools.registerMany(createMemoryTools(memoryStore, config.memory, {
+        ...(memoryRetrievalService === undefined ? {} : { retrieval: memoryRetrievalService }),
+      }));
+      memoryMutationApplier = async (targetRunId, mutation) => {
+        const next = await memoryStore.apply(targetRunId, mutation);
+        memoryRetrievalService?.syncState(next);
+      };
     }
 
     const providerFactory = dependencies.createProvider ?? createProvider;
@@ -80,10 +99,12 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ? createActionPolicy(config, riskProvider)
       : dependencies.createActionPolicy(config, riskProvider);
     const features = featureConfig(config);
-    const contextCompiler = dependencies.createContextCompiler?.(tools, features, config) ?? new DefaultContextCompiler(tools, {
+    const contextMemoryRecall = memoryRetrievalService === undefined ? undefined : createContextMemoryRecall(memoryRetrievalService);
+    const contextCompiler = dependencies.createContextCompiler?.(tools, features, config, contextMemoryRecall) ?? new DefaultContextCompiler(tools, {
       mode: config.contextMode,
       maxHistoryEvents: config.contextMaxHistoryEvents,
       features,
+      ...(contextMemoryRecall === undefined ? {} : { memoryRecall: contextMemoryRecall }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
     });
     const computer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {
@@ -118,6 +139,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       batching: config.batching,
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
+      ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),
       ...(windowTargetToolNames === undefined ? {} : { enabledToolNames: windowTargetToolNames }),
       ...(dependencies.clock === undefined ? {} : { clock: dependencies.clock }),
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
@@ -128,6 +150,59 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     await eventWriter?.close().catch(() => undefined);
     throw error;
   }
+}
+
+function createContextMemoryRecall(service: HybridMemoryRecallService): MemoryRecallService {
+  return {
+    async search(state, query, signal) {
+      const result = await service.search(state, query, signal);
+      return {
+        method: result.trace.method,
+        semanticStatus: result.trace.semanticStatus,
+        stateStable: result.trace.stateStable,
+        embeddingBudgetUsed: result.trace.embeddingBudgetUsed,
+        embeddingBudgetLimit: result.trace.embeddingBudgetLimit,
+        admitted: result.trace.admitted,
+        revalidation: result.trace.revalidation,
+        excluded: result.trace.excluded,
+      };
+    },
+  };
+}
+
+function resolveMemoryRetrievalMode(config: ResolvedRunConfig): MemoryRetrievalMode {
+  if (config.memory === "off") return "off";
+  return config.memoryRetrieval ?? "lexical";
+}
+
+function createMemoryRecallService(
+  config: ResolvedRunConfig,
+  credentials: ProviderCredentials,
+  configuredProvider: MemoryEmbeddingProvider | undefined,
+): HybridMemoryRecallService {
+  const mode = resolveMemoryRetrievalMode(config);
+  let provider: MemoryEmbeddingProvider | undefined;
+  if (mode === "hybrid") {
+    provider = configuredProvider ?? createDefaultEmbeddingProvider(config, credentials);
+    if (provider === undefined) throw new Error("memoryRetrieval hybrid requires an explicit embedding provider");
+  }
+  return new HybridMemoryRecallService(provider, {
+    ...(config.memoryEmbeddingMaxRequests === undefined ? {} : { maxEmbeddingRequestsPerRun: config.memoryEmbeddingMaxRequests }),
+    ...(config.memoryEmbeddingTimeoutMs === undefined ? {} : { deadlineMs: config.memoryEmbeddingTimeoutMs }),
+  });
+}
+
+function createDefaultEmbeddingProvider(config: ResolvedRunConfig, credentials: ProviderCredentials): MemoryEmbeddingProvider {
+  if (config.memoryEmbeddingEndpoint === undefined || config.memoryEmbeddingEndpoint.trim().length === 0) {
+    throw new Error("memoryRetrieval hybrid requires --memory-embedding-endpoint or an injected endpoint");
+  }
+  if (credentials.memoryEmbeddingApiKey === undefined || credentials.memoryEmbeddingApiKey.trim().length === 0) {
+    throw new Error("memoryRetrieval hybrid requires an independent memory embedding credential");
+  }
+  return new QwenTextEmbeddingProvider({
+    endpoint: config.memoryEmbeddingEndpoint,
+    apiKey: credentials.memoryEmbeddingApiKey,
+  });
 }
 
 function createActionPolicy(config: ResolvedRunConfig, riskProvider: ProviderAdapter | undefined): ActionPolicy | undefined {
@@ -145,6 +220,7 @@ function featureConfig(config: ResolvedRunConfig): RunFeatureConfig {
     memory: config.memory === "off" ? "off" : config.memory === "facts" ? "facts-v1" : "entities-v1",
     batching: config.batching,
     riskGuard: config.riskGuard,
+    monitor: config.monitor ?? "off",
   };
 }
 

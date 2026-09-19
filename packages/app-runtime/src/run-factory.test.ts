@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { HybridMemoryRecallService, InMemoryMemoryStore, type MemoryStore } from "@computer-harness/memory";
 import type { RunId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import type { Computer, ProviderAdapter } from "@computer-harness/runtime";
 import { createRun, writeRunReport, type ResolvedRunConfig } from "./index.js";
@@ -126,6 +127,88 @@ describe("app-runtime RunHandle", () => {
       expect(report.summary.tools).toEqual(expect.arrayContaining(["click", "wait"]));
       expect(report.summary.tools).not.toContain("type");
       expect(report.summary.tools).not.toContain("scroll");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("materializes session-scoped Memory lifecycle updates through the app factory", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-memory-lifecycle-"));
+    const store = new InMemoryMemoryStore();
+    const retrieval = new HybridMemoryRecallService();
+    const syncState = vi.spyOn(retrieval, "syncState");
+    const provider: ProviderAdapter = {
+      id: "fixture-memory-provider",
+      calls: 0,
+      async generate() {
+        this.calls += 1;
+        return this.calls === 1
+          ? { type: "tool_calls", calls: [{ id: "session-fact-call" as ToolCallId, name: "memory_write_fact", arguments: { key: "window_state", value: "synthetic-last-known", scope: "computer_session", retentionClass: "short_lived" } }] }
+          : { type: "finish", summary: "memory lifecycle checked", reportedStatus: "success" };
+      },
+    } as ProviderAdapter & { calls: number };
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        runId: "app-runtime-memory-lifecycle" as RunId,
+        goal: "write one synthetic session fact and finish",
+        memory: "facts",
+      }, {
+        createProvider: () => provider,
+        createMemoryStore: () => store,
+        createMemoryRecallService: () => retrieval,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const state = await store.get("app-runtime-memory-lifecycle" as RunId);
+      expect(state.facts).toMatchObject([{ status: "needs_check", statusReason: "scope_ended", scope: { kind: "computer_session", sessionId: "fixture-session" } }]);
+      const report = await handle.report();
+      expect(report.events.some((event) => event.type === "memory.updated" && event.source === "lifecycle" && event.callId === undefined)).toBe(true);
+      expect(syncState.mock.calls.some(([next]) => next.facts.some((fact) => fact.statusReason === "scope_ended"))).toBe(true);
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails the app Run when lifecycle Memory materialization is rejected", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-memory-lifecycle-failure-"));
+    const backingStore = new InMemoryMemoryStore();
+    const failingStore: MemoryStore = {
+      get: (runId) => backingStore.get(runId),
+      apply: async (runId, mutation) => {
+        if (mutation.operation === "mark_fact_needs_check") throw new Error("injected app lifecycle store failure");
+        return backingStore.apply(runId, mutation);
+      },
+      rebuild: (runId, mutations) => backingStore.rebuild(runId, mutations),
+    };
+    const provider: ProviderAdapter & { calls: number } = {
+      id: "fixture-memory-provider-failure",
+      calls: 0,
+      async generate() {
+        this.calls += 1;
+        return this.calls === 1
+          ? { type: "tool_calls", calls: [{ id: "session-fact-failure" as ToolCallId, name: "memory_write_fact", arguments: { key: "window_state", value: "synthetic-last-known", scope: "computer_session", retentionClass: "short_lived" } }] }
+          : { type: "finish", summary: "memory lifecycle checked", reportedStatus: "success" };
+      },
+    };
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        runId: "app-runtime-memory-lifecycle-failure" as RunId,
+        goal: "write one synthetic session fact and finish",
+        memory: "facts",
+      }, {
+        createProvider: () => provider,
+        createMemoryStore: () => failingStore,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      const report = await handle.report();
+      expect(report.events).toContainEqual(expect.objectContaining({ type: "runtime.error", category: "memory_materialization_failed" }));
+      expect(report.summary.runtimeOutcome).toBe("failed");
+      expect((await backingStore.get("app-runtime-memory-lifecycle-failure" as RunId)).facts).toMatchObject([{ status: "active" }]);
       await handle.close();
     } finally {
       await rm(outputDir, { recursive: true, force: true });

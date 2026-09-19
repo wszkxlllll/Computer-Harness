@@ -1,4 +1,4 @@
-import type { MemoryStore, MemoryToolMode } from "@computer-harness/memory";
+import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
 import type { PlanStore } from "@computer-harness/planning";
 import type { RunId, RunOutcome } from "@computer-harness/protocol";
 import type {
@@ -10,6 +10,8 @@ import type {
   ProviderAdapter,
   RunController,
   RunFeatureConfig,
+  MonitorPolicyMode,
+  MemoryRecallService,
   RuntimePolicy,
   ToolRegistry,
 } from "@computer-harness/runtime";
@@ -22,6 +24,7 @@ import type { RunEventFeed } from "./event-feed.js";
 
 export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash";
 export type AppRuntimeRiskModel = "off" | "same" | AppRuntimeModel;
+export type MemoryRetrievalMode = "off" | "lexical" | "hybrid";
 
 /** JSON-safe configuration after CLI parsing and environment resolution. */
 export interface ResolvedRunConfig {
@@ -34,6 +37,11 @@ export interface ResolvedRunConfig {
   maxModelRequests: number;
   planning: boolean;
   memory: "off" | MemoryToolMode;
+  /** Optional for backwards-compatible fixtures; app defaults to lexical when Memory is enabled. */
+  memoryRetrieval?: MemoryRetrievalMode;
+  memoryEmbeddingEndpoint?: string;
+  memoryEmbeddingMaxRequests?: number;
+  memoryEmbeddingTimeoutMs?: number;
   batching: "off" | "same-control-input-v1";
   contextMode: "raw" | "recent";
   contextMaxHistoryEvents: number;
@@ -52,12 +60,15 @@ export interface ResolvedRunConfig {
   glmThinking?: "disabled" | "enabled";
   glmEndpoint?: string;
   fixtureResult?: string;
+  monitor?: MonitorPolicyMode;
 }
 
 /** Credentials are injected at the application boundary and never serialized. */
 export interface ProviderCredentials {
   glmApiKey?: string;
   qwenApiKey?: string;
+  /** Independent embedding credential; never serialized into ResolvedRunConfig. */
+  memoryEmbeddingApiKey?: string;
   osworldBridgeToken?: string;
 }
 
@@ -96,8 +107,19 @@ export interface RunDependencies {
   createAssetStore?: (rootDir: string) => AssetStore & AssetReader;
   createPlanStore?: (rootDir: string) => PlanStore;
   createMemoryStore?: (rootDir: string) => MemoryStore;
+  /** Application-bound provider seam; Runtime does not construct a default Memory backend. */
+  createMemoryEmbeddingProvider?: (options: {
+    config: ResolvedRunConfig;
+    credentials: ProviderCredentials;
+  }) => MemoryEmbeddingProvider | undefined;
+  /** Optional per-Run service seam for tests or a future local provider. */
+  createMemoryRecallService?: (options: {
+    config: ResolvedRunConfig;
+    credentials: ProviderCredentials;
+    provider?: MemoryEmbeddingProvider;
+  }) => HybridMemoryRecallService | undefined;
   createToolRegistry?: () => ToolRegistry;
-  createContextCompiler?: (tools: ToolRegistry, features: RunFeatureConfig, config: ResolvedRunConfig) => ContextCompiler;
+  createContextCompiler?: (tools: ToolRegistry, features: RunFeatureConfig, config: ResolvedRunConfig, memoryRecall?: MemoryRecallService) => ContextCompiler;
   createPolicy?: (config: ResolvedRunConfig) => RuntimePolicy;
   createActionPolicy?: (config: ResolvedRunConfig, provider: ProviderAdapter | undefined) => ActionPolicy | undefined;
   clock?: Clock;

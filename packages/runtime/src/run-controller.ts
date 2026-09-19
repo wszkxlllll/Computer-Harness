@@ -6,6 +6,7 @@ import type {
   JsonValue,
   ModelTurn,
   MemoryMutation,
+  MemoryFact,
   ObservationFrame,
   ObservationId,
   RunId,
@@ -16,7 +17,7 @@ import type {
   ToolCallId,
   ToolResult,
 } from "@computer-harness/protocol";
-import { sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
+import { memoryFactRetentionClass, memoryFactScope, sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
 import {
   type AssetStore,
   type RunEventWriter,
@@ -35,7 +36,9 @@ import type {
   NonComputerToolDefinition,
   ModelInput,
   ModelMessage,
+  MonitorGuidance,
   ProviderAdapter,
+  PreparedProviderRequest,
   RuntimePolicy,
   ActionPolicy,
   ActionPolicyDecision,
@@ -51,6 +54,8 @@ import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
 import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.js";
 import type { CommittedEventListener } from "./committed-events.js";
+import { createProgressMonitorState, reduceProgressMonitor, type ProgressMonitorState } from "./progress-monitor.js";
+import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -82,6 +87,8 @@ export interface RunControllerDependencies {
   enabledCategories?: readonly ToolCategory[];
   /** Optional per-run tool allow-list for independent Planning/Memory switches. */
   enabledToolNames?: readonly string[];
+  /** Event-first Memory materialization for Runtime-owned lifecycle mutations. */
+  memoryMutationApplier?: (runId: RunId, mutation: MemoryMutation) => Promise<void>;
   /** One immutable source for prompt, Runtime and Registry feature semantics. */
   features?: RunFeatureConfig;
   /** Disabled by default so the existing one-computer-call baseline is stable. */
@@ -267,8 +274,10 @@ export class RunController {
   private enabledToolNames: ReadonlySet<string> | undefined;
   private readonly memoryEnabled: boolean;
   private readonly planningEnabled: boolean;
+  private readonly memoryMutationApplier: ((runId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
   private readonly batching: "off" | "same-control-input-v1";
   private readonly features: RunFeatureConfig;
+  private readonly monitorMode: MonitorPolicyMode;
   private readonly cleanupDeadlineMs: number;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
@@ -288,6 +297,17 @@ export class RunController {
   private actionBudgetExhausted = false;
   private actionBudgetCloseTurnsRemaining = MAX_ACTION_BUDGET_CLOSE_TURNS;
   private goal: string | undefined;
+  private monitorState: ProgressMonitorState | undefined;
+  private monitorPolicyState: MonitorPolicyState | undefined;
+  private monitorWorkClock: MonitorWorkClock = { modelDecisionCount: 0, guiActionCount: 0 };
+  private monitorPendingGuidance: MonitorGuidance | undefined;
+  private monitorPendingHelp: Extract<MonitorPolicyProposal, { kind: "help_requested" }> | undefined;
+  private monitorProcessing = false;
+  private monitorDiagnosticRecording = false;
+  private monitorProposalCount = 0;
+  private monitorLastPersistedKey: string | undefined;
+  private monitorLastPartitionKey: string | undefined;
+  private sessionMemoryScopeEnded = false;
 
   public constructor(dependencies: RunControllerDependencies) {
     this.runId = dependencies.runId;
@@ -305,12 +325,18 @@ export class RunController {
     this.toolAudience = dependencies.toolAudience ?? "main";
     this.enabledCategories = new Set(dependencies.enabledCategories ?? ["computer", "planning", "control", "side"]);
     this.enabledToolNames = dependencies.enabledToolNames === undefined ? undefined : new Set(dependencies.enabledToolNames);
+    this.memoryMutationApplier = dependencies.memoryMutationApplier;
     this.batching = dependencies.batching ?? "off";
     this.features = dependencies.features ?? {
       planning: this.enabledCategories.has("planning") ? "tasks-v1" : "off",
       memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
       batching: this.batching,
     };
+    this.monitorMode = this.features.monitor ?? "off";
+    if (this.monitorMode !== "off") {
+      this.monitorState = createProgressMonitorState(this.runId);
+      this.monitorPolicyState = createMonitorPolicyState({ mode: this.monitorMode });
+    }
     this.cleanupDeadlineMs = dependencies.cleanupDeadlineMs ?? DEFAULT_CLEANUP_DEADLINE_MS;
     if (!Number.isInteger(this.cleanupDeadlineMs) || this.cleanupDeadlineMs <= 0) {
       throw new Error("cleanupDeadlineMs must be a positive integer");
@@ -506,6 +532,7 @@ export class RunController {
               ...(this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
               ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
               features: this.features,
+              ...(this.monitorPendingGuidance === undefined ? {} : { monitorGuidance: this.monitorPendingGuidance }),
               ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
             },
             this.abortController.signal,
@@ -521,12 +548,29 @@ export class RunController {
             continue;
           }
           let requestContext = context;
+          const decisionId = this.idFactory.eventId();
+          const prepareProvider = this.provider.prepare?.bind(this.provider);
+          const generatePrepared = this.provider.generatePrepared?.bind(this.provider);
+          const canPrepareProvider = prepareProvider !== undefined && generatePrepared !== undefined;
+          let prepared: PreparedProviderRequest | undefined;
           let retryCount = 0;
           let providerFailed = false;
+          let decisionInvalidated = false;
+          let requestIdForResponse: string | undefined;
           const retryWindowStartedAt = Date.now();
           let closeTurnConsumed = false;
+          if (canPrepareProvider) {
+            prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+            // Preparation may read assets or otherwise await provider-local
+            // work.  Re-check the command barrier before any network attempt.
+            const afterPrepare = await this.drainCommands();
+            if ((this.snapshot.status as string) === "paused" || afterPrepare.correction) {
+              if (afterPrepare.correction) await this.refreshAfterUserInput(session);
+              decisionInvalidated = true;
+            }
+          }
           turn = undefined;
-          while (turn === undefined) {
+          while (turn === undefined && !decisionInvalidated) {
             if (retryCount > 0) {
               const retryBudget = this.policy.checkBudget(this.snapshot);
               if (!retryBudget.allowed) {
@@ -545,9 +589,32 @@ export class RunController {
               this.actionBudgetCloseTurnsRemaining -= 1;
               closeTurnConsumed = true;
             }
-            await this.commitEvent({ type: "model.request.started", providerId: this.provider.id, ...(requestContext.contextBudget === undefined ? {} : { contextBudget: requestContext.contextBudget }) });
+            const attempt = retryCount + 1;
+            const requestId = this.idFactory.eventId();
+            requestIdForResponse = requestId;
+            const preparedRequest = prepared === undefined ? undefined : {
+              payloadHash: prepared.payloadHash,
+              ...(prepared.estimate === undefined ? {} : { estimate: prepared.estimate }),
+            };
+            const contextBudget = requestContext.contextBudget === undefined || preparedRequest === undefined || requestContext.contextBudget.trace === undefined
+              ? requestContext.contextBudget
+              : {
+                  ...requestContext.contextBudget,
+                  trace: { ...requestContext.contextBudget.trace, preparedRequest },
+                };
+            await this.commitEvent({
+              type: "model.request.started",
+              providerId: this.provider.id,
+              requestId,
+              decisionId,
+              attempt,
+              ...(preparedRequest === undefined ? {} : { preparedRequest }),
+              ...(contextBudget === undefined ? {} : { contextBudget }),
+            });
             try {
-              turn = await this.provider.generate(requestContext, { signal: this.abortController.signal });
+              turn = prepared !== undefined && generatePrepared !== undefined
+                ? await generatePrepared(prepared, { signal: this.abortController.signal })
+                : await this.provider.generate(requestContext, { signal: this.abortController.signal });
             } catch (error) {
               const details = providerErrorDetails(error);
               const nextRetryCount = retryCount + 1;
@@ -561,6 +628,9 @@ export class RunController {
                 type: "model.request.failed",
                 category: this.isAborted() ? "cancelled" : "provider",
                 message: providerFailureMessage(error, retry, retryCount + 1),
+                requestId,
+                decisionId,
+                attempt,
                 ...details,
               });
               if (!retry) {
@@ -570,17 +640,41 @@ export class RunController {
               }
               retryCount = nextRetryCount;
               await waitBeforeProviderRetry(this.abortController.signal, retryCount);
+              const retryEffects = await this.drainCommands();
+              if ((this.snapshot.status as string) === "paused" || retryEffects.correction) {
+                if (retryEffects.correction) await this.refreshAfterUserInput(session);
+                decisionInvalidated = true;
+                break;
+              }
               if (providerErrorDetails(error).retryMode !== "same_input") {
                 requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
+                if (canPrepareProvider) {
+                  prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+                  const afterRetryPrepare = await this.drainCommands();
+                  if ((this.snapshot.status as string) === "paused" || afterRetryPrepare.correction) {
+                    if (afterRetryPrepare.correction) await this.refreshAfterUserInput(session);
+                    decisionInvalidated = true;
+                    break;
+                  }
+                }
               }
             }
+          }
+          if (decisionInvalidated) {
+            continue;
           }
           if (providerFailed || turn === undefined) {
             break;
           }
 
           this.throwIfAborted();
-          await this.commitEvent({ type: "model.response.received", turn });
+          await this.commitEvent({
+            type: "model.response.received",
+            turn,
+            ...(requestIdForResponse === undefined ? {} : { requestId: requestIdForResponse }),
+            decisionId,
+            attempt: retryCount + 1,
+          });
           this.throwIfAborted();
           const afterResponse = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused") {
@@ -621,8 +715,7 @@ export class RunController {
             break;
           }
           outcome = turn.reportedStatus === "failure" ? "failed" : "succeeded";
-          await this.commitEvent({
-            type: "run.finished",
+          outcome = await this.commitRunFinished({
             outcome,
             summary: turn.summary,
             ...(turn.reportedStatus === undefined ? {} : { reportedStatus: turn.reportedStatus }),
@@ -645,7 +738,7 @@ export class RunController {
       }
 
       if (this.snapshot.status !== "finished") {
-        await this.commitEvent({ type: "run.finished", outcome });
+        outcome = await this.commitRunFinished({ outcome });
       }
       return outcome;
     } catch (error) {
@@ -672,7 +765,7 @@ export class RunController {
           });
           outcome = "failed";
         }
-        await this.commitEvent({ type: "run.finished", outcome });
+        outcome = await this.commitRunFinished({ outcome });
       }
       return outcome;
     } finally {
@@ -796,6 +889,11 @@ export class RunController {
   }
 
   private async applyCommand(command: RuntimeCommand): Promise<CommandEffects> {
+    // A correction/approval/explicit pause-resume changes the control
+    // boundary.  Never carry a guidance or deferred-help proposal across it.
+    if (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause" || command.kind === "resume") {
+      this.clearMonitorPendingRecommendations();
+    }
     switch (command.kind) {
       case "user_input":
         if (this.approvedPendingApproval !== undefined) {
@@ -900,6 +998,7 @@ export class RunController {
     } else {
       await this.executeNonComputerCall(pending.call, pending.definition, context);
     }
+    await this.flushDeferredMonitorHelp();
   }
 
   private async processToolCalls(session: ComputerSession, calls: readonly ToolCall[]): Promise<CommandEffects> {
@@ -1152,6 +1251,18 @@ export class RunController {
       } else {
         await this.executeNonComputerCall(entry.call, entry.definition, context);
       }
+      // Monitor help is deferred until the complete tool/action boundary has
+      // settled.  In particular, an action receipt is followed by its
+      // terminal ToolResult and post-action observation before status changes
+      // to waiting_user.
+      await this.flushDeferredMonitorHelp();
+      if (this.snapshot.status === "waiting_user") {
+        // Stop a multi-tool turn at the Inbox boundary.  The completed entry
+        // is not replayed; remaining entries resume from this watermark or
+        // are invalidated by the subsequent user correction.
+        this.pendingToolTurn = { ...pendingTurn, nextIndex: index + 1 };
+        return { correction: false };
+      }
       const callState = this.callStates.get(entry.call.id);
       if (callState === "failed" || callState === "rejected") {
         if (this.snapshot.status === "finished") return { correction: false };
@@ -1222,7 +1333,7 @@ export class RunController {
                 category: "planning_materialization_failed",
                 message: errorMessage(error),
               });
-              await this.commitEvent({ type: "run.finished", outcome: "failed" });
+              await this.commitRunFinished({ outcome: "failed" });
               return;
             }
           }
@@ -1236,7 +1347,7 @@ export class RunController {
           : validateMemoryMutation(this.attachMemoryProvenance(normalizedMutation, call.id));
         if (mutation !== undefined) {
           this.validateMemoryMutationReferences(mutation);
-          await this.commitEvent({ type: "memory.updated", callId: call.id, mutation });
+          await this.commitEvent({ type: "memory.updated", source: "tool", callId: call.id, mutation });
           if (definition.afterMemoryCommit !== undefined) {
             try {
               await definition.afterMemoryCommit(mutation, context);
@@ -1249,7 +1360,7 @@ export class RunController {
               await this.commitEvent({ type: "tool.call.failed", result });
               this.callStates.set(call.id, "failed");
               await this.commitEvent({ type: "runtime.error", category: "memory_materialization_failed", message: errorMessage(error) });
-              await this.commitEvent({ type: "run.finished", outcome: "failed" });
+              await this.commitRunFinished({ outcome: "failed" });
               return;
             }
           }
@@ -1330,7 +1441,7 @@ export class RunController {
         category: "unknown_side_effect",
         message: errorMessage(error),
       });
-      await this.commitEvent({ type: "run.finished", outcome: "outcome_unknown" });
+      await this.commitRunFinished({ outcome: "outcome_unknown" });
       this.callStates.set(call.id, "executing");
       return;
     }
@@ -1410,7 +1521,13 @@ export class RunController {
     const source = [...this.events].reverse().find((event) => event.type === "tool.call.received" && event.call.id === callId);
     const sourceEventId = source?.eventId ?? this.idFactory.eventId();
     const updatedSequence = source?.sequence ?? this.nextSequence;
-    const stampFact = <T extends { sourceEventId: import("@computer-harness/protocol").EventId; updatedSequence: number }>(fact: T): T => ({ ...fact, sourceEventId, updatedSequence });
+    const stampFact = <T extends Pick<MemoryFact, "sourceEventId" | "updatedSequence"> & Partial<Pick<MemoryFact, "scope" | "retentionClass" | "statusReason">>>(fact: T): T => ({
+      ...fact,
+      scope: fact.scope ?? { kind: "run" },
+      retentionClass: fact.retentionClass ?? "stable",
+      sourceEventId,
+      updatedSequence,
+    });
     switch (mutation.operation) {
       case "upsert_fact": return { operation: "upsert_fact", fact: stampFact(mutation.fact) };
       case "supersede_fact": return { operation: "supersede_fact", factId: mutation.factId, ...(mutation.replacement === undefined ? {} : { replacement: stampFact(mutation.replacement) }) };
@@ -1464,6 +1581,13 @@ export class RunController {
       throw new Error(`Memory fact id ${fact.id} already exists; changed content requires supersede_fact`);
     }
     const subject = fact.subject;
+    const scope = memoryFactScope(fact);
+    if (scope.kind === "computer_session" && (this.snapshot.computerSession === undefined || scope.sessionId !== this.snapshot.computerSession.id)) {
+      throw new Error("Memory computer_session scope does not match the current Computer session");
+    }
+    if (memoryFactRetentionClass(fact) === "task" && (!this.planningEnabled || fact.relatedTaskIds === undefined || fact.relatedTaskIds.length === 0)) {
+      throw new Error("Memory task retention requires Planning and relatedTaskIds");
+    }
     if (subject.type === "entity") {
       const entity = this.snapshot.memory.entities.find((item) => item.id === subject.entityId);
       if (entity === undefined || entity.status !== "active") throw new Error(`Memory fact subject references an unknown or inactive entity ${subject.entityId}`);
@@ -1516,6 +1640,56 @@ export class RunController {
     return persisted.observation;
   }
 
+  private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
+    let outcome = data.outcome;
+    try {
+      await this.markSessionMemoryScopeEnded();
+    } catch (error) {
+      // Lifecycle events remain the replay authority, while Store failures
+      // are explicit and do not masquerade as a fully materialized close.
+      if (this.snapshot.status !== "finished") {
+        await this.commitEvent({ type: "runtime.error", category: "memory_materialization_failed", message: `Memory scope cleanup incomplete: ${errorMessage(error)}` });
+      }
+      if (outcome === "succeeded") outcome = "failed";
+    }
+    await this.commitEvent({
+      type: "run.finished",
+      outcome,
+      ...(data.summary === undefined ? {} : { summary: data.summary }),
+      ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
+    });
+    return outcome;
+  }
+
+  private async markSessionMemoryScopeEnded(): Promise<void> {
+    if (this.sessionMemoryScopeEnded || !this.memoryEnabled || this.snapshot.computerSession === undefined) return;
+    const sessionId = this.snapshot.computerSession.id;
+    const facts = this.snapshot.memory.facts.filter((fact) => {
+      const scope = memoryFactScope(fact);
+      return scope.kind === "computer_session" && scope.sessionId === sessionId && fact.status !== "superseded";
+    });
+    let firstError: unknown;
+    for (const fact of facts) {
+      const mutation: MemoryMutation = { operation: "mark_fact_needs_check", factId: fact.id, reason: "scope_ended" };
+      const existingLifecycleEvent = [...this.events].reverse().find((event) => event.type === "memory.updated"
+        && (event.source === "lifecycle" || event.callId === ("runtime:scope-ended" as ToolCallId))
+        && event.mutation.operation === "mark_fact_needs_check"
+        && event.mutation.factId === fact.id);
+      try {
+        if (existingLifecycleEvent === undefined) {
+          await this.commitEvent({ type: "memory.updated", source: "lifecycle", mutation });
+        }
+        await this.memoryMutationApplier?.(this.runId, mutation);
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError !== undefined) {
+      throw firstError;
+    }
+    this.sessionMemoryScopeEnded = true;
+  }
+
   private async commitEvent(data: RuntimeEventData): Promise<RuntimeEvent> {
     const draft = {
       ...data,
@@ -1546,7 +1720,160 @@ export class RunController {
       // is already durable and reduced, so observer failure is isolated from
       // the Controller's scheduling path.
     }
+    try {
+      await this.processMonitorCommittedEvent(persisted);
+    } catch (error) {
+      // Monitor is diagnostic/control assistance, never the authority for a
+      // durable business event.  A failed proposal append or policy callback
+      // must not turn the already-committed action/tool event into a failed
+      // Run.  Best-effort recording is itself isolated below.
+      await this.recordMonitorDiagnosticFailure(error);
+    }
     return persisted;
+  }
+
+  private async processMonitorCommittedEvent(event: RuntimeEvent): Promise<void> {
+    if (this.monitorMode === "off" || this.monitorProcessing || event.type === "monitor.proposal" || this.monitorState === undefined || this.monitorPolicyState === undefined) return;
+    this.monitorProcessing = true;
+    try {
+      if (event.type === "model.request.started" && event.attempt === 1) {
+        this.monitorWorkClock = { ...this.monitorWorkClock, modelDecisionCount: this.monitorWorkClock.modelDecisionCount + 1 };
+        this.monitorPendingGuidance = undefined;
+      } else if (event.type === "action.execution.completed" || event.type === "action.execution.failed") {
+        this.monitorWorkClock = { ...this.monitorWorkClock, guiActionCount: this.monitorWorkClock.guiActionCount + 1 };
+      }
+      const progress = reduceProgressMonitor(this.monitorState, event);
+      this.monitorState = progress.state;
+      const executionBarrier = this.monitorExecutionBarrier();
+      if (this.monitorBarrierClearsPendingRecommendations() || this.snapshot.status === "finished") {
+        this.clearMonitorPendingRecommendations();
+      }
+      const partitionKey = this.monitorPartitionKey();
+      if (this.monitorLastPartitionKey !== undefined && this.monitorLastPartitionKey !== partitionKey) {
+        this.monitorLastPersistedKey = undefined;
+        this.clearMonitorPendingRecommendations();
+      }
+      this.monitorLastPartitionKey = partitionKey;
+      const policy = reduceMonitorPolicy(this.monitorPolicyState, {
+        runId: this.runId,
+        partitionKey,
+        sequence: event.sequence,
+        clock: this.monitorWorkClock,
+        monitor: progress.output,
+        ...(executionBarrier === undefined ? {} : { executionBarrier }),
+        ...(this.snapshot.status === "finished" ? { terminal: true } : {}),
+      });
+      this.monitorPolicyState = policy.state;
+      if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
+      const proposalEvent = this.monitorProposalEvent(policy.proposal, progress.output, event.eventId);
+      if (proposalEvent === undefined || this.monitorProposalCount >= 64 || this.snapshot.status === "finished") return;
+      this.monitorProposalCount += 1;
+      this.monitorLastPersistedKey = this.monitorProposalKey(policy.proposal, progress.output);
+      await this.commitEvent(proposalEvent);
+      if (policy.proposal.kind === "guidance") {
+        this.monitorPendingGuidance = { text: policy.proposal.text, fingerprint: policy.proposal.fingerprint };
+      } else if (policy.proposal.kind === "help_requested" && this.snapshot.status === "running" && this.monitorExecutionBarrier() === undefined) {
+        // Do not transition status from inside action.execution.completed or
+        // before the matching ToolResult/post-observation has been committed.
+        // The owning tool-turn loop flushes this deferred request at its
+        // atomic boundary.
+        this.monitorPendingHelp = policy.proposal;
+      }
+    } finally {
+      this.monitorProcessing = false;
+    }
+  }
+
+  private async flushDeferredMonitorHelp(): Promise<void> {
+    const pending = this.monitorPendingHelp;
+    if (pending === undefined || this.snapshot.status !== "running" || this.monitorExecutionBarrier() !== undefined) return;
+    this.monitorPendingHelp = undefined;
+    try {
+      await this.commitEvent({ type: "user.input.requested", question: `Monitor requests human review (${pending.reason}); confirm the current state before continuing.` });
+    } catch (error) {
+      // A diagnostic request is best effort.  If its own event cannot be
+      // committed, leave the already-completed action outcome untouched.
+      await this.recordMonitorDiagnosticFailure(error);
+    }
+  }
+
+  private clearMonitorPendingRecommendations(): void {
+    this.monitorPendingGuidance = undefined;
+    this.monitorPendingHelp = undefined;
+  }
+
+  private monitorBarrierClearsPendingRecommendations(): boolean {
+    return this.snapshot.outcome === "outcome_unknown"
+      || this.isAborted()
+      || this.snapshot.pendingApproval !== undefined
+      || this.snapshot.pendingUserQuestion !== undefined;
+  }
+
+  private async recordMonitorDiagnosticFailure(error: unknown): Promise<void> {
+    if (this.monitorDiagnosticRecording) return;
+    this.monitorDiagnosticRecording = true;
+    try {
+      await this.commitEvent({
+        type: "runtime.error",
+        category: "monitor_diagnostic",
+        message: `Monitor diagnostic unavailable: ${errorMessage(error)}`,
+      });
+    } catch {
+      // A broken event writer cannot accept its own diagnostic; retaining the
+      // committed business event is still the required fail-open boundary.
+    } finally {
+      this.monitorDiagnosticRecording = false;
+    }
+  }
+
+  private monitorPartitionKey(): string {
+    const session = this.snapshot.computerSession;
+    const viewport = this.latestObservation?.viewport ?? session?.viewport;
+    return session === undefined || viewport === undefined
+      ? `run:${String(this.runId)}`
+      : `session:${String(session.id)}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
+  }
+
+  private monitorExecutionBarrier(): "unknown_outcome" | "pending_side_effect" | undefined {
+    if (this.snapshot.outcome === "outcome_unknown") return "unknown_outcome";
+    if (this.isAborted() || this.snapshot.pendingApproval !== undefined || this.snapshot.pendingUserQuestion !== undefined || this.snapshot.unresolvedActionId !== undefined) return "pending_side_effect";
+    return undefined;
+  }
+
+  private shouldPersistMonitorProposal(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): boolean {
+    if (proposal.kind === "guidance" || proposal.kind === "help_requested") return true;
+    if (!output.candidate) return proposal.reason === "suppressed_by_execution_barrier";
+    return proposal.reason === "candidate_observed" || proposal.reason === "shadow" || proposal.reason === "suppressed_by_execution_barrier";
+  }
+
+  private monitorProposalKey(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): string {
+    const fingerprint = proposal.kind === "none" ? this.monitorPolicyState?.candidateFingerprint ?? output.eventIds.join(",") : proposal.fingerprint;
+    const reason = proposal.kind === "none" ? proposal.reason : proposal.kind === "guidance" ? "guidance" : proposal.reason;
+    return `${proposal.kind}:${reason}:${fingerprint}`;
+  }
+
+  private monitorProposalEvent(
+    proposal: MonitorPolicyProposal,
+    output: import("./progress-monitor.js").ProgressMonitorOutput,
+    sourceEventId: EventId,
+  ): Extract<RuntimeEventData, { type: "monitor.proposal" }> | undefined {
+    const key = this.monitorProposalKey(proposal, output);
+    if (key === this.monitorLastPersistedKey) return undefined;
+    const fingerprint = proposal.kind === "none" ? this.monitorPolicyState?.candidateFingerprint ?? `event-${String(sourceEventId)}` : proposal.fingerprint;
+    return {
+      type: "monitor.proposal",
+      mode: this.monitorMode === "guidance" ? "guidance" : "shadow",
+      proposal: proposal.kind === "none"
+        ? proposal.reason === "suppressed_by_execution_barrier" ? "suppressed_by_execution_barrier" : output.candidate ? "candidate" : "suppressed_by_execution_barrier"
+        : proposal.kind,
+      fingerprint,
+      sourceEventIds: [...new Set([sourceEventId, ...output.eventIds])].slice(-12),
+      reasonCodes: output.reasons.map((reason) => reason.code).slice(-8),
+      evidenceKinds: output.evidence.map((item) => item.kind).slice(-8),
+      modelDecisionCount: this.monitorWorkClock.modelDecisionCount,
+      guiActionCount: this.monitorWorkClock.guiActionCount,
+      ...(proposal.kind === "guidance" ? { guidanceText: proposal.text } : {}),
+    };
   }
 
   private throwIfAborted(): void {

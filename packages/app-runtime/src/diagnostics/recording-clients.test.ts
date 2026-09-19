@@ -66,7 +66,7 @@ describe("recording client diagnostic paths", () => {
           ],
         },
       }],
-      usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, private_value: "memory-secret" },
+      usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, prompt_tokens_details: { cached_tokens: 6 }, private_value: "memory-secret" },
     };
     const fake = new FakeGlmHttpClient(response);
     const directory = await mkdtemp(join(tmpdir(), "harness-glm-diagnostic-"));
@@ -88,6 +88,8 @@ describe("recording client diagnostic paths", () => {
     expectForwarded(fake.requests[0], url, body, headers, signal);
     expect(record).toMatchObject({ provider: "glm", request: 1, requestedModel: "glm-5.3-flash", toolNames: ["type", "click"] });
     expect((record.response as Record<string, unknown>).toolCallCount).toBe(2);
+    expect((record.response as Record<string, unknown>).usage).not.toHaveProperty("cachedReadTokens");
+    expect((record.response as Record<string, unknown>).usage).toMatchObject({ diagnosticCodes: expect.arrayContaining(["usage_unknown_fields_omitted"]) });
     expect((record.response as Record<string, unknown>).toolCalls).toMatchObject([
       { id: expect.stringMatching(/^sha256:[0-9a-f]{16}$/u), name: "type", arguments: { shape: "object", parse: "valid_json" } },
       { id: expect.stringMatching(/^sha256:[0-9a-f]{16}$/u), name: "click", arguments: { shape: "object", parse: "valid_json" } },
@@ -112,7 +114,7 @@ describe("recording client diagnostic paths", () => {
           ] }),
         },
       }],
-      usage: { prompt_tokens: 20, completion_tokens: 3, total_tokens: 23, url: "https://example.invalid/secret" },
+      usage: { prompt_tokens: 20, completion_tokens: 3, total_tokens: 23, prompt_tokens_details: { cached_tokens: 8 }, url: "https://example.invalid/secret" },
     };
     const fake = new FakeQwenHttpClient(response);
     const directory = await mkdtemp(join(tmpdir(), "harness-qwen-diagnostic-"));
@@ -139,6 +141,7 @@ describe("recording client diagnostic paths", () => {
     expectForwarded(fake.requests[0], url, body, headers, signal);
     expect(record).toMatchObject({ provider: "qwen", request: 1, requestedModel: "qwen3.8-flash", coordinateMode: "normalized_1000", thinkingMode: "low", outputMode: "strict_json", toolNames: ["type", "click"] });
     expect((record.response as Record<string, unknown>).toolCallCount).toBe(2);
+    expect((record.response as Record<string, unknown>).usage).toMatchObject({ cachedReadTokens: 8 });
     expect((record.response as Record<string, unknown>).toolCalls).toMatchObject([
       { id: expect.stringMatching(/^sha256:[0-9a-f]{16}$/u), name: "type", arguments: { shape: "object", keyCount: 2 } },
       { id: expect.stringMatching(/^sha256:[0-9a-f]{16}$/u), name: "click", arguments: { shape: "object", keyCount: 2 } },

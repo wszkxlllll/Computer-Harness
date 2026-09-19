@@ -3,6 +3,8 @@ dist/
 coverage/
 .turbo/
 .cache/
+.tools/
+.harness.local.psd1
 .env
 .env.*
 !.env.example

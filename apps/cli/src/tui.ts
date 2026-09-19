@@ -1,6 +1,6 @@
 import { emitKeypressEvents } from "node:readline";
 import type { RuntimeEvent, RunId, RunOutcome } from "@computer-harness/protocol";
-import { writeRunReport, type ApplicationSession, type EventFeedNotification, type RunHandle } from "@computer-harness/app-runtime";
+import { writeRunReport, type ApplicationSession, type ApplicationSessionRunFeatureOverrides, type EventFeedNotification, type RunHandle } from "@computer-harness/app-runtime";
 import type { RunController } from "@computer-harness/runtime";
 import type { RunSnapshot } from "@computer-harness/trajectory";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
@@ -20,6 +20,18 @@ export interface TuiMetadata {
   output: string;
   profile: RiskProfile;
   riskGuard: RiskGuardMode;
+  features?: TuiFeatureSelection;
+  /** True only when the explicit endpoint and independent key are present. */
+  embeddingReady?: boolean;
+}
+
+export interface TuiFeatureSelection {
+  planning: boolean;
+  memory: "off" | "facts" | "entities";
+  memoryRetrieval: "off" | "lexical" | "hybrid";
+  batching: "off" | "same-control-input-v1";
+  contextMode: "raw" | "recent";
+  monitor: "off" | "shadow" | "guidance";
 }
 
 interface TuiInput extends NodeJS.ReadableStream {
@@ -44,7 +56,7 @@ export interface ApplicationTuiOptions {
   lifecycleWaitMs?: number;
 }
 
-type TuiMode = "home" | "run";
+type TuiMode = "home" | "features" | "run";
 type TuiFeedState = "live" | "resync_required" | "closed";
 
 interface PendingCorrection {
@@ -80,6 +92,10 @@ export async function runApplicationTui(
   input.setRawMode(true);
   input.resume();
   let mode: TuiMode = "home";
+  let activeMetadata = metadata;
+  let featureSelection = normalizeTuiFeatureSelection(metadata.features);
+  let draftFeatureSelection = { ...featureSelection };
+  let featureCursor = 0;
   let editMode = true;
   let inputValue = "";
   let notice = "";
@@ -109,7 +125,7 @@ export async function runApplicationTui(
   const render = (): void => {
     if (mode === "run" && currentHandle !== undefined) {
       currentSnapshot = currentHandle.controller.getSnapshot();
-      write(`\u001b[H\u001b[2J${buildTuiFrame(currentSnapshot, currentEvents, currentGoal, metadata, {
+      write(`\u001b[H\u001b[2J${buildTuiFrame(currentSnapshot, currentEvents, currentGoal, activeMetadata, {
         editMode,
         input: inputValue,
         notice,
@@ -123,7 +139,11 @@ export async function runApplicationTui(
       })}`);
       return;
     }
-    write(`\u001b[H\u001b[2J${buildTuiHomeFrame(metadata, session, {
+    if (mode === "features") {
+      write(`\u001b[H\u001b[2J${buildTuiFeaturesFrame(activeMetadata, draftFeatureSelection, featureCursor, output.columns, output.rows)}\n`);
+      return;
+    }
+    write(`\u001b[H\u001b[2J${buildTuiHomeFrame(activeMetadata, session, {
       editMode,
       input: inputValue,
       notice,
@@ -290,8 +310,13 @@ export async function runApplicationTui(
       render();
       return;
     }
+    if (featureSelection.memoryRetrieval === "hybrid" && activeMetadata.embeddingReady !== true) {
+      notice = "Hybrid retrieval needs --memory-embedding-endpoint and MEMORY_EMBEDDING_API_KEY before starting.";
+      render();
+      return;
+    }
     invoke(async () => {
-      const handle = await session.startRun(trimmed);
+      const handle = await session.startRun(trimmed, featureOverrides(featureSelection));
       attachRun(handle, trimmed);
     }, "Run started");
   };
@@ -486,6 +511,18 @@ export async function runApplicationTui(
       cancelPendingCorrection("Correction cancelled; draft discarded.");
       return;
     }
+    // Uppercase F is an explicit home-screen shortcut, even while the goal
+    // editor is focused. Lowercase f remains ordinary goal text.
+    if (mode === "home" && editMode && keyName === "f" && printable === "F") {
+      editMode = false;
+      inputValue = "";
+      inputLimitReached = false;
+      draftFeatureSelection = { ...featureSelection };
+      mode = "features";
+      notice = "Choose features for the next Run; arrows move, Space/Left/Right change, Enter saves.";
+      render();
+      return;
+    }
     if (editMode) {
       if (keyName === "escape") {
         if (pendingCorrection !== undefined) {
@@ -526,7 +563,51 @@ export async function runApplicationTui(
       if (!key.ctrl && printable.length > 0) { appendInput(printable); requestRender(); }
       return;
     }
+    if (mode === "features") {
+      if (keyName === "escape") {
+        draftFeatureSelection = { ...featureSelection };
+        mode = "home";
+        notice = "Feature selection cancelled; previous settings kept.";
+        render();
+        return;
+      }
+      if (keyName === "up" || keyName === "k") {
+        featureCursor = (featureCursor + tuiFeatureRows.length - 1) % tuiFeatureRows.length;
+        render();
+        return;
+      }
+      if (keyName === "down" || keyName === "j") {
+        featureCursor = (featureCursor + 1) % tuiFeatureRows.length;
+        render();
+        return;
+      }
+      if (keyName === "return") {
+        featureSelection = { ...draftFeatureSelection };
+        activeMetadata = { ...activeMetadata, features: { ...featureSelection } };
+        mode = "home";
+        notice = "Feature selection saved for the next Run.";
+        render();
+        return;
+      }
+      if (keyName === "space" || printable === " " || keyName === "left" || keyName === "right") {
+        const direction = keyName === "left" ? -1 : 1;
+        draftFeatureSelection = changeTuiFeature(draftFeatureSelection, featureCursor, keyName === "space" || printable === " " ? 1 : direction);
+        if (draftFeatureSelection.memory === "off") draftFeatureSelection = { ...draftFeatureSelection, memoryRetrieval: "off" };
+        if (draftFeatureSelection.memoryRetrieval === "hybrid" && draftFeatureSelection.memory === "off") draftFeatureSelection = { ...draftFeatureSelection, memoryRetrieval: "off" };
+        render();
+        return;
+      }
+      return;
+    }
     if (mode === "home") {
+      if (keyName === "f") {
+        featureCursor = 0;
+        draftFeatureSelection = { ...featureSelection };
+        mode = "features";
+        notice = "Choose features for the next Run; arrows move, Space/Left/Right change, Enter saves.";
+        render();
+        return;
+      }
       if (keyName === "i" || keyName === "return") { editMode = true; render(); return; }
       if (keyName === "q" || keyName === "escape") { requestExit(); return; }
       if (!key.ctrl && printable.length > 0) { editMode = true; appendInput(printable); requestRender(); }
@@ -758,6 +839,7 @@ export function buildTuiFrame(
     `Profile: ${metadata.profile}   Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${metadata.riskGuard})`,
     `Focus evidence: ${metadata.computer === "cua" ? "UNKNOWN (generic foreground input is not fixture-verified)" : "UNKNOWN (backend metadata is not focus proof)"}`,
     `Session: ${ui.sessionStatus ?? "single-run"}   Event feed: ${ui.feedState ?? "legacy"}`,
+    `Features: ${formatTuiFeatures(metadata.features)}`,
     ...(waitingForModel ? ["WAITING: provider request in progress; correction will pause safely before editing."] : []),
     `Steps: ${snapshot.stepCount}   Model requests: ${snapshot.modelRequestCount}   Guard: ${snapshot.guardEvaluationCount}   Risk model: ${snapshot.riskModelRequestCount}`,
     `Plan: ${snapshot.plan.tasks.filter((task) => task.status !== "completed").length} open / ${snapshot.plan.tasks.length} total   Memory: ${snapshot.memory.facts.length} facts / ${snapshot.memory.entities.length} entities`,
@@ -800,6 +882,7 @@ function buildTuiHomeFrame(
     `Profile: ${metadata.profile}   Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${metadata.riskGuard})`,
     `Session: ${session.status}   Event feed: ${ui.feedState}`,
     `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}`,
+    `Features: ${formatTuiFeatures(metadata.features)}`,
     `Focus evidence: ${metadata.computer === "cua" ? "UNKNOWN (generic foreground input is not fixture-verified)" : "UNKNOWN (backend metadata is not focus proof)"}`,
     TERMINAL_INPUT_SCOPE_NOTICE,
     "",
@@ -810,13 +893,112 @@ function buildTuiHomeFrame(
     "",
     ...(ui.reply === undefined || ui.reply.length === 0 ? [] : renderDetailBlock({ label: "Last reply", text: ui.reply }, width, rows, ui.detailPage ?? 0)),
     "",
-    ui.editMode ? "Editing: Enter start   Esc cancel   Ctrl-C abort" : "Keys: I/Enter edit   Esc/Q exit",
+    ui.editMode ? "Editing: Enter start   Esc cancel   Ctrl-C abort" : "Keys: F configure features   I/Enter edit   Esc/Q exit",
   ];
   if (ui.editMode) lines.push(`> ${tailTuiInput(ui.input, Math.max(1, width - 2))}`);
   if (ui.inputLimitReached) lines.push(`Input is limited to ${MAX_TUI_INPUT_LENGTH} characters; newest characters remain visible.`);
   if (ui.notice.length > 0) lines.push(`Notice: ${clip(ui.notice, width - 8)}`);
   lines.push(`Artifacts root: ${clip(metadata.output, width - 17)}`);
   return `${lines.join("\n")}\n`;
+}
+
+const tuiFeatureRows = [
+  { label: "Planning tasks", values: ["off", "on"] as const },
+  { label: "Memory", values: ["off", "facts", "entities"] as const },
+  { label: "Memory retrieval", values: ["off", "lexical", "hybrid"] as const },
+  { label: "Action batching", values: ["off", "same-control-input-v1"] as const },
+  { label: "Context history", values: ["raw", "recent"] as const },
+  { label: "Progress Monitor", values: ["off", "shadow", "guidance"] as const },
+] as const;
+
+function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined): TuiFeatureSelection {
+  return {
+    planning: features?.planning ?? false,
+    memory: features?.memory ?? "off",
+    memoryRetrieval: features?.memoryRetrieval ?? "off",
+    batching: features?.batching ?? "off",
+    contextMode: features?.contextMode ?? "raw",
+    monitor: features?.monitor ?? "off",
+  };
+}
+
+function featureOverrides(features: TuiFeatureSelection): ApplicationSessionRunFeatureOverrides {
+  return {
+    planning: features.planning,
+    memory: features.memory,
+    memoryRetrieval: features.memory === "off" ? "off" : features.memoryRetrieval,
+    batching: features.batching,
+    contextMode: features.contextMode,
+    monitor: features.monitor,
+  };
+}
+
+function changeTuiFeature(features: TuiFeatureSelection, rowIndex: number, delta: number): TuiFeatureSelection {
+  const row = tuiFeatureRows[rowIndex];
+  if (row === undefined) return features;
+  const key: keyof TuiFeatureSelection = rowIndex === 0
+    ? "planning"
+    : rowIndex === 1
+      ? "memory"
+      : rowIndex === 2
+        ? "memoryRetrieval"
+        : rowIndex === 3
+          ? "batching"
+          : rowIndex === 4
+            ? "contextMode"
+            : "monitor";
+  const current = features[key] as string | boolean;
+  if (typeof current === "boolean") return { ...features, [key]: !current } as TuiFeatureSelection;
+  const currentIndex = row.values.indexOf(current as never);
+  const nextIndex = (currentIndex + delta + row.values.length) % row.values.length;
+  return { ...features, [key]: row.values[nextIndex] } as TuiFeatureSelection;
+}
+
+function featureValue(features: TuiFeatureSelection, rowIndex: number): string {
+  if (rowIndex === 0) return features.planning ? "on" : "off";
+  if (rowIndex === 1) return features.memory;
+  if (rowIndex === 2) return features.memoryRetrieval;
+  if (rowIndex === 3) return features.batching;
+  if (rowIndex === 4) return features.contextMode;
+  return features.monitor;
+}
+
+function formatTuiFeatures(features: TuiFeatureSelection | undefined): string {
+  const normalized = normalizeTuiFeatureSelection(features);
+  return `plan=${normalized.planning ? "on" : "off"}, memory=${normalized.memory}/${normalized.memoryRetrieval}, batch=${normalized.batching}, context=${normalized.contextMode}, monitor=${normalized.monitor}`;
+}
+
+function buildTuiFeaturesFrame(
+  metadata: TuiMetadata,
+  features: TuiFeatureSelection,
+  cursor: number,
+  columns?: number,
+  rows?: number,
+): string {
+  const width = tuiWidth(columns);
+  const terminalRows = Math.max(12, rows ?? process.stdout.rows ?? 24);
+  const lines = [
+    "Computer Harness TUI  |  FEATURES",
+    "─".repeat(width),
+    `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}`,
+    "Choose features for the next Run. Changes apply when the next goal starts.",
+    "Arrow keys/J-K move   Space toggles   Left/Right changes   Enter saves   Esc cancels",
+    "",
+    ...tuiFeatureRows.map((row, index) => `${index === cursor ? "❯" : " "} ${row.label.padEnd(20, " ")} ${featureValue(features, index)}`),
+    "",
+    `Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (controlled by profile/CLI; not changed here)`,
+    "Each Run gets fresh tools, Context, Memory and Monitor state.",
+    `Embedding config: ${metadata.embeddingReady === true ? "ready" : "not configured (hybrid cannot start)"}`,
+    uiFeatureHint(features),
+  ];
+  return `${lines.slice(0, terminalRows).join("\n")}\n`;
+}
+
+function uiFeatureHint(features: TuiFeatureSelection): string {
+  if (features.memory === "off" && features.memoryRetrieval !== "off") return "Memory retrieval requires Memory facts or entities; it will be forced off.";
+  if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
+  if (features.monitor === "guidance") return "Guidance is advisory only; it cannot execute, approve or retry actions.";
+  return "Provider and Computer are selected by the launch command; this page changes Run features only.";
 }
 
 function formatEvent(event: RuntimeEvent, width: number): string {

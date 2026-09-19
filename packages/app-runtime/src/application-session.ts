@@ -14,6 +14,12 @@ import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js"
 
 export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId">;
 
+/** Feature-only overrides selected by an interactive UI for the next Run. */
+export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
+  ApplicationSessionConfig,
+  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "monitor"
+>>;
+
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";
 
 export interface SessionRunRecord {
@@ -87,13 +93,14 @@ export class ApplicationSession {
     return this.owner.inspect(this.environmentIdentity);
   }
 
-  public async startRun(goal: string): Promise<RunHandle> {
+  public async startRun(goal: string, featureOverrides: ApplicationSessionRunFeatureOverrides = {}): Promise<RunHandle> {
     if (this.closed) throw new Error("application session is closed");
     if (goal.trim().length === 0) throw new Error("application session requires a non-empty goal");
     if (this.active !== undefined) throw new Error("application session already has an active Run");
     const runId = `run-${Date.now()}-${randomUUID().slice(0, 12)}` as RunId;
     const config: ResolvedRunConfig = {
       ...this.config,
+      ...featureOverrides,
       goal,
       runId,
       outputDir: resolve(this.config.outputDir, runId),

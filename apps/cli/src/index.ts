@@ -1,10 +1,11 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ApplicationSession, createRun, writeRunReport, type AppRuntimeModel, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, createRun, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
-import { runApplicationTui } from "./tui.js";
+import type { MonitorPolicyMode } from "@computer-harness/runtime";
+import { runApplicationTui, type TuiFeatureSelection } from "./tui.js";
 import { runCuaDoctor } from "./doctor-command.js";
 import { resolveCliModel } from "./cli-model.js";
 import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
@@ -36,6 +37,8 @@ interface CliOptions {
   qwenOutputMode?: Qwen38OutputMode;
   planning: boolean;
   memory: "off" | MemoryToolMode;
+  memoryRetrieval: MemoryRetrievalMode;
+  memoryEmbeddingEndpoint?: string;
   batching: "off" | "same-control-input-v1";
   contextMode: "raw" | "recent";
   contextMaxHistoryEvents: number;
@@ -48,6 +51,7 @@ interface CliOptions {
   riskTimeoutMs: number;
   cleanupDeadlineMs: number;
   doctorTimeoutMs: number;
+  monitor: MonitorPolicyMode;
 }
 
 function parseArgs(rawArgv: readonly string[]): CliOptions {
@@ -63,6 +67,9 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const tui = argv.includes("--tui");
   const modelValue = value("--model");
   const model = resolveCliModel(modelValue, doctor) as ModelName;
+  const monitorValue = value("--monitor") ?? "off";
+  if (monitorValue !== "off" && monitorValue !== "shadow" && monitorValue !== "guidance") throw new Error("--monitor must be off, shadow, or guidance");
+  if (doctor && monitorValue !== "off") throw new Error("--doctor does not run Monitor");
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
   if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor) throw new Error("--goal is required unless --tui opens the interactive home or --doctor runs a read-only CUA diagnostic");
   if (doctor && goal !== undefined) throw new Error("--doctor cannot be combined with --goal");
@@ -128,6 +135,11 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const planning = argv.includes("--planning");
   const memoryValue = value("--memory") ?? "off";
   if (memoryValue !== "off" && memoryValue !== "facts" && memoryValue !== "entities") throw new Error("--memory must be off, facts, or entities");
+  const memoryRetrievalValue = value("--memory-retrieval") ?? (memoryValue === "off" ? "off" : "lexical");
+  if (memoryRetrievalValue !== "off" && memoryRetrievalValue !== "lexical" && memoryRetrievalValue !== "hybrid") throw new Error("--memory-retrieval must be off, lexical, or hybrid");
+  if (memoryValue === "off" && memoryRetrievalValue !== "off") throw new Error("--memory-retrieval requires --memory facts or entities");
+  const memoryEmbeddingEndpoint = value("--memory-embedding-endpoint");
+  if (memoryRetrievalValue === "hybrid" && (memoryEmbeddingEndpoint === undefined || memoryEmbeddingEndpoint.trim().length === 0)) throw new Error("--memory-embedding-endpoint is required for hybrid Memory retrieval");
   const batchingValue = value("--batching") ?? "off";
   if (batchingValue !== "off" && batchingValue !== "same-control-input-v1") throw new Error("--batching must be off or same-control-input-v1");
   const contextModeValue = value("--context-mode") ?? "raw";
@@ -154,6 +166,8 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     ...(model === "qwen3.8-flash" ? { qwenOutputMode: (qwenOutputModeValue ?? "strict_json") as Qwen38OutputMode } : {}),
     planning,
     memory: memoryValue as "off" | MemoryToolMode,
+    memoryRetrieval: memoryRetrievalValue as MemoryRetrievalMode,
+    ...(memoryEmbeddingEndpoint === undefined ? {} : { memoryEmbeddingEndpoint }),
     batching: batchingValue as "off" | "same-control-input-v1",
     contextMode: contextModeValue as "raw" | "recent",
     contextMaxHistoryEvents,
@@ -166,6 +180,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     riskTimeoutMs,
     cleanupDeadlineMs,
     doctorTimeoutMs,
+    monitor: monitorValue,
   };
 }
 
@@ -177,7 +192,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. --doctor performs only redacted CUA daemon checks and never reads provider credentials. CUA window flags are explicit host opt-in; keyboard input remains disabled until focus delivery is independently verified.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. CUA window flags are explicit host opt-in; keyboard input remains disabled until focus delivery is independently verified. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -201,6 +216,15 @@ async function main(): Promise<void> {
       output: options.output,
       profile: options.risk.profile,
       riskGuard: options.risk.riskGuard,
+      features: {
+        planning: options.planning,
+        memory: options.memory,
+        memoryRetrieval: options.memoryRetrieval,
+        batching: options.batching,
+        contextMode: options.contextMode,
+        monitor: options.monitor,
+      } satisfies TuiFeatureSelection,
+      embeddingReady: options.memoryEmbeddingEndpoint !== undefined && (process.env.MEMORY_EMBEDDING_API_KEY?.trim().length ?? 0) > 0,
     }, options.goal === undefined ? {} : { initialGoal: options.goal });
     return;
   }
@@ -237,6 +261,8 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     maxModelRequests: options.maxModelRequests,
     planning: options.planning,
     memory: options.memory,
+    memoryRetrieval: options.memoryRetrieval,
+    ...(options.memoryEmbeddingEndpoint === undefined ? {} : { memoryEmbeddingEndpoint: options.memoryEmbeddingEndpoint }),
     batching: options.batching,
     contextMode: options.contextMode,
     contextMaxHistoryEvents: options.contextMaxHistoryEvents,
@@ -247,6 +273,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     riskMaxModelRequests: options.riskMaxModelRequests,
     riskTimeoutMs: options.riskTimeoutMs,
     cleanupDeadlineMs: options.cleanupDeadlineMs,
+    monitor: options.monitor,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
     ...(options.qwenOutputMode === undefined ? {} : { qwenOutputMode: options.qwenOutputMode }),
@@ -261,10 +288,12 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
 function readProviderCredentials(): ProviderCredentials {
   const glmApiKey = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   const qwenApiKey = process.env.DASHSCOPE_API_KEY;
+  const memoryEmbeddingApiKey = process.env.MEMORY_EMBEDDING_API_KEY;
   const osworldBridgeToken = process.env.OSWORLD_BRIDGE_TOKEN;
   return {
     ...(glmApiKey === undefined ? {} : { glmApiKey }),
     ...(qwenApiKey === undefined ? {} : { qwenApiKey }),
+    ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
 }

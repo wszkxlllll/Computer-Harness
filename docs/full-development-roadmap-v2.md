@@ -48,6 +48,8 @@ REL 编号仅用于产品里程碑；现有实验组 M1/M2 继续表示 Fact/Ent
 
 阶段不是单个大 PR；每一阶段按独立测试边界拆提交。纯移动代码与行为修改分开。
 
+DEV-3/4/5 的共享实施合同与公开来源缓存见[DEV-3/4/5 实施计划](./dev-3-5-implementation-plan.md)。编号保持：DEV-3=Context/指令，DEV-4=Memory reconciliation，DEV-5=Monitor；Risk Guard 与执行边界加固归 DEV-6，不将 Monitor 改号。该计划只定义 producer→consumer→持久化/失效→测试闭环，不表示目标能力已实现。
+
 文件级执行见[分块重构施工表](./module-refactoring-work-plan.md)。其 RFT 工单按本路线所属 DEV 阶段执行，不要求先全仓重构再修缺陷。
 
 ### 3.1 现有基础与待新增合同（2026-09-17 本地复核）

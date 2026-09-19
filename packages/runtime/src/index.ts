@@ -7,3 +7,4 @@ export * from "./action-validation.js";
 export * from "./action-effect-projection.js";
 export * from "./run-controller.js";
 export * from "./committed-events.js";
+export * from "./monitor-policy.js";

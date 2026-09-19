@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   JsonValue,
   ModelUsage,
@@ -14,6 +15,7 @@ import type {
   ModelMessage,
   ModelToolSpec,
   ProviderAdapter,
+  PreparedProviderRequest,
 } from "@computer-harness/runtime";
 import { HARNESS_EFFECT_KEY, declaredActionEffects, encodeToolCallArguments, splitActionEffectArguments } from "@computer-harness/runtime";
 
@@ -106,6 +108,11 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
   private readonly outputMode: Qwen38OutputMode;
   private readonly imagePreprocessor: QwenImagePreprocessor;
   private readonly httpClient: QwenHttpClient;
+  private readonly preparedRequests = new WeakMap<PreparedProviderRequest, {
+    body: Record<string, unknown>;
+    input: ModelInput;
+    imageSpace?: QwenImageSpace;
+  }>();
 
   public constructor(options: Qwen38AdapterOptions) {
     if (options.apiKey.trim().length === 0) throw new Error("Qwen apiKey must be non-empty");
@@ -120,27 +127,33 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
   }
 
   public async generate(input: ModelInput, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    const prepared = await this.prepare(input, options);
+    return this.generatePrepared(prepared, options);
+  }
+
+  public async prepare(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest> {
     options.signal.throwIfAborted();
+    const snapshot = structuredClone(input);
     const strictProtocol = this.outputMode === "strict_json";
     const catalog = strictProtocol
-      ? `\n${qwenToolCatalog(input.tools, this.coordinateMode)}`
+      ? `\n${qwenToolCatalog(snapshot.tools, this.coordinateMode)}`
       : "";
     const envelopeInstruction = strictProtocol
       ? "\nStrict output envelope for this provider: every response must be one JSON object with a non-empty calls array. Each item must contain only id, name, and arguments. A single action or control decision is still represented as calls with one item; never emit kind, a top-level tool_call, a bare array, a nested calls object, or extra call fields. Across turns, preserve this exact envelope, emit only unfinished current calls, and never reuse a ToolCall id that was already accepted. Arguments must follow the Available tools catalog; Runtime performs the final exact validation."
       : "";
-    const controlNames = input.tools.filter((tool) => tool.control !== undefined).map((tool) => tool.name);
+    const controlNames = snapshot.tools.filter((tool) => tool.control !== undefined).map((tool) => tool.name);
     const terminateBoundary = controlNames.length > 0
       ? `\nControl boundary: each control tool (${controlNames.join(", ")}) must be the only call in its response. Never mix a control tool with any computer, planning, memory, or other call; wait for prior tool receipts and the next observation before returning a control decision.`
       : "";
-    const system = `${input.system}${catalog}${envelopeInstruction}${terminateBoundary}`;
-    const presentation = await this.presentMessages(system, input.messages, input.tools, options.signal);
+    const system = `${snapshot.system}${catalog}${envelopeInstruction}${terminateBoundary}`;
+    const presentation = await this.presentMessages(system, snapshot.messages, snapshot.tools, options.signal);
     const body: Record<string, unknown> = {
       model: this.id,
       messages: presentation.messages,
       ...(this.outputMode === "strict_json"
-        ? { response_format: qwen38ResponseFormat(input) }
+        ? { response_format: qwen38ResponseFormat(snapshot) }
         : {
-            tools: qwen38FunctionTools(input, this.coordinateMode, presentation.latestImageSpace?.presented),
+            tools: qwen38FunctionTools(snapshot, this.coordinateMode, presentation.latestImageSpace?.presented),
             tool_choice: "auto",
             parallel_tool_calls: false,
           }),
@@ -151,16 +164,43 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
         ? { enable_thinking: false, preserve_thinking: false }
         : { reasoning_effort: this.thinking, preserve_thinking: true }),
     };
+    const frozenBody = deepFreeze(body);
+    const prepared: PreparedProviderRequest = Object.freeze({
+      providerId: this.id,
+      payloadHash: createHash("sha256").update(JSON.stringify(frozenBody)).digest("hex"),
+      estimate: Object.freeze({
+        estimatedTextTokens: estimateWireTextTokens(frozenBody),
+        imageCount: countImages(snapshot),
+        estimationMethod: "provider_projection",
+      } as const),
+    });
+    this.preparedRequests.set(prepared, {
+      body: frozenBody,
+      input: snapshot,
+      ...(presentation.latestImageSpace === undefined ? {} : { imageSpace: presentation.latestImageSpace }),
+    });
+    return prepared;
+  }
+
+  public async generatePrepared(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    options.signal.throwIfAborted();
+    if (prepared.providerId !== this.id || !Object.isFrozen(prepared)) {
+      throw new QwenProviderError("Qwen prepared request metadata is invalid", "QWEN_INVALID_PREPARED_REQUEST");
+    }
+    const state = this.preparedRequests.get(prepared);
+    if (state === undefined) {
+      throw new QwenProviderError("Qwen prepared request was not created by this adapter", "QWEN_INVALID_PREPARED_REQUEST");
+    }
     const response = await this.httpClient.post(
       this.endpoint,
-      body,
+      state.body,
       { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
       options.signal,
     );
     options.signal.throwIfAborted();
     return this.outputMode === "strict_json"
-      ? this.parseStructuredResponse(response, input, presentation.latestImageSpace)
-      : this.parseResponse(response, input, presentation.latestImageSpace);
+      ? this.parseStructuredResponse(response, state.input, state.imageSpace)
+      : this.parseResponse(response, state.input, state.imageSpace);
   }
 
   private async presentMessages(system: string, messages: readonly ModelMessage[], tools: readonly ModelToolSpec[], signal: AbortSignal): Promise<QwenPresentedMessages> {
@@ -321,6 +361,34 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
   }
 }
 
+function countImages(input: ModelInput): number {
+  return input.messages.reduce((total, message) => total + message.content.filter((block) => block.type === "image").length, 0);
+}
+
+function estimateWireTextTokens(body: unknown): number {
+  const withoutImagePayload = stripImagePayload(body);
+  return Math.ceil(JSON.stringify(withoutImagePayload).length / 4);
+}
+
+function stripImagePayload(value: unknown, parentKey?: string): unknown {
+  if (Array.isArray(value)) return value.map((item) => stripImagePayload(item, parentKey));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    parentKey === "image_url" && key === "url" && typeof child === "string"
+      ? "[image payload omitted]"
+      : stripImagePayload(child, key),
+  ]));
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  }
+  return value;
+}
+
 function looksLikeUntaggedComputerUseJson(content: string): boolean {
   const trimmed = content.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
@@ -471,11 +539,14 @@ function readUsage(value: unknown): ModelUsage | undefined {
   const inputTokens = usage.prompt_tokens;
   const outputTokens = usage.completion_tokens;
   const totalTokens = usage.total_tokens;
-  if (![inputTokens, outputTokens, totalTokens].some((item) => item !== undefined)) return undefined;
+  const promptDetails = usage.prompt_tokens_details;
+  const cachedTokens = isRecord(promptDetails) ? promptDetails.cached_tokens : undefined;
+  if (![inputTokens, outputTokens, totalTokens, cachedTokens].some((item) => item !== undefined)) return undefined;
   const parsed = {
     ...(typeof inputTokens === "number" && Number.isInteger(inputTokens) && inputTokens >= 0 ? { inputTokens } : {}),
     ...(typeof outputTokens === "number" && Number.isInteger(outputTokens) && outputTokens >= 0 ? { outputTokens } : {}),
     ...(typeof totalTokens === "number" && Number.isInteger(totalTokens) && totalTokens >= 0 ? { totalTokens } : {}),
+    ...(typeof cachedTokens === "number" && Number.isInteger(cachedTokens) && cachedTokens >= 0 ? { cacheReadTokens: cachedTokens } : {}),
   };
   return Object.keys(parsed).length === 0 ? undefined : parsed;
 }

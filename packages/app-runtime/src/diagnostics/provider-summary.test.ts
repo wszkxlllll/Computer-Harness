@@ -155,4 +155,20 @@ describe("safe provider response summaries", () => {
   it("returns a safe shape for non-object usage envelopes", () => {
     expect(summarizeProviderUsage("usage text with a token")).toEqual({ shape: "string", diagnosticCodes: ["usage_not_object"] });
   });
+
+  it("reports Qwen cache reads only from a valid nested usage field", () => {
+    expect(summarizeProviderUsage({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, prompt_tokens_details: { cached_tokens: 6 } }, { providerId: "qwen3.8-flash" })).toMatchObject({ cachedReadTokens: 6 });
+    expect(summarizeProviderUsage({ prompt_tokens: 10, prompt_tokens_details: {} }, { providerId: "qwen3.8-flash" })).not.toHaveProperty("cachedReadTokens");
+    expect(summarizeProviderUsage({ prompt_tokens: 10, prompt_tokens_details: { cached_tokens: "6" } }, { providerId: "qwen3.8-flash" })).toMatchObject({ diagnosticCodes: ["usage_invalid_fields_omitted"] });
+  });
+
+  it("does not apply the Qwen-only cache extension to a GLM recording", () => {
+    const summary = summarizeProviderResponse({
+      model: "glm-5.3-flash",
+      choices: [{ message: { content: "done" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, prompt_tokens_details: { cached_tokens: 6 } },
+    }, { trustedModel: "glm-5.3-flash" });
+    expect(summary.usage).not.toHaveProperty("cachedReadTokens");
+    expect(summary.usage).toMatchObject({ diagnosticCodes: ["usage_unknown_fields_omitted"] });
+  });
 });

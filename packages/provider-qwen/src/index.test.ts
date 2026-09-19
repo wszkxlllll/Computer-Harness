@@ -10,13 +10,19 @@ const reader: AssetReader = {
   async read(_ref, signal) { signal.throwIfAborted(); return new Uint8Array([7, 8]); },
 };
 
+function readerWithBytes(bytes: Uint8Array): AssetReader {
+  return { async read(_ref, signal) { signal.throwIfAborted(); return bytes; } };
+}
+
 class Client implements QwenHttpClient {
   public body: Record<string, unknown> | undefined;
   public url: string | undefined;
   public headers: Readonly<Record<string, string>> | undefined;
+  public postCount = 0;
   public constructor(private readonly response: unknown) {}
   public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
     signal.throwIfAborted();
+    this.postCount += 1;
     this.url = url;
     this.body = body;
     this.headers = headers;
@@ -49,7 +55,23 @@ function input(): ModelInput {
   return { system: "system", messages: [{ role: "user", content: [{ type: "image", asset, viewport }] }], tools };
 }
 
-function response(name: string, argumentsValue: Record<string, unknown>, usage?: Record<string, number>): unknown {
+function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelInput {
+  return {
+    ...input(),
+    messages: [
+      { role: "user", content: [{ type: "text", text: "stable user goal" }] },
+      { role: "user", content: [{ type: "text", text: planAndMemory }, { type: "image", asset, viewport: dynamicViewport }] },
+    ],
+  };
+}
+
+function strictFinishResponse(): unknown {
+  return {
+    choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-finish", name: "terminate", arguments: { status: "success", text: "done" } }] }) } }],
+  };
+}
+
+function response(name: string, argumentsValue: Record<string, unknown>, usage?: Record<string, unknown>): unknown {
   return {
     choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "native-call-1", type: "function", function: { name, arguments: JSON.stringify(argumentsValue) } }] } }],
     ...(usage === undefined ? {} : { usage }),
@@ -61,6 +83,108 @@ function withoutControls(value: ModelInput): ModelInput {
 }
 
 describe("Qwen3.8-Flash provider adapter", () => {
+  it("keeps prepared wire state private to the creating adapter", async () => {
+    const client = new Client(response("terminate", { status: "success", text: "prepared" }));
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
+    const signal = new AbortController().signal;
+    const prepared = await adapter.prepare(input(), { signal });
+    expect(prepared).toMatchObject({ providerId: "qwen3.8-flash", payloadHash: expect.any(String), estimate: { imageCount: 1, estimationMethod: "provider_projection" } });
+    expect(prepared.estimate?.estimatedTextTokens).toBeGreaterThan(0);
+    expect(Object.isFrozen(prepared)).toBe(true);
+    await expect(adapter.generatePrepared(prepared, { signal })).resolves.toMatchObject({ type: "finish", summary: "prepared" });
+    const postsBeforeAbort = client.postCount;
+    const cancelled = new AbortController();
+    cancelled.abort(new Error("cancelled before prepared send"));
+    await expect(adapter.generatePrepared(prepared, { signal: cancelled.signal })).rejects.toThrow("cancelled before prepared send");
+    expect(client.postCount).toBe(postsBeforeAbort);
+    const forged = Object.freeze({ ...prepared });
+    await expect(adapter.generatePrepared(forged, { signal })).rejects.toMatchObject({ code: "QWEN_INVALID_PREPARED_REQUEST" });
+  });
+
+  it("uses an immutable input snapshot when parsing a prepared response", async () => {
+    const client = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: "snapshot-call", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 400, y: 500 }) } }] } }] });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
+    const mutableInput = input();
+    const prepared = await adapter.prepare(mutableInput, { signal: new AbortController().signal });
+    mutableInput.tools = [];
+    mutableInput.messages = [];
+    await expect(adapter.generatePrepared(prepared, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 319.6, y: 299.5 } }] });
+  });
+
+  it("keeps the stable strict prefix separate from dynamic history, images, catalog, and payload identity", async () => {
+    const captureStrict = async (value: ModelInput, bytes = new Uint8Array([7, 8])) => {
+      const client = new Client(strictFinishResponse());
+      const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: readerWithBytes(bytes), httpClient: client, thinking: "disabled", outputMode: "strict_json" });
+      const prepared = await adapter.prepare(value, { signal: new AbortController().signal });
+      await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+      return { body: client.body!, prepared };
+    };
+    const first = await captureStrict(dynamicInput("plan A / memory A"));
+    const second = await captureStrict(dynamicInput("plan B / memory B"), new Uint8Array([8, 7, 6, 5]));
+    const firstMessages = first.body.messages as unknown[];
+    const secondMessages = second.body.messages as unknown[];
+    expect(firstMessages[0]).toEqual(secondMessages[0]);
+    expect(first.body.response_format).toEqual(second.body.response_format);
+    expect(firstMessages).not.toEqual(secondMessages);
+    expect(first.prepared.payloadHash).not.toBe(second.prepared.payloadHash);
+    expect(first.prepared.estimate?.imageCount).toBe(1);
+    expect(first.prepared.estimate?.estimatedTextTokens).toBe(second.prepared.estimate?.estimatedTextTokens);
+
+    const changedCatalog = await captureStrict({ ...dynamicInput("same plan"), tools: dynamicInput("same plan").tools.filter((tool) => tool.name !== "drag") });
+    expect(String((firstMessages[0] as Record<string, unknown>).content)).toContain("drag(");
+    expect(String(((changedCatalog.body.messages as unknown[])[0] as Record<string, unknown>).content)).not.toContain("drag(");
+    expect(first.prepared.payloadHash).not.toBe(changedCatalog.prepared.payloadHash);
+
+    const captureNative = async (value: ModelInput, dynamicViewport: Viewport) => {
+      const client = new Client(response("terminate", { status: "success" }));
+      const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels" });
+      const prepared = await adapter.prepare({ ...value, messages: [{ role: "user", content: [{ type: "image", asset, viewport: dynamicViewport }] }] }, { signal: new AbortController().signal });
+      await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+      return { body: client.body!, prepared };
+    };
+    const nativeA = await captureNative(input(), viewport);
+    const nativeB = await captureNative(input(), { width: 1024, height: 768, coordinateSpace: "physical" });
+    expect(nativeA.body.tools).not.toEqual(nativeB.body.tools);
+    expect(nativeA.prepared.payloadHash).not.toBe(nativeB.prepared.payloadHash);
+
+    const continuationInput = {
+      ...dynamicInput("continuation"),
+      messages: [
+        ...dynamicInput("continuation").messages,
+        { role: "assistant" as const, content: [{ type: "provider_continuation" as const, continuation: { providerId: "qwen3.8-flash", kind: "reasoning_content" as const, content: "retain this reasoning" } }] },
+      ],
+    };
+    const continuation = await captureStrict(continuationInput);
+    expect(continuation.prepared.estimate!.estimatedTextTokens).toBeGreaterThan(first.prepared.estimate!.estimatedTextTokens);
+  });
+
+  it("preserves Qwen prompt cache reads only when the provider reports a valid field", async () => {
+    const cached = new Client(response("terminate", { status: "success" }, {
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      total_tokens: 12,
+      prompt_tokens_details: { cached_tokens: 6 },
+    }));
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: cached, thinking: "disabled", outputMode: "native_tools" });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, cacheReadTokens: 6 } });
+
+    const missing = new Client(response("terminate", { status: "success" }, {
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      total_tokens: 12,
+      prompt_tokens_details: {},
+    }));
+    const missingTurn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: missing, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal });
+    expect(missingTurn.usage).not.toHaveProperty("cacheReadTokens");
+
+    const invalid = new Client(response("terminate", { status: "success" }, {
+      prompt_tokens: 10,
+      prompt_tokens_details: { cached_tokens: "6" },
+    }));
+    const invalidTurn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: invalid, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal });
+    expect(invalidTurn.usage).not.toHaveProperty("cacheReadTokens");
+  });
+
   it("round-trips strict action effects while preserving the flat calls envelope", async () => {
     const guarded = { ...input(), tools: decorateToolsWithActionEffects(input().tools) };
     const client = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-effect", name: "click", arguments: { x: 400, y: 500, _harnessEffect: { effects: ["navigate"], target: "Details", summary: "Open product details" } } }] }) } }] });

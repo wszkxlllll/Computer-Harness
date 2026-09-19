@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   JsonValue,
   ModelUsage,
@@ -14,6 +15,7 @@ import type {
   ModelMessage,
   ModelToolSpec,
   ProviderAdapter,
+  PreparedProviderRequest,
   ControlKind,
   CoordinateField,
 } from "@computer-harness/runtime";
@@ -76,6 +78,7 @@ export class GlmAdapter implements ProviderAdapter {
   private readonly endpoint: string;
   private readonly apiKey: string;
   private readonly httpClient: GlmHttpClient;
+  private readonly preparedRequests = new WeakMap<PreparedProviderRequest, { body: Record<string, unknown>; input: ModelInput }>();
 
   public constructor(options: GlmAdapterOptions) {
     if (options.apiKey.trim().length === 0) {
@@ -90,22 +93,51 @@ export class GlmAdapter implements ProviderAdapter {
   }
 
   public async generate(input: ModelInput, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    const prepared = await this.prepare(input, options);
+    return this.generatePrepared(prepared, options);
+  }
+
+  public async prepare(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest> {
     options.signal.throwIfAborted();
+    const snapshot = structuredClone(input);
     const body = {
       model: this.profile.name,
-      messages: await this.presentMessages(`${input.system}\n${profilePrompt(this.profile)}`, input.messages, input.tools, options.signal),
-      tools: input.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(input))),
+      messages: await this.presentMessages(`${snapshot.system}\n${profilePrompt(this.profile)}`, snapshot.messages, snapshot.tools, options.signal),
+      tools: snapshot.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(snapshot))),
       stream: false,
       thinking: { type: this.profile.thinking },
     } satisfies Record<string, unknown>;
+    const frozenBody = deepFreeze(body);
+    const prepared: PreparedProviderRequest = Object.freeze({
+      providerId: this.id,
+      payloadHash: createHash("sha256").update(JSON.stringify(frozenBody)).digest("hex"),
+      estimate: Object.freeze({
+        estimatedTextTokens: estimateWireTextTokens(frozenBody),
+        imageCount: countImages(snapshot),
+        estimationMethod: "provider_projection",
+      } as const),
+    });
+    this.preparedRequests.set(prepared, { body: frozenBody, input: snapshot });
+    return prepared;
+  }
+
+  public async generatePrepared(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    options.signal.throwIfAborted();
+    if (prepared.providerId !== this.id || !Object.isFrozen(prepared)) {
+      throw new GlmProviderError("GLM prepared request metadata is invalid", "GLM_INVALID_PREPARED_REQUEST");
+    }
+    const state = this.preparedRequests.get(prepared);
+    if (state === undefined) {
+      throw new GlmProviderError("GLM prepared request was not created by this adapter", "GLM_INVALID_PREPARED_REQUEST");
+    }
     const response = await this.httpClient.post(
       this.endpoint,
-      body,
+      state.body,
       { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
       options.signal,
     );
     options.signal.throwIfAborted();
-    return this.parseResponse(response, input);
+    return this.parseResponse(response, state.input);
   }
 
   private async presentMessages(system: string, messages: readonly ModelMessage[], tools: readonly ModelToolSpec[], signal: AbortSignal): Promise<unknown[]> {
@@ -305,6 +337,34 @@ export class FetchGlmHttpClient implements GlmHttpClient {
       signal.removeEventListener("abort", abortRequest);
     }
   }
+}
+
+function countImages(input: ModelInput): number {
+  return input.messages.reduce((total, message) => total + message.content.filter((block) => block.type === "image").length, 0);
+}
+
+function estimateWireTextTokens(body: unknown): number {
+  const withoutImagePayload = stripImagePayload(body);
+  return Math.ceil(JSON.stringify(withoutImagePayload).length / 4);
+}
+
+function stripImagePayload(value: unknown, parentKey?: string): unknown {
+  if (Array.isArray(value)) return value.map((item) => stripImagePayload(item, parentKey));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    parentKey === "image_url" && key === "url" && typeof child === "string"
+      ? "[image payload omitted]"
+      : stripImagePayload(child, key),
+  ]));
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  }
+  return value;
 }
 
 function networkDiagnostic(error: unknown): string {

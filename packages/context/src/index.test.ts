@@ -3,6 +3,7 @@ import type {
   AssetId,
   ComputerSessionId,
   EventId,
+  MemoryState,
   ObservationId,
   RunId,
   RuntimeEvent,
@@ -68,6 +69,8 @@ describe("DefaultContextCompiler", () => {
     expect(input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text === "Please continue"))).toBe(true);
     expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId))).toBe(true);
     expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === first.screenshot.assetId))).toBe(false);
+    expect(input.contextBudget?.trace?.projectedEventIds).toContain("event-7");
+    expect(input.contextBudget?.trace?.projectedEventIds).not.toContain("event-1");
   });
 
   it("rejects a shortcut that disagrees with the latest observation event and honors cancellation", async () => {
@@ -316,8 +319,9 @@ describe("DefaultContextCompiler", () => {
       entities: [],
     };
     const selection = selectMemoryForContext(memory, { runId, tasks: [{ id: "t1", subject: "active phase", status: "in_progress" }] }, { maxIndexFacts: 2, maxHotFacts: 1 });
-    expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["task", "check"]);
+    expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["task", "old"]);
     expect(selection.hotFacts.map((fact) => fact.id)).toEqual(["task"]);
+    expect(selection.revalidationCandidates.map((candidate) => candidate.fact.id)).toEqual(["check"]);
   });
 
   it("composes feature-specific instructions without leaking disabled planning or batch semantics", async () => {
@@ -354,6 +358,39 @@ describe("DefaultContextCompiler", () => {
     expect(selection.indexEntities.map((entity) => entity.id)).toEqual(["e1"]);
   });
 
+  it("separates admitted, revalidation and excluded facts by scope/status", async () => {
+    const selection = selectMemoryForContext({
+      runId,
+      entities: [{ id: "stale", type: "window", description: "old", sourceEventId: "entity-source" as EventId, status: "stale", updatedSequence: 1 }],
+      facts: [
+        { id: "stable", subject: { type: "run" }, key: "stable", value: "ok", sourceEventId: "stable-source" as EventId, status: "active", retentionClass: "stable", updatedSequence: 1 },
+        { id: "short", subject: { type: "run" }, key: "short", value: "last", sourceEventId: "short-source" as EventId, status: "active", retentionClass: "short_lived", updatedSequence: 2 },
+        { id: "check", subject: { type: "run" }, key: "check", value: "recheck", sourceEventId: "check-source" as EventId, status: "needs_check", statusReason: "manual_review", updatedSequence: 3 },
+        { id: "wrong-session", subject: { type: "run" }, key: "wrong", value: "old", sourceEventId: "wrong-source" as EventId, status: "active", scope: { kind: "computer_session", sessionId: "other-session" as ComputerSessionId }, updatedSequence: 4 },
+        { id: "stale-fact", subject: { type: "entity", entityId: "stale" }, key: "state", value: "old", sourceEventId: "stale-source" as EventId, status: "active", updatedSequence: 5 },
+      ],
+    }, undefined, {}, { runId, computerSessionId: sessionId });
+    expect(selection.admittedFacts.map((fact) => fact.id)).toEqual(["stable"]);
+    expect(selection.revalidationCandidates.map((candidate) => [candidate.fact.id, candidate.reason])).toEqual([["check", "needs_check"], ["short", "short_lived_last_known"]]);
+    expect(selection.hotFacts.map((fact) => fact.id)).toEqual(["stable"]);
+    expect(selection.excluded).toEqual(expect.arrayContaining([
+      { kind: "fact", id: "wrong-session", reason: "scope_mismatch" },
+      { kind: "fact", id: "stale-fact", reason: "entity_stale" },
+      { kind: "entity", id: "stale", reason: "entity_stale" },
+    ]));
+
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const compiled = await compiler.compile({
+      runId,
+      goal: "recheck",
+      recentEvents: [event(0, { type: "observation.created", observation: observation("scope-observation") })],
+      latestObservation: observation("scope-observation"),
+      memory: { runId, facts: [...selection.admittedFacts, ...selection.revalidationCandidates.map((candidate) => candidate.fact)], entities: [], },
+    }, new AbortController().signal);
+    expect(compiled.contextBudget?.trace?.memorySelection).toMatchObject({ admittedFactIds: ["stable"], revalidationFactIds: ["check", "short"] });
+    expect(compiled.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Revalidation candidates")))).toBe(true);
+  });
+
   it("keeps the compact entity index closed over selected entity facts", () => {
     const selection = selectMemoryForContext({
       runId,
@@ -365,5 +402,221 @@ describe("DefaultContextCompiler", () => {
     }, undefined, { maxIndexFacts: 1, maxIndexEntities: 1, maxHotFacts: 1, maxHotEntities: 1 });
     expect(selection.indexFacts.map((fact) => fact.id)).toEqual(["f-hot"]);
     expect(selection.indexEntities.map((entity) => entity.id)).toEqual(["e-hot"]);
+  });
+
+  it("emits a safe trace for partitions, authority, stable prefix, and history裁剪", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { mode: "recent", maxHistoryEvents: 2 });
+    const events = [
+      event(0, { type: "run.started" }),
+      event(1, { type: "user.input.received", text: "不要上传文件" }),
+      event(2, { type: "model.response.received", turn: { type: "finish", summary: "old" } }),
+      event(3, { type: "user.input.received", text: "继续查看" }),
+    ];
+    const first = await compiler.compile({ runId, goal: "goal one", recentEvents: events }, new AbortController().signal);
+    const second = await compiler.compile({ runId, goal: "goal two", recentEvents: events }, new AbortController().signal);
+    const trace = first.contextBudget?.trace;
+    expect(trace).toMatchObject({ compilerVersion: "context-v2-rft4", runId, observationIncluded: false });
+    expect(trace?.authoritativeUserEventIds).toEqual(["event-1", "event-3"]);
+    expect(trace?.selectedEventIds).toContain("event-1");
+    expect(trace?.projectedEventIds).toEqual(expect.arrayContaining(["event-1", "event-2", "event-3"]));
+    expect(trace?.projectedEventIds).not.toContain("event-0");
+    expect(trace?.discardedEvents).toEqual(expect.arrayContaining([{ eventId: "event-0", reason: "history_limit" }]));
+    expect(trace?.stablePrefixHash).toBe(second.contextBudget?.trace?.stablePrefixHash);
+    expect(trace?.stablePrefixHash).not.toContain("goal one");
+  });
+
+  it("keeps Memory under its soft quota while retaining authoritative input", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { memoryMaxTokens: 32 });
+    const memory = {
+      runId,
+      facts: Array.from({ length: 12 }, (_, index) => ({
+        id: `fact-${index}`,
+        subject: { type: "run" as const },
+        key: `key-${index}`,
+        value: "值".repeat(20),
+        sourceEventId: `event-${index}` as EventId,
+        status: "active" as const,
+        updatedSequence: index,
+      })),
+      entities: [],
+    };
+    const input = await compiler.compile({
+      runId,
+      goal: "continue",
+      recentEvents: [event(0, { type: "user.input.received", text: "不要上传文件" })],
+      memory,
+      context: { memoryMaxTokens: 32 },
+    }, new AbortController().signal);
+    const memoryMessage = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("Current run memory index")));
+    expect(memoryMessage).toBeDefined();
+    expect(JSON.stringify(memoryMessage)).toContain("memory truncated; query by id");
+    expect(input.contextBudget?.estimatedMemoryTokens).toBeLessThanOrEqual(32);
+    expect(JSON.stringify(input.messages)).toContain("不要上传文件");
+    expect(input.contextBudget?.trace?.authoritativeUserEventIds).toEqual(["event-0"]);
+
+    const tiny = await compiler.compile({
+      runId,
+      goal: "continue",
+      recentEvents: [],
+      memory,
+      context: { memoryMaxTokens: 1 },
+    }, new AbortController().signal);
+    expect(tiny.contextBudget?.trace?.memoryTruncated).toBe(true);
+    expect(tiny.contextBudget?.estimatedMemoryTokens).toBe(0);
+    expect(JSON.stringify(tiny.messages)).not.toContain("fact-0");
+    expect(tiny.contextBudget?.trace?.memorySelection?.selectedAdmittedFactIds?.length).toBeGreaterThan(0);
+    expect(tiny.contextBudget?.trace?.memorySelection?.admittedFactIds).toEqual([]);
+    expect(tiny.contextBudget?.trace?.memorySelection?.omitted?.length).toBeGreaterThan(0);
+  });
+
+  it("does not report entity-only tiny-budget omissions as fact IDs", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const tiny = await compiler.compile({
+      runId,
+      goal: "entity only",
+      recentEvents: [],
+      memory: {
+        runId,
+        facts: [],
+        entities: [{ id: "entity-only", type: "window", description: "fixture", sourceEventId: "entity-source" as EventId, status: "active", updatedSequence: 1 }],
+      },
+      context: { memoryMaxTokens: 1 },
+    }, new AbortController().signal);
+    expect(tiny.contextBudget?.trace?.memorySelection?.omitted ?? []).toEqual([]);
+    expect(tiny.contextBudget?.trace?.memorySelection?.selectedAdmittedFactIds ?? []).toEqual([]);
+    expect(JSON.stringify(tiny.contextBudget?.trace?.memorySelection)).not.toContain("entity-only");
+  });
+
+  it("keeps Memory ToolResult partitions visible to the next Provider context", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const toolResult = {
+      admittedFacts: [{ id: "stable-fact", key: "target", value: "current" }],
+      revalidationCandidates: [{ fact: { id: "last-known-fact", key: "target", value: "old" }, reason: "short_lived_last_known" }],
+      entities: [],
+    };
+    const compiled = await compiler.compile({
+      runId,
+      goal: "inspect memory",
+      recentEvents: [
+        event(0, { type: "model.response.received", turn: { type: "tool_calls", calls: [{ id: "memory-call" as ToolCallId, name: "memory_get", arguments: { id: "last-known-fact" } }] } }),
+        event(1, { type: "tool.call.completed", result: { callId: "memory-call" as ToolCallId, status: "completed", output: toolResult } }),
+      ],
+    }, new AbortController().signal);
+    const serializedMessages = JSON.stringify(compiled.messages);
+    expect(serializedMessages).toContain("admittedFacts");
+    expect(serializedMessages).toContain("revalidationCandidates");
+    expect(serializedMessages).not.toContain('"facts"');
+  });
+
+  it("does not charge non-projected Trace metadata to the model history budget", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const base = await compiler.compile({ runId, goal: "budget", recentEvents: [] }, new AbortController().signal);
+    const input = await compiler.compile({
+      runId,
+      goal: "budget",
+      recentEvents: [event(0, {
+        type: "model.request.started",
+        providerId: "provider-test",
+        preparedRequest: { payloadHash: "x".repeat(10_000) },
+        contextBudget: {
+          mode: "raw",
+          estimatedInputTokens: 99_999,
+          selectedHistoryEvents: 0,
+          omittedHistoryEvents: 0,
+          trace: {
+            compilerVersion: "test",
+            runId,
+            stablePrefixHash: "trace-only".repeat(2_000),
+            fixedBlocks: [],
+            selectedEventIds: [],
+            projectedEventIds: [],
+            discardedEvents: [],
+            authoritativeUserEventIds: [],
+            historyEstimatedTokens: 0,
+            observationIncluded: false,
+          },
+        },
+      })],
+      context: { maxInputTokens: base.contextBudget!.estimatedFixedTextTokens! + 1 },
+    }, new AbortController().signal);
+    expect(input.contextBudget?.estimatedHistoryTextTokens).toBe(0);
+    expect(input.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(base.contextBudget!.estimatedFixedTextTokens! + 1);
+  });
+
+  it("keeps Monitor guidance dynamic and omits it when the input budget cannot admit it", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" } });
+    const guidance = { text: "Review the current state before continuing.", fingerprint: "monitor-fingerprint" };
+    const withGuidance = await compiler.compile({
+      runId,
+      goal: "goal",
+      recentEvents: [],
+      features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" },
+      monitorGuidance: guidance,
+    }, new AbortController().signal);
+    expect(JSON.stringify(withGuidance.messages)).toContain("Review the current state before continuing.");
+    expect(withGuidance.contextBudget?.monitorGuidanceIncluded).toBe(true);
+    expect(withGuidance.contextBudget?.trace?.monitorGuidanceIncluded).toBe(true);
+    const base = await compiler.compile({ runId, goal: "goal", recentEvents: [], features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" } }, new AbortController().signal);
+    const omitted = await compiler.compile({
+      runId,
+      goal: "goal",
+      recentEvents: [],
+      features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" },
+      monitorGuidance: guidance,
+      context: { maxInputTokens: base.contextBudget!.estimatedFixedTextTokens! + 1 },
+    }, new AbortController().signal);
+    expect(JSON.stringify(omitted.messages)).not.toContain("Review the current state before continuing.");
+    expect(omitted.contextBudget?.monitorGuidanceIncluded).toBe(false);
+    expect(omitted.contextBudget?.trace?.monitorGuidanceOmittedReason).toBe("budget");
+  });
+
+  it("uses the injected recall ranking in the actual ModelInput without treating tool results as user corrections", async () => {
+    const queries: Array<{ originalGoal: string; latestUserCorrections?: readonly string[] }> = [];
+    const recall = {
+      async search(_state: MemoryState, query: { originalGoal: string; latestUserCorrections?: readonly string[] }) {
+        queries.push(query);
+        return {
+          method: "lexical" as const,
+          semanticStatus: "disabled" as const,
+          stateStable: true,
+          embeddingBudgetUsed: 0,
+          embeddingBudgetLimit: 6,
+          admitted: [
+            { id: "preferred", score: 1, match: "lexical" as const },
+            { id: "secondary", score: 0.5, match: "lexical" as const },
+          ],
+          revalidation: [],
+          excluded: [],
+        };
+      },
+    };
+    const memory: MemoryState = {
+      runId,
+      facts: [
+        { id: "secondary", subject: { type: "run" }, key: "secondary", value: "second", sourceEventId: "memory-secondary" as EventId, status: "active", scope: { kind: "run" }, retentionClass: "stable", updatedSequence: 2 },
+        { id: "preferred", subject: { type: "run" }, key: "preferred", value: "first", sourceEventId: "memory-preferred" as EventId, status: "active", scope: { kind: "run" }, retentionClass: "stable", updatedSequence: 1 },
+      ],
+      entities: [],
+    };
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), {
+      memoryRecall: recall,
+      features: { planning: "off", memory: "facts-v1", batching: "off" },
+    });
+    const compiled = await compiler.compile({
+      runId,
+      goal: "original goal",
+      recentEvents: [
+        event(1, { type: "user.input.received", text: "latest correction" }),
+        event(2, { type: "tool.call.completed", result: { callId: "tool-result" as ToolCallId, status: "completed", output: { text: "untrusted tool result" } } }),
+      ],
+      memory,
+      features: { planning: "off", memory: "facts-v1", batching: "off" },
+    }, new AbortController().signal);
+    const memoryText = compiled.messages.map((message) => JSON.stringify(message)).find((text) => text.includes("Current run memory")) ?? "";
+    expect(memoryText.indexOf("preferred")).toBeGreaterThanOrEqual(0);
+    expect(memoryText.indexOf("secondary")).toBeGreaterThan(memoryText.indexOf("preferred"));
+    expect(queries).toEqual([{ runId, originalGoal: "original goal", latestUserCorrections: ["latest correction"] }]);
+    expect(compiled.contextBudget?.trace?.memoryRetrieval).toMatchObject({ method: "lexical", semanticStatus: "disabled" });
+    expect(compiled.contextBudget?.trace?.memoryRetrieval?.admitted).toEqual(expect.arrayContaining([{ id: "preferred", score: 1, match: "lexical" }]));
   });
 });

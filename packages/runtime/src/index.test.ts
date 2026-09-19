@@ -36,7 +36,9 @@ import {
   type ModelInput,
   type ModelMessage,
   type ProviderAdapter,
+  type PreparedProviderRequest,
   type RuntimePolicy,
+  type RunFeatureConfig,
   type ActionPolicy,
   type ContextCompiler,
   validateActionIntent,
@@ -202,6 +204,9 @@ class TestContextCompiler implements ContextCompiler {
     if (input.latestObservation !== undefined) {
       messages.push({ role: "user", content: [{ type: "image", asset: input.latestObservation.screenshot, viewport: input.latestObservation.viewport }] });
     }
+    if (input.monitorGuidance !== undefined) {
+      messages.push({ role: "user", content: [{ type: "text", text: input.monitorGuidance.text }] });
+    }
     return { system: "runtime test context", messages, tools: this.registry.modelTools() };
   }
 }
@@ -291,6 +296,54 @@ function clickCall(callId: string): ToolCall {
     name: "click",
     arguments: { x: 40, y: 50 },
   };
+}
+
+class PreparedScriptedProvider implements ProviderAdapter {
+  public readonly id = "prepared-test-provider";
+  public readonly preparedInputs: ModelInput[] = [];
+  public readonly preparedRequests: PreparedProviderRequest[] = [];
+  public generatedRequests: PreparedProviderRequest[] = [];
+  public prepareCalls = 0;
+  public generateCalls = 0;
+
+  public constructor(
+    private readonly mode: "success" | "same_input_retry" | "feedback_retry" | "prepare_failure",
+    private readonly onPrepare?: (count: number) => void,
+  ) {}
+
+  public async prepare(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest> {
+    options.signal.throwIfAborted();
+    this.prepareCalls += 1;
+    this.onPrepare?.(this.prepareCalls);
+    if (this.mode === "prepare_failure") throw new Error("prepare failed before network");
+    this.preparedInputs.push(input);
+    const request = Object.freeze({
+      providerId: this.id,
+      payloadHash: `prepared-${this.prepareCalls}`,
+      estimate: { estimatedTextTokens: 1, imageCount: 0, estimationMethod: "context_report" as const },
+    });
+    this.preparedRequests.push(request);
+    return request;
+  }
+
+  public async generate(input: ModelInput, _options: { signal: AbortSignal }): Promise<ModelTurn> {
+    throw new Error(`unexpected direct generate for ${input.system}`);
+  }
+
+  public async generatePrepared(request: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    options.signal.throwIfAborted();
+    this.generateCalls += 1;
+    this.generatedRequests.push(request);
+    if ((this.mode === "same_input_retry" || this.mode === "feedback_retry") && this.generateCalls === 1) {
+      const retryMode = this.mode === "same_input_retry" ? "same_input" : "feedback";
+      throw Object.assign(new Error("synthetic transient provider failure"), {
+        code: "TEST_RETRYABLE",
+        retryable: true,
+        retryMode,
+      });
+    }
+    return { type: "finish", summary: "prepared success", reportedStatus: "success" };
+  }
 }
 
 function typeCall(callId: string, text = "hello"): ToolCall {
@@ -383,7 +436,9 @@ async function makeController(
     enabledCategories?: readonly import("./contracts.js").ToolCategory[];
     enabledToolNames?: readonly string[];
     onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
+    onEventCommitted?: (event: import("@computer-harness/protocol").RuntimeEvent) => void;
     actionPolicy?: ActionPolicy;
+    features?: RunFeatureConfig;
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -403,11 +458,13 @@ async function makeController(
     toolRegistry: registry,
     policy,
     ...(overrides.actionPolicy === undefined ? {} : { actionPolicy: overrides.actionPolicy }),
+    ...(overrides.features === undefined ? {} : { features: overrides.features }),
     eventWriter: writer,
     assetStore: overrides.assetStore ?? new FileAssetStore(join(directory, "assets")),
     idFactory: new TestIds(),
     clock: { now: () => "2026-08-28T00:00:00.000Z" },
     ...(overrides.onCleanupError === undefined ? {} : { onCleanupError: overrides.onCleanupError }),
+    ...(overrides.onEventCommitted === undefined ? {} : { onEventCommitted: overrides.onEventCommitted }),
     ...(overrides.batching === undefined ? {} : { batching: overrides.batching }),
     ...(overrides.enabledCategories === undefined ? {} : { enabledCategories: overrides.enabledCategories }),
     ...(overrides.enabledToolNames === undefined ? {} : { enabledToolNames: overrides.enabledToolNames }),
@@ -416,7 +473,7 @@ async function makeController(
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 1000; attempt += 1) {
+  for (let attempt = 0; attempt < 5000; attempt += 1) {
     if (predicate()) {
       return;
     }
@@ -1787,6 +1844,192 @@ describe("RunController S2-4 failure boundaries", () => {
     const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
     expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "cancelled")).toBe(true);
     expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("prepares once and records one-to-one decision and attempt metadata", async () => {
+    const provider = new PreparedScriptedProvider("success");
+    const created = await makeController(provider);
+
+    await expect(created.controller.start("prepared request")).resolves.toBe("succeeded");
+    expect(provider.prepareCalls).toBe(1);
+    expect(provider.generateCalls).toBe(1);
+    expect(provider.generatedRequests[0]).toBe(provider.preparedRequests[0]);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    const started = events.find((event) => event.type === "model.request.started");
+    const received = events.find((event) => event.type === "model.response.received");
+    expect(started).toMatchObject({ attempt: 1, decisionId: expect.any(String), requestId: expect.any(String), preparedRequest: { payloadHash: "prepared-1", estimate: { estimatedTextTokens: 1, imageCount: 0 } } });
+    expect(received).toMatchObject({ attempt: 1, decisionId: started && started.type === "model.request.started" ? started.decisionId : undefined, requestId: started && started.type === "model.request.started" ? started.requestId : undefined });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("discards a prepared request when a correction arrives at the preparation barrier", async () => {
+    let controller: RunController | undefined;
+    let injected = false;
+    const provider = new PreparedScriptedProvider("success", () => {
+      if (!injected) {
+        injected = true;
+        void controller?.submitUserInput("use the corrected goal");
+      }
+    });
+    const created = await makeController(provider);
+    controller = created.controller;
+    await expect(created.controller.start("stale goal")).resolves.toBe("succeeded");
+    expect(provider.generateCalls).toBe(1);
+    expect(provider.prepareCalls).toBe(2);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(1);
+    expect(events.some((event) => event.type === "user.input.received" && event.text === "use the corrected goal")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("reuses the prepared payload for same-input retries and re-prepares feedback retries", async () => {
+    const sameInputProvider = new PreparedScriptedProvider("same_input_retry");
+    const sameInputRun = await makeController(sameInputProvider);
+    await expect(sameInputRun.controller.start("same input retry")).resolves.toBe("succeeded");
+    expect(sameInputProvider.prepareCalls).toBe(1);
+    expect(sameInputProvider.generateCalls).toBe(2);
+    expect(sameInputProvider.generatedRequests[1]).toBe(sameInputProvider.generatedRequests[0]);
+    const sameInputEvents = await readRuntimeEvents(join(sameInputRun.directory, "trajectory.jsonl"));
+    const sameInputAttempts = sameInputEvents.filter((event) => event.type === "model.request.started");
+    expect(sameInputAttempts.map((event) => event.type === "model.request.started" ? event.attempt : undefined)).toEqual([1, 2]);
+    expect(sameInputAttempts[0]).toMatchObject({ decisionId: sameInputAttempts[1] && sameInputAttempts[1].type === "model.request.started" ? sameInputAttempts[1].decisionId : undefined });
+    expect(sameInputAttempts[0]?.type === "model.request.started" && sameInputAttempts[1]?.type === "model.request.started" ? sameInputAttempts[0].requestId : undefined).not.toBe(
+      sameInputAttempts[0]?.type === "model.request.started" && sameInputAttempts[1]?.type === "model.request.started" ? sameInputAttempts[1].requestId : undefined,
+    );
+
+    const feedbackProvider = new PreparedScriptedProvider("feedback_retry");
+    const feedbackRun = await makeController(feedbackProvider);
+    await expect(feedbackRun.controller.start("feedback retry")).resolves.toBe("succeeded");
+    expect(feedbackProvider.prepareCalls).toBe(2);
+    expect(feedbackProvider.generateCalls).toBe(2);
+    expect(feedbackProvider.preparedInputs[1]?.messages.length).toBeGreaterThan(feedbackProvider.preparedInputs[0]?.messages.length ?? 0);
+    expect(feedbackProvider.generatedRequests[1]).not.toBe(feedbackProvider.generatedRequests[0]);
+    await rm(sameInputRun.directory, { recursive: true, force: true });
+    await rm(feedbackRun.directory, { recursive: true, force: true });
+  });
+
+  it("fails before model.request.started when preparation fails", async () => {
+    const provider = new PreparedScriptedProvider("prepare_failure");
+    const created = await makeController(provider);
+    await expect(created.controller.start("preparation failure")).resolves.toBe("failed");
+    expect(provider.generateCalls).toBe(0);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "model.request.started")).toBe(false);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+});
+
+describe("RunController Monitor online consumer", () => {
+  it("keeps Monitor fully absent when the feature is off", async () => {
+    const created = await makeController(new ScriptedProvider([{ type: "finish", summary: "done" }]));
+    await expect(created.controller.start("monitor off")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "monitor.proposal")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("Monitor candidate");
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("persists a bounded guidance proposal and consumes it in the next normal Context request", async () => {
+    const turns: ModelTurn[] = [];
+    for (let index = 0; index < 5; index += 1) turns.push({ type: "tool_calls", calls: [clickCall(`monitor-click-${index}`)] });
+    turns.push({ type: "finish", summary: "done" });
+    const provider = new ScriptedProvider(turns);
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    await expect(created.controller.start("monitor guidance")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    const proposals = events.filter((event) => event.type === "monitor.proposal");
+    expect(proposals.some((event) => event.type === "monitor.proposal" && event.proposal === "guidance")).toBe(true);
+    expect(proposals.every((event) => event.type !== "monitor.proposal" || event.guidanceText === undefined || event.guidanceText.length <= 240)).toBe(true);
+    expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Monitor candidate"))))).toBe(true);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(5);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("defers Monitor help until the action, ToolResult and post-action observation are committed", async () => {
+    const turns: ModelTurn[] = [];
+    for (let index = 0; index < 8; index += 1) turns.push({ type: "tool_calls", calls: [clickCall(`monitor-help-click-${index}`)] });
+    turns.push({ type: "finish", summary: "done" });
+    const created = await makeController(new ScriptedProvider(turns), undefined, clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    const running = created.controller.start("monitor help boundary");
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_user");
+    const beforeInput = created.controller.getEvents();
+    const requestIndex = beforeInput.findIndex((event) => event.type === "user.input.requested");
+    expect(requestIndex).toBeGreaterThan(-1);
+    expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "tool.call.completed" || event.type === "tool.call.failed")).toBe(true);
+    expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "observation.created" && event.sequence > (beforeInput.find((candidate) => candidate.type === "action.execution.completed")?.sequence ?? -1))).toBe(true);
+    expect(beforeInput.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(false);
+    await created.controller.submitUserInput("continue after review");
+    await expect(running).resolves.toBe("succeeded");
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("stops a legal Plan/Memory-before-GUI multi-call turn at the Inbox boundary", async () => {
+    const registry = clickRegistry();
+    registry.register({
+      name: "remember",
+      description: "Record a synthetic planning note.",
+      category: "planning",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      validate: () => undefined,
+      execute: async () => ({ ok: true }),
+      planMutationFromResult: () => undefined,
+    });
+    let controller: RunController | undefined;
+    let injected = false;
+    const created = await makeController(new ScriptedProvider([
+      { type: "tool_calls", calls: [
+        { id: "plan-before-help" as ToolCallId, name: "remember", arguments: {} },
+        clickCall("gui-after-help"),
+      ] },
+      { type: "finish", summary: "corrected" },
+    ]), undefined, registry, new DefaultRuntimePolicy(), {
+      features: { planning: "tasks-v1", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+      onEventCommitted: (event) => {
+        if (!injected && event.type === "tool.call.completed" && event.result.callId === "plan-before-help") {
+          injected = true;
+          (controller as unknown as { monitorPendingHelp: { kind: "help_requested"; reason: "guidance_budget_exhausted"; fingerprint: string } }).monitorPendingHelp = {
+            kind: "help_requested",
+            reason: "guidance_budget_exhausted",
+            fingerprint: "synthetic-deferred-help",
+          };
+        }
+      },
+    });
+    controller = created.controller;
+    const activeController = created.controller;
+    const running = activeController.start("stop the remaining GUI call at review");
+    await waitUntil(() => activeController.getSnapshot().status === "waiting_user");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(activeController.getEvents().some((event) => event.type === "action.proposed" && event.callId === "gui-after-help")).toBe(false);
+    expect(activeController.getEvents().some((event) => event.type === "user.input.requested")).toBe(true);
+    await activeController.submitUserInput("cancel the remaining click");
+    await expect(running).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(activeController.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "gui-after-help")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not turn a Monitor proposal append failure into a business Run failure", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("monitor-append-failure-1")] },
+      { type: "tool_calls", calls: [clickCall("monitor-append-failure-2")] },
+      { type: "tool_calls", calls: [clickCall("monitor-append-failure-3")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "shadow" },
+      eventWriter: (path) => new FailingWriter(new JsonlRunEventWriter(path, runId, { next: (() => { let count = 0; return () => `monitor-writer-${count++}` as EventId; })() }), (draft) => draft.type === "monitor.proposal"),
+    });
+    await expect(created.controller.start("monitor diagnostic failure")).resolves.toBe("succeeded");
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(3);
+    expect(created.controller.getSnapshot().outcome).toBe("succeeded");
+    expect(created.controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "monitor_diagnostic")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
   });
 });

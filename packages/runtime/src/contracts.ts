@@ -6,6 +6,8 @@ import type {
   AssetId,
   AssetRef,
   ComputerSessionDescriptor,
+  ComputerSessionId,
+  ContextTrace,
   EventId,
   JsonValue,
   ModelTurn,
@@ -18,6 +20,8 @@ import type {
   PlanState,
   PlanningTaskMutation,
   Point,
+  PreparedRequestEstimate as ProtocolPreparedRequestEstimate,
+  PreparedRequestMetadata,
   RunId,
   RiskCategory,
   RuntimeEvent,
@@ -27,6 +31,7 @@ import type {
   Viewport,
 } from "@computer-harness/protocol";
 import type { RunSnapshot } from "@computer-harness/trajectory";
+import type { MonitorPolicyMode } from "./monitor-policy.js";
 
 /** Runtime uses the serializable protocol description; adapter handles stay private. */
 export type ComputerSession = ComputerSessionDescriptor;
@@ -100,6 +105,11 @@ export interface ContextBudgetReport {
   omittedHistoryEvents: number;
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  estimatedMemoryTokens?: number;
+  memoryMaxTokens?: number;
+  estimatedMonitorGuidanceTokens?: number;
+  monitorGuidanceIncluded?: boolean;
+  trace?: ContextTrace;
 }
 
 /** Immutable Run-level switches shared by Registry projection, Runtime and Context. */
@@ -108,6 +118,7 @@ export interface RunFeatureConfig {
   memory: "off" | "facts-v1" | "entities-v1";
   batching: "off" | "same-control-input-v1";
   riskGuard?: "off" | "layered";
+  monitor?: MonitorPolicyMode;
 }
 
 export interface ProviderAdapter {
@@ -116,6 +127,16 @@ export interface ProviderAdapter {
     input: ModelInput,
     options: { signal: AbortSignal },
   ): Promise<ModelTurn>;
+  prepare?(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest>;
+  generatePrepared?(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn>;
+}
+
+/** Provider-owned wire preparation metadata. The actual request body stays in
+ * the adapter's private identity-keyed state and is never serialized. */
+export type PreparedRequestEstimate = ProtocolPreparedRequestEstimate;
+
+export interface PreparedProviderRequest extends PreparedRequestMetadata {
+  readonly providerId: string;
 }
 
 export interface ContextCompileInput {
@@ -129,6 +150,12 @@ export interface ContextCompileInput {
   enabledToolNames?: readonly string[];
   memory?: MemoryState;
   features?: RunFeatureConfig;
+  monitorGuidance?: MonitorGuidance;
+}
+
+export interface MonitorGuidance {
+  readonly text: string;
+  readonly fingerprint: string;
 }
 
 export interface ContextOptions {
@@ -136,6 +163,48 @@ export interface ContextOptions {
   maxHistoryEvents?: number;
   /** Approximate text/tool budget; image cost is reported by the Provider when available. */
   maxInputTokens?: number;
+  /** Soft cap for memory text inside the Context fixed blocks. */
+  memoryMaxTokens?: number;
+}
+
+/** Query sources allowed for automatic Memory recall; tool results are not user corrections. */
+export interface MemoryRecallQuery {
+  readonly runId: RunId;
+  readonly computerSessionId?: ComputerSessionId;
+  readonly originalGoal: string;
+  readonly latestUserCorrections?: readonly string[];
+  readonly explicitQuery?: string;
+  readonly recentActionHints?: readonly string[];
+}
+
+export type MemoryRecallMatch = "exact" | "lexical" | "semantic";
+export type MemoryRecallMethod = "lexical" | "hybrid";
+export type MemoryRecallSemanticStatus = "used" | "disabled" | "not_needed" | "unavailable" | "timed_out";
+
+export interface MemoryRecallRankedId {
+  readonly id: string;
+  readonly score: number;
+  readonly match: MemoryRecallMatch;
+  readonly reason?: "needs_check" | "short_lived_last_known";
+}
+
+/**
+ * Runtime-facing read contract. It contains only IDs/ranking/status metadata;
+ * the Context side joins IDs back to its canonical MemoryState snapshot.
+ */
+export interface MemoryRecallSelection {
+  readonly method: MemoryRecallMethod;
+  readonly semanticStatus: MemoryRecallSemanticStatus;
+  readonly stateStable: boolean;
+  readonly embeddingBudgetUsed: number;
+  readonly embeddingBudgetLimit: number;
+  readonly admitted: readonly MemoryRecallRankedId[];
+  readonly revalidation: readonly MemoryRecallRankedId[];
+  readonly excluded: readonly { kind: "fact"; id: string; reason: "superseded" | "scope_mismatch" | "entity_stale" | "entity_missing" }[];
+}
+
+export interface MemoryRecallService {
+  search(state: MemoryState, query: MemoryRecallQuery, signal: AbortSignal): Promise<MemoryRecallSelection>;
 }
 
 export interface ContextCompiler {

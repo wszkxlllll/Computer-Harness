@@ -76,6 +76,41 @@ function makePendingCorrectionFixture(pauseBarrier: () => Promise<void>) {
 }
 
 describe("TUI renderer", () => {
+  it("lets the home screen select per-Run feature flags before entering a goal", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined);
+    fixture.output.columns = 80;
+    fixture.output.rows = 24;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "osworld",
+      output: "runs/tui-features",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+
+    fixture.input.emit("keypress", "F", { name: "f" });
+    await tick();
+    expect(fixture.outputText.join("")).toContain("FEATURES");
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "space" });
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "right" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    expect(fixture.outputText.join("")).toContain("memory=facts/lexical");
+
+    fixture.input.emit("keypress", "打开任务管理器", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    const startedConfig = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig | undefined;
+    expect(startedConfig?.planning).toBe(false);
+    expect(startedConfig?.memory).toBe("facts");
+    expect(startedConfig?.memoryRetrieval).toBe("lexical");
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
   it("renders status and does not expose typed action content", () => {
     const runId = "tui-run" as RunId;
     const snapshot = { ...initialRunSnapshot(runId), status: "running" as const };

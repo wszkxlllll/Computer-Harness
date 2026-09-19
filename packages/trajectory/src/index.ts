@@ -247,6 +247,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         throw new Error(`memory.updated requires running status, got ${snapshot.status}`);
       }
       return { ...snapshot, memory: reduceMemoryMutation(snapshot.memory, event.mutation) };
+    case "monitor.proposal":
+      if (snapshot.status !== "running") {
+        throw new Error(`monitor.proposal requires running status, got ${snapshot.status}`);
+      }
+      return snapshot;
     case "run.paused":
       if (snapshot.status !== "running") {
         throw new Error(`run.paused requires running status, got ${snapshot.status}`);
@@ -355,6 +360,9 @@ function assertNever(value: never): never {
 }
 
 function addUsage(previous: ModelUsage | undefined, next: ModelUsage): ModelUsage {
+  // Cache reads remain on each ModelTurn. A run-level sum would silently
+  // treat a response that omitted provider cache details as a zero, so the
+  // normalized snapshot intentionally does not claim aggregate coverage.
   return {
     ...(previous?.inputTokens === undefined && next.inputTokens === undefined ? {} : { inputTokens: (previous?.inputTokens ?? 0) + (next.inputTokens ?? 0) }),
     ...(previous?.outputTokens === undefined && next.outputTokens === undefined ? {} : { outputTokens: (previous?.outputTokens ?? 0) + (next.outputTokens ?? 0) }),
@@ -633,6 +641,7 @@ const modelUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative().optional(),
   outputTokens: z.number().int().nonnegative().optional(),
   totalTokens: z.number().int().nonnegative().optional(),
+  cacheReadTokens: z.number().int().nonnegative().optional(),
 });
 const modelContinuationSchema = z.object({
   providerId: nonEmptyString,
@@ -716,6 +725,12 @@ const memoryFactSchema = z.object({
   value: z.string(),
   sourceEventId: nonEmptyString,
   status: z.enum(["active", "needs_check", "superseded"]),
+  scope: z.union([
+    z.object({ kind: z.literal("run") }),
+    z.object({ kind: z.literal("computer_session"), sessionId: nonEmptyString }),
+  ]).optional(),
+  retentionClass: z.enum(["stable", "task", "short_lived"]).optional(),
+  statusReason: z.enum(["manual_review", "scope_ended"]).optional(),
   relatedTaskIds: z.array(nonEmptyString).optional(),
   updatedSequence: z.number().int().nonnegative(),
 });
@@ -731,7 +746,7 @@ const memoryEntitySchema = z.object({
 const memoryMutationSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("upsert_fact"), fact: memoryFactSchema }),
   z.object({ operation: z.literal("supersede_fact"), factId: nonEmptyString, replacement: memoryFactSchema.optional() }),
-  z.object({ operation: z.literal("mark_fact_needs_check"), factId: nonEmptyString }),
+  z.object({ operation: z.literal("mark_fact_needs_check"), factId: nonEmptyString, reason: z.enum(["manual_review", "scope_ended"]).optional() }),
   z.object({ operation: z.literal("upsert_entity"), entity: memoryEntitySchema }),
   z.object({ operation: z.literal("invalidate_entity"), entityId: nonEmptyString }),
 ]);
@@ -751,6 +766,52 @@ const eventBaseSchema = {
   sequence: z.number().int().nonnegative(),
   occurredAt: nonEmptyString,
 };
+const contextTraceSchema = z.object({
+  compilerVersion: nonEmptyString,
+  runId: nonEmptyString,
+  stablePrefixHash: nonEmptyString,
+  fixedBlocks: z.array(z.object({
+    name: z.enum(["system", "goal", "tools", "plan", "memory"]),
+    estimatedTokens: z.number().int().nonnegative(),
+    included: z.boolean(),
+  })),
+  selectedEventIds: z.array(nonEmptyString),
+  projectedEventIds: z.array(nonEmptyString).optional(),
+  discardedEvents: z.array(z.object({ eventId: nonEmptyString, reason: z.enum(["history_limit", "input_budget"]) })),
+  authoritativeUserEventIds: z.array(nonEmptyString),
+  historyEstimatedTokens: z.number().int().nonnegative(),
+  historyBudgetTokens: z.number().int().nonnegative().optional(),
+  memoryEstimatedTokens: z.number().int().nonnegative().optional(),
+  memoryTruncated: z.boolean().optional(),
+  memorySelection: z.object({
+    admittedFactIds: z.array(nonEmptyString),
+    revalidationFactIds: z.array(nonEmptyString),
+    selectedAdmittedFactIds: z.array(nonEmptyString).optional(),
+    selectedRevalidationFactIds: z.array(nonEmptyString).optional(),
+    omitted: z.array(z.object({ id: nonEmptyString, class: z.enum(["admitted", "revalidation"]), reason: z.enum(["budget", "not_rendered"]) })).optional(),
+    excluded: z.array(z.object({ kind: z.enum(["fact", "entity"]), id: nonEmptyString, reason: z.enum(["superseded", "scope_mismatch", "entity_stale", "entity_missing"]) })),
+  }).optional(),
+  memoryRetrieval: z.object({
+    method: z.enum(["lexical", "hybrid"]),
+    semanticStatus: z.enum(["used", "disabled", "not_needed", "unavailable", "timed_out"]),
+    stateStable: z.boolean(),
+    embeddingBudgetUsed: z.number().int().nonnegative(),
+    embeddingBudgetLimit: z.number().int().nonnegative(),
+    admitted: z.array(z.object({ id: nonEmptyString, score: z.number().finite(), match: z.enum(["exact", "lexical", "semantic"]) })),
+    revalidation: z.array(z.object({ id: nonEmptyString, score: z.number().finite(), match: z.enum(["exact", "lexical", "semantic"]), reason: z.enum(["needs_check", "short_lived_last_known"]).optional() })),
+  }).optional(),
+  observationIncluded: z.boolean(),
+  monitorGuidanceIncluded: z.boolean().optional(),
+  monitorGuidanceOmittedReason: z.literal("budget").optional(),
+  preparedRequest: z.object({
+    payloadHash: nonEmptyString,
+    estimate: z.object({
+      estimatedTextTokens: z.number().int().nonnegative(),
+      imageCount: z.number().int().nonnegative(),
+      estimationMethod: z.enum(["context_report", "provider_projection"]),
+    }).optional(),
+  }).optional(),
+});
 
 const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ ...eventBaseSchema, type: z.literal("run.created"), goal: nonEmptyString }),
@@ -766,6 +827,17 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     ...eventBaseSchema,
     type: z.literal("model.request.started"),
     providerId: nonEmptyString,
+    requestId: nonEmptyString.optional(),
+    decisionId: nonEmptyString.optional(),
+    attempt: z.number().int().positive().optional(),
+    preparedRequest: z.object({
+      payloadHash: nonEmptyString,
+      estimate: z.object({
+        estimatedTextTokens: z.number().int().nonnegative(),
+        imageCount: z.number().int().nonnegative(),
+        estimationMethod: z.enum(["context_report", "provider_projection"]),
+      }).optional(),
+    }).optional(),
     contextBudget: z.object({
       mode: z.enum(["raw", "recent"]),
       estimatedInputTokens: z.number().int().nonnegative(),
@@ -777,9 +849,14 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       omittedHistoryEvents: z.number().int().nonnegative(),
       maxHistoryEvents: z.number().int().positive().optional(),
       maxInputTokens: z.number().int().positive().optional(),
+      estimatedMemoryTokens: z.number().int().nonnegative().optional(),
+      memoryMaxTokens: z.number().int().positive().optional(),
+      estimatedMonitorGuidanceTokens: z.number().int().nonnegative().optional(),
+      monitorGuidanceIncluded: z.boolean().optional(),
+      trace: contextTraceSchema.optional(),
     }).optional(),
   }),
-  z.object({ ...eventBaseSchema, type: z.literal("model.response.received"), turn: modelTurnSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("model.response.received"), requestId: nonEmptyString.optional(), decisionId: nonEmptyString.optional(), attempt: z.number().int().positive().optional(), turn: modelTurnSchema }),
   z.object({
     ...eventBaseSchema,
     type: z.literal("model.request.failed"),
@@ -787,6 +864,9 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     message: z.string(),
     code: nonEmptyString.optional(),
     retryable: z.boolean().optional(),
+    requestId: nonEmptyString.optional(),
+    decisionId: nonEmptyString.optional(),
+    attempt: z.number().int().positive().optional(),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("tool.call.received"), call: toolCallSchema }),
   z.object({
@@ -861,8 +941,22 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     ...eventBaseSchema,
     type: z.literal("memory.updated"),
-    callId: nonEmptyString,
+    callId: nonEmptyString.optional(),
+    source: z.enum(["tool", "lifecycle"]).optional(),
     mutation: memoryMutationSchema,
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("monitor.proposal"),
+    mode: z.enum(["shadow", "guidance"]),
+    proposal: z.enum(["candidate", "guidance", "help_requested", "suppressed_by_execution_barrier"]),
+    fingerprint: nonEmptyString,
+    sourceEventIds: z.array(nonEmptyString).max(12),
+    reasonCodes: z.array(nonEmptyString).max(8),
+    evidenceKinds: z.array(nonEmptyString).max(8),
+    modelDecisionCount: z.number().int().nonnegative(),
+    guiActionCount: z.number().int().nonnegative(),
+    guidanceText: z.string().max(240).optional(),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("run.paused"), reason: z.string() }),
   z.object({ ...eventBaseSchema, type: z.literal("run.resumed") }),
@@ -898,6 +992,14 @@ export const runtimeEventSchema = runtimeEventUnionSchema.superRefine((event, co
       path: ["observation", "runId"],
       message: "observation.runId must match event.runId",
     });
+  }
+  if (event.type === "memory.updated") {
+    if (event.source === "lifecycle" && event.callId !== undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["callId"], message: "lifecycle memory.updated must not masquerade as a ToolCall" });
+    }
+    if (event.source !== "lifecycle" && event.callId === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["callId"], message: "tool memory.updated requires callId" });
+    }
   }
 });
 
