@@ -224,6 +224,7 @@ async function main(): Promise<void> {
         contextMode: options.contextMode,
         monitor: options.monitor,
       } satisfies TuiFeatureSelection,
+      embeddingReady: options.memoryEmbeddingEndpoint !== undefined && (process.env.MEMORY_EMBEDDING_API_KEY?.trim().length ?? 0) > 0,
     }, options.goal === undefined ? {} : { initialGoal: options.goal });
     return;
   }

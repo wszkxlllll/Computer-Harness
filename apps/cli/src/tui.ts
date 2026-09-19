@@ -21,6 +21,8 @@ export interface TuiMetadata {
   profile: RiskProfile;
   riskGuard: RiskGuardMode;
   features?: TuiFeatureSelection;
+  /** True only when the explicit endpoint and independent key are present. */
+  embeddingReady?: boolean;
 }
 
 export interface TuiFeatureSelection {
@@ -305,6 +307,11 @@ export async function runApplicationTui(
     const trimmed = goal.trim();
     if (trimmed.length === 0) {
       notice = "Enter a goal before starting a Run.";
+      render();
+      return;
+    }
+    if (featureSelection.memoryRetrieval === "hybrid" && activeMetadata.embeddingReady !== true) {
+      notice = "Hybrid retrieval needs --memory-embedding-endpoint and MEMORY_EMBEDDING_API_KEY before starting.";
       render();
       return;
     }
@@ -981,6 +988,7 @@ function buildTuiFeaturesFrame(
     "",
     `Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (controlled by profile/CLI; not changed here)`,
     "Each Run gets fresh tools, Context, Memory and Monitor state.",
+    `Embedding config: ${metadata.embeddingReady === true ? "ready" : "not configured (hybrid cannot start)"}`,
     uiFeatureHint(features),
   ];
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
@@ -988,7 +996,7 @@ function buildTuiFeaturesFrame(
 
 function uiFeatureHint(features: TuiFeatureSelection): string {
   if (features.memory === "off" && features.memoryRetrieval !== "off") return "Memory retrieval requires Memory facts or entities; it will be forced off.";
-  if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY.";
+  if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
   if (features.monitor === "guidance") return "Guidance is advisory only; it cannot execute, approve or retry actions.";
   return "Provider and Computer are selected by the launch command; this page changes Run features only.";
 }

@@ -10,10 +10,11 @@ TUI 首页现在支持在启动每个新 Run 前配置实验功能，不需要�
 - 首页按大写 `F` 进入 FEATURES 页面；
 - 方向键或 `J/K` 移动；Space 切换布尔值；Left/Right 切换枚举值；Enter 保存；Esc 取消；
 - 可选择 Planning、Memory（off/facts/entities）、Memory retrieval（off/lexical/hybrid）、Action batching、Context history 和 Progress Monitor；
+- `facts` 提供事实读写/核验工具；`entities` 是 facts 的超集，保留全部事实工具并增加实体工具（创建、列出、失效）。
 - Risk Guard、Provider 和 Computer 不在此页面修改，继续由 profile/启动参数控制；
 - 保存的选项只作用于下一次 Run。`ApplicationSession.startRun` 接受 feature-only overrides，Run 仍使用独立的 ToolRegistry、Context、Memory store 和 Monitor 状态。
 
-Memory 关闭时 retrieval 会被强制为 off。选择 hybrid 只改变 Run 配置，不会自动联网；仍需在启动命令中提供 embedding endpoint，并通过 `MEMORY_EMBEDDING_API_KEY` 注入独立凭据。
+Memory 关闭时 retrieval 会被强制为 off。选择 hybrid 只改变 Run 配置，不会自动联网；必须同时在启动命令中提供 embedding endpoint，并通过 `MEMORY_EMBEDDING_API_KEY` 注入独立凭据。TUI 会在 HOME/FEATURES 显示 embedding 配置状态，未满足条件时不会启动该 Run。
 
 ## 2. 设计边界
 
