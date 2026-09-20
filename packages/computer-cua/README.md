@@ -20,4 +20,16 @@ const computer = new CuaDriverComputer({
 和 drag。scroll 使用 `point + direction + positive ticks`，Adapter 将 ticks 映射为 CUA 的
 wheel `amount`。Transport 失败后 session 进入失效状态，调用方必须重新 `open()`。
 
+显式 `windowTarget` 时，截图使用 window-local physical pixels，动作携带精确的
+`{ pid, window_id }`，绝不静默回退到 primary desktop。默认 `background` 模式只开放
+`click` 与 `wait`；经 Host 显式选择并单独验证的 `foreground` 模式才开放
+`type`、`keypress`/`hotkey`、`scroll` 和 `drag`。右键与双击仍由 Host 工具 allowlist
+拒绝。窗口输入投递可由 Host 显式选择 `windowDeliveryMode: "background" | "foreground"`；
+`foreground` 不是回退，但当前仅保证目标动作投递，不承诺每个动作后恢复原前台窗口。
+`foreground` 的 scroll 仅在用户保持目标窗口可见且不被其他窗口遮挡的 side-by-side
+预览条件下验证过；窗口模式不是 sandbox，也不保证遮挡场景安全。
+
+Host picker 可以通过 `CuaWindowDiscovery.listWindows()` 获取只读的窗口身份与本地显示标签。
+选择结果必须在每个 Run 中显式传入；新窗口、tab、popup 或 PID/window_id 重建不会自动接管。
+
 真实 daemon contract test 属于 S3-4，不由这个 package 的 fake-driver 单元测试替代。

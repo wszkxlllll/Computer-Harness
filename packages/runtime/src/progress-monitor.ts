@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ActionIntent, EventId, RunId, RuntimeEvent, Viewport } from "@computer-harness/protocol";
+import type { ActionIntent, EventId, ObservationTransition, RunId, RuntimeEvent, Viewport } from "@computer-harness/protocol";
 
 const DEFAULT_LIMITS = {
   maxObservations: 32,
@@ -27,6 +27,7 @@ export type ProgressMonitorReasonCode =
   | "repeated_proposal"
   | "repeated_action"
   | "action_cycle"
+  | "no_observed_change"
   | "repeated_refusal"
   | "repeated_failure"
   | "plan_memory_churn"
@@ -35,6 +36,9 @@ export type ProgressMonitorReasonCode =
 export type ProgressMonitorEvidenceKind =
   | "action_proposed"
   | "action_receipt"
+  | "visual_transition_changed"
+  | "visual_transition_unchanged"
+  | "visual_transition_unknown"
   | "receipt_unbound"
   | "planning_update"
   | "memory_update"
@@ -76,8 +80,16 @@ interface ActionRecord {
   actionKey: string;
   partitionKey?: string;
   signature?: string;
+  observationId?: string;
   eventId: EventId;
   status: ActionStatus;
+}
+
+interface TransitionRecord {
+  readonly partitionKey?: string;
+  readonly signature?: string;
+  readonly postObservationId: string;
+  readonly transition: ObservationTransition;
 }
 
 /**
@@ -90,6 +102,9 @@ export interface ProgressMonitorState {
   readonly observations: ReadonlyMap<string, ObservationBinding>;
   readonly actionRecords: ReadonlyMap<string, ActionRecord>;
   readonly recentActions: readonly ActionRecord[];
+  /** The latest post-action transition; retained only for the next decision. */
+  readonly lastTransition: TransitionRecord | undefined;
+  readonly lastObservationId: string | undefined;
   readonly updateEventIds: readonly EventId[];
   readonly lastObservationPartition?: string;
   readonly limits: MonitorLimits;
@@ -106,6 +121,8 @@ export function createProgressMonitorState(runId?: RunId, options?: ProgressMoni
     observations: new Map(),
     actionRecords: new Map(),
     recentActions: [],
+    lastTransition: undefined,
+    lastObservationId: undefined,
     updateEventIds: [],
     limits: normalizeLimits(options),
   };
@@ -127,6 +144,8 @@ export function reduceProgressMonitor(state: ProgressMonitorState, event: Runtim
     case "action.execution.completed":
     case "action.execution.failed":
       return onActionReceipt(current, event);
+    case "monitor.transition":
+      return onTransition(current, event);
     case "planning.task.updated":
       return onProgressUpdate(current, event.eventId, "planning_update");
     case "memory.updated":
@@ -159,6 +178,8 @@ function onObservation(
     state: {
       ...state,
       observations,
+      ...(partitionChanged ? { lastTransition: undefined } : {}),
+      lastObservationId: String(event.observation.id),
       lastObservationPartition: partitionKey,
       updateEventIds: partitionChanged ? [] : state.updateEventIds,
     },
@@ -173,10 +194,12 @@ function onActionProposed(
   const partitionKey = actionPartition(state, event.action);
   const actionKey = opaqueHash(`action:${String(event.action.actionId)}`);
   const signature = partitionKey === undefined ? undefined : actionSignature(event.action, partitionKey);
+  const observationId = actionObservationId(state, event.action);
   const record: ActionRecord = {
     actionKey,
     ...(partitionKey === undefined ? {} : { partitionKey }),
     ...(signature === undefined ? {} : { signature }),
+    ...(observationId === undefined ? {} : { observationId }),
     eventId: event.eventId,
     status: "proposed",
   };
@@ -266,6 +289,59 @@ function onActionReceipt(
   };
 }
 
+function onTransition(
+  state: ProgressMonitorState,
+  event: Extract<RuntimeEvent, { type: "monitor.transition" }>,
+): ProgressMonitorUpdate {
+  const actionKey = opaqueHash(`action:${String(event.actionId)}`);
+  const action = state.actionRecords.get(actionKey);
+  const evidenceKind: ProgressMonitorEvidenceKind = event.transition === "changed"
+    ? "visual_transition_changed"
+    : event.transition === "unchanged"
+      ? "visual_transition_unchanged"
+      : "visual_transition_unknown";
+  const evidenceEventIds = [event.sourceActionEventId, event.sourceObservationEventId, event.eventId];
+  const evidence: ProgressMonitorEvidence[] = [{ kind: evidenceKind, eventIds: evidenceEventIds }];
+  if (action === undefined) {
+    evidence.push({ kind: "receipt_unbound", eventIds: [event.eventId] });
+    return {
+      state: { ...state, lastTransition: undefined },
+      output: makeOutput(state.limits, false, [], evidence, evidenceEventIds),
+    };
+  }
+
+  if (action.observationId !== String(event.preObservationId ?? "")) {
+    evidence.push({ kind: "action_binding_unavailable", eventIds: [event.eventId] });
+    return {
+      state: { ...state, lastTransition: undefined },
+      output: makeOutput(
+        state.limits,
+        false,
+        [],
+        [{ kind: "visual_transition_unknown", eventIds: evidenceEventIds }, ...evidence.slice(1)],
+        evidenceEventIds,
+      ),
+    };
+  }
+
+  const transition: TransitionRecord = {
+    ...(action.partitionKey === undefined ? {} : { partitionKey: action.partitionKey }),
+    ...(action.signature === undefined ? {} : { signature: action.signature }),
+    postObservationId: String(event.postObservationId),
+    transition: event.transition,
+  };
+  const reasons: ProgressMonitorReason[] = event.transition === "unchanged"
+    ? [{
+        code: "no_observed_change",
+        eventIds: [event.eventId],
+      }]
+    : [];
+  return {
+    state: { ...state, lastTransition: transition },
+    output: makeOutput(state.limits, reasons.length > 0, reasons, evidence, evidenceEventIds),
+  };
+}
+
 function onProgressUpdate(
   state: ProgressMonitorState,
   eventId: EventId,
@@ -311,6 +387,10 @@ function actionPartition(state: ProgressMonitorState, action: ActionIntent): str
   if (action.kind === "wait") return state.lastObservationPartition;
   const observationId = action.basedOn;
   return state.observations.get(opaqueHash(`observation:${String(observationId)}`))?.partitionKey;
+}
+
+function actionObservationId(state: ProgressMonitorState, action: ActionIntent): string | undefined {
+  return action.kind === "wait" ? state.lastObservationId : String(action.basedOn);
 }
 
 function actionSignature(action: ActionIntent, partitionKey: string): string {
@@ -399,6 +479,23 @@ function makeOutput(
     evidence: evidence.map((item) => ({ ...item, eventIds: limitEventIds(item.eventIds, limits.maxOutputEventIds) })),
     eventIds: limitEventIds(eventIds, limits.maxOutputEventIds),
   };
+}
+
+/**
+ * Guidance-mode-only deterministic guard. While the latest bound transition
+ * remains an unchanged observation, it rejects every exact repeat on that
+ * same post-action frame until the model chooses a different action or a new
+ * transition replaces the evidence. It never inspects or returns the action
+ * payload, and unknown/changed evidence never blocks.
+ */
+export function shouldRejectRepeatedNoChange(state: ProgressMonitorState, action: ActionIntent): boolean {
+  if (action.kind === "wait" || state.lastTransition?.transition !== "unchanged") return false;
+  const partitionKey = actionPartition(state, action);
+  if (partitionKey === undefined) return false;
+  const signature = actionSignature(action, partitionKey);
+  return state.lastTransition.signature === signature
+    && state.lastTransition.partitionKey === partitionKey
+    && state.lastTransition.postObservationId === String(action.basedOn);
 }
 
 function limitEventIds(eventIds: readonly EventId[], limit: number): readonly EventId[] {

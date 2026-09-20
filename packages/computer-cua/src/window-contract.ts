@@ -26,6 +26,16 @@ export interface CuaWindowBinding {
   readonly bounds: CuaWindowGeometry;
 }
 
+/**
+ * Host-only window discovery result.  The optional label is for a local
+ * picker/status line; it is never inserted into a model Context by this
+ * package.  Actions must still use the opaque PID/window_id pair.
+ */
+export interface CuaWindowInfo extends CuaWindowBinding {
+  readonly title?: string;
+  readonly appName?: string;
+}
+
 export interface CuaWindowCapture {
   readonly binding: CuaWindowBinding;
   readonly viewport: Viewport;
@@ -54,17 +64,32 @@ export async function discoverWindow(
   target: CuaWindowTarget,
   signal: AbortSignal,
 ): Promise<CuaWindowBinding> {
+  const windows = await listWindowTargets(driver, session, signal, target.pid);
+  const match = windows.find((window) => window.target.pid === target.pid && window.target.windowId === target.windowId);
+  if (match === undefined) throw new WindowContractError("WINDOW_TARGET_NOT_FOUND", "configured CUA window target was not found");
+  return { target, bounds: match.bounds };
+}
+
+/**
+ * Enumerate visible top-level windows for a host-owned picker.  This is a
+ * read-only operation: it never focuses, captures, or dispatches input to a
+ * window.  A caller must select a returned identity explicitly; the adapter
+ * never auto-selects a sibling window, tab, popup, or recreated PID/windowId.
+ */
+export async function listWindowTargets(
+  driver: CuaDriverLike,
+  session: string,
+  signal: AbortSignal,
+  pid?: number,
+): Promise<readonly CuaWindowInfo[]> {
   const result = await driver.callTool("list_windows", JSON.stringify({
     on_screen_only: true,
-    pid: target.pid,
+    ...(pid === undefined ? {} : { pid }),
     session,
   }), { signal });
   if (result.isError) throw new WindowContractError("WINDOW_TARGET_REFUSED", "configured CUA window target was refused");
   if (result.degraded) throw new WindowContractError("WINDOW_TARGET_UNKNOWN", "configured CUA window target is degraded");
-  const windows = parseWindows(result);
-  const match = windows.find((window) => window.target.pid === target.pid && window.target.windowId === target.windowId);
-  if (match === undefined) throw new WindowContractError("WINDOW_TARGET_NOT_FOUND", "configured CUA window target was not found");
-  return { target, bounds: match.bounds };
+  return parseWindows(result);
 }
 
 export async function captureWindow(
@@ -121,7 +146,7 @@ export function windowActionTarget(binding: CuaWindowBinding): { kind: "window";
   return { kind: "window", pid: binding.target.pid, window_id: binding.target.windowId };
 }
 
-function parseWindows(result: ToolResult): CuaWindowBinding[] {
+function parseWindows(result: ToolResult): CuaWindowInfo[] {
   const value = parseStructured(result.structuredJson);
   const windows = value?.windows;
   if (!Array.isArray(windows)) throw new WindowContractError("WINDOW_TARGET_SCHEMA", "CUA list_windows returned no structured windows");
@@ -131,8 +156,21 @@ function parseWindows(result: ToolResult): CuaWindowBinding[] {
     const windowId = positiveSafeInteger(item.window_id);
     const bounds = parseGeometry(item.bounds);
     if (pid === undefined || windowId === undefined || bounds === undefined) return [];
-    return [{ target: { pid, windowId }, bounds }];
+    const title = boundedLabel(item.title);
+    const appName = boundedLabel(item.app_name);
+    return [{
+      target: { pid, windowId },
+      bounds,
+      ...(title === undefined ? {} : { title }),
+      ...(appName === undefined ? {} : { appName }),
+    }];
   });
+}
+
+function boundedLabel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= 240 ? trimmed : undefined;
 }
 
 function parseGeometry(value: unknown): CuaWindowGeometry | undefined {

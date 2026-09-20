@@ -31,6 +31,7 @@ const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 const CLEANUP_POLL_INTERVAL_MS = 50;
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
+export type CuaWindowDeliveryMode = "background" | "foreground";
 
 export interface CuaDriverComputerOptions {
   /** Explicit daemon endpoint. The adapter never falls back to embedded CUA. */
@@ -41,6 +42,13 @@ export interface CuaDriverComputerOptions {
   sessionLabel?: string;
   /** Explicit host-owned window opt-in; omitted means the existing desktop path. */
   windowTarget?: CuaWindowTarget;
+  /**
+   * Delivery is explicit per window Run. Background never escalates; foreground
+   * asks CUA to deliver to this target. It is not a desktop fallback or a
+   * sandbox, and foreground restoration/occlusion are driver-dependent. The
+   * default preserves the existing background route.
+   */
+  windowDeliveryMode?: CuaWindowDeliveryMode;
   /** Total wall-clock budget for endSession/shutdown cleanup; no GUI action is retried. */
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
@@ -63,7 +71,20 @@ interface PendingDriverCleanup {
 
 interface PrivateObservation {
   sessionId: string;
+  /**
+   * The image coordinate space that the model used for this observation.
+   * Window actions must be projected from this viewport, not from the
+   * current session viewport (which may belong to a later observation).
+   */
+  viewport: Viewport;
   geometry?: CuaWindowGeometry;
+}
+
+class WindowCoordinateMappingError extends Error {
+  public constructor(public readonly code: string, message: string) {
+    super(message);
+    this.name = "WindowCoordinateMappingError";
+  }
 }
 
 interface DriverErrorDetails {
@@ -91,6 +112,11 @@ export class CuaDriverComputer implements Computer {
     };
     if (!Number.isInteger(this.options.cleanupWaitMs) || this.options.cleanupWaitMs <= 0) {
       throw new Error("cleanupWaitMs must be a positive integer");
+    }
+    if (this.options.windowDeliveryMode !== undefined
+      && this.options.windowDeliveryMode !== "background"
+      && this.options.windowDeliveryMode !== "foreground") {
+      throw new Error("windowDeliveryMode must be background or foreground");
     }
     if (this.options.windowTarget !== undefined) validateWindowTarget(this.options.windowTarget);
   }
@@ -132,7 +158,16 @@ export class CuaDriverComputer implements Computer {
         id: label as ComputerSessionDescriptor["id"],
         backend: "cua-driver-daemon",
         viewport,
-        capabilities: { screenshot: true, pointer: true, keyboard: windowBinding === undefined, accessibility: false },
+        // The explicit window route uses the driver's targeted delivery for
+        // the verified input primitives below. It never falls back to the
+        // primary desktop, so advertising keyboard here does not mean that
+        // the OS foreground focus is owned by this session.
+        capabilities: {
+          screenshot: true,
+          pointer: true,
+          keyboard: windowBinding === undefined || this.options.windowDeliveryMode === "foreground",
+          accessibility: false,
+        },
         openedAt: new Date().toISOString(),
       };
       this.session = {
@@ -167,7 +202,11 @@ export class CuaDriverComputer implements Computer {
         const capture = await captureWindow(current.driver, current.label, liveBinding, signal);
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
-        this.observations.set(String(observationId), { sessionId: String(session.id), geometry: liveBinding.bounds });
+        this.observations.set(String(observationId), {
+          sessionId: String(session.id),
+          viewport: capture.viewport,
+          geometry: liveBinding.bounds,
+        });
         this.latestObservationId = observationId;
         return {
           capturedAt: new Date().toISOString(),
@@ -197,7 +236,10 @@ export class CuaDriverComputer implements Computer {
         throw new Error(`CUA screenshot ${dimensions.width}x${dimensions.height} does not match opened viewport ${current.descriptor.viewport.width}x${current.descriptor.viewport.height}`);
       }
       const data = new Uint8Array(await readFile(screenshotPath));
-      this.observations.set(String(observationId), { sessionId: String(session.id) });
+      this.observations.set(String(observationId), {
+        sessionId: String(session.id),
+        viewport: current.descriptor.viewport,
+      });
       this.latestObservationId = observationId;
       return {
         capturedAt: new Date().toISOString(),
@@ -221,9 +263,10 @@ export class CuaDriverComputer implements Computer {
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
+    let decisionObservation: PrivateObservation | undefined;
     if (action.kind !== "wait") {
-      const observation = this.observations.get(String(action.basedOn));
-      if (observation === undefined || observation.sessionId !== String(session.id)) {
+      decisionObservation = this.observations.get(String(action.basedOn));
+      if (decisionObservation === undefined || decisionObservation.sessionId !== String(session.id)) {
         return refused(action.actionId, "OBSERVATION_NOT_FOUND", `action is based on unknown observation ${String(action.basedOn)}`);
       }
       const executionObservationId = options?.executionObservationId ?? action.basedOn;
@@ -239,19 +282,27 @@ export class CuaDriverComputer implements Computer {
       if (current.windowIdentityInvalidated) {
         return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session");
       }
-      if (action.kind === "type" || action.kind === "keypress") {
-        return refused(action.actionId, "WINDOW_INPUT_UNSUPPORTED", "window keyboard input is disabled until focus delivery is independently verified");
-      }
-      if (action.kind !== "click") {
+      if (action.kind === "double_click" || action.kind === "right_click") {
         return refused(action.actionId, "WINDOW_ACTION_UNSUPPORTED", "this window-target primitive is not enabled by the verified coordinate contract");
       }
-      const observation = this.observations.get(String(action.basedOn));
-      if (observation?.geometry === undefined) {
+      if (action.kind === "scroll" && this.options.windowDeliveryMode !== "foreground") {
+        return refused(action.actionId, "WINDOW_ACTION_UNSUPPORTED", "window scroll requires explicit foreground delivery");
+      }
+      if (action.kind === "drag" && this.options.windowDeliveryMode !== "foreground") {
+        return refused(action.actionId, "WINDOW_ACTION_UNSUPPORTED", "window drag requires explicit foreground delivery");
+      }
+      if (action.kind === "keypress" && action.keys.length > 1 && this.options.windowDeliveryMode !== "foreground") {
+        return refused(action.actionId, "WINDOW_INPUT_UNSUPPORTED", "window hotkey requires explicit foreground delivery");
+      }
+      if ((action.kind === "type" || action.kind === "keypress") && this.options.windowDeliveryMode !== "foreground") {
+        return refused(action.actionId, "WINDOW_INPUT_UNSUPPORTED", "window keyboard input requires explicit foreground delivery");
+      }
+      if (decisionObservation?.geometry === undefined) {
         return refused(action.actionId, "WINDOW_GEOMETRY_UNKNOWN", "window action is not bound to verified window geometry");
       }
       try {
         const liveBinding = await discoverWindow(current.driver, current.label, current.windowBinding.target, signal);
-        if (!sameWindowGeometry(liveBinding.bounds, observation.geometry)) {
+        if (!sameWindowGeometry(liveBinding.bounds, decisionObservation.geometry)) {
           return refused(action.actionId, "WINDOW_GEOMETRY_CHANGED", "window geometry changed since the action observation");
         }
         current.windowBinding = liveBinding;
@@ -265,7 +316,21 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
       }
     }
-    const request = actionRequest(action, current.label, current.windowBinding);
+    let request: { name: string; arguments: Record<string, unknown> };
+    try {
+      request = actionRequest(
+        action,
+        current.label,
+        current.windowBinding,
+        this.options.windowDeliveryMode,
+        decisionObservation?.viewport,
+      );
+    } catch (error) {
+      if (error instanceof WindowCoordinateMappingError) {
+        return refused(action.actionId, error.code, error.message);
+      }
+      throw error;
+    }
     try {
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
@@ -362,16 +427,25 @@ export class CuaDriverComputer implements Computer {
   }
 }
 
-function actionRequest(action: Exclude<ActionIntent, { kind: "wait" }>, session: string, windowBinding?: CuaWindowBinding): { name: string; arguments: Record<string, unknown> } {
+function actionRequest(
+  action: Exclude<ActionIntent, { kind: "wait" }>,
+  session: string,
+  windowBinding?: CuaWindowBinding,
+  configuredDeliveryMode?: CuaWindowDeliveryMode,
+  decisionViewport?: Viewport,
+): { name: string; arguments: Record<string, unknown> } {
   const target = windowBinding === undefined ? PRIMARY_DESKTOP : windowActionTarget(windowBinding);
-  const deliveryMode = windowBinding === undefined ? "foreground" : "background";
+  const deliveryMode = windowBinding === undefined ? "foreground" : configuredDeliveryMode ?? "background";
+  const point = (value: { x: number; y: number }) => windowBinding === undefined
+    ? value
+    : mapWindowPoint(value, decisionViewport, windowBinding.bounds);
   switch (action.kind) {
     case "click":
-      return { name: "click", arguments: { session, target, x: action.point.x, y: action.point.y, delivery_mode: deliveryMode } };
+      return { name: "click", arguments: { session, target, ...point(action.point), delivery_mode: deliveryMode } };
     case "double_click":
-      return { name: "click", arguments: { session, target, x: action.point.x, y: action.point.y, count: 2, delivery_mode: deliveryMode } };
+      return { name: "click", arguments: { session, target, ...point(action.point), count: 2, delivery_mode: deliveryMode } };
     case "right_click":
-      return { name: "click", arguments: { session, target, x: action.point.x, y: action.point.y, button: "right", delivery_mode: deliveryMode } };
+      return { name: "click", arguments: { session, target, ...point(action.point), button: "right", delivery_mode: deliveryMode } };
     case "type":
       return { name: "type_text", arguments: { session, target, text: action.text, delivery_mode: deliveryMode } };
     case "keypress":
@@ -379,12 +453,55 @@ function actionRequest(action: Exclude<ActionIntent, { kind: "wait" }>, session:
         ? { name: "press_key", arguments: { session, target, key: action.keys[0], delivery_mode: deliveryMode } }
         : { name: "hotkey", arguments: { session, target, keys: action.keys, delivery_mode: deliveryMode } };
     case "scroll":
-      return { name: "scroll", arguments: { session, target, x: action.point.x, y: action.point.y, direction: action.direction, by: "line", amount: action.ticks, delivery_mode: deliveryMode } };
-    case "drag":
-      return { name: "drag", arguments: { session, target, from_x: action.from.x, from_y: action.from.y, to_x: action.to.x, to_y: action.to.y, delivery_mode: deliveryMode } };
+      return { name: "scroll", arguments: { session, target, ...point(action.point), direction: action.direction, by: "line", amount: action.ticks, delivery_mode: deliveryMode } };
+    case "drag": {
+      const from = point(action.from);
+      const to = point(action.to);
+      return { name: "drag", arguments: { session, target, from_x: from.x, from_y: from.y, to_x: to.x, to_y: to.y, delivery_mode: deliveryMode } };
+    }
     default:
       return assertNever(action);
   }
+}
+
+/**
+ * Convert model/image-local coordinates to the CUA window-local coordinates.
+ * The decision frame is the source of truth: an approved action may execute
+ * against a later observation, but its coordinates were still produced from
+ * action.basedOn. Geometry is checked by the caller before this projection.
+ */
+function mapWindowPoint(
+  point: { x: number; y: number },
+  sourceViewport: Viewport | undefined,
+  targetBounds: CuaWindowGeometry,
+): { x: number; y: number } {
+  if (sourceViewport === undefined) {
+    throw new WindowCoordinateMappingError("WINDOW_VIEWPORT_UNKNOWN", "window action has no source observation viewport");
+  }
+  if (sourceViewport.coordinateSpace !== "physical") {
+    throw new WindowCoordinateMappingError("WINDOW_COORDINATE_SPACE_UNSUPPORTED", "window action requires a physical observation viewport");
+  }
+  if (!validDimension(sourceViewport.width) || !validDimension(sourceViewport.height)) {
+    throw new WindowCoordinateMappingError("WINDOW_VIEWPORT_INVALID", "window action has an invalid source observation viewport");
+  }
+  if (!validDimension(targetBounds.width) || !validDimension(targetBounds.height)) {
+    throw new WindowCoordinateMappingError("WINDOW_GEOMETRY_INVALID", "window action has invalid target geometry");
+  }
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0 || point.x >= sourceViewport.width || point.y >= sourceViewport.height) {
+    throw new WindowCoordinateMappingError("WINDOW_COORDINATE_INVALID", `window action point (${point.x}, ${point.y}) is outside source viewport ${sourceViewport.width}x${sourceViewport.height}`);
+  }
+  return {
+    x: clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),
+    y: clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height), targetBounds.height),
+  };
+}
+
+function validDimension(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function clampCoordinate(value: number, size: number): number {
+  return Math.min(size - 1, Math.max(0, value));
 }
 
 async function callTool(driver: CuaDriverLike, name: string, input: Record<string, unknown>, signal: AbortSignal) {

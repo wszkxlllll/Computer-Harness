@@ -81,10 +81,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       outputDir: config.outputDir,
       credentials,
     });
-    if (config.riskModel !== "off" && config.riskModel !== "same") {
+    if (config.riskGuard === "layered" && config.riskModel !== "off" && config.riskModel !== "same") {
       await mkdir(resolve(config.outputDir, "risk-review"), { recursive: true });
     }
-    const riskProvider = config.riskModel === "off"
+    const riskProvider = config.riskGuard !== "layered" || config.riskModel === "off"
       ? undefined
       : config.riskModel === "same"
         ? provider
@@ -118,9 +118,19 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     );
     const cleanupDiagnostics: import("@computer-harness/runtime").CleanupDiagnostic[] = [];
     const windowTargetToolNames = config.computer.kind === "cua" && config.computer.windowTarget !== undefined
-      ? tools.list()
-        .filter((definition) => definition.category !== "computer" || definition.name === "click" || definition.name === "wait")
-        .map((definition) => definition.name)
+      ? (() => {
+        const allowedComputerTools = new Set(["click", "wait"]);
+        if (config.computer.windowDeliveryMode === "foreground") {
+          allowedComputerTools.add("type");
+          allowedComputerTools.add("keypress");
+          allowedComputerTools.add("hotkey");
+          allowedComputerTools.add("drag");
+          allowedComputerTools.add("scroll");
+        }
+        return tools.list()
+          .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
+          .map((definition) => definition.name);
+      })()
       : undefined;
     controller = new RunController({
       runId,

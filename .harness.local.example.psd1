@@ -2,6 +2,8 @@
   # Keep machine paths here, never API keys. Copy this file to
   # .harness.local.psd1; the local file is ignored by Git.
   NodePath = 'C:\path\to\node.exe'
+  # Optional: local pnpm entry (.mjs/.cjs/.js/.cmd). Required when pnpm is not on PATH.
+  PnpmCliPath = ''
   EnvFile = '.env'
   CuaBinary = '.tools\cua-driver\0.22.2\bin\cua-driver.exe'
   CuaSocket = '\\.\pipe\computer-harness-local'

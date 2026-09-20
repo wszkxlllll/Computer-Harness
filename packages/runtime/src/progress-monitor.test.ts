@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActionId, ActionIntent, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
-import { createProgressMonitorState, reduceProgressMonitor } from "./progress-monitor.js";
+import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange } from "./progress-monitor.js";
 
 let sequence = 0;
 
@@ -72,6 +72,24 @@ function memoryUpdate(runId: RunId): RuntimeEvent {
     type: "memory.updated",
     callId: "memory-call" as ToolCallId,
     mutation: { operation: "mark_fact_needs_check", factId: "fact-1" },
+  });
+}
+
+function transition(
+  runId: RunId,
+  actionId: string,
+  postObservationId: string,
+  transitionKind: "changed" | "unchanged" | "unknown",
+  preObservationId = "observation-1",
+): RuntimeEvent {
+  return eventForRun(runId, {
+    type: "monitor.transition",
+    actionId: actionId as ActionId,
+    preObservationId: preObservationId as ObservationId,
+    postObservationId: postObservationId as ObservationId,
+    sourceActionEventId: "action-terminal" as EventId,
+    sourceObservationEventId: "observation-event" as EventId,
+    transition: transitionKind,
   });
 }
 
@@ -186,6 +204,52 @@ describe("progress monitor foundation", () => {
     expect(result.output.candidate).toBe(false);
     expect(result.output.evidence.map((item) => item.kind)).toContain("visual_feature_unavailable");
     expect(result.output.reasons).toHaveLength(0);
+  });
+
+  it("emits post-action transition evidence and exposes the deterministic repeat guard", () => {
+    let state = createProgressMonitorState(runId);
+    state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
+    state = reduceProgressMonitor(state, click(runId, "same-1", "observation-1", 10, 20)).state;
+    state = reduceProgressMonitor(state, receipt(runId, "same-1", "completed")).state;
+    const first = reduceProgressMonitor(state, transition(runId, "same-1", "observation-2", "unchanged"));
+    expect(first.output.candidate).toBe(true);
+    expect(first.output.reasons.map((reason) => reason.code)).toEqual(["no_observed_change"]);
+    expect(first.output.evidence.map((item) => item.kind)).toContain("visual_transition_unchanged");
+
+    const current = reduceProgressMonitor(first.state, observation(runId, "observation-2")).state;
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(true);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 11, y: 20 } })).toBe(false);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-3" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
+  });
+
+  it("does not treat changed or unknown transition evidence as a no-change candidate", () => {
+    let state = createProgressMonitorState(runId);
+    state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
+    state = reduceProgressMonitor(state, click(runId, "changed-1", "observation-1")).state;
+    state = reduceProgressMonitor(state, receipt(runId, "changed-1", "completed")).state;
+    const changed = reduceProgressMonitor(state, transition(runId, "changed-1", "observation-2", "changed"));
+    expect(changed.output.candidate).toBe(false);
+    expect(changed.output.evidence.map((item) => item.kind)).toContain("visual_transition_changed");
+
+    state = changed.state;
+    state = reduceProgressMonitor(state, observation(runId, "observation-2")).state;
+    state = reduceProgressMonitor(state, click(runId, "unknown-1", "observation-2")).state;
+    state = reduceProgressMonitor(state, receipt(runId, "unknown-1", "failed")).state;
+    const unknown = reduceProgressMonitor(state, transition(runId, "unknown-1", "observation-3", "unknown", "observation-2"));
+    expect(unknown.output.candidate).toBe(false);
+    expect(unknown.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
+  });
+
+  it("does not trust a transition whose pre-observation binding does not match the action", () => {
+    let state = createProgressMonitorState(runId);
+    state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
+    state = reduceProgressMonitor(state, click(runId, "forged-1", "observation-1")).state;
+    state = reduceProgressMonitor(state, receipt(runId, "forged-1", "completed")).state;
+    const forged = reduceProgressMonitor(state, transition(runId, "forged-1", "observation-2", "unchanged", "wrong-observation"));
+    expect(forged.output.candidate).toBe(false);
+    expect(forged.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
+    expect(forged.output.evidence.map((item) => item.kind)).toContain("action_binding_unavailable");
+    expect(shouldRejectRepeatedNoChange(forged.state, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
   });
 
   it("bounds observation/action history and resets it when the run changes", () => {

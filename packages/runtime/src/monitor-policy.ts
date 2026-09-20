@@ -113,6 +113,12 @@ export function reduceMonitorPolicy(state: MonitorPolicyState, input: MonitorPol
     return { state: clearCandidate(sequenceState), proposal: { kind: "none", reason: "terminal" } };
   }
   if (!input.monitor.candidate) {
+    // A post-action transition is the boundary for the preceding action. Any
+    // changed/unknown result invalidates an older candidate immediately; it
+    // must not age into guidance merely because the work clock advances.
+    if (hasEvidence(input.monitor, "visual_transition_changed") || hasEvidence(input.monitor, "visual_transition_unknown")) {
+      return { state: clearCandidate(sequenceState), proposal: { kind: "none", reason: "no_candidate" } };
+    }
     const candidateAge = sequenceState.candidateClock === undefined
       ? 0
       : workDistance(sequenceState.candidateClock, currentClock);
@@ -144,7 +150,8 @@ export function reduceMonitorPolicy(state: MonitorPolicyState, input: MonitorPol
     return { state: clearCandidate(candidateState), proposal: { kind: "none", reason: "no_candidate" } };
   }
   if (candidateState.candidateClock?.modelDecisionCount === currentClock.modelDecisionCount
-    && candidateState.candidateClock.guiActionCount === currentClock.guiActionCount) {
+    && candidateState.candidateClock.guiActionCount === currentClock.guiActionCount
+    && !hasEvidence(input.monitor, "visual_transition_unchanged")) {
     return { state: candidateState, proposal: options.mode === "shadow" ? { kind: "none", reason: "shadow" } : { kind: "none", reason: "candidate_observed" } };
   }
   if (options.mode === "shadow") return { state: candidateState, proposal: { kind: "none", reason: "shadow" } };
@@ -221,8 +228,14 @@ function candidateFingerprint(output: ProgressMonitorOutput): string {
 function guidanceText(output: ProgressMonitorOutput, maxChars: number): string {
   const reasons = [...new Set(output.reasons.map((reason) => reason.code))].sort();
   const evidence = [...new Set(output.evidence.map((item) => item.kind))].sort();
-  const text = `Monitor candidate; review current state before continuing. Reasons: ${reasons.join(", ") || "unspecified"}. Evidence: ${evidence.join(", ") || "unspecified"}.`;
+  const text = reasons.includes("no_observed_change")
+    ? "The previous GUI action produced no observable change. Re-observe and re-localize the target before continuing; do not blindly repeat the same action."
+    : `Monitor candidate; review current state before continuing. Reasons: ${reasons.join(", ") || "unspecified"}. Evidence: ${evidence.join(", ") || "unspecified"}.`;
   return text.slice(0, maxChars);
+}
+
+function hasEvidence(output: ProgressMonitorOutput, kind: string): boolean {
+  return output.evidence.some((evidence) => evidence.kind === kind);
 }
 
 function normalizeClock(clock: MonitorWorkClock, previous?: MonitorWorkClock): MonitorWorkClock {

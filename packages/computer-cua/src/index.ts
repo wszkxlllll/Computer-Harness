@@ -2,6 +2,7 @@ export {
   CuaDriverComputer,
   type CuaDriverComputerOptions,
   type CuaDriverFactory,
+  type CuaWindowDeliveryMode,
 } from "./cua-driver-computer.js";
 export {
   inspectCuaCapabilities,
@@ -11,4 +12,13 @@ export {
   type CuaDeclaredToolCapabilities,
   type CuaDoctorCheck,
 } from "./capability-doctor.js";
-export type { CuaWindowTarget } from "./window-contract.js";
+export {
+  listWindowTargets,
+  type CuaWindowInfo,
+  type CuaWindowTarget,
+} from "./window-contract.js";
+export {
+  CuaWindowDiscovery,
+  CuaWindowDiscoveryCleanupError,
+  type CuaWindowDiscoveryOptions,
+} from "./window-discovery.js";
