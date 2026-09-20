@@ -2,14 +2,18 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { ActionId, EventId, ObservationId, RunId, RuntimeEvent, RunOutcome, ToolCallId } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
-import type { RunHandle, ResolvedRunConfig } from "@computer-harness/app-runtime";
+import type { RunHandle, ResolvedRunConfig, WindowTargetDiscovery } from "@computer-harness/app-runtime";
 import { ApplicationSession, createRunEventFeed, InProcessEnvironmentOwner, type ApplicationSessionConfig } from "@computer-harness/app-runtime";
 import { initialRunSnapshot, type RunSnapshot } from "@computer-harness/trajectory";
 import { buildTuiFrame, runApplicationTui } from "./tui.js";
 import { limitTuiInput, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
 import stringWidth from "string-width";
 
-function makePendingCorrectionFixture(pauseBarrier: () => Promise<void>) {
+function makePendingCorrectionFixture(
+  pauseBarrier: () => Promise<void>,
+  windowDiscovery?: WindowTargetDiscovery,
+  computer: ResolvedRunConfig["computer"] = { kind: "osworld", bridgeUrl: "http://tui-fixture" },
+) {
   const input = new PassThrough() as PassThrough & { isTTY?: boolean; setRawMode?: (mode: boolean) => void };
   const output = new PassThrough() as PassThrough & { isTTY?: boolean; columns?: number; rows?: number };
   input.isTTY = true;
@@ -38,7 +42,7 @@ function makePendingCorrectionFixture(pauseBarrier: () => Promise<void>) {
   const config = {
     goal: "placeholder",
     model: "glm-5.3-flash",
-    computer: { kind: "osworld", bridgeUrl: "http://tui-fixture" },
+    computer,
     outputDir: "runs/tui-pending",
     maxSteps: 2,
     maxModelRequests: 2,
@@ -71,6 +75,7 @@ function makePendingCorrectionFixture(pauseBarrier: () => Promise<void>) {
     config: sessionConfig,
     createRun,
     owner: new InProcessEnvironmentOwner(),
+    ...(windowDiscovery === undefined ? {} : { windowDiscovery }),
   });
   return { input, output, outputText, rawModes, controller, session, handle, runId, createRun };
 }
@@ -88,7 +93,6 @@ describe("TUI renderer", () => {
       riskGuard: "layered",
     }, { terminal: { input: fixture.input, output: fixture.output } });
     const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
-
     fixture.input.emit("keypress", "F", { name: "f" });
     await tick();
     expect(fixture.outputText.join("")).toContain("FEATURES");
@@ -96,9 +100,14 @@ describe("TUI renderer", () => {
     fixture.input.emit("keypress", "", { name: "space" });
     fixture.input.emit("keypress", "", { name: "down" });
     fixture.input.emit("keypress", "", { name: "right" });
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "space" });
     fixture.input.emit("keypress", "", { name: "return" });
     await tick();
     expect(fixture.outputText.join("")).toContain("memory=facts/lexical");
+    expect(fixture.outputText.join("")).toContain("guard=off");
 
     fixture.input.emit("keypress", "打开任务管理器", {});
     fixture.input.emit("keypress", "", { name: "return" });
@@ -107,6 +116,184 @@ describe("TUI renderer", () => {
     expect(startedConfig?.planning).toBe(false);
     expect(startedConfig?.memory).toBe("facts");
     expect(startedConfig?.memoryRetrieval).toBe("lexical");
+    expect(startedConfig?.riskGuard).toBe("off");
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("keeps uppercase W in the goal editor and opens the picker after editing ends", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, {
+      listWindows: async () => [{ pid: 1234, windowId: 5678, appName: "Browser", title: "12306" }],
+    }, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-w-editor/screenshots" });
+    fixture.output.columns = 100;
+    fixture.output.rows = 30;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-w-editor",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+
+    fixture.input.emit("keypress", "Windows 任务", {});
+    await tick();
+    expect(fixture.outputText.join("")).toContain("Windows 任务");
+    expect(fixture.outputText.join("")).not.toContain("WINDOW TARGET");
+
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await tick();
+    await tick();
+    expect(fixture.outputText.join("")).toContain("WINDOW TARGET");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("selects a host window by label and keeps it for subsequent Runs", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, {
+      listWindows: async () => [{ pid: 1234, windowId: 5678, appName: "Browser", title: "12306" }],
+    }, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-windows/screenshots" });
+    fixture.output.columns = 100;
+    fixture.output.rows = 30;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-windows",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    const waitFor = async (predicate: () => boolean): Promise<void> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (predicate()) return;
+        await tick();
+      }
+      throw new Error("TUI fixture condition was not reached");
+    };
+
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await tick();
+    await tick();
+    expect(fixture.outputText.join("")).toContain("WINDOW TARGET");
+    expect(fixture.outputText.join("")).toContain("Browser — 12306");
+    expect(fixture.outputText.join("")).toContain("fully visible, unobscured");
+    expect(fixture.outputText.join("")).toContain("Window layout is user-managed; Harness does not move/resize windows.");
+    expect(fixture.outputText.join("")).toContain("occlusion support is limited");
+    expect(fixture.outputText.join("")).toContain("focus restoration is not guaranteed");
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    expect(fixture.outputText.join("")).toContain("Target: window Browser — 12306 (pid=1234, window=5678) pid=1234 id=5678 (host-selected, delivery=foreground)");
+
+    fixture.input.emit("keypress", "打开目标窗口", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    await tick();
+    const startedConfig = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig | undefined;
+    expect(startedConfig?.computer).toMatchObject({ kind: "cua", windowTarget: { pid: 1234, windowId: 5678 }, windowDeliveryMode: "foreground" });
+
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitFor(() => fixture.session.status === "idle");
+    await tick();
+
+    fixture.input.emit("keypress", "第二个窗口任务", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitFor(() => fixture.createRun.mock.calls.length >= 2);
+    const secondConfig = ((fixture.createRun.mock.calls as unknown[][])[1]?.[0]) as ResolvedRunConfig | undefined;
+    expect(secondConfig?.computer).toMatchObject({ kind: "cua", windowTarget: { pid: 1234, windowId: 5678 }, windowDeliveryMode: "foreground" });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitFor(() => fixture.session.status === "idle");
+    await tick();
+
+    // Choosing the desktop explicitly clears the sticky window override for
+    // the following Run; it must not silently fall back when a window dies.
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await tick();
+    await tick();
+    expect(fixture.outputText.join("")).toContain("Browser — 12306");
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    fixture.input.emit("keypress", "第三个桌面任务", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitFor(() => fixture.createRun.mock.calls.length >= 3);
+    const thirdConfig = ((fixture.createRun.mock.calls as unknown[][])[2]?.[0]) as ResolvedRunConfig | undefined;
+    expect(thirdConfig?.computer).toMatchObject({ kind: "cua" });
+    expect(thirdConfig?.computer).not.toHaveProperty("windowTarget");
+    expect(thirdConfig?.computer).not.toHaveProperty("windowDeliveryMode");
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitFor(() => fixture.session.status === "idle");
+    await tick();
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("ignores a late window-list result after cancel and reopen", async () => {
+    let firstResolve!: (targets: readonly { pid: number; windowId: number; appName: string; title: string }[]) => void;
+    const discovery = {
+      listWindows: vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => { firstResolve = resolve; }))
+        .mockResolvedValueOnce([{ pid: 2222, windowId: 3333, appName: "Second", title: "Fresh" }]),
+    };
+    const fixture = makePendingCorrectionFixture(async () => undefined, discovery);
+    fixture.output.columns = 100;
+    fixture.output.rows = 30;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-window-refresh",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await tick();
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await tick();
+    await tick();
+    expect(fixture.outputText.join("")).toContain("Second — Fresh");
+    firstResolve([{ pid: 1111, windowId: 1112, appName: "Stale", title: "Old" }]);
+    await tick();
+    await tick();
+    const rendered = fixture.outputText.join("");
+    expect(rendered).not.toContain("Stale — Old");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("shows picker cleanup diagnostics after cancellation without changing the target", async () => {
+    let rejectFirst!: (error: Error) => void;
+    const discovery = {
+      listWindows: vi.fn(() => new Promise<readonly { pid: number; windowId: number }[]>((_resolve, reject) => { rejectFirst = reject; })),
+    };
+    const fixture = makePendingCorrectionFixture(async () => undefined, discovery);
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-window-cleanup",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await tick();
+    fixture.input.emit("keypress", "", { name: "escape" });
+    const error = new Error("window picker cleanup is not confirmed");
+    error.name = "CuaWindowDiscoveryCleanupError";
+    rejectFirst(error);
+    await tick();
+    await tick();
+    expect(fixture.outputText.join("")).toContain("Window picker cleanup is unconfirmed");
+    expect(fixture.outputText.join("")).toContain("Target: primary desktop (default)");
     fixture.input.emit("keypress", "", { name: "q" });
     await tui;
   });
@@ -165,6 +352,20 @@ describe("TUI renderer", () => {
     expect(frame).toContain("Focus evidence: UNKNOWN");
   });
 
+  it("renders the host-selected CUA window target without implying model window discovery", () => {
+    const runId = "tui-window-target" as RunId;
+    const frame = buildTuiFrame({ ...initialRunSnapshot(runId), status: "running" as const }, [], "inspect selected window", {
+      provider: "glm",
+      computer: "cua",
+      cuaWindowTarget: { pid: 1234, windowId: 5678 },
+      output: "runs/test",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { editMode: false, input: "", notice: "" });
+    expect(frame).toContain("Target: window selected window pid=1234 id=5678 (host-selected, delivery=background)");
+    expect(frame).toContain("Focus evidence: UNKNOWN");
+  });
+
   it("renders a final reply and useful model request failure detail", () => {
     const runId = "tui-reply-run" as RunId;
     const snapshot = { ...initialRunSnapshot(runId), status: "finished" as const, outcome: "failed" as const, summary: "无法完成：模型请求失败" };
@@ -214,6 +415,61 @@ describe("TUI renderer", () => {
     expect(inputFrame).toContain("Esc cancel");
     expect(inputFrame).toContain("Input is limited to 500 characters");
     expect(inputFrame).not.toContain("Keys: I correction/input");
+  });
+
+  it("explains why an approval is pending without rendering tool arguments", () => {
+    const runId = "tui-approval-explanation" as RunId;
+    const callId = "approval-call" as ToolCallId;
+    const snapshot = {
+      ...initialRunSnapshot(runId),
+      status: "waiting_approval" as const,
+      pendingApproval: { requestId: "approval-1", callId, reason: "Risk semantics are unclear and no reviewer is configured." },
+    };
+    const events: RuntimeEvent[] = [
+      {
+        eventId: "approval-call-received" as EventId,
+        runId,
+        sequence: 1,
+        occurredAt: "2026-09-20T00:00:00.000Z",
+        type: "tool.call.received",
+        call: {
+          id: callId,
+          name: "click",
+          arguments: { text: "private-value" },
+          declaredEffect: { effects: ["external_commitment"], target: "查询按钮", summary: "提交查询结果，不创建订单" },
+        },
+      },
+      {
+        eventId: "approval-guard" as EventId,
+        runId,
+        sequence: 2,
+        occurredAt: "2026-09-20T00:00:00.001Z",
+        type: "action.guard.evaluated",
+        callIds: [callId],
+        actions: [],
+        decision: "require_approval",
+        categories: ["external_commitment"],
+        reasonCode: "semantic_review_unavailable",
+        reason: "Risk semantics are unclear and no reviewer is configured.",
+        path: "fallback",
+        policyVersion: "layered-effects-v1",
+        modelRequestCount: 0,
+      },
+    ];
+    const frame = buildTuiFrame(snapshot, events, "查询车票", { provider: "glm", computer: "cua", output: "runs/test", profile: "live-interactive", riskGuard: "layered" }, { editMode: false, input: "", notice: "", columns: 100, rows: 40 });
+    expect(frame).toContain("APPROVAL REQUIRED: Run is waiting");
+    expect(frame).toContain("Approval is pending: the Run is waiting and no GUI action is executing.");
+    expect(frame).toContain("Action: click");
+    expect(frame).toContain("Target: 查询按钮");
+    expect(frame).toContain("Intent: 提交查询结果，不创建订单");
+    expect(frame).toContain("Effects: external_commitment");
+    expect(frame).toContain("Guard detail: require_approval via fallback (semantic_review_unavailable)");
+    expect(frame).toContain("Why: Risk semantics are unclear and no reviewer is configured.");
+    expect(frame).toContain("Approval controls: Y approve   N reject   I correct   A abort");
+    expect(frame).not.toContain("private-value");
+    const compactFrame = buildTuiFrame(snapshot, events, "查询车票", { provider: "glm", computer: "cua", output: "runs/test", profile: "live-interactive", riskGuard: "layered" }, { editMode: false, input: "", notice: "", columns: 100, rows: 24 });
+    expect(compactFrame).toContain("Why: Risk semantics are unclear and no reviewer is configured.");
+    expect(compactFrame).toContain("Approval controls: Y approve   N reject   I correct   A abort");
   });
 
   it("wraps graphemes by terminal display width without splitting emoji or combining marks", () => {

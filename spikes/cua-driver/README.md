@@ -94,6 +94,44 @@ adapter only sends the public desktop action; it does not guess or silently stea
 window. The redacted `summary.json` records viewport, action receipts, and fixture text length;
 screenshots and raw driver data remain local under ignored `runs/`.
 
+## Side-by-side production window retest
+
+These are optional diagnostic probes, not prerequisites for normal TUI use.
+The Harness does not arrange user windows; only these owned-fixture experiments
+set window geometry. The 2026-09-20 user requested that further experiments stop.
+Existing failed/partial artifacts remain evidence, not passing acceptance results.
+
+| Script alias | File | Purpose |
+|---|---|---|
+| `probe:adapter:side-by-side` | `dev2-adapter-window-side-by-side-retest.ts` | Production adapter and scripted approval against owned native windows |
+| `probe:window:matrix` | `dev2-window-action-matrix-retest.ts` | Separate covered/uncovered and foreground/background input cases |
+| `probe:browser:window` | `browser-adapter-probe.ts` | Isolated browser profile and local fixture; requires explicit `--allow-input` |
+
+All three can create real windows and dispatch input. Run only with explicit
+permission, a private socket/output directory, and no concurrent desktop driver.
+See the [current evidence and limitations](../../docs/travel-pilot-preparation-2026-09-20.md#117-用户决定停止追加实验当前交付状态).
+
+`probe:adapter:side-by-side` launches two owned WinForms fixtures side by side
+(left witness/control, right target) and drives only the exact target PID/window
+through the production `CuaDriverComputer` with explicit foreground delivery.
+It records a target observe before/after focusing the left witness, screenshot
+hashes, click/type/scroll/Ctrl+A+replace/drag receipts, both fixture oracles,
+and one local scripted-provider approval click. The witness is never placed over
+the target; this probe does not claim covered-window isolation or focus restore.
+The foreground scroll path is now enabled in the production adapter; rebuild
+before a future probe so it does not load an older `dist` gate:
+
+```text
+pnpm --dir spikes/cua-driver run probe:adapter:side-by-side -- `
+  --binary <path-to-cua-driver.exe> `
+  --socket '\\.\pipe\computer-harness-side-by-side-r1' `
+  --fixture <path-to-isolated-computer-harness-fixture.exe> `
+  --output 'runs/dev2-adapter-window-side-by-side-r1'
+```
+
+The command uses no model/API credentials and leaves all captures and trajectory
+artifacts under the ignored output directory.
+
 ## S3-4 Runtime/Trajectory contract probe
 
 `probe:runtime` runs two separate daemon lifecycles with the real

@@ -7,10 +7,21 @@ param(
   [ValidateSet('baseline', 'assisted', 'research')]
   [string] $Preset,
 
+  [ValidateSet('off', 'layered')]
+  [string] $RiskGuard,
+
   [ValidateSet('glm-5.3-flash', 'qwen3.8-flash')]
   [string] $Model,
 
   [string] $Goal,
+  [string] $OutputDir,
+  [ValidateRange(1, 1000000)]
+  [int] $MaxSteps = 100,
+  [ValidateRange(1, 1000000)]
+  [int] $MaxModelRequests = 100,
+  [string] $CuaWindowPid,
+  [string] $CuaWindowId,
+  [switch] $AllowExistingOutputDir,
   [switch] $Build
 )
 
@@ -39,12 +50,33 @@ function Require-Config([string] $Name) {
   return [string] $value
 }
 
+function Get-CuaWindowArguments {
+  $hasPid = -not [string]::IsNullOrWhiteSpace($CuaWindowPid)
+  $hasWindowId = -not [string]::IsNullOrWhiteSpace($CuaWindowId)
+  if ($hasPid -ne $hasWindowId) {
+    throw '-CuaWindowPid and -CuaWindowId must be provided together.'
+  }
+  if (-not $hasPid) { return @() }
+  foreach ($entry in @(@{ Name = '-CuaWindowPid'; Value = $CuaWindowPid }, @{ Name = '-CuaWindowId'; Value = $CuaWindowId })) {
+    if ($entry.Value -notmatch '^[1-9][0-9]*$') { throw "$($entry.Name) must be a positive safe integer." }
+    try {
+      $number = [decimal]::Parse($entry.Value, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+      throw "$($entry.Name) must be a positive safe integer."
+    }
+    if ($number -gt 9007199254740991) { throw "$($entry.Name) must be a positive safe integer." }
+  }
+  return @('--cua-window-pid', $CuaWindowPid, '--cua-window-id', $CuaWindowId)
+}
+
 $nodePath = Resolve-LocalPath (Require-Config 'NodePath')
 $envFile = Resolve-LocalPath (Require-Config 'EnvFile')
 $cuaBinary = Resolve-LocalPath (Require-Config 'CuaBinary')
 $cuaSocket = Require-Config 'CuaSocket'
 $selectedModel = if ($Model) { $Model } else { Require-Config 'Model' }
 $selectedPreset = if ($Preset) { $Preset } elseif ($config['Preset']) { [string] $config['Preset'] } else { 'assisted' }
+$selectedRiskGuard = if ($RiskGuard) { $RiskGuard } elseif ($selectedPreset -eq 'research') { 'off' } else { 'layered' }
+$cuaWindowArguments = Get-CuaWindowArguments
 $outputRoot = Resolve-LocalPath (Require-Config 'OutputRoot')
 $cliPath = Join-Path $repoRoot 'apps\cli\dist\index.js'
 
@@ -60,19 +92,79 @@ if ($nodeMajor -lt 22) {
 
 function Invoke-Build {
   $nodeDir = Split-Path -Parent $nodePath
+  $configuredPnpm = [string] $config['PnpmCliPath']
+  if ([string]::IsNullOrWhiteSpace($configuredPnpm)) {
+    $fallbackPnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+    if ($null -eq $fallbackPnpm) {
+      throw "pnpm was not found. Set PnpmCliPath in .harness.local.psd1 to a local pnpm .mjs/.cjs/.js entry (or an explicit pnpm command)."
+    }
+    $pnpmPath = $fallbackPnpm.Source
+  } else {
+    $pnpmPath = Resolve-LocalPath $configuredPnpm
+    if (-not (Test-Path -LiteralPath $pnpmPath -PathType Leaf)) {
+      throw "Configured PnpmCliPath was not found: $pnpmPath"
+    }
+    $extension = [System.IO.Path]::GetExtension($pnpmPath).ToLowerInvariant()
+    if ($extension -notin @('.mjs', '.cjs', '.js', '.cmd', '.bat', '.exe')) {
+      throw "Configured PnpmCliPath must point to .mjs, .cjs, .js, .cmd, .bat, or .exe: $pnpmPath"
+    }
+  }
+  $pnpmExtension = [System.IO.Path]::GetExtension($pnpmPath).ToLowerInvariant()
+  $pnpmShimRoot = $null
+  $previousNodeExecPath = $env:npm_node_execpath
+  $previousExecPath = $env:npm_execpath
+  $previousPnpmCliPath = $env:PNPM_CLI_PATH
+  $previousBuildNodeExe = $env:HARNESS_BUILD_NODE_EXE
+  $previousBuildPnpmCli = $env:HARNESS_BUILD_PNPM_CLI
   $previousPath = $env:PATH
   try {
-    $env:PATH = "$nodeDir;$previousPath"
+    $pnpmShimRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("computer-harness-pnpm-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $pnpmShimRoot -ErrorAction Stop | Out-Null
+    $pnpmShim = Join-Path $pnpmShimRoot 'pnpm.cmd'
+    $shimBody = if ($pnpmExtension -in @('.mjs', '.cjs', '.js')) {
+      "@echo off`r`n`"%HARNESS_BUILD_NODE_EXE%`" `"%HARNESS_BUILD_PNPM_CLI%`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    } else {
+      "@echo off`r`ncall `"%HARNESS_BUILD_PNPM_CLI%`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    }
+    [IO.File]::WriteAllText($pnpmShim, $shimBody, [Text.Encoding]::ASCII)
+    $env:PATH = "$pnpmShimRoot;$nodeDir;$previousPath"
+    $env:npm_node_execpath = $nodePath
+    $env:npm_execpath = $pnpmPath
+    $env:PNPM_CLI_PATH = $pnpmPath
+    $env:HARNESS_BUILD_NODE_EXE = $nodePath
+    $env:HARNESS_BUILD_PNPM_CLI = $pnpmPath
     Push-Location $repoRoot
     try {
-      & pnpm.cmd run build
-      if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE." }
+      if ($pnpmExtension -in @('.mjs', '.cjs', '.js')) {
+        & $nodePath $pnpmPath run build
+      } else {
+        & $pnpmPath run build
+      }
+      $buildExitCode = $LASTEXITCODE
+      if ($buildExitCode -ne 0) { throw "Build failed with exit code $buildExitCode." }
     } finally {
       Pop-Location
     }
   } finally {
     $env:PATH = $previousPath
+    if ($null -eq $previousNodeExecPath) { Remove-Item Env:npm_node_execpath -ErrorAction SilentlyContinue } else { $env:npm_node_execpath = $previousNodeExecPath }
+    if ($null -eq $previousExecPath) { Remove-Item Env:npm_execpath -ErrorAction SilentlyContinue } else { $env:npm_execpath = $previousExecPath }
+    if ($null -eq $previousPnpmCliPath) { Remove-Item Env:PNPM_CLI_PATH -ErrorAction SilentlyContinue } else { $env:PNPM_CLI_PATH = $previousPnpmCliPath }
+    if ($null -eq $previousBuildNodeExe) { Remove-Item Env:HARNESS_BUILD_NODE_EXE -ErrorAction SilentlyContinue } else { $env:HARNESS_BUILD_NODE_EXE = $previousBuildNodeExe }
+    if ($null -eq $previousBuildPnpmCli) { Remove-Item Env:HARNESS_BUILD_PNPM_CLI -ErrorAction SilentlyContinue } else { $env:HARNESS_BUILD_PNPM_CLI = $previousBuildPnpmCli }
+    if ($null -ne $pnpmShimRoot -and (Test-Path -LiteralPath $pnpmShimRoot)) {
+      $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+      $shimRootFull = [IO.Path]::GetFullPath($pnpmShimRoot)
+      if (-not $shimRootFull.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $shimRootFull) -notlike 'computer-harness-pnpm-*') {
+        throw "Refusing to remove an unexpected pnpm shim directory: $shimRootFull"
+      }
+      Remove-Item -LiteralPath $shimRootFull -Recurse -Force
+    }
   }
+}
+
+if ($AllowExistingOutputDir -and $Command -ne 'tui') {
+  throw "-AllowExistingOutputDir is only valid with -Command tui."
 }
 
 if ($Build -or -not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {
@@ -130,9 +222,11 @@ function Show-Check {
   Write-Output "Environment: $envReady ($envFile)"
   Write-Output "CUA daemon : $cuaReady ($cuaBinary)"
   Write-Output "CUA socket : $cuaSocket"
+  Write-Output "CUA target : $(if ($cuaWindowArguments.Count -eq 0) { 'primary desktop (default)' } else { "window pid=$CuaWindowPid id=$CuaWindowId (host-selected)" })"
   Write-Output "CLI build  : $distReady ($cliPath)"
   Write-Output "Model      : $selectedModel"
   Write-Output "Preset     : $selectedPreset"
+  Write-Output "Risk Guard : $selectedRiskGuard"
   Write-Output "Output root: $outputRoot"
   Write-Output "Secrets are loaded from the local env file; no system-wide variables are required."
 }
@@ -196,18 +290,37 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
   throw "Local env file was not found: $envFile"
 }
 
-$timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$outputDir = Join-Path $outputRoot "$($Command)-$timestamp"
+if ($OutputDir) {
+  $outputDir = Resolve-LocalPath $OutputDir
+  if (Test-Path -LiteralPath $outputDir -PathType Leaf) {
+    throw "Configured output directory is a file: $outputDir"
+  }
+  if (-not $AllowExistingOutputDir -and (Test-Path -LiteralPath $outputDir -PathType Container) -and ($null -ne (Get-ChildItem -LiteralPath $outputDir -Force | Select-Object -First 1))) {
+    throw "Configured output directory must be empty: $outputDir"
+  }
+  if (-not (Test-Path -LiteralPath $outputDir)) {
+    New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+  }
+} else {
+  $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $outputDir = Join-Path $outputRoot "$($Command)-$timestamp"
+}
 $arguments = @(
   $cliPath,
   '--model', $selectedModel,
   '--computer', 'cua',
   '--cua-socket', $cuaSocket,
   '--env-file', $envFile,
-  '--output', $outputDir
+  '--output', $outputDir,
+  '--max-steps', [string]$MaxSteps,
+  '--max-model-requests', [string]$MaxModelRequests,
+  '--profile', 'live-interactive',
+  '--risk-guard', $selectedRiskGuard
 )
+if ($selectedRiskGuard -eq 'off') { $arguments += '--confirm-risk-guard-off' }
 $arguments += Get-ModelArguments
 $arguments += Get-PresetArguments $selectedPreset
+$arguments += $cuaWindowArguments
 
 $embeddingEndpoint = [string] $config['MemoryEmbeddingEndpoint']
 if (-not [string]::IsNullOrWhiteSpace($embeddingEndpoint)) {
@@ -216,7 +329,7 @@ if (-not [string]::IsNullOrWhiteSpace($embeddingEndpoint)) {
 
 if ($Command -eq 'tui') {
   $arguments += '--tui'
-  Write-Output "Starting TUI with preset '$selectedPreset'. Press F on the home screen to change the next Run."
+  Write-Output "Starting TUI with preset '$selectedPreset' and Risk Guard '$selectedRiskGuard'. Press F on the home screen to change the next Run."
   $tuiExit = 1
   try {
     & $nodePath @arguments

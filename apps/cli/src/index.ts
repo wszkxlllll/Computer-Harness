@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ApplicationSession, createRun, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, createRun, createWindowTargetDiscovery, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
@@ -84,8 +84,8 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const cuaWindowIdValue = value("--cua-window-id");
   const cuaWindowTarget = resolveCuaWindowTargetOptions({ pid: cuaWindowPidValue, windowId: cuaWindowIdValue, computer, doctor });
   const output = resolve(value("--output") ?? "runs/live-cli");
-  const maxSteps = positiveInteger(value("--max-steps"), 30, "--max-steps");
-  const maxModelRequests = positiveInteger(value("--max-model-requests"), 30, "--max-model-requests");
+  const maxSteps = positiveInteger(value("--max-steps"), 100, "--max-steps");
+  const maxModelRequests = positiveInteger(value("--max-model-requests"), 100, "--max-model-requests");
   const fixtureResult = value("--fixture-result");
   const envFile = value("--env-file");
   if (doctor && envFile !== undefined) throw new Error("--doctor does not read --env-file or provider credentials");
@@ -192,7 +192,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. CUA window flags are explicit host opt-in; keyboard input remains disabled until focus delivery is independently verified. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. Press F on the home screen to choose next-Run features, including Risk Guard off/layered. Guard off skips risk evaluation, approvals and risk-model requests, but leaves schema/policy/budget/Abort/stale/window checks active. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. Explicit --cua-window-pid/--cua-window-id use restricted background delivery (click/wait only). In TUI, press Esc then W to choose a CUA window for foreground preview; click/type/keypress/hotkey/scroll/drag/wait are available there. Window position and size are user-managed; Harness does not move/resize windows. Keep the target visible and unobscured; occlusion support and focus restoration are limited. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -206,14 +206,21 @@ async function main(): Promise<void> {
   if (options.tui) {
     const config = toResolvedRunConfig(options, options.goal ?? "");
     const { goal: _goal, runId: _runId, ...sessionConfig } = config;
+    const windowDiscovery = createWindowTargetDiscovery(sessionConfig.computer);
     const session = new ApplicationSession({
       config: sessionConfig,
       dependencies: { credentials: readProviderCredentials() },
+      ...(windowDiscovery === undefined ? {} : { windowDiscovery }),
     });
     await runApplicationTui(session, {
       provider: options.model,
       computer: options.computer,
       output: options.output,
+      ...(options.cuaWindowTarget === undefined ? {} : { cuaWindowTarget: options.cuaWindowTarget }),
+      ...(sessionConfig.computer.kind === "cua" && sessionConfig.computer.windowTarget !== undefined && sessionConfig.computer.windowDeliveryMode !== undefined
+        ? { cuaWindowDeliveryMode: sessionConfig.computer.windowDeliveryMode }
+        : {}),
+      windowSelectionAvailable: windowDiscovery !== undefined,
       profile: options.risk.profile,
       riskGuard: options.risk.riskGuard,
       features: {
@@ -222,6 +229,7 @@ async function main(): Promise<void> {
         memoryRetrieval: options.memoryRetrieval,
         batching: options.batching,
         contextMode: options.contextMode,
+        riskGuard: options.risk.riskGuard,
         monitor: options.monitor,
       } satisfies TuiFeatureSelection,
       embeddingReady: options.memoryEmbeddingEndpoint !== undefined && (process.env.MEMORY_EMBEDDING_API_KEY?.trim().length ?? 0) > 0,

@@ -15,7 +15,9 @@ internal static class ProbeWindow
     private static string lastKey = "";
     private static string lastModifiers = "";
     private static Point dragStart;
+    private static Point dragEnd;
     private static bool mouseMovedSinceDown;
+    private static Form hostForm;
 
     private static string Escape(string value)
     {
@@ -38,6 +40,22 @@ internal static class ProbeWindow
         }
     }
 
+    private static void WriteDeferredScrollState()
+    {
+        if (editor == null || editor.IsDisposed || !editor.IsHandleCreated)
+        {
+            return;
+        }
+        try
+        {
+            editor.BeginInvoke((MethodInvoker)(() => WriteState("v_scroll_settled")));
+        }
+        catch
+        {
+            // Cleanup may race the deferred UI sample; keep the fixture alive.
+        }
+    }
+
     private static void WriteState(string eventName)
     {
         if (String.IsNullOrWhiteSpace(statePath) || editor == null || editor.IsDisposed)
@@ -53,6 +71,7 @@ internal static class ProbeWindow
         {
             "event=" + Escape(lastEvent),
             "eventSequence=" + eventSequence,
+            "formActive=" + (hostForm != null && Form.ActiveForm == hostForm),
             "focused=" + editor.Focused,
             "textLength=" + text.Length,
             // Keep the exact final value available to the external evaluator.
@@ -68,6 +87,10 @@ internal static class ProbeWindow
             "lastKey=" + Escape(lastKey),
             "lastModifiers=" + Escape(lastModifiers),
             "dragCount=" + dragCount,
+            "dragStartX=" + dragStart.X,
+            "dragStartY=" + dragStart.Y,
+            "dragEndX=" + dragEnd.X,
+            "dragEndY=" + dragEnd.Y,
         };
         try
         {
@@ -83,6 +106,8 @@ internal static class ProbeWindow
     private static void Main(string[] args)
     {
         statePath = args.Length > 0 ? args[0] : null;
+        var preloadScrollContent = args.Any(argument => String.Equals(argument, "preload", StringComparison.OrdinalIgnoreCase)
+            || argument.IndexOf("MATRIX", StringComparison.OrdinalIgnoreCase) >= 0);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
@@ -95,6 +120,7 @@ internal static class ProbeWindow
             MinimizeBox = false,
             MaximizeBox = false,
         };
+        hostForm = form;
         var label = new Label
         {
             Text = "Safe local fixture: click, type, key, scroll and drag are expected.",
@@ -109,7 +135,9 @@ internal static class ProbeWindow
             DetectUrls = false,
             ScrollBars = RichTextBoxScrollBars.Both,
             Font = new Font("Consolas", 12.0f),
-            Text = "READY\r\n",
+            Text = preloadScrollContent
+                ? "READY\r\n" + String.Join("\r\n", Enumerable.Range(1, 80).Select(index => "scroll-line-" + index)) + "\r\n"
+                : "READY\r\n",
         };
         editor.TextChanged += (_sender, _args) => WriteState("text_changed");
         editor.KeyDown += (_sender, eventArgs) =>
@@ -137,20 +165,29 @@ internal static class ProbeWindow
                 WriteState("mouse_move");
             }
         };
-        editor.MouseUp += (_sender, _args) =>
+        editor.MouseUp += (_sender, eventArgs) =>
         {
             if (mouseMovedSinceDown)
             {
                 dragCount += 1;
             }
+            dragEnd = eventArgs.Location;
             WriteState("mouse_up");
         };
-        editor.VScroll += (_sender, _args) => WriteState("v_scroll");
+        editor.VScroll += (_sender, _args) =>
+        {
+            // Keep the synchronous event evidence, then sample once more after
+            // the native RichEdit scroll position has settled on the UI queue.
+            WriteState("v_scroll");
+            WriteDeferredScrollState();
+        };
         form.Shown += (_sender, _args) =>
         {
             editor.Focus();
             WriteState("shown");
         };
+        form.Activated += (_sender, _args) => WriteState("activated");
+        form.Deactivate += (_sender, _args) => WriteState("deactivated");
         form.Controls.Add(editor);
         form.Controls.Add(label);
         Application.Run(form);

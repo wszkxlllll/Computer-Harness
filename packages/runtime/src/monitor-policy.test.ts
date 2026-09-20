@@ -13,6 +13,15 @@ function candidate(eventId = "candidate-event"): MonitorPolicyInput["monitor"] {
   };
 }
 
+function unchangedTransition(eventId = "transition-event"): MonitorPolicyInput["monitor"] {
+  return {
+    candidate: true,
+    reasons: [{ code: "no_observed_change", eventIds: [eventId as EventId] }],
+    evidence: [{ kind: "visual_transition_unchanged", eventIds: [eventId as EventId] }],
+    eventIds: [eventId as EventId],
+  };
+}
+
 function input(
   sequence: number,
   clock: MonitorWorkClock,
@@ -61,6 +70,16 @@ describe("MonitorPolicy", () => {
     expect(cooldown.proposal).toEqual({ kind: "none", reason: "guidance_cooldown" });
     const secondGuidance = reduceMonitorPolicy(state, input(14, { modelDecisionCount: 4, guiActionCount: 0 }, candidate("fifth-event")));
     expect(secondGuidance.proposal.kind).toBe("guidance");
+  });
+
+  it("emits transition guidance immediately so the next Context can consume it", () => {
+    const state = createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 2 });
+    const result = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 1 }, unchangedTransition()));
+    expect(result.proposal.kind).toBe("guidance");
+    if (result.proposal.kind === "guidance") {
+      expect(result.proposal.text).toContain("no observable change");
+      expect(result.proposal.text).not.toContain("transition-event");
+    }
   });
 
   it("requests help only after guidance budget, never because an old candidate aged out", () => {

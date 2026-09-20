@@ -1,6 +1,7 @@
-import type { CuaDriverComputerOptions } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, type CuaDriverComputerOptions } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import type { Computer } from "@computer-harness/runtime";
+import type { WindowTargetDiscovery } from "./application-session.js";
 
 export type ComputerBackendConfig =
   | {
@@ -9,6 +10,8 @@ export type ComputerBackendConfig =
       screenshotDir: string;
       /** Explicit host-only opt-in; omitted keeps primary desktop behavior. */
       windowTarget?: { pid: number; windowId: number };
+      /** Explicit window action delivery; background never escalates. */
+      windowDeliveryMode?: "background" | "foreground";
     }
   | {
       kind: "osworld";
@@ -23,6 +26,22 @@ export interface ComputerFactoryDependencies {
   importCuaComputer?: () => Promise<CuaComputerModule>;
   /** Injected by the application boundary; no ambient environment read here. */
   osworldBridgeToken?: string;
+}
+
+export function createWindowTargetDiscovery(config: ComputerBackendConfig): WindowTargetDiscovery | undefined {
+  if (config.kind !== "cua") return undefined;
+  const discovery = new CuaWindowDiscovery({ socketPath: config.socketPath });
+  return {
+    async listWindows(signal) {
+      const windows = await discovery.listWindows(signal);
+      return windows.map((window) => ({
+        pid: window.target.pid,
+        windowId: window.target.windowId,
+        ...(window.appName === undefined ? {} : { appName: window.appName }),
+        ...(window.title === undefined ? {} : { title: window.title }),
+      }));
+    },
+  };
 }
 
 const defaultCuaImporter = (): Promise<CuaComputerModule> => import("@computer-harness/computer-cua");
@@ -59,5 +78,6 @@ export async function createComputer(
     socketPath: config.socketPath,
     screenshotDir: config.screenshotDir,
     ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
+    ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
   });
 }

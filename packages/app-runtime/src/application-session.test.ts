@@ -72,6 +72,27 @@ describe("ApplicationSession", () => {
     }
   });
 
+  it("applies an explicit Guard mode only to the selected Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-guard-mode-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => fakeHandle(config, "succeeded"));
+    try {
+      const session = new ApplicationSession({
+        config: { ...baseConfig(outputDir), riskGuard: "layered" },
+        owner,
+        createRun,
+      });
+      await session.startRun("Guard disabled for this Run", { riskGuard: "off" });
+      await session.waitForActiveRun();
+      await session.startRun("base Guard mode restored");
+      await session.waitForActiveRun();
+      expect(createRun.mock.calls[0]?.[0].riskGuard).toBe("off");
+      expect(createRun.mock.calls[1]?.[0].riskGuard).toBe("layered");
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("wires the real createRun Controller into the session feed without an API or desktop", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-real-"));
     const owner = new InProcessEnvironmentOwner();
@@ -162,5 +183,33 @@ describe("ApplicationSession", () => {
     lease.markPending("unconfirmed cleanup");
     expect(() => owner.acquire(renamed, "run-two")).toThrow(/pending_cleanup/iu);
     expect(owner.inspect(first)?.state).toBe("pending_cleanup");
+  });
+
+  it("keeps window discovery host-only and applies the selected target per Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-window-"));
+    const owner = new InProcessEnvironmentOwner();
+    const config: ApplicationSessionConfig = {
+      ...baseConfig(outputDir),
+      computer: { kind: "cua", socketPath: "fixture-pipe", screenshotDir: join(outputDir, "screens") },
+    };
+    const createRun = vi.fn(async (runConfig: ResolvedRunConfig) => fakeHandle(runConfig, "succeeded"));
+    const discovery = {
+      listWindows: vi.fn(async () => [{ pid: 1234, windowId: 5678, appName: "Browser", title: "12306" }]),
+    };
+    try {
+      const session = new ApplicationSession({ config, owner, createRun, windowDiscovery: discovery });
+      await expect(session.listWindowTargets(new AbortController().signal)).resolves.toEqual([
+        { pid: 1234, windowId: 5678, appName: "Browser", title: "12306" },
+      ]);
+      await session.startRun("window task", { windowTarget: { pid: 1234, windowId: 5678 } });
+      expect(createRun.mock.calls[0]?.[0].computer).toMatchObject({ windowTarget: { pid: 1234, windowId: 5678 } });
+      await session.waitForActiveRun();
+      await session.startRun("desktop task", { windowTarget: null });
+      expect(createRun.mock.calls[1]?.[0].computer).toMatchObject({ kind: "cua" });
+      expect((createRun.mock.calls[1]?.[0].computer as { windowTarget?: unknown }).windowTarget).toBeUndefined();
+      await session.waitForActiveRun();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
   });
 });

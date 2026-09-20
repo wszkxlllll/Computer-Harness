@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
+import { listWindowTargets } from "./window-contract.js";
 
 const ONE_BY_ONE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -50,7 +51,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       const input = JSON.parse(inputJson) as Record<string, unknown>;
       calls.push({ name, input });
       if (name === "list_windows") {
-        return result({ structuredJson: JSON.stringify({ windows: missing ? [] : [{ pid: target.pid, window_id: target.windowId, bounds }] }) });
+        return result({ structuredJson: JSON.stringify({ windows: missing ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds }] }) });
       }
       return result();
     },
@@ -88,6 +89,21 @@ function fakeDriver() {
 }
 
 describe("CuaDriverComputer", () => {
+  it("provides read-only host window candidates without selecting or focusing one", async () => {
+    const fake = windowDriver();
+    const windows = await listWindowTargets(fake.driver, "picker-session", new AbortController().signal);
+    expect(windows).toEqual([{
+      target: fake.target,
+      bounds: { x: 100, y: 120, width: 960, height: 680 },
+      title: "Safe fixture",
+      appName: "Computer Harness",
+    }]);
+    expect(fake.calls).toEqual([{
+      name: "list_windows",
+      input: { on_screen_only: true, session: "picker-session" },
+    }]);
+  });
+
   it("opens, observes, maps actions, and closes without exposing CUA state", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-"));
     const fake = fakeDriver();
@@ -414,7 +430,174 @@ describe("CuaDriverComputer", () => {
       expect(receipt.status).toBe("completed");
       const click = fake.calls.find((call) => call.name === "click");
       expect(click?.input).toMatchObject({ target: { kind: "window", pid: 1234, window_id: 5678 }, x: 10, y: 20, delivery_mode: "background" });
+      const backgroundType = await computer.execute(session, {
+        actionId: "window-background-type-refused" as ActionId,
+        basedOn: "window-observation" as ObservationId,
+        kind: "type",
+        text: "must-not-dispatch",
+      }, new AbortController().signal);
+      expect(backgroundType).toMatchObject({ status: "refused", driverCode: "WINDOW_INPUT_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      const backgroundScroll = await computer.execute(session, {
+        actionId: "window-background-scroll-refused" as ActionId,
+        basedOn: "window-observation" as ObservationId,
+        kind: "scroll",
+        point: { x: 10, y: 20 },
+        direction: "down",
+        ticks: 1,
+      }, new AbortController().signal);
+      expect(backgroundScroll).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTION_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "scroll")).toHaveLength(0);
+      const backgroundHotkey = await computer.execute(session, {
+        actionId: "window-background-hotkey-refused" as ActionId,
+        basedOn: "window-observation" as ObservationId,
+        kind: "keypress",
+        keys: ["CTRL", "A"],
+      }, new AbortController().signal);
+      expect(backgroundHotkey).toMatchObject({ status: "refused", driverCode: "WINDOW_INPUT_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "hotkey")).toHaveLength(0);
+      const backgroundDrag = await computer.execute(session, {
+        actionId: "window-background-drag-refused" as ActionId,
+        basedOn: "window-observation" as ObservationId,
+        kind: "drag",
+        from: { x: 1, y: 1 },
+        to: { x: 20, y: 20 },
+      }, new AbortController().signal);
+      expect(backgroundDrag).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTION_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "drag")).toHaveLength(0);
       expect(fake.calls.some((call) => call.name === "get_screen_size" || call.name === "get_desktop_state")).toBe(false);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("maps click, scroll, and drag coordinates from the image viewport to window-local bounds", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-coordinate-map-"));
+    const fake = windowDriver(
+      { x: 100, y: 120, width: 1828, height: 1528 },
+      { width: 1568, height: 1310 },
+    );
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "window-coordinate-map" as ObservationId;
+      await computer.observe(session, observationId, new AbortController().signal);
+
+      const click = await computer.execute(session, {
+        actionId: "window-coordinate-map-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 444, y: 458 },
+      }, new AbortController().signal);
+      expect(click.status).toBe("completed");
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ x: 518, y: 534 });
+
+      const scroll = await computer.execute(session, {
+        actionId: "window-coordinate-map-scroll" as ActionId,
+        basedOn: observationId,
+        kind: "scroll",
+        point: { x: 1567, y: 1309 },
+        direction: "down",
+        ticks: 1,
+      }, new AbortController().signal);
+      expect(scroll.status).toBe("completed");
+      expect(fake.calls.find((call) => call.name === "scroll")?.input).toMatchObject({ x: 1827, y: 1527 });
+
+      const drag = await computer.execute(session, {
+        actionId: "window-coordinate-map-drag" as ActionId,
+        basedOn: observationId,
+        kind: "drag",
+        from: { x: 0, y: 0 },
+        to: { x: 1567, y: 1309 },
+      }, new AbortController().signal);
+      expect(drag.status).toBe("completed");
+      expect(fake.calls.find((call) => call.name === "drag")?.input).toMatchObject({
+        from_x: 0,
+        from_y: 0,
+        to_x: 1827,
+        to_y: 1527,
+      });
+
+      const invalid = await computer.execute(session, {
+        actionId: "window-coordinate-map-invalid" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 1568, y: 1310 },
+      }, new AbortController().signal);
+      expect(invalid).toMatchObject({ status: "refused", driverCode: "WINDOW_COORDINATE_INVALID" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the decision observation viewport when Runtime supplies a fresh execution observation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-coordinate-map-execution-"));
+    const fake = windowDriver(
+      { x: 100, y: 120, width: 1828, height: 1528 },
+      { width: 1568, height: 1310 },
+    );
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const decisionObservationId = "window-decision-observation" as ObservationId;
+      await computer.observe(session, decisionObservationId, new AbortController().signal);
+      fake.setBounds(
+        { x: 100, y: 120, width: 1828, height: 1528 },
+        { width: 800, height: 600 },
+      );
+      const executionObservationId = "window-execution-observation" as ObservationId;
+      await computer.observe(session, executionObservationId, new AbortController().signal);
+
+      const click = await computer.execute(session, {
+        actionId: "window-coordinate-map-fresh-execution" as ActionId,
+        basedOn: decisionObservationId,
+        kind: "click",
+        point: { x: 444, y: 458 },
+      }, new AbortController().signal, { executionObservationId });
+      expect(click.status).toBe("completed");
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ x: 518, y: 534 });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps foreground window delivery an explicit host choice", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-foreground-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "window-foreground-observation" as ObservationId;
+      await computer.observe(session, observationId, new AbortController().signal);
+      const receipt = await computer.execute(session, {
+        actionId: "window-foreground-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(receipt.status).toBe("completed");
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ delivery_mode: "foreground" });
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -454,23 +637,66 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("does not expose unverified window keyboard input or silently fall back when a target closes", async () => {
+  it("dispatches verified window input primitives and never falls back when a target closes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-"));
     const fake = windowDriver();
-    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, driverFactory: () => fake.driver });
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", driverFactory: () => fake.driver });
     try {
       const session = await computer.open({}, new AbortController().signal);
       await computer.observe(session, "window-input" as ObservationId, new AbortController().signal);
-      const keyboard = await computer.execute(session, {
+      const typed = await computer.execute(session, {
         actionId: "window-type" as ActionId,
         basedOn: "window-input" as ObservationId,
         kind: "type",
-        text: "not-dispatched",
+        text: "window-target-text",
       }, new AbortController().signal);
-      expect(keyboard).toMatchObject({ status: "refused", driverCode: "WINDOW_INPUT_UNSUPPORTED" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      expect(typed).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({
+        target: { kind: "window", pid: 1234, window_id: 5678 },
+        text: "window-target-text",
+        delivery_mode: "foreground",
+      });
 
-      const unsupported = await computer.execute(session, {
+      const keypress = await computer.execute(session, {
+        actionId: "window-keypress" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "keypress",
+        keys: ["F2"],
+      }, new AbortController().signal);
+      expect(keypress).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "press_key")?.input).toMatchObject({
+        target: { kind: "window", pid: 1234, window_id: 5678 },
+        key: "F2",
+        delivery_mode: "foreground",
+      });
+
+      const hotkey = await computer.execute(session, {
+        actionId: "window-hotkey" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "keypress",
+        keys: ["CTRL", "A"],
+      }, new AbortController().signal);
+      expect(hotkey).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "hotkey")?.input).toMatchObject({
+        target: { kind: "window", pid: 1234, window_id: 5678 },
+        keys: ["CTRL", "A"],
+        delivery_mode: "foreground",
+      });
+
+      const drag = await computer.execute(session, {
+        actionId: "window-drag" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "drag",
+        from: { x: 1, y: 1 },
+        to: { x: 20, y: 20 },
+      }, new AbortController().signal);
+      expect(drag).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "drag")?.input).toMatchObject({
+        target: { kind: "window", pid: 1234, window_id: 5678 },
+        delivery_mode: "foreground",
+      });
+
+      const scroll = await computer.execute(session, {
         actionId: "window-scroll" as ActionId,
         basedOn: "window-input" as ObservationId,
         kind: "scroll",
@@ -478,8 +704,28 @@ describe("CuaDriverComputer", () => {
         direction: "down",
         ticks: 1,
       }, new AbortController().signal);
+      expect(scroll).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "scroll")?.input).toMatchObject({
+        target: { kind: "window", pid: 1234, window_id: 5678 },
+        delivery_mode: "foreground",
+      });
+
+      const unsupported = await computer.execute(session, {
+        actionId: "window-double-click" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "double_click",
+        point: { x: 1, y: 1 },
+      }, new AbortController().signal);
       expect(unsupported).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTION_UNSUPPORTED" });
-      expect(fake.calls.filter((call) => call.name === "scroll")).toHaveLength(0);
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      const rightClick = await computer.execute(session, {
+        actionId: "window-right-click" as ActionId,
+        basedOn: "window-input" as ObservationId,
+        kind: "right_click",
+        point: { x: 1, y: 1 },
+      }, new AbortController().signal);
+      expect(rightClick).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTION_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
 
       fake.setMissing(true);
       const closed = await computer.execute(session, {

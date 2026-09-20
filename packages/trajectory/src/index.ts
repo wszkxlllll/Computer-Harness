@@ -252,6 +252,16 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         throw new Error(`monitor.proposal requires running status, got ${snapshot.status}`);
       }
       return snapshot;
+    case "monitor.transition":
+      if (snapshot.status !== "running") {
+        throw new Error(`monitor.transition requires running status, got ${snapshot.status}`);
+      }
+      if (snapshot.latestObservationId !== event.postObservationId) {
+        throw new Error(
+          `monitor.transition must reference the latest observation ${snapshot.latestObservationId ?? "<none>"}, got ${event.postObservationId}`,
+        );
+      }
+      return snapshot;
     case "run.paused":
       if (snapshot.status !== "running") {
         throw new Error(`run.paused requires running status, got ${snapshot.status}`);
@@ -957,6 +967,16 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     modelDecisionCount: z.number().int().nonnegative(),
     guiActionCount: z.number().int().nonnegative(),
     guidanceText: z.string().max(240).optional(),
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("monitor.transition"),
+    actionId: nonEmptyString,
+    preObservationId: nonEmptyString.optional(),
+    postObservationId: nonEmptyString,
+    sourceActionEventId: nonEmptyString,
+    sourceObservationEventId: nonEmptyString,
+    transition: z.enum(["changed", "unchanged", "unknown"]),
   }),
   z.object({ ...eventBaseSchema, type: z.literal("run.paused"), reason: z.string() }),
   z.object({ ...eventBaseSchema, type: z.literal("run.resumed") }),

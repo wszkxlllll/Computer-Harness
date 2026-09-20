@@ -14,11 +14,24 @@ import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js"
 
 export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId">;
 
+export interface WindowTargetInfo {
+  readonly pid: number;
+  readonly windowId: number;
+  readonly appName?: string;
+  readonly title?: string;
+}
+
+export interface WindowTargetDiscovery {
+  listWindows(signal: AbortSignal): Promise<readonly WindowTargetInfo[]>;
+}
+
+export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
+
 /** Feature-only overrides selected by an interactive UI for the next Run. */
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
-  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "monitor"
->>;
+  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor"
+>> & { windowTarget?: ApplicationSessionWindowTarget | null; windowDeliveryMode?: "background" | "foreground" | null };
 
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";
 
@@ -36,6 +49,7 @@ export interface ApplicationSessionOptions {
   readonly dependencies?: RunDependencies;
   readonly createRun?: typeof createRun;
   readonly owner?: InProcessEnvironmentOwner;
+  readonly windowDiscovery?: WindowTargetDiscovery;
 }
 
 export function createApplicationSession(options: ApplicationSessionOptions): ApplicationSession {
@@ -52,6 +66,7 @@ export class ApplicationSession {
   private readonly createRunFactory: typeof createRun;
   private readonly owner: InProcessEnvironmentOwner;
   private readonly environmentIdentity: string;
+  private readonly windowDiscovery: WindowTargetDiscovery | undefined;
   private readonly records: SessionRunRecord[] = [];
   private active: { handle: RunHandle; lease: EnvironmentLease; completion: Promise<void>; record: SessionRunRecord } | undefined;
   private closed = false;
@@ -62,6 +77,7 @@ export class ApplicationSession {
     this.dependencies = options.dependencies ?? {};
     this.createRunFactory = options.createRun ?? createRun;
     this.owner = options.owner ?? inProcessEnvironmentOwner;
+    this.windowDiscovery = options.windowDiscovery;
     this.environmentIdentity = environmentIdentityForConfig(this.config.computer);
   }
 
@@ -93,18 +109,39 @@ export class ApplicationSession {
     return this.owner.inspect(this.environmentIdentity);
   }
 
+  public async listWindowTargets(signal: AbortSignal): Promise<readonly WindowTargetInfo[]> {
+    if (this.windowDiscovery === undefined) throw new Error("window discovery is unavailable for this ApplicationSession");
+    if (this.closed) throw new Error("application session is closed");
+    if (this.active !== undefined) throw new Error("window discovery is available only while no Run is active");
+    return this.windowDiscovery.listWindows(signal);
+  }
+
   public async startRun(goal: string, featureOverrides: ApplicationSessionRunFeatureOverrides = {}): Promise<RunHandle> {
     if (this.closed) throw new Error("application session is closed");
     if (goal.trim().length === 0) throw new Error("application session requires a non-empty goal");
     if (this.active !== undefined) throw new Error("application session already has an active Run");
     const runId = `run-${Date.now()}-${randomUUID().slice(0, 12)}` as RunId;
+    const { windowTarget, windowDeliveryMode, ...featureConfig } = featureOverrides;
     const config: ResolvedRunConfig = {
       ...this.config,
-      ...featureOverrides,
+      ...featureConfig,
       goal,
       runId,
       outputDir: resolve(this.config.outputDir, runId),
     };
+    if (config.computer.kind === "cua" && (windowTarget !== undefined || windowDeliveryMode !== undefined)) {
+      if (windowTarget === null || windowDeliveryMode === null) {
+        const { windowTarget: _windowTarget, ...desktopComputer } = config.computer;
+        const { windowDeliveryMode: _windowDeliveryMode, ...desktopConfig } = desktopComputer;
+        config.computer = desktopConfig;
+      } else {
+        config.computer = {
+          ...config.computer,
+          ...(windowTarget === undefined ? {} : { windowTarget }),
+          ...(windowDeliveryMode === undefined ? {} : { windowDeliveryMode }),
+        };
+      }
+    }
     const lease = this.owner.acquire(this.environmentIdentity, runId);
     let handle: RunHandle;
     try {

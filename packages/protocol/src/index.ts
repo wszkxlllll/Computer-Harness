@@ -556,6 +556,13 @@ export interface ActionReceipt {
   message?: string;
 }
 
+/**
+ * Runtime-owned, low-confidence visual evidence for one completed action.
+ * It deliberately contains no screenshot bytes, hashes, text or coordinates;
+ * the corresponding Observation assets remain the only visual source.
+ */
+export type ObservationTransition = "changed" | "unchanged" | "unknown";
+
 export interface ComputerCapabilities {
   screenshot: boolean;
   pointer: boolean;
@@ -735,6 +742,15 @@ export type RuntimeEventData =
       guiActionCount: number;
       guidanceText?: string;
     }
+  | {
+      type: "monitor.transition";
+      actionId: ActionId;
+      preObservationId?: ObservationId;
+      postObservationId: ObservationId;
+      sourceActionEventId: EventId;
+      sourceObservationEventId: EventId;
+      transition: ObservationTransition;
+    }
   | { type: "run.paused"; reason: string }
   | { type: "run.resumed" }
   | { type: "approval.requested"; requestId: string; callId: ToolCallId; reason: string }
@@ -778,6 +794,7 @@ export const runtimeEventTypes = [
   "planning.task.updated",
   "memory.updated",
   "monitor.proposal",
+  "monitor.transition",
   "run.paused",
   "run.resumed",
   "approval.requested",

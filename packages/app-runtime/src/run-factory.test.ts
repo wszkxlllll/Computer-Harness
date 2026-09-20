@@ -89,7 +89,17 @@ describe("app-runtime RunHandle", () => {
       expect(calls).toMatchObject({ provider: 1, open: 1, observe: 1, close: 1 });
       await expect(handle.start()).rejects.toThrow(/only start once/iu);
       const report = await handle.report();
-      expect(report.summary).toMatchObject({ runId: "app-runtime-test", model: "glm-5.3-flash", computer: "osworld", runtimeOutcome: "succeeded" });
+      expect(report.summary).toMatchObject({
+        runId: "app-runtime-test",
+        goal: "finish the fixture",
+        model: "glm-5.3-flash",
+        computer: "osworld",
+        maxSteps: 5,
+        maxModelRequests: 5,
+        memoryRetrieval: "off",
+        monitor: "off",
+        runtimeOutcome: "succeeded",
+      });
       expect(report.events.map((event) => event.type)).toEqual([
         "run.created",
         "run.started",
@@ -110,7 +120,7 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it("reports the effective click-only tool allowlist for an explicit window target", async () => {
+  it("reports the verified window-target tool allowlist without enabling unverified primitives", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-window-tools-"));
     const calls = { open: 0, observe: 0, close: 0 };
     const windowConfig: ResolvedRunConfig = {
@@ -124,9 +134,73 @@ describe("app-runtime RunHandle", () => {
       });
       await expect(handle.start()).resolves.toBe("succeeded");
       const report = await handle.report();
+      expect(report.summary.computerTarget).toEqual({ mode: "window", pid: 1234, windowId: 5678, deliveryMode: "background" });
       expect(report.summary.tools).toEqual(expect.arrayContaining(["click", "wait"]));
       expect(report.summary.tools).not.toContain("type");
+      expect(report.summary.tools).not.toContain("keypress");
       expect(report.summary.tools).not.toContain("scroll");
+      expect(report.summary.tools).not.toContain("double_click");
+      expect(report.summary.tools).not.toContain("right_click");
+      expect(report.summary.tools).not.toContain("drag");
+      expect(report.summary.tools).not.toContain("hotkey");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not construct a risk provider or emit Guard work when Guard is off", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-guard-off-"));
+    const calls = { provider: 0, open: 0, observe: 0, close: 0 };
+    const fixtureProvider: ProviderAdapter = {
+      id: "fixture-provider",
+      async generate() { return { type: "finish", summary: "guard-off" }; },
+    };
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        riskModel: "glm-5.3-flash",
+        riskGuard: "off",
+      }, {
+        createProvider: () => {
+          calls.provider += 1;
+          return fixtureProvider;
+        },
+        createComputer: () => Promise.resolve(fakeComputer(calls)),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(calls.provider).toBe(1);
+      expect(report.events.some((event) => event.type === "action.guard.evaluated")).toBe(false);
+      expect(report.events.some((event) => event.type === "approval.requested")).toBe(false);
+      expect(report.summary.riskGuard).toBe("off");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes window scroll only with explicit foreground delivery", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-window-foreground-tools-"));
+    const windowConfig: ResolvedRunConfig = {
+      ...config(outputDir),
+      computer: {
+        kind: "cua",
+        socketPath: "fixture.sock",
+        screenshotDir: "screenshots",
+        windowTarget: { pid: 1234, windowId: 5678 },
+        windowDeliveryMode: "foreground",
+      },
+    };
+    try {
+      const handle = await createRun(windowConfig, {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "window done" }; } }),
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(report.summary.computerTarget).toMatchObject({ mode: "window", deliveryMode: "foreground" });
+      expect(report.summary.tools).toEqual(expect.arrayContaining(["click", "type", "keypress", "hotkey", "drag", "scroll", "wait"]));
       await handle.close();
     } finally {
       await rm(outputDir, { recursive: true, force: true });
@@ -165,6 +239,8 @@ describe("app-runtime RunHandle", () => {
       expect(state.facts).toMatchObject([{ status: "needs_check", statusReason: "scope_ended", scope: { kind: "computer_session", sessionId: "fixture-session" } }]);
       const report = await handle.report();
       expect(report.events.some((event) => event.type === "memory.updated" && event.source === "lifecycle" && event.callId === undefined)).toBe(true);
+      expect(report.summary.memoryRetrieval).toBe("lexical");
+      expect(report.summary.monitor).toBe("off");
       expect(syncState.mock.calls.some(([next]) => next.facts.some((fact) => fact.statusReason === "scope_ended"))).toBe(true);
       await handle.close();
     } finally {

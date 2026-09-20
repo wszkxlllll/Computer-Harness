@@ -26,17 +26,28 @@ export async function buildRunReport(
   }
   const outcome = snapshot.outcome;
   const fixture = await readFixtureResult(config.fixtureResult);
+  const memoryRetrieval = config.memory === "off" ? "off" : config.memoryRetrieval ?? "lexical";
   const summary = {
     runId,
+    goal: config.goal,
     model: config.model,
     computer: config.computer.kind,
+    computerTarget: config.computer.kind === "cua"
+      ? config.computer.windowTarget === undefined
+        ? { mode: "desktop" }
+        : { mode: "window", pid: config.computer.windowTarget.pid, windowId: config.computer.windowTarget.windowId, deliveryMode: config.computer.windowDeliveryMode ?? "background" }
+      : { mode: "osworld" },
+    maxSteps: config.maxSteps,
+    maxModelRequests: config.maxModelRequests,
     coordinateMode: config.qwenCoordinateMode ?? null,
     thinkingMode: config.qwenThinking ?? null,
     outputMode: config.qwenOutputMode ?? null,
     glmThinking: config.glmThinking ?? "enabled",
     planning: config.planning,
     memory: config.memory,
+    memoryRetrieval,
     batching: config.batching,
+    monitor: config.monitor ?? "off",
     cleanupDeadlineMs: config.cleanupDeadlineMs,
     riskProfile: config.riskProfile,
     riskGuard: config.riskGuard,
@@ -76,6 +87,9 @@ export async function buildRunReport(
       providerErrors: events
         .filter((event): event is Extract<RuntimeEvent, { type: "model.request.failed" }> => event.type === "model.request.failed")
         .map((event) => ({ category: event.category, code: event.code ?? null, retryable: event.retryable ?? null, message: event.message })),
+      monitorTransitions: events
+        .filter((event): event is Extract<RuntimeEvent, { type: "monitor.transition" }> => event.type === "monitor.transition")
+        .reduce((counts, event) => ({ ...counts, [event.transition]: (counts[event.transition] ?? 0) + 1 }), {} as Record<string, number>),
     },
   } satisfies Record<string, unknown>;
   return { runId, outcome, summary, snapshot, events };

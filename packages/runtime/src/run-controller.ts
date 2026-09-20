@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   ActionId,
   ActionIntent,
@@ -7,6 +8,7 @@ import type {
   ModelTurn,
   MemoryMutation,
   MemoryFact,
+  ObservationTransition,
   ObservationFrame,
   ObservationId,
   RunId,
@@ -54,7 +56,7 @@ import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
 import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.js";
 import type { CommittedEventListener } from "./committed-events.js";
-import { createProgressMonitorState, reduceProgressMonitor, type ProgressMonitorState } from "./progress-monitor.js";
+import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange, type ProgressMonitorState } from "./progress-monitor.js";
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 
 const MAX_PROVIDER_RETRIES = 1;
@@ -233,6 +235,19 @@ interface PreparedComputerAction {
   decisionObservationId?: ObservationId;
 }
 
+interface ObservationFingerprint {
+  readonly sessionId: string;
+  readonly mediaType: string;
+  readonly byteLength: number;
+  readonly viewport: ObservationFrame["viewport"];
+  readonly digest: string;
+}
+
+interface LatestObservationFingerprint {
+  readonly observationId: ObservationId;
+  readonly fingerprint: ObservationFingerprint;
+}
+
 type PreflightEntry = {
   call: ToolCall;
   definition?: ToolDefinition;
@@ -284,6 +299,8 @@ export class RunController {
   private readonly callStates = new Map<ToolCallId, CallState>();
   private readonly actionCallIds = new Map<ActionId, ToolCallId>();
   private readonly commandInbox = new CommandInbox();
+  /** Private, per-Run evidence for approval revalidation; never enters protocol or Provider Context. */
+  private latestObservationFingerprint: LatestObservationFingerprint | undefined;
   private snapshot: RunSnapshot;
   private latestObservation: ObservationFrame | undefined;
   private nextSequence = 0;
@@ -783,6 +800,7 @@ export class RunController {
         cleanupPendingComputers.add(this.computer);
       });
     }
+    this.latestObservationFingerprint = undefined;
   }
 
   private async cleanupOperation(
@@ -978,7 +996,7 @@ export class RunController {
   }
 
   private async executeApprovedCall(pending: PendingApproval): Promise<void> {
-    const context: ToolExecutionContext = {
+    let context: ToolExecutionContext = {
       runId: this.runId,
       session: pending.session,
       signal: this.abortController.signal,
@@ -987,8 +1005,57 @@ export class RunController {
     if (pending.definition.category === "computer") {
       if (pending.preparedAction !== undefined) {
         const originalId = pending.preparedAction.decisionObservationId;
-        if (originalId !== undefined && this.snapshot.latestObservationId !== originalId) {
-          await this.rejectToolCall(pending.call.id, "approval context was superseded inside the Harness; observe the current screen and propose the action again");
+        const originalFingerprint = originalId === undefined || this.latestObservationFingerprint?.observationId !== originalId
+          ? undefined
+          : this.latestObservationFingerprint.fingerprint;
+        let freshObservation: ObservationFrame;
+        try {
+          // Approval is a pause in the control boundary. Re-observe before a
+          // side effect so an external page/content change cannot silently
+          // reuse the old coordinate decision. This does not prove hidden
+          // keyboard focus; type/keypress are handled conservatively below.
+          // The observation ID is intentionally not used as the equality test:
+          // every observe creates a new ID.
+          freshObservation = await this.observeAndCommit(pending.session);
+        } catch (error) {
+          if (this.abortController.signal.aborted) throw error;
+          if (!(error instanceof ObservationCaptureError)) throw error;
+          this.pendingReobserve = true;
+          await this.rejectToolCall(
+            pending.call.id,
+            `approval context could not be re-observed; action was not executed: ${errorMessage(error)}`,
+          );
+          return;
+        }
+        const freshFingerprint = this.latestObservationFingerprint?.observationId === freshObservation.id
+          ? this.latestObservationFingerprint.fingerprint
+          : undefined;
+        if (originalFingerprint === undefined || freshFingerprint === undefined || !sameObservationFingerprint(originalFingerprint, freshFingerprint)) {
+          await this.rejectToolCall(
+            pending.call.id,
+            "screen changed while approval was pending or approval evidence was unavailable; action was not executed; observe the current screen and propose the action again",
+          );
+          return;
+        }
+        context = { ...context, observation: freshObservation };
+        if (pending.preparedAction.action.kind === "type" || pending.preparedAction.action.kind === "keypress") {
+          await this.rejectToolCall(
+            pending.call.id,
+            "approval context was re-observed, but this Computer backend has no independent keyboard-focus evidence; action was not executed; confirm focus manually, then use TUI I to tell the agent to continue",
+          );
+          await this.commitEvent({
+            type: "user.input.requested",
+            question: "Keyboard focus could not be independently verified, so the approved keyboard action was not executed. Manually confirm or perform the intended input, then press I and describe the current screen/state; the agent will not retry it automatically.",
+          });
+          return;
+        }
+        const commandEffects = await this.drainCommands();
+        this.throwIfAborted();
+        if (commandEffects.correction || this.snapshot.status !== "running") {
+          await this.rejectToolCall(
+            pending.call.id,
+            "approval context was superseded by a user control command; action was not executed; observe the current screen and propose it again",
+          );
           return;
         }
       }
@@ -1389,6 +1456,7 @@ export class RunController {
   ): Promise<void> {
     this.throwIfAborted();
     const executionObservationId = this.snapshot.latestObservationId;
+    const preActionFingerprint = this.latestObservationFingerprint;
     let candidate: PreparedComputerAction;
     try {
       candidate = prepared ?? this.prepareComputerAction(call, definition, context, decisionObservationId);
@@ -1406,6 +1474,13 @@ export class RunController {
       return;
     }
     const action = candidate.action;
+    if (this.monitorMode === "guidance" && this.monitorState !== undefined && shouldRejectRepeatedNoChange(this.monitorState, action)) {
+      await this.rejectToolCall(
+        call.id,
+        "Monitor blocked a repeated GUI action after an unchanged observation; re-observe and re-localize the target before trying a different action",
+      );
+      return;
+    }
     if (this.callStates.get(call.id) !== "received") {
       throw new Error(`ToolCall ${call.id} is not available for action proposal`);
     }
@@ -1446,10 +1521,11 @@ export class RunController {
       return;
     }
 
+    let terminalActionEvent: RuntimeEvent;
     if (receipt.status === "completed") {
-      await this.commitEvent({ type: "action.execution.completed", receipt });
+      terminalActionEvent = await this.commitEvent({ type: "action.execution.completed", receipt });
     } else {
-      await this.commitEvent({ type: "action.execution.failed", receipt });
+      terminalActionEvent = await this.commitEvent({ type: "action.execution.failed", receipt });
     }
     const result: ToolResult =
       receipt.status === "completed"
@@ -1472,7 +1548,46 @@ export class RunController {
     // The action and ToolCall facts are durable before taking the follow-up
     // observation. If observing the post-action state fails, the Run can be
     // marked failed without leaving a completed action with a dangling call.
-    await this.observeAndCommit(context.session);
+    const postObservation = await this.observeAndCommit(context.session);
+    await this.commitMonitorTransition(
+      action,
+      receipt.status,
+      preActionFingerprint,
+      this.latestObservationFingerprint,
+      terminalActionEvent.eventId,
+      postObservation,
+    );
+  }
+
+  private async commitMonitorTransition(
+    action: ActionIntent,
+    receiptStatus: import("@computer-harness/protocol").ActionReceipt["status"],
+    preActionFingerprint: LatestObservationFingerprint | undefined,
+    postActionFingerprint: LatestObservationFingerprint | undefined,
+    sourceActionEventId: EventId,
+    postObservation: ObservationFrame,
+  ): Promise<void> {
+    if (this.monitorMode === "off") return;
+    const observationEvent = this.events[this.events.length - 1];
+    if (observationEvent?.type !== "observation.created" || observationEvent.observation.id !== postObservation.id) {
+      throw new Error("post-action observation was not the latest committed observation");
+    }
+    const transition: ObservationTransition = receiptStatus !== "completed"
+      || preActionFingerprint === undefined
+      || postActionFingerprint === undefined
+      ? "unknown"
+      : sameObservationFingerprint(preActionFingerprint.fingerprint, postActionFingerprint.fingerprint)
+        ? "unchanged"
+        : "changed";
+    await this.commitEvent({
+      type: "monitor.transition",
+      actionId: action.actionId,
+      ...(preActionFingerprint === undefined ? {} : { preObservationId: preActionFingerprint.observationId }),
+      postObservationId: postObservation.id,
+      sourceActionEventId,
+      sourceObservationEventId: observationEvent.eventId,
+      transition,
+    });
   }
 
   private prepareComputerAction(
@@ -1616,7 +1731,12 @@ export class RunController {
   private async observeAndCommit(session: ComputerSession): Promise<ObservationFrame> {
     const observationId = this.idFactory.observationId();
     const assetId = this.idFactory.assetId();
-    const capture = await this.computer.observe(session, observationId, this.abortController.signal);
+    let capture: import("@computer-harness/protocol").ObservationCapture;
+    try {
+      capture = await this.computer.observe(session, observationId, this.abortController.signal);
+    } catch (error) {
+      throw new ObservationCaptureError(error);
+    }
     const extension = capture.screenshot.mediaType === "image/jpeg" ? "jpg" : "png";
     const asset = await this.assetStore.put({
       assetId,
@@ -1637,6 +1757,10 @@ export class RunController {
       throw new Error("observation commit returned an unexpected event type");
     }
     this.latestObservation = persisted.observation;
+    this.latestObservationFingerprint = {
+      observationId,
+      fingerprint: fingerprintObservation(session.id, capture),
+    };
     return persisted.observation;
   }
 
@@ -1766,7 +1890,16 @@ export class RunController {
       this.monitorPolicyState = policy.state;
       if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
       const proposalEvent = this.monitorProposalEvent(policy.proposal, progress.output, event.eventId);
-      if (proposalEvent === undefined || this.monitorProposalCount >= 64 || this.snapshot.status === "finished") return;
+      if (proposalEvent === undefined || this.monitorProposalCount >= 64) return;
+      // The monitor still consumes control events to keep its in-memory state
+      // and policy lifecycle coherent, but trajectory proposals are legal only
+      // while the Run reducer is in `running`. In particular, approval and
+      // user-input barriers must not produce a diagnostic by attempting to
+      // append a proposal after the status has already changed.
+      if (this.snapshot.status !== "running") {
+        this.clearMonitorPendingRecommendations();
+        return;
+      }
       this.monitorProposalCount += 1;
       this.monitorLastPersistedKey = this.monitorProposalKey(policy.proposal, progress.output);
       await this.commitEvent(proposalEvent);
@@ -1906,6 +2039,38 @@ function actionReceiptOutput(receipt: import("@computer-harness/protocol").Actio
     output.message = receipt.message;
   }
   return output;
+}
+
+/** Capture failure is retryable at the approval boundary; asset/event
+ * persistence failures are deliberately left as fatal Run errors. */
+class ObservationCaptureError extends Error {
+  public constructor(cause: unknown) {
+    super(`computer observation failed: ${errorMessage(cause)}`);
+    this.name = "ObservationCaptureError";
+  }
+}
+
+function fingerprintObservation(
+  sessionId: import("@computer-harness/protocol").ComputerSessionId,
+  capture: import("@computer-harness/protocol").ObservationCapture,
+): ObservationFingerprint {
+  return {
+    sessionId: String(sessionId),
+    mediaType: capture.screenshot.mediaType,
+    byteLength: capture.screenshot.data.byteLength,
+    viewport: { ...capture.viewport },
+    digest: createHash("sha256").update(capture.screenshot.data).digest("hex"),
+  };
+}
+
+function sameObservationFingerprint(left: ObservationFingerprint, right: ObservationFingerprint): boolean {
+  return left.sessionId === right.sessionId
+    && left.mediaType === right.mediaType
+    && left.byteLength === right.byteLength
+    && left.viewport.width === right.viewport.width
+    && left.viewport.height === right.viewport.height
+    && left.viewport.coordinateSpace === right.viewport.coordinateSpace
+    && left.digest === right.digest;
 }
 
 function errorMessage(error: unknown): string {

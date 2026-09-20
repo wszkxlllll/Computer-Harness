@@ -65,8 +65,20 @@ export class LayeredRiskGuard implements ActionPolicy {
     signal.throwIfAborted();
     const route = routeCandidate(context, this.forbiddenShortcuts);
     if (route.route !== "semantic_review") return localDecision(route);
-    if (this.options.assessor === undefined) return fallbackDecision(route.categories, "semantic_review_unavailable", "Risk semantics are unclear and no reviewer is configured.");
-    if (this.modelRequests >= this.maxModelRequests) return fallbackDecision(route.categories, "risk_model_budget_exhausted", "Risk semantics are unclear and the review budget is exhausted.");
+    if (this.options.assessor === undefined) {
+      return fallbackDecision(
+        route.categories,
+        "semantic_review_unavailable",
+        `Risk semantics are unclear and no reviewer is configured. Trigger: ${route.reason}`,
+      );
+    }
+    if (this.modelRequests >= this.maxModelRequests) {
+      return fallbackDecision(
+        route.categories,
+        "risk_model_budget_exhausted",
+        `Risk semantics are unclear and the review budget is exhausted. Trigger: ${route.reason}`,
+      );
+    }
     this.modelRequests += 1;
     const started = Date.now();
     const timeout = AbortSignal.timeout(this.timeoutMs);
@@ -77,7 +89,13 @@ export class LayeredRiskGuard implements ActionPolicy {
       return assessmentDecision(assessment, this.options.assessor.id, Date.now() - started);
     } catch (error) {
       signal.throwIfAborted();
-      return fallbackDecision(route.categories, "risk_model_failed", `Risk semantics remain unclear because review failed: ${shortError(error)}`, Date.now() - started, 1);
+      return fallbackDecision(
+        route.categories,
+        "risk_model_failed",
+        `Risk semantics remain unclear because review failed: ${shortError(error)}. Trigger: ${route.reason}`,
+        Date.now() - started,
+        1,
+      );
     }
   }
 }

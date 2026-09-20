@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CUA Browser Fixture</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 5200px; background: #f7f8fa; color: #18212f; }
+    main { width: min(760px, calc(100vw - 80px)); margin: 16px auto 0; }
+    .card { padding: 16px; border: 1px solid #c9d2df; border-radius: 16px; background: #fff; box-shadow: 0 8px 24px #15223814; }
+    h1 { margin: 0 0 10px; font-size: 28px; }
+    p { margin: 8px 0; line-height: 1.5; }
+    label { display: block; margin: 16px 0 8px; font-weight: 650; }
+    input { width: 100%; height: 320px; padding: 10px 14px; border: 2px solid #718096; border-radius: 10px; font: inherit; font-size: 18px; }
+    input:focus { border-color: #2563eb; outline: 3px solid #bfdbfe; }
+    #oracle-status { margin-top: 18px; padding: 10px 12px; border-radius: 8px; background: #eef4ff; font-family: ui-monospace, monospace; }
+    .spacer { height: 2600px; margin-top: 56px; border-radius: 16px; background: repeating-linear-gradient(0deg, #e8edf4, #e8edf4 1px, transparent 1px, transparent 80px); }
+    footer { margin: 28px 0 120px; padding: 18px; border-top: 1px solid #c9d2df; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card" aria-labelledby="heading">
+      <h1 id="heading">CUA local browser fixture</h1>
+      <p>Loopback fixture; no account or external navigation.</p>
+      <label for="probe-input">Synthetic probe input</label>
+      <input id="probe-input" autocomplete="off" spellcheck="false" value="">
+      <div id="oracle-status" aria-live="polite">oracle: ready</div>
+    </section>
+    <div class="spacer" aria-hidden="true"></div>
+    <footer>End of local CUA fixture.</footer>
+  </main>
+  <script>
+    (() => {
+      const input = document.getElementById("probe-input");
+      const status = document.getElementById("oracle-status");
+      if (!(input instanceof HTMLInputElement) || !(status instanceof HTMLElement)) return;
+      let serial = 0;
+      const report = (event) => {
+        serial += 1;
+        const payload = {
+          event,
+          serial,
+          value: input.value,
+          selectionStart: input.selectionStart,
+          selectionEnd: input.selectionEnd,
+          scrollY: Math.round(window.scrollY),
+          activeId: document.activeElement && document.activeElement.id || ""
+        };
+        status.textContent = `oracle: ${event} #${serial} scrollY=${payload.scrollY}`;
+        fetch("/oracle", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+          cache: "no-store",
+          keepalive: true
+        }).catch(() => {});
+      };
+      window.addEventListener("load", () => report("load"), { once: true });
+      window.addEventListener("scroll", () => report("scroll"), { passive: true });
+      input.addEventListener("click", () => report("click"));
+      input.addEventListener("input", () => report("input"));
+      input.addEventListener("select", () => report("select"));
+      document.addEventListener("selectionchange", () => report("selectionchange"));
+      report("ready");
+    })();
+  </script>
+</body>
+</html>
