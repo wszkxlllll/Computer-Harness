@@ -52,6 +52,7 @@ interface CliOptions {
   cleanupDeadlineMs: number;
   doctorTimeoutMs: number;
   monitor: MonitorPolicyMode;
+  grounding: "off" | "uia-catalog-v1";
 }
 
 function parseArgs(rawArgv: readonly string[]): CliOptions {
@@ -70,6 +71,8 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const monitorValue = value("--monitor") ?? "off";
   if (monitorValue !== "off" && monitorValue !== "shadow" && monitorValue !== "guidance") throw new Error("--monitor must be off, shadow, or guidance");
   if (doctor && monitorValue !== "off") throw new Error("--doctor does not run Monitor");
+  const groundingValue = value("--grounding") ?? "off";
+  if (groundingValue !== "off" && groundingValue !== "uia-catalog-v1") throw new Error("--grounding must be off or uia-catalog-v1");
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
   if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor) throw new Error("--goal is required unless --tui opens the interactive home or --doctor runs a read-only CUA diagnostic");
   if (doctor && goal !== undefined) throw new Error("--doctor cannot be combined with --goal");
@@ -83,6 +86,10 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const cuaWindowPidValue = value("--cua-window-pid");
   const cuaWindowIdValue = value("--cua-window-id");
   const cuaWindowTarget = resolveCuaWindowTargetOptions({ pid: cuaWindowPidValue, windowId: cuaWindowIdValue, computer, doctor });
+  if (groundingValue === "uia-catalog-v1" && (computer !== "cua" || cuaWindowTarget === undefined)) {
+    throw new Error("--grounding uia-catalog-v1 requires --computer cua and an explicit --cua-window-pid/--cua-window-id target");
+  }
+  if (doctor && groundingValue !== "off") throw new Error("--doctor does not run grounding");
   const output = resolve(value("--output") ?? "runs/live-cli");
   const maxSteps = positiveInteger(value("--max-steps"), 100, "--max-steps");
   const maxModelRequests = positiveInteger(value("--max-model-requests"), 100, "--max-model-requests");
@@ -181,6 +188,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     cleanupDeadlineMs,
     doctorTimeoutMs,
     monitor: monitorValue,
+    grounding: groundingValue as "off" | "uia-catalog-v1",
   };
 }
 
@@ -192,7 +200,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. Press F on the home screen to choose next-Run features, including Risk Guard off/layered. Guard off skips risk evaluation, approvals and risk-model requests, but leaves schema/policy/budget/Abort/stale/window checks active. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. Explicit --cua-window-pid/--cua-window-id use restricted background delivery (click/wait only). In TUI, press Esc then W to choose a CUA window for foreground preview; click/type/keypress/hotkey/scroll/drag/wait are available there. Window position and size are user-managed; Harness does not move/resize windows. Keep the target visible and unobscured; occlusion support and focus restoration are limited. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. Press F on the home screen to choose next-Run features, including Risk Guard off/layered and grounding off/uia-catalog-v1. Guard off skips risk evaluation, approvals and risk-model requests, but leaves schema/policy/budget/Abort/stale/window checks active. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. Explicit --cua-window-pid/--cua-window-id use restricted background delivery (click/wait only). In TUI, press Esc then W to choose a CUA window for foreground preview; click/type/keypress/hotkey/scroll/drag/wait are available there. Window position and size are user-managed; Harness does not move/resize windows. Keep the target visible and unobscured; occlusion support and focus restoration are limited. UIA grounding is opt-in, window-only, and adds an observation-bound click_element tool; raw UIA values and backend tokens remain private. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -231,6 +239,7 @@ async function main(): Promise<void> {
         contextMode: options.contextMode,
         riskGuard: options.risk.riskGuard,
         monitor: options.monitor,
+        grounding: options.grounding,
       } satisfies TuiFeatureSelection,
       embeddingReady: options.memoryEmbeddingEndpoint !== undefined && (process.env.MEMORY_EMBEDDING_API_KEY?.trim().length ?? 0) > 0,
     }, options.goal === undefined ? {} : { initialGoal: options.goal });
@@ -259,6 +268,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
+          grounding: options.grounding,
         }
       : {
           kind: "osworld",
@@ -282,6 +292,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     riskTimeoutMs: options.riskTimeoutMs,
     cleanupDeadlineMs: options.cleanupDeadlineMs,
     monitor: options.monitor,
+    grounding: options.grounding,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
     ...(options.qwenOutputMode === undefined ? {} : { qwenOutputMode: options.qwenOutputMode }),

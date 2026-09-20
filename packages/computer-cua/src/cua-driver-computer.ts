@@ -1,4 +1,5 @@
 import { mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   CuaDriver,
@@ -10,6 +11,8 @@ import type {
   ActionIntent,
   ActionReceipt,
   ComputerSessionDescriptor,
+  GroundingCatalog,
+  GroundingElement,
   ObservationCapture,
   ObservationId,
   Viewport,
@@ -32,6 +35,15 @@ const CLEANUP_POLL_INTERVAL_MS = 50;
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
 export type CuaWindowDeliveryMode = "background" | "foreground";
+export type CuaGroundingMode = "off" | "uia-catalog-v1";
+
+// Keep the adapter side bounded but larger than the model-facing hot set. The
+// Runtime selector narrows this to at most 16 before Observation persistence;
+// the private ref map still retains every safe candidate here for the current
+// Computer session. Depth 16 is needed for real browser document descendants;
+// the hard element cap prevents an unbounded UIA tree from entering Runtime.
+const GROUNDING_MAX_ELEMENTS = 256;
+const GROUNDING_QUERY_MAX_ELEMENTS = 256;
 
 export interface CuaDriverComputerOptions {
   /** Explicit daemon endpoint. The adapter never falls back to embedded CUA. */
@@ -49,6 +61,8 @@ export interface CuaDriverComputerOptions {
    * default preserves the existing background route.
    */
   windowDeliveryMode?: CuaWindowDeliveryMode;
+  /** Optional, explicit UIA sidecar; requires an explicit window target. */
+  grounding?: CuaGroundingMode;
   /** Total wall-clock budget for endSession/shutdown cleanup; no GUI action is retried. */
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
@@ -80,6 +94,15 @@ interface PrivateObservation {
   geometry?: CuaWindowGeometry;
 }
 
+interface PrivateGrounding {
+  readonly catalog: GroundingCatalog;
+  readonly elements: ReadonlyMap<string, {
+    readonly element: GroundingElement;
+    readonly point: { readonly x: number; readonly y: number };
+    readonly geometry?: CuaWindowGeometry;
+  }>;
+}
+
 class WindowCoordinateMappingError extends Error {
   public constructor(public readonly code: string, message: string) {
     super(message);
@@ -96,6 +119,7 @@ interface DriverErrorDetails {
 export class CuaDriverComputer implements Computer {
   private readonly options: Required<Pick<CuaDriverComputerOptions, "socketPath" | "screenshotDir" | "cleanupWaitMs">> & Omit<CuaDriverComputerOptions, "socketPath" | "screenshotDir" | "cleanupWaitMs">;
   private readonly observations = new Map<string, PrivateObservation>();
+  private readonly groundings = new Map<string, PrivateGrounding>();
   private latestObservationId: ObservationId | undefined;
   private session: PrivateSession | undefined;
   private pendingCleanup: PendingDriverCleanup | undefined;
@@ -119,6 +143,12 @@ export class CuaDriverComputer implements Computer {
       throw new Error("windowDeliveryMode must be background or foreground");
     }
     if (this.options.windowTarget !== undefined) validateWindowTarget(this.options.windowTarget);
+    if (this.options.grounding !== undefined && this.options.grounding !== "off" && this.options.grounding !== "uia-catalog-v1") {
+      throw new Error("grounding must be off or uia-catalog-v1");
+    }
+    if (this.options.grounding === "uia-catalog-v1" && this.options.windowTarget === undefined) {
+      throw new Error("uia-catalog-v1 grounding requires an explicit CUA window target");
+    }
   }
 
   public async open(options: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
@@ -166,7 +196,7 @@ export class CuaDriverComputer implements Computer {
           screenshot: true,
           pointer: true,
           keyboard: windowBinding === undefined || this.options.windowDeliveryMode === "foreground",
-          accessibility: false,
+          accessibility: this.options.grounding === "uia-catalog-v1",
         },
         openedAt: new Date().toISOString(),
       };
@@ -202,16 +232,21 @@ export class CuaDriverComputer implements Computer {
         const capture = await captureWindow(current.driver, current.label, liveBinding, signal);
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
+        const grounding = this.options.grounding === "uia-catalog-v1"
+          ? await readGroundingCatalog(current.driver, current.label, liveBinding, capture.viewport, observationId, session.id, signal)
+          : undefined;
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
           viewport: capture.viewport,
           geometry: liveBinding.bounds,
         });
+        if (grounding !== undefined) this.groundings.set(String(observationId), grounding);
         this.latestObservationId = observationId;
         return {
           capturedAt: new Date().toISOString(),
           viewport: capture.viewport,
           screenshot: { mediaType: "image/png", data: capture.data },
+          ...(grounding === undefined ? {} : { grounding: grounding.catalog }),
         };
       } catch (error) {
         const details = driverErrorDetails(error);
@@ -316,10 +351,31 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
       }
     }
+    let requestAction = action;
+    if (action.groundingRef !== undefined) {
+      if (action.kind !== "click") {
+        return refused(action.actionId, "GROUNDING_ACTION_UNSUPPORTED", "grounding references are only valid for click actions");
+      }
+      const privateGrounding = this.groundings.get(String(action.basedOn));
+      const resolved = privateGrounding?.elements.get(action.groundingRef);
+      if (resolved === undefined) {
+        return refused(action.actionId, "GROUNDING_REF_STALE", "UIA element reference is stale or unavailable; observe again and choose a current element");
+      }
+      if (resolved.element.state?.enabled === false) {
+        return refused(action.actionId, "GROUNDING_ELEMENT_DISABLED", "UIA element is explicitly disabled and cannot receive a click");
+      }
+      if (resolved.geometry !== undefined && decisionObservation?.geometry !== undefined && !sameWindowGeometry(resolved.geometry, decisionObservation.geometry)) {
+        return refused(action.actionId, "GROUNDING_GEOMETRY_CHANGED", "UIA element reference was created for an older window geometry");
+      }
+      if (Math.abs(action.point.x - resolved.point.x) > 0.01 || Math.abs(action.point.y - resolved.point.y) > 0.01) {
+        return refused(action.actionId, "GROUNDING_POINT_MISMATCH", "grounding click point does not match the current element bounds");
+      }
+      requestAction = { ...action, point: resolved.point };
+    }
     let request: { name: string; arguments: Record<string, unknown> };
     try {
       request = actionRequest(
-        action,
+        requestAction,
         current.label,
         current.windowBinding,
         this.options.windowDeliveryMode,
@@ -364,6 +420,7 @@ export class CuaDriverComputer implements Computer {
     this.observations.forEach((_value, key) => {
       if (_value.sessionId === String(session.id)) this.observations.delete(key);
     });
+    this.groundings.clear();
     this.latestObservationId = undefined;
     const deadline = Date.now() + this.options.cleanupWaitMs;
     try {
@@ -462,6 +519,220 @@ function actionRequest(
     default:
       return assertNever(action);
   }
+}
+
+type GroundingToolResult = {
+  readonly isError?: boolean;
+  readonly degraded?: boolean;
+  readonly structuredJson?: string;
+};
+
+async function readGroundingCatalog(
+  driver: CuaDriverLike,
+  session: string,
+  binding: CuaWindowBinding,
+  viewport: Viewport,
+  observationId: ObservationId,
+  computerSessionId: ComputerSessionDescriptor["id"],
+  signal: AbortSignal,
+): Promise<PrivateGrounding> {
+  const empty = (completeness: "partial" | "unknown", degraded: boolean): PrivateGrounding => ({
+    catalog: {
+      version: "uia-catalog-v1",
+      source: "uia",
+      observationId,
+      computerSessionId,
+      completeness,
+      degraded,
+      maxElements: GROUNDING_MAX_ELEMENTS,
+      elements: [],
+    },
+    elements: new Map(),
+  });
+  let result: GroundingToolResult;
+  try {
+    result = await callTool(driver, "get_window_state", {
+      pid: binding.target.pid,
+      window_id: binding.target.windowId,
+      include_screenshot: false,
+      max_depth: 16,
+      max_elements: GROUNDING_QUERY_MAX_ELEMENTS,
+      session,
+    }, signal);
+  } catch (error) {
+    if (signal.aborted) signal.throwIfAborted();
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    return empty("unknown", true);
+  }
+  if (result.isError === true) return empty("unknown", true);
+  const structured = parseStructuredRecord(result.structuredJson);
+  const rawElements = structured?.elements;
+  if (!Array.isArray(rawElements)) return empty("unknown", true);
+  const parsed = rawElements.flatMap((value, index) => parseGroundingCandidate(value, index, binding, viewport));
+  parsed.sort((left, right) => left.priority - right.priority || left.sortKey.localeCompare(right.sortKey));
+  const selected = parsed.slice(0, GROUNDING_MAX_ELEMENTS);
+  const elements = new Map<string, { readonly element: GroundingElement; readonly point: { readonly x: number; readonly y: number }; readonly geometry: CuaWindowGeometry }>();
+  const publicElements = selected.map((candidate, index) => {
+    const elementRef = `uia-${groundingObservationDiscriminator(observationId)}-${index + 1}`;
+    const element: GroundingElement = { ...candidate.element, elementRef };
+    elements.set(elementRef, { element, point: candidate.point, geometry: binding.bounds });
+    return element;
+  });
+  const explicitlyComplete = structured?.complete === true || structured?.elements_complete === true;
+  const truncated = structured?.truncated === true || structured?.degraded === true || rawElements.length > GROUNDING_MAX_ELEMENTS;
+  const completeness = explicitlyComplete && !truncated ? "complete" : "partial";
+  return {
+    catalog: {
+      version: "uia-catalog-v1",
+      source: "uia",
+      observationId,
+      computerSessionId,
+      completeness,
+      degraded: Boolean(result.degraded) || structured?.degraded === true || structured?.truncated === true,
+      maxElements: GROUNDING_MAX_ELEMENTS,
+      elements: publicElements,
+    },
+    elements,
+  };
+}
+
+interface GroundingCandidate {
+  readonly element: Omit<GroundingElement, "elementRef">;
+  readonly point: { readonly x: number; readonly y: number };
+  readonly priority: number;
+  readonly sortKey: string;
+}
+
+function parseGroundingCandidate(
+  value: unknown,
+  index: number,
+  binding: CuaWindowBinding,
+  viewport: Viewport,
+): GroundingCandidate[] {
+  const item = parseStructuredRecord(value);
+  if (item === undefined) return [];
+  const role = boundedGroundingLabel(item.role, 64);
+  const frame = parseGroundingFrame(item.frame);
+  if (role === undefined || frame === undefined) return [];
+  // UIA frames are desktop/global coordinates in the native window space.
+  // First translate to window-local native pixels, then map into the actual
+  // screenshot viewport. The screenshot can be smaller than native bounds
+  // because of client capture/DPI scaling; treating the native frame as an
+  // image coordinate would apply the scale twice during execution.
+  const localNative = {
+    x: frame.x - binding.bounds.x,
+    y: frame.y - binding.bounds.y,
+    width: frame.width,
+    height: frame.height,
+  };
+  const scaled = {
+    x: localNative.x * viewport.width / binding.bounds.width,
+    y: localNative.y * viewport.height / binding.bounds.height,
+    width: localNative.width * viewport.width / binding.bounds.width,
+    height: localNative.height * viewport.height / binding.bounds.height,
+  };
+  const clipped = intersectGroundingFrame(scaled, viewport.width, viewport.height);
+  if (clipped === undefined) return [];
+  const name = boundedGroundingLabel(item.name ?? item.label ?? item.title, 160);
+  const description = boundedGroundingLabel(item.description ?? item.help_text, 240);
+  const state = groundingState(item);
+  const element: Omit<GroundingElement, "elementRef"> = {
+    role,
+    ...(name === undefined ? {} : { name }),
+    ...(description === undefined ? {} : { description }),
+    bbox: { ...clipped, coordinateSpace: "physical" },
+    ...(state === undefined ? {} : { state }),
+  };
+  const point = { x: clipped.x + clipped.width / 2, y: clipped.y + clipped.height / 2 };
+  const priority = state?.enabled === false
+    ? 20
+    : state?.editable === true
+      ? 0
+      : state?.focused === true
+        ? 1
+        : state?.enabled === true && name !== undefined
+          ? 2
+          : name === undefined ? 4 : 3;
+  return [{ element, point, priority, sortKey: `${role}\u0000${name ?? ""}\u0000${index.toString().padStart(8, "0")}` }];
+}
+
+function groundingState(item: Record<string, unknown>): GroundingElement["state"] | undefined {
+  const enabled = booleanField(item, "enabled") ?? booleanField(item, "is_enabled");
+  const focused = booleanField(item, "focused") ?? booleanField(item, "is_focused");
+  const editable = booleanField(item, "editable") ?? booleanField(item, "is_editable");
+  const expanded = booleanField(item, "expanded") ?? booleanField(item, "is_expanded");
+  const selected = booleanField(item, "selected") ?? booleanField(item, "checked") ?? booleanField(item, "is_selected");
+  const value = item.value;
+  const valuePresent = value !== undefined && value !== null && (typeof value !== "string" || value.length > 0);
+  if (enabled === undefined && focused === undefined && editable === undefined && expanded === undefined && selected === undefined && !valuePresent) return undefined;
+  return {
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(focused === undefined ? {} : { focused }),
+    ...(editable === undefined ? {} : { editable }),
+    ...(expanded === undefined ? {} : { expanded }),
+    ...(selected === undefined ? {} : { selected }),
+    ...(valuePresent ? { valuePresent: true } : {}),
+  };
+}
+
+function parseGroundingFrame(value: unknown): CuaWindowGeometry | undefined {
+  const item = parseStructuredRecord(value);
+  if (item === undefined) return undefined;
+  const x = finiteNumber(item.x);
+  const y = finiteNumber(item.y);
+  const width = finiteNumber(item.width ?? item.w);
+  const height = finiteNumber(item.height ?? item.h);
+  return x === undefined || y === undefined || width === undefined || height === undefined || width <= 0 || height <= 0
+    ? undefined
+    : { x, y, width, height };
+}
+
+function intersectGroundingFrame(
+  frame: CuaWindowGeometry,
+  viewportWidth: number,
+  viewportHeight: number,
+): { x: number; y: number; width: number; height: number } | undefined {
+  const left = Math.max(0, frame.x);
+  const top = Math.max(0, frame.y);
+  const right = Math.min(viewportWidth, frame.x + frame.width);
+  const bottom = Math.min(viewportHeight, frame.y + frame.height);
+  return right <= left || bottom <= top ? undefined : { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function boundedGroundingLabel(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F]/gu, " ")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
+    .replace(/\b1\d{10}\b/gu, "[redacted-phone]")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return normalized.length === 0 ? undefined : normalized.slice(0, maxLength);
+}
+
+function booleanField(item: Record<string, unknown>, ...keys: string[]): boolean | undefined {
+  for (const key of keys) if (typeof item[key] === "boolean") return item[key] as boolean;
+  return undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function groundingObservationDiscriminator(observationId: ObservationId): string {
+  return createHash("sha256").update(String(observationId)).digest("hex").slice(0, 12);
+}
+
+function parseStructuredRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
 /**

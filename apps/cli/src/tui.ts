@@ -41,6 +41,7 @@ export interface TuiFeatureSelection {
   contextMode: "raw" | "recent";
   riskGuard: RiskGuardMode;
   monitor: "off" | "shadow" | "guidance";
+  grounding: "off" | "uia-catalog-v1";
 }
 
 interface TuiInput extends NodeJS.ReadableStream {
@@ -332,6 +333,11 @@ export async function runApplicationTui(
     }
     if (featureSelection.memoryRetrieval === "hybrid" && activeMetadata.embeddingReady !== true) {
       notice = "Hybrid retrieval needs --memory-embedding-endpoint and MEMORY_EMBEDDING_API_KEY before starting.";
+      render();
+      return;
+    }
+    if (featureSelection.grounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
+      notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
       render();
       return;
     }
@@ -1091,6 +1097,7 @@ const tuiFeatureRows = [
   { label: "Context history", values: ["raw", "recent"] as const },
   { label: "Risk Guard", values: ["off", "layered"] as const },
   { label: "Progress Monitor", values: ["off", "shadow", "guidance"] as const },
+  { label: "UIA grounding", values: ["off", "uia-catalog-v1"] as const },
 ] as const;
 
 function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined, defaultRiskGuard: RiskGuardMode = "layered"): TuiFeatureSelection {
@@ -1102,6 +1109,7 @@ function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined,
     contextMode: features?.contextMode ?? "raw",
     riskGuard: features?.riskGuard ?? defaultRiskGuard,
     monitor: features?.monitor ?? "off",
+    grounding: features?.grounding ?? "off",
   };
 }
 
@@ -1118,6 +1126,7 @@ function featureOverrides(
     contextMode: features.contextMode,
     riskGuard: features.riskGuard,
     monitor: features.monitor,
+    grounding: features.grounding,
     ...(windowTarget === undefined ? {} : { windowTarget }),
     ...(windowDeliveryMode === undefined ? {} : { windowDeliveryMode }),
   };
@@ -1138,7 +1147,9 @@ function changeTuiFeature(features: TuiFeatureSelection, rowIndex: number, delta
           ? "contextMode"
           : rowIndex === 5
             ? "riskGuard"
-            : "monitor";
+            : rowIndex === 6
+              ? "monitor"
+              : "grounding";
   const current = features[key] as string | boolean;
   if (typeof current === "boolean") return { ...features, [key]: !current } as TuiFeatureSelection;
   const currentIndex = row.values.indexOf(current as never);
@@ -1153,12 +1164,13 @@ function featureValue(features: TuiFeatureSelection, rowIndex: number): string {
   if (rowIndex === 3) return features.batching;
   if (rowIndex === 4) return features.contextMode;
   if (rowIndex === 5) return features.riskGuard;
-  return features.monitor;
+  if (rowIndex === 6) return features.monitor;
+  return features.grounding;
 }
 
 function formatTuiFeatures(features: TuiFeatureSelection | undefined, defaultRiskGuard?: RiskGuardMode): string {
   const normalized = normalizeTuiFeatureSelection(features, defaultRiskGuard);
-  return `plan=${normalized.planning ? "on" : "off"}, memory=${normalized.memory}/${normalized.memoryRetrieval}, batch=${normalized.batching}, context=${normalized.contextMode}, guard=${normalized.riskGuard}, monitor=${normalized.monitor}`;
+  return `plan=${normalized.planning ? "on" : "off"}, memory=${normalized.memory}/${normalized.memoryRetrieval}, batch=${normalized.batching}, context=${normalized.contextMode}, guard=${normalized.riskGuard}, monitor=${normalized.monitor}, grounding=${normalized.grounding}`;
 }
 
 function formatCuaTarget(metadata: TuiMetadata): string {
@@ -1241,6 +1253,7 @@ function uiFeatureHint(features: TuiFeatureSelection): string {
   if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
   if (features.riskGuard === "off") return "Risk Guard is disabled for the next Run; schema/policy/budget/stale checks remain active.";
   if (features.monitor === "guidance") return "Guidance is advisory only; it cannot execute, approve or retry actions.";
+  if (features.grounding === "uia-catalog-v1") return "UIA grounding requires an explicit CUA window target; click_element references expire after each observation.";
   return "Provider and Computer are selected by the launch command; this page changes Run features only.";
 }
 

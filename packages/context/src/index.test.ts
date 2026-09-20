@@ -73,6 +73,40 @@ describe("DefaultContextCompiler", () => {
     expect(input.contextBudget?.trace?.projectedEventIds).not.toContain("event-1");
   });
 
+  it("projects a bounded observation grounding catalog near the current image and records its budget trace", async () => {
+    const latest = {
+      ...observation("obs-grounding"),
+      grounding: {
+        version: "uia-catalog-v1" as const,
+        source: "uia" as const,
+        observationId: "obs-grounding" as ObservationId,
+        computerSessionId: sessionId,
+        completeness: "partial" as const,
+        degraded: false,
+        maxElements: 16,
+        elements: [{
+          elementRef: "uia-1",
+          role: "ComboBox",
+          name: "Departure time",
+          bbox: { x: 100, y: 200, width: 80, height: 24, coordinateSpace: "physical" as const },
+          state: { enabled: true, editable: false },
+        }],
+      },
+    };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "choose a departure time",
+      recentEvents: [event(0, { type: "observation.created", observation: latest })],
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const grounding = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("UIA grounding")));
+    expect(grounding).toBeDefined();
+    expect(grounding?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("ref=uia-1") });
+    expect(input.contextBudget?.trace?.grounding).toMatchObject({ present: true, projected: true, completeness: "partial", candidateElementCount: 1, projectedElementCount: 1 });
+    expect(input.contextBudget?.estimatedGroundingTokens).toBeGreaterThan(0);
+    expect(input.contextBudget?.groundingIncluded).toBe(true);
+  });
+
   it("rejects a shortcut that disagrees with the latest observation event and honors cancellation", async () => {
     const latest = observation("obs-latest");
     const other = observation("obs-other");

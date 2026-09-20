@@ -8,3 +8,4 @@ export * from "./action-effect-projection.js";
 export * from "./run-controller.js";
 export * from "./committed-events.js";
 export * from "./monitor-policy.js";
+export * from "./grounding-selector.js";

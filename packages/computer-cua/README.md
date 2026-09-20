@@ -32,4 +32,11 @@ wheel `amount`。Transport 失败后 session 进入失效状态，调用方必�
 Host picker 可以通过 `CuaWindowDiscovery.listWindows()` 获取只读的窗口身份与本地显示标签。
 选择结果必须在每个 Run 中显式传入；新窗口、tab、popup 或 PID/window_id 重建不会自动接管。
 
+UIA grounding 是显式实验开关：`grounding: "uia-catalog-v1"` 必须与 `windowTarget` 一起使用。
+每次 window observation 会额外以 depth 16 读取 UIA window state，并返回最多 256 个脱敏安全候选；Runtime 在落盘前确定性选择最多 16 个 hot elements 到
+`ObservationCapture.grounding`；原始树、PID/HWND、snapshot token 和控件 value 留在 Adapter
+内部或被丢弃。`click_element` 由 Runtime 从当前目录映射为普通 click，Adapter 再校验其
+observation/geometry-bound ref；旧 ref、resize、重建或 UIA 查询失败不会静默回退到坐标点击。
+默认 `off`，primary desktop 与 OSWorld 不调用 UIA。
+
 真实 daemon contract test 属于 S3-4，不由这个 package 的 fake-driver 单元测试替代。

@@ -58,6 +58,7 @@ import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.
 import type { CommittedEventListener } from "./committed-events.js";
 import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange, type ProgressMonitorState } from "./progress-monitor.js";
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
+import { DeterministicGroundingSelector, type GroundingSelector } from "./grounding-selector.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -95,6 +96,8 @@ export interface RunControllerDependencies {
   features?: RunFeatureConfig;
   /** Disabled by default so the existing one-computer-call baseline is stable. */
   batching?: "off" | "same-control-input-v1";
+  /** Runtime-owned, deterministic hot-element projection; Computer stays context-agnostic. */
+  groundingSelector?: GroundingSelector;
   /** Total wall-clock budget shared by event-writer and Computer cleanup. */
   cleanupDeadlineMs?: number;
   onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
@@ -291,6 +294,7 @@ export class RunController {
   private readonly planningEnabled: boolean;
   private readonly memoryMutationApplier: ((runId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
   private readonly batching: "off" | "same-control-input-v1";
+  private readonly groundingSelector: GroundingSelector;
   private readonly features: RunFeatureConfig;
   private readonly monitorMode: MonitorPolicyMode;
   private readonly cleanupDeadlineMs: number;
@@ -344,6 +348,7 @@ export class RunController {
     this.enabledToolNames = dependencies.enabledToolNames === undefined ? undefined : new Set(dependencies.enabledToolNames);
     this.memoryMutationApplier = dependencies.memoryMutationApplier;
     this.batching = dependencies.batching ?? "off";
+    this.groundingSelector = dependencies.groundingSelector ?? new DeterministicGroundingSelector();
     this.features = dependencies.features ?? {
       planning: this.enabledCategories.has("planning") ? "tasks-v1" : "off",
       memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
@@ -1737,6 +1742,27 @@ export class RunController {
     } catch (error) {
       throw new ObservationCaptureError(error);
     }
+    if (capture.grounding !== undefined) {
+      if (capture.grounding.observationId !== observationId || capture.grounding.computerSessionId !== session.id) {
+        throw new ObservationCaptureError(new Error("GROUNDING_CAPTURE_MISMATCH: grounding catalog is not bound to the current observation and computer session"));
+      }
+    }
+    const grounding = capture.grounding === undefined
+      ? undefined
+      : this.groundingSelector.select(capture.grounding, {
+          goal: this.goal ?? "",
+          latestUserCorrections: this.events
+            .filter((event): event is Extract<RuntimeEvent, { type: "user.input.received" }> => event.type === "user.input.received")
+            .slice(-4)
+            .map((event) => event.text),
+          ...(() => {
+            const activePlanText = this.snapshot.plan.tasks
+              .filter((task) => task.status !== "completed")
+              .map((task) => `${task.subject}: ${task.description}`)
+              .join("\n");
+            return activePlanText.length === 0 ? {} : { activePlanText };
+          })(),
+        });
     const extension = capture.screenshot.mediaType === "image/jpeg" ? "jpg" : "png";
     const asset = await this.assetStore.put({
       assetId,
@@ -1751,6 +1777,7 @@ export class RunController {
       capturedAt: capture.capturedAt,
       viewport: capture.viewport,
       screenshot: asset,
+      ...(grounding === undefined ? {} : { grounding }),
     };
     const persisted = await this.commitEvent({ type: "observation.created", observation });
     if (persisted.type !== "observation.created") {

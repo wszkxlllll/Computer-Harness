@@ -9,7 +9,7 @@ import type {
 } from "@computer-harness/runtime";
 import { createHash } from "node:crypto";
 import { decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
-import type { RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
+import type { GroundingCatalog, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
 import { composeSystemPrompt, formatMemory, formatPlan } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
@@ -106,7 +106,13 @@ export class DefaultContextCompiler implements ContextCompiler {
     let monitorGuidanceText = rawMonitorGuidanceText;
     let monitorGuidanceIncluded = rawMonitorGuidanceText !== undefined;
     let monitorGuidanceOmittedReason: "budget" | undefined;
-    let historyBudget = maxInputTokens === undefined ? undefined : maxInputTokens - estimatedFixedTextTokens - rawMonitorGuidanceTokens;
+    const groundingCatalog = input.latestObservation?.grounding;
+    const groundingCandidate = groundingCatalog === undefined ? undefined : formatGroundingCatalog(groundingCatalog);
+    let groundingText = groundingCandidate?.text;
+    let groundingIncluded = groundingText !== undefined;
+    let groundingOmittedByBudget = false;
+    const rawGroundingTokens = groundingCandidate?.estimatedTokens ?? 0;
+    let historyBudget = maxInputTokens === undefined ? undefined : maxInputTokens - estimatedFixedTextTokens - rawMonitorGuidanceTokens - rawGroundingTokens;
     if (maxInputTokens !== undefined) {
       const fixedBudget = maxInputTokens - estimatedFixedTextTokens;
       if (fixedBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
@@ -114,14 +120,21 @@ export class DefaultContextCompiler implements ContextCompiler {
         monitorGuidanceText = undefined;
         monitorGuidanceIncluded = false;
         monitorGuidanceOmittedReason = "budget";
-        historyBudget = fixedBudget;
       }
+      const availableAfterMonitor = fixedBudget - (monitorGuidanceIncluded ? rawMonitorGuidanceTokens : 0);
+      if (groundingIncluded && rawGroundingTokens > availableAfterMonitor) {
+        groundingText = undefined;
+        groundingIncluded = false;
+        groundingOmittedByBudget = true;
+      }
+      historyBudget = availableAfterMonitor - (groundingIncluded ? rawGroundingTokens : 0);
       if (historyBudget === undefined || historyBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
       selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
     }
     const monitorGuidanceTokens = monitorGuidanceIncluded && monitorGuidanceText !== undefined
       ? estimateTextTokens(monitorGuidanceText)
       : 0;
+    const groundingTokens = groundingIncluded && groundingText !== undefined ? estimateTextTokens(groundingText) : 0;
     const latestEventObservation = findLatestObservation(orderedEvents);
     if (input.latestObservation !== undefined &&
       (latestEventObservation === undefined || input.latestObservation.id !== latestEventObservation.id)) {
@@ -218,6 +231,10 @@ export class DefaultContextCompiler implements ContextCompiler {
       messages.push({ role: "user", content: [{ type: "text", text: monitorGuidanceText }] });
     }
 
+    if (groundingText !== undefined && groundingIncluded) {
+      messages.push({ role: "user", content: [{ type: "text", text: groundingText }] });
+    }
+
     if (latestObservation !== undefined) {
       messages.push({
         role: "user",
@@ -231,7 +248,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
     const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents);
-    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + monitorGuidanceTokens;
+    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + monitorGuidanceTokens + groundingTokens;
     if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
       throw new Error("Context history exceeds maxInputTokens after selection");
     }
@@ -283,6 +300,20 @@ export class DefaultContextCompiler implements ContextCompiler {
           revalidation: memoryProjection.recall.revalidation,
         },
       }),
+      ...(groundingCatalog === undefined ? {} : {
+        grounding: {
+          present: true,
+          projected: groundingIncluded,
+          truncated: groundingOmittedByBudget || (groundingCandidate?.truncated ?? false),
+          completeness: groundingCatalog.completeness,
+          candidateElementCount: groundingCandidate?.candidateElementCount ?? groundingCatalog.elements.length,
+          projectedElementCount: groundingCandidate?.projectedElementCount ?? 0,
+          estimatedTokens: rawGroundingTokens,
+          ...(groundingCandidate?.strategy === undefined ? {} : { strategy: groundingCandidate.strategy }),
+          ...(groundingCandidate?.selectedElementRefs === undefined ? {} : { selectedElementRefs: groundingCandidate.selectedElementRefs }),
+          ...(groundingCandidate?.selectionReasons === undefined ? {} : { selectionReasons: groundingCandidate.selectionReasons }),
+        },
+      }),
       observationIncluded: latestObservation !== undefined,
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? {
         monitorGuidanceIncluded,
@@ -302,6 +333,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
       ...(memoryText === undefined ? {} : { estimatedMemoryTokens: memoryEstimatedTokens, memoryMaxTokens: input.context?.memoryMaxTokens ?? this.memoryMaxTokens }),
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? { estimatedMonitorGuidanceTokens: monitorGuidanceTokens, monitorGuidanceIncluded } : {}),
+      ...(groundingCatalog === undefined ? {} : { estimatedGroundingTokens: groundingTokens, groundingIncluded }),
       trace,
     };
     return {
@@ -315,4 +347,71 @@ export class DefaultContextCompiler implements ContextCompiler {
 
 function estimateTextTokens(value: string): number {
   return Math.ceil(value.length / 4);
+}
+
+interface GroundingProjection {
+  readonly text: string;
+  readonly estimatedTokens: number;
+  readonly truncated: boolean;
+  readonly candidateElementCount: number;
+  readonly projectedElementCount: number;
+  readonly strategy: "deterministic-lexical-v1" | "adapter-bounded-v1";
+  readonly selectedElementRefs: readonly string[];
+  readonly selectionReasons: readonly { elementRef: string; codes: readonly string[] }[];
+}
+
+function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection {
+  const candidates = [...catalog.elements];
+  // Runtime has already applied the observation-bound hot-set selector. Keep
+  // the persisted order here; Context must not silently select a second,
+  // potentially different set from the one validated by click_element.
+  const projected = candidates.slice(0, Math.min(catalog.maxElements, 16));
+  const lines = [
+    `UIA grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing):`,
+    ...projected.map((element) => {
+      const box = element.bbox === undefined
+        ? "bbox=unknown"
+        : `bbox=[${round(element.bbox.x)},${round(element.bbox.y)},${round(element.bbox.width)},${round(element.bbox.height)}]`;
+      const label = element.name === undefined ? "" : ` name="${compactLabel(element.name, 96)}"`;
+      const description = element.description === undefined ? "" : ` description="${compactLabel(element.description, 120)}"`;
+      const states = element.state === undefined ? "" : ` state=${formatGroundingState(element.state)}`;
+      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${label}${description} ${box}${states}`;
+    }),
+  ];
+  const text = lines.join("\n");
+  return {
+    text,
+    estimatedTokens: estimateTextTokens(text),
+    truncated: catalog.selection?.truncated ?? projected.length < candidates.length,
+    candidateElementCount: catalog.selection?.candidateElementCount ?? candidates.length,
+    projectedElementCount: projected.length,
+    strategy: catalog.selection?.strategy ?? "adapter-bounded-v1",
+    selectedElementRefs: catalog.selection?.selectedElementRefs ?? projected.map((element) => element.elementRef),
+    selectionReasons: catalog.selection?.reasons ?? [],
+  };
+}
+
+function formatGroundingState(state: NonNullable<GroundingCatalog["elements"][number]["state"]>): string {
+  const values: string[] = [];
+  if (state.enabled !== undefined) values.push(`enabled=${state.enabled}`);
+  if (state.focused !== undefined) values.push(`focused=${state.focused}`);
+  if (state.editable !== undefined) values.push(`editable=${state.editable}`);
+  if (state.expanded !== undefined) values.push(`expanded=${state.expanded}`);
+  if (state.selected !== undefined) values.push(`selected=${state.selected}`);
+  if (state.valuePresent !== undefined) values.push(`valuePresent=${state.valuePresent}`);
+  return values.join(",");
+}
+
+function compactLabel(value: string, maxLength: number): string {
+  return value
+    .replace(/[\u0000-\u001F\u007F]/gu, " ")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
+    .replace(/\b1\d{10}\b/gu, "[redacted-phone]")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function round(value: number): number {
+  return Math.round(value * 100) / 100;
 }

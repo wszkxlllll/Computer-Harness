@@ -12,6 +12,8 @@ export type ComputerBackendConfig =
       windowTarget?: { pid: number; windowId: number };
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
+      /** Optional UIA grounding sidecar; requires this explicit window target. */
+      grounding?: "off" | "uia-catalog-v1";
     }
   | {
       kind: "osworld";
@@ -79,5 +81,6 @@ export async function createComputer(
     screenshotDir: config.screenshotDir,
     ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
     ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
+    ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
   });
 }

@@ -212,4 +212,50 @@ describe("ApplicationSession", () => {
       await rm(outputDir, { recursive: true, force: true });
     }
   });
+
+  it("normalizes per-Run grounding into the Computer adapter and clears it when toggled off", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-grounding-"));
+    const owner = new InProcessEnvironmentOwner();
+    const capturedGrounding: Array<string | undefined> = [];
+    const viewport: Viewport = { width: 2, height: 2, coordinateSpace: "physical" };
+    const provider: ProviderAdapter = { id: "grounding-fixture-provider", async generate() { return { type: "finish", summary: "done" }; } };
+    const createComputer = vi.fn(async (options: { config: ResolvedRunConfig["computer"] }) => {
+      if (options.config.kind !== "cua") throw new Error("expected CUA config");
+      capturedGrounding.push(options.config.grounding);
+      const computerSession: ComputerSession = {
+        id: `grounding-session-${capturedGrounding.length}` as ComputerSessionId,
+        backend: "fixture",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: options.config.grounding === "uia-catalog-v1" },
+        openedAt: "2026-09-21T00:00:00.000Z",
+      };
+      return {
+        async open() { return computerSession; },
+        async observe() { return { capturedAt: "2026-09-21T00:00:00.000Z", viewport, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) } }; },
+        async execute(_session: ComputerSession, action: import("@computer-harness/protocol").ActionIntent) { return { actionId: action.actionId, status: "completed" as const }; },
+        async close() {},
+      } satisfies Computer;
+    });
+    const config: ApplicationSessionConfig = {
+      ...baseConfig(outputDir),
+      computer: { kind: "cua", socketPath: "grounding-pipe", screenshotDir: join(outputDir, "screens") },
+      grounding: "off",
+    };
+    try {
+      const session = new ApplicationSession({
+        config,
+        owner,
+        dependencies: { createProvider: () => provider, createComputer },
+      });
+      await session.startRun("UIA Run", { windowTarget: { pid: 1234, windowId: 5678 }, grounding: "uia-catalog-v1" });
+      await session.waitForActiveRun();
+      await session.startRun("grounding off Run", { grounding: "off" });
+      await session.waitForActiveRun();
+      expect(capturedGrounding).toEqual(["uia-catalog-v1", "off"]);
+      await expect(session.startRun("missing target", { windowTarget: null, grounding: "uia-catalog-v1" })).rejects.toThrow(/explicit CUA window target/iu);
+      expect(capturedGrounding).toEqual(["uia-catalog-v1", "off"]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -2,6 +2,7 @@ export {
   CuaDriverComputer,
   type CuaDriverComputerOptions,
   type CuaDriverFactory,
+  type CuaGroundingMode,
   type CuaWindowDeliveryMode,
 } from "./cua-driver-computer.js";
 export {
