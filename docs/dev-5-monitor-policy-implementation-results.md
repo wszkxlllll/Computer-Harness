@@ -47,4 +47,4 @@ pnpm run typecheck
 
 早期 online 接入的专项证据为 runtime/context/trajectory/CLI focused 5 files / 123 tests，后续 `ba97878`/`eec591c` 定点回归为 147/149 及独立 173 项专项通过；上轮集成后全仓 full 为 36 files/389 tests，typecheck、CLI help、锁文件安装和 diff-check 通过，但这些不是本次最终重跑。未调用真实 API/桌面/VM，Monitor 误报/漏报、视觉特征和真实 guidance/help 效果仍未验收。
 
-当前行为摘要：`monitor=off` 默认不创建状态、不写事件、不改 Context；`shadow` 仅记录脱敏候选；`guidance` 只在完整 action→ToolResult→post-observation 边界后进入下一轮动态 Context，受预算约束；过时候选只 clear，unknown/approval/未决副作用屏障优先。`eec591c` 关闭了合法 multi-call turn 中 deferred help 未及时停止的问题；这些边界修复不等于开放域页面停滞检测或产品效果证明。
+当前行为摘要：`monitor=off` 默认不创建状态、不写事件、不改 Context；`shadow` 仅记录脱敏候选；`guidance` 通过完整 action→ToolResult→post-observation→`monitor.transition` 边界进入下一轮动态 Context，`unchanged` 证据可立即产生下一轮提示并受预算约束；过时候选只 clear，unknown/approval/未决副作用屏障优先。`guidance` 模式下同一 post-observation 上重复的相同动作在驱动执行前被有限拒绝，`shadow` 不拒绝。`eec591c` 关闭了合法 multi-call turn 中 deferred help 未及时停止的问题；这些边界修复不等于开放域页面停滞检测或产品效果证明。

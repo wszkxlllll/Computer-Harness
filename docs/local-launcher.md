@@ -27,12 +27,13 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 
 进入 TUI 首页后：
 
-- 按 `F` 配置下一次 Run 的 Planning、Memory、检索、Batch、Context 和 Monitor；
+- 按 `F` 配置下一次 Run 的 Planning、Memory、检索、Batch、Context、Risk Guard 和 Monitor；
+- 按 `W` 打开只读窗口列表，按应用名/标题选择下一次 Run 的窗口，或选择 primary desktop；
 - 按 `I` 或 `Enter` 输入目标；
 - `Y/N` 处理审批，`P/R` 暂停/恢复，`A` 或 `Ctrl-C` 中止当前 Run；
 - `Esc/Q` 退出。
 
-默认 `assisted` 预设启用 Planning、Fact Memory、本地 lexical retrieval、受限输入 Batch、recent Context 和 Monitor shadow。Risk Guard 由 TUI 的 `live-interactive` profile 默认启用。可显式切换：
+默认 `assisted` 预设启用 Planning、Fact Memory、本地 lexical retrieval、受限输入 Batch、recent Context、Monitor shadow 和 layered Risk Guard。`research` 预设默认关闭 Risk Guard，以免研究/联调被逐次审批阻断；TUI 的 `F` 页面仍可为下一次 Run 切换 `off`/`layered`。可显式切换：
 
 ```powershell
 .\scripts\harness.ps1 start -Preset baseline
@@ -41,6 +42,16 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 ```
 
 `baseline` 关闭这些实验模块；`research` 使用 Entity Memory 和 Monitor guidance，适合功能联调，不代表效果更好。
+
+启动器的 `-RiskGuard off` / `-RiskGuard layered` 可覆盖预设，并同时写入 Run 配置与报告；`off` 只关闭风险评估、审批和风险模型请求，仍保留工具参数校验、Policy/audience、预算、Abort、stale observation、窗口 geometry/coordinate 和未知副作用保护。直接调用 CLI 时对应使用 `--risk-guard off --confirm-risk-guard-off`。
+
+调试或受控 fixture 已经取得目标窗口的 PID 和 window ID 时，可以显式绑定窗口目标：
+
+```powershell
+.\scripts\harness.ps1 start -CuaWindowPid <pid> -CuaWindowId <window-id>
+```
+
+两个参数必须成对提供；省略它们时保持 primary desktop 默认路径。它们是脚本/调试接口，不要求日常用户手填编号，显式编号入口默认background。日常 TUI 在输入goal前先按 `Esc` 退出编辑，再按 `W` 打开只读窗口列表，按应用名/标题选择；菜单选窗明确使用foreground预览，可能激活目标且不保证自动恢复原前台。选择持续到用户主动修改，列表不可用或窗口关闭会明确报错，不自动改成desktop。窗口动作能力以[最新实测边界](./travel-pilot-preparation-2026-09-20.md#115-无人工输入的窗口重测与放行边界)为准。
 
 ## 排查命令
 

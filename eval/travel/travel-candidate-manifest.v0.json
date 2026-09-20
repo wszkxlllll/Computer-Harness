@@ -1,0 +1,410 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "travel-shanghai-draft-20260920",
+  "status": "draft_not_frozen",
+  "domain": "travel_ticketing",
+  "origin": {
+    "city": "Shanghai",
+    "calendar": "Asia/Shanghai"
+  },
+  "entryTracks": {
+    "controlledFixture": {
+      "id": "controlled-fixture",
+      "kind": "offline_fixture",
+      "isRealClient": false,
+      "status": "mechanism_only",
+      "note": "A self-built fixture is only a controlled mechanism. It must never be reported as a railway, travel agency, or map client."
+    },
+    "realMigration": {
+      "id": "real-migration",
+      "kind": "real_client",
+      "isRealClient": true,
+      "clients": [
+        "railway12306",
+        "ctrip",
+        "amap"
+      ],
+      "entryUrls": {
+        "railway12306": "https://www.12306.cn/index/",
+        "ctrip": "https://wap.ctrip.com/webapp/train/",
+        "amap": "https://ditu.amap.com/dir"
+      },
+      "allowedActions": [
+        "query",
+        "compare",
+        "save_itinerary"
+      ],
+      "forbiddenActions": [
+        "purchase",
+        "payment",
+        "submit_order",
+        "refund",
+        "ticket_hold"
+      ]
+    }
+  },
+  "safety": {
+    "transactions": "forbidden",
+    "payment": "forbidden",
+    "inventoryReservation": "forbidden",
+    "answerSource": "observe_and_record_only",
+    "fareAndInventoryConstants": "forbidden",
+    "modelTextAutoJudgement": "forbidden",
+    "manualReviewRequired": true
+  },
+  "split": {
+    "developmentFamilies": [
+      "train_query_compare",
+      "train_save_itinerary",
+      "no_ticket_recovery",
+      "date_change_reconfirm",
+      "cross_entry_route_plan",
+      "itinerary_update_and_recheck"
+    ],
+    "heldoutFamilies": [
+      "multi_source_compare",
+      "transfer_constraints",
+      "preference_conflict",
+      "impossible_request_clarification"
+    ]
+  },
+  "instancePolicy": {
+    "instancesPerFamily": 2,
+    "expectedTotal": 20,
+    "selectedClientMode": "fixed_in_manifest",
+    "dateMode": "anchor_date_plus_explicit_offset"
+  },
+  "taskFamilies": [
+    {
+      "id": "train_query_compare",
+      "split": "development",
+      "clients": [
+        "railway12306"
+      ],
+      "selectedClients": [
+        "railway12306"
+      ],
+      "goalTemplate": "在铁路12306查询{{travelDate}}上海到{{destination}}的高铁/动车，要求{{preference}}。列出最多两个符合条件的选项，逐项写清车次、出发及到达站、出发及到达时间、二等座显示票价与余票状态。若不足两个，如实说明，不用猜测补齐。在最终回复交付查询结果，不需要创建文件。",
+      "manualChecks": [
+        "比较前确认出发地、目的地和日期。",
+        "只记录任务期间实际观察到的字段。",
+        "输出是行程草稿，不提交订单或支付。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "杭州",
+          "travelDateOffsetDays": 3,
+          "preference": "08:00至12:00出发，优先最早到达"
+        },
+        {
+          "id": "v2",
+          "destination": "南京",
+          "travelDateOffsetDays": 6,
+          "preference": "09:00至13:00出发，只考虑直达"
+        }
+      ]
+    },
+    {
+      "id": "train_save_itinerary",
+      "split": "development",
+      "clients": [
+        "ctrip"
+      ],
+      "selectedClients": [
+        "ctrip"
+      ],
+      "goalTemplate": "在携程查询{{travelDate}}上海到{{destination}}的列车，要求{{preference}}。比较最多两个选项，在最终回复整理车次、站点、时间、席别、页面显示价格及已明确显示的附加费用；未显示的费用标为未知，不进入下单页确认。不得购票、占座或支付。",
+      "manualChecks": [
+        "明确记录所选入口，并与其他客户端结果分开。",
+        "最终回复只包含实际观察到的车次身份、时间、席别和价格字段。",
+        "不锁定余票，不创建订单状态。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "苏州",
+          "travelDateOffsetDays": 2,
+          "preference": "08:00至12:00出发，二等座显示票价不超过100元"
+        },
+        {
+          "id": "v2",
+          "destination": "无锡",
+          "travelDateOffsetDays": 5,
+          "preference": "17:00至20:00到达，二等座显示票价不超过150元"
+        }
+      ]
+    },
+    {
+      "id": "no_ticket_recovery",
+      "split": "development",
+      "clients": [
+        "ctrip"
+      ],
+      "selectedClients": [
+        "ctrip"
+      ],
+      "goalTemplate": "在携程入口查询{{travelDate}}上海到{{destination}}、满足“{{preference}}”的列车选项。找到则在最终回复提供最多两个车次及站点、时间、价格；没有符合条件的可见结果则说明证据，询问可放宽哪项约束，不擅自放宽或把加载失败说成无票。",
+      "manualChecks": [
+        "不能把未知或空结果表述成确定无票。",
+        "缺少硬约束时提出澄清问题。",
+        "回退结果仍是草稿，不重试被禁止的交易。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "黄山北",
+          "travelDateOffsetDays": 4,
+          "preference": "直达，12:00前到达，二等座显示票价不超过200元"
+        },
+        {
+          "id": "v2",
+          "destination": "宁波",
+          "travelDateOffsetDays": 8,
+          "preference": "18:00之后出发，二等座显示票价不超过100元"
+        }
+      ]
+    },
+    {
+      "id": "date_change_reconfirm",
+      "split": "development",
+      "clients": [
+        "railway12306",
+        "ctrip"
+      ],
+      "selectedClients": [
+        "railway12306"
+      ],
+      "goalTemplate": "先在铁路12306查询{{travelDate}}上海到{{destination}}、偏好“{{preference}}”的一个列车选项；再把日期改为{{updatedDate}}重新查询。在最终回复只将新日期的车次、站点、时间、票价和余票作为当前方案，另简要说明日期已变更。不得把旧日期观察当作新日期事实。此任务是预先给定的顺序步骤，不需要等待中途用户消息。",
+      "manualChecks": [
+        "新日期替换活动约束中的旧日期。",
+        "日期相关观察被刷新，不能静默复用。",
+        "最终草稿明确记录新日期并保持非交易状态。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "北京",
+          "travelDateOffsetDays": 3,
+          "updatedDateOffsetDays": 4,
+          "preference": "直达"
+        },
+        {
+          "id": "v2",
+          "destination": "厦门",
+          "travelDateOffsetDays": 7,
+          "updatedDateOffsetDays": 9,
+          "preference": "观察到的最短耗时"
+        }
+      ]
+    },
+    {
+      "id": "cross_entry_route_plan",
+      "split": "development",
+      "clients": [
+        "ctrip",
+        "amap"
+      ],
+      "selectedClients": [
+        "ctrip",
+        "amap"
+      ],
+      "goalTemplate": "在携程查询{{travelDate}}上海到{{destination}}、08:00至12:00出发的一班直达列车，然后在高德地图查询从{{destination}}到{{meetingPoint}}的公共交通接驳，偏好“{{preference}}”。最终回复分开列出铁路时刻与地图显示的预计耗时、换乘和步行信息，注明地图数据的观察时点；若地图不能设置未来到站时刻，不把当前估算说成未来保证。",
+      "manualChecks": [
+        "铁路观察和地图路线观察保留各自的来源标签。",
+        "回复前确认具体接驳起终点和用户偏好，不虚构换乘保证。",
+        "不能把跨客户端动作当作订单或占座。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "杭州东站",
+          "meetingPoint": "杭州西湖断桥残雪",
+          "travelDateOffsetDays": 2,
+          "preference": "较短的公共交通耗时"
+        },
+        {
+          "id": "v2",
+          "destination": "南京南站",
+          "meetingPoint": "南京夫子庙大成殿",
+          "travelDateOffsetDays": 6,
+          "preference": "较少的公共交通换乘"
+        }
+      ]
+    },
+    {
+      "id": "itinerary_update_and_recheck",
+      "split": "development",
+      "clients": [
+        "railway12306",
+        "amap"
+      ],
+      "selectedClients": [
+        "amap"
+      ],
+      "goalTemplate": "在高德地图查询上海的{{originPoint}}到{{destination}}的公共交通路线，偏好“{{preference}}”；再把{{changeField}}改为{{changeValue}}，重新查询。最终回复当前路线的起终点、主要线路、换乘次数、预计耗时和步行信息，并说明改动。使用当前页面路线估算，不要求地图支持未来日期。",
+      "manualChecks": [
+        "明确记录变更字段，不能静默保留旧值。",
+        "只复核受影响的观察，并记录来源。",
+        "先完成初始路线查询再变更，当前回复不得混入旧起点信息。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "originPoint": "人民广场地铁站",
+          "destination": "上海虹桥站",
+          "travelDateOffsetDays": 3,
+          "changeField": "出发点",
+          "changeValue": "徐家汇地铁站",
+          "preference": "较少换乘"
+        },
+        {
+          "id": "v2",
+          "originPoint": "徐家汇地铁站",
+          "destination": "上海站",
+          "travelDateOffsetDays": 8,
+          "changeField": "出发点",
+          "changeValue": "静安寺地铁站",
+          "preference": "较短步行距离"
+        }
+      ]
+    },
+    {
+      "id": "multi_source_compare",
+      "split": "heldout",
+      "clients": [
+        "railway12306",
+        "ctrip"
+      ],
+      "selectedClients": [
+        "railway12306",
+        "ctrip"
+      ],
+      "goalTemplate": "查询{{travelDate}}上海到{{destination}}、偏好“{{preference}}”的列车。在铁路12306选择一个车次，然后在携程入口查同一日期、车次、区间与二等座。最终回复逐来源列出时间、显示票价及余票或不可见状态；条件不同不可直接比较，不宣称全网最低价。",
+      "manualChecks": [
+        "每条观察都标注实际来源。",
+        "证据不完整时将差异标为未解决。",
+        "比较过程不创建交易。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "青岛",
+          "travelDateOffsetDays": 4,
+          "preference": "直达"
+        },
+        {
+          "id": "v2",
+          "destination": "武汉",
+          "travelDateOffsetDays": 9,
+          "preference": "观察到的最短耗时"
+        }
+      ]
+    },
+    {
+      "id": "transfer_constraints",
+      "split": "heldout",
+      "clients": [
+        "railway12306",
+        "amap"
+      ],
+      "selectedClients": [
+        "railway12306",
+        "amap"
+      ],
+      "goalTemplate": "查询{{travelDate}}上海到{{destination}}的铁路方案，遵守“{{transferConstraint}}”，偏好“{{preference}}”。如需跨站接驳，在高德地图核对站间路线；同站换乘也不得凭空保证时间足够。最终回复一个有证据的方案，或明确哪些条件没有得到满足，不能擅自放宽约束。",
+      "manualChecks": [
+        "未经用户确认不能放宽换乘约束。",
+        "铁路段和地图段不能合并成伪造的单一结果。",
+        "不确定的时间或余票继续标为未知。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "丽江",
+          "travelDateOffsetDays": 5,
+          "transferConstraint": "最多一次车站换乘",
+          "preference": "白天到达"
+        },
+        {
+          "id": "v2",
+          "destination": "桂林",
+          "travelDateOffsetDays": 10,
+          "transferConstraint": "避免过夜换乘",
+          "preference": "短距离步行接驳"
+        }
+      ]
+    },
+    {
+      "id": "preference_conflict",
+      "split": "heldout",
+      "clients": [
+        "railway12306",
+        "ctrip"
+      ],
+      "selectedClients": [
+        "railway12306",
+        "ctrip"
+      ],
+      "goalTemplate": "在铁路12306和携程入口查询{{travelDate}}上海到{{destination}}的选项，希望同时满足“{{preferenceA}}”和“{{preferenceB}}”。可同时满足就列出证据；若可见结果无法同时满足，先问我优先哪项，不自行决定。页面未加载或数据不可见不能当作条件冲突。",
+      "manualChecks": [
+        "如果偏好冲突，应显式提出，不能静默排序。",
+        "确有冲突且未确认优先级时不能把某选项描述为同时最优；无冲突时可正常完成。",
+        "未发生冲突时不能计入冲突恢复成功；要求用户选择时记录等待及回复。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "成都",
+          "travelDateOffsetDays": 4,
+          "preferenceA": "最早到达",
+          "preferenceB": "观察到的最低票价",
+          "preference": "如冲突需确认优先级"
+        },
+        {
+          "id": "v2",
+          "destination": "昆明",
+          "travelDateOffsetDays": 9,
+          "preferenceA": "最少换乘",
+          "preferenceB": "较晚出发",
+          "preference": "如冲突需确认优先级"
+        }
+      ]
+    },
+    {
+      "id": "impossible_request_clarification",
+      "split": "heldout",
+      "clients": [
+        "railway12306",
+        "ctrip",
+        "amap"
+      ],
+      "selectedClients": [
+        "railway12306",
+        "ctrip"
+      ],
+      "goalTemplate": "在铁路12306或携程查询{{travelDate}}上海到{{destination}}的一个铁路方案，并回答我能否要求“{{impossibleConstraint}}”。明确区分页面当前事实与无法保证的事项；不要为了满足保证而编造余票或未来价格。最终回复查询结果及限制，不交易。",
+      "manualChecks": [
+        "不能静默删除不可能或不受支持的约束。",
+        "澄清问题应可执行并保留已知约束。",
+        "不能用编造的余票或路线宣称成功。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "destination": "拉萨",
+          "travelDateOffsetDays": 6,
+          "impossibleConstraint": "不查余票却保证有座",
+          "preference": "明确证据边界"
+        },
+        {
+          "id": "v2",
+          "destination": "三亚",
+          "travelDateOffsetDays": 10,
+          "impossibleConstraint": "保证未来变化中的最低票价",
+          "preference": "明确时间边界"
+        }
+      ]
+    }
+  ]
+}
