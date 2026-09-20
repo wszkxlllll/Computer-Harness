@@ -48,6 +48,7 @@ export async function buildRunReport(
     memoryRetrieval,
     batching: config.batching,
     monitor: config.monitor ?? "off",
+    grounding: config.grounding ?? "off",
     cleanupDeadlineMs: config.cleanupDeadlineMs,
     riskProfile: config.riskProfile,
     riskGuard: config.riskGuard,

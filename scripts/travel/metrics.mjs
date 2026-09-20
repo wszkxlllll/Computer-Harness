@@ -18,6 +18,7 @@ export const TRAVEL_RUN_ROOT = resolve(REPO_ROOT, "runs", "travel");
 
 const GUI_TOOL_NAMES = new Set([
   "click",
+  "click_element",
   "double_click",
   "right_click",
   "type",
@@ -733,6 +734,128 @@ function createMonitorMetrics(events, context) {
   };
 }
 
+function numericSummary(values) {
+  const known = values.filter((value) => typeof value === "number" && Number.isFinite(value));
+  if (known.length === 0) return { count: 0, total: null, average: null, max: null };
+  const total = known.reduce((sum, value) => sum + value, 0);
+  return { count: known.length, total, average: total / known.length, max: Math.max(...known) };
+}
+
+/**
+ * Grounding evidence is intentionally operational rather than semantic: it
+ * reports catalog exposure, selector/context projection and click_element
+ * lifecycle without deciding whether a route/task was correct.
+ */
+function createGroundingMetrics(events, summary) {
+  const completeness = {};
+  const degraded = { true: 0, false: 0 };
+  const truncated = { true: 0, false: 0 };
+  const contextProjected = { true: 0, false: 0 };
+  const contextTruncated = { true: 0, false: 0 };
+  const selectionStrategies = {};
+  const selectionReasonCodes = {};
+  const candidateCounts = [];
+  const projectedCounts = [];
+  const estimatedTokens = [];
+  const clickCallIds = new Set();
+  const clickActionIds = new Map();
+  const refusalCodesByCall = new Map();
+  const refusalCodes = {};
+  const clickElement = { received: 0, completed: 0, rejected: 0, failed: 0 };
+  let observationsWithCatalog = 0;
+  let contextTraces = 0;
+
+  for (const event of events) {
+    if (event.type === "observation.created") {
+      const catalog = isRecord(event.observation?.grounding) ? event.observation.grounding : null;
+      if (catalog === null) continue;
+      observationsWithCatalog += 1;
+      increment(completeness, catalog.completeness);
+      if (typeof catalog.degraded === "boolean") incrementBoolean(degraded, catalog.degraded);
+      const elements = Array.isArray(catalog.elements) ? catalog.elements : [];
+      const selection = isRecord(catalog.selection) ? catalog.selection : null;
+      if (selection !== null) {
+        if (typeof selection.truncated === "boolean") incrementBoolean(truncated, selection.truncated);
+        if (typeof selection.strategy === "string") increment(selectionStrategies, selection.strategy);
+        if (typeof selection.candidateElementCount === "number" && Number.isFinite(selection.candidateElementCount)) candidateCounts.push(selection.candidateElementCount);
+        if (Array.isArray(selection.reasons)) {
+          for (const reason of selection.reasons) {
+            if (!isRecord(reason) || !Array.isArray(reason.codes)) continue;
+            for (const code of reason.codes) increment(selectionReasonCodes, code);
+          }
+        }
+      } else {
+        incrementBoolean(truncated, false);
+        candidateCounts.push(elements.length);
+      }
+      projectedCounts.push(elements.length);
+    }
+    if (event.type === "model.request.started") {
+      const grounding = event.contextBudget?.trace?.grounding;
+      if (!isRecord(grounding)) continue;
+      contextTraces += 1;
+      if (typeof grounding.projected === "boolean") incrementBoolean(contextProjected, grounding.projected);
+      if (typeof grounding.truncated === "boolean") incrementBoolean(contextTruncated, grounding.truncated);
+      if (typeof grounding.candidateElementCount === "number" && Number.isFinite(grounding.candidateElementCount)) candidateCounts.push(grounding.candidateElementCount);
+      if (typeof grounding.projectedElementCount === "number" && Number.isFinite(grounding.projectedElementCount)) projectedCounts.push(grounding.projectedElementCount);
+      if (typeof grounding.estimatedTokens === "number" && Number.isFinite(grounding.estimatedTokens)) estimatedTokens.push(grounding.estimatedTokens);
+      if (typeof grounding.strategy === "string") increment(selectionStrategies, grounding.strategy);
+      if (Array.isArray(grounding.selectionReasons)) {
+        for (const reason of grounding.selectionReasons) {
+          if (!isRecord(reason) || !Array.isArray(reason.codes)) continue;
+          for (const code of reason.codes) increment(selectionReasonCodes, code);
+        }
+      }
+    }
+    if (event.type === "tool.call.received" && event.call?.name === "click_element") {
+      clickElement.received += 1;
+      if (typeof event.call.id === "string") clickCallIds.add(event.call.id);
+    } else if ((event.type === "tool.call.completed" || event.type === "tool.call.failed") && typeof event.result?.callId === "string" && clickCallIds.has(event.result.callId)) {
+      if (event.type === "tool.call.completed") clickElement.completed += 1;
+      else {
+        clickElement.failed += 1;
+        recordRefusal(refusalCodesByCall, refusalCodes, event.result.callId, event.result.error?.code);
+      }
+    } else if (event.type === "tool.call.rejected" && typeof event.callId === "string" && clickCallIds.has(event.callId)) {
+      clickElement.rejected += 1;
+      recordRefusal(refusalCodesByCall, refusalCodes, event.callId, "TOOL_REJECTED");
+    } else if (event.type === "action.proposed" && typeof event.callId === "string" && clickCallIds.has(event.callId) && typeof event.action?.actionId === "string") {
+      clickActionIds.set(event.action.actionId, event.callId);
+    } else if ((event.type === "action.execution.completed" || event.type === "action.execution.failed") && typeof event.receipt?.actionId === "string" && clickActionIds.has(event.receipt.actionId) && typeof event.receipt?.driverCode === "string") {
+      const callId = clickActionIds.get(event.receipt.actionId);
+      recordRefusal(refusalCodesByCall, refusalCodes, callId, event.receipt.driverCode);
+    }
+  }
+  return {
+    mode: stringOrNull(summary?.grounding),
+    observationsWithCatalog,
+    completeness: sortedEntries(completeness),
+    degraded,
+    truncated,
+    context: {
+      traces: contextTraces,
+      projected: contextProjected,
+      truncated: contextTruncated,
+    },
+    candidateElementCount: numericSummary(candidateCounts),
+    projectedElementCount: numericSummary(projectedCounts),
+    estimatedGroundingTokens: numericSummary(estimatedTokens),
+    selectionStrategies: sortedEntries(selectionStrategies),
+    selectionReasonCodes: sortedEntries(selectionReasonCodes),
+    clickElement: {
+      ...clickElement,
+      refusalCodes: sortedEntries(refusalCodes),
+    },
+  };
+}
+
+function recordRefusal(refusalCodesByCall, refusalCodes, callId, code) {
+  if (typeof code !== "string" || code.length === 0) return;
+  if (typeof callId === "string" && refusalCodesByCall.has(callId)) return;
+  if (typeof callId === "string") refusalCodesByCall.set(callId, code);
+  increment(refusalCodes, code);
+}
+
 function createGuardMetrics(events) {
   const decisions = {};
   const categories = {};
@@ -823,6 +946,7 @@ function buildMetrics({ trial, summary, trajectory }) {
   const modules = createToolModuleMetrics(events, actions);
   const monitor = createMonitorMetrics(events, context);
   const guard = createGuardMetrics(events);
+  const grounding = createGroundingMetrics(events, isRecord(summary) ? summary : null);
   const humanControl = createHumanControlMetrics(events);
   const knownUsage = normalizeUsage(usageTotal, summaryUsage);
   const runId = runIds.length === 1 ? runIds[0] : null;
@@ -878,6 +1002,7 @@ function buildMetrics({ trial, summary, trajectory }) {
     batch: eventDataAvailable ? createBatchMetrics(events) : null,
     monitor: eventDataAvailable ? monitor : null,
     guard: eventDataAvailable ? guard : null,
+    grounding: eventDataAvailable ? grounding : null,
     humanControl: eventDataAvailable ? humanControl : null,
   };
 }

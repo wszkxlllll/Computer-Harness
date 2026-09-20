@@ -81,6 +81,16 @@ runs/travel/tui-<本次TUI会话>/
 | summary.json | Runtime结果、模型自述与配置等原始汇总；其中modelSummary是最终文字来源之一 | Harness |
 | trajectory.jsonl | 事件时间线，包括执行、失败、暂停、恢复、已接收输入等，供后续定位 | Harness |
 
+如果本轮启用了 UIA grounding，`metrics.json.grounding` 只记录可观测的基础设施证据，不替代人工业务评分：
+
+- `mode`：以本轮 `summary.json` 的实际配置为准；
+- `observationsWithCatalog`、`completeness`、`degraded`、`truncated`：UIA 目录是否出现、是否完整/降级/被裁剪；
+- `candidateElementCount`、`projectedElementCount`、`estimatedGroundingTokens`：候选、进入观察/Context 的元素数量和估算成本；
+- `selectionStrategies`、`selectionReasonCodes`：Runtime selector 是否运行及采用的确定性原因，不包含控件原文和值；
+- `clickElement`：`received/completed/rejected/failed` 与可关联的拒绝码，例如 stale ref；不推断点击是否完成业务目标。
+
+UIA catalog 缺失不等于任务失败；反之 `click_element` completed 也不等于路线或报告正确。把这些指标和 `manual-review.md` 中的实际点击、最终结果、错误点击及人工纠正一起交给后续分析。
+
 比如T01，理想调查结果应有“日期、实际出发/到达站、车次、时刻、二等座显示价格、余票状态”和不足两个选项时的说明；**不是只有‘任务已完成’一句话**。如果模型只说完成、缺少关键字段，你在人工表记为结果不完整，不需要自己替模型补成一份合格报告。
 
 如果显示取消/失败或没最终报告，仍检查该Run的metrics/轨迹和人工表。数秒后文件仍缺失时，保留Run目录并告诉我错误；不要靠再跑一次掩盖第一次失败。补收集方法在实施入口第9节。

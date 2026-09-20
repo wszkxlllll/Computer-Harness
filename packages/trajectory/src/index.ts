@@ -629,6 +629,50 @@ const assetRefSchema = z.object({
   mediaType: nonEmptyString,
   byteLength: z.number().int().nonnegative(),
 });
+const groundingBoundingBoxSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().finite().nonnegative(),
+  height: z.number().finite().nonnegative(),
+  coordinateSpace: z.literal("physical"),
+});
+const groundingElementStateSchema = z.object({
+  enabled: z.boolean().optional(),
+  focused: z.boolean().optional(),
+  editable: z.boolean().optional(),
+  expanded: z.boolean().optional(),
+  selected: z.boolean().optional(),
+  valuePresent: z.boolean().optional(),
+});
+const groundingElementSchema = z.object({
+  elementRef: nonEmptyString.max(96),
+  role: nonEmptyString.max(64),
+  name: z.string().max(160).optional(),
+  description: z.string().max(240).optional(),
+  bbox: groundingBoundingBoxSchema.optional(),
+  state: groundingElementStateSchema.optional(),
+});
+const groundingSelectionTraceSchema = z.object({
+  strategy: z.literal("deterministic-lexical-v1"),
+  candidateElementCount: z.number().int().nonnegative(),
+  selectedElementRefs: z.array(nonEmptyString.max(96)).max(16),
+  truncated: z.boolean(),
+  reasons: z.array(z.object({
+    elementRef: nonEmptyString.max(96),
+    codes: z.array(nonEmptyString.max(64)).max(8),
+  })).max(16),
+});
+const groundingCatalogSchema = z.object({
+  version: z.literal("uia-catalog-v1"),
+  source: z.literal("uia"),
+  observationId: nonEmptyString,
+  computerSessionId: nonEmptyString,
+  completeness: z.enum(["complete", "partial", "unknown"]),
+  degraded: z.boolean(),
+  maxElements: z.number().int().positive().max(256),
+  elements: z.array(groundingElementSchema).max(256),
+  selection: groundingSelectionTraceSchema.optional(),
+});
 const observationSchema = z.object({
   id: nonEmptyString,
   runId: nonEmptyString,
@@ -636,6 +680,7 @@ const observationSchema = z.object({
   capturedAt: nonEmptyString,
   viewport: viewportSchema,
   screenshot: assetRefSchema,
+  grounding: groundingCatalogSchema.optional(),
 });
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -687,6 +732,7 @@ const modelTurnSchema = z.union([
 const actionBaseSchema = {
   actionId: nonEmptyString,
   basedOn: nonEmptyString,
+  groundingRef: nonEmptyString.max(96).optional(),
 };
 const actionIntentSchema = z.discriminatedUnion("kind", [
   z.object({ ...actionBaseSchema, kind: z.literal("click"), point: pointSchema }),
@@ -810,6 +856,21 @@ const contextTraceSchema = z.object({
     admitted: z.array(z.object({ id: nonEmptyString, score: z.number().finite(), match: z.enum(["exact", "lexical", "semantic"]) })),
     revalidation: z.array(z.object({ id: nonEmptyString, score: z.number().finite(), match: z.enum(["exact", "lexical", "semantic"]), reason: z.enum(["needs_check", "short_lived_last_known"]).optional() })),
   }).optional(),
+  grounding: z.object({
+    present: z.boolean(),
+    projected: z.boolean(),
+    truncated: z.boolean(),
+    completeness: z.enum(["complete", "partial", "unknown"]),
+    candidateElementCount: z.number().int().nonnegative(),
+    projectedElementCount: z.number().int().nonnegative(),
+    estimatedTokens: z.number().int().nonnegative(),
+    strategy: z.enum(["deterministic-lexical-v1", "adapter-bounded-v1"]).optional(),
+    selectedElementRefs: z.array(nonEmptyString.max(96)).max(16).optional(),
+    selectionReasons: z.array(z.object({
+      elementRef: nonEmptyString.max(96),
+      codes: z.array(nonEmptyString.max(64)).max(8),
+    })).max(16).optional(),
+  }).optional(),
   observationIncluded: z.boolean(),
   monitorGuidanceIncluded: z.boolean().optional(),
   monitorGuidanceOmittedReason: z.literal("budget").optional(),
@@ -863,6 +924,8 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       memoryMaxTokens: z.number().int().positive().optional(),
       estimatedMonitorGuidanceTokens: z.number().int().nonnegative().optional(),
       monitorGuidanceIncluded: z.boolean().optional(),
+      estimatedGroundingTokens: z.number().int().nonnegative().optional(),
+      groundingIncluded: z.boolean().optional(),
       trace: contextTraceSchema.optional(),
     }).optional(),
   }),

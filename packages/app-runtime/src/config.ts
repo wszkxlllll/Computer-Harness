@@ -48,6 +48,8 @@ export interface ResolvedRunConfig {
   contextMaxInputTokens?: number;
   riskProfile: "experiment" | "live-interactive";
   riskGuard: "off" | "layered";
+  /** Defaults to off; uia-catalog-v1 is valid only for an explicit CUA window. */
+  grounding?: "off" | "uia-catalog-v1";
   riskModel: AppRuntimeRiskModel;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;
