@@ -31,6 +31,11 @@ export interface TuiMetadata {
   features?: TuiFeatureSelection;
   /** True only when the explicit endpoint and independent key are present. */
   embeddingReady?: boolean;
+  /** Explicit managed-browser URL; only its host is rendered in the TUI. */
+  managedBrowserUrl?: string;
+  /** Managed profile lifecycle; paths are never rendered. */
+  managedBrowserProfileMode?: "ephemeral" | "persistent";
+  managedBrowserProfileLabel?: string;
 }
 
 export interface TuiFeatureSelection {
@@ -41,7 +46,7 @@ export interface TuiFeatureSelection {
   contextMode: "raw" | "recent";
   riskGuard: RiskGuardMode;
   monitor: "off" | "shadow" | "guidance";
-  grounding: "off" | "uia-catalog-v1";
+  grounding: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
 }
 
 interface TuiInput extends NodeJS.ReadableStream {
@@ -340,6 +345,18 @@ export async function runApplicationTui(
       notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
       render();
       return;
+    }
+    if (isManagedGrounding(featureSelection.grounding)) {
+      if (activeMetadata.computer !== "cua") {
+        notice = "DOM/Hybrid grounding requires the CUA computer and shared CUA socket; choose off/UIA or relaunch with --computer cua.";
+        render();
+        return;
+      }
+      if (!isHttpUrl(activeMetadata.managedBrowserUrl)) {
+        notice = "DOM/Hybrid grounding requires --managed-browser-url <http(s)-url>; choose off/UIA or relaunch with an explicit URL.";
+        render();
+        return;
+      }
     }
     invoke(async () => {
       const handle = await session.startRun(trimmed, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode));
@@ -1097,7 +1114,7 @@ const tuiFeatureRows = [
   { label: "Context history", values: ["raw", "recent"] as const },
   { label: "Risk Guard", values: ["off", "layered"] as const },
   { label: "Progress Monitor", values: ["off", "shadow", "guidance"] as const },
-  { label: "UIA grounding", values: ["off", "uia-catalog-v1"] as const },
+  { label: "Grounding", values: ["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"] as const },
 ] as const;
 
 function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined, defaultRiskGuard: RiskGuardMode = "layered"): TuiFeatureSelection {
@@ -1118,6 +1135,7 @@ function featureOverrides(
   windowTarget: ApplicationSessionWindowTarget | null | undefined,
   windowDeliveryMode: "background" | "foreground" | null | undefined,
 ): ApplicationSessionRunFeatureOverrides {
+  const managedGrounding = isManagedGrounding(features.grounding);
   return {
     planning: features.planning,
     memory: features.memory,
@@ -1127,8 +1145,12 @@ function featureOverrides(
     riskGuard: features.riskGuard,
     monitor: features.monitor,
     grounding: features.grounding,
-    ...(windowTarget === undefined ? {} : { windowTarget }),
-    ...(windowDeliveryMode === undefined ? {} : { windowDeliveryMode }),
+    ...(managedGrounding
+      ? { windowTarget: null, windowDeliveryMode: null }
+      : {
+          ...(windowTarget === undefined ? {} : { windowTarget }),
+          ...(windowDeliveryMode === undefined ? {} : { windowDeliveryMode }),
+        }),
   };
 }
 
@@ -1205,7 +1227,8 @@ function buildTuiFeaturesFrame(
     `Risk Guard: ${features.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${features.riskGuard}; applies to the next Run)`,
     "Each Run gets fresh tools, Context, Memory and Monitor state.",
     `Embedding config: ${metadata.embeddingReady === true ? "ready" : "not configured (hybrid cannot start)"}`,
-    uiFeatureHint(features),
+    ...(isManagedGrounding(features.grounding) ? [managedBrowserFeatureLine(metadata)] : []),
+    uiFeatureHint(features, metadata),
   ];
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
 }
@@ -1248,13 +1271,43 @@ function windowDisplayLabel(target: WindowTargetInfo): string {
   return `${app} — ${title} (pid=${target.pid}, window=${target.windowId})`;
 }
 
-function uiFeatureHint(features: TuiFeatureSelection): string {
+function uiFeatureHint(features: TuiFeatureSelection, metadata?: TuiMetadata): string {
   if (features.memory === "off" && features.memoryRetrieval !== "off") return "Memory retrieval requires Memory facts or entities; it will be forced off.";
   if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
   if (features.riskGuard === "off") return "Risk Guard is disabled for the next Run; schema/policy/budget/stale checks remain active.";
   if (features.monitor === "guidance") return "Guidance is advisory only; it cannot execute, approve or retry actions.";
   if (features.grounding === "uia-catalog-v1") return "UIA grounding requires an explicit CUA window target; click_element references expire after each observation.";
+  if (isManagedGrounding(features.grounding)) {
+    if (metadata === undefined || !isHttpUrl(metadata.managedBrowserUrl)) return "DOM/Hybrid grounding requires --managed-browser-url <http(s)-url>; the TUI does not edit this value.";
+    return "DOM/Hybrid grounding uses a visible temporary managed-browser profile; personal browser login data is never reused. click_element references expire after each observation.";
+  }
   return "Provider and Computer are selected by the launch command; this page changes Run features only.";
+}
+
+function isManagedGrounding(grounding: TuiFeatureSelection["grounding"]): boolean {
+  return grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
+}
+
+function isHttpUrl(value: string | undefined): boolean {
+  if (value === undefined || value.trim().length === 0) return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function managedBrowserFeatureLine(metadata: TuiMetadata): string {
+  const host = isHttpUrl(metadata.managedBrowserUrl)
+    ? new URL(metadata.managedBrowserUrl!).host
+    : "not configured";
+  const persistent = metadata.managedBrowserProfileMode === "persistent";
+  const profile = persistent
+    ? `persistent Harness-owned profile${metadata.managedBrowserProfileLabel === undefined ? "" : ` label=${metadata.managedBrowserProfileLabel}`}`
+    : "temporary profile";
+  const login = persistent ? "manual login required; Harness never reads credentials" : "no personal login reuse";
+  return `Managed browser: ${profile}; delivery=foreground; ${login}; do not operate this window concurrently; active tab is revalidated each observation (same-tab navigation continues; ambiguous/popup tabs degrade); URL host=${host} (query hidden).`;
 }
 
 function formatEvent(event: RuntimeEvent, width: number): string {

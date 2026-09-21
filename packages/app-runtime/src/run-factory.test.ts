@@ -180,6 +180,68 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("registers the shared click_element tool for managed DOM grounding without exposing the URL", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-dom-grounding-"));
+    const calls = { open: 0, observe: 0, close: 0 };
+    const managedConfig: ResolvedRunConfig = {
+      ...config(outputDir),
+      computer: {
+        kind: "cua",
+        socketPath: "fixture.sock",
+        screenshotDir: "screenshots",
+        managedBrowserUrl: "https://example.test/path?secret=not-for-model",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "fixture",
+        managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles",
+      },
+      grounding: "dom-catalog-v1",
+    };
+    try {
+      const handle = await createRun(managedConfig, {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "managed grounding done" }; } }),
+        createComputer: (options) => {
+          expect(options.config).toMatchObject({ grounding: "dom-catalog-v1", windowDeliveryMode: "foreground", managedBrowserUrl: managedConfig.computer.kind === "cua" ? managedConfig.computer.managedBrowserUrl : undefined, managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles" });
+          return Promise.resolve(fakeComputer(calls));
+        },
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(report.summary.grounding).toBe("dom-catalog-v1");
+      expect(report.summary.computerTarget).toEqual({ mode: "managed-browser", deliveryMode: "foreground" });
+      expect(report.summary.tools).toContain("click_element");
+      expect(report.summary.tools).toEqual(expect.arrayContaining(["type", "keypress", "hotkey", "scroll", "drag"]));
+      expect(JSON.stringify(report.summary)).not.toContain("secret=not-for-model");
+      expect(JSON.stringify(report.summary)).not.toContain("HarnessOwned");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects managed DOM/Hybrid grounding without CUA, URL, or socket before Run assembly", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-dom-grounding-gate-"));
+    try {
+      await expect(createRun({ ...config(outputDir), grounding: "dom-catalog-v1" })).rejects.toThrow(/requires the CUA computer/iu);
+      await expect(createRun({
+        ...config(outputDir),
+        grounding: "hybrid-catalog-v1",
+        computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots" },
+      })).rejects.toThrow(/managedBrowserUrl/iu);
+      await expect(createRun({
+        ...config(outputDir),
+        grounding: "dom-catalog-v1",
+        computer: { kind: "cua", socketPath: "", screenshotDir: "screenshots", managedBrowserUrl: "https://example.test" },
+      })).rejects.toThrow(/non-empty CUA socket/iu);
+      await expect(createRun({
+        ...config(outputDir),
+        grounding: "dom-catalog-v1",
+        computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", managedBrowserUrl: "https://example.test", managedBrowserProfileMode: "persistent" },
+      })).rejects.toThrow(/profile label/iu);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not construct a risk provider or emit Guard work when Guard is off", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-guard-off-"));
     const calls = { provider: 0, open: 0, observe: 0, close: 0 };

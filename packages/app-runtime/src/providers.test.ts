@@ -157,7 +157,7 @@ describe("app-runtime provider factory", () => {
       async post(url, body) {
         request = { url, body };
         return {
-          choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "finish-call", name: "finish", arguments: { text: "done", status: "success" } }] }) } }],
+            choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "finish-call", name: "finish", arguments: { text: "Observed fixture result", status: "success" } }] }) } }],
         };
       },
     };
@@ -171,7 +171,7 @@ describe("app-runtime provider factory", () => {
     });
     const input = finishInput();
     input.tools = [...clickInput().tools, ...input.tools];
-    await expect(provider.generate(input, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", summary: "done", reportedStatus: "success" });
+    await expect(provider.generate(input, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", summary: "Observed fixture result", reportedStatus: "success" });
     expect(request?.url).toBe("https://qwen.strict/v1/chat/completions");
     expect(request?.body).toMatchObject({ model: "qwen3.8-flash", enable_thinking: false, preserve_thinking: false });
     expect(request?.body).not.toHaveProperty("reasoning_effort");

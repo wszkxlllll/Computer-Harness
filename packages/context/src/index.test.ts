@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   AssetId,
+  ActionId,
   ComputerSessionId,
   EventId,
   MemoryState,
@@ -105,6 +106,49 @@ describe("DefaultContextCompiler", () => {
     expect(input.contextBudget?.trace?.grounding).toMatchObject({ present: true, projected: true, completeness: "partial", candidateElementCount: 1, projectedElementCount: 1 });
     expect(input.contextBudget?.estimatedGroundingTokens).toBeGreaterThan(0);
     expect(input.contextBudget?.groundingIncluded).toBe(true);
+  });
+
+  it("projects hybrid provenance and recovery trace through the same catalog", async () => {
+    const latest = {
+      ...observation("obs-hybrid-grounding"),
+      grounding: {
+        version: "grounding-catalog-v2" as const,
+        source: "hybrid" as const,
+        observationId: "obs-hybrid-grounding" as ObservationId,
+        computerSessionId: sessionId,
+        completeness: "partial" as const,
+        degraded: false,
+        maxElements: 16,
+        elements: [{
+          elementRef: "dom-1",
+          role: "button",
+          name: "Route options",
+          source: "dom" as const,
+          browserRegion: "content" as const,
+          bbox: { x: 100, y: 200, width: 80, height: 24, coordinateSpace: "physical" as const },
+          state: { enabled: true },
+        }],
+        selection: {
+          strategy: "bounded-fusion-v1" as const,
+          candidateElementCount: 2,
+          selectedElementRefs: ["dom-1"],
+          truncated: true,
+          reasons: [{ elementRef: "dom-1", codes: ["local_recovery_region", "dom_content_priority"] }],
+          sourceCounts: { uia: 1, dom: 1 },
+          deduplicatedElementCount: 1,
+          recovery: { reason: "no_observed_change" as const, attempt: 1, regionApplied: true, localIntentApplied: true, localIntentSource: "user_correction" as const, actionId: "action-1" as ActionId },
+        },
+      },
+    };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "choose a route",
+      recentEvents: [event(0, { type: "observation.created", observation: latest })],
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const grounding = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("UIA+DOM grounding")));
+    expect(grounding?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("source=dom/content") });
+    expect(input.contextBudget?.trace?.grounding).toMatchObject({ source: "hybrid", strategy: "bounded-fusion-v1", deduplicatedElementCount: 1, recovery: { reason: "no_observed_change", attempt: 1, localIntentSource: "user_correction" } });
   });
 
   it("rejects a shortcut that disagrees with the latest observation event and honors cancellation", async () => {
@@ -366,6 +410,9 @@ describe("DefaultContextCompiler", () => {
     const off = await compiler.compile({ runId, goal: "baseline", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off" } }, new AbortController().signal);
     expect(off.system).not.toContain("Planning tools");
     expect(off.system).not.toContain("Run Memory");
+    expect(off.system).toContain("finish.summary is the user-facing answer");
+    expect(off.system).toContain("Do not return only a status");
+    expect(off.system).not.toContain("recalled Run Memory");
     expect(off.system).toContain("at most one Computer tool call");
     const batch = await compiler.compile({ runId, goal: "batch", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
     expect(batch.system).toContain("state writes");
@@ -374,6 +421,35 @@ describe("DefaultContextCompiler", () => {
     expect(guarded.system).toContain("_harnessEffect");
     expect(guarded.tools.find((tool) => tool.category === "computer")?.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
     expect(guarded.tools.find((tool) => tool.category === "control")?.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
+  });
+
+  it("keeps the completion contract aware of recalled Memory without requiring another model call", async () => {
+    const latest = observation("obs-completion-memory");
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const input = await compiler.compile({
+      runId,
+      goal: "report the observed route and its caveats",
+      recentEvents: [event(0, { type: "observation.created", observation: latest })],
+      latestObservation: latest,
+      memory: {
+        runId,
+        facts: [{
+          id: "route-fact",
+          subject: { type: "run" },
+          key: "route",
+          value: "Observed route; verify before acting",
+          sourceEventId: "event-route" as EventId,
+          status: "active",
+          updatedSequence: 1,
+        }],
+        entities: [],
+      },
+    }, new AbortController().signal);
+
+    expect(input.system).toContain("recalled Run Memory");
+    expect(input.system).toContain("preserve their caveats");
+    expect(JSON.stringify(input.messages)).toContain("route-fact");
+    expect(input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Current run memory")))).toBe(true);
   });
 
   it("recalls active entity facts through the normalized subject link and hides stale entities", () => {

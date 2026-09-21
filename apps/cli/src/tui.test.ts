@@ -150,6 +150,70 @@ describe("TUI renderer", () => {
     await tui;
   });
 
+  it("blocks managed DOM grounding before start when the CLI did not provide a URL", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-dom-grounding/screenshots" });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-dom-grounding",
+      profile: "live-interactive",
+      riskGuard: "layered",
+      features: {
+        planning: false,
+        memory: "off",
+        memoryRetrieval: "off",
+        batching: "off",
+        contextMode: "raw",
+        riskGuard: "layered",
+        monitor: "off",
+        grounding: "dom-catalog-v1",
+      },
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    fixture.input.emit("keypress", "find a control", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    expect(fixture.createRun).not.toHaveBeenCalled();
+    expect(fixture.outputText.join("")).toContain("DOM/Hybrid grounding requires --managed-browser-url");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("shows managed browser mode and host only on the feature page", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-dom-display/screenshots" });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-dom-display",
+      profile: "live-interactive",
+      riskGuard: "layered",
+      managedBrowserUrl: "https://example.test/path?secret=should-not-render",
+      features: {
+        planning: false,
+        memory: "off",
+        memoryRetrieval: "off",
+        batching: "off",
+        contextMode: "raw",
+        riskGuard: "layered",
+        monitor: "off",
+        grounding: "hybrid-catalog-v1",
+      },
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    fixture.input.emit("keypress", "F", { name: "f" });
+    await tick();
+    const rendered = fixture.outputText.join("");
+    expect(rendered).toContain("temporary profile");
+    expect(rendered).toContain("delivery=foreground");
+    expect(rendered).toContain("do not operate this window concurrently");
+    expect(rendered).toContain("example.test");
+    expect(rendered).not.toContain("secret=should-not-render");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
   it("keeps uppercase W in the goal editor and opens the picker after editing ends", async () => {
     const fixture = makePendingCorrectionFixture(async () => undefined, {
       listWindows: async () => [{ pid: 1234, windowId: 5678, appName: "Browser", title: "12306" }],

@@ -39,4 +39,12 @@ UIA grounding 是显式实验开关：`grounding: "uia-catalog-v1"` 必须与 `w
 observation/geometry-bound ref；旧 ref、resize、重建或 UIA 查询失败不会静默回退到坐标点击。
 默认 `off`，primary desktop 与 OSWorld 不调用 UIA。
 
+Managed DOM grounding 使用 CDP 的 CSS viewport frame，但可执行的 DOM
+`click_element` 只在 Hybrid 模式中放行：Adapter 必须从同一 observation 的
+UIA `Document` 候选取得可信 physical content rectangle，再进行独立的 x/y
+scale 与 origin 投影。当前 `dom-catalog-v1` 没有可信 content-rect producer，
+因此保持 degraded empty catalog，不能执行 DOM click；这是一项 fail-closed
+边界，不会根据浏览器窗口 bounds、DPI 或工具栏高度猜坐标。DOM/Hybrid 的
+transport 仍然是 loopback、managed-browser、observation-bound 的只读 sidecar。
+
 真实 daemon contract test 属于 S3-4，不由这个 package 的 fake-driver 单元测试替代。

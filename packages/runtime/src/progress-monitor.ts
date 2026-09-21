@@ -489,7 +489,15 @@ function makeOutput(
  * payload, and unknown/changed evidence never blocks.
  */
 export function shouldRejectRepeatedNoChange(state: ProgressMonitorState, action: ActionIntent): boolean {
-  if (action.kind === "wait" || state.lastTransition?.transition !== "unchanged") return false;
+  // An unchanged screenshot is strong evidence that an exact click target did
+  // not take effect, but it is not proof that keyboard input or scrolling was
+  // invalid.  Repeated type/keypress/scroll actions are often intentional
+  // (for example, entering repeated characters or paging through a long list),
+  // so the deterministic execution guard is limited to discrete click-like
+  // targets.  The Monitor may still report a candidate for other repeated
+  // actions; it must not turn that diagnostic into an automatic rejection.
+  if (action.kind !== "click" && action.kind !== "double_click" && action.kind !== "right_click") return false;
+  if (state.lastTransition?.transition !== "unchanged") return false;
   const partitionKey = actionPartition(state, action);
   if (partitionKey === undefined) return false;
   const signature = actionSignature(action, partitionKey);
