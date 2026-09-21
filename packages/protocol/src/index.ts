@@ -414,6 +414,73 @@ export interface AssetRef {
   byteLength: number;
 }
 
+/** A bounded, redacted UI grounding box in the observation's physical pixels. */
+export interface GroundingBoundingBox {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly coordinateSpace: "physical";
+}
+
+/** Low-sensitivity state that may help a model choose an interaction target. */
+export interface GroundingElementState {
+  readonly enabled?: boolean;
+  readonly focused?: boolean;
+  readonly editable?: boolean;
+  readonly expanded?: boolean;
+  readonly selected?: boolean;
+  /** Only whether a value exists; the value itself is never exposed here. */
+  readonly valuePresent?: boolean;
+}
+
+/**
+ * A model-facing element reference. It is minted by a Computer adapter and is
+ * valid only for this observation/session/target geometry. It is not a CUA
+ * token, PID, HWND, selector, or other backend identity.
+ */
+export interface GroundingElement {
+  readonly elementRef: string;
+  readonly role: string;
+  readonly name?: string;
+  readonly description?: string;
+  readonly bbox?: GroundingBoundingBox;
+  readonly state?: GroundingElementState;
+}
+
+export type GroundingCompleteness = "complete" | "partial" | "unknown";
+
+/** Deterministic, runtime-owned projection metadata for a bounded catalog. */
+export interface GroundingSelectionTrace {
+  readonly strategy: "deterministic-lexical-v1";
+  /** Number of safe adapter candidates before the runtime hot-element cap. */
+  readonly candidateElementCount: number;
+  readonly selectedElementRefs: readonly string[];
+  readonly truncated: boolean;
+  readonly reasons: readonly {
+    readonly elementRef: string;
+    readonly codes: readonly string[];
+  }[];
+}
+
+/**
+ * Bounded sidecar evidence attached to one ObservationFrame. Raw UIA/DOM
+ * trees and backend references stay inside the Computer adapter.
+ */
+export interface GroundingCatalog {
+  readonly version: "uia-catalog-v1";
+  readonly source: "uia";
+  readonly observationId: ObservationId;
+  readonly computerSessionId: ComputerSessionId;
+  readonly completeness: GroundingCompleteness;
+  readonly degraded: boolean;
+  /** Adapter safety cap (currently at most 256); Runtime persists a hot subset. */
+  readonly maxElements: number;
+  readonly elements: readonly GroundingElement[];
+  /** Present when Runtime narrowed an adapter catalog for persistence/Context. */
+  readonly selection?: GroundingSelectionTrace;
+}
+
 export interface ObservationFrame {
   id: ObservationId;
   runId: RunId;
@@ -421,6 +488,7 @@ export interface ObservationFrame {
   capturedAt: string;
   viewport: Viewport;
   screenshot: AssetRef;
+  readonly grounding?: GroundingCatalog;
 }
 
 /** Raw computer output before Runtime persists its screenshot asset. */
@@ -431,6 +499,7 @@ export interface ObservationCapture {
     mediaType: "image/png" | "image/jpeg";
     data: Uint8Array;
   };
+  readonly grounding?: GroundingCatalog;
 }
 
 export type DeclaredActionEffect =
@@ -526,6 +595,8 @@ export type ModelTurn =
 export interface GuiActionBase {
   actionId: ActionId;
   basedOn: ObservationId;
+  /** Adapter-validated opaque grounding reference, when click_element was used. */
+  groundingRef?: string;
 }
 
 export type ActionIntent =
@@ -638,6 +709,20 @@ export interface ContextMemoryRetrievalTrace {
   revalidation: readonly { id: string; score: number; match: "exact" | "lexical" | "semantic"; reason?: "needs_check" | "short_lived_last_known" }[];
 }
 
+/** Redacted accounting for the dynamic Observation grounding projection. */
+export interface ContextGroundingTrace {
+  readonly present: boolean;
+  readonly projected: boolean;
+  readonly truncated: boolean;
+  readonly completeness: GroundingCompleteness;
+  readonly candidateElementCount: number;
+  readonly projectedElementCount: number;
+  readonly estimatedTokens: number;
+  readonly strategy?: "deterministic-lexical-v1" | "adapter-bounded-v1";
+  readonly selectedElementRefs?: readonly string[];
+  readonly selectionReasons?: readonly { elementRef: string; codes: readonly string[] }[];
+}
+
 /** Private diagnostic metadata emitted alongside a prepared Provider request;
  * it contains no body/path, and its hash is not an anonymity guarantee. */
 export interface PreparedRequestEstimate {
@@ -676,6 +761,7 @@ export interface ContextTrace {
   memoryTruncated?: boolean;
   memorySelection?: ContextMemorySelectionTrace;
   memoryRetrieval?: ContextMemoryRetrievalTrace;
+  grounding?: ContextGroundingTrace;
   observationIncluded: boolean;
   monitorGuidanceIncluded?: boolean;
   monitorGuidanceOmittedReason?: "budget";
@@ -688,7 +774,7 @@ export type RuntimeEventData =
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
   | { type: "observation.created"; observation: ObservationFrame }
-  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; trace?: ContextTrace } }
+  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
       type: "model.request.failed";

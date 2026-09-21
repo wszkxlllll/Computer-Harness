@@ -241,6 +241,26 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(String(systemMessage?.content)).toContain("every response must be one JSON object with a non-empty calls array");
   });
 
+  it("keeps click_element in the shared strict schema and parses its opaque ref", async () => {
+    const client = new Client({
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-grounding", name: "click_element", arguments: { elementRef: "uia-1" } }] }) } }],
+    });
+    const groundingInput: ModelInput = {
+      ...input(),
+      tools: [...input().tools, {
+        name: "click_element",
+        description: "Click the current UIA element reference.",
+        category: "computer",
+        inputSchema: { type: "object", properties: { elementRef: { type: "string", maxLength: 96 } }, required: ["elementRef"], additionalProperties: false },
+      }],
+    };
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
+    await expect(adapter.generate(groundingInput, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click_element", arguments: { elementRef: "uia-1" } }] });
+    const schema = (client.body?.response_format as { json_schema: { schema: { properties: { calls: { items: { properties: { name: { enum: string[] } } } } } } } }).json_schema.schema;
+    expect(schema.properties.calls.items.properties.name.enum).toContain("click_element");
+    expect((client.body?.messages as Array<Record<string, unknown>>).find((message) => message.role === "system")?.content).toEqual(expect.stringContaining("click_element"));
+  });
+
   it("parses a strict JSON tool_calls envelope for a permitted short batch", async () => {
     const client = new Client({
       choices: [{ finish_reason: "stop", message: { content: JSON.stringify({

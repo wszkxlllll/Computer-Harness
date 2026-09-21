@@ -8,6 +8,7 @@ import type {
   AssetId,
   ComputerSessionId,
   EventId,
+  GroundingCatalog,
   ModelTurn,
   ObservationFrame,
   ObservationId,
@@ -129,6 +130,56 @@ class RefusingComputer extends FakeComputer {
     signal.throwIfAborted();
     this.calls.push(`execute:${action.kind}`);
     return { actionId: action.actionId, status: "refused", driverCode: "FIXTURE_REFUSED" };
+  }
+}
+
+class MismatchedGroundingComputer extends FakeComputer {
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal): Promise<import("@computer-harness/protocol").ObservationCapture> {
+    const capture = await super.observe(session, observationId, signal);
+    const grounding: GroundingCatalog = {
+      version: "uia-catalog-v1",
+      source: "uia",
+      observationId: "wrong-observation" as ObservationId,
+      computerSessionId: "wrong-session" as ComputerSessionId,
+      completeness: "partial",
+      degraded: false,
+      maxElements: 16,
+      elements: [],
+    };
+    return { ...capture, grounding };
+  }
+}
+
+class ManyGroundingComputer extends FakeComputer {
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal): Promise<import("@computer-harness/protocol").ObservationCapture> {
+    const capture = await super.observe(session, observationId, signal);
+    const elements: GroundingCatalog["elements"] = Array.from({ length: 19 }, (_, index) => ({
+      elementRef: `uia-source-${index}`,
+      role: "Button",
+      name: `Generic action ${index}`,
+      bbox: { x: index, y: index, width: 20, height: 20, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    elements.push({
+      elementRef: "uia-source-target",
+      role: "Button",
+      name: "Departure station",
+      bbox: { x: 100, y: 100, width: 20, height: 20, coordinateSpace: "physical" },
+      state: { enabled: true },
+    });
+    return {
+      ...capture,
+      grounding: {
+        version: "uia-catalog-v1",
+        source: "uia",
+        observationId,
+        computerSessionId: session.id,
+        completeness: "partial",
+        degraded: false,
+        maxElements: 256,
+        elements,
+      },
+    };
   }
 }
 
@@ -567,6 +618,33 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 }
 
 describe("RunController S2-2 happy path", () => {
+  it("selects a bounded goal-relevant grounding hot set before persistence", async () => {
+    const provider = new ScriptedProvider([{ type: "finish", summary: "done" }]);
+    const { controller, directory } = await makeController(provider, new ManyGroundingComputer());
+    await expect(controller.start("Choose the departure station")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    const observation = events.find((event): event is Extract<typeof events[number], { type: "observation.created" }> => event.type === "observation.created")?.observation;
+    expect(observation?.grounding?.elements).toHaveLength(16);
+    expect(observation?.grounding?.elements.some((element) => element.name === "Departure station")).toBe(true);
+    expect(observation?.grounding?.selection).toMatchObject({
+      strategy: "deterministic-lexical-v1",
+      candidateElementCount: 20,
+      truncated: true,
+    });
+    expect(controller.getSnapshot().status).toBe("finished");
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects a grounding sidecar that is not bound to the current observation and session", async () => {
+    const provider = new ScriptedProvider([{ type: "finish", summary: "unused" }]);
+    const computer = new MismatchedGroundingComputer();
+    const { controller, directory } = await makeController(provider, computer);
+    await expect(controller.start("reject orphan grounding")).resolves.toBe("failed");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "runtime.error" && event.message.includes("GROUNDING_CAPTURE_MISMATCH"))).toBe(true);
+    expect(events.filter((event) => event.type === "observation.created")).toHaveLength(0);
+  });
+
   it("persists observe → model → action → observe → finish and links the ToolCall", async () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [clickCall("call-1")] },

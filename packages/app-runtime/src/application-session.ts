@@ -30,7 +30,7 @@ export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
 /** Feature-only overrides selected by an interactive UI for the next Run. */
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
-  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor"
+  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding"
 >> & { windowTarget?: ApplicationSessionWindowTarget | null; windowDeliveryMode?: "background" | "foreground" | null };
 
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";

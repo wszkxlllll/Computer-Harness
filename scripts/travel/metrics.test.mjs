@@ -34,6 +34,17 @@ function completeEvents() {
         capturedAt: occurredAt(2),
         viewport: { width: 100, height: 100, coordinateSpace: "physical" },
         screenshot: { assetId: "asset-1", relativePath: "screenshots/private.png", mediaType: "image/png", byteLength: 1 },
+        grounding: {
+          version: "uia-catalog-v1",
+          source: "uia",
+          observationId: "observation-1",
+          computerSessionId: "session-1",
+          completeness: "partial",
+          degraded: false,
+          maxElements: 16,
+          elements: [{ elementRef: "uia-ref-1", role: "Edit", name: "origin", bbox: { x: 1, y: 2, width: 10, height: 10, coordinateSpace: "physical" }, state: { enabled: true, editable: true } }],
+          selection: { strategy: "deterministic-lexical-v1", candidateElementCount: 20, selectedElementRefs: ["uia-ref-1"], truncated: true, reasons: [{ elementRef: "uia-ref-1", codes: ["query_match", "editable"] }] },
+        },
       },
     }),
     event("model.request.started", 3, {
@@ -85,6 +96,7 @@ function completeEvents() {
             revalidation: [{ id: "fact-recheck", score: 0.5, match: "lexical", reason: "needs_check" }],
           },
           observationIncluded: true,
+          grounding: { present: true, projected: true, truncated: true, completeness: "partial", candidateElementCount: 20, projectedElementCount: 1, estimatedTokens: 25, strategy: "deterministic-lexical-v1", selectedElementRefs: ["uia-ref-1"], selectionReasons: [{ elementRef: "uia-ref-1", codes: ["query_match", "editable"] }] },
           monitorGuidanceIncluded: true,
           preparedRequest: { payloadHash: "payload-hash", estimate: { estimatedTextTokens: 90, imageCount: 1, estimationMethod: "context_report" } },
         },
@@ -192,7 +204,7 @@ test("collects complete base and module evidence without raw payloads", async (t
   const manual = "manual content must remain unchanged\n";
   const trialDirectory = await makeTrial(root, {
     manual,
-    summary: { runId, runtimeOutcome: "succeeded", modelReportedStatus: "success", modelUsage: { inputTokens: 999 } },
+    summary: { runId, runtimeOutcome: "succeeded", modelReportedStatus: "success", grounding: "uia-catalog-v1", modelUsage: { inputTokens: 999 } },
     trajectoryText: `${completeEvents().map((item) => JSON.stringify(item)).join("\n")}\n`,
   });
   const result = await collectTrial(trialDirectory, { root });
@@ -231,11 +243,49 @@ test("collects complete base and module evidence without raw payloads", async (t
   assert.equal(metrics.context.cacheHit, null);
   assert.equal(metrics.context.stablePrefixHashChanges, 2);
   assert.equal(metrics.context.stablePrefixHashDistinct, 2);
+  assert.equal(metrics.grounding.mode, "uia-catalog-v1");
+  assert.equal(metrics.grounding.observationsWithCatalog, 1);
+  assert.equal(metrics.grounding.completeness.partial, 1);
+  assert.equal(metrics.grounding.degraded.false, 1);
+  assert.equal(metrics.grounding.truncated.true, 1);
+  assert.equal(metrics.grounding.candidateElementCount.max, 20);
+  assert.equal(metrics.grounding.projectedElementCount.max, 1);
+  assert.equal(metrics.grounding.estimatedGroundingTokens.total, 25);
+  assert.equal(metrics.grounding.selectionStrategies["deterministic-lexical-v1"], 2);
+  assert.equal(metrics.grounding.selectionReasonCodes.query_match, 2);
   assert.equal(await readFile(join(trialDirectory, "manual-review.md"), "utf8"), manual);
   const serialized = JSON.stringify(metrics);
   assert.equal(serialized.includes("typed-secret"), false);
   assert.equal(serialized.includes("private response text"), false);
   assert.equal(serialized.includes("screenshots/private.png"), false);
+});
+
+test("collects click_element lifecycle and refusal codes without payloads", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-metrics-grounding-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const events = completeEvents().map((item) => item.type === "run.finished" ? { ...item, sequence: 38 } : item);
+  const finishIndex = events.findIndex((item) => item.type === "run.finished");
+  events.splice(finishIndex, 0,
+    event("model.response.received", 31, { requestId: "request-grounding", turn: { type: "tool_calls", calls: [{ id: "click-element-1", name: "click_element", arguments: {} }] } }),
+    event("tool.call.received", 32, { call: { id: "click-element-1", name: "click_element", arguments: {} } }),
+    event("tool.call.completed", 33, { result: { callId: "click-element-1", status: "completed", output: {} } }),
+    event("tool.call.received", 34, { call: { id: "click-element-2", name: "click_element", arguments: {} } }),
+    event("tool.call.failed", 35, { result: { callId: "click-element-2", status: "failed", error: { code: "GROUNDING_REF_STALE", message: "refused" } } }),
+    event("tool.call.received", 36, { call: { id: "click-element-3", name: "click_element", arguments: {} } }),
+    event("tool.call.rejected", 37, { callId: "click-element-3", reason: "refused" }),
+  );
+  const trialDirectory = await makeTrial(root, {
+    summary: { runId, runtimeOutcome: "succeeded", grounding: "uia-catalog-v1" },
+    trajectoryText: `${events.map((item) => JSON.stringify(item)).join("\n")}\n`,
+  });
+  const metrics = await collectTrial(trialDirectory, { root });
+  assert.deepEqual(metrics.grounding.clickElement, {
+    received: 3,
+    completed: 1,
+    rejected: 1,
+    failed: 1,
+    refusalCodes: { GROUNDING_REF_STALE: 1, TOOL_REJECTED: 1 },
+  });
 });
 
 test("keeps valid prefix and reports truncated trajectory plus missing summary as partial", async (t) => {

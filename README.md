@@ -14,6 +14,7 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 | Risk Guard | 实验性 layered Guard；交互 profile 默认开启，实验 profile 默认关闭 |
 | TUI | 无 goal 首页、中文粘贴、暂停/恢复、纠正、审批、Abort、分页回复、退出清理 |
 | CUA window opt-in | TUI 可按应用名/标题选择窗口并使用 foreground 预览；当前实验性开放 click/type/keypress/hotkey/scroll/drag/wait，脚本 PID + window ID 入口仍是 background 的 click/wait |
+| UIA grounding（实验） | 显式 CUA window target 上可选 `uia-catalog-v1`：观察后投影有界、脱敏、Observation-bound 元素目录，并提供 `click_element`；默认关闭，OSWorld/desktop 基线不变 |
 | Monitor | 可选 off/shadow/guidance；记录动作前后 transition，guidance 可阻断同一观察后的完全相同重复动作，但不替模型重新定位 |
 | 诊断 | `--doctor` 无模型、无截图/输入窗口动作且脱敏；会建立并结束临时诊断 session，cleanup 未确认时返回 `unknown` |
 
@@ -24,7 +25,7 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 当前基线由 [PR #7](https://github.com/wszkxlllll/Computer-Harness/pull/7) 收敛，合并前后都应以对应 CI 和提交记录为准。当前本地源码证据包括：
 
 - Node 24 下 `pnpm run typecheck` 通过；
-- `pnpm test`：最近一次离线证据为 37 个测试文件、428 项测试通过；
+- `pnpm test`：最近一次离线证据为 38 个测试文件、447 项测试通过；
 - GitHub CI：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 均通过；
 - GLM/Qwen 合成 Memory 协议探针均完成 `search → admitted/revalidation → admitted-only terminate`，没有真实桌面动作。
 
@@ -114,6 +115,9 @@ node apps/cli/dist/index.js --help
 
 ```text
 node apps/cli/dist/index.js --goal "describe the current screen" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
+
+# Optional UIA grounding experiment; requires a preselected CUA window target.
+node apps/cli/dist/index.js --goal "choose the departure-time control" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --cua-window-pid <pid> --cua-window-id <window-id> --grounding uia-catalog-v1 --output "runs/live-grounding" --env-file ".env"
 ```
 
 OSWorld 需要一个已经通过无模型 Gate 2 的 loopback Bridge；VM、快照和 Python 环境不在本仓库中：
@@ -140,6 +144,7 @@ node apps/cli/dist/index.js --goal "<instruction returned by reset>" --model glm
 | 输出目录 | `runs/live-cli` | CUA screenshot 默认在输出目录下的 `driver-screenshots` |
 | Cleanup / Risk timeout | `5000ms` / `30000ms` | 可分别用 `--cleanup-deadline-ms`、`--risk-timeout-ms` 调整 |
 | Window target | 关闭 | 必须同时提供 `--cua-window-pid` 和 `--cua-window-id` |
+| `--grounding` | `off` | `uia-catalog-v1` 只允许 CUA + 显式 window target；每次 Run 独立，ref 随 Observation/geometry 失效 |
 
 默认组合是 `--planning`/Memory/Batch=`off`、Context=`raw`；非交互 `experiment` profile 的 Guard 默认 `off`，直接使用 `--interactive`/`--tui` 的 `live-interactive` profile 默认 `layered`。本仓库 Windows 启动器的 `research` 预设是联调例外，显式使用 `--risk-guard off --confirm-risk-guard-off`；TUI 的 `F` 页面可为下一次 Run 改回 `layered`。需要改变这些默认值时使用对应开关并记录配置。
 
@@ -171,7 +176,7 @@ node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-soc
 
 `--interactive` 不启动 TUI：它提供行式用户输入和审批；`P`/`R`/`I` 是 TUI 控制，不适用于行式入口。
 
-功能选择页覆盖下一次 Run 的 Planning、Memory、Memory retrieval、Action batching、Context history、Risk Guard 和 Progress Monitor。每次 Run 仍创建新的工具注册表、Context、Memory store、Monitor 和 Guard 生命周期；Provider、Computer 仍由启动参数和 profile 决定。Guard 选择复用 `off`/`layered` 合同；关闭 Guard 只关闭风险评估、审批和风险模型请求，不关闭工具 schema/参数、Policy/audience、budget、Abort、stale observation、窗口 geometry/coordinate 或未知副作用处理。`Memory=entities` 包含 `facts` 的全部工具，再增加实体创建、列出和失效工具；它不是只保存实体而不保存 facts。Hybrid retrieval 只有在 Memory 不是 `off` 且同时配置了独立 embedding endpoint 和 key 时才可用；TUI 会显示配置状态，未配置时阻止该 Run 启动。
+功能选择页覆盖下一次 Run 的 Planning、Memory、Memory retrieval、Action batching、Context history、Risk Guard、Progress Monitor 和 UIA grounding。每次 Run 仍创建新的工具注册表、Context、Memory store、Monitor、Guard 和 grounding 生命周期；Provider、Computer 仍由启动参数和 profile 决定。UIA grounding 只有在已经显式选定 CUA window target 时才能启动；Context 会在当前 observation 附近投影有限的 role/name/bbox/低敏状态，模型可调用 `click_element`，执行后必须重新观察，不能把旧 ref 当作坐标或 backend token。UIA 查询失败保留截图并标记 `unknown/degraded`，不会回退到任意坐标。Guard 选择复用 `off`/`layered` 合同；关闭 Guard 只关闭风险评估、审批和风险模型请求，不关闭工具 schema/参数、Policy/audience、budget、Abort、stale observation、窗口 geometry/coordinate 或未知副作用处理。`Memory=entities` 包含 `facts` 的全部工具，再增加实体创建、列出和失效工具；它不是只保存实体而不保存 facts。Hybrid retrieval 只有在 Memory 不是 `off` 且同时配置了独立 embedding endpoint 和 key 时才可用；TUI 会显示配置状态，未配置时阻止该 Run 启动。
 
 `same-control-input-v1` 是有界 Action Batch，不是任意 open-loop 宏：同一已激活文本控件内只允许 `click→type`、`Ctrl+A→type` 或 `click→Ctrl+A→type` 这类输入序列；不包含 Enter、Tab、提交、导航、scroll、drag、wait 或 state write。Runtime 仍逐动作执行、校验、记事件和 Receipt，并在失败、Abort、失效或观察失败时停止后缀；Plan/Memory 写操作可以与一个 GUI 调用在同一 ModelTurn 中出现，但 Control call 不能混用。关闭 Batch 即回到逐轮基线。
 
@@ -221,7 +226,7 @@ TUI 显式选窗使用 foreground 预览，可用能力以当前 CUA 后端门�
 
 ### UIA / DOM grounding 状态
 
-UIA/Accessibility 目前只完成了私有 daemon + 自有 fixture 的只读 probe（窗口枚举、role/name/frame/部分 state、有限 `verify_state`）；生产 `accessibility` 仍为关闭，未接入 Provider Context，也没有对 Edge、微信或真实小程序覆盖作出承诺。浏览器 DOM grounding 仍是隔离 fixture/设计研究，不是当前产品入口。它们未来应以有界、脱敏、绑定 Observation 的 catalog 作为辅助证据，不替换截图坐标链路，也不应把 probe 通过写成真实桌面成功。
+UIA/Accessibility 已接入一个默认关闭的 CUA window-only 实验入口：观察时以 depth 16、最多 256 个元素读取 `get_window_state`，Adapter 生成有界、脱敏、绑定 Observation 的安全候选，Runtime 再用当前 goal/最近纠正做确定性 lexical 选择，最多把 16 个 hot elements 落入 `GroundingCatalog`/Context。Provider 继续从统一 ToolRegistry 获取 `click_element` schema。执行层只接受当前 observation 的 ref，并将 bbox 中心映射为既有 click ActionIntent；旧 observation、resize、窗口重建或查询失败都会拒绝/降级，不会把 raw UIA tree、PID/HWND、snapshot token 或原始 value 放进 Context/trajectory。自有 fixture 已验证超过 64 候选时的 Edit ref 可执行与 stale refusal；CUA 当前未可靠暴露 disabled evidence，故仍保持 fail-closed。最新高德轨迹只发现 Edge chrome 候选、没有网页 Edit，不能宣称已解决真实网页 grounding；DOM grounding 仍是后续独立能力。
 
 ## Provider 与环境变量
 
@@ -258,12 +263,12 @@ CLI/SDK 负责组装和注入依赖，Provider 不反向依赖 CLI；贡献时�
 
 ## 当前证据与限制
 
-- 离线基线：Node 24 下最近一次记录为 `pnpm test` 37 files / 428 tests，`pnpm run typecheck` 通过；测试不代表真实模型效果。
+- 离线基线：Node 24 下最近一次记录为 `pnpm test` 38 files / 447 tests，`pnpm run typecheck` 通过；测试不代表真实模型效果。
 - CI 矩阵：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 已通过；CI 通过只证明构建和协议测试跨平台可运行，不等于真实 Mac/Linux 桌面已验收。
 - 真实 API 窄证据：GLM/Qwen 各完成两轮合成 Memory 协议消费，无 GUI action；这不证明语义检索质量、长任务质量或真实用户数据安全。
 - 本机真实体验：已观察到模型坐标偏差、重复尝试、前台失配和高 Context/token 成本；这说明产品体验仍需优化，不能把 `runtimeOutcome=succeeded` 当作任务成功。
 - `--doctor` 是无模型、无截图/输入窗口动作的诊断，但会建立/结束临时 session，仍可能 cleanup `unknown`；不能把 metadata/inventory 支持误读成 session、权限或 cleanup 全部通过。
-- UIA 只读 probe 的结果见[UIA 能力探针记录](./docs/dev-2-uia-readonly-probe-results-2026-09-20.md)；它只支持后续设计 GroundingCatalog，不代表 UIA/DOM 已产品化。
+- UIA 只读 probe 与默认关闭的 grounding 实验分别见[UIA 能力探针记录](./docs/dev-2-uia-readonly-probe-results-2026-09-20.md)和[UIA Grounding 实施结果](./docs/dev-2-uia-grounding-implementation-results-2026-09-21.md)；当前仅有自有 fixture 离线证据，不代表真实应用或 DOM grounding 已通过。
 - Provider transport failure、CUA refusal、真实焦点、登录/OTP 审批和 OSWorld 业务结果需按独立验证记录解释；本 README 不把它们包装成已解决或成熟安全保证。
 
 ## 继续阅读与贡献

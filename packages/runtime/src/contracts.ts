@@ -109,6 +109,8 @@ export interface ContextBudgetReport {
   memoryMaxTokens?: number;
   estimatedMonitorGuidanceTokens?: number;
   monitorGuidanceIncluded?: boolean;
+  estimatedGroundingTokens?: number;
+  groundingIncluded?: boolean;
   trace?: ContextTrace;
 }
 
@@ -229,7 +231,7 @@ export interface CoordinateSemantics {
 }
 
 export type GuiActionDraft =
-  | { kind: "click"; point: Point }
+  | { kind: "click"; point: Point; groundingRef?: string }
   | { kind: "double_click"; point: Point }
   | { kind: "right_click"; point: Point }
   | { kind: "type"; text: string }

@@ -330,6 +330,22 @@ describe("GLM provider adapter", () => {
     }
   });
 
+  it("projects and parses the shared click_element grounding tool", async () => {
+    const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "glm-grounding", function: { name: "click_element", arguments: JSON.stringify({ elementRef: "uia-1" }) } }] } }] });
+    const groundingInput: ModelInput = {
+      ...input(),
+      tools: [...input().tools, {
+        name: "click_element",
+        description: "Click the current UIA element reference.",
+        category: "computer",
+        inputSchema: { type: "object", properties: { elementRef: { type: "string" } }, required: ["elementRef"], additionalProperties: false },
+      }],
+    };
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(groundingInput, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click_element", arguments: { elementRef: "uia-1" } }] });
+    expect((client.body?.tools as Array<Record<string, unknown>>).map((item) => (item.function as Record<string, unknown>).name)).toContain("click_element");
+  });
+
   it("applies one deadline to fetch and response-body reading", async () => {
     let observedSignal: AbortSignal | undefined;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => {

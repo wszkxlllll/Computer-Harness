@@ -13,6 +13,7 @@
     "probe:window:matrix": "tsx dev2-window-action-matrix-retest.ts",
     "probe:browser:window": "tsx browser-adapter-probe.ts",
     "probe:uia:readonly": "tsx uia-readonly-probe.ts",
+    "probe:uia:grounding:production": "tsx uia-grounding-production-probe.ts",
     "probe:runtime": "tsx runtime-contract-probe.ts",
     "run:stage4-task": "tsx stage4-local-runner.ts",
     "test:stage4-runner": "tsx ../../scripts/stage4-local/runner-contract-check.ts",

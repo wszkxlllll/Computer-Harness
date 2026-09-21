@@ -1,6 +1,6 @@
 # CUA UIA 只读能力探针结果（2026-09-20）
 
-状态：**Windows 自有 fixture 的窄链路已验证；生产 Harness 尚未接入 UIA；窗口 resize 后的 UIA stale 语义仍未验证。**
+状态：**这是 2026-09-20 的只读探针记录；Windows 自有 fixture 的窄链路已验证。生产侧默认关闭的 `uia-catalog-v1` 后续实施见[UIA Grounding 实施结果](./dev-2-uia-grounding-implementation-results-2026-09-21.md)。**
 
 本记录只覆盖 CUA 0.22.2 的只读观察能力。探针使用独立 named pipe 和本探针编译的 WinForms fixture，只调用 `launch_app` 启动自有 fixture、`list_windows`、`get_window_state` 和 `verify_state`；没有调用 `click`、`type_text`、`press_key`、`hotkey`、`scroll`、`drag`、`bring_to_front` 或 `set_window_frame`。没有模型/API 请求、没有读取 `.env`、没有访问用户 Edge/微信/账号窗口，也没有保存截图、窗口标题、原始 UIA value 或完整 UIA 树。
 
@@ -80,6 +80,6 @@ UIA 不应把原始树、`tree_markdown`、PID/HWND、完整 value 或 snapshot 
 
 本轮可以确认：**CUA 0.22.2 Windows daemon 能够为自有 WinForms 控件提供只读 UIA role/name/frame/部分 state，并支持窗口存在与角色存在的确定性 `verify_state`。** 这足以进入 Adapter 侧 grounding 设计和 Monitor Transition Evidence 设计。
 
-本轮不能确认：任意真实应用的 UIA 完整性、浏览器原生弹层的 UIA 覆盖、后台输入、焦点稳定性、resize 后 token 失效、跨平台能力，以及 Provider 已经能够消费 UIA。生产 `ComputerSession.capabilities.accessibility` 仍应保持 `false`，直到生产 Adapter 有真实 producer、context consumer、隐私过滤和回归测试。
+本轮不能确认：任意真实应用的 UIA 完整性、浏览器原生弹层的 UIA 覆盖、后台输入、焦点稳定性、resize 后 token 失效、跨平台能力，以及 Provider 已经能够消费 UIA。后续实验已补齐默认关闭的生产 Adapter producer、Context consumer、隐私过滤和 GLM/Qwen 离线 schema 回归，但仍没有真实 Edge/微信/高德证据。
 
-下一步建议先做离线 `GroundingCatalog` 投影与字段预算测试，再做一次独立的 fixture resize/recreate 语义实验；不要把 UIA 结果直接并入当前真实旅行任务基线。
+后续离线 `GroundingCatalog` 投影、字段预算、ref stale/geometry 拒绝和 Provider schema 回归已记录在[UIA Grounding 实施结果](./dev-2-uia-grounding-implementation-results-2026-09-21.md)；仍不要把 UIA 结果直接等同于真实旅行任务成功。
