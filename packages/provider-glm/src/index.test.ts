@@ -204,10 +204,16 @@ describe("GLM provider adapter", () => {
   });
 
   it("maps control definitions from the shared tool projection", async () => {
-    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "done" }) } }] } }] });
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Observed control result" }) } }] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
-    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success", summary: "done" });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success", summary: "Observed control result" });
     expect((client.body?.tools as Array<Record<string, unknown>>).map((item) => (item.function as Record<string, unknown>).name)).toContain("terminate");
+  });
+
+  it("rejects a terminate control with only a status label", async () => {
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "empty-finish", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "done" }) } }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_INVALID_TOOL_CALL" });
   });
 
   it("adds actual-pixel bounds to the Function Schema when a viewport is available", async () => {

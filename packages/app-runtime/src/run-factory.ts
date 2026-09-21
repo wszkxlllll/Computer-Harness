@@ -37,6 +37,28 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     outputDir: resolve(input.outputDir),
     computer: effectiveComputerConfig(input.computer, grounding),
   };
+  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
+  if (managedGrounding) {
+    if (config.computer.kind !== "cua") {
+      throw new Error(`grounding ${grounding} requires the CUA computer and its explicit socket`);
+    }
+    if (!isManagedBrowserUrl(config.computer.managedBrowserUrl)) {
+      throw new Error(`grounding ${grounding} requires an explicit managedBrowserUrl (http/https)`);
+    }
+    if (config.computer.socketPath.trim().length === 0) {
+      throw new Error(`grounding ${grounding} requires a non-empty CUA socket`);
+    }
+    if (config.computer.windowTarget !== undefined) {
+      throw new Error(`grounding ${grounding} owns its temporary browser window; omit the preselected CUA window target`);
+    }
+    const profileMode = config.computer.managedBrowserProfileMode ?? "ephemeral";
+    if (profileMode !== "ephemeral" && profileMode !== "persistent") {
+      throw new Error("managed browser profile mode must be ephemeral or persistent");
+    }
+    if (profileMode === "persistent" && (config.computer.managedBrowserProfileLabel === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(config.computer.managedBrowserProfileLabel) || config.computer.managedBrowserProfileRoot === undefined || config.computer.managedBrowserProfileRoot.trim().length === 0)) {
+      throw new Error("persistent managed browser mode requires a bounded profile label and explicit profile root");
+    }
+  }
   const credentials = dependencies.credentials ?? {};
   let eventWriter: RunEventWriter | undefined;
   let eventFeed: CommittedEventFeed | undefined;
@@ -56,8 +78,8 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       if (config.computer.kind !== "cua" || config.computer.windowTarget === undefined) {
         throw new Error("grounding uia-catalog-v1 requires an explicit CUA window target");
       }
-      tools.registerMany(groundingComputerTools());
     }
+    if (config.grounding !== "off") tools.registerMany(groundingComputerTools());
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
     const configuredEmbeddingProvider = memoryRetrievalMode === "hybrid"
@@ -131,7 +153,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       },
     );
     const cleanupDiagnostics: import("@computer-harness/runtime").CleanupDiagnostic[] = [];
-    const windowTargetToolNames = config.computer.kind === "cua" && config.computer.windowTarget !== undefined
+    const windowTargetToolNames = config.computer.kind === "cua" && (config.computer.windowTarget !== undefined || managedGrounding)
       ? (() => {
         const allowedComputerTools = new Set(["click", "wait"]);
         if (config.computer.windowDeliveryMode === "foreground") {
@@ -141,7 +163,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
           allowedComputerTools.add("drag");
           allowedComputerTools.add("scroll");
         }
-        if (config.grounding === "uia-catalog-v1") allowedComputerTools.add("click_element");
+        if (config.grounding !== "off") allowedComputerTools.add("click_element");
         return tools.list()
           .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
           .map((definition) => definition.name);
@@ -187,7 +209,22 @@ function effectiveComputerConfig(
   grounding: NonNullable<ResolvedRunConfig["grounding"]>,
 ): ResolvedRunConfig["computer"] {
   if (computer.kind !== "cua") return computer;
-  return { ...computer, grounding };
+  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
+  return {
+    ...computer,
+    grounding,
+    ...(managedGrounding ? { windowDeliveryMode: "foreground" as const } : {}),
+  };
+}
+
+function isManagedBrowserUrl(value: string | undefined): value is string {
+  if (value === undefined || value.trim().length === 0) return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function createContextMemoryRecall(service: HybridMemoryRecallService): MemoryRecallService {

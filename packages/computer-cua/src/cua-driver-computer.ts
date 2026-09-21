@@ -19,6 +19,14 @@ import type {
 } from "@computer-harness/protocol";
 import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
 import {
+  DomGroundingUnavailableError,
+  materializeDomGrounding,
+  validateManagedBrowserTarget,
+  type DomGroundingContentRect,
+  type DomGroundingTransport,
+  type ManagedBrowserTarget,
+} from "./dom-grounding.js";
+import {
   captureWindow,
   discoverWindow,
   sameWindowGeometry,
@@ -35,7 +43,7 @@ const CLEANUP_POLL_INTERVAL_MS = 50;
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
 export type CuaWindowDeliveryMode = "background" | "foreground";
-export type CuaGroundingMode = "off" | "uia-catalog-v1";
+export type CuaGroundingMode = "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
 
 // Keep the adapter side bounded but larger than the model-facing hot set. The
 // Runtime selector narrows this to at most 16 before Observation persistence;
@@ -63,6 +71,10 @@ export interface CuaDriverComputerOptions {
   windowDeliveryMode?: CuaWindowDeliveryMode;
   /** Optional, explicit UIA sidecar; requires an explicit window target. */
   grounding?: CuaGroundingMode;
+  /** Explicit host-owned managed browser target for the DOM transport gate. */
+  browserTarget?: ManagedBrowserTarget;
+  /** Host-supplied managed-browser transport; never discovered by this adapter. */
+  domGroundingTransport?: DomGroundingTransport;
   /** Total wall-clock budget for endSession/shutdown cleanup; no GUI action is retried. */
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
@@ -76,6 +88,8 @@ interface PrivateSession {
   active: boolean;
   windowBinding?: CuaWindowBinding;
   windowIdentityInvalidated: boolean;
+  /** Adapter-private active managed tab; never serialized to Runtime. */
+  browserTarget?: ManagedBrowserTarget;
 }
 
 interface PendingDriverCleanup {
@@ -96,6 +110,10 @@ interface PrivateObservation {
 
 interface PrivateGrounding {
   readonly catalog: GroundingCatalog;
+  /** Current host-attested tab/generation, retained only by the Adapter. */
+  readonly browserTarget?: ManagedBrowserTarget;
+  /** Trusted physical browser content rect derived from the same observation's UIA Document. */
+  readonly contentRect?: DomGroundingContentRect;
   readonly elements: ReadonlyMap<string, {
     readonly element: GroundingElement;
     readonly point: { readonly x: number; readonly y: number };
@@ -143,11 +161,25 @@ export class CuaDriverComputer implements Computer {
       throw new Error("windowDeliveryMode must be background or foreground");
     }
     if (this.options.windowTarget !== undefined) validateWindowTarget(this.options.windowTarget);
-    if (this.options.grounding !== undefined && this.options.grounding !== "off" && this.options.grounding !== "uia-catalog-v1") {
-      throw new Error("grounding must be off or uia-catalog-v1");
+    if (this.options.grounding !== undefined && !["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"].includes(this.options.grounding)) {
+      throw new Error("grounding must be off, uia-catalog-v1, dom-catalog-v1 or hybrid-catalog-v1");
     }
     if (this.options.grounding === "uia-catalog-v1" && this.options.windowTarget === undefined) {
       throw new Error("uia-catalog-v1 grounding requires an explicit CUA window target");
+    }
+    if (this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") {
+      if (this.options.windowTarget === undefined) throw new Error("DOM grounding requires an explicit CUA window target");
+      if (this.options.browserTarget === undefined) throw new DomGroundingUnavailableError("DOM grounding requires an explicit managed Chromium/Edge target");
+      validateManagedBrowserTarget(this.options.browserTarget);
+      if (this.options.browserTarget.windowTarget.pid !== this.options.windowTarget!.pid || this.options.browserTarget.windowTarget.windowId !== this.options.windowTarget!.windowId) {
+        throw new DomGroundingUnavailableError("managed browser target must match the explicitly selected CUA window pid/windowId");
+      }
+      if (this.options.domGroundingTransport === undefined) {
+        throw new DomGroundingUnavailableError("CUA 0.22.2 has no browser/DOM typed surface; provide a managed loopback CDP transport");
+      }
+      if (this.options.domGroundingTransport.kind !== "managed-loopback-cdp-v1") {
+        throw new DomGroundingUnavailableError("unsupported DOM grounding transport");
+      }
     }
   }
 
@@ -196,7 +228,9 @@ export class CuaDriverComputer implements Computer {
           screenshot: true,
           pointer: true,
           keyboard: windowBinding === undefined || this.options.windowDeliveryMode === "foreground",
-          accessibility: this.options.grounding === "uia-catalog-v1",
+          // `accessibility` means native/OS UIA availability. DOM grounding
+          // alone is structured browser content, not OS Accessibility.
+          accessibility: this.options.grounding === "uia-catalog-v1" || this.options.grounding === "hybrid-catalog-v1",
         },
         openedAt: new Date().toISOString(),
       };
@@ -207,6 +241,7 @@ export class CuaDriverComputer implements Computer {
         active: true,
         windowIdentityInvalidated: false,
         ...(windowBinding === undefined ? {} : { windowBinding }),
+        ...(this.options.browserTarget === undefined ? {} : { browserTarget: this.options.browserTarget }),
       };
       return descriptor;
     } catch (error) {
@@ -232,15 +267,27 @@ export class CuaDriverComputer implements Computer {
         const capture = await captureWindow(current.driver, current.label, liveBinding, signal);
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
-        const grounding = this.options.grounding === "uia-catalog-v1"
-          ? await readGroundingCatalog(current.driver, current.label, liveBinding, capture.viewport, observationId, session.id, signal)
-          : undefined;
+        const grounding = await readWindowGrounding(
+          this.options.grounding,
+          current.driver,
+          current.label,
+          liveBinding,
+          capture.viewport,
+          observationId,
+          session.id,
+          current.browserTarget ?? this.options.browserTarget,
+          this.options.domGroundingTransport,
+          signal,
+        );
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
           viewport: capture.viewport,
           geometry: liveBinding.bounds,
         });
-        if (grounding !== undefined) this.groundings.set(String(observationId), grounding);
+        if (grounding !== undefined) {
+          if (grounding.browserTarget !== undefined) current.browserTarget = grounding.browserTarget;
+          this.groundings.set(String(observationId), grounding);
+        }
         this.latestObservationId = observationId;
         return {
           capturedAt: new Date().toISOString(),
@@ -527,6 +574,147 @@ type GroundingToolResult = {
   readonly structuredJson?: string;
 };
 
+async function readWindowGrounding(
+  mode: CuaGroundingMode | undefined,
+  driver: CuaDriverLike,
+  session: string,
+  binding: CuaWindowBinding,
+  viewport: Viewport,
+  observationId: ObservationId,
+  computerSessionId: ComputerSessionDescriptor["id"],
+  browserTarget: ManagedBrowserTarget | undefined,
+  domTransport: DomGroundingTransport | undefined,
+  signal: AbortSignal,
+): Promise<PrivateGrounding | undefined> {
+  if (mode === undefined || mode === "off") return undefined;
+  if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal);
+  if (browserTarget === undefined || domTransport === undefined) {
+    // Constructor validation normally prevents this branch. Preserve an
+    // observable degraded DOM sidecar if an untyped host boundary mutates it.
+    return emptyDomGrounding(observationId, computerSessionId);
+  }
+  const uia = mode === "hybrid-catalog-v1"
+    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal)
+    : undefined;
+  // DOM-only has no trusted producer for the browser content origin. Keep the
+  // capability explicitly fail-closed until a future browser-native content
+  // rect producer is added; never guess from window bounds/DPI.
+  const dom = mode === "dom-catalog-v1" && uia === undefined
+    ? emptyDomGrounding(observationId, computerSessionId)
+    : await readDomGroundingCatalog(domTransport, browserTarget, binding, viewport, observationId, computerSessionId, uia?.contentRect, signal);
+  if (mode === "dom-catalog-v1") return dom;
+  if (uia === undefined) return dom;
+  if (dom === undefined) return uia;
+  return mergeGroundings(uia, dom, observationId, computerSessionId);
+}
+
+async function readDomGroundingCatalog(
+  transport: DomGroundingTransport,
+  browserTarget: ManagedBrowserTarget,
+  binding: CuaWindowBinding,
+  viewport: Viewport,
+  observationId: ObservationId,
+  computerSessionId: ComputerSessionDescriptor["id"],
+  trustedContentRect: DomGroundingContentRect | undefined,
+  signal: AbortSignal,
+): Promise<PrivateGrounding> {
+  if (trustedContentRect === undefined) return emptyDomGrounding(observationId, computerSessionId);
+  try {
+    const result = await transport.collect({ observationId, computerSessionId, viewport, browserTarget }, signal);
+    // The host attests the active tab/generation at collection time. A tab
+    // switch may update both private fields; every public ref remains bound to
+    // this observation and must be re-observed before reuse.
+    if (!isBoundedBrowserIdentity(result.tabId) || !isBoundedBrowserIdentity(result.generation)) return emptyDomGrounding(observationId, computerSessionId);
+    const activeBrowserTarget: ManagedBrowserTarget = { ...browserTarget, tabId: result.tabId, generation: result.generation };
+    const materialized = materializeDomGrounding({ observationId, computerSessionId, viewport, browserTarget: activeBrowserTarget }, result, GROUNDING_MAX_ELEMENTS, trustedContentRect);
+    const elements = new Map<string, { readonly element: GroundingElement; readonly point: { readonly x: number; readonly y: number }; readonly geometry?: CuaWindowGeometry }>();
+    for (const [elementRef, privateElement] of materialized.privateElements) {
+      elements.set(elementRef, { element: privateElement.element, point: privateElement.point, geometry: binding.bounds });
+    }
+    return {
+      catalog: materialized.catalog,
+      browserTarget: activeBrowserTarget,
+      contentRect: trustedContentRect,
+      elements,
+    };
+  } catch (error) {
+    if (signal.aborted) signal.throwIfAborted();
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    // A DOM transport is an optional producer. Keep a redacted degraded
+    // sidecar so DOM-only/hybrid runs expose the capability failure without
+    // leaking error text or browser identity; screenshot/visual fallback is
+    // still unaffected.
+    return emptyDomGrounding(observationId, computerSessionId);
+  }
+}
+
+function emptyDomGrounding(
+  observationId: ObservationId,
+  computerSessionId: ComputerSessionDescriptor["id"],
+): PrivateGrounding {
+  return {
+    catalog: {
+      version: "grounding-catalog-v2",
+      source: "dom",
+      observationId,
+      computerSessionId,
+      completeness: "unknown",
+      degraded: true,
+      maxElements: GROUNDING_MAX_ELEMENTS,
+      elements: [],
+    },
+    elements: new Map(),
+  };
+}
+
+function isBoundedBrowserIdentity(value: string | undefined): value is string {
+  return value !== undefined && /^[A-Za-z0-9._:-]{1,128}$/u.test(value);
+}
+
+/** Fairly merge the two bounded producers before Runtime applies its hot cap. */
+export function mergeGroundingElements(
+  uiaElements: readonly GroundingElement[],
+  domElements: readonly GroundingElement[],
+  maxElements = GROUNDING_MAX_ELEMENTS,
+): GroundingElement[] {
+  const merged: GroundingElement[] = [];
+  let uiaIndex = 0;
+  let domIndex = 0;
+  while (merged.length < maxElements && (uiaIndex < uiaElements.length || domIndex < domElements.length)) {
+    if (uiaIndex < uiaElements.length) merged.push(uiaElements[uiaIndex++]!);
+    if (merged.length >= maxElements) break;
+    if (domIndex < domElements.length) merged.push(domElements[domIndex++]!);
+  }
+  return merged;
+}
+
+function mergeGroundings(
+  uia: PrivateGrounding,
+  dom: PrivateGrounding,
+  observationId: ObservationId,
+  computerSessionId: ComputerSessionDescriptor["id"],
+): PrivateGrounding {
+  const elements = new Map(uia.elements);
+  for (const [elementRef, value] of dom.elements) elements.set(elementRef, value);
+  const publicElements = mergeGroundingElements(uia.catalog.elements, dom.catalog.elements);
+  const truncated = uia.catalog.completeness !== "complete" || dom.catalog.completeness !== "complete";
+  return {
+    catalog: {
+      version: "grounding-catalog-v2",
+      source: "hybrid",
+      observationId,
+      computerSessionId,
+      completeness: truncated ? "partial" : "complete",
+      degraded: uia.catalog.degraded || dom.catalog.degraded,
+      maxElements: GROUNDING_MAX_ELEMENTS,
+      elements: publicElements,
+    },
+    ...(dom.browserTarget === undefined ? {} : { browserTarget: dom.browserTarget }),
+    ...(dom.contentRect === undefined ? {} : { contentRect: dom.contentRect }),
+    elements,
+  };
+}
+
 async function readGroundingCatalog(
   driver: CuaDriverLike,
   session: string,
@@ -581,6 +769,7 @@ async function readGroundingCatalog(
   const explicitlyComplete = structured?.complete === true || structured?.elements_complete === true;
   const truncated = structured?.truncated === true || structured?.degraded === true || rawElements.length > GROUNDING_MAX_ELEMENTS;
   const completeness = explicitlyComplete && !truncated ? "complete" : "partial";
+  const contentRect = trustedContentRectFromUia(publicElements, viewport);
   return {
     catalog: {
       version: "uia-catalog-v1",
@@ -592,7 +781,27 @@ async function readGroundingCatalog(
       maxElements: GROUNDING_MAX_ELEMENTS,
       elements: publicElements,
     },
+    ...(contentRect === undefined ? {} : { contentRect }),
     elements,
+  };
+}
+
+function trustedContentRectFromUia(
+  elements: readonly GroundingElement[],
+  viewport: Viewport,
+): DomGroundingContentRect | undefined {
+  const candidates = elements
+    .filter((element) => element.role.toLocaleLowerCase() === "document" && element.bbox?.coordinateSpace === "physical")
+    .map((element) => element.bbox!)
+    .filter((bbox) => bbox.width >= viewport.width * 0.5 && bbox.height >= viewport.height * 0.5)
+    .filter((bbox) => bbox.x >= 0 && bbox.y >= 0 && bbox.x + bbox.width <= viewport.width + 1 && bbox.y + bbox.height <= viewport.height + 1)
+    .sort((left, right) => right.width * right.height - left.width * left.height);
+  const candidate = candidates[0];
+  return candidate === undefined ? undefined : {
+    x: candidate.x,
+    y: candidate.y,
+    width: candidate.width,
+    height: candidate.height,
   };
 }
 
@@ -642,6 +851,7 @@ function parseGroundingCandidate(
     ...(description === undefined ? {} : { description }),
     bbox: { ...clipped, coordinateSpace: "physical" },
     ...(state === undefined ? {} : { state }),
+    source: "uia",
   };
   const point = { x: clipped.x + clipped.width / 2, y: clipped.y + clipped.height / 2 };
   const priority = state?.enabled === false

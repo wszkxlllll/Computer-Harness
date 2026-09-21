@@ -734,6 +734,14 @@ describe("RunController S2-2 happy path", () => {
     expect(controller.getSnapshot()).toMatchObject({ outcome: "failed", reportedStatus: "failure", summary: "the task is not complete" });
   });
 
+  it("rejects a structured success finish whose summary is only a status label", async () => {
+    const provider = new ScriptedProvider([{ type: "finish", summary: "done", reportedStatus: "success" }]);
+    const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 1));
+    await expect(controller.start("reject status-only completion")).resolves.toBe("failed");
+    expect(controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "finish_summary_invalid")).toBe(true);
+    expect(controller.getSnapshot().outcome).toBe("failed");
+  });
+
   it("uses a model-request budget independently from the GUI step budget", async () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [{ id: "budget-1" as ToolCallId, name: "missing", arguments: null }] },

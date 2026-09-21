@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('check', 'start', 'daemon', 'stop', 'doctor', 'tui', 'run', 'help')]
+  [ValidateSet('check', 'start', 'daemon', 'stop', 'doctor', 'tui', 'run', 'browser-login', 'help')]
   [string] $Command = 'start',
 
   [ValidateSet('baseline', 'assisted', 'research')]
@@ -19,6 +19,10 @@ param(
   [int] $MaxSteps = 100,
   [ValidateRange(1, 1000000)]
   [int] $MaxModelRequests = 100,
+  [string] $ManagedBrowserUrl,
+  [ValidateSet('ephemeral', 'persistent')]
+  [string] $ManagedBrowserProfileMode,
+  [string] $ManagedBrowserProfileLabel,
   [string] $CuaWindowPid,
   [string] $CuaWindowId,
   [switch] $AllowExistingOutputDir,
@@ -76,7 +80,25 @@ $cuaSocket = Require-Config 'CuaSocket'
 $selectedModel = if ($Model) { $Model } else { Require-Config 'Model' }
 $selectedPreset = if ($Preset) { $Preset } elseif ($config['Preset']) { [string] $config['Preset'] } else { 'assisted' }
 $selectedRiskGuard = if ($RiskGuard) { $RiskGuard } elseif ($selectedPreset -eq 'research') { 'off' } else { 'layered' }
+function Get-ManagedBrowserArguments {
+  if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) {
+    $profileOnly = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { [void]$profileOnly.Add('--managed-browser-profile-mode'); [void]$profileOnly.Add($ManagedBrowserProfileMode) }
+    if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { [void]$profileOnly.Add('--managed-browser-profile-label'); [void]$profileOnly.Add($ManagedBrowserProfileLabel) }
+    return $profileOnly.ToArray()
+  }
+  $parsed = $null
+  if (-not [Uri]::TryCreate($ManagedBrowserUrl.Trim(), [UriKind]::Absolute, [ref]$parsed) -or $parsed.Scheme -notin @('http', 'https') -or [string]::IsNullOrWhiteSpace($parsed.Host)) {
+    throw 'ManagedBrowserUrl must be an explicit http(s) URL.'
+  }
+  $result = [System.Collections.Generic.List[string]]::new()
+  [void]$result.Add('--managed-browser-url'); [void]$result.Add($ManagedBrowserUrl.Trim())
+  if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { [void]$result.Add('--managed-browser-profile-mode'); [void]$result.Add($ManagedBrowserProfileMode) }
+  if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { [void]$result.Add('--managed-browser-profile-label'); [void]$result.Add($ManagedBrowserProfileLabel) }
+  return $result.ToArray()
+}
 $cuaWindowArguments = Get-CuaWindowArguments
+$managedBrowserArguments = Get-ManagedBrowserArguments
 $outputRoot = Resolve-LocalPath (Require-Config 'OutputRoot')
 $cliPath = Join-Path $repoRoot 'apps\cli\dist\index.js'
 
@@ -260,6 +282,23 @@ if ($Command -eq 'doctor') {
   exit $LASTEXITCODE
 }
 
+if ($Command -eq 'browser-login') {
+  if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) { throw "-Command browser-login requires -ManagedBrowserUrl <http(s)-url>." }
+  if ($ManagedBrowserProfileMode -ne 'persistent' -or [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) {
+    throw "-Command browser-login requires -ManagedBrowserProfileMode persistent and -ManagedBrowserProfileLabel <label>."
+  }
+  if (-not (Test-CuaReady)) { throw 'CUA daemon is not ready; start it explicitly before browser-login.' }
+  $prepareArguments = @(
+    $cliPath,
+    '--prepare-managed-browser-profile',
+    '--computer', 'cua',
+    '--cua-socket', $cuaSocket
+  )
+  $prepareArguments += $managedBrowserArguments
+  & $nodePath @prepareArguments
+  exit $LASTEXITCODE
+}
+
 $ownedDaemon = $false
 $daemonProcess = $null
 if ($Command -eq 'start') {
@@ -321,6 +360,7 @@ if ($selectedRiskGuard -eq 'off') { $arguments += '--confirm-risk-guard-off' }
 $arguments += Get-ModelArguments
 $arguments += Get-PresetArguments $selectedPreset
 $arguments += $cuaWindowArguments
+$arguments += $managedBrowserArguments
 
 $embeddingEndpoint = [string] $config['MemoryEmbeddingEndpoint']
 if (-not [string]::IsNullOrWhiteSpace($embeddingEndpoint)) {

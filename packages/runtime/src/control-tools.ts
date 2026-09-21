@@ -2,6 +2,7 @@ import type { JsonValue } from "@computer-harness/protocol";
 import type { ControlToolDefinition } from "./contracts.js";
 import { defaultComputerTools } from "./computer-tools.js";
 import { ToolRegistry } from "./tool-registry.js";
+import { isActionableFinishSummary } from "./finish-summary.js";
 
 /**
  * Control decisions are model-visible definitions, not executable GUI tools.
@@ -18,9 +19,9 @@ export function defaultControlTools(): readonly ControlToolDefinition[] {
         type: "object",
         properties: {
           status: { type: "string", enum: ["success", "failure"], description: "Whether the user goal is complete." },
-          text: { type: "string", description: "A concise final summary." },
+          text: { type: "string", minLength: 1, description: "The complete user-facing result. Include every requested deliverable and relevant caveat; do not return only a completion status." },
         },
-        required: ["status"],
+        required: ["status", "text"],
         additionalProperties: false,
       },
       validate: validateTerminate,
@@ -42,8 +43,8 @@ export function defaultControlTools(): readonly ControlToolDefinition[] {
 }
 
 function validateTerminate(args: JsonValue): void {
-  if (!isRecord(args) || (args.status !== "success" && args.status !== "failure") || (args.text !== undefined && typeof args.text !== "string")) {
-    throw new Error("terminate requires status success/failure and optional text");
+  if (!isRecord(args) || (args.status !== "success" && args.status !== "failure") || typeof args.text !== "string" || !isActionableFinishSummary(args.text)) {
+    throw new Error("terminate requires status success/failure and non-empty result text");
   }
 }
 
