@@ -121,4 +121,10 @@ Monitor 拒绝了第三次完全相同的点击，但模型换成相邻坐标后
 2. `terminate.text` 改为必填且必须不是纯状态标签，GLM/Qwen 不再把缺失文本自动降级成成功摘要；统一系统契约要求 `finish.summary` 本身就是完整用户交付，并在 Memory 开启时复核相关事实及其 caveat。一次有界真实 GLM 回归已经从两条 Run Memory 事实生成包含车次、39 分钟方案、换乘/步行、观察时点和不确定性的完整结果。
 3. Monitor 的确定性重复拒绝仅针对无变化后的 click-like 动作，不再误伤合法重复的 scroll、type 或 keypress。
 
-全仓验证为 44 个测试文件、505 项测试全部通过，根级 `pnpm run typecheck` 通过。DOM 坐标修复仍需一次真实携程输入框点击复验；在该复验通过前，不把 DOM 业务动作标记为完全放行。登录态已由独立 persistent-profile 实验验证，不属于本 Run 的阻塞项。
+全仓验证为 44 个测试文件、505 项测试全部通过，根级 `pnpm run typecheck` 通过。登录态已由独立 persistent-profile 实验验证，不属于本 Run 的阻塞项。
+
+### 修复后的真实点击复验
+
+Run `run-1789994984014-a42f31b1-c12` 已补齐真实复验。模型使用 DOM `click_element` 定位携程“到达城市”，Runtime 投影的窗口内点为 `(559.15, 524.87)`；CUA 执行后页面立即变化，Monitor 记录 `changed`，没有出现旧轨迹中的错位与 `no_observed_change`。随后完成 `Ctrl+A → type("北京") → 选择候选`，最终截图确认到达城市为北京。整个 Run 为4次模型请求、4个动作、0拒绝、0 Tool/Provider/Runtime 错误。
+
+最终 `finish.summary` 不再只是“任务完成”，而是完整说明原值、修改结果、当前页面字段、未搜索/未预订边界，并指出测试 Goal 同时包含“改为北京”和“确认杭州东”的歧义。由此可以放行普通网页文本控件的 Hybrid DOM 点击路径；Canvas、高德自定义地图控件、iframe 和缺少可信 UIA content rect 的页面仍不在该结论范围内。

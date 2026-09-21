@@ -69,6 +69,10 @@ DOM 不限制在起始网站。Managed host 在每次 Observation 重新枚举�
 
 下一道门禁：
 
-1. 用携程“到达城市”输入框复验修复后的 Hybrid DOM `click_element`，要求点击点落在同一 observation 的 UIA/DOM 对齐 physical bbox 内，且 post-observation 出现 focus/dropdown 变化，不再触发 `no_observed_change`；
-2. 再对高德自定义控件执行只读候选审计与受控 `click_element`，核对 post-observation 和 DOM 语义状态；
-3. 明确 DOM-only 当前只验证 fail-closed degraded 行为；保持 OSWorld、UIA-only、普通 CUA 与个人浏览器基线不变；将独立 profile 重新登录成本作为产品交互问题单独评估。
+真实携程复验 `run-1789994984014-a42f31b1-c12` 已通过首项门禁。模型使用 DOM `click_element` 点击“到达城市”，投影后的窗口内点为 `(559.15, 524.87)`；CUA 执行后 post-observation 为 `changed`，没有再次出现 `no_observed_change`。随后 `Ctrl+A`、输入“北京”和选择候选均成功，最终截图显示出发城市上海、到达城市北京、日期 2026-09-22。该 Run 为4次模型请求、4个动作、0拒绝、0 Tool/Provider/Runtime 错误，完整 `finish.summary` 同时交付结果并指出测试 Goal 的文字歧义。
+
+这只放行普通网页文本控件的 Hybrid DOM 点击路径，不自动外推到 Canvas、自定义地图控件、iframe 或缺少 UIA `Document` content rect 的页面。后续门禁调整为：
+
+1. 对高德自定义控件执行只读候选审计与受控 `click_element`，核对 post-observation 和 DOM 语义状态；
+2. 明确 DOM-only 当前只验证 fail-closed degraded 行为；保持 OSWorld、UIA-only、普通 CUA 与个人浏览器基线不变；
+3. 将独立 profile 重新登录成本作为产品交互问题单独评估。
