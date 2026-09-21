@@ -98,7 +98,6 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 | --- | --- | --- |
 | GLM key | `ZHIPUAI_API_KEY` | 兼容别名：`ZHIPU_API_KEY`、`GLM_API_KEY` |
 | GLM endpoint | `GLM_BASE_URL` | 可选，自定义 OpenAI-compatible endpoint |
-| GLM thinking | `GLM_THINKING` | `enabled` 或 `disabled`，默认 `enabled` |
 | Qwen key | `DASHSCOPE_API_KEY` | Qwen3.8-Flash |
 | Qwen endpoint | `DASHSCOPE_BASE_URL` | 别名：`DASHSCOPE_ENDPOINT` |
 | Qwen workspace | `DASHSCOPE_WORKSPACE_ID` | 可选；用于生成 workspace endpoint |

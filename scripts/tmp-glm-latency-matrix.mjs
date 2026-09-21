@@ -163,9 +163,8 @@ if (process.argv.includes("--local-only")) {
 async function probe(stream, thinking) {
   const body = structuredClone(baseBody);
   body.stream = stream;
-  body.thinking = { type: thinking ? "enabled" : "disabled" };
   const requestBytes = Buffer.byteLength(JSON.stringify(body), "utf8");
-  const metadata = { endpointHost: new URL(endpoint).host, requestedThinking: body.thinking.type, requestedStream: body.stream };
+  const metadata = { endpointHost: new URL(endpoint).host, requestedThinking: "provider_default", legacyThinkingVariant: thinking ? "enabled" : "disabled", requestedStream: body.stream };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error("probe deadline")), 240_000);
   const started = performance.now();

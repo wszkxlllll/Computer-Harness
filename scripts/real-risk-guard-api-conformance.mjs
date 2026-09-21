@@ -40,7 +40,7 @@ function createProvider(name, assetStore) {
   if (name === "glm-5.3-flash") {
     return new GlmAdapter({
       apiKey: process.env.ZHIPU_API_KEY ?? "",
-      profile: { ...glmProfiles["glm-5.3-flash"], thinking: "disabled" },
+      profile: glmProfiles["glm-5.3-flash"],
       assetReader: assetStore,
       ...(process.env.GLM_ENDPOINT === undefined ? {} : { endpoint: process.env.GLM_ENDPOINT }),
     });

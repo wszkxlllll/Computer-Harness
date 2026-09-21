@@ -28,14 +28,12 @@ export type GlmProfileName = "glm-5.3-flash";
 export interface GlmProfile {
   /** Provider model id; custom profiles may use another id explicitly. */
   readonly name: string;
-  readonly thinking: "disabled" | "enabled";
   readonly coordinateMode: GlmCoordinateMode;
 }
 
 export const glmProfiles: Readonly<Record<GlmProfileName, GlmProfile>> = {
   "glm-5.3-flash": {
     name: "glm-5.3-flash",
-    thinking: "enabled",
     coordinateMode: "actual_pixels",
   },
 };
@@ -105,7 +103,6 @@ export class GlmAdapter implements ProviderAdapter {
       messages: await this.presentMessages(`${snapshot.system}\n${profilePrompt(this.profile)}`, snapshot.messages, snapshot.tools, options.signal),
       tools: snapshot.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(snapshot))),
       stream: false,
-      thinking: { type: this.profile.thinking },
     } satisfies Record<string, unknown>;
     const frozenBody = deepFreeze(body);
     const prepared: PreparedProviderRequest = Object.freeze({

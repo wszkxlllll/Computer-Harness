@@ -176,7 +176,7 @@ async function main() {
   const assetStore = new FileAssetStore(resolve(output, "assets"));
   const exchanges = resolve(output, "provider-exchanges.jsonl");
   const provider = model === "glm-5.3-flash"
-    ? new GlmAdapter({ apiKey: process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY ?? "", profile: { ...glmProfiles["glm-5.3-flash"], thinking: process.env.GLM_THINKING === "disabled" ? "disabled" : "enabled" }, assetReader: assetStore, httpClient: new RecordingGlmClient(exchanges), ...(process.env.GLM_ENDPOINT === undefined ? {} : { endpoint: process.env.GLM_ENDPOINT }) })
+    ? new GlmAdapter({ apiKey: process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY ?? "", profile: glmProfiles["glm-5.3-flash"], assetReader: assetStore, httpClient: new RecordingGlmClient(exchanges), ...(process.env.GLM_ENDPOINT === undefined ? {} : { endpoint: process.env.GLM_ENDPOINT }) })
     : new Qwen38FlashAdapter({ apiKey: process.env.DASHSCOPE_API_KEY ?? "", assetReader: assetStore, httpClient: new RecordingQwenClient(exchanges), thinking: "low", coordinateMode: "normalized_1000", outputMode: "strict_json", ...(process.env.DASHSCOPE_ENDPOINT === undefined ? {} : { endpoint: process.env.DASHSCOPE_ENDPOINT }), ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { workspaceId: process.env.DASHSCOPE_WORKSPACE_ID }) });
   const eventWriter = new JsonlRunEventWriter(resolve(output, "trajectory.jsonl"), runId);
   const controller = new RunController({

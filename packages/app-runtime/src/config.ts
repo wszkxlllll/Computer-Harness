@@ -59,7 +59,6 @@ export interface ResolvedRunConfig {
   qwenOutputMode?: "native_tools" | "strict_json";
   qwenEndpoint?: string;
   qwenWorkspaceId?: string;
-  glmThinking?: "disabled" | "enabled";
   glmEndpoint?: string;
   fixtureResult?: string;
   monitor?: MonitorPolicyMode;

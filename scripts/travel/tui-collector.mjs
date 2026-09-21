@@ -35,7 +35,6 @@ const CONFIG_FIELDS = [
   "qwenThinking",
   "outputMode",
   "qwenOutputMode",
-  "glmThinking",
   "planning",
   "memory",
   "memoryRetrieval",

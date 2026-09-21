@@ -5,7 +5,7 @@ import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile } f
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 3 };
-const normalizedProfile: GlmProfile = { name: "test-normalized", thinking: "disabled", coordinateMode: "normalized_1000" };
+const normalizedProfile: GlmProfile = { name: "test-normalized", coordinateMode: "normalized_1000" };
 
 class Reader implements AssetReader {
   public constructor(private readonly bytes = new Uint8Array([1, 2, 3])) {}
@@ -118,7 +118,7 @@ describe("GLM provider adapter", () => {
       ...dynamicInput("same plan"),
       tools: [{ ...input().tools[0]!, inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false } }],
     };
-    const pixelProfile: GlmProfile = { name: "pixel-test", thinking: "disabled", coordinateMode: "actual_pixels" };
+    const pixelProfile: GlmProfile = { name: "pixel-test", coordinateMode: "actual_pixels" };
     const pixelA = await capture(schemaInput, new Uint8Array([1]), pixelProfile);
     const pixelB = await capture({ ...schemaInput, messages: [{ role: "user", content: [{ type: "image", asset, viewport: { width: 1024, height: 768, coordinateSpace: "physical" } }] }] }, new Uint8Array([1]), pixelProfile);
     expect(pixelA.body.tools).not.toEqual(pixelB.body.tools);
@@ -164,7 +164,7 @@ describe("GLM provider adapter", () => {
     const turn = await adapter.generate(input(), { signal: new AbortController().signal });
     expect(turn).toEqual({ type: "tool_calls", calls: [{ id: "glm-call", name: "click", arguments: { x: 400, y: 150 } }] });
     expect(client.body?.tools).toEqual([{ type: "function", function: { name: "click", description: "click Coordinates x,y are normalized numbers from 0 to 1000.", parameters: { type: "object" } } }]);
-    expect(client.body?.thinking).toEqual({ type: "disabled" });
+    expect(client.body).not.toHaveProperty("thinking");
     const messages = client.body?.messages as Array<Record<string, unknown>>;
     const userContent = messages[1]?.content as Array<Record<string, unknown>>;
     const imageBlock = userContent[1];
@@ -195,7 +195,7 @@ describe("GLM provider adapter", () => {
     const client = new Client({ choices: [{ message: { content: "finished" } }], usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 } });
     const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
     expect(await adapter.generate(input(), { signal: new AbortController().signal })).toEqual({ type: "finish", summary: "finished", usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9 } });
-    expect(client.body?.thinking).toEqual({ type: "enabled" });
+    expect(client.body).not.toHaveProperty("thinking");
     const messages = client.body?.messages as Array<Record<string, unknown>>;
     expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).toContain("Coordinates are pixels");
     const controller = new AbortController();
@@ -212,7 +212,7 @@ describe("GLM provider adapter", () => {
 
   it("adds actual-pixel bounds to the Function Schema when a viewport is available", async () => {
     const client = new Client({ choices: [{ message: { tool_calls: [{ id: "pixel-call", function: { name: "click", arguments: "{\"x\":799,\"y\":599}" } }] } }] });
-    const profile: GlmProfile = { name: "test-pixels", thinking: "disabled", coordinateMode: "actual_pixels" };
+    const profile: GlmProfile = { name: "test-pixels", coordinateMode: "actual_pixels" };
     const adapter = new GlmAdapter({ apiKey: "key", profile, assetReader: new Reader(), httpClient: client });
     const pixelInput: ModelInput = { ...input(), tools: [{ name: "click", description: "click", category: "computer", coordinate: { fields: ["x", "y"] }, inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false } }] };
     await expect(adapter.generate(pixelInput, { signal: new AbortController().signal })).resolves.toMatchObject({ calls: [{ arguments: { x: 799, y: 599 } }] });

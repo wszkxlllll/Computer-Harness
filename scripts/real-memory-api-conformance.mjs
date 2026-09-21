@@ -168,7 +168,7 @@ async function run(providerName, mode, envFile, output) {
   registry.registerMany(createMemoryTools(memoryStore, mode === "entities" ? "entities" : "facts"));
   const assetStore = new FileAssetStore(resolve(output, "assets"));
   const provider = providerName === "glm-5.3-flash"
-    ? new GlmAdapter({ apiKey: process.env.ZHIPU_API_KEY ?? "", profile: { ...glmProfiles["glm-5.3-flash"], thinking: "disabled" }, assetReader: assetStore, httpClient: client, ...(process.env.GLM_ENDPOINT === undefined ? {} : { endpoint: process.env.GLM_ENDPOINT }) })
+    ? new GlmAdapter({ apiKey: process.env.ZHIPU_API_KEY ?? "", profile: glmProfiles["glm-5.3-flash"], assetReader: assetStore, httpClient: client, ...(process.env.GLM_ENDPOINT === undefined ? {} : { endpoint: process.env.GLM_ENDPOINT }) })
     : new Qwen38FlashAdapter({ apiKey: process.env.DASHSCOPE_API_KEY ?? "", assetReader: assetStore, httpClient: client, thinking: "low", coordinateMode: "normalized_1000", outputMode: "strict_json", ...(process.env.DASHSCOPE_ENDPOINT === undefined ? {} : { endpoint: process.env.DASHSCOPE_ENDPOINT }), ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { workspaceId: process.env.DASHSCOPE_WORKSPACE_ID }) });
   const eventWriter = new JsonlRunEventWriter(resolve(output, "trajectory.jsonl"), runId);
   const compiler = new DefaultContextCompiler(registry, { features: { planning: "off", memory: mode === "entities" ? "entities-v1" : "facts-v1", batching: "off" } });

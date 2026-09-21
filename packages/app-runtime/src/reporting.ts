@@ -42,7 +42,6 @@ export async function buildRunReport(
     coordinateMode: config.qwenCoordinateMode ?? null,
     thinkingMode: config.qwenThinking ?? null,
     outputMode: config.qwenOutputMode ?? null,
-    glmThinking: config.glmThinking ?? "enabled",
     planning: config.planning,
     memory: config.memory,
     memoryRetrieval,

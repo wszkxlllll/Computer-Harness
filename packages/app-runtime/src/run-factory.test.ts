@@ -27,7 +27,6 @@ function config(outputDir: string): ResolvedRunConfig {
     riskMaxModelRequests: 2,
     riskTimeoutMs: 100,
     cleanupDeadlineMs: 100,
-    glmThinking: "enabled",
   };
 }
 

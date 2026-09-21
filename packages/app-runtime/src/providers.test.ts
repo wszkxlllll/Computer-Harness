@@ -95,7 +95,7 @@ describe("app-runtime provider factory", () => {
     expect(qwen.id).toBe("qwen3.8-flash");
   });
 
-  it("preserves GLM request endpoint, thinking mode, and canonical tool projection", async () => {
+  it("preserves the GLM request endpoint and canonical tool projection without a legacy thinking field", async () => {
     let request: { url: string; body: Record<string, unknown>; headers: Readonly<Record<string, string>> } | undefined;
     const client: ProviderHttpClient = {
       async post(url, body, headers) {
@@ -110,7 +110,7 @@ describe("app-runtime provider factory", () => {
     };
     const provider = createProvider({
       model: "glm-5.3-flash",
-      config: config({ glmEndpoint: "https://glm.fixture/v1", glmThinking: "disabled" }),
+      config: config({ glmEndpoint: "https://glm.fixture/v1" }),
       assetReader,
       outputDir: "runs/glm-wire",
       credentials: { glmApiKey: "fixture-glm-key" },
@@ -119,7 +119,8 @@ describe("app-runtime provider factory", () => {
     await expect(provider.generate(clickInput(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 12, y: 34 } }] });
     expect(request?.url).toBe("https://glm.fixture/v1");
     expect(request?.headers.Authorization).toBe("Bearer fixture-glm-key");
-    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false, thinking: { type: "disabled" } });
+    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false });
+    expect(request?.body).not.toHaveProperty("thinking");
     expect(request?.body.tools).toMatchObject([{ type: "function", function: { name: "click" } }]);
   });
 

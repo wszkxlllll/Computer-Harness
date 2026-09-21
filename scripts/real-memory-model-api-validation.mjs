@@ -309,7 +309,7 @@ async function runProvider(providerName, envFile, outputRoot, maxRequests) {
     : new RecordingHttpClient(providerName, new FetchQwenHttpClient({ requestTimeoutMs: REQUEST_TIMEOUT_MS }), attemptsPath, maxRequests);
   const assetReader = assets;
   const live = providerName === "glm-5.3-flash"
-    ? new GlmAdapter({ apiKey: process.env.ZHIPU_API_KEY ?? "", profile: { ...glmProfiles["glm-5.3-flash"], thinking: "disabled" }, assetReader, httpClient: client, ...(process.env.GLM_ENDPOINT === undefined ? {} : { endpoint: process.env.GLM_ENDPOINT }) })
+    ? new GlmAdapter({ apiKey: process.env.ZHIPU_API_KEY ?? "", profile: glmProfiles["glm-5.3-flash"], assetReader, httpClient: client, ...(process.env.GLM_ENDPOINT === undefined ? {} : { endpoint: process.env.GLM_ENDPOINT }) })
     : new Qwen38FlashAdapter({ apiKey: process.env.DASHSCOPE_API_KEY ?? "", assetReader, httpClient: client, thinking: "low", outputMode: "strict_json", ...(process.env.DASHSCOPE_ENDPOINT === undefined ? {} : { endpoint: process.env.DASHSCOPE_ENDPOINT }), ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { workspaceId: process.env.DASHSCOPE_WORKSPACE_ID }) });
   const provider = new SeedThenNoRetryProvider(live, providerName);
   const writer = new JsonlRunEventWriter(resolve(providerDir, "trajectory.jsonl"), runId);
