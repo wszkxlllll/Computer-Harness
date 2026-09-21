@@ -1,0 +1,6 @@
+{
+  "cuaBinary": "/absolute/path/to/cua-driver",
+  "cuaSocket": "/tmp/computer-harness-local.sock",
+  "browser": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "outputRoot": "runs/local"
+}

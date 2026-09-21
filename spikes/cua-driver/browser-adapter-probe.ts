@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 import {
+  CaptureScope,
   CuaDriver,
   EndSessionInput,
   SetWindowFrameInput,
@@ -76,6 +77,7 @@ interface Summary {
     viewport: { width: number; height: number; coordinateSpace: string };
     bytes: number;
     windowLocal: boolean;
+    backingScale: { x: number; y: number };
   };
   actions?: Record<string, unknown>;
   oracle?: {
@@ -139,6 +141,13 @@ function defaultBrowserPath(): string {
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
   ];
   return candidates.find((candidate) => existsSync(candidate)) ?? "msedge.exe";
+}
+
+function macBrowserBundleId(browserPath: string): string {
+  if (/Google Chrome\.app/iu.test(browserPath)) return "com.google.Chrome";
+  if (/Microsoft Edge\.app/iu.test(browserPath)) return "com.microsoft.edgemac";
+  if (/Chromium\.app/iu.test(browserPath)) return "org.chromium.Chromium";
+  throw new Error("the configured macOS browser is not a supported Chrome, Edge, or Chromium app bundle");
 }
 
 function structured(result: { structuredJson?: string }): Record<string, unknown> | undefined {
@@ -221,7 +230,9 @@ async function waitWindow(driver: CuaDriverLike, pid: number): Promise<WindowInf
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const windows = windowsFrom(await call(driver, "list_windows", { pid, on_screen_only: true, session: SETUP_SESSION }));
-    const target = windows.find((window) => window.pid === pid && window.bounds.width > 0 && window.bounds.height > 0);
+    const target = windows
+      .filter((window) => window.pid === pid && window.bounds.width > 0 && window.bounds.height > 0)
+      .sort((left, right) => right.bounds.width * right.bounds.height - left.bounds.width * left.bounds.height)[0];
     if (target !== undefined) return target;
     await delay(100);
   }
@@ -315,7 +326,30 @@ async function killOwnedProcess(pid: number | undefined): Promise<void> {
     await runProcess("taskkill.exe", ["/PID", String(pid), "/T", "/F"], 10_000).catch(() => undefined);
     return;
   }
-  try { process.kill(pid); } catch { /* already exited */ }
+  try { process.kill(pid); } catch { return; }
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+      await delay(100);
+    } catch {
+      return;
+    }
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ }
+}
+
+async function removeOwnedProfile(path: string): Promise<boolean> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return true;
+    } catch {
+      await delay(100);
+    }
+  }
+  return false;
 }
 
 async function stopDaemon(binary: string, socket: string, daemon: Daemon): Promise<void> {
@@ -407,42 +441,58 @@ async function main(): Promise<void> {
   try {
     await waitDaemon(options.binary, options.socket, daemon);
     setupDriver = CuaDriver.connect(options.socket);
-    await setupDriver.startSession(StartSessionInput.new({ session: SETUP_SESSION }), { signal: new AbortController().signal });
+    // Setup reads the physical display size only to place the owned fixture.
+    // The adapter session created below remains Window-scoped for all actions.
+    await setupDriver.startSession(StartSessionInput.new({ session: SETUP_SESSION, captureScope: CaptureScope.Desktop }), { signal: new AbortController().signal });
     setupStarted = true;
-    const launch = await call(setupDriver, "launch_app", {
+    const screen = await readScreenSize(setupDriver);
+    const targetRequest: Frame = {
+      x: Math.floor(screen.width / 2),
+      y: process.platform === "darwin" ? 34 : 0,
+      width: screen.width - Math.floor(screen.width / 2),
+      height: screen.height - (process.platform === "darwin" ? 34 : 0),
+    };
+    const browserArguments = [
+      "--new-window",
+      "--app=" + fixtureServer.url,
+      "--user-data-dir=" + profileDir,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-default-apps",
+      "--disable-features=Translate",
+      ...(process.platform === "darwin" ? [
+        `--window-position=${targetRequest.x},${targetRequest.y}`,
+        `--window-size=${targetRequest.width},${targetRequest.height}`,
+      ] : []),
+    ];
+    const launch = await call(setupDriver, "launch_app", process.platform === "darwin" ? {
+      bundle_id: macBrowserBundleId(options.browser),
+      creates_new_application_instance: true,
+      additional_arguments: browserArguments,
+      session: SETUP_SESSION,
+    } : {
       path: options.browser,
       additional_arguments: [
-        "--new-window",
-        "--app=" + fixtureServer.url,
-        "--user-data-dir=" + profileDir,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-networking",
-        "--disable-component-update",
-        "--disable-default-apps",
-        "--disable-features=Translate",
+        ...browserArguments,
       ],
       start_minimized: false,
       session: SETUP_SESSION,
     });
     browserPid = numberField(structured(launch), "pid");
     if (launch.isError || browserPid === undefined) throw new Error("owned browser launch was refused");
-    const screen = await readScreenSize(setupDriver);
-    const targetRequest: Frame = {
-      x: Math.floor(screen.width / 2),
-      y: 0,
-      width: screen.width - Math.floor(screen.width / 2),
-      height: screen.height,
-    };
     let target = await waitWindow(setupDriver, browserPid);
-    const frameResult = await setupDriver.setWindowFrame(SetWindowFrameInput.new({
-      pid: target.pid,
-      windowId: BigInt(target.windowId),
-      ...targetRequest,
-      session: SETUP_SESSION,
-    }), { signal: new AbortController().signal });
-    if (frameResult.isError || frameResult.degraded) throw new Error("owned browser frame request was refused");
-    target = await waitWindow(setupDriver, browserPid);
+    if (process.platform !== "darwin") {
+      const frameResult = await setupDriver.setWindowFrame(SetWindowFrameInput.new({
+        pid: target.pid,
+        windowId: BigInt(target.windowId),
+        ...targetRequest,
+        session: SETUP_SESSION,
+      }), { signal: new AbortController().signal });
+      if (frameResult.isError || frameResult.degraded) throw new Error("owned browser frame request was refused");
+      target = await waitWindow(setupDriver, browserPid);
+    }
     const targetRightHalf = target.bounds.x >= targetRequest.x - 12 && target.bounds.width >= Math.floor(screen.width * 0.35);
     summary.layout = {
       screen,
@@ -455,9 +505,11 @@ async function main(): Promise<void> {
     if (!targetRightHalf) throw new Error("owned browser did not land in the right-half layout");
     const loaded = await waitOracle(state, (record) => record.event === "load" || record.event === "ready", 12_000);
     if (loaded === undefined) throw new Error("loopback browser fixture did not report readiness");
-    const foreground = await call(setupDriver, "bring_to_front", { pid: target.pid, window_id: target.windowId, session: SETUP_SESSION });
-    if (foreground.isError || structured(foreground)?.landed_on_target !== true) throw new Error("owned browser could not be brought to the foreground");
-    await delay(250);
+    if (process.platform !== "darwin") {
+      const foreground = await call(setupDriver, "bring_to_front", { pid: target.pid, window_id: target.windowId, session: SETUP_SESSION });
+      if (foreground.isError || structured(foreground)?.landed_on_target !== true) throw new Error("owned browser could not be brought to the foreground");
+      await delay(250);
+    }
     adapter = new CuaDriverComputer({
       socketPath: options.socket,
       screenshotDir: join(options.output, "adapter-observations"),
@@ -469,10 +521,20 @@ async function main(): Promise<void> {
     adapterSession = await adapter.open({}, new AbortController().signal);
     const observationId = "browser-observation-0" as ObservationId;
     const before = await adapter.observe(adapterSession, observationId, new AbortController().signal);
+    const backingScale = {
+      x: before.viewport.width / target.bounds.width,
+      y: before.viewport.height / target.bounds.height,
+    };
+    const windowLocal = backingScale.x >= 0.5
+      && backingScale.x <= 4
+      && backingScale.y >= 0.5
+      && backingScale.y <= 4
+      && Math.abs(backingScale.x - backingScale.y) <= 0.08;
     summary.observation = {
       viewport: before.viewport,
       bytes: before.screenshot.data.byteLength,
-      windowLocal: before.viewport.width < screen.width && before.viewport.height <= screen.height,
+      windowLocal,
+      backingScale,
     };
     if (!summary.observation.windowLocal) throw new Error("window-target observation was not window-local");
     const point = {
@@ -489,7 +551,8 @@ async function main(): Promise<void> {
     if (type.status !== "completed" || typedOracle?.matchesProbe !== true) throw new Error("browser type oracle did not confirm the synthetic value");
     const afterTypeId = "browser-observation-after-type" as ObservationId;
     await adapter.observe(adapterSession, afterTypeId, new AbortController().signal);
-    const ctrlA = await adapter.execute(adapterSession, action("browser-ctrl-a", afterTypeId, { kind: "keypress", keys: ["CTRL", "A"] }), new AbortController().signal);
+    const selectAllKeys = process.platform === "darwin" ? ["CMD", "A"] : ["CTRL", "A"];
+    const ctrlA = await adapter.execute(adapterSession, action("browser-select-all", afterTypeId, { kind: "keypress", keys: selectAllKeys }), new AbortController().signal);
     const selectedOracle = await waitOracle(state, (record) => record.matchesProbe && record.selectionLength >= PROBE_TEXT.length, 5_000);
     if (ctrlA.status !== "completed" || selectedOracle === undefined || selectedOracle.selectionLength < PROBE_TEXT.length) throw new Error("browser Ctrl+A oracle did not confirm selection");
     const afterCtrlAId = "browser-observation-after-ctrl-a" as ObservationId;
@@ -541,13 +604,7 @@ async function main(): Promise<void> {
       await stopDaemon(options.binary, options.socket, daemon);
     }
     await new Promise<void>((resolveClose) => fixtureServer.server.close(() => resolveClose()));
-    let profileDirectoryRemoved = false;
-    try {
-      await rm(profileDir, { recursive: true, force: true });
-      profileDirectoryRemoved = true;
-    } catch {
-      profileDirectoryRemoved = false;
-    }
+    const profileDirectoryRemoved = await removeOwnedProfile(profileDir);
     summary.cleanup = {
       ...(browserPid === undefined ? {} : { browserPid }),
       profileDirectoryRemoved,

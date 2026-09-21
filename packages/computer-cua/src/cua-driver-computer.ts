@@ -2,6 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
+  CaptureScope,
   CuaDriver,
   EndSessionInput,
   StartSessionInput,
@@ -75,6 +76,10 @@ interface PrivateSession {
   descriptor: ComputerSessionDescriptor;
   active: boolean;
   windowBinding?: CuaWindowBinding;
+  /** One confirmed click point that may establish renderer focus for the next type action. */
+  pendingWindowTypePoint?: { x: number; y: number };
+  /** Last confirmed click point used to focus a renderer before a window hotkey. */
+  windowHotkeyPoint?: { x: number; y: number };
   windowIdentityInvalidated: boolean;
 }
 
@@ -163,7 +168,14 @@ export class CuaDriverComputer implements Computer {
     const label = this.options.sessionLabel ?? `computer-harness-${Date.now()}`;
     let sessionStarted = false;
     try {
-      await driver.startSession(StartSessionInput.new({ session: label }), { signal });
+      await driver.startSession(StartSessionInput.new({
+        session: label,
+        // Keep the shared Computer contract explicit across platforms. On
+        // macOS CUA 0.22.2, Auto intentionally resolves to Window; the
+        // primary-desktop adapter must request Desktop while an explicit
+        // host-selected window stays least-privilege Window.
+        captureScope: this.options.windowTarget === undefined ? CaptureScope.Desktop : CaptureScope.Window,
+      }), { signal });
       sessionStarted = true;
       let viewport: Viewport;
       let windowBinding: CuaWindowBinding | undefined;
@@ -229,6 +241,10 @@ export class CuaDriverComputer implements Computer {
       }
       try {
         const liveBinding = await discoverWindow(current.driver, current.label, current.windowBinding.target, signal);
+        if (!sameWindowGeometry(liveBinding.bounds, current.windowBinding.bounds)) {
+          delete current.pendingWindowTypePoint;
+          delete current.windowHotkeyPoint;
+        }
         const capture = await captureWindow(current.driver, current.label, liveBinding, signal);
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
@@ -380,6 +396,8 @@ export class CuaDriverComputer implements Computer {
         current.windowBinding,
         this.options.windowDeliveryMode,
         decisionObservation?.viewport,
+        current.pendingWindowTypePoint,
+        current.windowHotkeyPoint,
       );
     } catch (error) {
       if (error instanceof WindowCoordinateMappingError) {
@@ -394,6 +412,16 @@ export class CuaDriverComputer implements Computer {
       }
       if (result.degraded) {
         return { actionId: action.actionId, status: "failed", driverCode: "CUA_DEGRADED", message: result.text };
+      }
+      if (current.windowBinding !== undefined && action.kind === "click") {
+        const x = request.arguments.x;
+        const y = request.arguments.y;
+        if (typeof x === "number" && typeof y === "number") {
+          current.pendingWindowTypePoint = { x, y };
+          current.windowHotkeyPoint = { x, y };
+        }
+      } else if (current.windowBinding !== undefined && action.kind === "type") {
+        delete current.pendingWindowTypePoint;
       }
       return { actionId: action.actionId, status: "completed", ...(result.text ? { message: result.text } : {}) };
     } catch (error) {
@@ -490,6 +518,8 @@ function actionRequest(
   windowBinding?: CuaWindowBinding,
   configuredDeliveryMode?: CuaWindowDeliveryMode,
   decisionViewport?: Viewport,
+  pendingWindowTypePoint?: { x: number; y: number },
+  windowHotkeyPoint?: { x: number; y: number },
 ): { name: string; arguments: Record<string, unknown> } {
   const target = windowBinding === undefined ? PRIMARY_DESKTOP : windowActionTarget(windowBinding);
   const deliveryMode = windowBinding === undefined ? "foreground" : configuredDeliveryMode ?? "background";
@@ -504,11 +534,29 @@ function actionRequest(
     case "right_click":
       return { name: "click", arguments: { session, target, ...point(action.point), button: "right", delivery_mode: deliveryMode } };
     case "type":
-      return { name: "type_text", arguments: { session, target, text: action.text, delivery_mode: deliveryMode } };
+      return {
+        name: "type_text",
+        arguments: {
+          session,
+          target,
+          text: action.text,
+          delivery_mode: deliveryMode,
+          ...(windowBinding === undefined || pendingWindowTypePoint === undefined ? {} : pendingWindowTypePoint),
+        },
+      };
     case "keypress":
       return action.keys.length === 1
         ? { name: "press_key", arguments: { session, target, key: action.keys[0], delivery_mode: deliveryMode } }
-        : { name: "hotkey", arguments: { session, target, keys: action.keys, delivery_mode: deliveryMode } };
+        : {
+            name: "hotkey",
+            arguments: {
+              session,
+              target,
+              keys: action.keys,
+              delivery_mode: deliveryMode,
+              ...(windowBinding === undefined || windowHotkeyPoint === undefined ? {} : windowHotkeyPoint),
+            },
+          };
     case "scroll":
       return { name: "scroll", arguments: { session, target, ...point(action.point), direction: action.direction, by: "line", amount: action.ticks, delivery_mode: deliveryMode } };
     case "drag": {
@@ -740,6 +788,12 @@ function parseStructuredRecord(value: unknown): Record<string, unknown> | undefi
  * The decision frame is the source of truth: an approved action may execute
  * against a later observation, but its coordinates were still produced from
  * action.basedOn. Geometry is checked by the caller before this projection.
+ *
+ * Windows window captures can differ from the outer bounds by a small border,
+ * so the established contract scales those near-1:1 dimensions. macOS Retina
+ * captures instead expose physical screenshot pixels while WindowServer bounds
+ * are logical points. CUA's pixel actions consume screenshot-local pixels, so a
+ * coherent high-density ratio must not be divided back into logical points.
  */
 function mapWindowPoint(
   point: { x: number; y: number },
@@ -760,6 +814,15 @@ function mapWindowPoint(
   }
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0 || point.x >= sourceViewport.width || point.y >= sourceViewport.height) {
     throw new WindowCoordinateMappingError("WINDOW_COORDINATE_INVALID", `window action point (${point.x}, ${point.y}) is outside source viewport ${sourceViewport.width}x${sourceViewport.height}`);
+  }
+  const scaleX = sourceViewport.width / targetBounds.width;
+  const scaleY = sourceViewport.height / targetBounds.height;
+  const highDensityCapture = scaleX >= 1.25 && scaleY >= 1.25 && Math.abs(scaleX - scaleY) <= 0.08;
+  if (highDensityCapture) {
+    return {
+      x: clampCoordinate(Math.round(point.x), sourceViewport.width),
+      y: clampCoordinate(Math.round(point.y), sourceViewport.height),
+    };
   }
   return {
     x: clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),

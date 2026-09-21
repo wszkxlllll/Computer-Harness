@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import { CaptureScope, type CuaDriverLike, type ToolResult } from "@trycua/cua-driver";
 import { inspectCuaCapabilities } from "./capability-doctor.js";
 
 function toolResult(overrides: Partial<ToolResult> = {}): ToolResult {
@@ -25,7 +25,7 @@ function fakeDriver(options: {
   hangEnd?: boolean;
   hangMetadata?: boolean;
   hangStart?: boolean;
-  onStart?: () => void;
+  onStart?: (input: { session?: string; captureScope?: CaptureScope }) => void;
   captureCleanupSignal?: (signal: AbortSignal | undefined) => void;
 } = {}): { driver: CuaDriverLike; calls: string[]; destroyed: () => number } {
   const calls: string[] = [];
@@ -51,10 +51,10 @@ function fakeDriver(options: {
       calls.push("listToolsJson");
       return options.inventory ?? JSON.stringify({ tools: [{ name: "list_windows" }, { name: "bring_to_front" }, { name: "get_desktop_state" }] });
     },
-    async startSession(input: { session?: string }) {
+    async startSession(input: { session?: string; captureScope?: CaptureScope }) {
       calls.push("startSession");
       if (typeof input.session === "string") activeLabel = input.session;
-      options.onStart?.();
+      options.onStart?.(input);
       if (options.hangStart === true) return await new Promise<never>(() => undefined);
       return { active: true, revived: false, state: { session: activeLabel, captureScope: 2, effectiveScope: 1, desktopUnlocked: true } } as never;
     },
@@ -86,7 +86,8 @@ function fakeDriver(options: {
 
 describe("CUA capability doctor", () => {
   it("returns redacted daemon checks without discovering windows or dispatching actions", async () => {
-    const fake = fakeDriver();
+    let startInput: { session?: string; captureScope?: CaptureScope } | undefined;
+    const fake = fakeDriver({ onStart: (input) => { startInput = input; } });
     const report = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => fake.driver });
 
     expect(report.status).toBe("supported");
@@ -99,12 +100,28 @@ describe("CUA capability doctor", () => {
     expect(report.verified.health.status).toBe("supported");
     expect(report.verified.permissions.status).toBe("supported");
     expect(report.cleanup.status).toBe("supported");
+    expect(startInput?.captureScope).toBe(CaptureScope.Desktop);
     expect(JSON.stringify(report)).not.toContain("private-daemon-version");
     expect(JSON.stringify(report)).not.toContain("private daemon text");
     expect(fake.calls).not.toContain("list_windows");
     expect(fake.calls).not.toContain("bring_to_front");
     expect(fake.calls).not.toContain("get_window_state");
     expect(fake.destroyed()).toBe(1);
+  });
+
+  it("accepts the structured macOS permission source without persisting its details", async () => {
+    const fake = fakeDriver({
+      permission: toolResult({
+        structuredJson: JSON.stringify({
+          accessibility: true,
+          screen_recording: true,
+          source: { attribution: "caller", bundle_id: "com.trycua.driver", executable: "/private/path" },
+        }),
+      }),
+    });
+    const report = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => fake.driver });
+    expect(report.verified.permissions).toEqual({ status: "supported" });
+    expect(JSON.stringify(report)).not.toContain("/private/path");
   });
 
   it("uses a cleanup signal independent from the caller signal", async () => {
@@ -236,6 +253,12 @@ describe("CUA capability doctor", () => {
     });
     const skippedReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => skippedCheck.driver });
     expect(skippedReport.verified.health).toEqual({ status: "degraded", reasonCode: "health_checks_skipped" });
+
+    const expectedReadOnlySkip = fakeDriver({
+      health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: "darwin", driver_version: "0.22.2", overall: "ok", checks: [{ name: "screen_capture_capability", status: "skip" }] }) }),
+    });
+    const expectedReadOnlySkipReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => expectedReadOnlySkip.driver });
+    expect(expectedReadOnlySkipReport.verified.health).toEqual({ status: "supported" });
 
     const mismatchedVersion = fakeDriver({
       health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: "win32", driver_version: "0.22.1", overall: "ok", checks: [{ name: "binary_version", status: "pass" }] }) }),

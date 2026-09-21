@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import { CaptureScope, type CuaDriverLike, type ToolResult } from "@trycua/cua-driver";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
 import { listWindowTargets } from "./window-contract.js";
@@ -39,7 +39,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let abortGrounding = false;
   const target = { pid: 1234, windowId: 5678 };
   const driver = {
-    async startSession() { calls.push({ name: "startSession" }); return { active: true, revived: false } as never; },
+    async startSession(input: { captureScope?: CaptureScope }) { calls.push({ name: "startSession", input }); return { active: true, revived: false } as never; },
     async endSession() { calls.push({ name: "endSession" }); return { active: false, session: "window-test" } as never; },
     async shutdown() { calls.push({ name: "shutdown" }); },
     async verifyState() {
@@ -77,7 +77,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
 function fakeDriver() {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
   const driver = {
-    async startSession() { return { active: true, revived: false } as never; },
+    async startSession(input: { captureScope?: CaptureScope }) { calls.push({ name: "startSession", input }); return { active: true, revived: false } as never; },
     async endSession() { return { active: false, session: "test" } as never; },
     async shutdown() {},
     async callTool(name: string, inputJson: string) {
@@ -124,6 +124,7 @@ describe("CuaDriverComputer", () => {
 
     try {
       const session = await computer.open({}, new AbortController().signal);
+      expect(fake.calls[0]).toMatchObject({ name: "startSession", input: { captureScope: CaptureScope.Desktop } });
       expect(session).toMatchObject({
         backend: "cua-driver-daemon",
         viewport: { width: 1, height: 1, coordinateSpace: "physical" },
@@ -718,6 +719,37 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("preserves screenshot-local physical coordinates for a coherent Retina capture", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-retina-window-"));
+    const fake = windowDriver(
+      { x: 756, y: 34, width: 756, height: 948 },
+      { width: 1250, height: 1567 },
+    );
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "retina-window-observation" as ObservationId;
+      await computer.observe(session, observationId, new AbortController().signal);
+      const receipt = await computer.execute(session, {
+        actionId: "retina-window-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 625, y: 313 },
+      }, new AbortController().signal);
+      expect(receipt.status).toBe("completed");
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ x: 625, y: 313 });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("uses the decision observation viewport when Runtime supplies a fresh execution observation", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-coordinate-map-execution-"));
     const fake = windowDriver(
@@ -750,6 +782,61 @@ describe("CuaDriverComputer", () => {
       }, new AbortController().signal, { executionObservationId });
       expect(click.status).toBe("completed");
       expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ x: 518, y: 534 });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses one confirmed window click point for the next type action only", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-type-focus-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "window-type-focus" as ObservationId;
+      await computer.observe(session, observationId, new AbortController().signal);
+      await computer.execute(session, {
+        actionId: "window-type-focus-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 100, y: 200 },
+      }, new AbortController().signal);
+      await computer.execute(session, {
+        actionId: "window-type-focus-first" as ActionId,
+        basedOn: observationId,
+        kind: "type",
+        text: "first",
+      }, new AbortController().signal);
+      await computer.execute(session, {
+        actionId: "window-type-focus-second" as ActionId,
+        basedOn: observationId,
+        kind: "type",
+        text: "second",
+      }, new AbortController().signal);
+      const types = fake.calls.filter((call) => call.name === "type_text");
+      const clickInput = fake.calls.find((call) => call.name === "click")?.input;
+      expect(types[0]?.input).toMatchObject({ x: clickInput?.x, y: clickInput?.y, text: "first" });
+      expect(types[1]?.input).toMatchObject({ text: "second" });
+      expect(types[1]?.input).not.toHaveProperty("x");
+      expect(types[1]?.input).not.toHaveProperty("y");
+      await computer.execute(session, {
+        actionId: "window-type-focus-hotkey" as ActionId,
+        basedOn: observationId,
+        kind: "keypress",
+        keys: ["CMD", "A"],
+      }, new AbortController().signal);
+      expect(fake.calls.find((call) => call.name === "hotkey")?.input).toMatchObject({
+        x: clickInput?.x,
+        y: clickInput?.y,
+        keys: ["CMD", "A"],
+      });
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

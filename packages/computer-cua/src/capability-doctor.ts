@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  CaptureScope,
   CuaDriver,
   EndSessionInput,
   GetSessionInput,
@@ -149,7 +150,13 @@ export async function inspectCuaCapabilities(options: CuaCapabilityDoctorOptions
     return buildReport(metadata, inventory.check, unknownCheck("inventory_invalid"), unknownCheck("inventory_invalid"), unknownCheck("inventory_invalid"), cleanup, inventory.tools);
   }
 
-  const startOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.startSession(StartSessionInput.new({ session: sessionLabel }), { signal }));
+  const startOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.startSession(StartSessionInput.new({
+    session: sessionLabel,
+    // The doctor declares and validates the primary desktop path. CUA 0.22.2
+    // defaults Auto to Window on macOS, so leaving this implicit makes the
+    // doctor's own desktopUnlocked check fail even when TCC is fully granted.
+    captureScope: CaptureScope.Desktop,
+  }), { signal }));
   if (!startOperation.settled) {
     return buildReport(metadata, inventory.check, startOperation.check, unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), inventory.tools);
   }
@@ -353,7 +360,14 @@ function validateHealthReport(result: ToolResult | undefined, expectedDriverVers
   const statuses = value.checks.map((check) => (check as Record<string, unknown>).status);
   if (statuses.includes("fail") || value.overall === "failed") return unknownCheck("health_failed");
   if (value.overall === "degraded") return { status: "degraded", reasonCode: "health_degraded" };
-  if (statuses.includes("skip")) return { status: "degraded", reasonCode: "health_checks_skipped" };
+  const unexpectedSkippedCheck = value.checks.some((check) => {
+    const record = check as Record<string, unknown>;
+    return record.status === "skip" && record.name !== "screen_capture_capability";
+  });
+  // health_report is intentionally read-only, so CUA 0.22.2 always skips the
+  // active ScreenCaptureKit probe here. The separate probe-readonly command is
+  // the gate that actually captures and validates pixels.
+  if (unexpectedSkippedCheck) return { status: "degraded", reasonCode: "health_checks_skipped" };
   return supportedCheck();
 }
 
@@ -361,9 +375,18 @@ function validatePermissionReport(result: ToolResult | undefined): CuaDoctorChec
   const envelope = validateToolEnvelope(result);
   if (envelope.status !== "supported") return envelope;
   const value = parseStructured(result?.structuredJson);
-  if (!isRecord(value) || typeof value.accessibility !== "boolean" || typeof value.screen_recording !== "boolean" || typeof value.source !== "string") return unknownCheck("permission_schema");
+  if (!isRecord(value) || typeof value.accessibility !== "boolean" || typeof value.screen_recording !== "boolean" || !isPermissionSource(value.source)) return unknownCheck("permission_schema");
   if (!value.accessibility || !value.screen_recording) return unknownCheck("permission_not_granted");
   return supportedCheck();
+}
+
+function isPermissionSource(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (!isRecord(value)) return false;
+  return typeof value.attribution === "string"
+    && value.attribution.trim().length > 0
+    && typeof value.bundle_id === "string"
+    && value.bundle_id.trim().length > 0;
 }
 
 function validateToolEnvelope(result: ToolResult | undefined): CuaDoctorCheck {

@@ -3,6 +3,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import {
+  CaptureScope,
   CuaDriver,
   EndSessionInput,
   GetDesktopStateInput,
@@ -201,7 +202,7 @@ async function main(): Promise<void> {
       driver: metadata,
       options,
     }, null, 2), "utf8");
-    await driver.startSession(StartSessionInput.new({ session: options.session }));
+    await driver.startSession(StartSessionInput.new({ session: options.session, captureScope: CaptureScope.Desktop }));
     const screenSize = await driver.getScreenSize(GetScreenSizeInput.new({ session: options.session }));
     await writeFile(join(options.outputDir, "screen-size.json"), JSON.stringify(serializableToolResult(screenSize), null, 2), "utf8");
     const screenshotPath = join(options.outputDir, "desktop.png");
