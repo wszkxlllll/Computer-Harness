@@ -226,7 +226,35 @@ TUI 显式选窗使用 foreground 预览，可用能力以当前 CUA 后端门�
 
 ### UIA / DOM grounding 状态
 
-UIA/Accessibility 已接入一个默认关闭的 CUA window-only 实验入口：观察时以 depth 16、最多 256 个元素读取 `get_window_state`，Adapter 生成有界、脱敏、绑定 Observation 的安全候选，Runtime 再用当前 goal/最近纠正做确定性 lexical 选择，最多把 16 个 hot elements 落入 `GroundingCatalog`/Context。Provider 继续从统一 ToolRegistry 获取 `click_element` schema。执行层只接受当前 observation 的 ref，并将 bbox 中心映射为既有 click ActionIntent；旧 observation、resize、窗口重建或查询失败都会拒绝/降级，不会把 raw UIA tree、PID/HWND、snapshot token 或原始 value 放进 Context/trajectory。自有 fixture 已验证超过 64 候选时的 Edit ref 可执行与 stale refusal；CUA 当前未可靠暴露 disabled evidence，故仍保持 fail-closed。最新高德轨迹只发现 Edge chrome 候选、没有网页 Edit，不能宣称已解决真实网页 grounding；DOM grounding 仍是后续独立能力。
+UIA/Accessibility 与 DOM 都是默认关闭的可选 Grounding 生产者。UIA 仅用于显式 CUA window target，以 depth 16、最多 256 个安全候选读取 Accessibility；DOM/Hybrid 只用于 Harness 自己启动的 managed Edge profile 和 loopback CDP，profile 可按 Run 选择临时或 Harness-owned 持久模式，不附加个人现有浏览器。Runtime 对 UIA/DOM 候选去重、融合和有界召回，每轮最多向 Context 投影 16 个 hot elements；最近失败区域、用户纠正和低信任 `declaredEffect/assistantText` 只用于召回，不是事实或授权。Provider 仍只从统一 ToolRegistry 获取 `click_element`；截图和普通坐标 `click` 始终保留，Canvas/WebGL/iframe 等边界不伪造 DOM ref。
+
+在 TUI 体验 managed DOM/Hybrid 时，启动命令必须显式提供一个 HTTP(S) 起始 URL，然后在 `F` 页面选择 `dom-catalog-v1` 或 `hybrid-catalog-v1`：
+
+```powershell
+.\scripts\travel\run.ps1 tui -Preset research -Model glm-5.3-flash -ManagedBrowserUrl "https://example.com" -Build
+```
+
+如需先手动登录并保留 Harness-owned 持久 profile，先执行一次（仅启动 managed host，不创建 Run/Provider）：
+
+```powershell
+.\scripts\travel\run.ps1 browser-login -ManagedBrowserUrl "https://example.com" -ManagedBrowserProfileLabel travel
+```
+
+同一 label 的第二个站点继续使用相同参数即可登记：
+
+```powershell
+.\scripts\travel\run.ps1 browser-login -ManagedBrowserUrl "https://another.example" -ManagedBrowserProfileLabel travel
+```
+
+登录完成后在 PowerShell 按 Enter 保存 profile。之后用相同 label 启动 TUI：
+
+```powershell
+.\scripts\travel\run.ps1 tui -Preset research -Model glm-5.3-flash -ManagedBrowserUrl "https://example.com" -ManagedBrowserProfileMode persistent -ManagedBrowserProfileLabel travel -Build
+```
+
+同一个 label 可以多次执行 `browser-login` 登记不同站点；Harness 只在自己的 profile 元数据中保留最多 8 个去重后的 HTTP(S) origin/path，默认剥离 query 和 fragment，不读取 Edge 历史、cookie 或 storage。之后的 persistent Run 会把本次 `-ManagedBrowserUrl` 作为初始活动页，并在同一个 Harness-owned Edge window 中恢复已登记站点为后台 tabs；如果 profile 还没有登记清单，则只打开本次 URL。新 tab 不会被 DOM transport 混入当前活动 tab，且不能依赖 Edge session restore。
+
+Managed 模式会自动启动可见 Edge、用 CUA 严格解析 Harness-owned browser window，并使用 foreground 交付以开放 type/keypress/hotkey/scroll/drag。profile mode 默认 `ephemeral`（临时 profile，Run 结束清理）；`persistent` 只接受 Harness-owned 的显式 label/profile root，用户需在可见 managed 浏览器中手动登录一次，Harness 不自动登录、不读取或输出 cookie/localStorage/password/input value，也不会静默回退个人 profile。运行时不要与 Agent 并发操作该窗口。DOM 每次观察都会在 Harness-owned browser window 内重新枚举 page targets：同一 tab 的跨站导航继续收集 DOM；同一 browser window 内切换到唯一 `visibilityState=visible` tab 会刷新 Adapter 私有 generation；popup/新 browser window、关闭 tab 或 0/多个可见 tab 一律降级为 UIA/视觉，不会把旧 tab 的 DOM 错配给新活动窗口。当前真实 fixture 只读 pilot 已验证 custom div/button/input/open shadow 可发现，但高德“换乘少”真实 DOM 命中与动作仍待下一轮人工观察验证。详见 [DOM Grounding 基础实施与门禁](./docs/dev-2-dom-grounding-foundation-2026-09-21.md)。
 
 ## Provider 与环境变量
 
@@ -268,7 +296,7 @@ CLI/SDK 负责组装和注入依赖，Provider 不反向依赖 CLI；贡献时�
 - 真实 API 窄证据：GLM/Qwen 各完成两轮合成 Memory 协议消费，无 GUI action；这不证明语义检索质量、长任务质量或真实用户数据安全。
 - 本机真实体验：已观察到模型坐标偏差、重复尝试、前台失配和高 Context/token 成本；这说明产品体验仍需优化，不能把 `runtimeOutcome=succeeded` 当作任务成功。
 - `--doctor` 是无模型、无截图/输入窗口动作的诊断，但会建立/结束临时 session，仍可能 cleanup `unknown`；不能把 metadata/inventory 支持误读成 session、权限或 cleanup 全部通过。
-- UIA 只读 probe 与默认关闭的 grounding 实验分别见[UIA 能力探针记录](./docs/dev-2-uia-readonly-probe-results-2026-09-20.md)和[UIA Grounding 实施结果](./docs/dev-2-uia-grounding-implementation-results-2026-09-21.md)；当前仅有自有 fixture 离线证据，不代表真实应用或 DOM grounding 已通过。
+- UIA 只读 probe、UIA Grounding 和 managed DOM/Hybrid fixture pilot 分别见[UIA 能力探针记录](./docs/dev-2-uia-readonly-probe-results-2026-09-20.md)、[UIA Grounding 实施结果](./docs/dev-2-uia-grounding-implementation-results-2026-09-21.md)和[DOM Grounding 基础实施与门禁](./docs/dev-2-dom-grounding-foundation-2026-09-21.md)；真实 fixture 通过不代表高德/携程业务操作已通过。
 - Provider transport failure、CUA refusal、真实焦点、登录/OTP 审批和 OSWorld 业务结果需按独立验证记录解释；本 README 不把它们包装成已解决或成熟安全保证。
 
 ## 继续阅读与贡献
