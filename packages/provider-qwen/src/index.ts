@@ -17,7 +17,7 @@ import type {
   ProviderAdapter,
   PreparedProviderRequest,
 } from "@computer-harness/runtime";
-import { HARNESS_EFFECT_KEY, declaredActionEffects, encodeToolCallArguments, splitActionEffectArguments } from "@computer-harness/runtime";
+import { HARNESS_EFFECT_KEY, declaredActionEffects, encodeToolCallArguments, isActionableFinishSummary, splitActionEffectArguments } from "@computer-harness/runtime";
 
 export interface QwenImagePreprocessorInput {
   bytes: Uint8Array;
@@ -788,7 +788,10 @@ function mapQwen38ToolCall(
   if (tool === undefined) throw new QwenProviderError(`Qwen selected a tool not offered by this run: ${value.name}`, "QWEN_UNAVAILABLE_TOOL");
   if (tool.control === "finish") {
     if (args.status !== "success" && args.status !== "failure") throw new QwenProviderError(`${value.name} requires status success or failure`, "QWEN_INVALID_TOOL_CALL");
-    return { type: "finish", summary: typeof args.text === "string" && args.text.trim().length > 0 ? args.text : `Qwen3.8 terminated with ${args.status}`, reportedStatus: args.status };
+    if (typeof args.text !== "string" || !isActionableFinishSummary(args.text)) {
+      throw new QwenProviderError(`${value.name} requires user-facing result text, not only a status label`, "QWEN_INVALID_TOOL_CALL");
+    }
+    return { type: "finish", summary: args.text.trim(), reportedStatus: args.status };
   }
   if (tool.control === "user_input_required") {
     if (typeof args.text !== "string" || args.text.trim().length === 0) throw new QwenProviderError(`${value.name} requires text`, "QWEN_INVALID_TOOL_CALL");

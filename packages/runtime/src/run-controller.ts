@@ -4,6 +4,8 @@ import type {
   ActionIntent,
   AssetId,
   EventId,
+  GroundingBoundingBox,
+  GroundingRecoveryHint,
   JsonValue,
   ModelTurn,
   MemoryMutation,
@@ -59,6 +61,7 @@ import type { CommittedEventListener } from "./committed-events.js";
 import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange, type ProgressMonitorState } from "./progress-monitor.js";
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 import { DeterministicGroundingSelector, type GroundingSelector } from "./grounding-selector.js";
+import { finishSummaryRejectionReason } from "./finish-summary.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -300,6 +303,8 @@ export class RunController {
   private readonly cleanupDeadlineMs: number;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
+  /** Full bounded adapter catalog for the latest observation; the model only sees the hot projection. */
+  private readonly groundingCandidates = new Map<string, import("@computer-harness/protocol").GroundingCatalog>();
   private readonly callStates = new Map<ToolCallId, CallState>();
   private readonly actionCallIds = new Map<ActionId, ToolCallId>();
   private readonly commandInbox = new CommandInbox();
@@ -323,6 +328,8 @@ export class RunController {
   private monitorWorkClock: MonitorWorkClock = { modelDecisionCount: 0, guiActionCount: 0 };
   private monitorPendingGuidance: MonitorGuidance | undefined;
   private monitorPendingHelp: Extract<MonitorPolicyProposal, { kind: "help_requested" }> | undefined;
+  /** Short-lived local recall for the next GroundingCatalog projection. */
+  private groundingRecoveryHint: GroundingRecoveryHint | undefined;
   private monitorProcessing = false;
   private monitorDiagnosticRecording = false;
   private monitorProposalCount = 0;
@@ -555,7 +562,7 @@ export class RunController {
               ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
               features: this.features,
               ...(this.monitorPendingGuidance === undefined ? {} : { monitorGuidance: this.monitorPendingGuidance }),
-              ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
+               ...(this.latestObservation === undefined ? {} : { latestObservation: this.observationForContext(this.latestObservation) }),
             },
             this.abortController.signal,
           );
@@ -725,6 +732,22 @@ export class RunController {
           }
           if (beforeFinish.correction) {
             continue;
+          }
+          // Provider adapters validate explicit terminate controls. Runtime
+          // applies the same check when a provider supplies a structured
+          // reportedStatus; plain textual finishes remain compatible with
+          // providers that do not expose a terminate control.
+          const finishSummaryError = turn.reportedStatus === undefined
+            ? undefined
+            : finishSummaryRejectionReason(turn.summary);
+          if (finishSummaryError !== undefined) {
+            await this.commitEvent({
+              type: "runtime.error",
+              category: "finish_summary_invalid",
+              message: finishSummaryError,
+            });
+            outcome = "failed";
+            break;
           }
           const finish = this.policy.canFinish(this.snapshot);
           if (!finish.allowed) {
@@ -1005,7 +1028,7 @@ export class RunController {
       runId: this.runId,
       session: pending.session,
       signal: this.abortController.signal,
-      ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+       ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
     };
     if (pending.definition.category === "computer") {
       if (pending.preparedAction !== undefined) {
@@ -1140,7 +1163,7 @@ export class RunController {
         runId: this.runId,
         session,
         signal: this.abortController.signal,
-        ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+         ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
       };
       for (const entry of preflight) {
         if (entry.rejection !== undefined || entry.definition?.category !== "computer") continue;
@@ -1299,7 +1322,7 @@ export class RunController {
         runId: this.runId,
         session: pendingTurn.session,
         signal: this.abortController.signal,
-        ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+         ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
       };
       this.throwIfAborted();
       if (entry.definition.category === "computer") {
@@ -1468,7 +1491,7 @@ export class RunController {
       const action = candidate.action;
       validateActionIntent(action, {
         capabilities: context.session.capabilities,
-        ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+       ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
         ...(executionObservationId === undefined ? {} : { executionObservationId }),
       });
     } catch (error) {
@@ -1608,7 +1631,7 @@ export class RunController {
     const action = makeActionIntent(this.idFactory.actionId(), decisionObservationId, draft);
     validateActionIntent(action, {
       capabilities: context.session.capabilities,
-      ...(this.latestObservation === undefined ? {} : { observation: this.latestObservation }),
+      ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
       ...(executionObservationId === undefined ? {} : { executionObservationId }),
     });
     return { action, ...(decisionObservationId === undefined ? {} : { decisionObservationId }) };
@@ -1746,6 +1769,12 @@ export class RunController {
       if (capture.grounding.observationId !== observationId || capture.grounding.computerSessionId !== session.id) {
         throw new ObservationCaptureError(new Error("GROUNDING_CAPTURE_MISMATCH: grounding catalog is not bound to the current observation and computer session"));
       }
+      this.groundingCandidates.set(String(observationId), capture.grounding);
+      while (this.groundingCandidates.size > 4) {
+        const oldest = this.groundingCandidates.keys().next().value;
+        if (oldest === undefined) break;
+        this.groundingCandidates.delete(oldest);
+      }
     }
     const grounding = capture.grounding === undefined
       ? undefined
@@ -1762,6 +1791,7 @@ export class RunController {
               .join("\n");
             return activePlanText.length === 0 ? {} : { activePlanText };
           })(),
+          ...(this.groundingRecoveryHint === undefined ? {} : { recoveryHint: this.groundingRecoveryHint }),
         });
     const extension = capture.screenshot.mediaType === "image/jpeg" ? "jpg" : "png";
     const asset = await this.assetStore.put({
@@ -1791,6 +1821,36 @@ export class RunController {
     return persisted.observation;
   }
 
+  /**
+   * Re-project the already committed latest catalog with the current
+   * short-lived recovery hint.  This keeps the durable Observation immutable
+   * while allowing the next Context request to prefer the failed-action
+   * neighborhood; click_element refs remain valid because the adapter's
+   * private map is observation/session bound and contains the same refs.
+   */
+  private observationForContext(observation: ObservationFrame): ObservationFrame {
+    if (this.groundingRecoveryHint === undefined) return observation;
+    const candidates = this.groundingCandidates.get(String(observation.id));
+    const sourceCatalog = candidates ?? observation.grounding;
+    if (sourceCatalog === undefined) return observation;
+    const grounding = this.groundingSelector.select(sourceCatalog, {
+      goal: this.goal ?? "",
+      latestUserCorrections: this.events
+        .filter((event): event is Extract<RuntimeEvent, { type: "user.input.received" }> => event.type === "user.input.received")
+        .slice(-4)
+        .map((event) => event.text),
+      ...(() => {
+        const activePlanText = this.snapshot.plan.tasks
+          .filter((task) => task.status !== "completed")
+          .map((task) => `${task.subject}: ${task.description}`)
+          .join("\n");
+        return activePlanText.length === 0 ? {} : { activePlanText };
+      })(),
+      recoveryHint: this.groundingRecoveryHint,
+    });
+    return { ...observation, grounding };
+  }
+
   private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
     let outcome = data.outcome;
     try {
@@ -1809,6 +1869,8 @@ export class RunController {
       ...(data.summary === undefined ? {} : { summary: data.summary }),
       ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
     });
+    this.groundingCandidates.clear();
+    this.groundingRecoveryHint = undefined;
     return outcome;
   }
 
@@ -1895,6 +1957,7 @@ export class RunController {
       }
       const progress = reduceProgressMonitor(this.monitorState, event);
       this.monitorState = progress.state;
+      this.updateGroundingRecoveryHint(event, progress.output);
       const executionBarrier = this.monitorExecutionBarrier();
       if (this.monitorBarrierClearsPendingRecommendations() || this.snapshot.status === "finished") {
         this.clearMonitorPendingRecommendations();
@@ -1960,6 +2023,144 @@ export class RunController {
   private clearMonitorPendingRecommendations(): void {
     this.monitorPendingGuidance = undefined;
     this.monitorPendingHelp = undefined;
+  }
+
+  /**
+   * Turn existing Monitor evidence into one bounded selector hint. This is a
+   * consumer of the current Monitor path, not another retry/stop mechanism.
+   * Regions are derived only from committed ActionIntent/Observation events.
+   */
+  private updateGroundingRecoveryHint(event: RuntimeEvent, output: import("./progress-monitor.js").ProgressMonitorOutput): void {
+    if (event.type === "user.input.received") {
+      if (this.groundingRecoveryHint !== undefined) {
+        const localIntent = boundedRecoveryIntent(event.text);
+        if (localIntent === undefined) {
+          const { localIntent: _oldIntent, localIntentSource: _oldSource, ...withoutIntent } = this.groundingRecoveryHint;
+          this.groundingRecoveryHint = { ...withoutIntent, attempt: 1 };
+        } else {
+          this.groundingRecoveryHint = {
+            ...this.groundingRecoveryHint,
+            attempt: 1,
+            localIntent,
+            localIntentSource: "user_correction",
+          };
+        }
+      }
+      return;
+    }
+    if (event.type === "planning.task.updated" || event.type === "run.finished") {
+      this.groundingRecoveryHint = undefined;
+      return;
+    }
+    if (event.type === "observation.created") {
+      if (output.evidence.some((evidence) => evidence.kind === "partition_changed")) this.groundingRecoveryHint = undefined;
+      return;
+    }
+    if (event.type === "monitor.transition") {
+      if (event.transition === "changed") {
+        this.groundingRecoveryHint = undefined;
+        return;
+      }
+      const reason = event.transition === "unchanged" ? "no_observed_change" : "unknown_outcome";
+      const action = this.actionForId(event.actionId);
+      this.setGroundingRecoveryHint(reason, event.actionId, action);
+      return;
+    }
+    if (event.type === "action.execution.failed") {
+      if (/WINDOW_GEOMETRY_CHANGED|GROUNDING_REF_STALE|WINDOW_TARGET/iu.test(event.receipt.driverCode ?? "")) {
+        this.groundingRecoveryHint = undefined;
+        return;
+      }
+      const action = this.actionForId(event.receipt.actionId);
+      this.setGroundingRecoveryHint("repeated_failure", event.receipt.actionId, action);
+      return;
+    }
+    if (event.type === "tool.call.rejected" && output.reasons.some((reason) => reason.code === "repeated_refusal")) {
+      this.groundingRecoveryHint = undefined;
+    }
+  }
+
+  private setGroundingRecoveryHint(
+    reason: GroundingRecoveryHint["reason"],
+    actionId: ActionId,
+    action: ActionIntent | undefined,
+  ): void {
+    const region = action === undefined ? undefined : this.groundingRecoveryRegion(action);
+    const prior = this.groundingRecoveryHint;
+    const sameRegion = region !== undefined && prior?.region !== undefined && groundingBoxesOverlap(region, prior.region) >= 0.45;
+    const attempt = sameRegion && prior.reason === reason ? Math.min(16, prior.attempt + 1) : 1;
+    // Monitor's own guidance/help budget remains authoritative. Grounding gets
+    // at most three local attempts before it falls back to ordinary visual/UIA
+    // selection; a human correction explicitly resets this small budget.
+    if (attempt > 3) {
+      this.groundingRecoveryHint = undefined;
+      return;
+    }
+    const providerHint = prior?.localIntentSource === "user_correction" ? undefined : this.providerRecoveryIntent(actionId);
+    this.groundingRecoveryHint = {
+      actionId,
+      reason,
+      attempt,
+      ...(region === undefined ? {} : { region }),
+      ...(prior?.localIntentSource === "user_correction" && prior.localIntent !== undefined
+        ? { localIntent: prior.localIntent, localIntentSource: "user_correction" as const }
+        : providerHint === undefined ? {} : { localIntent: providerHint.text, localIntentSource: providerHint.source }),
+    };
+  }
+
+  private providerRecoveryIntent(actionId: ActionId): { readonly text: string; readonly source: "declared_effect" | "provider_hint" } | undefined {
+    const proposed = [...this.events].reverse().find((event): event is Extract<RuntimeEvent, { type: "action.proposed" }> =>
+      event.type === "action.proposed" && event.action.actionId === actionId);
+    const callId = this.actionCallIds.get(actionId) ?? proposed?.callId;
+    if (callId === undefined) return undefined;
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      const event = this.events[index];
+      if (event?.type !== "model.response.received" || event.turn.type !== "tool_calls") continue;
+      const call = event.turn.calls.find((candidate) => candidate.id === callId);
+      if (call === undefined) continue;
+      if (call.declaredEffect !== undefined) {
+        const text = boundedRecoveryIntent(`${call.declaredEffect.target}: ${call.declaredEffect.summary}`);
+        if (text !== undefined) return { text, source: "declared_effect" };
+      }
+      const assistantText = event.turn.assistantText === undefined ? undefined : boundedRecoveryIntent(event.turn.assistantText);
+      if (assistantText !== undefined) return { text: assistantText, source: "provider_hint" };
+      return undefined;
+    }
+    return undefined;
+  }
+
+  private actionForId(actionId: ActionId): ActionIntent | undefined {
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      const event = this.events[index];
+      if (event?.type === "action.execution.started" && event.action.actionId === actionId) return event.action;
+      if (event?.type === "action.proposed" && event.action.actionId === actionId) return event.action;
+    }
+    return undefined;
+  }
+
+  private groundingRecoveryRegion(action: ActionIntent): GroundingBoundingBox | undefined {
+    if (action.kind === "wait" || this.latestObservation === undefined) return undefined;
+    const viewport = this.latestObservation.viewport;
+    const point = action.kind === "click" || action.kind === "double_click" || action.kind === "right_click" || action.kind === "scroll"
+      ? action.point
+      : action.kind === "drag"
+        ? { x: (action.from.x + action.to.x) / 2, y: (action.from.y + action.to.y) / 2 }
+        : undefined;
+    if (point === undefined) {
+      if (action.groundingRef === undefined) return undefined;
+      const boundObservation = this.events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> =>
+        event.type === "observation.created" && event.observation.id === action.basedOn);
+      return boundObservation?.observation.grounding?.elements.find((element) => element.elementRef === action.groundingRef)?.bbox;
+    }
+    const width = Math.min(96, viewport.width);
+    const height = Math.min(96, viewport.height);
+    return {
+      x: Math.max(0, Math.min(viewport.width - width, point.x - width / 2)),
+      y: Math.max(0, Math.min(viewport.height - height, point.y - height / 2)),
+      width,
+      height,
+      coordinateSpace: "physical",
+    };
   }
 
   private monitorBarrierClearsPendingRecommendations(): boolean {
@@ -2098,6 +2299,27 @@ function sameObservationFingerprint(left: ObservationFingerprint, right: Observa
     && left.viewport.height === right.viewport.height
     && left.viewport.coordinateSpace === right.viewport.coordinateSpace
     && left.digest === right.digest;
+}
+
+function boundedRecoveryIntent(value: string): string | undefined {
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F]/gu, " ")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
+    .replace(/\b1\d{10}\b/gu, "[redacted-phone]")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return normalized.length === 0 ? undefined : normalized.slice(0, 160);
+}
+
+function groundingBoxesOverlap(
+  left: GroundingBoundingBox,
+  right: GroundingBoundingBox,
+): number {
+  const overlapWidth = Math.max(0, Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x));
+  const overlapHeight = Math.max(0, Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y));
+  const intersection = overlapWidth * overlapHeight;
+  const union = left.width * left.height + right.width * right.height - intersection;
+  return union <= 0 ? 0 : intersection / union;
 }
 
 function errorMessage(error: unknown): string {

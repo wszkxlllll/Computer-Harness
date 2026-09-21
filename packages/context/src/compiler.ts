@@ -310,8 +310,12 @@ export class DefaultContextCompiler implements ContextCompiler {
           projectedElementCount: groundingCandidate?.projectedElementCount ?? 0,
           estimatedTokens: rawGroundingTokens,
           ...(groundingCandidate?.strategy === undefined ? {} : { strategy: groundingCandidate.strategy }),
+          source: groundingCatalog.source,
+          ...(groundingCandidate?.sourceCounts === undefined ? {} : { sourceCounts: groundingCandidate.sourceCounts }),
+          ...(groundingCandidate?.deduplicatedElementCount === undefined ? {} : { deduplicatedElementCount: groundingCandidate.deduplicatedElementCount }),
           ...(groundingCandidate?.selectedElementRefs === undefined ? {} : { selectedElementRefs: groundingCandidate.selectedElementRefs }),
           ...(groundingCandidate?.selectionReasons === undefined ? {} : { selectionReasons: groundingCandidate.selectionReasons }),
+          ...(groundingCandidate?.recovery === undefined ? {} : { recovery: groundingCandidate.recovery }),
         },
       }),
       observationIncluded: latestObservation !== undefined,
@@ -355,9 +359,13 @@ interface GroundingProjection {
   readonly truncated: boolean;
   readonly candidateElementCount: number;
   readonly projectedElementCount: number;
-  readonly strategy: "deterministic-lexical-v1" | "adapter-bounded-v1";
+  readonly strategy: "deterministic-lexical-v1" | "bounded-fusion-v1" | "adapter-bounded-v1";
+  readonly source: GroundingCatalog["source"];
+  readonly sourceCounts?: NonNullable<GroundingCatalog["selection"]>["sourceCounts"];
+  readonly deduplicatedElementCount?: number;
   readonly selectedElementRefs: readonly string[];
   readonly selectionReasons: readonly { elementRef: string; codes: readonly string[] }[];
+  readonly recovery?: NonNullable<GroundingCatalog["selection"]>["recovery"];
 }
 
 function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection {
@@ -366,8 +374,9 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
   // the persisted order here; Context must not silently select a second,
   // potentially different set from the one validated by click_element.
   const projected = candidates.slice(0, Math.min(catalog.maxElements, 16));
+  const sourceLabel = catalog.source === "hybrid" ? "UIA+DOM" : catalog.source.toUpperCase();
   const lines = [
-    `UIA grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing):`,
+    `${sourceLabel} grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing):`,
     ...projected.map((element) => {
       const box = element.bbox === undefined
         ? "bbox=unknown"
@@ -375,7 +384,8 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
       const label = element.name === undefined ? "" : ` name="${compactLabel(element.name, 96)}"`;
       const description = element.description === undefined ? "" : ` description="${compactLabel(element.description, 120)}"`;
       const states = element.state === undefined ? "" : ` state=${formatGroundingState(element.state)}`;
-      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${label}${description} ${box}${states}`;
+      const provenance = element.source === undefined ? "" : ` source=${element.source}${element.browserRegion === undefined ? "" : `/${element.browserRegion}`}`;
+      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}`;
     }),
   ];
   const text = lines.join("\n");
@@ -386,8 +396,12 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
     candidateElementCount: catalog.selection?.candidateElementCount ?? candidates.length,
     projectedElementCount: projected.length,
     strategy: catalog.selection?.strategy ?? "adapter-bounded-v1",
+    source: catalog.source,
+    ...(catalog.selection?.sourceCounts === undefined ? {} : { sourceCounts: catalog.selection.sourceCounts }),
+    ...(catalog.selection?.deduplicatedElementCount === undefined ? {} : { deduplicatedElementCount: catalog.selection.deduplicatedElementCount }),
     selectedElementRefs: catalog.selection?.selectedElementRefs ?? projected.map((element) => element.elementRef),
     selectionReasons: catalog.selection?.reasons ?? [],
+    ...(catalog.selection?.recovery === undefined ? {} : { recovery: catalog.selection.recovery }),
   };
 }
 

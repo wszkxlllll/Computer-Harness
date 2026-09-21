@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('list', 'show', 'prepare', 'run', 'collect', 'tui')]
+  [ValidateSet('list', 'show', 'prepare', 'run', 'collect', 'tui', 'browser-login')]
   [string] $Command = 'list',
 
   [ValidatePattern('^T(?:0[1-9]|1[0-9]|20)$')]
@@ -23,6 +23,10 @@ param(
 
   [ValidateRange(1, 1000000)]
   [int] $MaxModelRequests = 100,
+  [string] $ManagedBrowserUrl,
+  [ValidateSet('ephemeral', 'persistent')]
+  [string] $ManagedBrowserProfileMode,
+  [string] $ManagedBrowserProfileLabel,
 
   [string] $CuaWindowPid,
   [string] $CuaWindowId,
@@ -39,6 +43,17 @@ $travelScript = Join-Path $PSScriptRoot 'travel.mjs'
 $harnessScript = Join-Path $repoRoot 'scripts\harness.ps1'
 $configPath = Join-Path $repoRoot '.harness.local.psd1'
 $selectedRiskGuard = if ($RiskGuard) { $RiskGuard } elseif ($Preset -eq 'research') { 'off' } else { 'layered' }
+
+function Get-ManagedBrowserArgument {
+  if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) { return @() }
+  $parsed = $null
+  if (-not [Uri]::TryCreate($ManagedBrowserUrl.Trim(), [UriKind]::Absolute, [ref]$parsed) -or $parsed.Scheme -notin @('http', 'https') -or [string]::IsNullOrWhiteSpace($parsed.Host)) {
+    throw '-ManagedBrowserUrl must be an explicit http(s) URL.'
+  }
+  return @('--managed-browser-url', $ManagedBrowserUrl.Trim())
+}
+
+$managedBrowserArgument = Get-ManagedBrowserArgument
 
 function Resolve-RepoPath([string] $Value) {
   if ([string]::IsNullOrWhiteSpace($Value)) { throw 'path is required' }
@@ -225,6 +240,20 @@ function Finalize-TuiCollector([string] $SessionPath, [hashtable] $Collector) {
 }
 
 switch ($Command) {
+  'browser-login' {
+    if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) { throw '-Command browser-login requires -ManagedBrowserUrl <http(s)-url>.' }
+    if ([string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { throw '-Command browser-login requires -ManagedBrowserProfileLabel <label>.' }
+    $config = Require-LocalConfig
+    Assert-CuaReady $config
+    $harnessParams = @{
+      Command = 'browser-login'
+      ManagedBrowserUrl = $ManagedBrowserUrl
+      ManagedBrowserProfileMode = 'persistent'
+      ManagedBrowserProfileLabel = $ManagedBrowserProfileLabel
+    }
+    & $harnessScript @harnessParams
+    exit $LASTEXITCODE
+  }
   'tui' {
     if (-not [string]::IsNullOrWhiteSpace($Task) -or -not [string]::IsNullOrWhiteSpace($AnchorDate) -or -not [string]::IsNullOrWhiteSpace($TrialDir) -or $AllowHeldout) {
       throw '-Command tui does not accept single-task options (-Task, -AnchorDate, -TrialDir, or -AllowHeldout). Enter the goal in the TUI instead.'
@@ -275,6 +304,9 @@ switch ($Command) {
         AllowExistingOutputDir = $true
         RiskGuard = $selectedRiskGuard
       }
+      if ($managedBrowserArgument.Count -gt 0) { $harnessParams['ManagedBrowserUrl'] = $ManagedBrowserUrl }
+      if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { $harnessParams['ManagedBrowserProfileMode'] = $ManagedBrowserProfileMode }
+      if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { $harnessParams['ManagedBrowserProfileLabel'] = $ManagedBrowserProfileLabel }
       if ($cuaWindowArguments.Count -gt 0) {
         $harnessParams['CuaWindowPid'] = $CuaWindowPid
         $harnessParams['CuaWindowId'] = $CuaWindowId
@@ -384,6 +416,9 @@ switch ($Command) {
         MaxModelRequests = $MaxModelRequests
         RiskGuard = $selectedRiskGuard
       }
+      if ($managedBrowserArgument.Count -gt 0) { $harnessParams['ManagedBrowserUrl'] = $ManagedBrowserUrl }
+      if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { $harnessParams['ManagedBrowserProfileMode'] = $ManagedBrowserProfileMode }
+      if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { $harnessParams['ManagedBrowserProfileLabel'] = $ManagedBrowserProfileLabel }
       if ($cuaWindowArguments.Count -gt 0) {
         $harnessParams['CuaWindowPid'] = $CuaWindowPid
         $harnessParams['CuaWindowId'] = $CuaWindowId

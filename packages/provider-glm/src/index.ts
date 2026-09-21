@@ -19,7 +19,7 @@ import type {
   ControlKind,
   CoordinateField,
 } from "@computer-harness/runtime";
-import { encodeToolCallArguments, splitActionEffectArguments } from "@computer-harness/runtime";
+import { encodeToolCallArguments, isActionableFinishSummary, splitActionEffectArguments } from "@computer-harness/runtime";
 
 export type GlmCoordinateMode = "normalized_1000" | "actual_pixels";
 
@@ -550,7 +550,10 @@ function mapControlCall(control: ControlKind, argumentsValue: JsonValue, name: s
   const args = argumentsValue as Record<string, JsonValue>;
   if (control === "finish") {
     if (args.status !== "success" && args.status !== "failure") throw new GlmProviderError("GLM terminate requires status success or failure", "GLM_INVALID_TOOL_CALL");
-    return { type: "finish", summary: typeof args.text === "string" && args.text.trim().length > 0 ? args.text : `GLM terminated with ${args.status}`, reportedStatus: args.status };
+    if (typeof args.text !== "string" || !isActionableFinishSummary(args.text)) {
+      throw new GlmProviderError("GLM terminate requires user-facing result text, not only a status label", "GLM_INVALID_TOOL_CALL");
+    }
+    return { type: "finish", summary: args.text.trim(), reportedStatus: args.status };
   }
   if (typeof args.text !== "string" || args.text.trim().length === 0) throw new GlmProviderError("GLM interact requires text", "GLM_INVALID_TOOL_CALL");
   return { type: "user_input_required", question: args.text };

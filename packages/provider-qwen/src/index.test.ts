@@ -49,7 +49,7 @@ function input(): ModelInput {
     inputSchema: schemas[name]!,
   }));
   tools.push(
-    { name: "terminate", description: "finish", category: "control" as const, control: "finish" as const, inputSchema: { type: "object", properties: { status: { type: "string", enum: ["success", "failure"] }, text: { type: "string" } }, required: ["status"], additionalProperties: false } },
+    { name: "terminate", description: "finish", category: "control" as const, control: "finish" as const, inputSchema: { type: "object", properties: { status: { type: "string", enum: ["success", "failure"] }, text: { type: "string" } }, required: ["status", "text"], additionalProperties: false } },
     { name: "interact", description: "ask", category: "control" as const, control: "user_input_required" as const, inputSchema: { type: "object", properties: { text: { type: "string" } } } },
   );
   return { system: "system", messages: [{ role: "user", content: [{ type: "image", asset, viewport }] }], tools };
@@ -67,13 +67,16 @@ function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelI
 
 function strictFinishResponse(): unknown {
   return {
-    choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-finish", name: "terminate", arguments: { status: "success", text: "done" } }] }) } }],
+    choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-finish", name: "terminate", arguments: { status: "success", text: "Observed strict finish" } }] }) } }],
   };
 }
 
 function response(name: string, argumentsValue: Record<string, unknown>, usage?: Record<string, unknown>): unknown {
+  const normalizedArguments = name === "terminate" && argumentsValue.text === undefined
+    ? { ...argumentsValue, text: "test completion" }
+    : argumentsValue;
   return {
-    choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "native-call-1", type: "function", function: { name, arguments: JSON.stringify(argumentsValue) } }] } }],
+    choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "native-call-1", type: "function", function: { name, arguments: JSON.stringify(normalizedArguments) } }] } }],
     ...(usage === undefined ? {} : { usage }),
   };
 }
@@ -192,20 +195,26 @@ describe("Qwen3.8-Flash provider adapter", () => {
     await expect(adapter.generate(guarded, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ arguments: { x: 319.6, y: 299.5 }, declaredEffect: { effects: ["navigate"], target: "Details" } }] });
     expect(String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content)).toContain("_harnessEffect");
     expect(String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content)).toContain("financial|external_commitment");
-    const historyClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-finish", name: "terminate", arguments: { status: "success" } }] }) } }] });
+    const historyClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-finish", name: "terminate", arguments: { status: "success", text: "finish history probe" } }] }) } }] });
     const historyInput: ModelInput = { ...guarded, messages: [...guarded.messages, { role: "assistant", content: [{ type: "tool_call", call: { id: "q38-effect" as import("@computer-harness/protocol").ToolCallId, name: "click", arguments: { x: 319.6, y: 299.5 }, declaredEffect: { effects: ["navigate"], target: "Details", summary: "Open product details" } }, viewport }] }] };
     await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: historyClient, thinking: "disabled" }).generate(historyInput, { signal: new AbortController().signal });
     const assistant = (historyClient.body?.messages as Array<Record<string, unknown>>).find((message) => message.role === "assistant");
     expect(String(assistant?.content)).toContain('"_harnessEffect"');
   });
   it("adds the terminate control boundary when terminate is available", async () => {
-    const client = new Client(response("terminate", { status: "success", text: "done" }));
+    const client = new Client(response("terminate", { status: "success", text: "Observed control result" }));
     const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
     await adapter.generate(input(), { signal: new AbortController().signal });
     const messages = client.body?.messages as Array<Record<string, unknown>>;
     expect(messages[0]).toMatchObject({ role: "system", content: expect.stringContaining("control tool (terminate, interact) must be the only call in its response") });
     expect(String(messages[0]?.content)).not.toContain("Available tools");
     expect(String(messages[0]?.content)).not.toContain("Strict output envelope");
+  });
+
+  it("rejects a terminate control with only a status label", async () => {
+    const client = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "empty-finish", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "done" }) } }] } }] });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_TOOL_CALL" });
   });
 
   it("uses the flat strict JSON response format and ToolRegistry catalog by default", async () => {
@@ -287,7 +296,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const mixedControl = new Client({
       choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [
         { id: "write-first", name: "type", arguments: { text: "hello" } },
-        { id: "finish-too-soon", name: "terminate", arguments: { status: "success" } },
+        { id: "finish-too-soon", name: "terminate", arguments: { status: "success", text: "finish too soon" } },
       ] }) } }],
     });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mixedControl, thinking: "disabled" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_RESPONSE" });
@@ -340,7 +349,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "disabled", outputMode: "strict_json" });
     const first = await adapter.generate(input(), { signal: new AbortController().signal });
     if (first.type !== "tool_calls") throw new Error("expected tool call");
-    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-json-finish", name: "terminate", arguments: { status: "success", text: "done" } }] }) } }] });
+    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-json-finish", name: "terminate", arguments: { status: "success", text: "Observed JSON finish" } }] }) } }] });
     const secondInput: ModelInput = {
       ...input(),
       messages: [
@@ -362,7 +371,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const firstAdapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: firstClient, thinking: "disabled" });
     const first = await firstAdapter.generate(input(), { signal: new AbortController().signal });
     if (first.type !== "tool_calls") throw new Error("expected tool call");
-    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "flat-finish", name: "terminate", arguments: { status: "success" } }] }) } }] });
+    const secondClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "flat-finish", name: "terminate", arguments: { status: "success", text: "flat history finish" } }] }) } }] });
     const secondInput: ModelInput = {
       ...input(),
       messages: [
@@ -388,7 +397,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
       ...input(),
       tools: input().tools.map((tool) => tool.name === "terminate" ? { ...tool, name: "complete" } : tool),
     };
-    const aliasClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-alias", name: "complete", arguments: { status: "success", text: "done" } }] }) } }] });
+    const aliasClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "q38-alias", name: "complete", arguments: { status: "success", text: "Observed alias finish" } }] }) } }] });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: aliasClient, thinking: "disabled" }).generate(aliasInput, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success" });
 
     const mismatch = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ kind: "user_input_required", id: "q38-mismatch", name: "terminate", arguments: { status: "success" } }) } }] });
@@ -439,7 +448,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
         { role: "tool", content: [{ type: "tool_result", result: { callId: first.calls[0]!.id, status: "completed", output: { ok: true } } }] },
       ],
     };
-    const secondClient = new Client(response("terminate", { status: "success", text: "done" }));
+    const secondClient = new Client(response("terminate", { status: "success", text: "Observed reasoning finish" }));
     const secondAdapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: secondClient, thinking: "low", outputMode: "native_tools" });
     await secondAdapter.generate(historyInput, { signal: new AbortController().signal });
     const messages = secondClient.body?.messages as Array<Record<string, unknown>>;

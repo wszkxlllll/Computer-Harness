@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ApplicationSession, createRun, createWindowTargetDiscovery, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, createRun, createWindowTargetDiscovery, prepareManagedBrowserProfile, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
@@ -11,6 +11,7 @@ import { resolveCliModel } from "./cli-model.js";
 import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 import { resolveCuaWindowTargetOptions } from "./window-target-options.js";
+import { defaultManagedBrowserProfileRoot } from "./managed-browser-profile.js";
 
 type ModelName = AppRuntimeModel;
 type MemoryToolMode = "facts" | "entities";
@@ -20,6 +21,7 @@ type Qwen38OutputMode = "native_tools" | "strict_json";
 
 interface CliOptions {
   doctor: boolean;
+  prepareManagedBrowserProfile: boolean;
   goal?: string;
   model: ModelName;
   computer: "cua" | "osworld";
@@ -52,7 +54,12 @@ interface CliOptions {
   cleanupDeadlineMs: number;
   doctorTimeoutMs: number;
   monitor: MonitorPolicyMode;
-  grounding: "off" | "uia-catalog-v1";
+  grounding: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+  /** Explicit URL for the host-owned temporary browser; never a profile/debug endpoint. */
+  managedBrowserUrl?: string;
+  managedBrowserProfileMode: "ephemeral" | "persistent";
+  managedBrowserProfileLabel?: string;
+  managedBrowserProfileRoot?: string;
 }
 
 function parseArgs(rawArgv: readonly string[]): CliOptions {
@@ -64,18 +71,23 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     return index >= 0 ? argv[index + 1] : undefined;
   };
   const doctor = argv.includes("--doctor");
+  const prepareManagedBrowserProfileValue = argv.includes("--prepare-managed-browser-profile");
   const goal = value("--goal");
   const tui = argv.includes("--tui");
   const modelValue = value("--model");
-  const model = resolveCliModel(modelValue, doctor) as ModelName;
+  const model = resolveCliModel(modelValue, doctor || prepareManagedBrowserProfileValue) as ModelName;
   const monitorValue = value("--monitor") ?? "off";
   if (monitorValue !== "off" && monitorValue !== "shadow" && monitorValue !== "guidance") throw new Error("--monitor must be off, shadow, or guidance");
   if (doctor && monitorValue !== "off") throw new Error("--doctor does not run Monitor");
   const groundingValue = value("--grounding") ?? "off";
-  if (groundingValue !== "off" && groundingValue !== "uia-catalog-v1") throw new Error("--grounding must be off or uia-catalog-v1");
+  if (groundingValue !== "off" && groundingValue !== "uia-catalog-v1" && groundingValue !== "dom-catalog-v1" && groundingValue !== "hybrid-catalog-v1") {
+    throw new Error("--grounding must be off, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
+  }
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
-  if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor) throw new Error("--goal is required unless --tui opens the interactive home or --doctor runs a read-only CUA diagnostic");
+  if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor && !prepareManagedBrowserProfileValue) throw new Error("--goal is required unless --tui opens the interactive home, --doctor runs a read-only CUA diagnostic, or --prepare-managed-browser-profile is used");
   if (doctor && goal !== undefined) throw new Error("--doctor cannot be combined with --goal");
+  if (prepareManagedBrowserProfileValue && (doctor || tui || argv.includes("--interactive"))) throw new Error("--prepare-managed-browser-profile cannot be combined with --doctor, --tui, or --interactive");
+  if (prepareManagedBrowserProfileValue && goal !== undefined) throw new Error("--prepare-managed-browser-profile does not accept --goal");
   if (doctor && (tui || argv.includes("--interactive"))) throw new Error("--doctor cannot be combined with --tui or --interactive");
   if (computer !== "cua" && computer !== "osworld") throw new Error("--computer must be cua or osworld");
   if (doctor && computer !== "cua") throw new Error("--doctor currently supports only --computer cua");
@@ -89,6 +101,36 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   if (groundingValue === "uia-catalog-v1" && (computer !== "cua" || cuaWindowTarget === undefined)) {
     throw new Error("--grounding uia-catalog-v1 requires --computer cua and an explicit --cua-window-pid/--cua-window-id target");
   }
+  const managedBrowserUrlValue = value("--managed-browser-url");
+  const managedBrowserUrl = managedBrowserUrlValue === undefined ? undefined : validateManagedBrowserUrl(managedBrowserUrlValue);
+  const managedGrounding = groundingValue === "dom-catalog-v1" || groundingValue === "hybrid-catalog-v1";
+  if (managedGrounding && computer !== "cua") {
+    throw new Error(`--grounding ${groundingValue} requires --computer cua and the shared CUA socket`);
+  }
+  if (managedGrounding && managedBrowserUrl === undefined) {
+    throw new Error(`--grounding ${groundingValue} requires --managed-browser-url <http(s)-url>`);
+  }
+  if (managedGrounding && cuaWindowTarget !== undefined) {
+    throw new Error(`--grounding ${groundingValue} owns its temporary managed-browser window; omit --cua-window-pid/--cua-window-id`);
+  }
+  const managedBrowserProfileModeValue = value("--managed-browser-profile-mode") ?? "ephemeral";
+  if (managedBrowserProfileModeValue !== "ephemeral" && managedBrowserProfileModeValue !== "persistent") {
+    throw new Error("--managed-browser-profile-mode must be ephemeral or persistent");
+  }
+  const managedBrowserProfileLabel = value("--managed-browser-profile-label");
+  if (managedBrowserProfileModeValue === "persistent" && (managedBrowserProfileLabel === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(managedBrowserProfileLabel))) {
+    throw new Error("persistent managed browser mode requires --managed-browser-profile-label <label> (letters, digits, . _ -)");
+  }
+  if (managedBrowserProfileModeValue === "ephemeral" && managedBrowserProfileLabel !== undefined) {
+    throw new Error("--managed-browser-profile-label requires --managed-browser-profile-mode persistent");
+  }
+  if (prepareManagedBrowserProfileValue) {
+    if (computer !== "cua") throw new Error("--prepare-managed-browser-profile requires --computer cua");
+    if (managedBrowserUrl === undefined) throw new Error("--prepare-managed-browser-profile requires --managed-browser-url <http(s)-url>");
+    if (managedBrowserProfileModeValue !== "persistent" || managedBrowserProfileLabel === undefined) {
+      throw new Error("--prepare-managed-browser-profile requires persistent mode and --managed-browser-profile-label <label>");
+    }
+  }
   if (doctor && groundingValue !== "off") throw new Error("--doctor does not run grounding");
   const output = resolve(value("--output") ?? "runs/live-cli");
   const maxSteps = positiveInteger(value("--max-steps"), 100, "--max-steps");
@@ -96,6 +138,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const fixtureResult = value("--fixture-result");
   const envFile = value("--env-file");
   if (doctor && envFile !== undefined) throw new Error("--doctor does not read --env-file or provider credentials");
+  if (prepareManagedBrowserProfileValue && envFile !== undefined) throw new Error("--prepare-managed-browser-profile does not read --env-file or provider credentials");
   const screenshotDir = value("--screenshot-dir");
   const qwenCoordinateModeValue = value("--qwen-coordinate-mode");
   if (qwenCoordinateModeValue !== undefined && qwenCoordinateModeValue !== "normalized_1000" && qwenCoordinateModeValue !== "actual_pixels") {
@@ -156,6 +199,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const contextMaxInputTokens = contextMaxInputTokensValue === undefined ? undefined : positiveInteger(contextMaxInputTokensValue, 1, "--context-max-tokens");
   return {
     doctor,
+    prepareManagedBrowserProfile: prepareManagedBrowserProfileValue,
     ...(goal === undefined ? {} : { goal }),
     model,
     computer,
@@ -188,7 +232,11 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     cleanupDeadlineMs,
     doctorTimeoutMs,
     monitor: monitorValue,
-    grounding: groundingValue as "off" | "uia-catalog-v1",
+    grounding: groundingValue as CliOptions["grounding"],
+    ...(managedBrowserUrl === undefined ? {} : { managedBrowserUrl }),
+    managedBrowserProfileMode: managedBrowserProfileModeValue,
+    ...(managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel }),
+    ...(managedBrowserProfileModeValue === "persistent" ? { managedBrowserProfileRoot: defaultManagedBrowserProfileRoot() } : {}),
   };
 }
 
@@ -200,7 +248,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. Press F on the home screen to choose next-Run features, including Risk Guard off/layered and grounding off/uia-catalog-v1. Guard off skips risk evaluation, approvals and risk-model requests, but leaves schema/policy/budget/Abort/stale/window checks active. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. Explicit --cua-window-pid/--cua-window-id use restricted background delivery (click/wait only). In TUI, press Esc then W to choose a CUA window for foreground preview; click/type/keypress/hotkey/scroll/drag/wait are available there. Window position and size are user-managed; Harness does not move/resize windows. Keep the target visible and unobscured; occlusion support and focus restoration are limited. UIA grounding is opt-in, window-only, and adds an observation-bound click_element tool; raw UIA values and backend tokens remain private. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --prepare-managed-browser-profile is used, no Run, Provider, screenshot, desktop input, cookie, storage, or credential read is performed; it only keeps a visible managed browser open for a manual login and retains the Harness-owned persistent profile after Enter/Ctrl+C. When --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. Press F on the home screen to choose next-Run features, including Risk Guard off/layered and grounding off/uia-catalog-v1/dom-catalog-v1/hybrid-catalog-v1. DOM/Hybrid grounding requires an explicit http(s) managed-browser URL and the shared CUA socket. Profile mode defaults to ephemeral; persistent mode uses a Harness-owned labeled profile, requires a one-time manual login by the user, never reads or prints cookie/localStorage/password/input values, and never falls back to a personal profile. Guard off skips risk evaluation, approvals and risk-model requests, but leaves schema/policy/budget/Abort/stale/window checks active. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. Explicit --cua-window-pid/--cua-window-id use restricted background delivery (click/wait only). In TUI, press Esc then W to choose a CUA window for foreground preview; click/type/keypress/hotkey/scroll/drag/wait are available there. Window position and size are user-managed; Harness does not move/resize windows. Keep the target visible and unobscured; occlusion support and focus restoration are limited. UIA/DOM grounding is opt-in and uses the shared observation-bound click_element tool; raw UIA/DOM values, selectors, backend tokens and browser profile details remain private. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -208,6 +256,33 @@ async function main(): Promise<void> {
     const report = await runCuaDoctor({ socketPath: options.cuaSocket!, timeoutMs: options.doctorTimeoutMs });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     if (report.status !== "supported") process.exitCode = 1;
+    return;
+  }
+  if (options.prepareManagedBrowserProfile) {
+    const abort = new AbortController();
+    const onSigint = () => abort.abort(new Error("managed browser preparation interrupted"));
+    process.once("SIGINT", onSigint);
+    try {
+      const result = await prepareManagedBrowserProfile({
+        socketPath: options.cuaSocket!,
+        managedBrowserUrl: options.managedBrowserUrl!,
+        profileLabel: options.managedBrowserProfileLabel!,
+        persistentProfileRoot: options.managedBrowserProfileRoot!,
+        signal: abort.signal,
+      }, {
+        onReady: (ready) => process.stdout.write(`Managed browser ready: profile-label=${ready.profileLabel} url-host=${ready.urlHost}. Complete manual login in the visible managed window; press Enter to close it and retain the profile.\n`),
+      });
+      const outcome = result.outcome === "enter" ? "finished" : "interrupted";
+      const retention = result.profileRetention === "confirmed"
+        ? "persistent profile retained"
+        : "persistent profile retention is unconfirmed; do not rely on this login until a new preparation succeeds";
+      process.stdout.write(`Managed browser preparation ${outcome}; ${retention}.\n`);
+      if (result.cleanupDiagnostics.length > 0) {
+        process.stderr.write(`Managed browser cleanup diagnostics: ${result.cleanupDiagnostics.join(", ")}.\n`);
+      }
+    } finally {
+      process.removeListener("SIGINT", onSigint);
+    }
     return;
   }
   if (options.envFile !== undefined) await loadEnvFile(options.envFile);
@@ -231,6 +306,9 @@ async function main(): Promise<void> {
       windowSelectionAvailable: windowDiscovery !== undefined,
       profile: options.risk.profile,
       riskGuard: options.risk.riskGuard,
+      ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
+      managedBrowserProfileMode: options.managedBrowserProfileMode,
+      ...(options.managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel: options.managedBrowserProfileLabel }),
       features: {
         planning: options.planning,
         memory: options.memory,
@@ -269,6 +347,10 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
           grounding: options.grounding,
+          ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
+          managedBrowserProfileMode: options.managedBrowserProfileMode,
+          ...(options.managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel: options.managedBrowserProfileLabel }),
+          ...(options.managedBrowserProfileRoot === undefined ? {} : { managedBrowserProfileRoot: options.managedBrowserProfileRoot }),
         }
       : {
           kind: "osworld",
@@ -301,6 +383,21 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };
+}
+
+function validateManagedBrowserUrl(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) throw new Error("--managed-browser-url must be an explicit http(s) URL");
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("--managed-browser-url must be an explicit http(s) URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:" || parsed.hostname.length === 0) {
+    throw new Error("--managed-browser-url must be an explicit http(s) URL");
+  }
+  return trimmed;
 }
 
 function readProviderCredentials(): ProviderCredentials {

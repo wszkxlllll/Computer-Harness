@@ -27,13 +27,16 @@ export async function buildRunReport(
   const outcome = snapshot.outcome;
   const fixture = await readFixtureResult(config.fixtureResult);
   const memoryRetrieval = config.memory === "off" ? "off" : config.memoryRetrieval ?? "lexical";
+  const managedGrounding = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
   const summary = {
     runId,
     goal: config.goal,
     model: config.model,
     computer: config.computer.kind,
     computerTarget: config.computer.kind === "cua"
-      ? config.computer.windowTarget === undefined
+      ? managedGrounding
+        ? { mode: "managed-browser", deliveryMode: config.computer.windowDeliveryMode ?? "foreground" }
+        : config.computer.windowTarget === undefined
         ? { mode: "desktop" }
         : { mode: "window", pid: config.computer.windowTarget.pid, windowId: config.computer.windowTarget.windowId, deliveryMode: config.computer.windowDeliveryMode ?? "background" }
       : { mode: "osworld" },

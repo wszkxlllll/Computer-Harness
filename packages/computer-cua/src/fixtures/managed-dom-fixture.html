@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <button aria-label="Continue">Continue</button>
+    <div role="button" tabindex="0" aria-label="Custom div">Custom div</div>
+    <input aria-label="Search" placeholder="Search">
+    <input type="checkbox" aria-label="Remember">
+    <input type="radio" aria-label="Option">
+    <input type="range" aria-label="Amount">
+    <canvas aria-label="Canvas visual control" width="80" height="30"></canvas>
+    <div id="open-shadow-host"></div>
+    <iframe title="Frame boundary" srcdoc="<button>Frame button</button>"></iframe>
+    <script>
+      const host = document.getElementById("open-shadow-host");
+      const root = host.attachShadow({ mode: "open" });
+      root.innerHTML = "<button aria-label=\"Shadow button\">Shadow button</button>";
+    </script>
+  </body>
+</html>

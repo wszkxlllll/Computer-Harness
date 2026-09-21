@@ -1,6 +1,7 @@
-import { CuaWindowDiscovery, type CuaDriverComputerOptions } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
-import type { Computer } from "@computer-harness/runtime";
+import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
+import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ObservationCapture, ObservationId } from "@computer-harness/protocol";
 import type { WindowTargetDiscovery } from "./application-session.js";
 
 export type ComputerBackendConfig =
@@ -12,8 +13,16 @@ export type ComputerBackendConfig =
       windowTarget?: { pid: number; windowId: number };
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
-      /** Optional UIA grounding sidecar; requires this explicit window target. */
-      grounding?: "off" | "uia-catalog-v1";
+      /** Optional UIA/managed-browser grounding sidecar. */
+      grounding?: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+      /** Explicit managed-browser URL; required for DOM/hybrid grounding. */
+      managedBrowserUrl?: string;
+      /** Harness-owned managed profile lifecycle; defaults to ephemeral. */
+      managedBrowserProfileMode?: "ephemeral" | "persistent";
+      /** Required bounded label for persistent managed profiles. */
+      managedBrowserProfileLabel?: string;
+      /** Private Harness-owned persistent profile root; never model/report data. */
+      managedBrowserProfileRoot?: string;
     }
   | {
       kind: "osworld";
@@ -28,6 +37,10 @@ export interface ComputerFactoryDependencies {
   importCuaComputer?: () => Promise<CuaComputerModule>;
   /** Injected by the application boundary; no ambient environment read here. */
   osworldBridgeToken?: string;
+  /** Test seam for managed-browser lifecycle; production uses the CUA host. */
+  createManagedBrowserHost?: (options: ManagedBrowserHostOptions) => ManagedBrowserHost;
+  /** Test seam for the short CUA bootstrap session. */
+  openCuaBootstrapSession?: typeof openCuaBootstrapSession;
 }
 
 export function createWindowTargetDiscovery(config: ComputerBackendConfig): WindowTargetDiscovery | undefined {
@@ -65,6 +78,20 @@ export async function createComputer(
     });
   }
 
+  const managedBrowser = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
+  if (managedBrowser) {
+    if (!isManagedBrowserUrl(config.managedBrowserUrl)) {
+      throw new Error("DOM/hybrid grounding requires an explicit managedBrowserUrl (http/https)");
+    }
+    if (config.socketPath.trim().length === 0) throw new Error("DOM/hybrid grounding requires a non-empty CUA socket");
+    if (config.windowTarget !== undefined) throw new Error("managed DOM/hybrid grounding owns its temporary browser window; do not pass a preselected window target");
+    const profileMode = config.managedBrowserProfileMode ?? "ephemeral";
+    if (profileMode !== "ephemeral" && profileMode !== "persistent") throw new Error("managed browser profile mode must be ephemeral or persistent");
+    if (profileMode === "persistent" && (config.managedBrowserProfileLabel === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(config.managedBrowserProfileLabel) || config.managedBrowserProfileRoot === undefined || config.managedBrowserProfileRoot.trim().length === 0)) {
+      throw new Error("persistent managed browser mode requires a bounded profile label and explicit profile root");
+    }
+  }
+
   const importCuaComputer = dependencies.importCuaComputer ?? defaultCuaImporter;
   let cuaModule: CuaComputerModule;
   try {
@@ -76,11 +103,119 @@ export async function createComputer(
     );
   }
 
-  return new cuaModule.CuaDriverComputer({
-    socketPath: config.socketPath,
-    screenshotDir: config.screenshotDir,
-    ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
-    ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
-    ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
+  if (!managedBrowser) {
+    return new cuaModule.CuaDriverComputer({
+      socketPath: config.socketPath,
+      screenshotDir: config.screenshotDir,
+      ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
+      ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
+      ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
+    });
+  }
+  const createHost = dependencies.createManagedBrowserHost ?? ((options: ManagedBrowserHostOptions) => new ManagedBrowserHost(options));
+  const openBootstrap = dependencies.openCuaBootstrapSession ?? openCuaBootstrapSession;
+  const createDelegate = cuaModule.CuaDriverComputer;
+  const managedConfig = { ...config, windowDeliveryMode: "foreground" as const };
+  return new ManagedBrowserComputer({
+    config: managedConfig,
+    createHost,
+    openBootstrap,
+    createDelegate,
   });
+}
+
+function isManagedBrowserUrl(value: string | undefined): value is string {
+  if (value === undefined || value.trim().length === 0) return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+interface ManagedBrowserComputerOptions {
+  readonly config: Extract<ComputerBackendConfig, { kind: "cua" }>;
+  readonly createHost: (options: ManagedBrowserHostOptions) => ManagedBrowserHost;
+  readonly openBootstrap: typeof openCuaBootstrapSession;
+  readonly createDelegate: CuaComputerModule["CuaDriverComputer"];
+}
+
+class ManagedBrowserComputer implements Computer {
+  private bootstrap: CuaBootstrapSession | undefined;
+  private host: ManagedBrowserHost | undefined;
+  private delegate: Computer | undefined;
+  private opened: ComputerSessionDescriptor | undefined;
+  private closing: Promise<void> | undefined;
+
+  public constructor(private readonly options: ManagedBrowserComputerOptions) {}
+
+  public async open(openOptions: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
+    if (this.opened !== undefined) throw new Error("managed browser Computer is already open");
+    const label = `computer-harness-managed-bootstrap-${Date.now()}`;
+    let bootstrap: CuaBootstrapSession | undefined;
+    let host: ManagedBrowserHost | undefined;
+    try {
+      bootstrap = await this.options.openBootstrap(this.options.config.socketPath, label, signal);
+      const createHost = this.options.createHost;
+      host = createHost({
+        browser: "edge",
+        url: this.options.config.managedBrowserUrl!,
+        profileMode: this.options.config.managedBrowserProfileMode ?? "ephemeral",
+        ...(this.options.config.managedBrowserProfileLabel === undefined ? {} : { profileLabel: this.options.config.managedBrowserProfileLabel }),
+        ...(this.options.config.managedBrowserProfileMode === "persistent"
+          ? { persistentProfileRoot: this.options.config.managedBrowserProfileRoot! }
+          : {}),
+        resolveOwnedWindowTarget: (browserProcessId, resolverSignal, hint?: ManagedBrowserWindowBindingHint) => resolveOwnedManagedBrowserWindow(bootstrap!.driver, bootstrap!.label, browserProcessId, resolverSignal, hint),
+      });
+      const record = await host.start(signal);
+      const delegateOptions: CuaDriverComputerOptions = {
+        socketPath: this.options.config.socketPath,
+        screenshotDir: this.options.config.screenshotDir,
+        windowTarget: record.target.windowTarget,
+        browserTarget: record.target,
+        domGroundingTransport: host.createTransport(),
+        ...(this.options.config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: this.options.config.windowDeliveryMode }),
+        ...(this.options.config.grounding === undefined ? {} : { grounding: this.options.config.grounding }),
+      };
+      const delegate = new this.options.createDelegate(delegateOptions);
+      const session = await delegate.open(openOptions, signal);
+      this.bootstrap = bootstrap;
+      this.host = host;
+      this.delegate = delegate;
+      this.opened = session;
+      return session;
+    } catch (error) {
+      await host?.close().catch(() => undefined);
+      await bootstrap?.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async observe(session: ComputerSessionDescriptor, observationId: ObservationId, signal: AbortSignal): Promise<ObservationCapture> {
+    if (this.delegate === undefined) throw new Error("managed browser Computer is not open");
+    return this.delegate.observe(session, observationId, signal);
+  }
+
+  public async execute(session: ComputerSessionDescriptor, action: ActionIntent, signal: AbortSignal, options?: ComputerExecuteOptions): Promise<ActionReceipt> {
+    if (this.delegate === undefined) throw new Error("managed browser Computer is not open");
+    return this.delegate.execute(session, action, signal, options);
+  }
+
+  public async close(session: ComputerSessionDescriptor): Promise<void> {
+    if (this.closing !== undefined) return this.closing;
+    this.closing = (async () => {
+      try {
+        if (this.delegate !== undefined && this.opened !== undefined) await this.delegate.close(session);
+      } finally {
+        await this.host?.close().catch(() => undefined);
+        await this.bootstrap?.close().catch(() => undefined);
+        this.opened = undefined;
+        this.delegate = undefined;
+        this.host = undefined;
+        this.bootstrap = undefined;
+      }
+    })();
+    return this.closing;
+  }
 }

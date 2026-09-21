@@ -16,6 +16,19 @@ function catalog(elements: GroundingCatalog["elements"]): GroundingCatalog {
   };
 }
 
+function hybridCatalog(elements: GroundingCatalog["elements"]): GroundingCatalog {
+  return {
+    version: "grounding-catalog-v2",
+    source: "hybrid",
+    observationId: "observation-hybrid" as ObservationId,
+    computerSessionId: "session-hybrid" as ComputerSessionId,
+    completeness: "partial",
+    degraded: false,
+    maxElements: 256,
+    elements,
+  };
+}
+
 describe("DeterministicGroundingSelector", () => {
   it("admits a goal-matching element beyond the generic first sixteen", () => {
     const elements = Array.from({ length: 19 }, (_, index) => ({
@@ -165,5 +178,122 @@ describe("DeterministicGroundingSelector", () => {
       },
     });
     expect(action).toMatchObject({ kind: "click", groundingRef: "uia-deep-origin-input", point: { x: 350, y: 212 } });
+  });
+
+  it("uses a bounded local recovery quota and records its source in the trace", () => {
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog([
+      {
+        elementRef: "dom-nearby",
+        role: "button",
+        name: "More options",
+        source: "dom",
+        browserRegion: "content",
+        bbox: { x: 100, y: 100, width: 40, height: 30, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "dom-distant-goal",
+        role: "button",
+        name: "Departure station",
+        source: "dom",
+        browserRegion: "content",
+        bbox: { x: 800, y: 500, width: 80, height: 30, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+    ]), {
+      goal: "Choose the departure station",
+      latestUserCorrections: [],
+      recoveryHint: {
+        actionId: "action-recovery" as never,
+        reason: "no_observed_change",
+        attempt: 1,
+        localIntent: "open the options near the failed click",
+        localIntentSource: "user_correction",
+        region: { x: 80, y: 80, width: 80, height: 70, coordinateSpace: "physical" },
+      },
+    });
+    expect(selected.elements[0]?.elementRef).toBe("dom-nearby");
+    expect(selected.selection?.strategy).toBe("bounded-fusion-v1");
+    expect(selected.selection?.recovery).toMatchObject({ reason: "no_observed_change", attempt: 1, regionApplied: true, localIntentSource: "user_correction" });
+    expect(selected.selection?.reasons[0]?.codes).toContain("local_recovery_region");
+  });
+
+  it("deduplicates overlapping UIA/DOM content while preferring DOM content and UIA chrome", () => {
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog([
+      {
+        elementRef: "uia-content",
+        role: "button",
+        name: "Route options",
+        source: "uia",
+        bbox: { x: 100, y: 100, width: 80, height: 30, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "dom-content",
+        role: "button",
+        name: "Route options",
+        source: "dom",
+        browserRegion: "content",
+        bbox: { x: 101, y: 101, width: 78, height: 28, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "dom-chrome",
+        role: "tab",
+        name: "Route options",
+        source: "dom",
+        browserRegion: "chrome",
+        bbox: { x: 300, y: 10, width: 80, height: 30, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "uia-chrome",
+        role: "tab",
+        name: "Route options",
+        source: "uia",
+        browserRegion: "chrome",
+        bbox: { x: 301, y: 11, width: 78, height: 28, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+    ]), { goal: "", latestUserCorrections: [] });
+    expect(selected.elements.map((element) => element.elementRef)).toEqual(expect.arrayContaining(["dom-content", "uia-chrome"]));
+    expect(selected.elements).not.toEqual(expect.arrayContaining(["uia-content", "dom-chrome"]));
+    expect(selected.selection?.deduplicatedElementCount).toBe(2);
+  });
+
+  it("borrows unused source capacity and keeps a scarce DOM source visible", () => {
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog([
+      { elementRef: "dom-only", role: "button", name: "Rare DOM control", source: "dom", browserRegion: "content", bbox: { x: 10, y: 10, width: 30, height: 20, coordinateSpace: "physical" }, state: { enabled: true } },
+      ...Array.from({ length: 20 }, (_, index) => ({
+        elementRef: `uia-${index}`,
+        role: "tab",
+        name: `Native item ${index}`,
+        source: "uia" as const,
+        browserRegion: "chrome" as const,
+        bbox: { x: 100 + index * 10, y: 100, width: 8, height: 20, coordinateSpace: "physical" as const },
+        state: { enabled: true },
+      })),
+    ]), { goal: "", latestUserCorrections: [] });
+    expect(selected.elements).toHaveLength(16);
+    expect(selected.elements.some((element) => element.elementRef === "dom-only")).toBe(true);
+  });
+
+  it("traces low-trust provider recovery source without persisting its hint text", () => {
+    const hintText = "provider-only target text must stay out of trace";
+    const selected = new DeterministicGroundingSelector().select(catalog([
+      {
+        elementRef: "uia-provider-hint",
+        role: "Button",
+        name: "Provider target",
+        bbox: { x: 10, y: 10, width: 30, height: 20, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+    ]), {
+      goal: "",
+      latestUserCorrections: [],
+      recoveryHint: { reason: "no_observed_change", attempt: 1, localIntent: hintText, localIntentSource: "provider_hint" },
+    });
+    expect(selected.selection?.recovery).toMatchObject({ localIntentApplied: true, localIntentSource: "provider_hint" });
+    expect(JSON.stringify(selected.selection)).not.toContain(hintText);
   });
 });

@@ -67,7 +67,16 @@ describe("default Computer tools", () => {
     expect(registry.getForAudience("advisor_note")).toBeUndefined();
     expect(registry.getForAudience("advisor_note", "advisor")?.category).toBe("side");
     expect(registry.modelTools().find((tool) => tool.name === "click")).toMatchObject({ category: "computer", coordinate: { fields: ["x", "y"] } });
-    expect(registry.modelTools().find((tool) => tool.name === "terminate")).toMatchObject({ category: "control", control: "finish" });
+    const terminate = registry.modelTools().find((tool) => tool.name === "terminate");
+    const terminateDefinition = registry.get("terminate");
+    expect(terminate).toMatchObject({ category: "control", control: "finish", inputSchema: { required: ["status", "text"] } });
+    expect(terminateDefinition?.category).toBe("control");
+    if (terminateDefinition?.category === "control") {
+      expect(() => terminateDefinition.validate({ status: "success" })).toThrow(/non-empty.*text/iu);
+      expect(() => terminateDefinition.validate({ status: "success", text: "  " })).toThrow(/non-empty.*text/iu);
+      expect(() => terminateDefinition.validate({ status: "success", text: "done" })).toThrow(/result text/iu);
+      expect(() => terminateDefinition.validate({ status: "success", text: "Observed result" })).not.toThrow();
+    }
   });
 
   it("does not offer keyboard primitives when keyboard focus is not verified", () => {

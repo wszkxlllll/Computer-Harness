@@ -423,6 +423,16 @@ export interface GroundingBoundingBox {
   readonly coordinateSpace: "physical";
 }
 
+/**
+ * Public grounding provenance.  The backend identity, selector and node
+ * handle remain private to the Computer adapter; only this coarse provenance
+ * is safe to use for deterministic fusion and diagnostics.
+ */
+export type GroundingElementSource = "uia" | "dom";
+export type GroundingCatalogSource = GroundingElementSource | "hybrid";
+export type GroundingCatalogVersion = "uia-catalog-v1" | "grounding-catalog-v2";
+export type GroundingBrowserRegion = "content" | "chrome" | "unknown";
+
 /** Low-sensitivity state that may help a model choose an interaction target. */
 export interface GroundingElementState {
   readonly enabled?: boolean;
@@ -446,13 +456,17 @@ export interface GroundingElement {
   readonly description?: string;
   readonly bbox?: GroundingBoundingBox;
   readonly state?: GroundingElementState;
+  /** Coarse source only; raw accessibility/DOM identities never cross this boundary. */
+  readonly source?: GroundingElementSource;
+  /** Browser content vs browser chrome/native UI; omitted for non-browser UIA. */
+  readonly browserRegion?: GroundingBrowserRegion;
 }
 
 export type GroundingCompleteness = "complete" | "partial" | "unknown";
 
 /** Deterministic, runtime-owned projection metadata for a bounded catalog. */
 export interface GroundingSelectionTrace {
-  readonly strategy: "deterministic-lexical-v1";
+  readonly strategy: "deterministic-lexical-v1" | "bounded-fusion-v1";
   /** Number of safe adapter candidates before the runtime hot-element cap. */
   readonly candidateElementCount: number;
   readonly selectedElementRefs: readonly string[];
@@ -461,6 +475,35 @@ export interface GroundingSelectionTrace {
     readonly elementRef: string;
     readonly codes: readonly string[];
   }[];
+  /** Counts only; names, selectors, node ids and values are never traced. */
+  readonly sourceCounts?: Readonly<Partial<Record<GroundingElementSource, number>>>;
+  readonly deduplicatedElementCount?: number;
+  readonly recovery?: GroundingRecoveryTrace;
+}
+
+/**
+ * A short-lived, low-sensitivity hint produced by Runtime's existing Monitor
+ * path.  It is a selector input, not a second retry/stop loop.  The action id
+ * is opaque and the region is limited to the latest observation's pixels.
+ */
+export interface GroundingRecoveryHint {
+  readonly actionId?: ActionId;
+  readonly reason: "no_observed_change" | "repeated_failure" | "repeated_refusal" | "unknown_outcome" | "action_stall";
+  readonly attempt: number;
+  readonly region?: GroundingBoundingBox;
+  /** Bounded local intent, normally the latest user correction or action label. */
+  readonly localIntent?: string;
+  readonly localIntentSource?: "user_correction" | "active_plan" | "goal_background" | "declared_effect" | "provider_hint";
+}
+
+/** Redacted selector trace for a recovery hint; no user text is retained. */
+export interface GroundingRecoveryTrace {
+  readonly reason: GroundingRecoveryHint["reason"];
+  readonly attempt: number;
+  readonly regionApplied: boolean;
+  readonly localIntentApplied: boolean;
+  readonly localIntentSource?: GroundingRecoveryHint["localIntentSource"];
+  readonly actionId?: ActionId;
 }
 
 /**
@@ -468,8 +511,8 @@ export interface GroundingSelectionTrace {
  * trees and backend references stay inside the Computer adapter.
  */
 export interface GroundingCatalog {
-  readonly version: "uia-catalog-v1";
-  readonly source: "uia";
+  readonly version: GroundingCatalogVersion;
+  readonly source: GroundingCatalogSource;
   readonly observationId: ObservationId;
   readonly computerSessionId: ComputerSessionId;
   readonly completeness: GroundingCompleteness;
@@ -638,6 +681,7 @@ export interface ComputerCapabilities {
   screenshot: boolean;
   pointer: boolean;
   keyboard: boolean;
+  /** Native/OS accessibility availability; DOM grounding is not OS Accessibility. */
   accessibility: boolean;
 }
 
@@ -718,9 +762,13 @@ export interface ContextGroundingTrace {
   readonly candidateElementCount: number;
   readonly projectedElementCount: number;
   readonly estimatedTokens: number;
-  readonly strategy?: "deterministic-lexical-v1" | "adapter-bounded-v1";
+  readonly strategy?: "deterministic-lexical-v1" | "bounded-fusion-v1" | "adapter-bounded-v1";
+  readonly source?: GroundingCatalogSource;
+  readonly sourceCounts?: Readonly<Partial<Record<GroundingElementSource, number>>>;
+  readonly deduplicatedElementCount?: number;
   readonly selectedElementRefs?: readonly string[];
   readonly selectionReasons?: readonly { elementRef: string; codes: readonly string[] }[];
+  readonly recovery?: GroundingRecoveryTrace;
 }
 
 /** Private diagnostic metadata emitted alongside a prepared Provider request;

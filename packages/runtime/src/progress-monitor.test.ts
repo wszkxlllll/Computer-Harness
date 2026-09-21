@@ -220,6 +220,9 @@ describe("progress monitor foundation", () => {
     expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(true);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 11, y: 20 } })).toBe(false);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-3" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-scroll" as ActionId, kind: "scroll", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 }, direction: "down", ticks: 1 })).toBe(false);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-type" as ActionId, kind: "type", basedOn: "observation-2" as ObservationId, text: "same input" })).toBe(false);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-key" as ActionId, kind: "keypress", basedOn: "observation-2" as ObservationId, keys: ["ARROWDOWN"] })).toBe(false);
   });
 
   it("does not treat changed or unknown transition evidence as a no-change candidate", () => {
