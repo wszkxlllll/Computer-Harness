@@ -142,6 +142,54 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
   ];
 }
 
+/**
+ * Optional Observation-bound grounding vocabulary. It is registered only for
+ * a Run whose Computer explicitly provides the matching grounding mode.
+ */
+export function groundingComputerTools(): readonly ComputerToolDefinition[] {
+  return [{
+    name: "click_element",
+    description: "Click the center of a named element from the current UIA grounding catalog. Use only after a fresh observation; after clicking, observe again before typing or using another element.",
+    category: "computer",
+    inputSchema: {
+      type: "object",
+      properties: {
+        elementRef: {
+          type: "string",
+          minLength: 1,
+          maxLength: 96,
+          description: "Opaque element reference from the current observation's UIA catalog; it expires when the observation or window changes.",
+        },
+      },
+      required: ["elementRef"],
+      additionalProperties: false,
+    },
+    validate: (args) => { parseElementRef(args); },
+    toAction: (args, context) => {
+      const elementRef = parseElementRef(args);
+      const observation = context.observation;
+      const catalog = observation?.grounding;
+      if (catalog === undefined || catalog.completeness === "unknown") {
+        throw new Error("GROUNDING_CATALOG_UNAVAILABLE: current observation has no usable UIA catalog");
+      }
+      const element = catalog.elements.find((candidate) => candidate.elementRef === elementRef);
+      if (element === undefined) throw new Error(`GROUNDING_REF_NOT_FOUND: ${elementRef}`);
+      if (element.state?.enabled === false) throw new Error(`GROUNDING_ELEMENT_DISABLED: ${elementRef}`);
+      if (element.bbox === undefined || element.bbox.width <= 0 || element.bbox.height <= 0) {
+        throw new Error(`GROUNDING_BBOX_UNAVAILABLE: ${elementRef}`);
+      }
+      return {
+        kind: "click",
+        point: {
+          x: element.bbox.x + element.bbox.width / 2,
+          y: element.bbox.y + element.bbox.height / 2,
+        },
+        groundingRef: elementRef,
+      };
+    },
+  }];
+}
+
 function asObject(value: JsonValue, name: string): Record<string, JsonValue> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${name} arguments must be an object`);
@@ -168,6 +216,14 @@ function parseText(value: JsonValue): string {
     throw new Error("type.text must be a string");
   }
   return object.text;
+}
+
+function parseElementRef(value: JsonValue): string {
+  const object = asObject(value, "click_element");
+  if (typeof object.elementRef !== "string" || object.elementRef.trim().length === 0 || object.elementRef.length > 96) {
+    throw new Error("click_element.elementRef must be a non-empty string of at most 96 characters");
+  }
+  return object.elementRef;
 }
 
 function parseKeys(value: JsonValue): string[] {

@@ -27,6 +27,10 @@ export function validateActionIntent(
     return;
   }
 
+  if (action.groundingRef !== undefined && action.kind !== "click") {
+    throw new Error("groundingRef is only valid for click actions");
+  }
+
   const observation = context.observation;
   if (observation === undefined) {
     throw new Error(`GUI action ${action.actionId} requires a current observation`);

@@ -149,6 +149,37 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("registers click_element only for an explicit CUA window grounding Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-grounding-"));
+    const groundingConfig: ResolvedRunConfig = {
+      ...config(outputDir),
+      computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } },
+      grounding: "uia-catalog-v1",
+    };
+    try {
+      const handle = await createRun(groundingConfig, {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "grounding done" }; } }),
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(report.summary.grounding).toBe("uia-catalog-v1");
+      expect(report.summary.tools).toContain("click_element");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects grounding configuration without an explicit CUA window before creating a Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-grounding-gate-"));
+    try {
+      await expect(createRun({ ...config(outputDir), grounding: "uia-catalog-v1" })).rejects.toThrow(/explicit CUA window target/iu);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not construct a risk provider or emit Guard work when Guard is off", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-guard-off-"));
     const calls = { provider: 0, open: 0, observe: 0, close: 0 };

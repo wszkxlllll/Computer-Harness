@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultComputerTools } from "./computer-tools.js";
+import { createDefaultComputerTools, groundingComputerTools } from "./computer-tools.js";
 import { createDefaultToolRegistry } from "./control-tools.js";
 import { restrictToolNamesForCapabilities } from "./tool-registry.js";
 
@@ -77,6 +77,46 @@ describe("default Computer tools", () => {
     expect(names).not.toContain("type");
     expect(names).not.toContain("keypress");
     expect(names).not.toContain("hotkey");
+  });
+
+  it("maps click_element to a bounded current-catalog center", () => {
+    const definition = groundingComputerTools()[0];
+    expect(definition?.name).toBe("click_element");
+    if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
+    const context = {
+      runId: "run" as never,
+      session: {} as never,
+      signal: new AbortController().signal,
+      observation: {
+        id: "observation" as never,
+        runId: "run" as never,
+        computerSessionId: "session" as never,
+        capturedAt: "2026-09-20T00:00:00Z",
+        viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+        screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png", byteLength: 1 },
+        grounding: {
+          version: "uia-catalog-v1" as const,
+          source: "uia" as const,
+          observationId: "observation" as never,
+          computerSessionId: "session" as never,
+          completeness: "partial" as const,
+          degraded: false,
+          maxElements: 16,
+          elements: [{ elementRef: "uia-1", role: "ComboBox", name: "Departure", bbox: { x: 100, y: 200, width: 80, height: 20, coordinateSpace: "physical" as const }, state: { enabled: true } }],
+        },
+      },
+    };
+    expect(definition.toAction({ elementRef: "uia-1" }, context)).toEqual({ kind: "click", point: { x: 140, y: 210 }, groundingRef: "uia-1" });
+    expect(() => definition.toAction({ elementRef: "uia-1" }, { ...context, observation: undefined })).toThrow(/GROUNDING_CATALOG_UNAVAILABLE/iu);
+    expect(() => definition.toAction({ elementRef: "uia-old-1" }, context)).toThrow(/GROUNDING_REF_NOT_FOUND/iu);
+    const disabledContext = {
+      ...context,
+      observation: {
+        ...context.observation,
+        grounding: { ...context.observation!.grounding!, elements: [{ ...context.observation!.grounding!.elements[0]!, state: { enabled: false } }] },
+      },
+    };
+    expect(() => definition.toAction({ elementRef: "uia-1" }, disabledContext)).toThrow(/GROUNDING_ELEMENT_DISABLED/iu);
   });
 
 });

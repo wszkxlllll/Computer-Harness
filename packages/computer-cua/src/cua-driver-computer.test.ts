@@ -35,6 +35,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let bounds = { ...initialBounds };
   let image = { ...initialImage };
   let missing = false;
+  let groundingState: Record<string, unknown> | undefined;
+  let abortGrounding = false;
   const target = { pid: 1234, windowId: 5678 };
   const driver = {
     async startSession() { calls.push({ name: "startSession" }); return { active: true, revived: false } as never; },
@@ -53,6 +55,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       if (name === "list_windows") {
         return result({ structuredJson: JSON.stringify({ windows: missing ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds }] }) });
       }
+      if (name === "get_window_state") {
+        if (abortGrounding) throw Object.assign(new Error("grounding aborted"), { name: "AbortError" });
+        return result({ structuredJson: JSON.stringify(groundingState ?? {}) });
+      }
       return result();
     },
     uniffiDestroy() { calls.push({ name: "uniffiDestroy" }); },
@@ -63,6 +69,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     calls,
     setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
     setMissing(value: boolean) { missing = value; },
+    setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; },
+    setGroundingAbort(value: boolean) { abortGrounding = value; },
   };
 }
 
@@ -466,6 +474,178 @@ describe("CuaDriverComputer", () => {
       expect(backgroundDrag).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTION_UNSUPPORTED" });
       expect(fake.calls.filter((call) => call.name === "drag")).toHaveLength(0);
       expect(fake.calls.some((call) => call.name === "get_screen_size" || call.name === "get_desktop_state")).toBe(false);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("projects a bounded redacted UIA catalog and validates observation-bound element clicks", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-grounding-"));
+    const fake = windowDriver(
+      { x: 100, y: 120, width: 1828, height: 1528 },
+      { width: 1568, height: 1310 },
+    );
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        { element_index: 1, role: "ComboBox", name: "Departure time", frame: { x: 568, y: 634, width: 100, height: 40 }, enabled: true, expanded: false, value: "secret" },
+        { element_index: 2, role: "Edit", name: "Search", frame: { x: 350, y: 420, width: 160, height: 30 }, enabled: true, editable: true, focused: true },
+        { element_index: 3, role: "Button", name: "Disabled", frame: { x: 800, y: 820, width: 120, height: 40 }, enabled: false },
+      ],
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      grounding: "uia-catalog-v1",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      expect(session.capabilities.accessibility).toBe(true);
+      const observationId = "grounding-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, new AbortController().signal);
+      expect(capture.grounding).toMatchObject({ version: "uia-catalog-v1", source: "uia", completeness: "complete", degraded: false, maxElements: 256 });
+      expect(capture.grounding?.elements).toHaveLength(3);
+      const combo = capture.grounding?.elements.find((element) => element.name === "Departure time");
+      expect(combo).toMatchObject({ role: "ComboBox", state: { enabled: true, valuePresent: true } });
+      expect(combo?.bbox?.x).toBeCloseTo(401.4, 1);
+      expect(combo?.bbox?.y).toBeCloseTo(440.7, 1);
+      expect(combo).not.toHaveProperty("value");
+      expect(combo?.elementRef).toMatch(/^uia-[0-9a-f]{12}-\d+$/u);
+
+      const comboPoint = {
+        x: combo!.bbox!.x + combo!.bbox!.width / 2,
+        y: combo!.bbox!.y + combo!.bbox!.height / 2,
+      };
+
+      const click = await computer.execute(session, {
+        actionId: "grounding-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: comboPoint,
+        groundingRef: combo!.elementRef,
+      }, new AbortController().signal);
+      expect(click.status).toBe("completed");
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ x: 518, y: 534 });
+
+      const disabled = capture.grounding?.elements.find((element) => element.name === "Disabled");
+      const disabledPoint = {
+        x: disabled!.bbox!.x + disabled!.bbox!.width / 2,
+        y: disabled!.bbox!.y + disabled!.bbox!.height / 2,
+      };
+      const disabledClick = await computer.execute(session, {
+        actionId: "grounding-disabled" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: disabledPoint,
+        groundingRef: disabled!.elementRef,
+      }, new AbortController().signal);
+      expect(disabledClick).toMatchObject({ status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+
+      const fresh = await computer.observe(session, "grounding-fresh" as ObservationId, new AbortController().signal);
+      const freshCombo = fresh.grounding?.elements.find((element) => element.name === "Departure time");
+      expect(freshCombo?.elementRef).not.toBe(combo?.elementRef);
+      const stale = await computer.execute(session, {
+        actionId: "grounding-stale" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: comboPoint,
+        groundingRef: combo!.elementRef,
+      }, new AbortController().signal);
+      expect(stale).toMatchObject({ status: "refused", driverCode: "STALE_OBSERVATION" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a safe candidate beyond 64 elements and executes its current ref", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-grounding-large-"));
+    const fake = windowDriver();
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        ...Array.from({ length: 80 }, (_, index) => ({
+          element_index: index + 1,
+          role: "TabItem",
+          name: `Chrome tab ${index}`,
+          frame: { x: 130 + index, y: 180 + index, width: 80, height: 24 },
+          enabled: true,
+        })),
+        { element_index: 81, role: "Edit", name: "起点输入框", frame: { x: 300, y: 400, width: 160, height: 30 }, enabled: true, editable: true },
+      ],
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      grounding: "uia-catalog-v1",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "grounding-large-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, new AbortController().signal);
+      expect(capture.grounding?.maxElements).toBe(256);
+      expect(capture.grounding?.elements).toHaveLength(81);
+      const target = capture.grounding?.elements.find((element) => element.name === "起点输入框");
+      expect(target).toBeDefined();
+      const point = { x: target!.bbox!.x + target!.bbox!.width / 2, y: target!.bbox!.y + target!.bbox!.height / 2 };
+      const receipt = await computer.execute(session, {
+        actionId: "grounding-large-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point,
+        groundingRef: target!.elementRef,
+      }, new AbortController().signal);
+      expect(receipt.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps screenshot observation available and marks UIA query failure degraded", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-grounding-degraded-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      grounding: "uia-catalog-v1",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const capture = await computer.observe(session, "grounding-degraded" as ObservationId, new AbortController().signal);
+      expect(capture.screenshot.data.byteLength).toBeGreaterThan(0);
+      expect(capture.grounding).toMatchObject({ completeness: "unknown", degraded: true, elements: [] });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not swallow an AbortError from the UIA query", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-grounding-abort-"));
+    const fake = windowDriver();
+    fake.setGroundingAbort(true);
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      grounding: "uia-catalog-v1",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      await expect(computer.observe(session, "grounding-abort" as ObservationId, new AbortController().signal)).rejects.toThrow(/grounding aborted/iu);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

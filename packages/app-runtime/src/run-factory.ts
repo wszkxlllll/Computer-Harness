@@ -10,6 +10,7 @@ import {
   DefaultRuntimePolicy,
   RunController,
   createDefaultToolRegistry,
+  groundingComputerTools,
   type ActionPolicy,
   type ContextCompiler,
   type MemoryRecallService,
@@ -28,7 +29,14 @@ import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunDe
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
   const runId = input.runId ?? generatedRunId();
-  const config: ResolvedRunConfig = { ...input, runId, outputDir: resolve(input.outputDir) };
+  const grounding = input.grounding ?? "off";
+  const config: ResolvedRunConfig = {
+    ...input,
+    runId,
+    grounding,
+    outputDir: resolve(input.outputDir),
+    computer: effectiveComputerConfig(input.computer, grounding),
+  };
   const credentials = dependencies.credentials ?? {};
   let eventWriter: RunEventWriter | undefined;
   let eventFeed: CommittedEventFeed | undefined;
@@ -44,6 +52,12 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         .filter((event) => event.sequence <= upToSequence),
     });
     const tools = dependencies.createToolRegistry?.() ?? createDefaultToolRegistry();
+    if (config.grounding === "uia-catalog-v1") {
+      if (config.computer.kind !== "cua" || config.computer.windowTarget === undefined) {
+        throw new Error("grounding uia-catalog-v1 requires an explicit CUA window target");
+      }
+      tools.registerMany(groundingComputerTools());
+    }
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
     const configuredEmbeddingProvider = memoryRetrievalMode === "hybrid"
@@ -127,6 +141,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
           allowedComputerTools.add("drag");
           allowedComputerTools.add("scroll");
         }
+        if (config.grounding === "uia-catalog-v1") allowedComputerTools.add("click_element");
         return tools.list()
           .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
           .map((definition) => definition.name);
@@ -160,6 +175,19 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     await eventWriter?.close().catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * Normalize the single public Run grounding switch into the adapter config.
+ * Application/TUI feature overrides change `config.grounding`; the Computer
+ * factory must never consume a stale nested value from the previous Run.
+ */
+function effectiveComputerConfig(
+  computer: ResolvedRunConfig["computer"],
+  grounding: NonNullable<ResolvedRunConfig["grounding"]>,
+): ResolvedRunConfig["computer"] {
+  if (computer.kind !== "cua") return computer;
+  return { ...computer, grounding };
 }
 
 function createContextMemoryRecall(service: HybridMemoryRecallService): MemoryRecallService {
