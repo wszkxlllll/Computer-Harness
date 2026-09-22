@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import type { CuaBootstrapSession, ManagedBrowserHost, ManagedBrowserHostOptions, ManagedBrowserWindowBindingHint, ManagedBrowserWindowResolution } from "@computer-harness/computer-cua";
+import { defaultManagedBrowserKind, type CuaBootstrapSession, type ManagedBrowserHost, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type ManagedBrowserWindowResolution } from "@computer-harness/computer-cua";
 
 export type ManagedBrowserPreparationBootstrap = CuaBootstrapSession;
 export type ManagedBrowserPreparationHost = ManagedBrowserHost;
@@ -78,7 +78,7 @@ export async function prepareManagedBrowserProfile(
     bootstrap = await openBootstrap(options.socketPath, label, signal);
     const bootstrapSession = bootstrap;
     host = createHost({
-      browser: "edge",
+      browser: defaultManagedBrowserKind(),
       url: options.managedBrowserUrl,
       profileMode: "persistent",
       profileLabel: options.profileLabel,

@@ -25,6 +25,7 @@ Commands:
   doctor            Start a private daemon, run the no-model Harness doctor, stop it
   probe-readonly    Start a private daemon and capture one local screenshot (no input)
   probe             Run the owned-browser click/type/scroll probe (requires --allow-input)
+  dom-probe         Verify managed-browser DOM/hybrid mode; add --allow-input for click/type/scroll
   stop              Stop the configured private daemon
   permissions       Read the CUA app's macOS permission status without prompting
   help              Show this message
@@ -294,6 +295,19 @@ async function main() {
     const probe = join(root, "spikes/cua-driver/browser-adapter-probe.ts");
     const pnpm = commandPath("pnpm");
     checked(pnpm, ["--filter", "@computer-harness/cua-driver-spike", "exec", "tsx", probe, "--allow-input", "--binary", config.binary, "--browser", config.browser, "--socket", config.socket, "--output", output], "owned-browser CUA probe", { inherit: true });
+    return;
+  }
+  if (command === "dom-probe") {
+    await requireCua(config);
+    if (!(await executable(config.browser))) throw new Error("a supported browser was not found; set browser in .harness.local.json");
+    const pilot = join(root, "scripts/managed-browser-dom-pilot.ts");
+    const pnpm = commandPath("pnpm");
+    await withDaemon(config, async () => {
+      checked(pnpm, ["--filter", "@computer-harness/cua-driver-spike", "exec", "tsx", pilot, ...(args.includes("--allow-input") ? ["--allow-input"] : [])], "managed browser DOM probe", {
+        inherit: true,
+        env: { ...process.env, COMPUTER_HARNESS_CUA_SOCKET: config.socket },
+      });
+    });
     return;
   }
   throw new Error(`unknown command: ${command}\n\n${usage()}`);

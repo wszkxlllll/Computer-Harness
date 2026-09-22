@@ -31,7 +31,7 @@ function pngWithDimensions(width: number, height: number): string {
   return bytes.toString("base64");
 }
 
-function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 }, initialImage = { width: 958, height: 678 }) {
+function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 }, initialImage = { width: 958, height: 678 }, displayScaleFactor = 1) {
   const calls: Array<{ name: string; input?: Record<string, unknown> }> = [];
   let bounds = { ...initialBounds };
   let image = { ...initialImage };
@@ -55,6 +55,9 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       calls.push({ name, input });
       if (name === "list_windows") {
         return result({ structuredJson: JSON.stringify({ windows: missing ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds }] }) });
+      }
+      if (name === "get_screen_size") {
+        return result({ structuredJson: JSON.stringify({ width: 1512, height: 982, scale_factor: displayScaleFactor }) });
       }
       if (name === "get_window_state") {
         if (abortGrounding) throw Object.assign(new Error("grounding aborted"), { name: "AbortError" });
@@ -177,6 +180,35 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("uses Retina desktop screenshot pixels when macOS screen size is reported in logical points", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-retina-"));
+    const fake = fakeDriver();
+    fake.driver.callTool = async (name: string, inputJson: string) => {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      fake.calls.push({ name, input });
+      if (name === "get_screen_size") return result({ structuredJson: JSON.stringify({ width: 1512, height: 982 }) });
+      if (name === "get_desktop_state") {
+        const bytes = Buffer.from(ONE_BY_ONE_PNG);
+        bytes.writeUInt32BE(3024, 16);
+        bytes.writeUInt32BE(1964, 20);
+        await writeFile(String(input.screenshot_out_file), bytes);
+        return result({ structuredJson: JSON.stringify({ screenshot_width: 3024, screenshot_height: 1964 }) });
+      }
+      return result();
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      expect(session.viewport).toEqual({ width: 3024, height: 1964, coordinateSpace: "physical" });
+      const capture = await computer.observe(session, "desktop-retina" as ObservationId, new AbortController().signal);
+      expect(capture.viewport).toEqual({ width: 3024, height: 1964, coordinateSpace: "physical" });
+      expect(fake.calls.filter((call) => call.name === "get_desktop_state")).toHaveLength(2);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed after a transport error instead of retrying a GUI action", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-"));
     const fake = fakeDriver();
@@ -243,9 +275,11 @@ describe("CuaDriverComputer", () => {
   it("invalidates the session when observation transport fails", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-"));
     const fake = fakeDriver();
+    let desktopCaptures = 0;
     fake.driver.callTool = async (name: string, input: string, options?: { signal: AbortSignal }) => {
       if (name === "get_desktop_state") {
-        throw Object.assign(new Error("observation channel closed"), { tag: "Transport", inner: { reason: "closed" } });
+        desktopCaptures += 1;
+        if (desktopCaptures > 1) throw Object.assign(new Error("observation channel closed"), { tag: "Transport", inner: { reason: "closed" } });
       }
       const fallback = fakeDriver();
       return fallback.driver.callTool(name, input, options);
@@ -475,7 +509,8 @@ describe("CuaDriverComputer", () => {
       }, new AbortController().signal);
       expect(backgroundDrag).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTION_UNSUPPORTED" });
       expect(fake.calls.filter((call) => call.name === "drag")).toHaveLength(0);
-      expect(fake.calls.some((call) => call.name === "get_screen_size" || call.name === "get_desktop_state")).toBe(false);
+      expect(fake.calls.some((call) => call.name === "get_desktop_state")).toBe(false);
+      expect(fake.calls.filter((call) => call.name === "get_screen_size")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -743,7 +778,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("calibrates a DOM control against the same observation's UIA Document rect", async () => {
+  it.each(["Document", "AXWebArea"] as const)("calibrates a DOM control against the same observation's trusted UIA content rectangle (%s)", async (contentRole) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-calibration-"));
     const bounds = { x: 100, y: 120, width: 1_828, height: 1_528 };
     const image = { width: 1_568, height: 1_310 };
@@ -753,7 +788,7 @@ describe("CuaDriverComputer", () => {
     fake.setGroundingState({
       elements_complete: true,
       elements: [
-        { role: "Document", frame: documentFrame, enabled: true },
+        { role: contentRole, frame: documentFrame, enabled: true },
         { role: "Edit", name: "到达城市", frame: controlFrame, enabled: true, editable: true },
       ],
     });
@@ -791,14 +826,16 @@ describe("CuaDriverComputer", () => {
         domGroundingTransport: createMockDomGroundingTransport({
           tabId: "tab-fixture",
           generation: "generation-1",
+          complete: true,
           coordinateSpace: "css",
-          viewportMetrics: { cssWidth: cssViewport.width, cssHeight: cssViewport.height, deviceScaleFactor: 1.25 },
+          viewportMetrics: { cssWidth: cssViewport.width, cssHeight: cssViewport.height, deviceScaleFactor: 2 },
           candidates: [{ tagName: "input", name: "到达城市", frame: domFrame, visible: true, interactive: true, state: { enabled: true, editable: true } }],
         }),
         driverFactory: () => fake.driver,
       });
       const session = await computer.open({}, new AbortController().signal);
       const capture = await computer.observe(session, "hybrid-calibration" as ObservationId, new AbortController().signal);
+      expect(capture.grounding).toMatchObject({ source: "hybrid", completeness: "complete", degraded: false });
       const uia = capture.grounding?.elements.find((element) => element.source === "uia" && element.name === "到达城市");
       const dom = capture.grounding?.elements.find((element) => element.source === "dom" && element.name === "到达城市");
       expect(uia?.bbox).toBeDefined();
@@ -816,7 +853,7 @@ describe("CuaDriverComputer", () => {
         groundingRef: dom!.elementRef,
       }, new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
       const click = fake.calls.find((call) => call.name === "click");
-      expect(click?.input).toMatchObject({ x: expect.any(Number), y: expect.any(Number) });
+      expect(click?.input).toMatchObject({ x: 1_000, y: 800 });
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -909,7 +946,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("preserves screenshot-local physical coordinates for a coherent Retina capture", async () => {
+  it("preserves screenshot-local physical coordinates for a coherent Retina capture without DOM scale attestation", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-retina-window-"));
     const fake = windowDriver(
       { x: 756, y: 34, width: 756, height: 948 },

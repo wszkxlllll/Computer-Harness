@@ -1,4 +1,4 @@
-import { CuaWindowDiscovery, ManagedBrowserHost, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
 import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ObservationCapture, ObservationId } from "@computer-harness/protocol";
@@ -159,7 +159,7 @@ class ManagedBrowserComputer implements Computer {
       bootstrap = await this.options.openBootstrap(this.options.config.socketPath, label, signal);
       const createHost = this.options.createHost;
       host = createHost({
-        browser: "edge",
+        browser: defaultManagedBrowserKind(),
         url: this.options.config.managedBrowserUrl!,
         profileMode: this.options.config.managedBrowserProfileMode ?? "ephemeral",
         ...(this.options.config.managedBrowserProfileLabel === undefined ? {} : { profileLabel: this.options.config.managedBrowserProfileLabel }),

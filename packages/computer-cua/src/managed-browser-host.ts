@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { access, mkdir, mkdtemp, open, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
 import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
@@ -25,6 +25,29 @@ const MANAGED_BROWSER_STARTUP_METADATA_FILE = "managed-browser-startup.json";
 export const MAX_MANAGED_BROWSER_STARTUP_URLS = 8;
 
 export type ManagedBrowserProfileMode = "ephemeral" | "persistent";
+export type ManagedBrowserKind = "edge" | "chromium";
+
+/** Select the native default without making callers duplicate OS policy. */
+export function defaultManagedBrowserKind(osPlatform: NodeJS.Platform = platform()): ManagedBrowserKind {
+  return osPlatform === "win32" ? "edge" : "chromium";
+}
+
+/** Explicit, bounded executable locations supported by the managed host. */
+export function managedBrowserExecutableCandidates(browser: ManagedBrowserKind, osPlatform: NodeJS.Platform = platform()): readonly string[] {
+  if (osPlatform === "darwin") {
+    return browser === "edge"
+      ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+      : ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium"];
+  }
+  if (osPlatform === "linux") {
+    return browser === "edge"
+      ? ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"]
+      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+  }
+  return browser === "edge"
+    ? ["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"]
+    : ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"];
+}
 
 export interface ManagedBrowserStartupMetadata {
   readonly schemaVersion: 1;
@@ -126,7 +149,7 @@ export async function acquireManagedBrowserProfileLease(options: {
  * title/process name and never reuses a user profile.
  */
 export interface ManagedBrowserHostOptions {
-  readonly browser: "edge" | "chromium";
+  readonly browser: ManagedBrowserKind;
   readonly url: string;
   /** Ephemeral is the default; persistent is Harness-owned and explicitly labeled. */
   readonly profileMode?: ManagedBrowserProfileMode;
@@ -487,6 +510,7 @@ export class ManagedBrowserHost {
         "--no-default-browser-check",
         "--disable-sync",
         "--disable-extensions",
+        ...(process.platform === "darwin" ? ["--force-renderer-accessibility"] : []),
         "--new-window",
         ...launchUrls,
       ];
@@ -691,7 +715,6 @@ async function discoverManagedBrowserProcessIds(
   signal: AbortSignal,
 ): Promise<Set<number>> {
   const owned = new Set<number>([hostProcessId]);
-  if (process.platform !== "win32") return owned;
   const queried = await queryManagedBrowserProcessIds(hostProcessId, profileRoot, signal, 2_500, true);
   if (queried !== undefined) for (const pid of queried) owned.add(pid);
   // Keep the exact spawned PID as the only proof when process inventory is unavailable.
@@ -705,7 +728,7 @@ async function queryManagedBrowserProcessIds(
   timeoutMs = 2_500,
   includeHostFallback = false,
 ): Promise<Set<number> | undefined> {
-  if (process.platform !== "win32") return new Set<number>();
+  if (process.platform !== "win32") return await queryPosixManagedBrowserProcessIds(hostProcessId, profileRoot, signal, timeoutMs, includeHostFallback);
   const script = "$root=[Environment]::GetEnvironmentVariable('CH_MANAGED_PROFILE_ROOT'); $hostPid=[int][Environment]::GetEnvironmentVariable('CH_MANAGED_HOST_PID'); $includeHost=[Environment]::GetEnvironmentVariable('CH_MANAGED_INCLUDE_HOST') -eq '1'; $items=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine); $owned=[Collections.Generic.HashSet[int]]::new(); $hostItem=$items | Where-Object { [int]$_.ProcessId -eq $hostPid } | Select-Object -First 1; $hostCommand=''; if($null -ne $hostItem){ $hostCommand=[string]$hostItem.CommandLine }; $hostMatchesRoot=($root.Length -gt 0 -and $hostCommand.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0); if($hostMatchesRoot -or ($includeHost -and $null -ne $hostItem)){ [void]$owned.Add($hostPid) }; $changed=$true; while($changed){ $changed=$false; foreach($item in $items){ $command=[string]$item.CommandLine; $byRoot=($root.Length -gt 0 -and $command.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0); $byParent=$owned.Contains([int]$item.ParentProcessId); if(($byRoot -or $byParent) -and $owned.Add([int]$item.ProcessId)){ $changed=$true } } }; $owned | Sort-Object";
   try {
     signal?.throwIfAborted();
@@ -727,6 +750,45 @@ async function queryManagedBrowserProcessIds(
   }
 }
 
+async function queryPosixManagedBrowserProcessIds(
+  hostProcessId: number,
+  profileRoot: string,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  includeHostFallback: boolean,
+): Promise<Set<number> | undefined> {
+  try {
+    signal?.throwIfAborted();
+    const result = await execFile("ps", ["-axo", "pid=,ppid=,command="], {
+      timeout: timeoutMs,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const items: { pid: number; parentPid: number; command: string }[] = [];
+    for (const line of String(result.stdout).split(/\r?\n/u)) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
+      if (match === null) continue;
+      items.push({ pid: Number(match[1]), parentPid: Number(match[2]), command: match[3] ?? "" });
+    }
+    const owned = new Set<number>();
+    const host = items.find((item) => item.pid === hostProcessId);
+    if (host?.command.includes(profileRoot) === true || (includeHostFallback && host !== undefined)) owned.add(hostProcessId);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const item of items) {
+        if ((item.command.includes(profileRoot) || owned.has(item.parentPid)) && !owned.has(item.pid)) {
+          owned.add(item.pid);
+          changed = true;
+        }
+      }
+    }
+    return owned;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return undefined;
+  }
+}
+
 /** Host-local redacted process-tree evidence used by lifecycle diagnostics. */
 export async function inspectManagedBrowserProcessTree(hostProcessId: number, profileRoot: string): Promise<number | undefined> {
   const live = await queryManagedBrowserProcessIds(hostProcessId, profileRoot, undefined, 1_000, false);
@@ -734,11 +796,7 @@ export async function inspectManagedBrowserProcessTree(hostProcessId: number, pr
 }
 
 async function resolveManagedBrowserExecutable(browser: ManagedBrowserHostOptions["browser"], explicitPath: string | undefined): Promise<string> {
-  const candidates = explicitPath === undefined
-    ? browser === "edge"
-      ? ["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"]
-      : ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"]
-    : [explicitPath];
+  const candidates = explicitPath === undefined ? managedBrowserExecutableCandidates(browser) : [explicitPath];
   for (const candidate of candidates) {
     try {
       await access(candidate);

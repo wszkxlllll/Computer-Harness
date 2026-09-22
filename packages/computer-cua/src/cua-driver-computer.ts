@@ -95,6 +95,8 @@ interface PrivateSession {
   windowIdentityInvalidated: boolean;
   /** Adapter-private active managed tab; never serialized to Runtime. */
   browserTarget?: ManagedBrowserTarget;
+  /** Managed DOM attestation for macOS display-pixel input; never serialized. */
+  windowInputScale?: number;
 }
 
 interface PendingDriverCleanup {
@@ -119,6 +121,8 @@ interface PrivateGrounding {
   readonly browserTarget?: ManagedBrowserTarget;
   /** Trusted physical browser content rect derived from the same observation's UIA Document. */
   readonly contentRect?: DomGroundingContentRect;
+  /** Browser-attested device scale used only for window input projection. */
+  readonly inputScale?: number;
   readonly elements: ReadonlyMap<string, {
     readonly element: GroundingElement;
     readonly point: { readonly x: number; readonly y: number };
@@ -213,10 +217,27 @@ export class CuaDriverComputer implements Computer {
       let windowBinding: CuaWindowBinding | undefined;
       if (this.options.windowTarget === undefined) {
         const size = await callTool(driver, "get_screen_size", { session: label }, signal);
-        const dimensions = readStructuredDimensions(size);
-        if (dimensions === undefined) {
+        const screenDimensions = readStructuredDimensions(size);
+        if (screenDimensions === undefined) {
           throw new Error("CUA get_screen_size did not return width/height");
         }
+        // On Retina macOS, get_screen_size reports logical points while the
+        // desktop screenshot is returned in physical pixels. The screenshot
+        // dimensions are the coordinate frame seen by the model and therefore
+        // the correct Computer viewport; verify that its scale is coherent
+        // with the display size before exposing it.
+        await mkdir(this.options.screenshotDir, { recursive: true });
+        const initialScreenshotPath = join(this.options.screenshotDir, `${safeId(label)}-open-viewport.png`);
+        const initialCapture = await callTool(driver, "get_desktop_state", {
+          session: label,
+          screenshot_out_file: initialScreenshotPath,
+        }, signal);
+        if (initialCapture.isError || initialCapture.degraded) throw new Error("CUA initial desktop screenshot was refused");
+        const screenshotDimensions = readStructuredScreenshotDimensions(initialCapture) ?? await readPngDimensions(initialScreenshotPath);
+        if (screenshotDimensions === undefined || !coherentDisplayScale(screenDimensions, screenshotDimensions)) {
+          throw new Error("CUA desktop screenshot dimensions do not have a coherent scale relative to get_screen_size");
+        }
+        const dimensions = screenshotDimensions;
         viewport = { ...dimensions, coordinateSpace: "physical" };
       } else {
         windowBinding = await discoverWindow(driver, label, this.options.windowTarget, signal);
@@ -302,6 +323,8 @@ export class CuaDriverComputer implements Computer {
         });
         if (grounding !== undefined) {
           if (grounding.browserTarget !== undefined) current.browserTarget = grounding.browserTarget;
+          if (grounding.inputScale !== undefined) current.windowInputScale = grounding.inputScale;
+          else delete current.windowInputScale;
           this.groundings.set(String(observationId), grounding);
         }
         this.latestObservationId = observationId;
@@ -443,6 +466,7 @@ export class CuaDriverComputer implements Computer {
         current.windowBinding,
         this.options.windowDeliveryMode,
         decisionObservation?.viewport,
+        current.windowInputScale,
         current.pendingWindowTypePoint,
         current.windowHotkeyPoint,
       );
@@ -565,6 +589,7 @@ function actionRequest(
   windowBinding?: CuaWindowBinding,
   configuredDeliveryMode?: CuaWindowDeliveryMode,
   decisionViewport?: Viewport,
+  windowInputScale?: number,
   pendingWindowTypePoint?: { x: number; y: number },
   windowHotkeyPoint?: { x: number; y: number },
 ): { name: string; arguments: Record<string, unknown> } {
@@ -572,7 +597,7 @@ function actionRequest(
   const deliveryMode = windowBinding === undefined ? "foreground" : configuredDeliveryMode ?? "background";
   const point = (value: { x: number; y: number }) => windowBinding === undefined
     ? value
-    : mapWindowPoint(value, decisionViewport, windowBinding.bounds);
+    : mapWindowPoint(value, decisionViewport, windowBinding.bounds, windowInputScale);
   switch (action.kind) {
     case "click":
       return { name: "click", arguments: { session, target, ...point(action.point), delivery_mode: deliveryMode } };
@@ -683,6 +708,7 @@ async function readDomGroundingCatalog(
       catalog: materialized.catalog,
       browserTarget: activeBrowserTarget,
       contentRect: trustedContentRect,
+      ...(validInputScale(result.viewportMetrics?.deviceScaleFactor) ? { inputScale: result.viewportMetrics!.deviceScaleFactor } : {}),
       elements,
     };
   } catch (error) {
@@ -759,6 +785,7 @@ function mergeGroundings(
     },
     ...(dom.browserTarget === undefined ? {} : { browserTarget: dom.browserTarget }),
     ...(dom.contentRect === undefined ? {} : { contentRect: dom.contentRect }),
+    ...(dom.inputScale === undefined ? {} : { inputScale: dom.inputScale }),
     elements,
   };
 }
@@ -817,7 +844,10 @@ async function readGroundingCatalog(
   const explicitlyComplete = structured?.complete === true || structured?.elements_complete === true;
   const truncated = structured?.truncated === true || structured?.degraded === true || rawElements.length > GROUNDING_MAX_ELEMENTS;
   const completeness = explicitlyComplete && !truncated ? "complete" : "partial";
-  const contentRect = trustedContentRectFromUia(publicElements, viewport);
+  // Keep trusted page geometry independent of the model-facing catalog cap:
+  // the web area may sort after interactive controls and be omitted from the
+  // bounded element list, but it is still needed to calibrate DOM coordinates.
+  const contentRect = trustedContentRectFromUia(parsed.map((candidate) => candidate.element), viewport);
   return {
     catalog: {
       version: "uia-catalog-v1",
@@ -835,11 +865,11 @@ async function readGroundingCatalog(
 }
 
 function trustedContentRectFromUia(
-  elements: readonly GroundingElement[],
+  elements: readonly Pick<GroundingElement, "role" | "bbox">[],
   viewport: Viewport,
 ): DomGroundingContentRect | undefined {
   const candidates = elements
-    .filter((element) => element.role.toLocaleLowerCase() === "document" && element.bbox?.coordinateSpace === "physical")
+    .filter((element) => ["document", "axwebarea", "webarea"].includes(element.role.toLocaleLowerCase()) && element.bbox?.coordinateSpace === "physical")
     .map((element) => element.bbox!)
     .filter((bbox) => bbox.width >= viewport.width * 0.5 && bbox.height >= viewport.height * 0.5)
     .filter((bbox) => bbox.x >= 0 && bbox.y >= 0 && bbox.x + bbox.width <= viewport.width + 1 && bbox.y + bbox.height <= viewport.height + 1)
@@ -999,16 +1029,16 @@ function parseStructuredRecord(value: unknown): Record<string, unknown> | undefi
  * against a later observation, but its coordinates were still produced from
  * action.basedOn. Geometry is checked by the caller before this projection.
  *
- * Windows window captures can differ from the outer bounds by a small border,
- * so the established contract scales those near-1:1 dimensions. macOS Retina
- * captures instead expose physical screenshot pixels while WindowServer bounds
- * are logical points. CUA's pixel actions consume screenshot-local pixels, so a
- * coherent high-density ratio must not be divided back into logical points.
+ * Window captures and WindowServer bounds can use different scales. CUA
+ * 0.22.2's macOS foreground CGEvent route consumes display pixels, while
+ * WindowServer reports logical points, so the host-attested display scale is
+ * applied after projecting the screenshot point into the window bounds.
  */
 function mapWindowPoint(
   point: { x: number; y: number },
   sourceViewport: Viewport | undefined,
   targetBounds: CuaWindowGeometry,
+  inputScale?: number,
 ): { x: number; y: number } {
   if (sourceViewport === undefined) {
     throw new WindowCoordinateMappingError("WINDOW_VIEWPORT_UNKNOWN", "window action has no source observation viewport");
@@ -1022,8 +1052,17 @@ function mapWindowPoint(
   if (!validDimension(targetBounds.width) || !validDimension(targetBounds.height)) {
     throw new WindowCoordinateMappingError("WINDOW_GEOMETRY_INVALID", "window action has invalid target geometry");
   }
+  if (inputScale !== undefined && !validInputScale(inputScale)) {
+    throw new WindowCoordinateMappingError("WINDOW_INPUT_SCALE_INVALID", "window action has an invalid display input scale");
+  }
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0 || point.x >= sourceViewport.width || point.y >= sourceViewport.height) {
     throw new WindowCoordinateMappingError("WINDOW_COORDINATE_INVALID", `window action point (${point.x}, ${point.y}) is outside source viewport ${sourceViewport.width}x${sourceViewport.height}`);
+  }
+  if (inputScale !== undefined) {
+    return {
+      x: clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width * inputScale), Math.round(targetBounds.width * inputScale)),
+      y: clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height * inputScale), Math.round(targetBounds.height * inputScale)),
+    };
   }
   const scaleX = sourceViewport.width / targetBounds.width;
   const scaleY = sourceViewport.height / targetBounds.height;
@@ -1038,6 +1077,10 @@ function mapWindowPoint(
     x: clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),
     y: clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height), targetBounds.height),
   };
+}
+
+function validInputScale(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value >= 1 && value <= 4;
 }
 
 function validDimension(value: number): boolean {
@@ -1060,6 +1103,7 @@ function readStructuredDimensions(result: { structuredJson?: string }): { width:
   } catch { return undefined; }
 }
 
+
 function readStructuredScreenshotDimensions(result: { structuredJson?: string }): { width: number; height: number } | undefined {
   if (typeof result.structuredJson !== "string") return undefined;
   try {
@@ -1072,6 +1116,21 @@ function dimensions(width: unknown, height: unknown): { width: number; height: n
   return typeof width === "number" && Number.isInteger(width) && width > 0 && typeof height === "number" && Number.isInteger(height) && height > 0
     ? { width, height }
     : undefined;
+}
+
+function coherentDisplayScale(
+  screen: { readonly width: number; readonly height: number },
+  screenshot: { readonly width: number; readonly height: number },
+): boolean {
+  const scaleX = screenshot.width / screen.width;
+  const scaleY = screenshot.height / screen.height;
+  return Number.isFinite(scaleX)
+    && Number.isFinite(scaleY)
+    && scaleX >= 0.5
+    && scaleX <= 4
+    && scaleY >= 0.5
+    && scaleY <= 4
+    && Math.abs(scaleX - scaleY) <= 0.08;
 }
 
 async function readPngDimensions(path: string): Promise<{ width: number; height: number } | undefined> {

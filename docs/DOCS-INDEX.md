@@ -4,6 +4,8 @@
 
 **2026-09-21 Jev / System One 调研**：Jev 不支持截图，也不是通用 GUI grounder 或 planner；它只适合在 UIA/DOM/视觉生产者已经形成有界 `GroundingCatalog` 后，尝试做低延迟候选判断。当前仅批准离线与在线 shadow 实验，不批准替换 GLM/Qwen、重构 Runtime 或获得直接执行权。实验边界、指标、回退与停止条件见[Jev / System One 适配性审计](./jev-system-one-fit-assessment-2026-09-21.md)。
 
+**2026-09-22 macOS DOM/Hybrid 更新**：macOS 已在 Harness-owned Chrome 受控页面完成从启动、窗口/进程绑定、11个DOM候选、未降级Hybrid目录到Retina精确点击、输入、滚动和零残留清理的整链路。本地一键验证为 `pnpm harness dom-probe --allow-input`。这不等于真实购物/通信站点已通过；详见[macOS Managed DOM / Hybrid 落地与真机验证](./macos-managed-dom-hybrid-results-2026-09-22.md)。
+
 **2026-09-21本地体验更新**：窗口选择已接入TUI：退出编辑态后按W，按应用名/标题选择；窗口布局由用户自行安排，Harness不移动或缩放窗口。foreground预览开放click/type/keypress/hotkey/scroll/drag/wait，background仍只click/wait。Risk Guard可按Run选择`off/layered`，research预设默认off。最新两条高德实验证明 UIA 介入既有正例也有明确边界：站点建议文本可被 depth16 UIA 暴露，`click_element` 4/4 完成；“换乘少”自定义偏好控件在完整 UIA 树中不存在，坐标点击后反复无变化。因此下一步是收紧 Monitor 恢复策略并沿用 GroundingCatalog 增加受限 DOM/CDP 生产者，不是无限扩大 UIA 深度。详见[最新出行轨迹审计](./travel-trajectory-review-2026-09-20.md)。当前操作以[操作手册](./travel-task-cards-and-feedback.md#0-你现在照这个顺序做)和[出行试点准备](./travel-pilot-preparation-2026-09-20.md)为准；下面DEV-2/3/4/5段落中的部分旧计数和能力边界仅作历史证据。
 
 > 阅读优先级：顶部更新、README与最新专题审计高于下方历史基线长段；后者保留提交沿革，不再作为当前窗口能力或测试计数来源。

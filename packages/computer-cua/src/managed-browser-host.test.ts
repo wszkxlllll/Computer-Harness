@@ -5,9 +5,18 @@ import { createHash } from "node:crypto";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, clearManagedBrowserDevToolsPort, cleanupManagedBrowser, closeManagedBrowserGracefully, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, clearManagedBrowserDevToolsPort, cleanupManagedBrowser, closeManagedBrowserGracefully, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
+  it("selects native managed browsers and bounded executable paths on every supported desktop OS", () => {
+    expect(defaultManagedBrowserKind("win32")).toBe("edge");
+    expect(defaultManagedBrowserKind("darwin")).toBe("chromium");
+    expect(defaultManagedBrowserKind("linux")).toBe("chromium");
+    expect(managedBrowserExecutableCandidates("chromium", "darwin")).toContain("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    expect(managedBrowserExecutableCandidates("chromium", "linux")).toContain("/usr/bin/chromium");
+    expect(managedBrowserExecutableCandidates("edge", "win32")).toContain("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe");
+  });
+
   it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("shadowRoot");
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("deviceScaleFactor");
