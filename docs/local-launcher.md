@@ -28,7 +28,7 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 进入 TUI 首页后：
 
 - 按 `F` 配置下一次 Run 的 Planning、Memory、检索、Batch、Context、Risk Guard 和 Monitor；
-- 按 `W` 打开只读窗口列表，按应用名/标题选择下一次 Run 的窗口，或选择 primary desktop；
+- 直接输入目标并按 `Enter`：CUA TUI 仅在本地找到唯一可信窗口时自动绑定并开始；否则保留目标，显示窗口列表供手选。按 `W` 可提前手选窗口或 primary desktop；显式选择始终优先；
 - 按 `I` 或 `Enter` 输入目标；
 - `Y/N` 处理审批，`P/R` 暂停/恢复，`A` 或 `Ctrl-C` 中止当前 Run；
 - `Esc/Q` 退出。
@@ -51,7 +51,7 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 .\scripts\harness.ps1 start -CuaWindowPid <pid> -CuaWindowId <window-id>
 ```
 
-两个参数必须成对提供；省略它们时保持 primary desktop 默认路径。它们是脚本/调试接口，不要求日常用户手填编号，显式编号入口默认background。日常 TUI 在输入goal前先按 `Esc` 退出编辑，再按 `W` 打开只读窗口列表，按应用名/标题选择；菜单选窗明确使用foreground预览，可能激活目标且不保证自动恢复原前台。选择持续到用户主动修改，列表不可用或窗口关闭会明确报错，不自动改成desktop。窗口动作能力以[最新实测边界](./travel-pilot-preparation-2026-09-20.md#115-无人工输入的窗口重测与放行边界)为准。
+两个参数必须成对提供；它们是脚本/调试接口，不要求日常用户手填编号，显式编号入口默认 background。日常 TUI 可直接输入 goal；唯一可信窗口由本地匹配自动绑定，多个/没有匹配时保留草稿并进入可滚动的选择列表。也可先按 `Esc` 退出编辑、按 `W` 手选；手选窗口或 desktop 后不会被自动覆盖。菜单选窗使用 foreground 预览，可能激活目标且不保证自动恢复原前台。列表不可用或窗口关闭会明确报错，不自动改成 desktop；直接 `run` 命令未启用 TUI 自动选窗。窗口动作能力以[最新实测边界](./travel-pilot-preparation-2026-09-20.md#115-无人工输入的窗口重测与放行边界)为准。
 
 ## 排查命令
 

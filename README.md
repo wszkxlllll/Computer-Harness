@@ -65,7 +65,7 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 .\scripts\travel\run.ps1 prepare -Task T01 -AnchorDate YYYY-MM-DD -Preset research
 ```
 
-TUI 中如果正在编辑 goal，先按 `Esc` 回到首页；再用 `W` 选择窗口、`F` 选择下一 Run 的功能，`I` 输入目标或纠正，`P/R` 暂停/恢复，`A` 或 `Ctrl-C` 中止，`Y/N` 处理审批。每个 Run 独立落盘到 `runs/travel/tui-*/run-*`；完整 goal 仍从任务卡复制，README 摘要表不作为执行输入。
+TUI 中可直接提交 goal，让本地匹配尝试绑定唯一窗口；不确定时从列表手选。也可先按 `Esc` 回到首页，用 `W` 手选窗口、`F` 选择下一 Run 的功能，`I` 输入目标或纠正，`P/R` 暂停/恢复，`A` 或 `Ctrl-C` 中止，`Y/N` 处理审批。每个 Run 独立落盘到 `runs/travel/tui-*/run-*`；完整 goal 仍从任务卡复制，README 摘要表不作为执行输入。
 
 ## 快速开始
 
@@ -103,7 +103,7 @@ node apps/cli/dist/index.js --help
 
 可选地，配置完成后可显式运行 `./scripts/install-harness-shortcut.ps1 -Destination StartMenu`（也支持 `Desktop` 或 `Both`），创建一个打开本仓库 `harness.ps1 start` 的 PowerShell 终端快捷方式。安装器不会自动运行、不覆盖同名快捷方式，也不把 `.env`、本地配置或密钥写入快捷方式；点击后仍是终端 TUI，不是原生 GUI，首次使用仍须按上文准备机器配置。`-WhatIf` 可预览目标；脚本参数允许把菜单/桌面目录注入临时 fixture 以离线验证。
 
-首页会并列显示模型、Computer/窗口目标、功能预设和 Risk Guard 状态。先输入目标并按 `Enter` 开始；`F` 查看高级功能。若要先选窗口，按 `Esc` 离开目标编辑（草稿保留在当前 TUI），再按 `W` 选择，最后按 `I` 继续编辑目标。
+首页会并列显示模型、Computer/窗口目标、功能预设和 Risk Guard 状态。输入目标并按 `Enter` 后，CUA TUI 会在 Run 前于本地查找可见窗口；只有唯一可信匹配才自动绑定并开始，多个/没有匹配则保留目标并显示可滚动的窗口列表。这个本地匹配不是模型选窗，不会把其他窗口标题发给 Provider；显式选过的窗口或整桌面不会被覆盖。`F` 查看高级功能；也可先按 `Esc` 离开目标编辑（草稿保留），再按 `W` 手选、按 `I` 继续编辑。
 
 窄终端首页会优先保留目标、Guard、状态和下一步；按 `D` 或 `PageDown` 打开可翻页的完整详情，`PageUp`/`PageDown` 翻页，`Esc` 或 `Q` 返回首页。详情页始终用文字显示 Guard 与会话状态；长错误通知不会覆盖 `BLOCKED`，两者都可在详情中读完。返回首页后可用 `I`/`Enter` 继续编辑保留的目标草稿。
 
@@ -113,7 +113,7 @@ node apps/cli/dist/index.js --help
 .\scripts\harness.ps1 start -CuaWindowPid <pid> -CuaWindowId <window-id>
 ```
 
-两个参数必须同时提供；未提供时保持 primary desktop。它们是脚本/调试接口，不要求日常用户手填编号。日常 TUI 在输入goal前先按 `Esc` 退出编辑，再按 `W` 打开只读窗口列表，用应用名/标题选择；选择保留到用户主动修改。菜单选窗使用显式foreground预览，动作可能激活目标，不保证自动切回终端；列表不可用或目标失效不会静默切换desktop。窗口动作能力仍以CUA后端验证为准，详见[当前体验与能力边界](./docs/travel-pilot-preparation-2026-09-20.md#115-无人工输入的窗口重测与放行边界)。
+两个参数必须同时提供；它们是脚本/调试接口，不要求日常用户手填编号。日常 TUI 可先直接提交 goal 触发唯一目标的本地自动匹配；不确定时从窗口列表选，也可先按 `Esc`、`W` 手选。明确选择的目标会保留到用户主动修改；明确选整桌面才走整桌面。窗口 foreground 动作可能激活目标，不保证自动切回终端；列表不可用或目标失效不会静默切换 desktop。直接 `run` 命令仍按其显式参数/默认 desktop 行为，不具备 TUI 的自动选窗。窗口动作能力仍以 CUA 后端验证为准，详见[当前体验与能力边界](./docs/travel-pilot-preparation-2026-09-20.md#115-无人工输入的窗口重测与放行边界)。
 
 ## 运行一个本地任务
 
@@ -156,7 +156,7 @@ node apps/cli/dist/index.js --goal "<instruction returned by reset>" --model glm
 
 ## TUI 预览
 
-TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首页的目标编辑；首页显示当前模型、Computer/窗口目标、功能预设和 Risk Guard 状态。输入目标后按 `Enter` 开始，`F` 打开本次 Run 的高级功能设置。CUA 选窗步骤是：按 `Esc` 离开目标编辑、按 `W` 选择 host 窗口（或 primary desktop）、按 `I` 回到保留的目标草稿，再按 `Enter` 开始。直接使用 CLI 时仍需提供 `--model` 和 Computer 连接：
+TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首页的目标编辑；首页显示当前模型、Computer/窗口目标、功能预设和 Risk Guard 状态。输入目标后按 `Enter`，CUA TUI 会先做本地唯一目标匹配，不确定时显示手选列表；`F` 打开下一次 Run 的高级功能设置。也可按 `Esc` 离开目标编辑、按 `W` 手选 host 窗口或 primary desktop、按 `I` 回到保留的目标草稿，再按 `Enter` 开始。直接使用 CLI 时仍需提供 `--model` 和 Computer 连接：
 
 ```text
 node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/tui" --env-file ".env"
@@ -169,14 +169,14 @@ node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-soc
 | 按键 | 作用 |
 | --- | --- |
 | `I` | 进入 goal/correction 编辑；Run 正在执行时先请求 pause/quiescence，不能用编辑态绕过未决动作 |
-| `Enter` | 目标编辑中开始 Run；首页非编辑状态进入目标编辑；Run 中提交 correction。提交经过 Controller Inbox，旧决策失效；pause barrier 未完成时会排队 |
-| `W` | 首页打开只读窗口选择器；编辑目标时先按 `Esc`，草稿会保留。按应用名/标题选择后续 Run 的 host target，或选择 primary desktop |
+| `Enter` | 目标编辑中先本地匹配目标窗口，唯一可信目标自动开始，否则进入手选列表；首页非编辑状态进入目标编辑；Run 中提交 correction。提交经过 Controller Inbox，旧决策失效；pause barrier 未完成时会排队 |
+| `W` | 首页打开只读窗口选择器；编辑目标时先按 `Esc`，草稿会保留。可按应用名/标题手选后续 Run 的 host target，或明确选择 primary desktop |
 | `F` | 首页打开高级功能页；目标编辑中按大写 `F` 也可打开且保留草稿。用方向键或 `J/K` 移动，Space 切换布尔项，Left/Right 切换枚举（包括 Risk Guard `off`/`layered`），Enter 保存，Esc 取消 |
 | `P` / `R` | 通过 Controller 暂停 / 恢复当前 Run |
 | `A` / `Ctrl-C` | Abort 当前 Run；退出时保留未确认 cleanup，不把停止请求冒称底层已停止 |
 | `Y` / `N` | waiting approval 时批准 / 拒绝 |
 | `PageUp` / `PageDown` | 查看长 reply、question 或 approval 的分页 |
-| `Esc` / `Q` | 目标编辑中 `Esc` 暂存草稿并回到设置首页；纠正编辑中 `Esc` 丢弃纠正；功能页/窗口页 `Esc` 取消该页；设置首页的 `Esc`/`Q` 退出并恢复 raw mode 和 cursor |
+| `Esc` / `Q` | 目标编辑中 `Esc` 暂存草稿；选窗匹配中 `Esc` 仅取消匹配并保留草稿，`Q` 退出；纠正编辑中 `Esc` 丢弃纠正；功能页/窗口页 `Esc` 取消该页；设置首页的 `Esc`/`Q` 退出并恢复 raw mode 和 cursor |
 
 编辑态中的 `A`、`Q` 是正文，不是快捷键。必须把焦点放在当前终端；TUI 不注册全局热键，也不会把其他应用收到的按键冒称为输入。输入会显示在本地终端，可能留在 terminal scrollback、录屏或终端日志中；共享 diagnostics/report 仍不写入原始输入。真实 no-goal WinPTY 只证明终端生命周期、中文/resize、尾部可见、500 上限和退出清理，不证明完整 model Run、跨 Run 的真实纠正或通用焦点；另有一次 T10 synthetic fixture GLM 闭环，见“当前证据与限制”。
 
@@ -222,13 +222,13 @@ node apps/cli/dist/index.js --doctor --computer cua --cua-socket "<private-socke
 
 ### 显式 window opt-in
 
-默认 desktop CUA 路径不变。只有在用户明确选择 PID 和 window ID 时才启用 host-only window target：
+直接 `run` 命令未提供目标时仍走 desktop CUA；显式 PID/window ID 可启用 host-only window target：
 
 ```text
 node apps/cli/dist/index.js --goal "observe the selected window" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --cua-window-pid <pid> --cua-window-id <windowId> --output "runs/window-preview" --env-file ".env"
 ```
 
-TUI 显式选窗使用 foreground 预览，可用能力以当前 CUA 后端门控为准：已接入 click、type、keypress/hotkey、scroll、drag 和 `wait`；显式 background 入口仍只开放 click 与 `wait`。窗口自动发现、通用 focus/AX、silent desktop fallback 和操作系统级隔离都不提供。截图坐标会从 action 所依据的 observation viewport 映射到已验证的窗口几何；窗口移动/resize、关闭或 identity 变化会使旧 observation/action 失效并拒绝执行。模型点偏或点击控件边缘仍需重新观察和重定位，不能把坐标映射当作业务成功保证；前台激活、遮挡和焦点恢复也受驱动与桌面状态影响。preflight 与 driver action 不是原子事务，OSWorld 不接受这些 CUA window flags。详见[出行任务手册](./docs/travel-task-cards-and-feedback.md#0-你现在照这个顺序做)的窗口边界。
+TUI 手选或唯一可信本地匹配的窗口使用 foreground 预览；可用能力以当前 CUA 后端门控为准：已接入 click、type、keypress/hotkey、scroll、drag 和 `wait`；显式 background 入口仍只开放 click 与 `wait`。模型自由换窗、通用 focus/AX、silent desktop fallback 和操作系统级隔离都不提供。截图坐标会从 action 所依据的 observation viewport 映射到已验证的窗口几何；窗口移动/resize、关闭或 identity 变化会使旧 observation/action 失效并拒绝执行。模型点偏或点击控件边缘仍需重新观察和重定位，不能把坐标映射当作业务成功保证；前台激活、遮挡和焦点恢复也受驱动与桌面状态影响。preflight 与 driver action 不是原子事务，OSWorld 不接受这些 CUA window flags。详见[出行任务手册](./docs/travel-task-cards-and-feedback.md#0-你现在照这个顺序做)的窗口边界。
 
 ### UIA / DOM grounding 状态
 

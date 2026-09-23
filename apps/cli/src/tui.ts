@@ -7,6 +7,7 @@ import { initialRunSnapshot } from "@computer-harness/trajectory";
 import type { RiskGuardMode, RiskProfile } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
+import { matchGoalToWindow } from "./window-target-matcher.js";
 
 const LEGACY_INCREMENTAL_POLL_MS = 250;
 const MAX_TUI_INPUT_LENGTH = 500;
@@ -26,6 +27,8 @@ export interface TuiMetadata {
   cuaWindowDeliveryMode?: "background" | "foreground";
   /** Local-only display label; never serialized into a Provider request/report. */
   cuaWindowLabel?: string;
+  /** Local-only selection provenance for the TUI; never sent to a Provider. */
+  cuaWindowSelectionSource?: "host" | "local_match";
   /** False for OSWorld and other environments without host window selection. */
   windowSelectionAvailable?: boolean;
   features?: TuiFeatureSelection;
@@ -115,9 +118,14 @@ export async function runApplicationTui(
   let windowTargets: readonly WindowTargetInfo[] = [];
   let windowLoading = false;
   let windowError = "";
+  let windowMatchReason = "";
   let windowDiscoveryAbort: AbortController | undefined;
+  let goalWindowDiscoveryAbort: AbortController | undefined;
+  let goalSubmissionPending = false;
+  let goalSubmissionGeneration = 0;
   let selectedWindowTarget: ApplicationSessionWindowTarget | null | undefined = metadata.cuaWindowTarget;
   let selectedWindowDeliveryMode: "background" | "foreground" | null | undefined = metadata.cuaWindowDeliveryMode;
+  let windowChoiceExplicit = metadata.cuaWindowTarget !== undefined;
   let editMode = true;
   let inputValue = "";
   let notice = "";
@@ -166,7 +174,7 @@ export async function runApplicationTui(
       return;
     }
     if (mode === "windows") {
-      write(`\u001b[H\u001b[2J${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, output.columns, output.rows)}\n`);
+      write(`\u001b[H\u001b[2J${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, windowMatchReason, output.columns, output.rows)}\n`);
       return;
     }
     if (mode === "home_details") {
@@ -353,10 +361,20 @@ export async function runApplicationTui(
       render();
       return;
     }
+    inputValue = trimmed;
     editMode = false;
     if (featureSelection.memoryRetrieval === "hybrid" && activeMetadata.embeddingReady !== true) {
       notice = "Hybrid retrieval needs --memory-embedding-endpoint and MEMORY_EMBEDDING_API_KEY before starting.";
       render();
+      return;
+    }
+    const managedGrounding = isManagedGrounding(featureSelection.grounding);
+    if (!windowChoiceExplicit && !managedGrounding && activeMetadata.computer === "cua") {
+      if (activeMetadata.windowSelectionAvailable !== false) {
+        resolveGoalWindowLocally(trimmed);
+        return;
+      }
+      requireExplicitDesktopChoice();
       return;
     }
     if (featureSelection.grounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
@@ -376,12 +394,126 @@ export async function runApplicationTui(
         return;
       }
     }
-    notice = "Starting Run…";
+    startRunForGoal(trimmed, "Starting Run…", "Run started");
+  };
+
+  const startRunForGoal = (goal: string, startNotice: string, successNotice: string): void => {
+    if (featureSelection.grounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
+      notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
+      render();
+      return;
+    }
+    notice = startNotice;
+    goalSubmissionPending = true;
     render();
     invoke(async () => {
-      const handle = await session.startRun(trimmed, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode));
-      attachRun(handle, trimmed);
-    }, "Run started");
+      try {
+        const handle = await session.startRun(goal, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode));
+        goalSubmissionPending = false;
+        attachRun(handle, goal);
+      } catch (error) {
+        goalSubmissionPending = false;
+        throw error;
+      }
+    }, successNotice);
+  };
+
+  const clearAutomaticWindowSelection = (): void => {
+    if (activeMetadata.cuaWindowSelectionSource !== "local_match") return;
+    selectedWindowTarget = undefined;
+    selectedWindowDeliveryMode = undefined;
+    const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...desktopMetadata } = activeMetadata;
+    activeMetadata = desktopMetadata;
+  };
+
+  const cancelGoalWindowDiscovery = (): void => {
+    goalSubmissionGeneration += 1;
+    goalWindowDiscoveryAbort?.abort();
+    goalWindowDiscoveryAbort = undefined;
+    goalSubmissionPending = false;
+    clearAutomaticWindowSelection();
+  };
+
+  const requireExplicitDesktopChoice = (): void => {
+    clearAutomaticWindowSelection();
+    windowTargets = [];
+    windowCursor = 0;
+    windowLoading = false;
+    windowError = "";
+    windowMatchReason = "No window list. Explicitly choose Primary desktop; no target was auto-selected.";
+    mode = "windows";
+    editMode = false;
+    render();
+  };
+
+  const resolveGoalWindowLocally = (goal: string): void => {
+    goalWindowDiscoveryAbort?.abort();
+    const abort = new AbortController();
+    const generation = ++goalSubmissionGeneration;
+    goalWindowDiscoveryAbort = abort;
+    goalSubmissionPending = true;
+    windowMatchReason = "";
+    notice = "Matching the goal against visible window names locally…";
+    render();
+
+    void session.listWindowTargets(abort.signal).then((targets) => {
+      if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+      goalWindowDiscoveryAbort = undefined;
+      goalSubmissionPending = false;
+      const result = matchGoalToWindow(goal, targets);
+      if (result.kind === "matched") {
+        const selected = result.match.target;
+        selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+        selectedWindowDeliveryMode = "foreground";
+        activeMetadata = {
+          ...activeMetadata,
+          cuaWindowTarget: selectedWindowTarget,
+          cuaWindowDeliveryMode: "foreground",
+          cuaWindowLabel: windowDisplayLabel(selected),
+          cuaWindowSelectionSource: "local_match",
+        };
+        const label = windowDisplayLabel(selected);
+        startRunForGoal(
+          goal,
+          `Local goal/name matching selected ${label} (no model selected the window). Starting Run…`,
+          "Run started after a local goal/name match; the model did not select the window.",
+        );
+        return;
+      }
+
+      clearAutomaticWindowSelection();
+      windowTargets = targets;
+      windowCursor = 0;
+      windowError = "";
+      windowMatchReason = result.kind === "ambiguous"
+        ? "Ambiguous local match; pick a window. Goal kept; no model chose it."
+        : "No confident local match; pick a window. Goal kept; no model chose it.";
+      mode = "windows";
+      editMode = false;
+      render();
+    }).catch((error: unknown) => {
+      const cleanupFailure = error instanceof Error && error.name === "CuaWindowDiscoveryCleanupError";
+      if (exiting) return;
+      if (generation !== goalSubmissionGeneration) {
+        if (abort.signal.aborted && cleanupFailure && mode === "home") {
+          notice = `Window picker cleanup is unconfirmed: ${errorMessage(error)}`;
+          render();
+        }
+        return;
+      }
+      if (abort.signal.aborted && !cleanupFailure) return;
+      goalWindowDiscoveryAbort = undefined;
+      goalSubmissionPending = false;
+      clearAutomaticWindowSelection();
+      windowTargets = [];
+      windowCursor = 0;
+      windowLoading = false;
+      windowError = errorMessage(error);
+      windowMatchReason = "Discovery failed. No Run started; goal kept. Refresh or pick a window.";
+      mode = "windows";
+      editMode = false;
+      render();
+    });
   };
 
   const refreshWindowTargets = (): void => {
@@ -391,6 +523,7 @@ export async function runApplicationTui(
     windowDiscoveryAbort = abort;
     windowLoading = true;
     windowError = "";
+    windowMatchReason = "";
     windowTargets = [];
     windowCursor = 0;
     render();
@@ -429,6 +562,7 @@ export async function runApplicationTui(
     editMode = false;
     windowCursor = 0;
     windowError = "";
+    windowMatchReason = "";
     notice = "Choose a host window for subsequent Runs; the selection persists until changed.";
     render();
     refreshWindowTargets();
@@ -443,9 +577,12 @@ export async function runApplicationTui(
     if (windowCursor === 0) {
       selectedWindowTarget = null;
       selectedWindowDeliveryMode = null;
-      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, ...desktopMetadata } = activeMetadata;
+      windowChoiceExplicit = true;
+      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...desktopMetadata } = activeMetadata;
       activeMetadata = desktopMetadata;
-      notice = "Primary desktop selected for subsequent Runs.";
+      notice = inputValue.trim().length > 0
+        ? "Primary desktop selected; goal draft kept. Press I, then Enter to start."
+        : "Primary desktop selected for subsequent Runs.";
     } else {
       const selected = windowTargets[windowCursor - 1];
       if (selected === undefined) {
@@ -455,16 +592,21 @@ export async function runApplicationTui(
       }
       selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
       selectedWindowDeliveryMode = "foreground";
+      windowChoiceExplicit = true;
       activeMetadata = {
         ...activeMetadata,
         cuaWindowTarget: selectedWindowTarget,
         cuaWindowDeliveryMode: "foreground",
         cuaWindowLabel: windowDisplayLabel(selected),
+        cuaWindowSelectionSource: "host",
       };
-      notice = `Window selected for subsequent Runs: ${windowDisplayLabel(selected)}.`;
+      notice = inputValue.trim().length > 0
+        ? `Window selected; goal draft kept. Press I, then Enter to start: ${windowDisplayLabel(selected)}.`
+        : `Window selected for subsequent Runs: ${windowDisplayLabel(selected)}.`;
     }
     mode = "home";
     windowError = "";
+    windowMatchReason = "";
     render();
   };
 
@@ -596,6 +738,10 @@ export async function runApplicationTui(
     if (finishPromise !== undefined) return;
     exiting = true;
     windowDiscoveryAbort?.abort();
+    goalSubmissionGeneration += 1;
+    goalWindowDiscoveryAbort?.abort();
+    goalWindowDiscoveryAbort = undefined;
+    goalSubmissionPending = false;
     if (pendingCorrection !== undefined) cancelPendingCorrection("Correction draft discarded for exit", false, false);
     commandQueue.length = 0;
     finishPromise = (async () => {
@@ -672,6 +818,35 @@ export async function runApplicationTui(
         render();
       } else {
         requestExit();
+      }
+      return;
+    }
+    if (goalSubmissionPending) {
+      if (keyName === "q") {
+        requestExit();
+        return;
+      }
+      if (keyName === "escape") {
+        if (goalWindowDiscoveryAbort !== undefined) {
+          cancelGoalWindowDiscovery();
+          mode = "home";
+          editMode = false;
+          windowMatchReason = "";
+          notice = "Local matching cancelled; goal draft kept. Press I then Enter to retry, or W to choose a window.";
+        } else {
+          notice = "Run creation is still in progress. Press Q or Ctrl-C to exit.";
+        }
+        render();
+        return;
+      }
+      if (keyName === "w" && goalWindowDiscoveryAbort !== undefined) {
+        cancelGoalWindowDiscovery();
+        openWindowPicker();
+        return;
+      }
+      if (keyName === "return") {
+        notice = "Goal submission is still in progress; wait for local window matching or the Run start.";
+        render();
       }
       return;
     }
@@ -1361,7 +1536,8 @@ function formatHomeTarget(metadata: TuiMetadata): string {
   const label = metadata.cuaWindowLabel === undefined
     ? "Selected window"
     : sanitizeTerminalText(metadata.cuaWindowLabel).replace(/\s+\(pid=\d+,\s*window=\d+\)$/u, "");
-  return `${label}; pid=${metadata.cuaWindowTarget.pid}; window=${metadata.cuaWindowTarget.windowId}; delivery=${metadata.cuaWindowDeliveryMode ?? "background"}`;
+  const source = metadata.cuaWindowSelectionSource === "local_match" ? "; selected by local goal/name match (not the model)" : "";
+  return `${label}; pid=${metadata.cuaWindowTarget.pid}; window=${metadata.cuaWindowTarget.windowId}; delivery=${metadata.cuaWindowDeliveryMode ?? "background"}${source}`;
 }
 
 const tuiFeatureRows = [
@@ -1458,7 +1634,8 @@ function formatCuaTarget(metadata: TuiMetadata): string {
   if (metadata.computer !== "cua") return `${metadata.computer} environment`;
   if (metadata.cuaWindowTarget === undefined) return "primary desktop (default)";
   const label = metadata.cuaWindowLabel === undefined ? "selected window" : sanitizeTerminalText(metadata.cuaWindowLabel).slice(0, 96);
-  return `window ${label} pid=${metadata.cuaWindowTarget.pid} id=${metadata.cuaWindowTarget.windowId} (host-selected, delivery=${metadata.cuaWindowDeliveryMode ?? "background"})`;
+  const source = metadata.cuaWindowSelectionSource === "local_match" ? "local goal/name match (not model-selected)" : "host-selected";
+  return `window ${label} pid=${metadata.cuaWindowTarget.pid} id=${metadata.cuaWindowTarget.windowId} (${source}, delivery=${metadata.cuaWindowDeliveryMode ?? "background"})`;
 }
 
 function canSelectWindow(metadata: TuiMetadata): boolean {
@@ -1498,29 +1675,46 @@ function buildTuiWindowsFrame(
   cursor: number,
   loading: boolean,
   error: string,
+  matchReason: string,
   columns?: number,
   rows?: number,
 ): string {
   const width = tuiWidth(columns);
   const terminalRows = Math.max(12, rows ?? process.stdout.rows ?? 24);
-  const options = [
-    `  ${cursor === 0 ? "❯" : " "} Primary desktop (no window target)`,
-    ...targets.map((target, index) => `  ${cursor === index + 1 ? "❯" : " "} ${clip(windowDisplayLabel(target), width - 4)}`),
+  const optionLabels = [
+    "Primary desktop (no window target)",
+    ...targets.map(windowDisplayLabel),
   ];
-  const lines = [
+  const safeCursor = Math.min(Math.max(cursor, 0), optionLabels.length - 1);
+  const headerLines = [
     "Computer Harness TUI  |  WINDOW TARGET",
     "─".repeat(width),
     `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}`,
     `Current: ${formatCuaTarget(metadata)}`,
     "Choose a fully visible, unobscured host window for subsequent Runs. Window layout is user-managed; Harness does not move/resize windows.",
     "Foreground delivery may activate the target; occlusion support is limited and focus restoration is not guaranteed.",
-    "Arrow keys/J-K move   Enter selects   R refreshes   Esc cancels",
-    "",
-    ...(loading ? ["Loading visible windows…"] : options),
+    ...(matchReason.length > 0 ? [`Status: ${clip(matchReason, width - 8)}`] : []),
     ...(error.length > 0 ? [`Window discovery error: ${clip(error, width - 24)}`] : []),
-    "",
-    "A closed or invalidated window never falls back to the desktop automatically.",
+    "Arrow keys/J-K move   Enter selects   R refreshes   Esc cancels",
   ];
+  const footerLines = ["A closed or invalidated window never falls back to the desktop automatically."];
+  const reservedRows = headerLines.length + 1 + footerLines.length;
+  const visibleOptionCount = Math.max(1, Math.min(optionLabels.length, terminalRows - reservedRows));
+  const firstVisibleOption = Math.min(
+    Math.max(0, safeCursor - Math.floor(visibleOptionCount / 2)),
+    Math.max(0, optionLabels.length - visibleOptionCount),
+  );
+  const lastVisibleOption = Math.min(optionLabels.length, firstVisibleOption + visibleOptionCount);
+  const positionLine = loading
+    ? "Window options are loading."
+    : `Option ${safeCursor + 1} of ${optionLabels.length}; showing ${firstVisibleOption + 1}-${lastVisibleOption}`;
+  const visibleOptions = loading
+    ? ["  Loading visible windows…"]
+    : optionLabels.slice(firstVisibleOption, lastVisibleOption).map((label, offset) => {
+        const optionIndex = firstVisibleOption + offset;
+        return `  ${safeCursor === optionIndex ? "❯" : " "} ${clip(label, width - 4)}`;
+      });
+  const lines = [...headerLines, positionLine, ...visibleOptions, ...footerLines];
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
 }
 
