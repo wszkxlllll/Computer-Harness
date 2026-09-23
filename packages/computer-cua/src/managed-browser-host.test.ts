@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, clearManagedBrowserDevToolsPort, cleanupManagedBrowser, closeManagedBrowserGracefully, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
@@ -14,9 +15,91 @@ describe("managed browser host pilot", () => {
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain('coordinateSpace: "css"');
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("iframe documents are intentionally not traversed");
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("canvasLike");
+    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("aria-labelledby");
+    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("selectedOptions");
     expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain("outerHTML");
     expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain("nodeId");
     expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain(".value");
+  });
+
+  it("uses bounded accessible names and selected descriptions in a synthetic page", () => {
+    const departureLabel = syntheticElement("label", { attrs: { for: "departure-time" }, textContent: "Departure time" });
+    const departureOption = syntheticElement("option", { attrs: { value: "08:00" }, textContent: "08:00" });
+    const disabledDepartureOption = syntheticElement("option", { attrs: { value: "09:00" }, textContent: "09:00", disabled: true });
+    const departure = syntheticElement("select", {
+      attrs: { id: "departure-time" },
+      children: [departureOption, disabledDepartureOption],
+      selectedOptions: [departureOption],
+    });
+    const ariaLabel = syntheticElement("span", { attrs: { id: "aria-departure-label" }, textContent: "Arrival time" });
+    const ariaOption = syntheticElement("option", { textContent: "09:00" });
+    const ariaDeparture = syntheticElement("select", {
+      attrs: { id: "aria-departure", "aria-labelledby": "aria-departure-label" },
+      children: [ariaOption],
+      selectedOptions: [ariaOption],
+    });
+    const button = syntheticElement("button", { textContent: "Save itinerary" });
+    const password = syntheticElement("input", {
+      attrs: { type: "password", "aria-label": "Password", value: "secret-password-value" },
+      textContent: "typed-password-value",
+    });
+    const input = syntheticElement("input", {
+      attrs: { type: "text", "aria-label": "Account", value: "secret-account-value" },
+      textContent: "typed-account-value",
+    });
+    const longLabel = syntheticElement("label", { attrs: { for: "long-options" }, textContent: "Long option list" });
+    const longOptions = Array.from({ length: 400 }, (_, index) => syntheticElement("option", {
+      attrs: { value: `option-value-${index}` },
+      textContent: `option-${index}`,
+    }));
+    const longSelect = syntheticElement("select", {
+      attrs: { id: "long-options" },
+      children: longOptions,
+      labels: [longLabel],
+      selectedOptions: [longOptions[0]!],
+      textContent: longOptions.map((option) => option.textContent).join(" "),
+    });
+    const page = new SyntheticDocument([
+      departureLabel,
+      departure,
+      ariaLabel,
+      ariaDeparture,
+      button,
+      password,
+      input,
+      longLabel,
+      longSelect,
+    ]);
+
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }),
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1 },
+    }) as SyntheticEvaluation;
+    const departureCandidate = evaluation.candidates.find((candidate) => candidate.name === "Departure time");
+    const ariaDepartureCandidate = evaluation.candidates.find((candidate) => candidate.name === "Arrival time");
+    const longSelectCandidate = evaluation.candidates.find((candidate) => candidate.name === "Long option list");
+    const buttonCandidate = evaluation.candidates.find((candidate) => candidate.name === "Save itinerary");
+    const passwordCandidate = evaluation.candidates.find((candidate) => candidate.inputType === "password");
+    const inputCandidate = evaluation.candidates.find((candidate) => candidate.inputType === "text");
+
+    expect(departureCandidate).toMatchObject({ name: "Departure time", description: "08:00", options: [{ text: "08:00", enabled: true }, { text: "09:00", enabled: false }], optionsTruncated: false });
+    expect(ariaDepartureCandidate).toMatchObject({ name: "Arrival time", description: "09:00" });
+    expect(buttonCandidate).toMatchObject({ name: "Save itinerary" });
+    expect(passwordCandidate).toMatchObject({ name: "Password" });
+    expect(inputCandidate).toMatchObject({ name: "Account" });
+    expect(passwordCandidate?.description).toBeUndefined();
+    expect(inputCandidate?.description).toBeUndefined();
+    expect(longSelectCandidate).toMatchObject({ name: "Long option list", description: "option-0", optionsTruncated: true, options: expect.arrayContaining([{ text: "option-0", enabled: true }]) });
+    expect(longSelectCandidate?.options).toHaveLength(32);
+    expect(longSelectCandidate?.name).not.toContain("option-399");
+    expect(JSON.stringify(evaluation)).not.toContain("secret-password-value");
+    expect(JSON.stringify(evaluation)).not.toContain("secret-account-value");
+    expect(JSON.stringify(evaluation)).not.toContain("typed-password-value");
+    expect(JSON.stringify(evaluation)).not.toContain("aria-departure-label");
+    expect(JSON.stringify(evaluation)).not.toContain("option-399");
+    expect(evaluation.candidates.length).toBeLessThanOrEqual(256);
   });
 
   it("keeps the local fixture coverage explicit for controls, canvas, shadow DOM and iframe boundaries", async () => {
@@ -322,6 +405,122 @@ describe("managed browser host pilot", () => {
     }
   });
 });
+
+interface SyntheticElementOptions {
+  readonly attrs?: Readonly<Record<string, string>>;
+  readonly children?: readonly SyntheticElement[];
+  readonly labels?: readonly SyntheticElement[];
+  readonly selectedOptions?: readonly SyntheticElement[];
+  readonly textContent?: string;
+  readonly tabIndex?: number;
+  readonly disabled?: boolean;
+  readonly isContentEditable?: boolean;
+  readonly rect?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+}
+
+interface SyntheticCandidate {
+  readonly name?: string;
+  readonly description?: string;
+  readonly inputType?: string;
+  readonly [key: string]: unknown;
+}
+
+interface SyntheticEvaluation {
+  readonly candidates: readonly SyntheticCandidate[];
+}
+
+class SyntheticElement {
+  public readonly localName: string;
+  public readonly children: readonly SyntheticElement[];
+  public readonly labels: readonly SyntheticElement[] | undefined;
+  public readonly selectedOptions: readonly SyntheticElement[] | undefined;
+  public readonly textContent: string;
+  public readonly tabIndex: number;
+  public readonly disabled: boolean;
+  public readonly isContentEditable: boolean;
+  public readonly shadowRoot: undefined;
+  private readonly attrs: Readonly<Record<string, string>>;
+  private readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+
+  public constructor(localName: string, options: SyntheticElementOptions = {}) {
+    this.localName = localName;
+    this.attrs = options.attrs ?? {};
+    this.children = options.children ?? [];
+    this.labels = options.labels;
+    this.selectedOptions = options.selectedOptions;
+    this.textContent = options.textContent ?? "";
+    this.tabIndex = options.tabIndex ?? -1;
+    this.disabled = options.disabled === true;
+    this.isContentEditable = options.isContentEditable === true;
+    this.shadowRoot = undefined;
+    this.rect = options.rect ?? { x: 10, y: 10, width: 120, height: 24 };
+  }
+
+  public getAttribute(name: string): string | null {
+    return this.attrs[name] ?? null;
+  }
+
+  public getBoundingClientRect(): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } {
+    return this.rect;
+  }
+
+  public querySelectorAll(selector: string): readonly SyntheticElement[] {
+    const descendants = this.descendants();
+    if (selector === "*") return descendants;
+    if (selector === "option") return descendants.filter((element) => element.localName === "option");
+    if (selector === '[role="option"][aria-selected="true"]') {
+      return descendants.filter((element) => element.getAttribute("role") === "option" && element.getAttribute("aria-selected") === "true");
+    }
+    return [];
+  }
+
+  private descendants(): SyntheticElement[] {
+    const result: SyntheticElement[] = [];
+    const visit = (element: SyntheticElement): void => {
+      result.push(element);
+      for (const child of element.children) visit(child);
+    };
+    for (const child of this.children) visit(child);
+    return result;
+  }
+}
+
+class SyntheticDocument {
+  public activeElement: SyntheticElement | null = null;
+  private readonly roots: readonly SyntheticElement[];
+
+  public constructor(roots: readonly SyntheticElement[]) {
+    this.roots = roots;
+  }
+
+  public querySelectorAll(selector: string): readonly SyntheticElement[] {
+    const elements = this.allElements();
+    if (selector === "*") return elements;
+    if (selector === "label[for]") return elements.filter((element) => element.localName === "label" && element.getAttribute("for") !== null);
+    return [];
+  }
+
+  public getElementById(id: string): SyntheticElement | null {
+    return this.allElements().find((element) => element.getAttribute("id") === id) ?? null;
+  }
+
+  private allElements(): SyntheticElement[] {
+    const elements: SyntheticElement[] = [];
+    const seen = new Set<SyntheticElement>();
+    const visit = (element: SyntheticElement): void => {
+      if (seen.has(element)) return;
+      seen.add(element);
+      elements.push(element);
+      for (const child of element.children) visit(child);
+    };
+    for (const root of this.roots) visit(root);
+    return elements;
+  }
+}
+
+function syntheticElement(localName: string, options: SyntheticElementOptions = {}): SyntheticElement {
+  return new SyntheticElement(localName, options);
+}
 
 function serverTextFrame(payload: Buffer, opcode: number, final: boolean): Buffer {
   const header = Buffer.alloc(payload.length < 126 ? 2 : 4);

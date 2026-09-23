@@ -29,6 +29,16 @@ wheel `amount`。Transport 失败后 session 进入失效状态，调用方必�
 `foreground` 的 scroll 仅在用户保持目标窗口可见且不被其他窗口遮挡的 side-by-side
 预览条件下验证过；窗口模式不是 sandbox，也不保证遮挡场景安全。
 
+Window-local `open`/`observe` 对 CUA daemon 短暂返回空图或非法 PNG 的情况执行有界恢复：
+最多三次 `verify_state` 只读 capture，每次重做 `list_windows`/geometry discovery，退避固定为 75ms、
+150ms（额外等待最多 300ms）。只读 capture 以外的 geometry、权限、transport、身份和
+action 错误不会重试；`execute` 永远只向 driver 发一次动作。Abort 在 discovery、退避和
+下一次 capture 前后都会阻止继续调用。若三次 capture 最终仍为
+`WINDOW_CAPTURE_SCHEMA`，adapter 只再对同一显式 PID/window_id 做一次 fresh discovery，
+随后最多调用一次同 session 的 `get_window_state(include_screenshot: true)`；只接受一个
+合法 PNG 及 window-local physical 尺寸。fallback 的 identity、geometry、transport、权限、
+degraded、Abort 或 schema 失败均 fail-closed，不裁剪 desktop，也不重放动作。
+
 Host picker 可以通过 `CuaWindowDiscovery.listWindows()` 获取只读的窗口身份与本地显示标签。
 选择结果必须在每个 Run 中显式传入；新窗口、tab、popup 或 PID/window_id 重建不会自动接管。
 
@@ -46,5 +56,19 @@ scale 与 origin 投影。当前 `dom-catalog-v1` 没有可信 content-rect prod
 因此保持 degraded empty catalog，不能执行 DOM click；这是一项 fail-closed
 边界，不会根据浏览器窗口 bounds、DPI 或工具栏高度猜坐标。DOM/Hybrid 的
 transport 仍然是 loopback、managed-browser、observation-bound 的只读 sidecar。
+
+DOM candidate 的 name 使用有界 accessible-name 近似：依次读取 `aria-label`、
+`aria-labelledby`、关联 `label`、`title`/`placeholder`，仅 button/link 使用有界可见文本。
+select/combobox 的当前选项只作为有界 description；option 列表、DOM id 和 input/password
+值不会外发。
+
+在 `hybrid-catalog-v1` 中，Adapter 只有在同一 observation 的 UIA `Document`
+候选证明了可信 physical content rect 后，才给 UIA 元素标注粗粒度
+`browserRegion`：可靠位于 content rect 内为 `content`，明确位于受控浏览器
+viewport 内且与 content rect 不相交为 `chrome`，跨边界或几何不确定为
+`unknown`。边界只使用有界的 2px 测量容差，不按固定工具栏高度、Y 坐标或 DPI
+猜测。`uia-catalog-v1`、缺少 `Document/contentRect` 的 Hybrid 和普通桌面 UIA
+均省略该字段；public catalog 与 adapter-private ref map 使用同一已标注元素，
+不会改变执行点或坐标映射。
 
 真实 daemon contract test 属于 S3-4，不由这个 package 的 fake-driver 单元测试替代。

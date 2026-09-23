@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { createMemoryTools, FileMemoryStore, HybridMemoryRecallService, QwenTextEmbeddingProvider, type MemoryEmbeddingProvider } from "@computer-harness/memory";
-import { createPlanningTools, FilePlanStore } from "@computer-harness/planning";
+import { createExecutionSegmentTools, createPlanningTools, FilePlanStore } from "@computer-harness/planning";
 import type { MemoryMutation, RunId, RunOutcome } from "@computer-harness/protocol";
 import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
 import {
@@ -79,7 +79,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         throw new Error("grounding uia-catalog-v1 requires an explicit CUA window target");
       }
     }
-    if (config.grounding !== "off") tools.registerMany(groundingComputerTools());
+    if (config.grounding !== "off") {
+      tools.registerMany(groundingComputerTools({ includeSelectOption: managedGrounding }));
+    }
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
     const configuredEmbeddingProvider = memoryRetrievalMode === "hybrid"
@@ -96,6 +98,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       const planRoot = resolve(config.outputDir, "plan-store");
       const planStore = (dependencies.createPlanStore ?? ((rootDir) => new FilePlanStore(rootDir)))(planRoot);
       tools.registerMany(createPlanningTools(planStore));
+    }
+    if (config.executionSegments === "segments-v1") {
+      tools.registerMany(createExecutionSegmentTools());
     }
     if (config.memory !== "off") {
       const memoryRoot = resolve(config.outputDir, "memory-store");
@@ -164,6 +169,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
           allowedComputerTools.add("scroll");
         }
         if (config.grounding !== "off") allowedComputerTools.add("click_element");
+        if (managedGrounding) allowedComputerTools.add("select_option");
         return tools.list()
           .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
           .map((definition) => definition.name);
@@ -292,6 +298,7 @@ function createActionPolicy(config: ResolvedRunConfig, riskProvider: ProviderAda
 function featureConfig(config: ResolvedRunConfig): RunFeatureConfig {
   return {
     planning: config.planning ? "tasks-v1" : "off",
+    executionSegments: config.executionSegments ?? "off",
     memory: config.memory === "off" ? "off" : config.memory === "facts" ? "facts-v1" : "entities-v1",
     batching: config.batching,
     riskGuard: config.riskGuard,

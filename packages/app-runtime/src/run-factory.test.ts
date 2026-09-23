@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { HybridMemoryRecallService, InMemoryMemoryStore, type MemoryStore } from "@computer-harness/memory";
+import { DefaultContextCompiler } from "@computer-harness/context";
 import type { RunId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import type { Computer, ProviderAdapter } from "@computer-harness/runtime";
 import { createRun, writeRunReport, type ResolvedRunConfig } from "./index.js";
@@ -63,6 +64,33 @@ function fakeComputer(calls: { open: number; observe: number; close: number }): 
 }
 
 describe("app-runtime RunHandle", () => {
+  it("does not expose ExecutionSegment unless explicitly opted in", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-segment-default-"));
+    const provider: ProviderAdapter = { id: "fixture-provider", async generate() { return { type: "finish", summary: "unused" }; } };
+    let observedTools: readonly string[] = [];
+    let observedSegments: string | undefined;
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        grounding: "dom-catalog-v1",
+        computer: { kind: "cua", socketPath: "fixture-socket", grounding: "dom-catalog-v1", managedBrowserUrl: "http://127.0.0.1:9222", managedBrowserProfileMode: "ephemeral" },
+      }, {
+        createProvider: () => provider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+        createContextCompiler: (tools, features) => {
+          observedTools = tools.list().map((tool) => tool.name);
+          observedSegments = features.executionSegments;
+          return new DefaultContextCompiler(tools, { features });
+        },
+      });
+      expect(observedTools).not.toContain("execution_segment_set");
+      expect(observedSegments).toBe("off");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("assembles a fake Run without starting it, then closes Controller-owned resources once", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-"));
     const calls = { provider: 0, open: 0, observe: 0, close: 0 };
@@ -165,6 +193,7 @@ describe("app-runtime RunHandle", () => {
       const report = await handle.report();
       expect(report.summary.grounding).toBe("uia-catalog-v1");
       expect(report.summary.tools).toContain("click_element");
+      expect(report.summary.tools).not.toContain("select_option");
       await handle.close();
     } finally {
       await rm(outputDir, { recursive: true, force: true });
@@ -209,6 +238,7 @@ describe("app-runtime RunHandle", () => {
       expect(report.summary.grounding).toBe("dom-catalog-v1");
       expect(report.summary.computerTarget).toEqual({ mode: "managed-browser", deliveryMode: "foreground" });
       expect(report.summary.tools).toContain("click_element");
+      expect(report.summary.tools).toContain("select_option");
       expect(report.summary.tools).toEqual(expect.arrayContaining(["type", "keypress", "hotkey", "scroll", "drag"]));
       expect(JSON.stringify(report.summary)).not.toContain("secret=not-for-model");
       expect(JSON.stringify(report.summary)).not.toContain("HarnessOwned");

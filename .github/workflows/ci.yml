@@ -87,7 +87,7 @@ jobs:
         run: node -e "require('node:fs').mkdirSync('.ci-reports',{recursive:true})"
 
       - name: Unit and contract tests (offline; no live desktop or model API)
-        run: pnpm exec vitest run --reporter=default --reporter=junit --outputFile=.ci-reports/vitest.xml
+        run: pnpm test
 
       - name: Built CLI help smoke test
         run: node apps/cli/dist/index.js --help

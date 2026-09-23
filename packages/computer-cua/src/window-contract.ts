@@ -42,6 +42,16 @@ export interface CuaWindowCapture {
   readonly data: Uint8Array;
 }
 
+/**
+ * Test seam for the bounded read-only capture retry loop. Production callers
+ * use the built-in abort-aware timer; tests can resolve immediately and use a
+ * fake clock without sleeping.
+ */
+export interface WindowCaptureRetryOptions {
+  readonly delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  readonly now?: () => number;
+}
+
 export class WindowContractError extends Error {
   public constructor(public readonly code: string, message: string) {
     super(message);
@@ -125,17 +135,178 @@ export async function captureWindow(
   if (verification === undefined || verification.status !== 0 || verification.stable !== true) {
     throw new WindowContractError("WINDOW_GEOMETRY_UNCONFIRMED", "configured CUA window geometry was not verified");
   }
-  if (result.images.length !== 1 || result.images[0]?.mimeType !== "image/png") {
-    throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture did not return one PNG image");
-  }
-  const data = decodeBase64Png(result.images[0].dataBase64);
-  const dimensions = readPngDimensions(data);
-  if (dimensions === undefined) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture returned an invalid PNG");
+  const { data, dimensions } = parseWindowCaptureImages(result.images, "CUA window capture");
   return {
     binding,
     viewport: { ...dimensions, coordinateSpace: "physical" },
     data,
   };
+}
+
+/**
+ * Capture a selected window for a read-only open/observe boundary. A daemon
+ * can transiently return an empty or malformed image envelope while the
+ * target window is still present. In that narrow case we rediscover the
+ * target before each retry so every capture uses fresh geometry. There are at
+ * most three read-only captures (the initial attempt plus two retries), with
+ * fixed 75ms/150ms abort-aware backoff and at most 300ms of retry waiting. No
+ * action path calls this helper, and no other contract failure is retried.
+ */
+export async function captureWindowWithRetry(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+  options: WindowCaptureRetryOptions = {},
+): Promise<CuaWindowCapture> {
+  let retryStartedAt: number | undefined;
+  let schemaFailure: WindowContractError | undefined;
+  const now = options.now ?? Date.now;
+  const delay = options.delay ?? delayWithAbort;
+
+  for (let attempt = 0; attempt < WINDOW_CAPTURE_MAX_ATTEMPTS; attempt += 1) {
+    signal.throwIfAborted();
+    const binding = await discoverWindowChecked(driver, session, target, signal);
+    try {
+      const capture = await captureWindow(driver, session, binding, signal);
+      signal.throwIfAborted();
+      return capture;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!isTransientWindowCaptureError(error)) {
+        throw error;
+      }
+      if (attempt >= WINDOW_CAPTURE_MAX_ATTEMPTS - 1) {
+        schemaFailure = error;
+        break;
+      }
+      signal.throwIfAborted();
+      if (retryStartedAt === undefined) retryStartedAt = now();
+      const elapsed = Math.max(0, now() - retryStartedAt);
+      const remaining = Math.max(0, WINDOW_CAPTURE_MAX_BACKOFF_MS - elapsed);
+      const backoff = Math.min(WINDOW_CAPTURE_BACKOFF_MS[attempt]!, remaining);
+      if (backoff > 0) await delay(backoff, signal);
+      signal.throwIfAborted();
+    }
+  }
+  if (schemaFailure !== undefined) {
+    return captureWindowFallbackAfterSchema(driver, session, target, signal);
+  }
+  throw new Error("unreachable window capture retry state");
+}
+
+/**
+ * Last-resort read-only capture for the daemon regression where every bounded
+ * verify_state attempt returns an envelope with no image. The caller has
+ * already exhausted retries; this path rediscovers the exact configured
+ * identity once, then permits exactly one screenshot-bearing get_window_state
+ * call. It never dispatches or repeats an action.
+ */
+async function captureWindowFallbackAfterSchema(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+): Promise<CuaWindowCapture> {
+  signal.throwIfAborted();
+  const binding = await discoverWindowChecked(driver, session, target, signal);
+  signal.throwIfAborted();
+  const result = await driver.callTool("get_window_state", JSON.stringify({
+    pid: binding.target.pid,
+    window_id: binding.target.windowId,
+    include_screenshot: true,
+    session,
+  }), { signal });
+  signal.throwIfAborted();
+  if (!isRecord(result)) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA get_window_state fallback returned an invalid result envelope");
+  if (result.isError) throw new WindowContractError("WINDOW_CAPTURE_REFUSED", "configured CUA window fallback capture was refused");
+  if (result.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window fallback capture is degraded");
+  const { data, dimensions } = parseWindowCaptureImages(
+    result.images,
+    "CUA get_window_state fallback",
+    binding.bounds,
+  );
+  return {
+    binding,
+    viewport: { ...dimensions, coordinateSpace: "physical" },
+    data,
+  };
+}
+
+function parseWindowCaptureImages(
+  rawImages: unknown,
+  label: string,
+  bounds?: CuaWindowGeometry,
+): { data: Uint8Array; dimensions: { width: number; height: number } } {
+  const images = Array.isArray(rawImages) ? rawImages : [];
+  const imageSummary = summarizeCaptureImages(images);
+  if (images.length !== 1 || !isRecord(images[0]) || images[0].mimeType !== "image/png") {
+    throw new WindowContractError(
+      "WINDOW_CAPTURE_SCHEMA",
+      `${label} did not return one PNG image (${imageSummary})`,
+    );
+  }
+  const dataBase64 = images[0].dataBase64;
+  if (typeof dataBase64 !== "string") {
+    throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", `${label} returned invalid image data (${imageSummary})`);
+  }
+  const data = decodeBase64Png(dataBase64, imageSummary, label);
+  const dimensions = readPngDimensions(data);
+  if (dimensions === undefined) {
+    throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", `${label} returned an invalid PNG (${imageSummary})`);
+  }
+  if (bounds !== undefined && (dimensions.width > bounds.width || dimensions.height > bounds.height)) {
+    throw new WindowContractError(
+      "WINDOW_CAPTURE_SCHEMA",
+      `${label} returned dimensions outside the verified window bounds (${dimensions.width}x${dimensions.height}; bounds=${bounds.width}x${bounds.height})`,
+    );
+  }
+  return { data, dimensions };
+}
+
+const WINDOW_CAPTURE_MAX_ATTEMPTS = 3;
+const WINDOW_CAPTURE_BACKOFF_MS = [75, 150] as const;
+const WINDOW_CAPTURE_MAX_BACKOFF_MS = 300;
+
+async function discoverWindowChecked(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+): Promise<CuaWindowBinding> {
+  signal.throwIfAborted();
+  const binding = await discoverWindow(driver, session, target, signal);
+  signal.throwIfAborted();
+  return binding;
+}
+
+function delayWithAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (milliseconds <= 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new Error("window capture retry aborted"));
+      return;
+    }
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new Error("window capture retry aborted"));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function isTransientWindowCaptureError(error: unknown): error is WindowContractError {
+  return error instanceof WindowContractError && error.code === "WINDOW_CAPTURE_SCHEMA";
 }
 
 export function sameWindowGeometry(left: CuaWindowGeometry, right: CuaWindowGeometry): boolean {
@@ -206,12 +377,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function decodeBase64Png(value: string): Uint8Array {
+const MAX_CAPTURE_DIAGNOSTIC_IMAGES = 4;
+const MAX_CAPTURE_DIAGNOSTIC_MIME_LENGTH = 64;
+
+function summarizeCaptureImages(images: readonly unknown[]): string {
+  const imageCount = images.length > MAX_CAPTURE_DIAGNOSTIC_IMAGES
+    ? `${MAX_CAPTURE_DIAGNOSTIC_IMAGES}+`
+    : String(images.length);
+  const mimeTypes = images.slice(0, MAX_CAPTURE_DIAGNOSTIC_IMAGES).map((image) => {
+    const mimeType = isRecord(image) ? image.mimeType : undefined;
+    if (typeof mimeType !== "string" || mimeType.length === 0) return "unknown";
+    const bounded = mimeType
+      .replace(/[\u0000-\u001f\u007f]/gu, "?")
+      .slice(0, MAX_CAPTURE_DIAGNOSTIC_MIME_LENGTH);
+    return bounded.length === 0 ? "unknown" : bounded;
+  });
+  return `imageCount=${imageCount}, mimeTypes=${mimeTypes.length === 0 ? "none" : `[${mimeTypes.join(",")}]`}`;
+}
+
+function decodeBase64Png(value: string, imageSummary: string, label = "CUA window capture"): Uint8Array {
   if (value.length === 0 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/u.test(value)) {
-    throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture returned invalid image data");
+    throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", `${label} returned invalid image data (${imageSummary})`);
   }
   const data = new Uint8Array(Buffer.from(value, "base64"));
-  if (data.length === 0) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture returned empty image data");
+  if (data.length === 0) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", `${label} returned empty image data (${imageSummary})`);
   return data;
 }
 

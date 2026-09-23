@@ -45,6 +45,10 @@ function finiteNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+function ratio(numerator, denominator) {
+  return denominator === 0 ? null : numerator / denominator;
+}
+
 function pathKey(value) {
   // The production target is Windows, where path comparison is
   // case-insensitive.  Lower-casing also makes the lexical check stable in
@@ -280,6 +284,15 @@ function normalizeUsage(total, fallback) {
     result[key] = total[key] ?? (finiteNonNegativeInteger(fallback?.[key]) ?? null);
   }
   return result;
+}
+
+function sumNormalizedUsages(usages) {
+  const total = {};
+  for (const usage of usages) {
+    if (!isRecord(usage)) continue;
+    addUsage(total, usage);
+  }
+  return normalizeUsage(total, null);
 }
 
 function createRequestMetrics(events) {
@@ -762,6 +775,14 @@ function createGroundingMetrics(events, summary) {
   const refusalCodesByCall = new Map();
   const refusalCodes = {};
   const clickElement = { received: 0, completed: 0, rejected: 0, failed: 0 };
+  const coordinateCoverage = {
+    events: 0,
+    mappings: {},
+    byDecisionSource: {},
+    inHotProjection: { true: 0, false: 0 },
+    records: [],
+  };
+  const actionOutcomes = new Map();
   let observationsWithCatalog = 0;
   let contextTraces = 0;
 
@@ -825,7 +846,22 @@ function createGroundingMetrics(events, summary) {
       const callId = clickActionIds.get(event.receipt.actionId);
       recordRefusal(refusalCodesByCall, refusalCodes, callId, event.receipt.driverCode);
     }
+    if (event.type === "grounding.coordinate_coverage") {
+      coordinateCoverage.events += 1;
+      coordinateCoverage.records.push(event);
+      increment(coordinateCoverage.mappings, event.mapping);
+      increment(coordinateCoverage.byDecisionSource, typeof event.decisionSource === "string" ? event.decisionSource : "unknown");
+      if (typeof event.inHotProjection === "boolean") incrementBoolean(coordinateCoverage.inHotProjection, event.inHotProjection);
+    }
+    if ((event.type === "action.execution.completed" || event.type === "action.execution.failed") && typeof event.receipt?.actionId === "string") {
+      actionOutcomes.set(event.receipt.actionId, event.type === "action.execution.completed" ? "completed" : event.receipt.status ?? "failed");
+    }
   }
+  const primaryRecallRecords = coordinateCoverage.records.filter((event) =>
+    event.decisionSource === "main_provider"
+      && event.mapping === "containment"
+      && actionOutcomes.get(event.actionId) === "completed");
+  const primaryEvaluated = primaryRecallRecords.filter((event) => typeof event.inHotProjection === "boolean");
   return {
     mode: stringOrNull(summary?.grounding),
     observationsWithCatalog,
@@ -845,6 +881,20 @@ function createGroundingMetrics(events, summary) {
     clickElement: {
       ...clickElement,
       refusalCodes: sortedEntries(refusalCodes),
+    },
+    coordinateCoverage: {
+      events: coordinateCoverage.events,
+      mappings: sortedEntries(coordinateCoverage.mappings),
+      byDecisionSource: sortedEntries(coordinateCoverage.byDecisionSource),
+      inHotProjection: coordinateCoverage.inHotProjection,
+      primaryRecall: {
+        cohort: primaryRecallRecords.length,
+        evaluated: primaryEvaluated.length,
+        notEvaluated: primaryRecallRecords.length - primaryEvaluated.length,
+        exactPresent: primaryEvaluated.filter((event) => event.inHotProjection === true).length,
+        exactAbsent: primaryEvaluated.filter((event) => event.inHotProjection === false).length,
+        spatialPresent: primaryRecallRecords.filter((event) => event.mapping === "containment" || event.mapping === "nearest").length,
+      },
     },
   };
 }
@@ -931,10 +981,11 @@ function buildMetrics({ trial, summary, trajectory }) {
   const events = eventDataAvailable ? allEvents : [];
   const request = createRequestMetrics(events);
   const actions = createActionMetrics(events);
-  const usageTotal = {};
+  const mainProviderUsage = {};
+  const guardUsage = {};
   for (const event of events) {
-    if (event.type === "model.response.received") addUsage(usageTotal, event.turn?.usage);
-    if (event.type === "action.guard.evaluated") addUsage(usageTotal, event.usage);
+    if (event.type === "model.response.received") addUsage(mainProviderUsage, event.turn?.usage);
+    if (event.type === "action.guard.evaluated") addUsage(guardUsage, event.usage);
   }
   const summaryUsage = isRecord(summary?.modelUsage) ? summary.modelUsage : null;
   const context = createContextMetrics(events);
@@ -948,7 +999,13 @@ function buildMetrics({ trial, summary, trajectory }) {
   const guard = createGuardMetrics(events);
   const grounding = createGroundingMetrics(events, isRecord(summary) ? summary : null);
   const humanControl = createHumanControlMetrics(events);
-  const knownUsage = normalizeUsage(usageTotal, summaryUsage);
+  const usageByComponent = {
+    mainProvider: normalizeUsage(mainProviderUsage, summaryUsage),
+    guard: normalizeUsage(guardUsage, null),
+  };
+  // `usage` is the all-model total. Per-component values remain available for
+  // the main Provider and optional Guard assessor.
+  const knownUsage = sumNormalizedUsages(Object.values(usageByComponent));
   const runId = runIds.length === 1 ? runIds[0] : null;
   return {
     schemaVersion: 1,
@@ -983,6 +1040,8 @@ function buildMetrics({ trial, summary, trajectory }) {
       observations: eventDataAvailable ? events.filter((event) => event.type === "observation.created").length : null,
       errors: eventDataAvailable ? errors : null,
       usage: eventDataAvailable ? knownUsage : null,
+      allModelUsage: eventDataAvailable ? knownUsage : null,
+      usageByComponent: eventDataAvailable ? usageByComponent : null,
       durations: eventDataAvailable ? {
         runMs: runDuration,
         requests: request.durations,
@@ -990,6 +1049,8 @@ function buildMetrics({ trial, summary, trajectory }) {
       } : null,
     },
     usage: eventDataAvailable ? knownUsage : null,
+    allModelUsage: eventDataAvailable ? knownUsage : null,
+    usageByComponent: eventDataAvailable ? usageByComponent : null,
     timing: eventDataAvailable ? {
       runMs: runDuration,
       requests: request.durations,

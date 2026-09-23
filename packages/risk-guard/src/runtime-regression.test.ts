@@ -13,10 +13,11 @@ import type {
   ToolCall,
   ToolCallId,
   Viewport,
+  GroundingCatalog,
 } from "@computer-harness/protocol";
 import type { AssetStore, RunEventWriter } from "@computer-harness/trajectory";
-import { DefaultRuntimePolicy, RunController, ToolRegistry, type Computer, type ComputerOpenOptions, type ComputerSession, type ContextCompiler, type IdFactory, type ModelInput, type ModelMessage, type ProviderAdapter } from "@computer-harness/runtime";
-import { LayeredRiskGuard } from "./index.js";
+import { DefaultRuntimePolicy, RunController, ToolRegistry, type ActionPolicyContext, type Computer, type ComputerOpenOptions, type ComputerSession, type ContextCompiler, type IdFactory, type ModelInput, type ModelMessage, type ProviderAdapter } from "@computer-harness/runtime";
+import { LayeredRiskGuard, ScriptedRiskAssessor } from "./index.js";
 
 const runId = "risk-guard-regression" as RunId;
 const sessionId = "risk-guard-computer" as ComputerSessionId;
@@ -55,6 +56,34 @@ class FakeComputer implements Computer {
   }
 
   public async close(_session: ComputerSession): Promise<void> {}
+}
+
+class GroundedFakeComputer extends FakeComputer {
+  public constructor(private readonly elementName = "Details") {
+    super();
+  }
+
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+    const capture = await super.observe(session, observationId, signal);
+    const grounding: GroundingCatalog = {
+      version: "grounding-catalog-v2",
+      source: "uia",
+      observationId,
+      computerSessionId: session.id,
+      completeness: "complete",
+      degraded: false,
+      maxElements: 256,
+      elements: [{
+        elementRef: "fast-target",
+        role: "Button",
+        name: this.elementName,
+        bbox: { x: 100, y: 100, width: 40, height: 30, coordinateSpace: "physical" },
+        state: { enabled: true },
+        source: "uia",
+      }],
+    };
+    return { ...capture, screenshot: { ...capture.screenshot, data: new Uint8Array([1]) }, grounding };
+  }
 }
 
 class ScriptedProvider implements ProviderAdapter {
@@ -243,4 +272,5 @@ describe("DEV-1B Risk Guard through RunController", () => {
     });
     expect(created.writer.events.some((event) => event.type === "approval.requested")).toBe(false);
   });
+
 });

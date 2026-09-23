@@ -14,7 +14,7 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 | Risk Guard | 实验性 layered Guard；交互 profile 默认开启，实验 profile 默认关闭 |
 | TUI | 无 goal 首页、中文粘贴、暂停/恢复、纠正、审批、Abort、分页回复、退出清理 |
 | CUA window opt-in | TUI 可按应用名/标题选择窗口并使用 foreground 预览；当前实验性开放 click/type/keypress/hotkey/scroll/drag/wait，脚本 PID + window ID 入口仍是 background 的 click/wait |
-| UIA grounding（实验） | 显式 CUA window target 上可选 `uia-catalog-v1`：观察后投影有界、脱敏、Observation-bound 元素目录，并提供 `click_element`；默认关闭，OSWorld/desktop 基线不变 |
+| UIA/Hybrid grounding（实验） | 显式 CUA window target 上可选 `uia-catalog-v1` 或 managed-browser `hybrid-catalog-v1`：观察后投影有界、脱敏、Observation-bound 元素目录，并提供 `click_element`；只有 Hybrid 在同一观察中取得可信 UIA `Document` content rect 时才标注 UIA 元素的 `browserRegion`（content/chrome/unknown），普通 UIA 不猜浏览器区域；默认关闭，OSWorld/desktop 基线不变 |
 | Monitor | 可选 off/shadow/guidance；记录动作前后 transition，guidance 可阻断同一观察后的完全相同重复动作，但不替模型重新定位 |
 | 诊断 | `--doctor` 无模型、无截图/输入窗口动作且脱敏；会建立并结束临时诊断 session，cleanup 未确认时返回 `unknown` |
 
@@ -25,7 +25,7 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 当前基线由 [PR #7](https://github.com/wszkxlllll/Computer-Harness/pull/7) 收敛，合并前后都应以对应 CI 和提交记录为准。当前本地源码证据包括：
 
 - Node 24 下 `pnpm run typecheck` 通过；
-- `pnpm test`：最近一次离线证据为 38 个测试文件、447 项测试通过；
+- `pnpm test`：最近一次离线证据为 49 个 Vitest 文件、563 项 Vitest 测试通过；另有 20 个 Node TAP 子测试（19 通过、1 个 Windows 符号链接限制跳过）；
 - GitHub CI：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 均通过；
 - GLM/Qwen 合成 Memory 协议探针均完成 `search → admitted/revalidation → admitted-only terminate`，没有真实桌面动作。
 
@@ -176,7 +176,7 @@ node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-soc
 
 `--interactive` 不启动 TUI：它提供行式用户输入和审批；`P`/`R`/`I` 是 TUI 控制，不适用于行式入口。
 
-功能选择页覆盖下一次 Run 的 Planning、Memory、Memory retrieval、Action batching、Context history、Risk Guard、Progress Monitor 和 UIA grounding。每次 Run 仍创建新的工具注册表、Context、Memory store、Monitor、Guard 和 grounding 生命周期；Provider、Computer 仍由启动参数和 profile 决定。UIA grounding 只有在已经显式选定 CUA window target 时才能启动；Context 会在当前 observation 附近投影有限的 role/name/bbox/低敏状态，模型可调用 `click_element`，执行后必须重新观察，不能把旧 ref 当作坐标或 backend token。UIA 查询失败保留截图并标记 `unknown/degraded`，不会回退到任意坐标。Guard 选择复用 `off`/`layered` 合同；关闭 Guard 只关闭风险评估、审批和风险模型请求，不关闭工具 schema/参数、Policy/audience、budget、Abort、stale observation、窗口 geometry/coordinate 或未知副作用处理。`Memory=entities` 包含 `facts` 的全部工具，再增加实体创建、列出和失效工具；它不是只保存实体而不保存 facts。Hybrid retrieval 只有在 Memory 不是 `off` 且同时配置了独立 embedding endpoint 和 key 时才可用；TUI 会显示配置状态，未配置时阻止该 Run 启动。
+功能选择页覆盖下一次 Run 的 Planning、Memory、Memory retrieval、Action batching、Context history、Risk Guard、Progress Monitor 和 Grounding。每次 Run 仍创建新的工具注册表、Context、Memory store、Monitor、Guard 和 grounding 生命周期；Provider、Computer 仍由启动参数和 profile 决定。UIA grounding 只有在已经显式选定 CUA window target 时才能启动；Context 会在当前 observation 附近投影有限的 role/name/bbox/低敏状态，模型可调用 `click_element`，执行后必须重新观察，不能把旧 ref 当作坐标或 backend token。UIA 查询失败保留截图并标记 `unknown/degraded`，不会回退到任意坐标。Guard 选择复用 `off`/`layered` 合同；关闭 Guard 只关闭风险评估、审批和风险模型请求，不关闭工具 schema/参数、Policy/audience、budget、Abort、stale observation、窗口 geometry/coordinate 或未知副作用处理。`Memory=entities` 包含 `facts` 的全部工具，再增加实体创建、列出和失效工具；它不是只保存实体而不保存 facts。Hybrid retrieval 只有在 Memory 不是 `off` 且同时配置了独立 embedding endpoint 和 key 时才可用；TUI 会显示配置状态，未配置时阻止该 Run 启动。
 
 `same-control-input-v1` 是有界 Action Batch，不是任意 open-loop 宏：同一已激活文本控件内只允许 `click→type`、`Ctrl+A→type` 或 `click→Ctrl+A→type` 这类输入序列；不包含 Enter、Tab、提交、导航、scroll、drag、wait 或 state write。Runtime 仍逐动作执行、校验、记事件和 Receipt，并在失败、Abort、失效或观察失败时停止后缀；Plan/Memory 写操作可以与一个 GUI 调用在同一 ModelTurn 中出现，但 Control call 不能混用。关闭 Batch 即回到逐轮基线。
 
@@ -291,7 +291,7 @@ CLI/SDK 负责组装和注入依赖，Provider 不反向依赖 CLI；贡献时�
 
 ## 当前证据与限制
 
-- 离线基线：Node 24 下最近一次记录为 `pnpm test` 38 files / 447 tests，`pnpm run typecheck` 通过；测试不代表真实模型效果。
+- 离线基线：Node 24 下最近一次 `pnpm test` 为 49 个 Vitest 文件、563 项 Vitest 测试通过，另有 20 个 Node TAP 子测试（19 通过、1 个 Windows 符号链接限制跳过）；`pnpm run typecheck` 通过。测试不代表真实模型效果。
 - CI 矩阵：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 已通过；CI 通过只证明构建和协议测试跨平台可运行，不等于真实 Mac/Linux 桌面已验收。
 - 真实 API 窄证据：GLM/Qwen 各完成两轮合成 Memory 协议消费，无 GUI action；这不证明语义检索质量、长任务质量或真实用户数据安全。
 - 本机真实体验：已观察到模型坐标偏差、重复尝试、前台失配和高 Context/token 成本；这说明产品体验仍需优化，不能把 `runtimeOutcome=succeeded` 当作任务成功。

@@ -6,7 +6,7 @@ import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
 import { createMockDomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
-import { listWindowTargets } from "./window-contract.js";
+import { captureWindowWithRetry, listWindowTargets } from "./window-contract.js";
 
 const ONE_BY_ONE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -38,6 +38,12 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let missing = false;
   let groundingState: Record<string, unknown> | undefined;
   let abortGrounding = false;
+  let captureImages: ToolResult["images"][] | undefined;
+  let captureImageIndex = 0;
+  let fallbackImages: ToolResult["images"] | undefined;
+  let abortAfterCapture: AbortController | undefined;
+  let listWindowsCallCount = 0;
+  let missingAfterListCall: number | undefined;
   const target = { pid: 1234, windowId: 5678 };
   const driver = {
     async startSession() { calls.push({ name: "startSession" }); return { active: true, revived: false } as never; },
@@ -45,8 +51,15 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     async shutdown() { calls.push({ name: "shutdown" }); },
     async verifyState() {
       calls.push({ name: "verifyState" });
+      const scriptedImages = captureImages === undefined
+        ? undefined
+        : captureImages[Math.min(captureImageIndex++, captureImages.length - 1)];
+      const images = scriptedImages ?? [{ mimeType: "image/png", dataBase64: pngWithDimensions(image.width, image.height) }];
+      const pendingAbort = abortAfterCapture;
+      abortAfterCapture = undefined;
+      pendingAbort?.abort();
       return result({
-        images: [{ mimeType: "image/png", dataBase64: pngWithDimensions(image.width, image.height) }],
+        images,
         verification: { status: 0, stable: true, elapsedMs: 0n, samples: 1n, predicates: [] },
       });
     },
@@ -54,11 +67,16 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       const input = JSON.parse(inputJson) as Record<string, unknown>;
       calls.push({ name, input });
       if (name === "list_windows") {
-        return result({ structuredJson: JSON.stringify({ windows: missing ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds }] }) });
+        listWindowsCallCount += 1;
+        const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
+        return result({ structuredJson: JSON.stringify({ windows: unavailable ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds }] }) });
       }
       if (name === "get_window_state") {
         if (abortGrounding) throw Object.assign(new Error("grounding aborted"), { name: "AbortError" });
-        return result({ structuredJson: JSON.stringify(groundingState ?? {}) });
+        return result({
+          images: input.include_screenshot === true ? fallbackImages ?? [] : [],
+          structuredJson: JSON.stringify(groundingState ?? {}),
+        });
       }
       return result();
     },
@@ -72,6 +90,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     setMissing(value: boolean) { missing = value; },
     setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; },
     setGroundingAbort(value: boolean) { abortGrounding = value; },
+    setCaptureImages(value: ToolResult["images"][] | undefined) { captureImages = value; captureImageIndex = 0; },
+    setFallbackImages(value: ToolResult["images"] | undefined) { fallbackImages = value; },
+    abortAfterNextCapture(controller: AbortController) { abortAfterCapture = controller; },
+    setMissingAfterListCall(value: number | undefined) { missingAfterListCall = value; },
   };
 }
 
@@ -174,6 +196,25 @@ describe("CuaDriverComputer", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("accepts the first valid window capture without backoff", async () => {
+    const fake = windowDriver();
+    const retryDelays: number[] = [];
+    const capture = await captureWindowWithRetry(
+      fake.driver,
+      "window-first-capture",
+      fake.target,
+      new AbortController().signal,
+      {
+        now: () => 0,
+        delay: async (milliseconds) => { retryDelays.push(milliseconds); },
+      },
+    );
+    expect(capture.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+    expect(retryDelays).toEqual([]);
+    expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(1);
   });
 
   it("fails closed after a transport error instead of retrying a GUI action", async () => {
@@ -481,6 +522,251 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("retries transient no-image captures twice after rediscovering geometry", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-retry-"));
+    const fake = windowDriver();
+    const retryDelays: number[] = [];
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowCaptureRetry: {
+        now: () => 0,
+        delay: async (milliseconds) => { retryDelays.push(milliseconds); },
+      },
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.setCaptureImages([
+        [],
+        [],
+        [{ mimeType: "image/png", dataBase64: pngWithDimensions(958, 678) }],
+      ]);
+      const observationId = "window-retry-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, new AbortController().signal);
+      expect(capture.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+      expect(retryDelays).toEqual([75, 150]);
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(4);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(4);
+
+      const receipt = await computer.execute(session, {
+        actionId: "window-retry-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(receipt.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses one same-target get_window_state fallback after bounded schema retries without replaying the action", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-fallback-"));
+    const fake = windowDriver();
+    const retryDelays: number[] = [];
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowCaptureRetry: {
+        now: () => 0,
+        delay: async (milliseconds) => { retryDelays.push(milliseconds); },
+      },
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.setCaptureImages([[], [], []]);
+      fake.setFallbackImages([{ mimeType: "image/png", dataBase64: pngWithDimensions(958, 678) }]);
+      const observationId = "window-fallback-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, new AbortController().signal);
+      expect(capture.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+      expect(retryDelays).toEqual([75, 150]);
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(5);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(4);
+      const fallbackCalls = fake.calls.filter((call) => call.name === "get_window_state");
+      expect(fallbackCalls).toHaveLength(1);
+      expect(fallbackCalls[0]?.input).toEqual({
+        pid: fake.target.pid,
+        window_id: fake.target.windowId,
+        include_screenshot: true,
+        session: session.id,
+      });
+
+      const receipt = await computer.execute(session, {
+        actionId: "window-fallback-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(receipt.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails after two retries when the window capture remains schema-invalid", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-retry-"));
+    const fake = windowDriver();
+    const retryDelays: number[] = [];
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowCaptureRetry: {
+        now: () => 0,
+        delay: async (milliseconds) => { retryDelays.push(milliseconds); },
+      },
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.setCaptureImages([[], [], []]);
+      await expect(computer.observe(session, "window-persistent-retry" as ObservationId, new AbortController().signal))
+        .rejects.toThrow(/imageCount=0, mimeTypes=none/iu);
+      expect(retryDelays).toEqual([75, 150]);
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(5);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(4);
+      expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not continue retrying when fresh window discovery fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-retry-"));
+    const fake = windowDriver();
+    const retryDelays: number[] = [];
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowCaptureRetry: {
+        now: () => 0,
+        delay: async (milliseconds) => { retryDelays.push(milliseconds); },
+      },
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.setCaptureImages([[]]);
+      // The open capture is list_windows call 1; the retry discovery below is
+      // call 3 because observe has its own first discovery at call 2.
+      fake.setMissingAfterListCall(3);
+      await expect(computer.observe(session, "window-rediscover-failed" as ObservationId, new AbortController().signal))
+        .rejects.toThrow(/window target was not found/iu);
+      expect(retryDelays).toEqual([75]);
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(3);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(2);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retry a refused window capture", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-retry-"));
+    const fake = windowDriver();
+    const retryDelays: number[] = [];
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowCaptureRetry: {
+        now: () => 0,
+        delay: async (milliseconds) => { retryDelays.push(milliseconds); },
+      },
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.driver.verifyState = async () => result({ isError: true, images: [] });
+      await expect(computer.observe(session, "window-refused-capture" as ObservationId, new AbortController().signal))
+        .rejects.toThrow(/capture was refused/iu);
+      expect(retryDelays).toEqual([]);
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(2);
+      expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(0);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("stops during retry backoff when the capture signal is aborted", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-retry-"));
+    const fake = windowDriver();
+    const retryDelays: number[] = [];
+    const controller = new AbortController();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowCaptureRetry: {
+        now: () => 0,
+        delay: async (milliseconds, signal) => {
+          retryDelays.push(milliseconds);
+          expect(signal).toBe(controller.signal);
+          controller.abort(new Error("aborted during capture backoff"));
+        },
+      },
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.setCaptureImages([[]]);
+      await expect(computer.observe(session, "window-abort-retry" as ObservationId, controller.signal)).rejects.toThrow(/aborted during capture backoff/iu);
+      expect(retryDelays).toEqual([75]);
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(2);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(2);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not enter the fallback after the final schema capture is aborted", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-fallback-abort-"));
+    const fake = windowDriver();
+    const controller = new AbortController();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowCaptureRetry: {
+        now: () => 0,
+        delay: async () => undefined,
+      },
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.setCaptureImages([[], [], []]);
+      fake.setFallbackImages([{ mimeType: "image/png", dataBase64: pngWithDimensions(958, 678) }]);
+      const verifyState = fake.driver.verifyState.bind(fake.driver);
+      let verifyCount = 0;
+      fake.driver.verifyState = async (...args: Parameters<CuaDriverLike["verifyState"]>) => {
+        const response = await verifyState(...args);
+        verifyCount += 1;
+        if (verifyCount === 3) controller.abort(new Error("aborted after final schema capture"));
+        return response;
+      };
+      await expect(computer.observe(session, "window-fallback-abort" as ObservationId, controller.signal))
+        .rejects.toThrow(/aborted after final schema capture/iu);
+      expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(0);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(4);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("projects a bounded redacted UIA catalog and validates observation-bound element clicks", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-grounding-"));
     const fake = windowDriver(
@@ -512,6 +798,7 @@ describe("CuaDriverComputer", () => {
       expect(capture.grounding?.elements).toHaveLength(3);
       const combo = capture.grounding?.elements.find((element) => element.name === "Departure time");
       expect(combo).toMatchObject({ role: "ComboBox", state: { enabled: true, valuePresent: true } });
+      expect(combo).not.toHaveProperty("browserRegion");
       expect(combo?.bbox?.x).toBeCloseTo(401.4, 1);
       expect(combo?.bbox?.y).toBeCloseTo(440.7, 1);
       expect(combo).not.toHaveProperty("value");
@@ -736,6 +1023,68 @@ describe("CuaDriverComputer", () => {
       const capture = await computer.observe(session, "hybrid-dom-fallback" as ObservationId, new AbortController().signal);
       expect(capture.grounding).toMatchObject({ version: "grounding-catalog-v2", source: "hybrid", completeness: "partial", degraded: true });
       expect(capture.grounding?.elements.some((element) => element.name === "Native fallback")).toBe(true);
+      expect(capture.grounding?.elements.find((element) => element.name === "Native fallback")).not.toHaveProperty("browserRegion");
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("labels UIA browser regions only in managed hybrid mode using the trusted Document rect", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-region-"));
+    const fake = windowDriver(
+      { x: 100, y: 120, width: 1_000, height: 800 },
+      { width: 1_000, height: 800 },
+    );
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        { role: "Document", frame: { x: 200, y: 220, width: 800, height: 600 }, enabled: true },
+        { role: "Button", name: "Content control", frame: { x: 300, y: 320, width: 100, height: 40 }, enabled: true },
+        { role: "Button", name: "Browser toolbar", frame: { x: 110, y: 130, width: 60, height: 30 }, enabled: true },
+        { role: "Button", name: "Boundary control", frame: { x: 180, y: 300, width: 50, height: 40 }, enabled: true },
+      ],
+    });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "edge",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    try {
+      const computer = new CuaDriverComputer({
+        socketPath: "test-socket",
+        screenshotDir: directory,
+        windowTarget: fake.target,
+        grounding: "hybrid-catalog-v1",
+        browserTarget,
+        domGroundingTransport: createMockDomGroundingTransport({
+          complete: true,
+          tabId: "tab-fixture",
+          generation: "generation-1",
+          candidates: [],
+        }),
+        driverFactory: () => fake.driver,
+      });
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "hybrid-region-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, new AbortController().signal);
+      expect(capture.grounding?.source).toBe("hybrid");
+      expect(capture.grounding?.elements.find((element) => element.name === "Content control")).toMatchObject({ browserRegion: "content" });
+      expect(capture.grounding?.elements.find((element) => element.name === "Browser toolbar")).toMatchObject({ browserRegion: "chrome" });
+      expect(capture.grounding?.elements.find((element) => element.name === "Boundary control")).toMatchObject({ browserRegion: "unknown" });
+
+      const content = capture.grounding?.elements.find((element) => element.name === "Content control");
+      await expect(computer.execute(session, {
+        actionId: "hybrid-region-content-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: content!.bbox!.x + content!.bbox!.width / 2, y: content!.bbox!.y + content!.bbox!.height / 2 },
+        groundingRef: content!.elementRef,
+      }, new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

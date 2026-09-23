@@ -11,6 +11,8 @@ import {
   DomGroundingUnavailableError,
   type DomGroundingCollectRequest,
   type DomGroundingRawCandidate,
+  type DomSelectOptionRequest,
+  type DomSelectOptionResult,
   type DomGroundingTransport,
   type DomGroundingTransportResult,
   type ManagedBrowserTarget,
@@ -236,6 +238,8 @@ export interface ManagedBrowserPageActivity {
   readonly browserWindowId: number;
   readonly visibilityState: "visible" | "hidden" | "prerender" | "unloaded";
   readonly hasFocus?: boolean;
+  /** Opaque per-document marker used only to invalidate stale actions. */
+  readonly navigationKey?: string;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 }
 
@@ -296,7 +300,8 @@ export async function resolveManagedBrowserActivePageSet(
 
 const MANAGED_PAGE_ACTIVITY_SCRIPT = String.raw`({
   visibilityState: document.visibilityState,
-  hasFocus: document.hasFocus()
+  hasFocus: document.hasFocus(),
+  navigationKey: typeof performance !== "undefined" && Number.isFinite(performance.timeOrigin) ? String(performance.timeOrigin) : undefined
 })`;
 const MAX_MANAGED_PAGE_TARGETS = 32;
 
@@ -306,6 +311,7 @@ interface HostState {
   profileId: string;
   tabId: string;
   generation: string;
+  navigationKey?: string;
   readonly browserWindowId: number;
   readonly child: ChildProcess;
   readonly profileRoot: string;
@@ -317,7 +323,8 @@ interface HostState {
 
 /**
  * Expression evaluated in the managed page's main world. It intentionally
- * avoids selectors, node IDs, input values and full text/DOM serialization.
+ * keeps label/reference lookups bounded and never emits node IDs, input values
+ * or full text/DOM serialization.
  * Open shadow roots are traversed; iframe documents (especially cross-origin)
  * remain an explicit boundary and canvas/WebGL stays visual-only.
  */
@@ -328,6 +335,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const maxCandidates = 256;
   const candidates = [];
   const seen = new Set();
+  let truncated = false;
   const interactiveRoles = new Set(["button", "link", "checkbox", "combobox", "listbox", "menuitem", "option", "radio", "slider", "switch", "tab", "textbox", "treeitem"]);
   const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
   const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
@@ -336,12 +344,124 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
     return text.length === 0 ? undefined : text.slice(0, max);
   };
+  const labelNodeText = (node, excluded, maxText) => {
+    const pieces = [];
+    let visited = 0;
+    const visit = (current, depth) => {
+      if (current === undefined || current === null || current === excluded || depth > 16 || visited >= 64 || pieces.length >= 8) return;
+      visited += 1;
+      if (current.nodeType === 3) {
+        const text = boundedText(current.nodeValue, maxText);
+        if (text !== undefined) pieces.push(text);
+        return;
+      }
+      const children = current.childNodes;
+      if (children !== undefined && children !== null && typeof children.length === "number") {
+        const limit = Math.min(Math.max(0, children.length), 64);
+        for (let index = 0; index < limit; index += 1) visit(children[index], depth + 1);
+        return;
+      }
+      const fallback = boundedText(current.textContent, maxText);
+      if (fallback !== undefined) pieces.push(fallback);
+    };
+    visit(node, 0);
+    return boundedText(pieces.join(" "), maxText);
+  };
+  const textFromElements = (elements, maxItems, maxText, excluded) => {
+    if (elements === undefined || elements === null || typeof elements.length !== "number") return undefined;
+    const pieces = [];
+    const limit = Math.min(Math.max(0, elements.length), maxItems);
+    for (let index = 0; index < limit; index += 1) {
+      const text = excluded === undefined
+        ? boundedText(elements[index] && elements[index].textContent, maxText)
+        : labelNodeText(elements[index], excluded, maxText);
+      if (text !== undefined) pieces.push(text);
+    }
+    return boundedText(pieces.join(" "), maxText);
+  };
+  const findById = (element, id) => {
+    const root = typeof element.getRootNode === "function" ? element.getRootNode() : undefined;
+    const owner = root !== undefined && root !== null && typeof root.getElementById === "function" ? root : document;
+    return owner.getElementById(id);
+  };
+  const ariaLabelledByText = (element) => {
+    const rawIds = boundedText(element.getAttribute("aria-labelledby"), 512);
+    if (rawIds === undefined) return undefined;
+    const ids = rawIds.split(/\s+/g).slice(0, 8);
+    const references = [];
+    for (const id of ids) {
+      if (id.length > 128) continue;
+      const referenced = findById(element, id);
+      if (referenced !== null && referenced !== element) references.push(referenced);
+    }
+    return textFromElements(references, 8, 160, element);
+  };
+  const labelText = (element) => {
+    const associated = textFromElements(element.labels, 8, 160, element);
+    if (associated !== undefined) return associated;
+    const id = boundedText(element.getAttribute("id"), 128);
+    if (id === undefined) return undefined;
+    const explicit = [];
+    const labels = document.querySelectorAll("label[for]");
+    const limit = Math.min(Math.max(0, labels.length), 32);
+    for (let index = 0; index < limit; index += 1) {
+      const label = labels[index];
+      if (label && label.getAttribute("for") === id) explicit.push(label);
+    }
+    return textFromElements(explicit, 8, 160, element);
+  };
   const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+  const nameOf = (element, role) => {
+    const candidates = [
+      element.getAttribute("aria-label"),
+      ariaLabelledByText(element),
+      labelText(element),
+      element.getAttribute("title"),
+      element.getAttribute("placeholder"),
+    ];
+    for (const candidate of candidates) {
+      const name = boundedText(candidate, 160);
+      if (name !== undefined) return name;
+    }
+    const roleName = typeof role === "string" ? role.toLowerCase() : "";
+    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+    return allowsTextName ? boundedText(element.textContent, 160) : undefined;
+  };
+  const optionDescription = (option) => {
+    if (option === undefined || option === null) return undefined;
+    return boundedText(option.textContent, 240);
+  };
+  const selectedOptionDescription = (element, role) => {
+    const roleName = typeof role === "string" ? role.toLowerCase() : "";
+    const options = element.localName === "select"
+      ? element.selectedOptions
+      : roleName === "combobox" ? element.querySelectorAll('[role="option"][aria-selected="true"]') : undefined;
+    if (options !== undefined && options !== null && typeof options.length === "number" && options.length > 0) return optionDescription(options[0]);
+    if (roleName !== "combobox") return undefined;
+    const activeId = boundedText(element.getAttribute("aria-activedescendant"), 128);
+    return activeId === undefined ? undefined : optionDescription(findById(element, activeId));
+  };
   const visibleFrame = (element) => {
     const style = getComputedStyle(element);
     const rect = element.getBoundingClientRect();
     if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none" || rect.width <= 0 || rect.height <= 0) return undefined;
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  };
+  const visibleNativeSelectOptions = (element) => {
+    if (element.localName !== "select") return undefined;
+    const nodes = element.options !== undefined && element.options !== null
+      ? [...element.options]
+      : [...element.querySelectorAll("option")];
+    const visible = [];
+    for (const option of nodes) {
+      const style = getComputedStyle(option);
+      if (option.hidden === true || style.display === "none" || style.visibility === "hidden") continue;
+      const text = boundedText(option.textContent, 160);
+      if (text === undefined) continue;
+      const parent = option.parentElement;
+      visible.push({ text, enabled: option.disabled !== true && parent?.disabled !== true });
+    }
+    return { options: visible.slice(0, 32), optionsTruncated: visible.length > 32 };
   };
   const isCanvasLike = (element, role) => element.localName === "canvas" || role === "canvas" || role === "webgl" || role === "bitmap";
   const isInteractive = (element, role) => {
@@ -351,30 +471,43 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     return ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName);
   };
   const emit = (element) => {
-    if (candidates.length >= maxCandidates || seen.has(element)) return;
+    if (candidates.length >= maxCandidates) {
+      truncated = true;
+      return;
+    }
+    if (seen.has(element)) return;
     seen.add(element);
     const role = roleOf(element);
     const frame = visibleFrame(element);
     if (frame === undefined || !isInteractive(element, role) || isCanvasLike(element, role)) return;
-    const name = boundedText(element.getAttribute("aria-label") || element.getAttribute("title") || element.getAttribute("placeholder") || (element.localName === "input" || element.localName === "textarea" ? undefined : element.textContent), 160);
+    const name = nameOf(element, role);
+    const roleName = typeof role === "string" ? role.toLowerCase() : "";
+    const description = roleName === "combobox" || element.localName === "select" ? selectedOptionDescription(element, role) : undefined;
     const enabled = element.disabled !== true;
     const inputType = (element.getAttribute("type") || "text").toLowerCase();
     const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
+    const optionProjection = visibleNativeSelectOptions(element);
     candidates.push({
       tagName: element.localName,
       ariaRole: role,
       name,
+      description,
       frame,
       visible: true,
       interactive: true,
       tabIndex: Number.isInteger(element.tabIndex) ? element.tabIndex : undefined,
       inputType: element.localName === "input" ? inputType : undefined,
       canvasLike: false,
+      ...(optionProjection === undefined ? {} : optionProjection),
       state: { enabled, focused: document.activeElement === element, editable, expanded: element.getAttribute("aria-expanded") === "true", selected: element.getAttribute("aria-selected") === "true" },
     });
   };
   const walk = (root) => {
-    if (root === undefined || root === null || candidates.length >= maxCandidates) return;
+    if (root === undefined || root === null) return;
+    if (candidates.length >= maxCandidates) {
+      truncated = true;
+      return;
+    }
     const elements = root instanceof Element ? [root, ...root.querySelectorAll("*")] : [...root.querySelectorAll("*")];
     for (const element of elements) {
       const role = roleOf(element);
@@ -388,7 +521,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   walk(document);
   return {
     candidates,
-    complete: true,
+    complete: !truncated,
     coordinateSpace: "css",
     viewportMetrics: { cssWidth, cssHeight, deviceScaleFactor },
   };
@@ -530,7 +663,7 @@ export class ManagedBrowserHost {
       };
       const resolution = await this.options.resolveOwnedWindowTarget(ownedProcessId, signal, windowHint);
       const windowTarget = validateOwnedWindowResolution(ownedProcessId, resolution, windowHint);
-      const generation = shortHash(`${ownedProcessId}:${tabId}:${Date.now()}`);
+      const generation = shortHash(`${ownedProcessId}:${tabId}:${selected.navigationKey ?? "unknown"}:${Date.now()}`);
       const target: ManagedBrowserTarget = {
         kind: "managed-chromium",
         browser: this.options.browser,
@@ -543,7 +676,7 @@ export class ManagedBrowserHost {
       if (profileMode === "persistent" && this.options.registerStartupUrl === true) {
         await registerManagedBrowserStartupUrl(profileRoot, this.options.url);
       }
-      this.state = { target, processId: ownedProcessId, profileId: profile.profileId, tabId, generation, browserWindowId: selected.browserWindowId, child, profileRoot, debuggerPort: devTools.port, browserWebSocketDebuggerUrl: browserEndpoint, profileMode, profileLock };
+      this.state = { target, processId: ownedProcessId, profileId: profile.profileId, tabId, generation, ...(selected.navigationKey === undefined ? {} : { navigationKey: selected.navigationKey }), browserWindowId: selected.browserWindowId, child, profileRoot, debuggerPort: devTools.port, browserWebSocketDebuggerUrl: browserEndpoint, profileMode, profileLock };
       return { target, processId: ownedProcessId, profileId: profile.profileId, tabId, generation, profileMode };
     } catch (error) {
       if (signal.aborted) signal.throwIfAborted();
@@ -580,15 +713,17 @@ export class ManagedBrowserHost {
     }
     // Revalidate every page target for every observation. A new active tab is
     // accepted only inside the host-attested browser window; a popup in a new
-    // browser window is excluded. Same-tab navigation is allowed because the
-    // target id remains stable and the freshly listed websocket URL is used.
+    // browser window is excluded. A same-tab navigation rotates generation via
+    // the opaque document marker before a fresh candidate catalog is returned.
     const pages = await listDevToolsPages(state.debuggerPort, signal);
     const selected = await resolveManagedBrowserActivePageSet(pages, (page, activitySignal) => inspectManagedPageActivity(page, state.browserWebSocketDebuggerUrl, activitySignal), signal, state.browserWindowId);
     if (selected === undefined) throw new DomGroundingUnavailableError("managed browser active page was stale or ambiguous");
     const selectedTabId = selected.page.id as string;
-    if (selectedTabId !== state.tabId) {
+    if (selectedTabId !== state.tabId || selected.navigationKey !== undefined && state.navigationKey !== undefined && selected.navigationKey !== state.navigationKey) {
       state.tabId = selectedTabId;
-      state.generation = shortHash(`${state.processId}:${state.tabId}:${Date.now()}`);
+      if (selected.navigationKey === undefined) delete state.navigationKey;
+      else state.navigationKey = selected.navigationKey;
+      state.generation = shortHash(`${state.processId}:${state.tabId}:${state.navigationKey ?? "unknown"}:${Date.now()}`);
       state.target = { ...state.target, tabId: state.tabId, generation: state.generation };
     }
     const webSocketDebuggerUrl = selected.page.webSocketDebuggerUrl as string;
@@ -621,6 +756,69 @@ export class ManagedBrowserHost {
       socket.close();
     }
   }
+
+  /**
+   * Revalidate the observation-bound candidate in the same managed tab and
+   * document generation, then set the option in page context. No native
+   * popup is opened and no selector, node id, input value or cookie crosses
+   * the adapter/host boundary.
+   */
+  public async selectOption(request: DomSelectOptionRequest, signal: AbortSignal): Promise<DomSelectOptionResult> {
+    const state = this.state;
+    if (state === undefined) throw new DomGroundingUnavailableError("managed browser host is not running");
+    if (!sameManagedBrowserTarget(request.browserTarget, state.target)) {
+      return { status: "refused", driverCode: "SELECT_OPTION_TARGET_STALE", message: "managed-browser target is stale" };
+    }
+    if (request.browserTarget.tabId !== state.tabId || request.browserTarget.generation !== state.generation) {
+      return { status: "refused", driverCode: "SELECT_OPTION_GENERATION_MISMATCH", message: "managed-browser tab or page generation changed" };
+    }
+    if (request.optionText.trim().length === 0 || request.optionText.length > 160) {
+      return { status: "refused", driverCode: "SELECT_OPTION_INVALID", message: "select_option optionText is invalid" };
+    }
+    if (!isBoundedSelectCandidateBinding(request)) {
+      return { status: "refused", driverCode: "SELECT_OPTION_BINDING_INVALID", message: "select_option candidate binding is invalid" };
+    }
+    const page = await this.activePageForSelection(state, signal);
+    if (page === undefined) {
+      return { status: "refused", driverCode: "SELECT_OPTION_GENERATION_MISMATCH", message: "managed-browser page was stale or ambiguous" };
+    }
+    const socket = await LoopbackWebSocket.connect(page.webSocketDebuggerUrl as string, signal);
+    try {
+      const expression = buildManagedDomSelectOptionExpression({
+        role: request.candidate.role,
+        ...(request.candidate.name === undefined ? {} : { name: request.candidate.name }),
+        ...(request.candidate.frame === undefined ? {} : { frame: request.candidate.frame }),
+        fingerprint: request.candidate.fingerprint,
+        optionText: request.optionText.trim(),
+      });
+      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false }, signal);
+      const value = response?.result?.result?.value;
+      if (!isRecord(value) || (value.status !== "completed" && value.status !== "refused" && value.status !== "failed")) {
+        return { status: "failed", driverCode: "SELECT_OPTION_EVALUATION_INVALID", message: "managed-browser select evaluation returned an invalid result" };
+      }
+      return {
+        status: value.status,
+        ...(typeof value.driverCode === "string" ? { driverCode: value.driverCode } : {}),
+        ...(typeof value.message === "string" ? { message: value.message } : {}),
+        tabId: state.tabId,
+        generation: state.generation,
+      };
+    } finally {
+      socket.close();
+    }
+  }
+
+  private async activePageForSelection(state: HostState, signal: AbortSignal): Promise<ManagedBrowserDevToolsPage | undefined> {
+    const pages = await listDevToolsPages(state.debuggerPort, signal);
+    const selected = await resolveManagedBrowserActivePageSet(
+      pages,
+      (page, activitySignal) => inspectManagedPageActivity(page, state.browserWebSocketDebuggerUrl, activitySignal),
+      signal,
+      state.browserWindowId,
+    );
+    if (selected === undefined || selected.page.id !== state.tabId || selected.navigationKey !== state.navigationKey) return undefined;
+    return selected.page;
+  }
 }
 
 class ManagedCdpDomGroundingTransport implements DomGroundingTransport {
@@ -631,6 +829,186 @@ class ManagedCdpDomGroundingTransport implements DomGroundingTransport {
   public async collect(request: DomGroundingCollectRequest, signal: AbortSignal): Promise<DomGroundingTransportResult> {
     return this.host.collect(request, signal);
   }
+
+  public async selectOption(request: DomSelectOptionRequest, signal: AbortSignal): Promise<DomSelectOptionResult> {
+    return this.host.selectOption(request, signal);
+  }
+}
+
+function sameManagedBrowserTarget(left: ManagedBrowserTarget, right: ManagedBrowserTarget): boolean {
+  return left.kind === right.kind
+    && left.browser === right.browser
+    && left.profileId === right.profileId
+    && left.delivery === right.delivery
+    && left.windowTarget.pid === right.windowTarget.pid
+    && left.windowTarget.windowId === right.windowTarget.windowId;
+}
+
+function isBoundedSelectCandidateBinding(request: DomSelectOptionRequest): boolean {
+  const candidate = request.candidate;
+  return /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.tabId)
+    && /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.generation)
+    && /^[A-Za-z0-9._-]{1,96}$/u.test(candidate.fingerprint)
+    && candidate.role.trim().length > 0
+    && candidate.role.length <= 64
+    && (candidate.name === undefined || candidate.name.length <= 160)
+    && candidate.bbox.width > 0
+    && candidate.bbox.height > 0
+    && [candidate.bbox.x, candidate.bbox.y, candidate.bbox.width, candidate.bbox.height].every(Number.isFinite)
+    && (candidate.frame === undefined || [candidate.frame.x, candidate.frame.y, candidate.frame.width, candidate.frame.height].every(Number.isFinite) && candidate.frame.width > 0 && candidate.frame.height > 0);
+}
+
+export function buildManagedDomSelectOptionExpression(input: {
+  readonly role: string;
+  readonly name?: string;
+  readonly frame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly fingerprint: string;
+  readonly optionText: string;
+}): string {
+  const encoded = JSON.stringify(input);
+  return String.raw`(function(target) {
+    const MAX_SELECTS = 256;
+    const MAX_OPTIONS = 512;
+    const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
+    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "select" ? "combobox" : undefined), 64);
+    const labelOf = (element) => {
+      const aria = normalize(element.getAttribute("aria-label"));
+      if (aria.length > 0) return aria;
+      const labelledBy = normalize(element.getAttribute("aria-labelledby"));
+      if (labelledBy.length > 0) {
+        const pieces = [];
+        for (const id of labelledBy.split(/\s+/g).slice(0, 8)) {
+          if (id.length > 128) continue;
+          const referenced = document.getElementById(id);
+          const text = normalize(referenced && referenced.textContent);
+          if (text.length > 0) pieces.push(text);
+        }
+        const labelledText = normalize(pieces.join(" "));
+        if (labelledText.length > 0) return labelledText;
+      }
+      if (element.labels && typeof element.labels.length === "number") {
+        for (let index = 0; index < Math.min(element.labels.length, 8); index += 1) {
+          const text = normalize(element.labels[index] && element.labels[index].textContent);
+          if (text.length > 0) return text;
+        }
+      }
+      const id = element.getAttribute("id");
+      if (typeof id === "string" && id.length > 0) {
+        const labels = document.querySelectorAll("label[for]");
+        for (let index = 0; index < Math.min(labels.length, 32); index += 1) {
+          const label = labels[index];
+          if (label && label.getAttribute("for") === id) {
+            const text = normalize(label.textContent);
+            if (text.length > 0) return text;
+          }
+        }
+      }
+      const title = normalize(element.getAttribute("title"));
+      if (title.length > 0) return title;
+      const placeholder = normalize(element.getAttribute("placeholder"));
+      if (placeholder.length > 0) return placeholder;
+      return "";
+    };
+    const frameOf = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none" || rect.width <= 0 || rect.height <= 0) return undefined;
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    // CSS layout can move a control by a few pixels between the screenshot
+    // observation and this same-tab revalidation. Keep the bound small and
+    // symmetric; a larger move/resize or a second nearby select fails closed.
+    const geometryTolerance = 4;
+    const sameFrame = (left, right) => left !== undefined && right !== undefined
+      && Math.abs(left.x - right.x) <= geometryTolerance && Math.abs(left.y - right.y) <= geometryTolerance
+      && Math.abs(left.width - right.width) <= geometryTolerance && Math.abs(left.height - right.height) <= geometryTolerance;
+    const part = (value, max) => normalize(value, max);
+    const fingerprintOf = (element, role, name) => {
+      const canonical = [
+        part(role, 64),
+        part(element.localName, 32),
+        // The page collector emits the computed public role as ariaRole,
+        // including the implicit native-select combobox role.
+        part(role, 64),
+        part(element.getAttribute("type"), 32),
+        part(name, 160),
+      ].join("\u001f");
+      let hash = 2166136261;
+      for (let index = 0; index < canonical.length; index += 1) {
+        hash ^= canonical.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return "domf-" + (hash >>> 0).toString(16).padStart(8, "0");
+    };
+    const selects = [];
+    const seen = new Set();
+    let selectOverflow = false;
+    const collectSelects = (root) => {
+      if (!root || selectOverflow) return;
+      const local = root instanceof Element && root.localName === "select" ? [root] : [];
+      const queried = root.querySelectorAll("select");
+      for (const element of [...local, ...queried]) {
+        if (seen.has(element)) continue;
+        seen.add(element);
+        if (selects.length >= MAX_SELECTS) {
+          selectOverflow = true;
+          return;
+        }
+        selects.push(element);
+      }
+      const descendants = root.querySelectorAll("*");
+      for (const element of descendants) {
+        if (element.shadowRoot) collectSelects(element.shadowRoot);
+        if (selectOverflow) return;
+      }
+    };
+    collectSelects(document);
+    if (selectOverflow) return { status: "refused", driverCode: "SELECT_OPTION_SELECT_CATALOG_INCOMPLETE", message: "native select catalog exceeded its safety bound" };
+    const candidates = selects.map((element) => {
+      const role = roleOf(element);
+      const name = labelOf(element);
+      const frame = frameOf(element);
+      return { element, role, name, frame, fingerprint: fingerprintOf(element, role, name) };
+    });
+    const roleMatches = candidates.filter((candidate) => candidate.frame !== undefined
+      && (candidate.role === normalize(target.role, 64) || candidate.role === "combobox" && normalize(target.role, 64) === "select")
+      && candidate.name === normalize(target.name, 160));
+    const matches = roleMatches.filter((candidate) => candidate.fingerprint === target.fingerprint && sameFrame(candidate.frame, target.frame));
+    if (matches.length === 0) {
+      if (roleMatches.some((candidate) => sameFrame(candidate.frame, target.frame))) return { status: "refused", driverCode: "SELECT_OPTION_CANDIDATE_STALE", message: "DOM candidate fingerprint or role changed" };
+      return { status: "refused", driverCode: "SELECT_OPTION_BBOX_MISMATCH", message: "DOM candidate bounds changed" };
+    }
+    if (matches.length > 1) return { status: "refused", driverCode: "SELECT_OPTION_CANDIDATE_AMBIGUOUS", message: "DOM candidate is ambiguous" };
+    const element = matches[0].element;
+    if (element.disabled === true) return { status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED", message: "managed-browser DOM select is disabled" };
+    const options = [...element.querySelectorAll("option")];
+    if (options.length > MAX_OPTIONS) return { status: "refused", driverCode: "SELECT_OPTION_OPTION_CATALOG_INCOMPLETE", message: "native option catalog exceeded its safety bound" };
+    const visibleOption = (option) => {
+      if (!option || option.hidden === true || option.disabled === true || option.getAttribute("aria-disabled") === "true") return false;
+      const style = getComputedStyle(option);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const parent = option.parentElement;
+      if (parent && parent.disabled === true) return false;
+      return true;
+    };
+    const wanted = normalize(target.optionText, 160);
+    const optionMatches = options.filter((option) => visibleOption(option) && normalize(option.textContent || option.label, 160) === wanted);
+    if (optionMatches.length === 0) return { status: "refused", driverCode: "SELECT_OPTION_OPTION_MISSING", message: "visible enabled option was not found" };
+    if (optionMatches.length > 1) return { status: "refused", driverCode: "SELECT_OPTION_OPTION_AMBIGUOUS", message: "visible option text was ambiguous" };
+    const option = optionMatches[0];
+    try {
+      if (element.multiple !== true) {
+        for (const candidate of options) candidate.selected = candidate === option;
+      } else {
+        option.selected = true;
+      }
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return { status: "completed" };
+    } catch (_) {
+      return { status: "failed", driverCode: "SELECT_OPTION_DISPATCH_FAILED", message: "DOM option selection could not be dispatched" };
+    }
+  })(${encoded})`;
 }
 
 interface ManagedBrowserProfileResources {
@@ -1008,6 +1386,7 @@ async function inspectManagedPageActivity(
     }
     let visibilityState: ManagedBrowserPageActivity["visibilityState"] = "unloaded";
     let hasFocus: boolean | undefined;
+    let navigationKey: string | undefined;
     try {
       socket = await LoopbackWebSocket.connect(webSocketDebuggerUrl, signal);
       const visibilityResponse = await socket.command("Runtime.evaluate", { expression: MANAGED_PAGE_ACTIVITY_SCRIPT, returnByValue: true, awaitPromise: false }, signal);
@@ -1017,6 +1396,9 @@ async function inspectManagedPageActivity(
         visibilityState = candidateVisibility;
       }
       if (isRecord(visibilityValue) && typeof visibilityValue.hasFocus === "boolean") hasFocus = visibilityValue.hasFocus;
+      if (isRecord(visibilityValue) && typeof visibilityValue.navigationKey === "string" && /^[0-9]+(?:\.[0-9]+)?$/u.test(visibilityValue.navigationKey)) {
+        navigationKey = visibilityValue.navigationKey.slice(0, 64);
+      }
     } catch {
       // Browser-internal or transient page targets may reject Runtime.evaluate;
       // retain their window identity and treat them as non-active.
@@ -1026,6 +1408,7 @@ async function inspectManagedPageActivity(
       browserWindowId,
       visibilityState,
       ...(hasFocus === undefined ? {} : { hasFocus }),
+      ...(navigationKey === undefined ? {} : { navigationKey }),
       ...(browserBounds === undefined ? {} : { browserBounds }),
     };
   } catch (error) {

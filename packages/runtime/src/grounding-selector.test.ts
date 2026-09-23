@@ -56,7 +56,7 @@ describe("DeterministicGroundingSelector", () => {
       candidateElementCount: 20,
       truncated: true,
     });
-    expect(selected.selection?.reasons.find((item) => item.elementRef === "uia-source-target")?.codes).toContain("query_match");
+    expect(selected.selection?.reasons.find((item) => item.elementRef === "uia-source-target")?.codes).toContain("goal_match");
   });
 
   it("uses state hints only as a deterministic fallback and preserves disabled evidence", () => {
@@ -111,7 +111,7 @@ describe("DeterministicGroundingSelector", () => {
       latestUserCorrections: [],
     });
     const targetReason = selected.selection?.reasons.find((item) => item.elementRef === "uia-target-station");
-    expect(targetReason?.codes).toContain("query_match");
+    expect(targetReason?.codes).toContain("goal_match");
     expect(selected.selection?.reasons.find((item) => item.elementRef === "uia-tab-station")?.codes).not.toContain("query_match");
   });
 
@@ -135,7 +135,33 @@ describe("DeterministicGroundingSelector", () => {
       latestUserCorrections: ["点击起点输入框"],
     });
     expect(selected.elements.some((element) => element.elementRef === "uia-origin-input")).toBe(true);
-    expect(selected.selection?.reasons.find((item) => item.elementRef === "uia-origin-input")?.codes).toContain("query_match");
+    expect(selected.selection?.reasons.find((item) => item.elementRef === "uia-origin-input")?.codes).toContain("correction_match");
+  });
+
+  it("compresses selection reasons to the trajectory cap without dropping specific matches", () => {
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog([{
+      elementRef: "dom-focused-editable",
+      role: "combobox",
+      name: "Choose route options",
+      source: "dom",
+      browserRegion: "content",
+      bbox: { x: 10, y: 10, width: 120, height: 24, coordinateSpace: "physical" },
+      state: { enabled: true, focused: true, editable: true },
+    }]), {
+      goal: "Choose route options",
+      latestUserCorrections: [],
+      activePlanText: "Choose route options",
+    });
+    const codes = selected.selection?.reasons.find((item) => item.elementRef === "dom-focused-editable")?.codes ?? [];
+    expect(codes.length).toBeLessThanOrEqual(8);
+    expect(codes).toEqual(expect.arrayContaining([
+      "plan_match",
+      "goal_match",
+      "focused",
+      "editable",
+      "dom_content_priority",
+    ]));
+    expect(codes).not.toEqual(expect.arrayContaining(["query_match", "query_substring_match"]));
   });
 
   it("keeps a correction-matching Edit beyond 64 candidates executable by click_element", () => {
@@ -295,5 +321,134 @@ describe("DeterministicGroundingSelector", () => {
     });
     expect(selected.selection?.recovery).toMatchObject({ localIntentApplied: true, localIntentSource: "provider_hint" });
     expect(JSON.stringify(selected.selection)).not.toContain(hintText);
+  });
+
+  it("reserves at most two enabled bounded DOM select controls among 256 noise elements", () => {
+    const noise = Array.from({ length: 256 }, (_, index) => ({
+      elementRef: `uia-noise-${index}`,
+      role: "Button",
+      name: `Noise control ${index}`,
+      source: "uia" as const,
+      browserRegion: "chrome" as const,
+      bbox: { x: 10 + (index % 32) * 24, y: 10 + Math.floor(index / 32) * 24, width: 16, height: 16, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog([
+      ...noise,
+      {
+        elementRef: "dom-select-first",
+        role: "select",
+        name: "Departure time",
+        source: "dom",
+        browserRegion: "content",
+        bbox: { x: 100, y: 500, width: 120, height: 26, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "dom-select-second",
+        role: "combobox",
+        name: "Arrival time",
+        source: "dom",
+        browserRegion: "content",
+        bbox: { x: 240, y: 500, width: 120, height: 26, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "dom-select-third",
+        role: "select",
+        name: "Passenger type",
+        source: "dom",
+        browserRegion: "content",
+        bbox: { x: 380, y: 500, width: 120, height: 26, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "dom-select-disabled",
+        role: "select",
+        name: "Disabled option",
+        source: "dom",
+        browserRegion: "content",
+        bbox: { x: 520, y: 500, width: 120, height: 26, coordinateSpace: "physical" },
+        state: { enabled: false },
+      },
+      {
+        elementRef: "dom-select-unbounded",
+        role: "select",
+        name: "Missing bounds",
+        source: "dom",
+        browserRegion: "content",
+        state: { enabled: true },
+      },
+      {
+        elementRef: "uia-select",
+        role: "ComboBox",
+        name: "Native combo",
+        source: "uia",
+        browserRegion: "content",
+        bbox: { x: 660, y: 500, width: 120, height: 26, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+    ]), {
+      goal: "",
+      latestUserCorrections: [],
+      preferredRoles: ["select", "combobox"],
+      structuredToolHints: [{ toolName: "select_option", preferredRoles: ["select", "combobox"], preferredSources: ["dom"] }],
+    });
+    const structured = selected.selection?.reasons.filter((reason) => reason.codes.includes("structured_control")) ?? [];
+    expect(selected.elements).toHaveLength(16);
+    expect(structured.map((reason) => reason.elementRef)).toEqual(["dom-select-first", "dom-select-second"]);
+    expect(selected.elements.some((element) => element.elementRef === "dom-select-third")).toBe(false);
+    expect(selected.elements.some((element) => element.elementRef === "dom-select-disabled")).toBe(false);
+    expect(selected.elements.some((element) => element.elementRef === "dom-select-unbounded")).toBe(false);
+    expect(selected.elements.some((element) => element.elementRef === "uia-select")).toBe(false);
+    expect(structured.every((reason) => reason.codes.length <= 8)).toBe(true);
+  });
+
+  it("does not inject structured select hints when the tool is off or the catalog is UIA-only", () => {
+    const select = {
+      elementRef: "dom-only-select",
+      role: "combobox",
+      name: "Only DOM select",
+      source: "dom" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 20, y: 20, width: 100, height: 24, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    };
+    const query = {
+      goal: "",
+      latestUserCorrections: [],
+      preferredRoles: ["select", "combobox"],
+      structuredToolHints: [{ toolName: "select_option", preferredRoles: ["select", "combobox"], preferredSources: ["dom"] }],
+    } as const;
+    const enabled = new DeterministicGroundingSelector().select(hybridCatalog([select]), query);
+    expect(enabled.selection?.reasons[0]?.codes).toContain("structured_control");
+
+    const toolOff = new DeterministicGroundingSelector().select(hybridCatalog([select]), {
+      goal: "",
+      latestUserCorrections: [],
+    });
+    expect(toolOff.selection?.reasons[0]?.codes).not.toContain("structured_control");
+
+    const uiaOnly = new DeterministicGroundingSelector().select(catalog([{ ...select, source: "uia", elementRef: "uia-select" }]), query);
+    expect(uiaOnly.selection?.reasons[0]?.codes).not.toContain("structured_control");
+  });
+
+  it("keeps a configured structured-control quota bounded", () => {
+    const elements = Array.from({ length: 8 }, (_, index) => ({
+      elementRef: `dom-select-${index}`,
+      role: "select",
+      name: `Choice ${index}`,
+      source: "dom" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 20 + index * 110, y: 20, width: 90, height: 24, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    const query = {
+      goal: "",
+      latestUserCorrections: [],
+      structuredToolHints: [{ toolName: "select_option", preferredRoles: ["select"], preferredSources: ["dom"] }],
+    } as const;
+    const selected = new DeterministicGroundingSelector({ structuredControlQuota: 99 }).select(hybridCatalog(elements), query);
+    expect(selected.selection?.reasons.filter((reason) => reason.codes.includes("structured_control"))).toHaveLength(4);
   });
 });

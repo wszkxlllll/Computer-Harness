@@ -10,7 +10,7 @@ import type {
 import { createHash } from "node:crypto";
 import { decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
 import type { GroundingCatalog, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
-import { composeSystemPrompt, formatMemory, formatPlan } from "./projections.js";
+import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
 import { selectHistoryEvents } from "./history.js";
@@ -67,6 +67,9 @@ export class DefaultContextCompiler implements ContextCompiler {
     const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(baseTools) : baseTools;
     const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
+    const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
+      ? formatExecutionSegment(input.executionSegment)
+      : undefined;
     const recallSelection = features.memory !== "off" && input.memory !== undefined && this.memoryRecall !== undefined
       ? await this.memoryRecall.search(input.memory, {
           runId: input.runId,
@@ -92,6 +95,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       { name: "goal" as const, text: input.goal, included: true },
       { name: "tools" as const, text: toolText, included: true },
       { name: "plan" as const, text: planText ?? "", included: planText !== undefined },
+      { name: "execution_segment" as const, text: executionSegmentText ?? "", included: executionSegmentText !== undefined },
       { name: "memory" as const, text: memoryText ?? "", included: memoryText !== undefined && memoryText.length > 0 },
     ];
     const fixedText = fixedBlocks.map((block) => block.text).join("\n");
@@ -219,6 +223,10 @@ export class DefaultContextCompiler implements ContextCompiler {
         role: "user",
         content: [{ type: "text", text: formatPlan(input.plan) }],
       });
+    }
+
+    if (executionSegmentText !== undefined) {
+      messages.push({ role: "user", content: [{ type: "text", text: executionSegmentText }] });
     }
 
     if (features.memory !== "off" && input.memory !== undefined) {
@@ -376,7 +384,7 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
   const projected = candidates.slice(0, Math.min(catalog.maxElements, 16));
   const sourceLabel = catalog.source === "hybrid" ? "UIA+DOM" : catalog.source.toUpperCase();
   const lines = [
-    `${sourceLabel} grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing):`,
+    `${sourceLabel} grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
     ...projected.map((element) => {
       const box = element.bbox === undefined
         ? "bbox=unknown"
@@ -385,7 +393,10 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
       const description = element.description === undefined ? "" : ` description="${compactLabel(element.description, 120)}"`;
       const states = element.state === undefined ? "" : ` state=${formatGroundingState(element.state)}`;
       const provenance = element.source === undefined ? "" : ` source=${element.source}${element.browserRegion === undefined ? "" : `/${element.browserRegion}`}`;
-      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}`;
+      const options = element.options === undefined
+        ? ""
+        : ` options=[${element.options.map((option) => `${compactLabel(option.text, 160)}:${option.enabled ? "enabled" : "disabled"}`).join(" | ")}]${element.optionsTruncated === true ? " optionsTruncated=true" : ""}`;
+      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}${options}`;
     }),
   ];
   const text = lines.join("\n");

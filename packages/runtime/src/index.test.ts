@@ -43,6 +43,7 @@ import {
   type ActionPolicy,
   type ContextCompiler,
   validateActionIntent,
+  groundingComputerTools,
 } from "./index.js";
 
 const runId = "runtime-test" as RunId;
@@ -273,6 +274,39 @@ class ScriptedProvider implements ProviderAdapter {
       throw new Error("fake provider script exhausted");
     }
     return turn;
+  }
+}
+
+class RawOnlyGroundingComputer extends FakeComputer {
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal): Promise<import("@computer-harness/protocol").ObservationCapture> {
+    const capture = await super.observe(session, observationId, signal);
+    const elements = Array.from({ length: 20 }, (_, index) => ({
+      elementRef: index === 19 ? "raw-only-target" : `raw-generic-${index}`,
+      role: "Button",
+      name: index === 19 ? "Raw only target" : `Generic ${index}`,
+      bbox: { x: index * 10, y: 40, width: 20, height: 20, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    return {
+      ...capture,
+      grounding: {
+        version: "grounding-catalog-v2",
+        source: "uia",
+        observationId,
+        computerSessionId: session.id,
+        completeness: "complete",
+        degraded: false,
+        maxElements: 256,
+        elements,
+      },
+    };
+  }
+}
+
+class ApprovalComputerPolicy extends DefaultRuntimePolicy {
+  public override async evaluateToolCall(context: Parameters<RuntimePolicy["evaluateToolCall"]>[0]) {
+    if (context.tool.category === "computer") return { decision: "require_approval" as const, reason: "test approval" };
+    return { decision: "allow" as const };
   }
 }
 
@@ -547,6 +581,70 @@ function clickRegistry(): ToolRegistry {
   return registry;
 }
 
+function waitRegistry(): ToolRegistry {
+  const registry = clickRegistry();
+  registry.registerMany(groundingComputerTools());
+  registry.register({
+    name: "wait",
+    description: "Wait for the current GUI to settle.",
+    category: "computer",
+    inputSchema: { type: "object", properties: { durationMs: { type: "number" } }, required: ["durationMs"], additionalProperties: false },
+    validate: (args) => {
+      if (typeof args !== "object" || args === null || Array.isArray(args) || typeof (args as { durationMs?: unknown }).durationMs !== "number") throw new Error("wait.durationMs must be a number");
+    },
+    toAction: (args) => ({ kind: "wait", durationMs: (args as { durationMs: number }).durationMs }),
+  });
+  return registry;
+}
+
+function planningOnlyRegistry(): ToolRegistry {
+  const registry = clickElementRegistry();
+  registry.register({
+    name: "note",
+    description: "Record a local planning note.",
+    category: "side",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    validate: () => undefined,
+    execute: async () => ({ ok: true }),
+  });
+  return registry;
+}
+
+function clickElementRegistry(): ToolRegistry {
+  const registry = clickRegistry();
+  registry.registerMany(groundingComputerTools());
+  return registry;
+}
+
+function segmentLifecycleRegistry(options: { intent: string; completionText: string }): ToolRegistry {
+  const registry = clickElementRegistry();
+  registry.register({
+    name: "execution_segment_set",
+    description: "Set a short-lived two-step click segment.",
+    category: "side",
+    inputSchema: { type: "object", properties: {}, additionalProperties: true },
+    validate: () => undefined,
+    execute: async (_args, context) => ({
+      operation: "set",
+      segment: {
+        id: "lifecycle-segment",
+        objective: "choose a departure control",
+        cursor: 0,
+        status: "active",
+        sourceObservationId: context.observation!.id,
+        computerSessionId: context.session.id,
+        attemptedStepIds: [],
+        steps: [
+          { id: "lifecycle-segment.1", intent: options.intent, allowedAction: "click", completion: { kind: "element_present", text: options.completionText } },
+          { id: "lifecycle-segment.2", intent: "choose the next departure option", allowedAction: "click", completion: { kind: "element_selected", text: "Shanghai" } },
+        ],
+      },
+    }),
+    executionSegmentMutationFromResult: (output) => output as never,
+  });
+  return registry;
+}
+
 function validateClickArgs(args: import("@computer-harness/protocol").JsonValue): { x: number; y: number } {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
     throw new Error("click arguments must be an object");
@@ -616,6 +714,47 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   }
   throw new Error("condition was not reached during the deterministic test window");
 }
+
+describe("RunController ExecutionSegment lifecycle", () => {
+  it("marks a semantically matching main-provider click attempted before evidence advances", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "segment-set" as ToolCallId, name: "execution_segment_set", arguments: {} }] },
+      { type: "tool_calls", calls: [{ id: "main-click" as ToolCallId, name: "click_element", arguments: { elementRef: "uia-source-target" } }] },
+      { type: "finish", summary: "departure control observed" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      new ManyGroundingComputer(),
+      segmentLifecycleRegistry({ intent: "open departure station", completionText: "Departure station" }),
+      new DefaultRuntimePolicy(5, 4),
+    );
+    await expect(controller.start("open the departure station")).resolves.toBe("succeeded");
+    const events = controller.getEvents();
+    expect(events.filter((event) => event.type === "execution.segment.updated").map((event) => event.mutation.operation)).toEqual(["set", "step_attempted", "advanced", "invalidated"]);
+    expect(events.find((event) => event.type === "execution.segment.updated" && event.mutation.operation === "invalidated")).toMatchObject({ mutation: { reason: "run_finished" } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("invalidates a segment when the main provider clicks a different semantic target", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "segment-set" as ToolCallId, name: "execution_segment_set", arguments: {} }] },
+      { type: "tool_calls", calls: [{ id: "main-click" as ToolCallId, name: "click_element", arguments: { elementRef: "uia-source-target" } }] },
+      { type: "finish", summary: "replanned" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      new ManyGroundingComputer(),
+      segmentLifecycleRegistry({ intent: "open arrival station", completionText: "Arrival station" }),
+      new DefaultRuntimePolicy(5, 4),
+    );
+    await expect(controller.start("open the arrival station")).resolves.toBe("succeeded");
+    const segmentEvents = controller.getEvents().filter((event) => event.type === "execution.segment.updated");
+    expect(segmentEvents.map((event) => event.mutation.operation)).toEqual(["set", "invalidated"]);
+    expect(segmentEvents[1]).toMatchObject({ mutation: { reason: "main_provider_replanned" } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+});
 
 describe("RunController S2-2 happy path", () => {
   it("selects a bounded goal-relevant grounding hot set before persistence", async () => {

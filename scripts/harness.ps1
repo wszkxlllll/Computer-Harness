@@ -25,6 +25,10 @@ param(
   [string] $ManagedBrowserProfileLabel,
   [string] $CuaWindowPid,
   [string] $CuaWindowId,
+  [ValidateSet('off', 'uia-catalog-v1', 'dom-catalog-v1', 'hybrid-catalog-v1')]
+  [string] $Grounding,
+  [ValidateSet('native_tools', 'strict_json')]
+  [string] $QwenOutputMode,
   [switch] $AllowExistingOutputDir,
   [switch] $Build
 )
@@ -210,8 +214,10 @@ function Get-PresetArguments([string] $Name) {
 
 function Get-ModelArguments {
   if ($selectedModel -eq 'qwen3.8-flash') {
-    return @('--qwen-coordinate-mode', 'normalized_1000', '--qwen-thinking', 'low', '--qwen-output-mode', 'strict_json')
+    $outputMode = if ([string]::IsNullOrWhiteSpace($QwenOutputMode)) { 'strict_json' } else { $QwenOutputMode }
+    return @('--qwen-coordinate-mode', 'normalized_1000', '--qwen-thinking', 'low', '--qwen-output-mode', $outputMode)
   }
+  if (-not [string]::IsNullOrWhiteSpace($QwenOutputMode)) { throw '-QwenOutputMode is only valid with qwen3.8-flash.' }
   return @()
 }
 
@@ -357,6 +363,7 @@ $arguments = @(
   '--risk-guard', $selectedRiskGuard
 )
 if ($selectedRiskGuard -eq 'off') { $arguments += '--confirm-risk-guard-off' }
+if (-not [string]::IsNullOrWhiteSpace($Grounding)) { $arguments += @('--grounding', $Grounding) }
 $arguments += Get-ModelArguments
 $arguments += Get-PresetArguments $selectedPreset
 $arguments += $cuaWindowArguments

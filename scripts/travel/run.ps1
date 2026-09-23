@@ -34,6 +34,10 @@ param(
   [string] $TrialDir,
   [switch] $AllowHeldout,
   [switch] $Yes,
+  [ValidateSet('off', 'uia-catalog-v1', 'dom-catalog-v1', 'hybrid-catalog-v1')]
+  [string] $Grounding,
+  [ValidateSet('native_tools', 'strict_json')]
+  [string] $QwenOutputMode,
   [switch] $Build
 )
 
@@ -311,6 +315,8 @@ switch ($Command) {
         $harnessParams['CuaWindowPid'] = $CuaWindowPid
         $harnessParams['CuaWindowId'] = $CuaWindowId
       }
+      if (-not [string]::IsNullOrWhiteSpace($Grounding)) { $harnessParams['Grounding'] = $Grounding }
+      if (-not [string]::IsNullOrWhiteSpace($QwenOutputMode)) { $harnessParams['QwenOutputMode'] = $QwenOutputMode }
       if ($Build) { $harnessParams['Build'] = $true }
       & $harnessScript @harnessParams
       $tuiExit = $LASTEXITCODE
@@ -423,6 +429,8 @@ switch ($Command) {
         $harnessParams['CuaWindowPid'] = $CuaWindowPid
         $harnessParams['CuaWindowId'] = $CuaWindowId
       }
+      if (-not [string]::IsNullOrWhiteSpace($Grounding)) { $harnessParams['Grounding'] = $Grounding }
+      if (-not [string]::IsNullOrWhiteSpace($QwenOutputMode)) { $harnessParams['QwenOutputMode'] = $QwenOutputMode }
       if ($Build) { $harnessParams['Build'] = $true }
       & $harnessScript @harnessParams
       $launcherExit = $LASTEXITCODE

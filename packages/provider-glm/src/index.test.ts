@@ -210,6 +210,30 @@ describe("GLM provider adapter", () => {
     expect((client.body?.tools as Array<Record<string, unknown>>).map((item) => (item.function as Record<string, unknown>).name)).toContain("terminate");
   });
 
+  it("projects Planning and Memory activation guidance into Function tool schemas", async () => {
+    const planDescription = "Handoff-sized current phase for multi-stage/cross-interface/compare/summarize GUI tasks: same ModelTurn before first GUI action, create before the first GUI action, then update or create the next phase at a stage boundary. Describe only this phase and unfinished work; do not copy the original Goal, final deliverables, reasoning, or future stages. skip simple screens/every-click plans.";
+    const memoryDescription = "Visible state is not stable. Write only context-loss, cross-stage, or final compare/summary facts; do not copy the original Goal or Plan. If the same ModelTurn creates a task, do not use task retention until task_create returns an id; then pass it in relatedTaskIds. Skip the write or use non-task retention only for a truly run-stable fact. Independent same-turn GUI writes remain allowed; skip clicks.";
+    const segmentDescription = "Short-lived local GUI execution segment for the NEXT observations only. This is not task_create/task_update: PlanningTask tracks handoff-sized global phases, while an execution segment contains 2-4 predictable click micro-steps inside the current stable interface. Use it only when the same ModelTurn can describe the current click and at least one later click well enough to replace a future main-provider turn. Call it immediately before the first GUI click. Do not use it for simple one-click screens, type/keypress/scroll/drag/wait, uncertain or open-ended work, cross-application transitions, or sensitive actions. Every step needs observable completion evidence; the segment does not prove progress, authorize actions, or replace re-observation.";
+    const base = input();
+    const modelInput: ModelInput = {
+      ...base,
+      tools: [
+        ...base.tools,
+        { name: "task_create", description: planDescription, category: "planning", inputSchema: { type: "object", properties: { subject: { type: "string", description: "Short title for the current handoff-sized phase; do not restate the original Goal or final delivery." }, description: { type: "string", description: "Only this phase's goal and necessary unfinished work (for example, fill the current form); omit final requirements and future stages." } }, required: ["subject"], additionalProperties: false } },
+        { name: "memory_write_fact", description: memoryDescription, category: "side", inputSchema: { type: "object", properties: { key: { type: "string", description: "Key for an observed result, entity, or option needed after recent context; do not restate the original Goal or Plan." }, value: { type: "string", description: "Short observed value for later cross-stage use or final comparison; do not copy Goal/Plan text or click progress." }, retentionClass: { type: "string", description: "Recall policy, not truth or authorization. A task value requires a task id returned by task_create in relatedTaskIds; do not use task retention in that create turn." }, relatedTaskIds: { type: "array", description: "Existing ids returned by task_create/task_list; use them only after the task-create result." } }, required: ["key", "value"], additionalProperties: false } },
+        { name: "execution_segment_set", description: segmentDescription, category: "side", inputSchema: { type: "object", properties: { objective: { type: "string" }, steps: { type: "array", minItems: 2, maxItems: 4 } }, required: ["objective", "steps"], additionalProperties: false } },
+      ],
+    };
+    const client = new Client({ choices: [{ message: { content: "done" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(modelInput, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", summary: "done" });
+    const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
+    expect(tools.find((tool) => tool.function.name === "task_create")).toMatchObject({ function: { description: planDescription, parameters: { required: ["subject"] } } });
+    expect(tools.find((tool) => tool.function.name === "task_create")).toMatchObject({ function: { parameters: { properties: { description: { description: expect.stringContaining("unfinished work") } } } } });
+    expect(tools.find((tool) => tool.function.name === "memory_write_fact")).toMatchObject({ function: { description: memoryDescription, parameters: { required: ["key", "value"], properties: { retentionClass: { description: expect.stringContaining("task_create") }, relatedTaskIds: { description: expect.stringContaining("task_create") } } } } });
+    expect(tools.find((tool) => tool.function.name === "execution_segment_set")).toMatchObject({ function: { description: segmentDescription, parameters: { required: ["objective", "steps"] } } });
+  });
+
   it("rejects a terminate control with only a status label", async () => {
     const client = new Client({ choices: [{ message: { tool_calls: [{ id: "empty-finish", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "done" }) } }] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });

@@ -32,3 +32,16 @@ fixture 是本 probe 自己启动的 `Dev2WindowTargetFixture.exe`，按钮点�
 ## 4. latch patch 边界
 
 本记录的真实 daemon/fixture adapter run 在后续 production latch patch 写入前完成；后续 latch 增加了 window identity invalidation 与 primitive gate。latch patch 之后只做了 Node24 focused noEmit/root typecheck，没有重新宣称桌面实机通过。因而本记录中的真实 click/stale/close 结果不能与 latch 后的离线实现检查混写；若要验收 latch 后行为，应另开一次新的 host-owned fixture run。
+
+## 5. 后续只读 capture 恢复边界（2026-09-22）
+
+针对 CUA daemon 偶发连续返回空图/非法 PNG 的情况，production adapter 现在在
+`open`/`observe` 的 window-local 只读路径使用有界恢复：最多三次 capture，每次重做
+`list_windows` 与 geometry discovery，退避为固定 75ms、150ms，额外等待上限为 300ms。
+只有 `WINDOW_CAPTURE_SCHEMA`（包括 no-image/invalid PNG）会进入该路径；身份、geometry、
+权限、transport 和任何 GUI action 错误不重试。Abort 在 discovery、退避和下一次 capture
+前后均会停止后续调用，`execute` 仍只派发一次动作。
+
+这部分由 fake-driver 单元测试覆盖，证明的是重试上限、最终诊断、Abort 和 action 不重试；
+它不等价于 T01 或其他真实桌面任务已重新验收。真实 daemon 若需确认连续空图是否由该恢复
+解决，必须另开 host-owned fixture/run，并单独保留其原始脱敏证据。

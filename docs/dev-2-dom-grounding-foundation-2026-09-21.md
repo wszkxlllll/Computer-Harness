@@ -34,6 +34,16 @@ Runtime 保持最多 16 个模型可见 hot elements，不拼接整棵 UIA/DOM �
 
 UIA/DOM 候选使用 bbox IoU、规范化 name/role/source 去重。网页 content 冲突优先 DOM，浏览器 chrome/原生控件优先 UIA；来源配额可借用，不会因一方候选少而浪费上限。
 
+Hybrid 的 UIA 候选还会在 Adapter 内部使用同一 observation 取得的可信 UIA
+`Document` physical rect 做浏览器区域标注：完整位于 content rect 内（或只在
+有界测量容差内跨边界且中心仍在其中）标为 `content`；与 content rect 明确不相交
+且仍在当前受控窗口 viewport 内标为 `chrome`；跨边界较大或几何不确定标为
+`unknown`。实现使用固定 2px 上限，不从 Y 坐标、浏览器工具栏高度或 DPI 推测。
+只有 managed-browser Hybrid 且 content rect 已被证明时才写入 UIA 的
+`browserRegion`；UIA-only、普通桌面 UIA 或缺少 Document 的 Hybrid 省略该字段。
+public catalog 和 private ref map 复用同一个已标注元素对象，因此该字段只提供
+召回/诊断语义，不改变 click point、坐标映射或执行路径。
+
 ## 生命周期与降级
 
 - ref 仍绑定 Observation/ComputerSession；下一次观察后必须重新获取；

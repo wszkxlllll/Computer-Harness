@@ -128,4 +128,69 @@ describe("default Computer tools", () => {
     expect(() => definition.toAction({ elementRef: "uia-1" }, disabledContext)).toThrow(/GROUNDING_ELEMENT_DISABLED/iu);
   });
 
+  it("exposes select_option only for managed DOM grounding and binds exact option text", () => {
+    expect(groundingComputerTools().map((tool) => tool.name)).toEqual(["click_element"]);
+    const definition = groundingComputerTools({ includeSelectOption: true }).find((tool) => tool.name === "select_option");
+    expect(definition?.inputSchema).toMatchObject({
+      properties: {
+        elementRef: { type: "string", minLength: 1, maxLength: 96 },
+        optionText: { type: "string", minLength: 1, maxLength: 160 },
+      },
+      required: ["elementRef", "optionText"],
+      additionalProperties: false,
+    });
+    if (definition === undefined || definition.category !== "computer") throw new Error("select_option tool missing");
+    expect(() => definition.validate({ elementRef: "dom-1", optionText: "  " })).toThrow(/non-empty/iu);
+    expect(() => definition.validate({ elementRef: "dom-1", optionText: "x".repeat(161) })).toThrow(/160/iu);
+    const observation = {
+      id: "dom-observation" as never,
+      runId: "run" as never,
+      computerSessionId: "session" as never,
+      capturedAt: "2026-09-20T00:00:00Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+      screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png" as const, byteLength: 1 },
+      grounding: {
+        version: "grounding-catalog-v2" as const,
+        source: "dom" as const,
+        observationId: "dom-observation" as never,
+        computerSessionId: "session" as never,
+        completeness: "complete" as const,
+        degraded: false,
+        maxElements: 16,
+        elements: [{ elementRef: "dom-1", role: "combobox", name: "Departure", source: "dom" as const, browserRegion: "content" as const, bbox: { x: 100, y: 200, width: 80, height: 20, coordinateSpace: "physical" as const }, options: [{ text: "08:00", enabled: true }], optionsTruncated: false, state: { enabled: true } }],
+      },
+    };
+    const context = { runId: "run" as never, session: {} as never, signal: new AbortController().signal, observation };
+    expect(definition.toAction({ elementRef: "dom-1", optionText: "  08:00  " }, context)).toEqual({ kind: "select_option", groundingRef: "dom-1", optionText: "08:00" });
+    expect(() => definition.toAction({ elementRef: "dom-1", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding!, source: "uia", version: "uia-catalog-v1", elements: [{ ...observation.grounding!.elements[0]!, source: "uia" }] } } })).toThrow(/DOM_REQUIRED/iu);
+  });
+
+  it("fails closed when the listed native-select options are missing, duplicate, disabled, or truncated", () => {
+    const definition = groundingComputerTools({ includeSelectOption: true }).find((tool) => tool.name === "select_option");
+    if (definition === undefined || definition.category !== "computer") throw new Error("select_option tool missing");
+    const observation = {
+      id: "dom-options" as never,
+      runId: "run" as never,
+      computerSessionId: "session" as never,
+      capturedAt: "2026-09-20T00:00:00Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+      screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png" as const, byteLength: 1 },
+      grounding: {
+        version: "grounding-catalog-v2" as const,
+        source: "dom" as const,
+        observationId: "dom-options" as never,
+        computerSessionId: "session" as never,
+        completeness: "complete" as const,
+        degraded: false,
+        maxElements: 16,
+        elements: [{ elementRef: "dom-options-ref", role: "combobox", source: "dom" as const, bbox: { x: 1, y: 1, width: 100, height: 20, coordinateSpace: "physical" as const }, state: { enabled: true }, options: [{ text: "08:00", enabled: true }], optionsTruncated: false }],
+      },
+    };
+    const context = { runId: "run" as never, session: {} as never, signal: new AbortController().signal, observation };
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "09:00" }, context)).toThrow(/OPTION_MISSING/iu);
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, options: [{ text: "08:00", enabled: false }] }] } } })).toThrow(/OPTION_DISABLED/iu);
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, options: [{ text: "08:00", enabled: true }, { text: "08:00", enabled: true }] }] } } })).toThrow(/OPTION_AMBIGUOUS/iu);
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true }] } } })).toThrow(/OPTIONS_TRUNCATED/iu);
+  });
+
 });

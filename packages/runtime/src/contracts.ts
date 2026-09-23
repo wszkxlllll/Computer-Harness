@@ -9,6 +9,8 @@ import type {
   ComputerSessionId,
   ContextTrace,
   EventId,
+  ExecutionSegment,
+  ExecutionSegmentMutation,
   JsonValue,
   ModelTurn,
   ModelContinuation,
@@ -25,6 +27,9 @@ import type {
   RunId,
   RiskCategory,
   RuntimeEvent,
+  GroundingBrowserRegion,
+  GroundingElementSource,
+  ModelUsage,
   ToolCall,
   ToolCallId,
   ToolResult,
@@ -117,6 +122,7 @@ export interface ContextBudgetReport {
 /** Immutable Run-level switches shared by Registry projection, Runtime and Context. */
 export interface RunFeatureConfig {
   planning: "off" | "tasks-v1";
+  executionSegments?: "off" | "segments-v1";
   memory: "off" | "facts-v1" | "entities-v1";
   batching: "off" | "same-control-input-v1";
   riskGuard?: "off" | "layered";
@@ -146,6 +152,7 @@ export interface ContextCompileInput {
   goal: string;
   latestObservation?: ObservationFrame;
   plan?: PlanState;
+  executionSegment?: ExecutionSegment;
   recentEvents: readonly RuntimeEvent[];
   context?: ContextOptions;
   enabledCategories?: readonly ToolCategory[];
@@ -236,6 +243,7 @@ export type GuiActionDraft =
   | { kind: "right_click"; point: Point }
   | { kind: "type"; text: string }
   | { kind: "keypress"; keys: string[] }
+  | { kind: "select_option"; groundingRef: string; optionText: string }
   | { kind: "scroll"; point: Point; direction: "up" | "down" | "left" | "right"; ticks: number }
   | { kind: "drag"; from: Point; to: Point }
   | { kind: "wait"; durationMs: number };
@@ -244,6 +252,8 @@ export interface ToolExecutionContext {
   runId: RunId;
   session: ComputerSession;
   observation?: ObservationFrame;
+  /** Authoritative internal catalog for execution; never projected to Providers. */
+  rawGrounding?: import("@computer-harness/protocol").GroundingCatalog;
   signal: AbortSignal;
 }
 
@@ -261,6 +271,15 @@ interface ToolDefinitionBase {
 
 export interface ComputerToolDefinition extends ToolDefinitionBase {
   category: "computer";
+  /**
+   * Optional observation-grounding preference for a structured-control tool.
+   * Runtime intersects it with the currently enabled ToolRegistry and catalog
+   * source before adding a bounded hint to the selector query.
+   */
+  groundingHint?: {
+    readonly preferredRoles: readonly string[];
+    readonly preferredSources: readonly GroundingElementSource[];
+  };
   toAction: (args: JsonValue, context: ToolExecutionContext) => GuiActionDraft;
 }
 
@@ -270,6 +289,9 @@ export interface NonComputerToolDefinition extends ToolDefinitionBase {
   /** Optional Planning projection; only Planning tools may provide these hooks. */
   planMutationFromResult?: (output: JsonValue) => PlanningTaskMutation | undefined;
   afterPlanCommit?: (mutation: PlanningTaskMutation, context: ToolExecutionContext) => Promise<void>;
+  /** Optional short-lived local execution mutation. This is deliberately
+   * separate from global PlanningTask progress. */
+  executionSegmentMutationFromResult?: (output: JsonValue, context: ToolExecutionContext) => ExecutionSegmentMutation | undefined;
   /** Optional Run Memory projection; the Runtime commits it before materialization. */
   memoryMutationFromResult?: (output: JsonValue, context: ToolExecutionContext) => MemoryMutation | undefined;
   afterMemoryCommit?: (mutation: MemoryMutation, context: ToolExecutionContext) => Promise<void>;
@@ -315,6 +337,17 @@ export interface ActionCandidateGroup {
   actions: readonly ActionIntent[];
   decisionObservation: ObservationFrame;
   session: ComputerSessionDescriptor;
+  /** Bounded, untrusted UI evidence for actions grounded to current elements. */
+  groundingEvidence?: readonly GroundingEvidenceSummary[];
+}
+
+export interface GroundingEvidenceSummary {
+  readonly role: string;
+  readonly name?: string;
+  readonly description?: string;
+  readonly source?: GroundingElementSource;
+  readonly browserRegion?: GroundingBrowserRegion;
+  readonly untrusted: true;
 }
 
 export interface ActionPolicyContext {

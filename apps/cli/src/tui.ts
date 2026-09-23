@@ -1166,7 +1166,7 @@ function changeTuiFeature(features: TuiFeatureSelection, rowIndex: number, delta
         : rowIndex === 3
         ? "batching"
         : rowIndex === 4
-          ? "contextMode"
+      ? "contextMode"
           : rowIndex === 5
             ? "riskGuard"
             : rowIndex === 6
@@ -1187,6 +1187,7 @@ function featureValue(features: TuiFeatureSelection, rowIndex: number): string {
   if (rowIndex === 4) return features.contextMode;
   if (rowIndex === 5) return features.riskGuard;
   if (rowIndex === 6) return features.monitor;
+  if (rowIndex === 7) return features.grounding;
   return features.grounding;
 }
 

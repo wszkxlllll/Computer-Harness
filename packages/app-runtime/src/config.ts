@@ -36,6 +36,8 @@ export interface ResolvedRunConfig {
   maxSteps: number;
   maxModelRequests: number;
   planning: boolean;
+  /** Explicit opt-in for the unfinished local execution-segment experiment. */
+  executionSegments?: "off" | "segments-v1";
   memory: "off" | MemoryToolMode;
   /** Optional for backwards-compatible fixtures; app defaults to lexical when Memory is enabled. */
   memoryRetrieval?: MemoryRetrievalMode;
