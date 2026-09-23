@@ -38,7 +38,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $repoRoot '.harness.local.psd1'
 
 if (-not (Test-Path -LiteralPath $configPath)) {
-  throw "Missing .harness.local.psd1. Copy .harness.local.example.psd1 and fill the machine-local paths."
+  throw "Missing .harness.local.psd1. From the repository root run 'Copy-Item .harness.local.example.psd1 .harness.local.psd1', then set NodePath, EnvFile, CuaBinary, CuaSocket, Model and OutputRoot in the copy. Keep API keys in the referenced .env file."
 }
 
 $config = Import-PowerShellDataFile -LiteralPath $configPath
@@ -376,7 +376,9 @@ if (-not [string]::IsNullOrWhiteSpace($embeddingEndpoint)) {
 
 if ($Command -eq 'tui') {
   $arguments += '--tui'
-  Write-Output "Starting TUI with preset '$selectedPreset' and Risk Guard '$selectedRiskGuard'. Press F on the home screen to change the next Run."
+  $guardState = if ($selectedRiskGuard -eq 'layered') { 'ON (layered)' } else { 'OFF (explicit)' }
+  Write-Output "TUI setup: model '$selectedModel', preset '$selectedPreset', Risk Guard $guardState."
+  Write-Output "Home: enter a goal and press Enter; D or PageDown opens details (Esc returns); F reviews advanced options. To choose a CUA window, press Esc then W."
   $tuiExit = 1
   try {
     & $nodePath @arguments

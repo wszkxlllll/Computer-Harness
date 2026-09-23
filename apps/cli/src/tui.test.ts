@@ -71,16 +71,268 @@ function makePendingCorrectionFixture(
   const sessionConfig: ApplicationSessionConfig = { ...config };
   delete (sessionConfig as Partial<ResolvedRunConfig>).goal;
   const createRun = vi.fn(async () => handle);
+  const owner = new InProcessEnvironmentOwner();
   const session = new ApplicationSession({
     config: sessionConfig,
     createRun,
-    owner: new InProcessEnvironmentOwner(),
+    owner,
     ...(windowDiscovery === undefined ? {} : { windowDiscovery }),
   });
-  return { input, output, outputText, rawModes, controller, session, handle, runId, createRun };
+  return { input, output, outputText, rawModes, controller, session, handle, runId, createRun, owner };
 }
 
 describe("TUI renderer", () => {
+  it("presents the home setup in readable text within a narrow terminal", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "runs/tui-home/screenshots",
+    });
+    fixture.output.columns = 40;
+    fixture.output.rows = 24;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm-5.3-flash",
+      computer: "cua",
+      cuaWindowTarget: { pid: 1234, windowId: 5678 },
+      cuaWindowLabel: "上海出行窗口标题很长需要换行显示",
+      cuaWindowDeliveryMode: "foreground",
+      output: "runs/tui-home",
+      profile: "live-interactive",
+      riskGuard: "layered",
+      features: {
+        planning: false,
+        memory: "off",
+        memoryRetrieval: "off",
+        batching: "off",
+        contextMode: "raw",
+        riskGuard: "layered",
+        monitor: "off",
+        grounding: "off",
+      },
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const frame = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(frame).toContain("Model: glm-5.3-flash");
+    expect(frame).toContain("Computer: cua");
+    expect(frame.replace(/\s/gu, "")).toContain("上海出行窗口标题很长需要换行显示");
+    expect(frame).toContain("Full target:");
+    expect(frame).toContain("Features: Baseline");
+    expect(frame).toContain("Risk Guard: ON");
+    expect(frame).toContain("Enter starts");
+    expect(frame).toContain("TTY only; no global hotkeys");
+    expect(frame.split("\n").every((line) => stringWidth(line) <= 40)).toBe(true);
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it.each([20, 40])("keeps Guard and next-step visible at %i columns by 12 rows with long Chinese content", async (columns) => {
+    let rejectSecond!: (error: Error) => void;
+    const longWindow = {
+      pid: 9876,
+      windowId: 54321,
+      appName: "12306上海出行查询应用窗口名称很长",
+      title: "12306车次查询结果页面标题也很长",
+    };
+    const listWindows = vi.fn<WindowTargetDiscovery["listWindows"]>()
+      .mockResolvedValueOnce([longWindow])
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectSecond = reject; }));
+    const windowDiscovery: WindowTargetDiscovery = { listWindows };
+    const fixture = makePendingCorrectionFixture(async () => undefined, windowDiscovery, {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "runs/tui-home-compact/screenshots",
+    });
+    fixture.output.columns = columns;
+    fixture.output.rows = 12;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm-5.3-flash",
+      computer: "cua",
+      output: "runs/tui-home-compact",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    const waitFor = async (predicate: () => boolean): Promise<void> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (predicate()) return;
+        await tick();
+      }
+      throw new Error("TUI fixture condition was not reached");
+    };
+    const longGoal = "请检查上海出行页面中的车次、到达时间、换乘条件并整理可选方案。".repeat(5);
+
+    fixture.input.emit("keypress", longGoal, {});
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await waitFor(() => fixture.outputText.join("").includes("WINDOW TARGET"));
+    await waitFor(() => fixture.outputText.join("").includes("12306上海"));
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await waitFor(() => listWindows.mock.calls.length === 2);
+    fixture.input.emit("keypress", "", { name: "escape" });
+    const cleanupError = new Error("窗口资源清理状态无法确认；请检查运行会话并在清理完成前不要启动下一次操作。".repeat(2));
+    cleanupError.name = "CuaWindowDiscoveryCleanupError";
+    rejectSecond(cleanupError);
+    const pendingOwner = fixture.owner.acquire(fixture.session.environmentId, "blocked-cleanup-fixture");
+    await waitFor(() => fixture.outputText.join("").includes("Status: BLOCKED"));
+
+    const frame = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(frame).toContain("Goal draft:");
+    expect(frame).toContain("Model: glm-5.3-flash");
+    expect(frame).toContain("Target:");
+    expect(frame).toContain("Features: Baseline");
+    expect(frame).toContain("Risk Guard: ON");
+    expect(frame).toContain("Status: BLOCKED");
+    expect(frame).toContain("Next: I resumes");
+    expect(frame).toContain("…");
+    expect(frame).not.toContain("Details [");
+    expect(frame.trimEnd().split("\n").length).toBeLessThanOrEqual(11);
+    expect(frame.split("\n").every((line) => stringWidth(line) <= columns)).toBe(true);
+
+    fixture.input.emit("keypress", "D", { name: "d" });
+    await waitFor(() => (fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "").includes("Harness | DETAILS"));
+    const detailsFrames: string[] = [];
+    const firstDetails = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    const pageCount = Number(/Details \[1\/(\d+)\]/u.exec(firstDetails)?.[1]);
+    expect(Number.isInteger(pageCount)).toBe(true);
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+      if (pageIndex > 0) {
+        fixture.input.emit("keypress", "", { name: "pagedown" });
+        await tick();
+      }
+      const detailFrame = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+      expect(detailFrame).toContain("Risk Guard: ON");
+      expect(detailFrame).toContain("Session: BLOCKED");
+      expect(detailFrame).toContain("Status: BLOCKED");
+      expect(detailFrame.trimEnd().split("\n").length).toBeLessThanOrEqual(11);
+      expect(detailFrame.split("\n").every((line) => stringWidth(line) <= columns)).toBe(true);
+      detailsFrames.push(detailFrame);
+    }
+    const allDetails = detailsFrames
+      .map((detailFrame) => detailFrame.trimEnd().split("\n").slice(5, -2).join(""))
+      .join("")
+      .replace(/\s/gu, "");
+    expect(allDetails).toContain(`Fullgoal:${longGoal}`.replace(/\s/gu, ""));
+    expect(allDetails).toContain(`${longWindow.appName}—${longWindow.title}`.replace(/\s/gu, ""));
+    expect(allDetails).toContain(cleanupError.message.replace(/\s/gu, ""));
+
+    fixture.input.emit("keypress", "", { name: "escape" });
+    await tick();
+    const returnedHome = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(returnedHome).toContain("Harness | HOME");
+    expect(returnedHome).toContain("Status: BLOCKED");
+    expect(returnedHome).toContain("Goal draft:");
+
+    pendingOwner.release();
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("keeps the focused goal draft read-only while the details page is open", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined);
+    fixture.output.columns = 80;
+    fixture.output.rows = 30;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm-5.3-flash",
+      computer: "osworld",
+      output: "runs/tui-home-details-readonly",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    const goal = "原始目标草稿保持不变";
+    const unintendedInput = "不应写入的文字";
+
+    fixture.input.emit("keypress", goal, {});
+    fixture.input.emit("keypress", "", { name: "pagedown" });
+    await tick();
+    expect(fixture.outputText.join("")).toContain("Harness | DETAILS");
+
+    fixture.input.emit("keypress", unintendedInput, {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    const detailsFrame = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(detailsFrame).toContain("Harness | DETAILS");
+    expect(detailsFrame).toContain("Full goal:");
+    expect(detailsFrame).toContain(goal);
+    expect(detailsFrame).not.toContain(unintendedInput);
+    expect(fixture.session.activeRun).toBeUndefined();
+    expect(fixture.createRun).not.toHaveBeenCalled();
+
+    fixture.input.emit("keypress", "", { name: "escape" });
+    await tick();
+    const returnedHome = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(returnedHome).toContain("Goal: >");
+    expect(returnedHome).toContain(goal);
+    expect(returnedHome).not.toContain(unintendedInput);
+
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+    expect(fixture.rawModes).toEqual([true, false]);
+  });
+
+  it("keeps a typed goal draft while the user reviews features and selects a window", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, {
+      listWindows: async () => [{ pid: 1234, windowId: 5678, appName: "Browser", title: "12306" }],
+    }, {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "runs/tui-home-draft/screenshots",
+    });
+    fixture.output.columns = 80;
+    fixture.output.rows = 30;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm-5.3-flash",
+      computer: "cua",
+      output: "runs/tui-home-draft",
+      profile: "live-interactive",
+      riskGuard: "layered",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const tick = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    const waitFor = async (predicate: () => boolean): Promise<void> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (predicate()) return;
+        await tick();
+      }
+      throw new Error("TUI fixture condition was not reached");
+    };
+    const goal = "检查上海出行窗口并整理当前查询结果";
+
+    fixture.input.emit("keypress", goal, {});
+    fixture.input.emit("keypress", "F", { name: "f" });
+    await tick();
+    expect(fixture.outputText.join("")).toContain("FEATURES");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    await tick();
+    expect(fixture.outputText.join("")).toContain(`Goal draft: ${goal}`);
+
+    fixture.input.emit("keypress", "W", { name: "w" });
+    await waitFor(() => fixture.outputText.join("").includes("Browser — 12306"));
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await tick();
+    expect(fixture.outputText.join("")).toContain(`Goal draft: ${goal}`);
+    expect(fixture.outputText.join("")).toContain("Target: Browser — 12306");
+
+    fixture.input.emit("keypress", "", { name: "i" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitFor(() => fixture.createRun.mock.calls.length === 1);
+    const startedConfig = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig | undefined;
+    expect(startedConfig?.goal).toBe(goal);
+    expect(startedConfig?.computer).toMatchObject({ kind: "cua", windowTarget: { pid: 1234, windowId: 5678 }, windowDeliveryMode: "foreground" });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitFor(() => fixture.session.status === "idle");
+    await tick();
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
   it("lets the home screen select per-Run feature flags before entering a goal", async () => {
     const fixture = makePendingCorrectionFixture(async () => undefined);
     fixture.output.columns = 80;
@@ -106,8 +358,8 @@ describe("TUI renderer", () => {
     fixture.input.emit("keypress", "", { name: "space" });
     fixture.input.emit("keypress", "", { name: "return" });
     await tick();
-    expect(fixture.outputText.join("")).toContain("memory=facts/lexical");
-    expect(fixture.outputText.join("")).toContain("guard=off");
+    expect(fixture.outputText.join("")).toContain("Features: Custom");
+    expect(fixture.outputText.join("")).toContain("Risk Guard: OFF");
 
     fixture.input.emit("keypress", "打开任务管理器", {});
     fixture.input.emit("keypress", "", { name: "return" });
@@ -279,7 +531,7 @@ describe("TUI renderer", () => {
     fixture.input.emit("keypress", "", { name: "down" });
     fixture.input.emit("keypress", "", { name: "return" });
     await tick();
-    expect(fixture.outputText.join("")).toContain("Target: window Browser — 12306 (pid=1234, window=5678) pid=1234 id=5678 (host-selected, delivery=foreground)");
+    expect(fixture.outputText.join("")).toContain("Target: Browser — 12306; pid=1234; window=5678; delivery=foreground");
 
     fixture.input.emit("keypress", "打开目标窗口", {});
     fixture.input.emit("keypress", "", { name: "return" });
@@ -386,7 +638,7 @@ describe("TUI renderer", () => {
     await tick();
     await tick();
     expect(fixture.outputText.join("")).toContain("Window picker cleanup is unconfirmed");
-    expect(fixture.outputText.join("")).toContain("Target: primary desktop (default)");
+    expect(fixture.outputText.join("")).toContain("Target: Primary desktop (default)");
     fixture.input.emit("keypress", "", { name: "q" });
     await tui;
   });
@@ -620,7 +872,7 @@ describe("TUI renderer", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));
     const rendered = outputText.join("");
-    expect(rendered).toContain("Input is limited to 500 characters");
+    expect(rendered.replace(/\s+/gu, " ")).toContain("Input limit reached (500 characters)");
     expect(rendered).toContain("> …字");
     expect(rendered.split("\u001b[H\u001b[2J").length).toBeLessThanOrEqual(5);
     input.emit("keypress", "", { name: "escape" });
@@ -728,6 +980,8 @@ describe("TUI renderer", () => {
     input.emit("keypress", "", { name: "a" });
     await tick();
     await tick();
+    input.emit("keypress", "", { name: "pagedown" });
+    input.emit("keypress", "", { name: "escape" });
     input.emit("keypress", "", { name: "escape" });
     input.emit("keypress", "", { name: "q" });
     await tui;
@@ -735,8 +989,8 @@ describe("TUI renderer", () => {
     expect(outputText.join("")).toContain("HOME");
     expect(outputText.join("")).toContain("查看支付历史");
     expect(outputText.join("")).toContain("不要发送草稿");
-    expect(outputText.join("")).toContain("No final reply was r");
-    expect(outputText.join("")).toContain("eported (cancelled)");
+    expect(outputText.join("")).toContain("Details [");
+    expect(outputText.join("").replace(/\s+/gu, " ")).toContain("No final reply was reported (cancelled).");
     expect(outputText.join("")).not.toContain("characters hidden");
   });
 
@@ -977,14 +1231,17 @@ describe("TUI renderer", () => {
     await tick();
     input.emit("keypress", "", { name: "pagedown" });
     await tick();
+    const latestReplyFrame = outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(latestReplyFrame).toContain("Harness | DETAILS");
+    expect(latestReplyFrame).toContain("第二轮最终回复");
+    expect(latestReplyFrame).not.toContain("第一轮最终回复");
+    input.emit("keypress", "", { name: "escape" });
     input.emit("keypress", "", { name: "escape" });
     input.emit("keypress", "", { name: "q" });
     await tui;
     const frames = outputText.join("").split("\u001b[H\u001b[2J");
     const lastFrame = frames[frames.length - 1] ?? "";
-    expect(lastFrame).toContain("Last reply [2/");
-    expect(lastFrame).toContain("细节");
-    expect(lastFrame).not.toContain("第一轮最终回复");
+    expect(lastFrame).toContain("HOME");
     expect(lastFrame.split("\n").length).toBeLessThanOrEqual(23);
     expect(rawModes).toEqual([true, false]);
   });

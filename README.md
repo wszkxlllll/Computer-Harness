@@ -99,7 +99,13 @@ node apps/cli/dist/index.js --help
 .\scripts\harness.ps1 start
 ```
 
-它会使用隔离 Node，启动本地 CUA daemon 并打开 TUI；退出后清理自己启动的 daemon。首页按 `F` 选择下一次 Run 的 Planning、Memory、Batch、Context、Risk Guard 与 Monitor。详细配置、预设和排查命令见[本地启动器说明](./docs/local-launcher.md)。
+首次使用时，先把 `.harness.local.example.psd1` 复制为 `.harness.local.psd1`，填写 Node、env 文件、CUA daemon、socket、Model 和输出目录；API key 只放在 env 文件。之后不必为每个 Run 重输这些机器设置，`start` 会读取本地配置，必要时启动 daemon 并进入 TUI，退出时清理本次启动的 daemon。这是 PowerShell 启动的终端界面，不是免命令行的桌面 App。详细配置和预设见[本地启动器说明](./docs/local-launcher.md)。
+
+可选地，配置完成后可显式运行 `./scripts/install-harness-shortcut.ps1 -Destination StartMenu`（也支持 `Desktop` 或 `Both`），创建一个打开本仓库 `harness.ps1 start` 的 PowerShell 终端快捷方式。安装器不会自动运行、不覆盖同名快捷方式，也不把 `.env`、本地配置或密钥写入快捷方式；点击后仍是终端 TUI，不是原生 GUI，首次使用仍须按上文准备机器配置。`-WhatIf` 可预览目标；脚本参数允许把菜单/桌面目录注入临时 fixture 以离线验证。
+
+首页会并列显示模型、Computer/窗口目标、功能预设和 Risk Guard 状态。先输入目标并按 `Enter` 开始；`F` 查看高级功能。若要先选窗口，按 `Esc` 离开目标编辑（草稿保留在当前 TUI），再按 `W` 选择，最后按 `I` 继续编辑目标。
+
+窄终端首页会优先保留目标、Guard、状态和下一步；按 `D` 或 `PageDown` 打开可翻页的完整详情，`PageUp`/`PageDown` 翻页，`Esc` 或 `Q` 返回首页。详情页始终用文字显示 Guard 与会话状态；长错误通知不会覆盖 `BLOCKED`，两者都可在详情中读完。返回首页后可用 `I`/`Enter` 继续编辑保留的目标草稿。
 
 调试或受控 fixture 需要显式绑定窗口时，可使用已由 CUA 能力探针取得的 PID 与 window ID：
 
@@ -150,7 +156,7 @@ node apps/cli/dist/index.js --goal "<instruction returned by reset>" --model glm
 
 ## TUI 预览
 
-TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首页，按大写 `W` 选择 host 窗口（或 primary desktop），按大写 `F` 打开本次 Run 的功能选择页，再输入目标并按 Enter 开始；使用时仍需提供 `--model` 和 Computer 连接：
+TUI 需要 `stdin`/`stdout` 都是可交互 TTY。无 `--goal` 时先进入首页的目标编辑；首页显示当前模型、Computer/窗口目标、功能预设和 Risk Guard 状态。输入目标后按 `Enter` 开始，`F` 打开本次 Run 的高级功能设置。CUA 选窗步骤是：按 `Esc` 离开目标编辑、按 `W` 选择 host 窗口（或 primary desktop）、按 `I` 回到保留的目标草稿，再按 `Enter` 开始。直接使用 CLI 时仍需提供 `--model` 和 Computer 连接：
 
 ```text
 node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/tui" --env-file ".env"
@@ -163,14 +169,14 @@ node apps/cli/dist/index.js --tui --model glm-5.3-flash --computer cua --cua-soc
 | 按键 | 作用 |
 | --- | --- |
 | `I` | 进入 goal/correction 编辑；Run 正在执行时先请求 pause/quiescence，不能用编辑态绕过未决动作 |
-| `Enter` | 首页开始 Run；Run 中提交 correction。提交经过 Controller Inbox，旧决策失效；pause barrier 未完成时会排队 |
-| `W` | 首页打开只读窗口选择器；按应用名/标题选择后续 Run 的 host target，或选择 primary desktop |
-| `F` | 首页打开功能选择页；用方向键或 `J/K` 移动，Space 切换布尔项，Left/Right 切换枚举（包括 Risk Guard `off`/`layered`），Enter 保存，Esc 取消 |
+| `Enter` | 目标编辑中开始 Run；首页非编辑状态进入目标编辑；Run 中提交 correction。提交经过 Controller Inbox，旧决策失效；pause barrier 未完成时会排队 |
+| `W` | 首页打开只读窗口选择器；编辑目标时先按 `Esc`，草稿会保留。按应用名/标题选择后续 Run 的 host target，或选择 primary desktop |
+| `F` | 首页打开高级功能页；目标编辑中按大写 `F` 也可打开且保留草稿。用方向键或 `J/K` 移动，Space 切换布尔项，Left/Right 切换枚举（包括 Risk Guard `off`/`layered`），Enter 保存，Esc 取消 |
 | `P` / `R` | 通过 Controller 暂停 / 恢复当前 Run |
 | `A` / `Ctrl-C` | Abort 当前 Run；退出时保留未确认 cleanup，不把停止请求冒称底层已停止 |
 | `Y` / `N` | waiting approval 时批准 / 拒绝 |
 | `PageUp` / `PageDown` | 查看长 reply、question 或 approval 的分页 |
-| `Esc` / `Q` | 取消编辑或退出；退出会恢复 raw mode 和 cursor |
+| `Esc` / `Q` | 目标编辑中 `Esc` 暂存草稿并回到设置首页；纠正编辑中 `Esc` 丢弃纠正；功能页/窗口页 `Esc` 取消该页；设置首页的 `Esc`/`Q` 退出并恢复 raw mode 和 cursor |
 
 编辑态中的 `A`、`Q` 是正文，不是快捷键。必须把焦点放在当前终端；TUI 不注册全局热键，也不会把其他应用收到的按键冒称为输入。输入会显示在本地终端，可能留在 terminal scrollback、录屏或终端日志中；共享 diagnostics/report 仍不写入原始输入。真实 no-goal WinPTY 只证明终端生命周期、中文/resize、尾部可见、500 上限和退出清理，不证明完整 model Run、跨 Run 的真实纠正或通用焦点；另有一次 T10 synthetic fixture GLM 闭环，见“当前证据与限制”。
 

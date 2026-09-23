@@ -6,7 +6,7 @@ import type { RunSnapshot } from "@computer-harness/trajectory";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
 import type { RiskGuardMode, RiskProfile } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
-import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput } from "./tui-text.js";
+import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
 
 const LEGACY_INCREMENTAL_POLL_MS = 250;
 const MAX_TUI_INPUT_LENGTH = 500;
@@ -71,7 +71,7 @@ export interface ApplicationTuiOptions {
   lifecycleWaitMs?: number;
 }
 
-type TuiMode = "home" | "features" | "windows" | "run";
+type TuiMode = "home" | "home_details" | "features" | "windows" | "run";
 type TuiFeedState = "live" | "resync_required" | "closed";
 
 interface PendingCorrection {
@@ -167,6 +167,20 @@ export async function runApplicationTui(
     }
     if (mode === "windows") {
       write(`\u001b[H\u001b[2J${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, output.columns, output.rows)}\n`);
+      return;
+    }
+    if (mode === "home_details") {
+      write(`\u001b[H\u001b[2J${buildTuiHomeDetailsFrame(activeMetadata, session, {
+        editMode,
+        input: inputValue,
+        notice,
+        feedState,
+        reply: lastReply,
+        detailPage,
+        inputLimitReached,
+        columns: output.columns,
+        rows: output.rows,
+      })}`);
       return;
     }
     write(`\u001b[H\u001b[2J${buildTuiHomeFrame(activeMetadata, session, {
@@ -285,14 +299,17 @@ export async function runApplicationTui(
       notice = `Run finished: ${outcome ?? currentSnapshot.outcome ?? "unknown"}`;
       render();
       let reportNotice = "";
+      let reportUnavailable = false;
       try {
         const report = await handle.report();
         await writeRunReport(report, handle.config.outputDir);
         reportNotice = `; report written to ${handle.config.outputDir}`;
       } catch (error) {
-        reportNotice = `; report unavailable: ${errorMessage(error)}`;
+        reportUnavailable = true;
+        reportNotice = "; report unavailable";
       }
       if (mode === "home" && currentHandle === undefined) {
+        if (reportUnavailable) lastReply = `${lastReply}\nRun report unavailable. Check the output path and write permissions.`;
         notice = `${notice}${reportNotice}`;
         render();
       }
@@ -336,6 +353,7 @@ export async function runApplicationTui(
       render();
       return;
     }
+    editMode = false;
     if (featureSelection.memoryRetrieval === "hybrid" && activeMetadata.embeddingReady !== true) {
       notice = "Hybrid retrieval needs --memory-embedding-endpoint and MEMORY_EMBEDDING_API_KEY before starting.";
       render();
@@ -358,6 +376,8 @@ export async function runApplicationTui(
         return;
       }
     }
+    notice = "Starting Run…";
+    render();
     invoke(async () => {
       const handle = await session.startRun(trimmed, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode));
       attachRun(handle, trimmed);
@@ -607,10 +627,32 @@ export async function runApplicationTui(
   const detailPageCount = (): number => {
     const width = tuiWidth(output.columns);
     const rows = Math.max(12, output.rows ?? process.stdout.rows ?? 24);
+    const homeUi = {
+      editMode,
+      input: inputValue,
+      notice,
+      feedState,
+      reply: lastReply,
+      detailPage: 0,
+      inputLimitReached,
+      columns: output.columns,
+      rows: output.rows,
+    };
+    if (mode === "home_details") {
+      const frame = buildTuiHomeDetailsFrame(activeMetadata, session, homeUi);
+      const pageCount = /Details \[1\/(\d+)\]/u.exec(frame)?.[1];
+      return pageCount === undefined ? 1 : Number(pageCount);
+    }
+    if (mode === "home") {
+      const frame = buildTuiHomeFrame(activeMetadata, session, homeUi);
+      const pageCount = /Details \[1\/(\d+)\]/u.exec(frame)?.[1];
+      return pageCount === undefined ? 1 : Number(pageCount);
+    }
     const detail = mode === "run" && currentHandle !== undefined
       ? detailForSnapshot(currentHandle.controller.getSnapshot(), currentEvents)
-      : lastReply.length > 0 ? { label: "Last reply", text: lastReply } : undefined;
-    return detail === undefined ? 1 : paginateTuiText(detail.text, Math.max(1, width - 4), 0, detailLineLimit(rows)).pageCount;
+      : undefined;
+    if (detail === undefined) return 1;
+    return paginateTuiText(detail.text, Math.max(1, width - 4), 0, detailLineLimit(rows)).pageCount;
   };
 
   const changeDetailPage = (delta: number): void => {
@@ -633,8 +675,27 @@ export async function runApplicationTui(
       }
       return;
     }
-    if (keyName === "pageup") { changeDetailPage(-1); return; }
-    if (keyName === "pagedown") { changeDetailPage(1); return; }
+    if (keyName === "pageup" || keyName === "pagedown") {
+      if (mode === "home") {
+        mode = "home_details";
+        detailPage = 0;
+        render();
+      } else if (mode === "home_details") {
+        changeDetailPage(keyName === "pageup" ? -1 : 1);
+      } else {
+        changeDetailPage(keyName === "pageup" ? -1 : 1);
+      }
+      return;
+    }
+    if (mode === "home_details" && (keyName === "escape" || keyName === "q")) {
+      mode = "home";
+      render();
+      return;
+    }
+    // Details is read-only even when opened from the focused goal editor.
+    // Only the navigation/return keys above and Ctrl-C (handled above) act;
+    // printable input, Backspace and Enter must not mutate or submit a draft.
+    if (mode === "home_details") return;
     if (keyName === "escape" && pendingCorrection !== undefined && !editMode) {
       cancelPendingCorrection("Correction cancelled; draft discarded.");
       return;
@@ -643,11 +704,18 @@ export async function runApplicationTui(
     // editor is focused. Lowercase f remains ordinary goal text.
     if (mode === "home" && editMode && keyName === "f" && printable === "F") {
       editMode = false;
-      inputValue = "";
-      inputLimitReached = false;
       draftFeatureSelection = { ...featureSelection };
       mode = "features";
       notice = "Choose features for the next Run; arrows move, Space/Left/Right change, Enter saves.";
+      render();
+      return;
+    }
+    // Keep D available from the focused goal editor without making ordinary
+    // lowercase goal text a navigation shortcut. PageDown is the alternate
+    // path for keyboards that cannot send an explicit uppercase character.
+    if (mode === "home" && editMode && keyName === "d" && printable === "D") {
+      mode = "home_details";
+      detailPage = 0;
       render();
       return;
     }
@@ -662,10 +730,14 @@ export async function runApplicationTui(
           return;
         }
         editMode = false;
-        inputValue = "";
-        inputLimitReached = false;
-        if (mode === "run" && currentHandle?.controller.getSnapshot().status === "paused") {
-          notice = "Correction cancelled; Run remains paused. Press R to resume.";
+        if (mode === "home") {
+          notice = inputValue.trim().length > 0 ? "Goal draft kept." : "Goal editor closed.";
+        } else {
+          inputValue = "";
+          inputLimitReached = false;
+          notice = currentHandle?.controller.getSnapshot().status === "paused"
+            ? "Correction cancelled; Run remains paused. Press R to resume."
+            : "Correction draft discarded.";
         }
         render();
         return;
@@ -678,11 +750,11 @@ export async function runApplicationTui(
         flushRender();
         const value = inputValue;
         if (mode === "home") {
+          startGoal(value);
+        } else {
           editMode = false;
           inputValue = "";
           inputLimitReached = false;
-          startGoal(value);
-        } else {
           submitCorrection(value);
         }
         render();
@@ -760,6 +832,12 @@ export async function runApplicationTui(
       return;
     }
     if (mode === "home") {
+      if (keyName === "d") {
+        mode = "home_details";
+        detailPage = 0;
+        render();
+        return;
+      }
       if (keyName === "f") {
         featureCursor = 0;
         draftFeatureSelection = { ...featureSelection };
@@ -995,8 +1073,8 @@ function detailLineLimit(rows: number): number {
   return Math.max(1, Math.floor(rows) - 20);
 }
 
-function renderDetailBlock(detail: TuiDetail, width: number, rows: number, pageIndex: number): string[] {
-  const page = paginateTuiText(detail.text, Math.max(1, width - 4), pageIndex, detailLineLimit(rows));
+function renderDetailBlock(detail: TuiDetail, width: number, rows: number, pageIndex: number, linesPerPage = detailLineLimit(rows)): string[] {
+  const page = paginateTuiText(detail.text, Math.max(1, width - 4), pageIndex, linesPerPage);
   return [
     clip(`${detail.label} [${page.pageIndex + 1}/${page.pageCount}] (PageUp/PageDown to view):`, width),
     ...page.lines.map((line) => `  ${line}`),
@@ -1077,33 +1155,213 @@ function buildTuiHomeFrame(
 ): string {
   const width = tuiWidth(ui.columns);
   const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
+  const visibleRows = Math.max(1, Math.min(rows - 1, 21));
   const last = session.lastRun;
-  const lines = [
-    "Computer Harness TUI  |  HOME",
-    "─".repeat(width),
-    `Profile: ${metadata.profile}   Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${metadata.riskGuard})`,
-    `Session: ${session.status}   Event feed: ${ui.feedState}`,
-    `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}   Target: ${formatCuaTarget(metadata)}`,
-    `Features: ${formatTuiFeatures(metadata.features, metadata.riskGuard)}`,
-    `Focus evidence: ${metadata.computer === "cua" ? "UNKNOWN (generic foreground input is not fixture-verified)" : "UNKNOWN (backend metadata is not focus proof)"}`,
-    TERMINAL_INPUT_SCOPE_NOTICE,
-    "",
-    session.status === "blocked"
-      ? "Environment ownership is held by another Run or pending cleanup; this session cannot start another Run."
-      : "Enter a goal to start a fresh Run. Finished Runs never reuse their Controller, approval, or Memory store.",
-    last === undefined ? "Last Run: none" : `Last Run: ${clip(last.goal, width - 12)} → ${last.outcome ?? last.error ?? "not completed"}`,
-    "",
-    ...(ui.reply === undefined || ui.reply.length === 0 ? [] : renderDetailBlock({ label: "Last reply", text: ui.reply }, width, rows, ui.detailPage ?? 0)),
-    "",
-    ui.editMode
-      ? "Editing: Enter start   Esc cancel   Ctrl-C abort"
-      : `${canSelectWindow(metadata) ? "Keys: W choose window   " : ""}F configure features   I/Enter edit   Esc/Q exit`,
+  const hasGoalDraft = ui.input.trim().length > 0;
+  const goalPrefix = ui.editMode ? "Goal: >" : hasGoalDraft ? "Goal draft:" : "Goal:";
+  const goalBudget = Math.max(1, width - goalPrefix.length - 1);
+  const goalValue = hasGoalDraft
+    ? tailTuiInput(ui.input, goalBudget)
+    : ui.editMode ? "" : "not entered";
+  const goalTruncated = hasGoalDraft && wrapHomeText(ui.input, goalBudget).length > 1;
+  const goal = clipHomeLine(`${goalPrefix}${goalValue.length === 0 ? "" : ` ${goalValue}`}`, width);
+  const targetValue = formatHomeTarget(metadata);
+  const target = clipHomeField("Target", targetValue, width);
+  const safety = clipHomeField("Risk Guard", metadata.riskGuard === "layered" ? "ON" : "OFF", width);
+  // A long notice must never erase the more important ownership barrier.
+  // The complete notice remains available from the keyboard-accessible page.
+  const statusValue = session.status === "blocked"
+    ? "BLOCKED"
+    : ui.inputLimitReached
+      ? `Input limit reached (${MAX_TUI_INPUT_LENGTH} characters)`
+      : ui.notice.length > 0 ? ui.notice : session.status;
+  const status = clipHomeField("Status", statusValue, width);
+  const next = clipHomeField("Next", ui.editMode
+    ? "Enter starts; Esc keeps draft"
+    : hasGoalDraft ? "I resumes; Enter edits" : "I/Enter edits", width);
+  const keysText = ui.editMode
+    ? canSelectWindow(metadata) ? "D details; Esc then W; F options" : "D details; F options; Ctrl-C exit"
+    : canSelectWindow(metadata) ? "D details; F options; W target" : "D details; F options; Esc/Q exit";
+  const keys = clipHomeField("Keys", keysText, width);
+  const scope = clipHomeLine("TTY only; no global hotkeys", width);
+  const model = clipHomeField("Model", metadata.provider, width);
+  const computer = clipHomeField("Computer", metadata.computer, width);
+  const featureSet = clipHomeField("Features", describeTuiFeatureSet(metadata.features), width);
+  const output = clipHomeField("Output", metadata.output, width);
+  const coreLines = [
+    "Harness | HOME",
+    goal.text,
+    model.text,
+    computer.text,
+    target.text,
+    featureSet.text,
+    safety.text,
+    status.text,
+    next.text,
+    keys.text,
+    scope.text,
   ];
-  if (ui.editMode) lines.push(`> ${tailTuiInput(ui.input, Math.max(1, width - 2))}`);
-  if (ui.inputLimitReached) lines.push(`Input is limited to ${MAX_TUI_INPUT_LENGTH} characters; newest characters remain visible.`);
-  if (ui.notice.length > 0) lines.push(`Notice: ${clip(ui.notice, width - 8)}`);
-  lines.push(`Artifacts root: ${clip(metadata.output, width - 17)}`);
+  const needsInlineDetails = status.truncated || ui.notice.length > 0 || (ui.reply?.length ?? 0) > 0 ||
+    ((goal.truncated || goalTruncated) && hasGoalDraft) || target.truncated || ui.inputLimitReached ||
+    next.truncated || keys.truncated || last !== undefined || output.truncated;
+  const details = needsInlineDetails ? buildHomeDetailsText(metadata, session, ui) : [];
+
+  const lines = [...coreLines];
+  const optionalRows = Math.max(0, visibleRows - lines.length);
+  if (last !== undefined && optionalRows > 2) lines.push(clipHomeField("Last Run", last.outcome ?? last.error ?? "not completed", width).text);
+  if (output.truncated === false && optionalRows > 3) lines.push(output.text);
+  const detailLineCount = details.length === 0 ? 0 : Math.max(0, visibleRows - lines.length - 1);
+  if (detailLineCount > 0) {
+    const page = paginateHomeText(details.join("\n\n"), width, ui.detailPage ?? 0, detailLineCount);
+    lines.push(clipHomeLine(`Details [${page.pageIndex + 1}/${page.pageCount}] PageUp/PageDown`, width).text);
+    lines.push(...page.lines);
+  }
   return `${lines.join("\n")}\n`;
+}
+
+function buildHomeDetailsText(
+  metadata: TuiMetadata,
+  session: ApplicationSession,
+  ui: TuiFrameUi & { readonly feedState: TuiFeedState; readonly reply?: string },
+): string[] {
+  const sections: string[] = [];
+  const ownership = session.inspectEnvironment();
+  const notice = ui.notice.trim();
+  const goal = ui.input.trim();
+
+  sections.push(`Current status / notice:\n${notice.length === 0 ? "No additional status." : notice}`);
+  if (ui.reply !== undefined && ui.reply.length > 0) sections.push(`Last reply:\n${ui.reply}`);
+  sections.push(`Full target:\n${formatHomeTarget(metadata)}`);
+  sections.push(`Full goal:\n${goal.length === 0 ? "not entered" : goal}`);
+  sections.push(`Model: ${metadata.provider}`);
+  sections.push(`Computer / environment: ${metadata.computer}`);
+  sections.push(`Preset: ${describeTuiFeatureSet(metadata.features)}\nAdvanced features: ${formatTuiFeatures(metadata.features, metadata.riskGuard)}`);
+  sections.push(formatTuiSafety(metadata));
+  if (session.status === "blocked") {
+    sections.push(`Session status: BLOCKED. Another Run or pending cleanup owns this environment.${ownership?.reason === undefined ? "" : `\nOwnership reason: ${ownership.reason}`}`);
+  } else {
+    sections.push(`Session status: ${session.status}.`);
+  }
+  sections.push(`Next: ${ui.editMode ? "Enter starts the Run; Esc keeps the goal draft." : goal.length > 0 ? "I resumes the goal draft; Enter opens the editor." : "I or Enter opens the goal editor."}`);
+  sections.push(`Keyboard:\nD opens these details; PageDown also opens them. PageUp/PageDown change pages; Esc or Q returns home.\nF opens advanced options.${canSelectWindow(metadata) ? " In the goal editor, Esc then W opens the CUA window chooser; W changes the target from setup." : ""}\nCtrl-C exits from the goal editor.\n${TERMINAL_INPUT_SCOPE_NOTICE}`);
+  if (ui.inputLimitReached) sections.push(`Goal input is limited to ${MAX_TUI_INPUT_LENGTH} characters. The newest characters remain visible in the editor.`);
+  const last = session.lastRun;
+  if (last !== undefined) {
+    sections.push(`Last Run:\n${last.outcome ?? last.error ?? "not completed"}\nGoal: ${last.goal}${last.error === undefined ? "" : `\nError: ${last.error}`}`);
+  }
+  sections.push(`Output directory:\n${metadata.output}`);
+  return sections;
+}
+
+function buildTuiHomeDetailsFrame(
+  metadata: TuiMetadata,
+  session: ApplicationSession,
+  ui: TuiFrameUi & { readonly feedState: TuiFeedState; readonly reply?: string },
+): string {
+  const width = tuiWidth(ui.columns);
+  const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
+  const visibleRows = Math.max(1, Math.min(rows - 1, 21));
+  const blocked = session.status === "blocked";
+  const notice = ui.notice.trim();
+  // Reserve a fixed, text-only context and return path on every page. The
+  // complete notice is paginated below, never substituted for BLOCKED.
+  const fixedRows = 7;
+  const page = paginateHomeText(
+    buildHomeDetailsText(metadata, session, ui).join("\n\n"),
+    width,
+    ui.detailPage ?? 0,
+    Math.max(1, visibleRows - fixedRows),
+  );
+  const statusText = blocked ? "BLOCKED" : notice.length > 0 ? notice : session.status;
+  const lines = [
+    clipHomeLine("Harness | DETAILS", width).text,
+    clipHomeField("Risk Guard", metadata.riskGuard === "layered" ? "ON" : "OFF", width).text,
+    clipHomeField("Session", blocked ? "BLOCKED" : session.status, width).text,
+    clipHomeField("Status", statusText, width).text,
+    clipHomeLine(`Details [${page.pageIndex + 1}/${page.pageCount}]`, width).text,
+    ...page.lines,
+    clipHomeLine("PgUp/PgDn page", width).text,
+    clipHomeLine("Esc/Q: home", width).text,
+  ];
+  return `${lines.slice(0, visibleRows).join("\n")}\n`;
+}
+
+function clipHomeField(label: string, value: string, width: number): { readonly text: string; readonly truncated: boolean } {
+  const prefix = `${label}: `;
+  const clipped = clipHomeLine(value, Math.max(1, width - prefix.length));
+  return { text: `${prefix}${clipped.text}`, truncated: clipped.truncated };
+}
+
+function clipHomeLine(value: string, width: number): { readonly text: string; readonly truncated: boolean } {
+  const normalized = sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
+  if (wrapHomeText(normalized, width).length <= 1) return { text: wrapHomeText(normalized, width)[0] ?? "", truncated: false };
+  const first = wrapHomeText(normalized, Math.max(1, width - 1))[0] ?? "";
+  return { text: `${first}…`, truncated: true };
+}
+
+function paginateHomeText(value: string, width: number, pageIndex: number, linesPerPage: number): { readonly lines: readonly string[]; readonly pageIndex: number; readonly pageCount: number } {
+  const wrapped = value.split(/\r?\n/u).flatMap((line) => wrapHomeText(line, Math.max(1, width)));
+  const pageSize = Math.max(1, Math.floor(linesPerPage));
+  const pageCount = Math.max(1, Math.ceil(wrapped.length / pageSize));
+  const currentPage = Math.min(Math.max(0, Math.floor(pageIndex)), pageCount - 1);
+  return {
+    lines: wrapped.slice(currentPage * pageSize, (currentPage + 1) * pageSize),
+    pageIndex: currentPage,
+    pageCount,
+  };
+}
+
+function wrapHomeText(value: string, width: number): string[] {
+  const normalized = sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
+  if (normalized.length === 0) return [""];
+  const lines: string[] = [];
+  let current = "";
+  for (const word of normalized.split(" ")) {
+    const candidate = current.length === 0 ? word : `${current} ${word}`;
+    const candidateLines = wrapTuiText(candidate, Math.max(1, width));
+    if (candidateLines.length === 1) {
+      current = candidateLines[0]!;
+      continue;
+    }
+    if (current.length > 0) lines.push(current);
+    const wordLines = wrapTuiText(word, Math.max(1, width));
+    lines.push(...wordLines.slice(0, -1));
+    current = wordLines[wordLines.length - 1] ?? "";
+  }
+  if (current.length > 0 || lines.length === 0) lines.push(current);
+  return lines;
+}
+
+function describeTuiFeatureSet(features: TuiFeatureSelection | undefined): string {
+  const selected = normalizeTuiFeatureSelection(features);
+  const matches = (expected: Pick<TuiFeatureSelection, "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "monitor">): boolean =>
+    selected.planning === expected.planning &&
+    selected.memory === expected.memory &&
+    selected.memoryRetrieval === expected.memoryRetrieval &&
+    selected.batching === expected.batching &&
+    selected.contextMode === expected.contextMode &&
+    selected.monitor === expected.monitor &&
+    selected.grounding === "off";
+  if (matches({ planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", monitor: "off" })) return "Baseline";
+  if (matches({ planning: true, memory: "facts", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "shadow" })) return "Assisted";
+  if (matches({ planning: true, memory: "entities", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "guidance" })) return "Research";
+  return "Custom";
+}
+
+function formatTuiSafety(metadata: TuiMetadata): string {
+  const guard = metadata.riskGuard === "layered"
+    ? "Risk Guard ON (layered)"
+    : "Risk Guard OFF; automatic review disabled";
+  return guard;
+}
+
+function formatHomeTarget(metadata: TuiMetadata): string {
+  if (metadata.computer !== "cua") return "N/A";
+  if (metadata.cuaWindowTarget === undefined) return "Primary desktop (default)";
+  const label = metadata.cuaWindowLabel === undefined
+    ? "Selected window"
+    : sanitizeTerminalText(metadata.cuaWindowLabel).replace(/\s+\(pid=\d+,\s*window=\d+\)$/u, "");
+  return `${label}; pid=${metadata.cuaWindowTarget.pid}; window=${metadata.cuaWindowTarget.windowId}; delivery=${metadata.cuaWindowDeliveryMode ?? "background"}`;
 }
 
 const tuiFeatureRows = [
