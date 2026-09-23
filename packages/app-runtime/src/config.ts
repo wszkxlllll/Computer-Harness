@@ -24,13 +24,19 @@ import type { RunEventFeed } from "./event-feed.js";
 
 export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash";
 export type AppRuntimeRiskModel = "off" | "same" | AppRuntimeModel;
+/** Explicit adapter identity for a Provider supplied by the application. */
+export interface ExternalProviderDescriptor {
+  readonly kind: "external";
+  readonly id: string;
+}
+export type RunModel = AppRuntimeModel | ExternalProviderDescriptor;
 export type MemoryRetrievalMode = "off" | "lexical" | "hybrid";
 
 /** JSON-safe configuration after CLI parsing and environment resolution. */
 export interface ResolvedRunConfig {
   runId?: RunId;
   goal: string;
-  model: AppRuntimeModel;
+  model: RunModel;
   computer: ComputerBackendConfig;
   outputDir: string;
   maxSteps: number;
@@ -77,7 +83,7 @@ export interface ProviderCredentials {
 }
 
 export interface ProviderFactoryOptions {
-  model: AppRuntimeModel;
+  model: RunModel;
   config: ResolvedRunConfig;
   assetReader: AssetReader;
   outputDir: string;
@@ -104,7 +110,9 @@ export type ComputerFactory = (options: ComputerFactoryOptions) => Promise<impor
 
 export interface RunDependencies {
   credentials?: ProviderCredentials;
+  /** Returned Providers belong to one Run; create fresh adapters and self-clean if construction rejects. */
   createProvider?: ProviderFactory;
+  /** Returned Computers belong to one Run; self-clean rejected construction and use Computer.dispose for failed-open resources. */
   createComputer?: ComputerFactory;
   computerFactoryDependencies?: ComputerFactoryDependencies;
   createEventWriter?: (path: string, runId: RunId) => RunEventWriter;

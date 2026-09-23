@@ -414,7 +414,7 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it("closes only the created writer when later computer construction fails", async () => {
+  it("closes the writer and already-created Provider when later Computer construction fails", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-failure-"));
     const close = vi.fn(async () => undefined);
     const providerClose = vi.fn(async () => undefined);
@@ -437,7 +437,7 @@ describe("app-runtime RunHandle", () => {
       })).rejects.toBe(computerError);
       expect(close).toHaveBeenCalledOnce();
       expect(computerFactory).toHaveBeenCalledOnce();
-      expect(providerClose).not.toHaveBeenCalled();
+      expect(providerClose).toHaveBeenCalledOnce();
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

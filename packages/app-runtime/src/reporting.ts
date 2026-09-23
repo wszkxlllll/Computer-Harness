@@ -28,12 +28,15 @@ export async function buildRunReport(
   const fixture = await readFixtureResult(config.fixtureResult);
   const memoryRetrieval = config.memory === "off" ? "off" : config.memoryRetrieval ?? "lexical";
   const managedGrounding = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
+  const externalComputer = config.computer.kind === "external" ? config.computer : undefined;
   const summary = {
     runId,
     goal: config.goal,
-    model: config.model,
-    computer: config.computer.kind,
-    computerTarget: config.computer.kind === "cua"
+    model: typeof config.model === "string" ? config.model : { kind: config.model.kind, id: config.model.id },
+    computer: externalComputer === undefined ? config.computer.kind : { kind: externalComputer.kind, id: externalComputer.id },
+    computerTarget: externalComputer !== undefined
+      ? { mode: "external", id: externalComputer.id }
+      : config.computer.kind === "cua"
       ? managedGrounding
         ? { mode: "managed-browser", deliveryMode: config.computer.windowDeliveryMode ?? "foreground" }
         : config.computer.windowTarget === undefined

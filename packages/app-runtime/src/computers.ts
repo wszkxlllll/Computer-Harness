@@ -6,6 +6,11 @@ import type { WindowTargetDiscovery } from "./application-session.js";
 
 export type ComputerBackendConfig =
   | {
+      /** Adapter supplied by RunDependencies.createComputer. */
+      kind: "external";
+      id: string;
+    }
+  | {
       kind: "cua";
       socketPath: string;
       screenshotDir: string;
@@ -69,6 +74,9 @@ export async function createComputer(
   config: ComputerBackendConfig,
   dependencies: ComputerFactoryDependencies = {},
 ): Promise<Computer> {
+  if (config.kind === "external") {
+    throw new Error(`external Computer '${config.id}' requires an injected createComputer factory`);
+  }
   if (config.kind === "osworld") {
     return new OsworldComputer({
       bridge: new OsworldBridgeClient({

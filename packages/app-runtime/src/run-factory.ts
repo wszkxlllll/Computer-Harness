@@ -12,6 +12,9 @@ import {
   createDefaultToolRegistry,
   groundingComputerTools,
   type ActionPolicy,
+  type CleanupDiagnostic,
+  type CleanupOperation,
+  type Computer,
   type ContextCompiler,
   type MemoryRecallService,
   type ProviderAdapter,
@@ -37,6 +40,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     outputDir: resolve(input.outputDir),
     computer: effectiveComputerConfig(input.computer, grounding),
   };
+  validateExternalSelections(config, dependencies);
+  if (!Number.isInteger(config.cleanupDeadlineMs) || config.cleanupDeadlineMs <= 0) {
+    throw new Error("cleanupDeadlineMs must be a positive integer");
+  }
   const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
   if (managedGrounding) {
     if (config.computer.kind !== "cua") {
@@ -60,6 +67,17 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     }
   }
   const credentials = dependencies.credentials ?? {};
+  const cleanupDiagnostics: CleanupDiagnostic[] = [];
+  const recordCleanupError = (diagnostic: CleanupDiagnostic): void => {
+    cleanupDiagnostics.push(diagnostic);
+    try {
+      dependencies.onCleanupError?.(diagnostic);
+    } catch {
+      // Cleanup diagnostics must not replace the Run outcome or assembly error.
+    }
+  };
+  const ownedProviders: ProviderAdapter[] = [];
+  let computer: Computer | undefined;
   let eventWriter: RunEventWriter | undefined;
   let eventFeed: CommittedEventFeed | undefined;
   let controller: RunController | undefined;
@@ -122,6 +140,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       outputDir: config.outputDir,
       credentials,
     });
+    ownedProviders.push(provider);
+    if (typeof config.model !== "string" && provider.id !== config.model.id) {
+      throw new Error(`injected Provider id '${provider.id}' does not match configured external Provider '${config.model.id}'`);
+    }
     if (config.riskGuard === "layered" && config.riskModel !== "off" && config.riskModel !== "same") {
       await mkdir(resolve(config.outputDir, "risk-review"), { recursive: true });
     }
@@ -136,6 +158,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
             outputDir: resolve(config.outputDir, "risk-review"),
             credentials,
           });
+    if (riskProvider !== undefined && riskProvider !== provider) ownedProviders.push(riskProvider);
     const actionPolicy = dependencies.createActionPolicy === undefined
       ? createActionPolicy(config, riskProvider)
       : dependencies.createActionPolicy(config, riskProvider);
@@ -148,7 +171,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(contextMemoryRecall === undefined ? {} : { memoryRecall: contextMemoryRecall }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
     });
-    const computer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {
+    const createdComputer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {
       ...dependencies.computerFactoryDependencies,
       ...(credentials.osworldBridgeToken === undefined ? {} : { osworldBridgeToken: credentials.osworldBridgeToken }),
     })))(
@@ -157,7 +180,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         credentials,
       },
     );
-    const cleanupDiagnostics: import("@computer-harness/runtime").CleanupDiagnostic[] = [];
+    computer = createdComputer;
     const windowTargetToolNames = config.computer.kind === "cua" && (config.computer.windowTarget !== undefined || managedGrounding)
       ? (() => {
         const allowedComputerTools = new Set(["click", "wait"]);
@@ -178,16 +201,14 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     controller = new RunController({
       runId,
       provider,
-      computer,
+      computer: createdComputer,
       contextCompiler,
       toolRegistry: tools,
       policy: dependencies.createPolicy?.(config) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,
       assetStore,
-      ...(dependencies.onCleanupError === undefined
-        ? { onCleanupError: (diagnostic: import("@computer-harness/runtime").CleanupDiagnostic) => cleanupDiagnostics.push(diagnostic) }
-        : { onCleanupError: (diagnostic: import("@computer-harness/runtime").CleanupDiagnostic) => { cleanupDiagnostics.push(diagnostic); dependencies.onCleanupError?.(diagnostic); } }),
+      onCleanupError: recordCleanupError,
       onEventCommitted: eventFeed.publish,
       batching: config.batching,
       cleanupDeadlineMs: config.cleanupDeadlineMs,
@@ -197,12 +218,133 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(dependencies.clock === undefined ? {} : { clock: dependencies.clock }),
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
     });
-    return createRunHandle(config, runId, controller, eventWriter, eventFeed, cleanupDiagnostics);
+    return createRunHandle(
+      config,
+      runId,
+      controller,
+      eventFeed,
+      cleanupDiagnostics,
+      () => attemptOwnedCleanup(
+        "event_writer.close",
+        () => eventWriter!.close(),
+        Date.now() + config.cleanupDeadlineMs,
+        recordCleanupError,
+      ),
+      (includeComputer) => releaseAdapters({
+        providers: ownedProviders,
+        ...(computer === undefined ? {} : { computer }),
+        includeComputer,
+        deadlineMs: config.cleanupDeadlineMs,
+        onCleanupError: recordCleanupError,
+      }),
+    );
   } catch (error) {
     eventFeed?.close();
-    await eventWriter?.close().catch(() => undefined);
+    const cleanupFailures: unknown[] = [];
+    if (eventWriter !== undefined) {
+      cleanupFailures.push(...await attemptOwnedCleanup("event_writer.close", () => eventWriter!.close(), Date.now() + config.cleanupDeadlineMs, recordCleanupError));
+    }
+    cleanupFailures.push(...await releaseAdapters({
+      providers: ownedProviders,
+      ...(computer === undefined ? {} : { computer }),
+      includeComputer: true,
+      deadlineMs: config.cleanupDeadlineMs,
+      onCleanupError: recordCleanupError,
+    }));
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError([error, ...cleanupFailures], "Run assembly failed and one or more owned resources did not close", { cause: error });
+    }
     throw error;
   }
+}
+
+function validateExternalSelections(config: ResolvedRunConfig, dependencies: RunDependencies): void {
+  if (typeof config.model !== "string") {
+    validateExternalId(config.model.id, "Provider");
+    if (dependencies.createProvider === undefined) {
+      throw new Error(`external Provider '${config.model.id}' requires RunDependencies.createProvider`);
+    }
+  }
+  if (config.computer.kind === "external") {
+    validateExternalId(config.computer.id, "Computer");
+    if (dependencies.createComputer === undefined) {
+      throw new Error(`external Computer '${config.computer.id}' requires RunDependencies.createComputer`);
+    }
+    if (config.grounding !== "off") {
+      throw new Error(`external Computer '${config.computer.id}' does not use app-managed CUA/UIA/DOM grounding; set grounding to off`);
+    }
+  }
+}
+
+function validateExternalId(id: string, label: string): void {
+  if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(id)) {
+    throw new Error(`external ${label} id must be 1-64 ASCII letters, digits, dots, underscores, or hyphens`);
+  }
+}
+
+interface AdapterReleaseOptions {
+  readonly providers: readonly ProviderAdapter[];
+  readonly computer?: Computer;
+  readonly includeComputer: boolean;
+  readonly deadlineMs: number;
+  readonly onCleanupError: (diagnostic: CleanupDiagnostic) => void;
+}
+
+async function releaseAdapters(options: AdapterReleaseOptions): Promise<unknown[]> {
+  const failures: unknown[] = [];
+  const deadline = Date.now() + options.deadlineMs;
+  if (options.includeComputer && options.computer?.dispose !== undefined) {
+    failures.push(...await attemptOwnedCleanup(
+      "computer.dispose",
+      () => options.computer!.dispose!(),
+      deadline,
+      options.onCleanupError,
+    ));
+  }
+  const closed = new Set<ProviderAdapter>();
+  for (const provider of [...options.providers].reverse()) {
+    if (provider.close === undefined || closed.has(provider)) continue;
+    closed.add(provider);
+    failures.push(...await attemptOwnedCleanup("provider.close", () => provider.close!(), deadline, options.onCleanupError));
+  }
+  return failures;
+}
+
+async function attemptOwnedCleanup(
+  operation: CleanupOperation,
+  work: () => Promise<void>,
+  deadline: number,
+  onCleanupError: (diagnostic: CleanupDiagnostic) => void,
+): Promise<unknown[]> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const error = new Error(`cleanup deadline exceeded before ${operation}`);
+    onCleanupError({ operation, message: error.message, status: "timed_out" });
+    return [error];
+  }
+  const settled = Promise.resolve().then(work).then(
+    () => ({ status: "completed" as const }),
+    (error: unknown) => ({ status: "failed" as const, error }),
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ status: "timed_out" }>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "timed_out" }), remaining);
+  });
+  const result = await Promise.race([settled, timeout]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (result.status === "completed") return [];
+  if (result.status === "failed") {
+    const message = errorMessage(result.error);
+    onCleanupError({ operation, message });
+    return [result.error];
+  }
+  const error = new Error(`cleanup deadline exceeded during ${operation}`);
+  onCleanupError({ operation, message: error.message, status: "timed_out" });
+  return [error];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -314,23 +456,29 @@ function createRunHandle(
   config: ResolvedRunConfig,
   runId: RunId,
   controller: RunController,
-  eventWriter: RunEventWriter,
   eventFeed: CommittedEventFeed,
-  cleanupDiagnostics: readonly import("@computer-harness/runtime").CleanupDiagnostic[],
+  cleanupDiagnostics: readonly CleanupDiagnostic[],
+  closeOwnedEventWriter: () => Promise<unknown[]>,
+  releaseOwnedAdapters: (includeComputer: boolean) => Promise<unknown[]>,
 ): RunHandle {
   let startPromise: Promise<RunOutcome> | undefined;
   let completionPromise: Promise<RunOutcome> | undefined;
-  let prestartCleanupPromise: Promise<void> | undefined;
+  let prestartCleanupPromise: Promise<unknown[]> | undefined;
   let controllerStarted = false;
   let closedBeforeStart = false;
   let feedClosed = false;
+  let ownedAdapterCleanupPromise: Promise<unknown[]> | undefined;
+  const cleanupOwnedAdapters = (includeComputer: boolean): Promise<unknown[]> => {
+    ownedAdapterCleanupPromise ??= releaseOwnedAdapters(includeComputer);
+    return ownedAdapterCleanupPromise;
+  };
   const closeFeed = (): void => {
     if (feedClosed) return;
     feedClosed = true;
     eventFeed.close();
   };
-  const closeBeforeControllerStart = (): Promise<void> => {
-    prestartCleanupPromise ??= eventWriter.close();
+  const closeBeforeControllerStart = (): Promise<unknown[]> => {
+    prestartCleanupPromise ??= closeOwnedEventWriter();
     return prestartCleanupPromise;
   };
   return {
@@ -350,19 +498,22 @@ function createRunHandle(
         ? Promise.reject<RunOutcome>(new Error("RunController.start requires a non-empty goal"))
         : Promise.resolve().then(() => starter(controller, config.goal, markControllerStarted));
       startPromise = starterPromise;
-      completionPromise = starterPromise.then(async (outcome) => {
+      const completion = starterPromise.then(async (outcome) => {
         if (!controllerStarted) {
-          await closeBeforeControllerStart().catch(() => undefined);
+          await closeBeforeControllerStart();
           closeFeed();
           throw new Error(`RunHandle for ${runId} starter completed without starting its Controller`);
         }
         return outcome;
       }, async (error: unknown) => {
         if (!controllerStarted) {
-          await closeBeforeControllerStart().catch(() => undefined);
+          await closeBeforeControllerStart();
           closeFeed();
         }
         throw error;
+      });
+      completionPromise = completion.finally(async () => {
+        await cleanupOwnedAdapters(!controllerStarted);
       });
       return completionPromise;
     },
@@ -381,10 +532,15 @@ function createRunHandle(
       }
       if (closedBeforeStart) return;
       closedBeforeStart = true;
+      let failures: unknown[] = [];
       try {
-        await eventWriter.close();
+        failures = await closeBeforeControllerStart();
       } finally {
         closeFeed();
+      }
+      failures.push(...await cleanupOwnedAdapters(true));
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `RunHandle for ${runId} failed to close all owned resources`);
       }
     },
   };

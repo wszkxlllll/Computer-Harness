@@ -11,6 +11,9 @@ import type { ProviderFactory, ProviderFactoryOptions } from "./config.js";
  * passed through ProviderFactoryOptions.
  */
 export const createProvider: ProviderFactory = (options: ProviderFactoryOptions): ProviderAdapter => {
+  if (typeof options.model !== "string") {
+    throw new Error(`external Provider '${options.model.id}' requires an injected createProvider factory`);
+  }
   if (options.model === "qwen3.8-flash") return createQwenProvider(options);
   return createGlmProvider(options);
 };

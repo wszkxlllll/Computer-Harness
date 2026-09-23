@@ -113,13 +113,19 @@ export interface RunControllerDependencies {
   onEventCommitted?: CommittedEventListener;
 }
 
-export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close";
+export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close";
 export type CleanupDiagnosticStatus = "timed_out";
 
 export interface CleanupDiagnostic {
   operation: CleanupOperation;
   message: string;
   status?: CleanupDiagnosticStatus;
+}
+
+class CleanupOperationFailure extends Error {
+  public constructor(public readonly operation: CleanupOperation, public readonly original: unknown) {
+    super(errorMessage(original), { cause: original });
+  }
 }
 
 type CallState = "received" | "proposed" | "executing" | "completed" | "failed" | "rejected";
@@ -829,12 +835,44 @@ export class RunController {
     const deadline = Date.now() + this.cleanupDeadlineMs;
     await this.cleanupOperation("event_writer.flush", () => this.eventWriter.flush(), deadline);
     await this.cleanupOperation("event_writer.close", () => this.eventWriter.close(), deadline);
-    if (session !== undefined) {
-      await this.cleanupOperation("computer.close", () => this.computer.close(session), deadline, () => {
+    if (session !== undefined || this.computer.dispose !== undefined) {
+      const operation = session === undefined ? "computer.dispose" : "computer.close";
+      await this.cleanupOperation(operation, () => this.closeComputerResources(session), deadline, () => {
         cleanupPendingComputers.add(this.computer);
       });
     }
     this.latestObservationFingerprint = undefined;
+  }
+
+  private async closeComputerResources(session: ComputerSession | undefined): Promise<void> {
+    let closeFailure: unknown;
+    let hasCloseFailure = false;
+    let disposeFailure: unknown;
+    let hasDisposeFailure = false;
+    if (session !== undefined) {
+      try {
+        await this.computer.close(session);
+      } catch (error) {
+        closeFailure = error;
+        hasCloseFailure = true;
+      }
+    }
+    if (this.computer.dispose !== undefined) {
+      try {
+        await this.computer.dispose();
+      } catch (error) {
+        disposeFailure = error;
+        hasDisposeFailure = true;
+      }
+    }
+    if (hasCloseFailure && hasDisposeFailure) {
+      throw new AggregateError(
+        [closeFailure, disposeFailure],
+        `computer.close: ${errorMessage(closeFailure)}; computer.dispose: ${errorMessage(disposeFailure)}`,
+      );
+    }
+    if (hasCloseFailure) throw closeFailure;
+    if (hasDisposeFailure) throw new CleanupOperationFailure("computer.dispose", disposeFailure);
   }
 
   private async cleanupOperation(
@@ -861,13 +899,15 @@ export class RunController {
     if (timer !== undefined) clearTimeout(timer);
     if (result.status === "completed") return;
     if (result.status === "failed") {
-      if (operation === "computer.close") cleanupPendingComputers.add(this.computer);
-      this.reportCleanupError({ operation, message: errorMessage(result.error) });
+      const failedOperation = result.error instanceof CleanupOperationFailure ? result.error.operation : operation;
+      const message = result.error instanceof CleanupOperationFailure ? errorMessage(result.error.original) : errorMessage(result.error);
+      if (failedOperation === "computer.close" || failedOperation === "computer.dispose") cleanupPendingComputers.add(this.computer);
+      this.reportCleanupError({ operation: failedOperation, message });
       return;
     }
     onTimeout?.();
     this.reportCleanupError({ operation, message: `cleanup deadline exceeded during ${operation}`, status: "timed_out" });
-    if (operation === "computer.close") {
+    if (operation === "computer.close" || operation === "computer.dispose") {
       void settled.then((lateResult) => {
         if (lateResult.status === "completed") cleanupPendingComputers.delete(this.computer);
       });

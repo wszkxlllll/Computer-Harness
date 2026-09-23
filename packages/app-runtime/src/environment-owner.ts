@@ -71,6 +71,7 @@ export function createInProcessEnvironmentOwner(): InProcessEnvironmentOwner {
 
 /** Derive a conservative, stable process-local identity from the backend route. */
 export function environmentIdentityForConfig(config: ComputerBackendConfig): string {
+  if (config.kind === "external") return `external-computer:${config.id}`;
   if (config.kind === "cua") {
     // CUA foreground input is attached to the local physical desktop. Its
     // named pipe is only a transport route, so changing the pipe cannot hand

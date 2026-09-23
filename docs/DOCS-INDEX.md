@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+**Pi 式模块化改造工作树入口**：本分支从 `73412c8` 保存基线后独立施工；第一条纵向切片、架构不变量及验收/停止条件见[Pi 式模块化改造计划](./pi-style-modularization-plan-2026-09-23.md)，workspace TypeScript 装配示例见[Run SDK 装配指南](./sdk-run-composition.md)。原工作树与其研究记录不受本分支改动影响。
+
 日期：2026-09-23
 
 **2026-09-23 GLM `assistantText` 下一步提示实验**：24 次 A/B 原生工具调用表明，一句系统提示可把合成场景的非空 `content` 从 9/12 提高到 12/12，但严格格式仅 5/12；六个可预测场景只有一例给出针对实际动作的具体下一步，且该例先做了多余点击，尚未证明节省主模型轮次。生产提示词未改。方法、逐例复核和现有 Monitor 消费边界见[对照实验报告](./glm-assistant-text-next-action-ab-2026-09-23.md)。

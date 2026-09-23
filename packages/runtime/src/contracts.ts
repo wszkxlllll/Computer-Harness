@@ -59,6 +59,11 @@ export interface Computer {
     options?: ComputerExecuteOptions,
   ): Promise<import("@computer-harness/protocol").ActionReceipt>;
   close(session: ComputerSession): Promise<void>;
+  /**
+   * Release Computer-owned resources acquired outside an open session, or
+   * during a failed open. RunController invokes this after close when present.
+   */
+  dispose?(): Promise<void>;
 }
 
 /** Runtime's current observation for a primitive; backend references stay private. */
@@ -137,6 +142,8 @@ export interface ProviderAdapter {
   ): Promise<ModelTurn>;
   prepare?(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest>;
   generatePrepared?(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn>;
+  /** Optional Run-owned resource cleanup, called after the Run completes. */
+  close?(): Promise<void>;
 }
 
 /** Provider-owned wire preparation metadata. The actual request body stays in
