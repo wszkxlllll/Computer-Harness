@@ -13,6 +13,7 @@ import { sanitizeTerminalText } from "./terminal-output.js";
 import { resolveCuaWindowTargetOptions } from "./window-target-options.js";
 import { defaultManagedBrowserProfileRoot } from "./managed-browser-profile.js";
 import { validateCliArguments } from "./argument-parser.js";
+import { createJevWindowSelector } from "./window-selection-jev.js";
 
 type ModelName = AppRuntimeModel;
 type MemoryToolMode = "facts" | "entities";
@@ -56,6 +57,7 @@ interface CliOptions {
   doctorTimeoutMs: number;
   monitor: MonitorPolicyMode;
   grounding: TuiFeatureSelection["grounding"];
+  windowSelection: "local" | "jev";
   /** Explicit URL for the host-owned temporary browser; never a profile/debug endpoint. */
   managedBrowserUrl?: string;
   managedBrowserProfileMode: "ephemeral" | "persistent";
@@ -85,6 +87,12 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     throw new Error("--grounding must be off, auto, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
   }
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
+  const windowSelectionValue = value("--window-selection") ?? "local";
+  if (windowSelectionValue !== "local" && windowSelectionValue !== "jev") throw new Error("--window-selection must be local or jev");
+  if (windowSelectionValue === "jev" && (!tui || computer !== "cua" || !argv.includes("--allow-window-title-sharing"))) {
+    throw new Error("Jev window selection requires --tui --computer cua and explicit --allow-window-title-sharing");
+  }
+  if (argv.includes("--allow-window-title-sharing") && windowSelectionValue !== "jev") throw new Error("--allow-window-title-sharing requires --window-selection jev");
   if (groundingValue === "auto" && (!tui || computer !== "cua")) throw new Error("--grounding auto is available only with --tui --computer cua");
   if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor && !prepareManagedBrowserProfileValue) throw new Error("--goal is required unless --tui opens the interactive home, --doctor runs a read-only CUA diagnostic, or --prepare-managed-browser-profile is used");
   if (doctor && goal !== undefined) throw new Error("--doctor cannot be combined with --goal");
@@ -235,6 +243,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     doctorTimeoutMs,
     monitor: monitorValue,
     grounding: groundingValue as CliOptions["grounding"],
+    windowSelection: windowSelectionValue,
     ...(managedBrowserUrl === undefined ? {} : { managedBrowserUrl }),
     managedBrowserProfileMode: managedBrowserProfileModeValue,
     ...(managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel }),
@@ -252,6 +261,7 @@ async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     validateCliArguments(process.argv.slice(2));
     process.stdout.write("TUI-only: --grounding auto selects UIA for native windows, DOM + UIA for a selected Harness-managed browser, and off for desktop.\n");
+    process.stdout.write("TUI-only: --window-selection jev requires --allow-window-title-sharing and TYPESAFE_API_KEY; default is local.\n");
     process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     return;
   }
@@ -291,6 +301,9 @@ async function main(): Promise<void> {
   }
   if (options.envFile !== undefined) await loadEnvFile(options.envFile);
   if (options.tui) {
+    const windowSelector = options.windowSelection === "jev"
+      ? createJevWindowSelector(process.env.TYPESAFE_API_KEY ?? "")
+      : undefined;
     const config = toResolvedRunConfig(options, options.goal ?? "");
     const { goal: _goal, runId: _runId, ...sessionConfig } = config;
     const windowDiscovery = createWindowTargetDiscovery(sessionConfig.computer);
@@ -324,7 +337,10 @@ async function main(): Promise<void> {
         grounding: options.grounding,
       } satisfies TuiFeatureSelection,
       embeddingReady: options.memoryEmbeddingEndpoint !== undefined && (process.env.MEMORY_EMBEDDING_API_KEY?.trim().length ?? 0) > 0,
-    }, options.goal === undefined ? {} : { initialGoal: options.goal });
+    }, {
+      ...(options.goal === undefined ? {} : { initialGoal: options.goal }),
+      ...(windowSelector === undefined ? {} : { windowSelector }),
+    });
     return;
   }
   const config = toResolvedRunConfig(options, options.goal!);

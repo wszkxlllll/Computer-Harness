@@ -23,6 +23,9 @@ param(
   [ValidateSet('ephemeral', 'persistent')]
   [string] $ManagedBrowserProfileMode,
   [string] $ManagedBrowserProfileLabel,
+  [ValidateSet('local', 'jev')]
+  [string] $WindowSelector,
+  [switch] $ShareWindowTitles,
   [string] $CuaWindowPid,
   [string] $CuaWindowId,
   [ValidateSet('off', 'auto', 'uia-catalog-v1', 'dom-catalog-v1', 'hybrid-catalog-v1')]
@@ -84,6 +87,8 @@ $cuaSocket = Require-Config 'CuaSocket'
 $selectedModel = if ($Model) { $Model } else { Require-Config 'Model' }
 $selectedPreset = if ($Preset) { $Preset } elseif ($config['Preset']) { [string] $config['Preset'] } else { 'assisted' }
 $selectedRiskGuard = if ($RiskGuard) { $RiskGuard } elseif ($selectedPreset -eq 'research') { 'off' } else { 'layered' }
+$selectedWindowSelector = if ($WindowSelector) { $WindowSelector } elseif ($config['WindowSelector']) { [string] $config['WindowSelector'] } else { 'local' }
+$selectedShareWindowTitles = $ShareWindowTitles -or $config['ShareWindowTitles'] -eq $true
 $selectedBrowserMode = if ($ManagedBrowserProfileMode) { $ManagedBrowserProfileMode } else { [string] $config['ManagedBrowserProfileMode'] }
 $selectedBrowserLabel = if ($ManagedBrowserProfileLabel) { $ManagedBrowserProfileLabel } else { [string] $config['ManagedBrowserProfileLabel'] }
 function Get-ManagedBrowserArguments {
@@ -257,6 +262,7 @@ function Show-Check {
   Write-Output "Model      : $selectedModel"
   Write-Output "Preset     : $selectedPreset"
   Write-Output "Risk Guard : $selectedRiskGuard"
+  Write-Output "Window selection: $selectedWindowSelector; title sharing: $selectedShareWindowTitles"
   Write-Output "Output root: $outputRoot"
   Write-Output "Secrets are loaded from the local env file; no system-wide variables are required."
 }
@@ -366,6 +372,10 @@ $arguments = @(
 )
 if ($selectedRiskGuard -eq 'off') { $arguments += '--confirm-risk-guard-off' }
 if (-not [string]::IsNullOrWhiteSpace($Grounding)) { $arguments += @('--grounding', $Grounding) }
+if ($selectedWindowSelector -eq 'jev' -and $Command -eq 'tui') {
+  if (-not $selectedShareWindowTitles) { throw 'Jev window selection requires explicit -ShareWindowTitles or local ShareWindowTitles = $true.' }
+  $arguments += @('--window-selection', 'jev', '--allow-window-title-sharing')
+}
 $arguments += Get-ModelArguments
 $arguments += Get-PresetArguments $selectedPreset
 $arguments += $cuaWindowArguments

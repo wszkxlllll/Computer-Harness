@@ -4,13 +4,13 @@
 
 第二切片的当前合同见[Planning / Run Memory 模块装配](./pi-module-composition-2026-09-23.md)与[TUI 体验结果](./pi-tui-ux-results-2026-09-23.md)：模块仍使用现有状态/Event 协议；TUI 窄屏全文入口已作离线验证，真实读屏和桌面快捷方式点击尚未验收。
 
-第三切片的 Computer 装配边界、离线审查和真实 GLM＋CUA 烟测见[第三切片结果](./pi-computer-assembly-results-2026-09-23.md)：整桌面找被遮挡窗口的任务失败，但精确窗口 background 单击→复观察的受控任务通过。TUI 的 Run 前本地匹配见[自动选窗切片结果](./pi-goal-window-selection-results-2026-09-23.md)，尚未做真实桌面验收；[Jev 选窗 shadow API 结果与自动 Grounding 边界](./pi-window-selection-jev-experiment-2026-09-23.md)已更新。Jev 未进入 TUI 默认/active 路径，`--grounding auto` 是 CUA TUI 的 opt-in 功能。
+第三切片的 Computer 装配边界、离线审查和真实 GLM＋CUA 烟测见[第三切片结果](./pi-computer-assembly-results-2026-09-23.md)：整桌面找被遮挡窗口的任务失败，但精确窗口 background 单击→复观察的受控任务通过。TUI 的 Run 前本地匹配见[自动选窗切片结果](./pi-goal-window-selection-results-2026-09-23.md)；[Jev 真实选窗 API 结果、显式 opt-in 接线与自动 Grounding 边界](./pi-window-selection-jev-experiment-2026-09-23.md)为当前增量。默认仍是本地选窗；本机已获授权使用 Jev 候选选择，但未完成真实 GUI 任务验收。`--grounding auto` 是 CUA TUI 的 opt-in 功能。
 
 日期：2026-09-23
 
 **2026-09-23 GLM `assistantText` 下一步提示实验**：24 次 A/B 原生工具调用表明，一句系统提示可把合成场景的非空 `content` 从 9/12 提高到 12/12，但严格格式仅 5/12；六个可预测场景只有一例给出针对实际动作的具体下一步，且该例先做了多余点击，尚未证明节省主模型轮次。生产提示词未改。方法、逐例复核和现有 Monitor 消费边界见[对照实验报告](./glm-assistant-text-next-action-ab-2026-09-23.md)。
 
-**2026-09-23 Jev 实验收口**：Jev/System One 的 all-observation、continuation、side-tool 和 recovery-only 方案均未在真实任务中稳定降低 GLM 请求或端到端延迟；recovery 触发机会稀少，实际调用均 abstain。因此 Jev 已从产品 Runtime、CLI、TUI、PowerShell、报告和协议事件中移除，不是当前 Provider 或 GUI 执行路径的一部分。完整实验数据、no-go 判断和回退依据保留在[Jev / System One 适配性审计](./jev-system-one-fit-assessment-2026-09-21.md)，该文档仅作为历史研究证据，不是当前实施入口。
+**2026-09-23 旧 Jev GUI fast path 收口**：all-observation、continuation、side-tool 和 recovery-only 方案均未在真实任务中稳定降低 GLM 请求或端到端延迟，旧 fast path 因此从 Runtime 移除。[历史适配性审计](./jev-system-one-fit-assessment-2026-09-21.md)保留 no-go 证据。现在新增的 Jev **选窗**是 Run 前、显式授权的不同实验边界，不是旧 GUI 动作 fast path，也不替代 GLM/Qwen 主 Provider。
 
 当前实施入口只描述仍有消费者的能力：GLM/Qwen Provider、CUA/OSWorld Computer、Context、Planning、Run Memory、Action Batch、Monitor、Risk Guard、Grounding、TUI 与可复现 Trajectory。没有生产消费者的局部策略、候选池和旁路网络配置不应重新加入 Runtime。
 

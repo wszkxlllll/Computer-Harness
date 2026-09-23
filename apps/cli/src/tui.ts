@@ -9,6 +9,7 @@ import { sanitizeTerminalText } from "./terminal-output.js";
 import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
 import { matchGoalToWindow } from "./window-target-matcher.js";
 import { resolveTuiGrounding, type TuiGroundingChoice } from "./window-grounding-policy.js";
+import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 
 const LEGACY_INCREMENTAL_POLL_MS = 250;
 const MAX_TUI_INPUT_LENGTH = 500;
@@ -29,7 +30,7 @@ export interface TuiMetadata {
   /** Local-only display label; never serialized into a Provider request/report. */
   cuaWindowLabel?: string;
   /** Local-only selection provenance for the TUI; never sent to a Provider. */
-  cuaWindowSelectionSource?: "host" | "local_match";
+  cuaWindowSelectionSource?: "host" | "local_match" | "jev";
   /** False for OSWorld and other environments without host window selection. */
   windowSelectionAvailable?: boolean;
   features?: TuiFeatureSelection;
@@ -75,6 +76,8 @@ export interface ApplicationTuiOptions {
   initialGoal?: string;
   terminal?: TuiTerminal;
   lifecycleWaitMs?: number;
+  /** Optional explicit external window selector; never used for GUI actions. */
+  windowSelector?: WindowSelectionStrategy;
 }
 
 type TuiMode = "home" | "home_details" | "features" | "windows" | "browser_url" | "run";
@@ -133,7 +136,7 @@ export async function runApplicationTui(
   let windowChoiceExplicit = metadata.cuaWindowTarget !== undefined;
   let editMode = true;
   let inputValue = "";
-  let notice = "";
+  let notice = options.windowSelector === undefined ? "" : "Jev fallback enabled: unmatched goals may send window names and titles to TypeSafe.";
   let lastReply = "";
   let exiting = false;
   let restored = false;
@@ -435,7 +438,7 @@ export async function runApplicationTui(
   };
 
   const clearAutomaticWindowSelection = (): void => {
-    if (activeMetadata.cuaWindowSelectionSource !== "local_match") return;
+    if (activeMetadata.cuaWindowSelectionSource !== "local_match" && activeMetadata.cuaWindowSelectionSource !== "jev") return;
     selectedWindowTarget = undefined;
     selectedWindowDeliveryMode = undefined;
     const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...desktopMetadata } = activeMetadata;
@@ -472,13 +475,13 @@ export async function runApplicationTui(
     notice = "Matching the goal against visible window names locally…";
     render();
 
-    void session.listWindowTargets(abort.signal).then((targets) => {
+    void session.listWindowTargets(abort.signal).then(async (targets) => {
       if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
-      goalWindowDiscoveryAbort = undefined;
-      goalSubmissionPending = false;
       const result = matchGoalToWindow(goal, targets);
       if (result.kind === "matched") {
         const selected = result.match.target;
+        goalWindowDiscoveryAbort = undefined;
+        goalSubmissionPending = false;
         managedBrowserSelected = false;
         selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
         selectedWindowDeliveryMode = "foreground";
@@ -499,13 +502,57 @@ export async function runApplicationTui(
         return;
       }
 
+      let pickerTargets = targets;
+      let jevReason = "";
+      if (options.windowSelector !== undefined) {
+        notice = "Asking Jev to choose from visible windows; their application names and titles are sent to TypeSafe. No GUI action yet.";
+        render();
+        const decision = await options.windowSelector.select(goal, targets, abort.signal);
+        if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+        if (decision.kind === "matched") {
+          const wasCurrentCandidate = targets.some((target) => target.pid === decision.target.pid && target.windowId === decision.target.windowId &&
+            target.appName === decision.target.appName && target.title === decision.target.title);
+          if (!wasCurrentCandidate) {
+            jevReason = "Jev returned a window outside the discovered candidates; pick a window manually.";
+          } else {
+            const currentTargets = await session.listWindowTargets(abort.signal);
+            if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+            pickerTargets = currentTargets;
+            const selected = currentTargets.find((target) => target.pid === decision.target.pid && target.windowId === decision.target.windowId &&
+              target.appName === decision.target.appName && target.title === decision.target.title);
+            if (selected !== undefined) {
+              goalWindowDiscoveryAbort = undefined;
+              goalSubmissionPending = false;
+              managedBrowserSelected = false;
+              selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+              selectedWindowDeliveryMode = "foreground";
+              activeMetadata = {
+                ...activeMetadata,
+                cuaWindowTarget: selectedWindowTarget,
+                cuaWindowDeliveryMode: "foreground",
+                cuaWindowLabel: windowDisplayLabel(selected),
+                cuaWindowSelectionSource: "jev",
+                managedBrowserSelected: false,
+              };
+              startRunForGoal(goal, `Jev selected ${windowDisplayLabel(selected)}; window identity rechecked. Starting Run…`, "Run started after Jev window selection.");
+              return;
+            }
+            jevReason = "Jev choice changed before Run start; pick a window manually.";
+          }
+        } else {
+          jevReason = `Jev abstained (${decision.reason}); pick a window manually.`;
+        }
+      }
+
+      goalWindowDiscoveryAbort = undefined;
+      goalSubmissionPending = false;
       clearAutomaticWindowSelection();
-      windowTargets = targets;
+      windowTargets = pickerTargets;
       windowCursor = 0;
       windowError = "";
-      windowMatchReason = result.kind === "ambiguous"
+      windowMatchReason = jevReason || (result.kind === "ambiguous"
         ? "Ambiguous local match; pick a window. Goal kept; no model chose it."
-        : "No confident local match; pick a window. Goal kept; no model chose it.";
+        : "No confident local match; pick a window. Goal kept; no model chose it.");
       mode = "windows";
       editMode = false;
       render();
@@ -1599,7 +1646,9 @@ function formatHomeTarget(metadata: TuiMetadata): string {
   const label = metadata.cuaWindowLabel === undefined
     ? "Selected window"
     : sanitizeTerminalText(metadata.cuaWindowLabel).replace(/\s+\(pid=\d+,\s*window=\d+\)$/u, "");
-  const source = metadata.cuaWindowSelectionSource === "local_match" ? "; selected by local goal/name match (not the model)" : "";
+  const source = metadata.cuaWindowSelectionSource === "local_match"
+    ? "; selected by local goal/name match (not the model)"
+    : metadata.cuaWindowSelectionSource === "jev" ? "; selected by Jev; host rechecked" : "";
   return `${label}; pid=${metadata.cuaWindowTarget.pid}; window=${metadata.cuaWindowTarget.windowId}; delivery=${metadata.cuaWindowDeliveryMode ?? "background"}${source}`;
 }
 
@@ -1702,7 +1751,9 @@ function formatCuaTarget(metadata: TuiMetadata): string {
   if (metadata.managedBrowserSelected === true) return `Harness-managed browser (grounding=${metadata.features?.grounding ?? "off"}; auto resolves to DOM + UIA)`;
   if (metadata.cuaWindowTarget === undefined) return "primary desktop (default)";
   const label = metadata.cuaWindowLabel === undefined ? "selected window" : sanitizeTerminalText(metadata.cuaWindowLabel).slice(0, 96);
-  const source = metadata.cuaWindowSelectionSource === "local_match" ? "local goal/name match (not model-selected)" : "host-selected";
+  const source = metadata.cuaWindowSelectionSource === "local_match"
+    ? "local goal/name match (not model-selected)"
+    : metadata.cuaWindowSelectionSource === "jev" ? "Jev-selected; host rechecked" : "host-selected";
   return `window ${label} pid=${metadata.cuaWindowTarget.pid} id=${metadata.cuaWindowTarget.windowId} (${source}, delivery=${metadata.cuaWindowDeliveryMode ?? "background"})`;
 }
 

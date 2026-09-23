@@ -35,6 +35,7 @@ const VALUE_OPTIONS = new Set([
   "--fixture-result",
   "--monitor",
   "--grounding",
+  "--window-selection",
 ]);
 
 const FLAG_OPTIONS = new Set([
@@ -44,6 +45,7 @@ const FLAG_OPTIONS = new Set([
   "--tui",
   "--planning",
   "--confirm-risk-guard-off",
+  "--allow-window-title-sharing",
   "--help",
   "-h",
 ]);

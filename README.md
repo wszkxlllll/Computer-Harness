@@ -232,7 +232,9 @@ TUI 手选或唯一可信本地匹配的窗口使用 foreground 预览；可用�
 
 ### UIA / DOM grounding 状态
 
-CUA TUI 可选 `--grounding auto`（默认仍为 `off`）：选中普通宿主窗口，包括个人 Edge，下一 Run 使用 UIA；在 `W` 窗口列表选择 Harness-managed browser 后，TUI 会要求输入 HTTP(S) 起始 URL，也可复用之前输入的 URL，此时使用 DOM + UIA；选整桌面则关闭 Grounding。目标草稿在选浏览器和输入 URL 时保留。这个选择只在 Run 创建前解析，不会让普通浏览器标题自动获得 CDP/DOM 权限。Jev 选窗目前仅有独立 shadow API 探针，**未接入 TUI 的自动选窗**；本地唯一匹配仍是默认策略。证据与限制见[选窗/Jev 实验](./docs/pi-window-selection-jev-experiment-2026-09-23.md)。
+CUA TUI 可选 `--grounding auto`（默认仍为 `off`）：选中普通宿主窗口，包括个人 Edge，下一 Run 使用 UIA；在 `W` 窗口列表选择 Harness-managed browser 后，TUI 会要求输入 HTTP(S) 起始 URL，也可复用之前输入的 URL，此时使用 DOM + UIA；选整桌面则关闭 Grounding。目标草稿在选浏览器和输入 URL 时保留。这个选择只在 Run 创建前解析，不会让普通浏览器标题自动获得 CDP/DOM 权限。
+
+窗口选择默认是完全本地的保守匹配。可显式启用 `--window-selection jev --allow-window-title-sharing` 并在私有 `.env` 中配置 `TYPESAFE_API_KEY`：本地无法唯一匹配时，才把当前可见候选的应用名、标题和 goal 发给 TypeSafe；Jev 返回当次候选后，Host 重新枚举并核对窗口身份，高置信且未变化才自动绑定，否则让用户手选，不退回整桌面。Jev 不执行 GUI 操作，不决定 DOM 权限。此入口在本机通过了选窗 API、TUI 离线链路和启动测试，尚无真实 GUI 任务成功率结论。证据与限制见[选窗/Jev 实验](./docs/pi-window-selection-jev-experiment-2026-09-23.md)。
 
 UIA/Accessibility 与 DOM 都是默认关闭的可选 Grounding 生产者。UIA 仅用于显式 CUA window target，以 depth 16、最多 256 个安全候选读取 Accessibility；DOM/Hybrid 只用于 Harness 自己启动的 managed Edge profile 和 loopback CDP，profile 可按 Run 选择临时或 Harness-owned 持久模式，不附加个人现有浏览器。Runtime 对 UIA/DOM 候选去重、融合和有界召回，每轮最多向 Context 投影 16 个 hot elements；最近失败区域、用户纠正和低信任 `declaredEffect/assistantText` 只用于召回，不是事实或授权。Provider 仍只从统一 ToolRegistry 获取 `click_element`；截图和普通坐标 `click` 始终保留，Canvas/WebGL/iframe 等边界不伪造 DOM ref。
 

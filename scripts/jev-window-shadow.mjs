@@ -11,6 +11,7 @@ let cases = [
   { id: "travel-booking", goal: "\u67e5\u770b\u643a\u7a0b\u7684\u9152\u5e97\u8ba2\u5355", expected: "w2", windows: [["w1", "Microsoft Edge", "\u9ad8\u5fb7\u5730\u56fe - Microsoft Edge"], ["w2", "Microsoft Edge", "\u643a\u7a0b\u65c5\u884c - Microsoft Edge"], ["w3", "\u8bb0\u4e8b\u672c", "\u65e0\u6807\u9898"]] },
   { id: "rail", goal: "\u572812306\u67e5\u8be2\u8f66\u6b21", expected: "w1", windows: [["w1", "Microsoft Edge", "\u4e2d\u56fd\u94c1\u8def12306 - Microsoft Edge"], ["w2", "Microsoft Edge", "\u643a\u7a0b\u65c5\u884c - Microsoft Edge"]] },
   { id: "notepad", goal: "\u5728\u8bb0\u4e8b\u672c\u8bb0\u5f55\u4f1a\u8bae\u8981\u70b9", expected: "w2", windows: [["w1", "Microsoft Edge", "\u9879\u76ee\u9762\u677f - Microsoft Edge"], ["w2", "\u8bb0\u4e8b\u672c", "\u65e0\u6807\u9898"]] },
+  { id: "notepad-exe-cn", goal: "\u6253\u5f00\u8bb0\u4e8b\u672c\u5e76\u67e5\u770b\u5f53\u524d\u5185\u5bb9", expected: "w2", windows: [["w1", "msedge.exe", "Inbox - Microsoft Edge"], ["w2", "Notepad.exe", "Notes - Notepad"], ["w3", "WindowsTerminal.exe", "PowerShell"]] },
   { id: "spreadsheet", goal: "Update the budget spreadsheet in Excel", expected: "w2", windows: [["w1", "Microsoft Edge", "Budget report - Microsoft Edge"], ["w2", "Microsoft Excel", "Budget.xlsx - Excel"]] },
   { id: "chat", goal: "\u5728\u5fae\u4fe1\u67e5\u770b\u672a\u8bfb\u6d88\u606f", expected: "w2", windows: [["w1", "Microsoft Edge", "\u5fae\u4fe1\u8bfb\u4e66 - Microsoft Edge"], ["w2", "\u5fae\u4fe1", "\u804a\u5929"]] },
   { id: "system", goal: "\u6253\u5f00\u4efb\u52a1\u7ba1\u7406\u5668\u67e5\u770b\u5185\u5b58", expected: "w2", windows: [["w1", "Windows Terminal", "PowerShell"], ["w2", "\u4efb\u52a1\u7ba1\u7406\u5668", "\u8fdb\u7a0b"]] },
@@ -42,6 +43,7 @@ if (process.argv.includes("--live")) {
   const patterns = [
     { id: "live-chat", app: /weixin|\u5fae\u4fe1/iu, goal: "\u5728\u5fae\u4fe1\u67e5\u770b\u6d88\u606f" },
     { id: "live-editor", app: /typora/iu, goal: "\u5728 Typora \u7f16\u8f91\u6587\u6863" },
+    { id: "live-notepad", app: /notepad/iu, goal: "\u6253\u5f00\u8bb0\u4e8b\u672c\u5e76\u67e5\u770b\u5f53\u524d\u5185\u5bb9" },
     { id: "live-browser", app: /msedge|microsoft edge/iu, goal: "\u5728 Microsoft Edge \u6d4f\u89c8\u5668\u67e5\u770b\u7f51\u9875" },
     { id: "live-terminal", app: /windowsterminal|windows terminal/iu, goal: "\u5728 Windows Terminal \u67e5\u770b\u63a7\u5236\u53f0" },
     { id: "live-office", app: /^wps$/iu, goal: "\u5728 WPS \u7f16\u8f91\u6587\u6863" },
@@ -58,15 +60,31 @@ if (process.argv.includes("--live")) {
   if (cases.length < 2) throw new Error(`Only ${cases.length} live scenarios available; no API calls made`);
 }
 
+const selectedCaseId = option("--case");
+if (selectedCaseId !== undefined) {
+  cases = cases.filter((item) => item.id === selectedCaseId);
+  if (cases.length !== 1) throw new Error(`Unknown or unavailable case: ${selectedCaseId}; no API calls made`);
+}
+
 const envFile = option("--env-file");
 const envLine = envFile === undefined ? undefined : readFileSync(envFile, "utf8").split(/\r?\n/u).find((line) => /^TYPESAFE_API_KEY\s*=/u.test(line));
 const key = process.env.TYPESAFE_API_KEY?.trim() ?? envLine?.replace(/^TYPESAFE_API_KEY\s*=\s*/u, "").replace(/^['"]|['"]$/gu, "").trim();
 if (!key) throw new Error("TYPESAFE_API_KEY is unavailable; no API calls made");
+const runtimeSelector = process.argv.includes("--runtime-selector")
+  ? (await import("../apps/cli/dist/window-selection-jev.js")).createJevWindowSelector(key)
+  : undefined;
 const results = [];
 for (const item of cases) {
   const windows = item.windows.map(([id, appName, title], index) => ({ id, pid: index + 1, windowId: index + 101, appName, title }));
   const local = matchGoalToWindow(item.goal, windows);
   const localId = local.kind === "matched" ? windows.find((window) => window === local.match.target)?.id : "none";
+  if (runtimeSelector !== undefined) {
+    const start = performance.now();
+    const decision = await runtimeSelector.select(item.goal, windows, new AbortController().signal);
+    const selected = decision.kind === "matched" ? windows.find((window) => window === decision.target)?.id : `abstain:${decision.reason}`;
+    results.push({ id: item.id, expected: item.expected, local: localId, jev: selected, latencyMs: Math.round(performance.now() - start), model: "jev-1.13.0" });
+    continue;
+  }
   const criteria = Object.fromEntries(windows.map((window) => [window.id, `Select only if this existing window is the best match: application=${window.appName}; title=${window.title}`]));
   criteria.none = "No single existing window matches, or the goal needs more than one window.";
   const body = {

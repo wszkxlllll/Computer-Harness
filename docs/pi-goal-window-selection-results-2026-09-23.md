@@ -1,5 +1,7 @@
 # TUI goal 自动选窗切片
 
+> 本文记录最初的本地匹配切片；当前新增的显式 opt-in Jev 候选选窗及实测边界见[后续实验记录](./pi-window-selection-jev-experiment-2026-09-23.md)。以下“尚未接入 Jev”只代表本地切片完成时的状态。
+
 状态：本地实现、离线复审通过；尚未做真实桌面和付费 API 的正向选窗验收。
 
 CUA TUI 首次直接提交 goal 时，会在 Run 前用现有只读 `WindowTargetDiscovery` 取得可见窗口；不截图、不聚焦、不派发输入。`window-target-matcher.ts` 只在唯一候选有完整应用身份或足够完整的标题身份时返回匹配。标题与 goal 同名但 goal 另指明其他应用、同应用多窗口、短语含混、窗口清单失败或无匹配，均不自动开始；TUI 保留 goal 并显示可滚动的窗口列表。用户明确选过窗口/整桌面后，不被自动匹配覆盖；managed browser 仍按其自有目标流程运行。自动匹配只选择当次返回的 PID/window ID，实际窗口身份与前台动作仍由既有 CUA adapter 校验，目标失效不退回整桌面。
