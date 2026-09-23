@@ -8,6 +8,7 @@ import type { RiskGuardMode, RiskProfile } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
 import { matchGoalToWindow } from "./window-target-matcher.js";
+import { resolveTuiGrounding, type TuiGroundingChoice } from "./window-grounding-policy.js";
 
 const LEGACY_INCREMENTAL_POLL_MS = 250;
 const MAX_TUI_INPUT_LENGTH = 500;
@@ -39,6 +40,8 @@ export interface TuiMetadata {
   /** Managed profile lifecycle; paths are never rendered. */
   managedBrowserProfileMode?: "ephemeral" | "persistent";
   managedBrowserProfileLabel?: string;
+  /** A Harness-owned managed browser was explicitly chosen in the picker. */
+  managedBrowserSelected?: boolean;
 }
 
 export interface TuiFeatureSelection {
@@ -49,7 +52,7 @@ export interface TuiFeatureSelection {
   contextMode: "raw" | "recent";
   riskGuard: RiskGuardMode;
   monitor: "off" | "shadow" | "guidance";
-  grounding: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+  grounding: TuiGroundingChoice;
 }
 
 interface TuiInput extends NodeJS.ReadableStream {
@@ -125,6 +128,7 @@ export async function runApplicationTui(
   let goalSubmissionGeneration = 0;
   let selectedWindowTarget: ApplicationSessionWindowTarget | null | undefined = metadata.cuaWindowTarget;
   let selectedWindowDeliveryMode: "background" | "foreground" | null | undefined = metadata.cuaWindowDeliveryMode;
+  let managedBrowserSelected = metadata.managedBrowserSelected === true;
   let windowChoiceExplicit = metadata.cuaWindowTarget !== undefined;
   let editMode = true;
   let inputValue = "";
@@ -368,7 +372,13 @@ export async function runApplicationTui(
       render();
       return;
     }
-    const managedGrounding = isManagedGrounding(featureSelection.grounding);
+    if (managedBrowserSelected && featureSelection.grounding !== "auto" && !isManagedGrounding(featureSelection.grounding)) {
+      notice = "The selected managed browser needs auto, DOM or hybrid grounding. Change Grounding in F before starting.";
+      render();
+      return;
+    }
+    const effectiveGrounding = resolveTuiGrounding(featureSelection.grounding, managedBrowserSelected ? "managed-browser" : selectedWindowTarget == null ? "desktop" : "host-window");
+    const managedGrounding = isManagedGrounding(effectiveGrounding);
     if (!windowChoiceExplicit && !managedGrounding && activeMetadata.computer === "cua") {
       if (activeMetadata.windowSelectionAvailable !== false) {
         resolveGoalWindowLocally(trimmed);
@@ -377,12 +387,12 @@ export async function runApplicationTui(
       requireExplicitDesktopChoice();
       return;
     }
-    if (featureSelection.grounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
+    if (effectiveGrounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
       notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
       render();
       return;
     }
-    if (isManagedGrounding(featureSelection.grounding)) {
+    if (isManagedGrounding(effectiveGrounding)) {
       if (activeMetadata.computer !== "cua") {
         notice = "DOM/Hybrid grounding requires the CUA computer and shared CUA socket; choose off/UIA or relaunch with --computer cua.";
         render();
@@ -398,7 +408,8 @@ export async function runApplicationTui(
   };
 
   const startRunForGoal = (goal: string, startNotice: string, successNotice: string): void => {
-    if (featureSelection.grounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
+    const effectiveGrounding = resolveTuiGrounding(featureSelection.grounding, managedBrowserSelected ? "managed-browser" : selectedWindowTarget == null ? "desktop" : "host-window");
+    if (effectiveGrounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
       notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
       render();
       return;
@@ -408,7 +419,7 @@ export async function runApplicationTui(
     render();
     invoke(async () => {
       try {
-        const handle = await session.startRun(goal, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode));
+        const handle = await session.startRun(goal, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode, managedBrowserSelected));
         goalSubmissionPending = false;
         attachRun(handle, goal);
       } catch (error) {
@@ -463,6 +474,7 @@ export async function runApplicationTui(
       const result = matchGoalToWindow(goal, targets);
       if (result.kind === "matched") {
         const selected = result.match.target;
+        managedBrowserSelected = false;
         selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
         selectedWindowDeliveryMode = "foreground";
         activeMetadata = {
@@ -471,6 +483,7 @@ export async function runApplicationTui(
           cuaWindowDeliveryMode: "foreground",
           cuaWindowLabel: windowDisplayLabel(selected),
           cuaWindowSelectionSource: "local_match",
+          managedBrowserSelected: false,
         };
         const label = windowDisplayLabel(selected);
         startRunForGoal(
@@ -575,22 +588,32 @@ export async function runApplicationTui(
       return;
     }
     if (windowCursor === 0) {
+      managedBrowserSelected = false;
       selectedWindowTarget = null;
       selectedWindowDeliveryMode = null;
       windowChoiceExplicit = true;
-      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...desktopMetadata } = activeMetadata;
+      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, managedBrowserSelected: _managed, ...desktopMetadata } = activeMetadata;
       activeMetadata = desktopMetadata;
       notice = inputValue.trim().length > 0
         ? "Primary desktop selected; goal draft kept. Press I, then Enter to start."
         : "Primary desktop selected for subsequent Runs.";
+    } else if (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) && windowCursor === 1) {
+      managedBrowserSelected = true;
+      selectedWindowTarget = null;
+      selectedWindowDeliveryMode = null;
+      windowChoiceExplicit = true;
+      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...previousMetadata } = activeMetadata;
+      activeMetadata = { ...previousMetadata, managedBrowserSelected: true };
+      notice = "Harness-managed browser selected; auto grounding will use DOM + UIA. Goal draft kept.";
     } else {
-      const selected = windowTargets[windowCursor - 1];
+      const selected = windowTargets[windowCursor - 1 - (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) ? 1 : 0)];
       if (selected === undefined) {
         notice = "That window is no longer available; press R to refresh.";
         render();
         return;
       }
       selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+      managedBrowserSelected = false;
       selectedWindowDeliveryMode = "foreground";
       windowChoiceExplicit = true;
       activeMetadata = {
@@ -599,6 +622,7 @@ export async function runApplicationTui(
         cuaWindowDeliveryMode: "foreground",
         cuaWindowLabel: windowDisplayLabel(selected),
         cuaWindowSelectionSource: "host",
+        managedBrowserSelected: false,
       };
       notice = inputValue.trim().length > 0
         ? `Window selected; goal draft kept. Press I, then Enter to start: ${windowDisplayLabel(selected)}.`
@@ -985,13 +1009,13 @@ export async function runApplicationTui(
         return;
       }
       if (keyName === "up" || keyName === "k") {
-        const optionCount = windowTargets.length + 1;
+        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) ? 1 : 0);
         windowCursor = (windowCursor + optionCount - 1) % optionCount;
         render();
         return;
       }
       if (keyName === "down" || keyName === "j") {
-        const optionCount = windowTargets.length + 1;
+        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) ? 1 : 0);
         windowCursor = (windowCursor + 1) % optionCount;
         render();
         return;
@@ -1532,6 +1556,7 @@ function formatTuiSafety(metadata: TuiMetadata): string {
 
 function formatHomeTarget(metadata: TuiMetadata): string {
   if (metadata.computer !== "cua") return "N/A";
+  if (metadata.managedBrowserSelected === true) return `Harness-managed browser (${isHttpUrl(metadata.managedBrowserUrl) ? new URL(metadata.managedBrowserUrl!).host : "URL unavailable"}); grounding=${metadata.features?.grounding ?? "off"}`;
   if (metadata.cuaWindowTarget === undefined) return "Primary desktop (default)";
   const label = metadata.cuaWindowLabel === undefined
     ? "Selected window"
@@ -1548,7 +1573,7 @@ const tuiFeatureRows = [
   { label: "Context history", values: ["raw", "recent"] as const },
   { label: "Risk Guard", values: ["off", "layered"] as const },
   { label: "Progress Monitor", values: ["off", "shadow", "guidance"] as const },
-  { label: "Grounding", values: ["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"] as const },
+  { label: "Grounding", values: ["off", "auto", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"] as const },
 ] as const;
 
 function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined, defaultRiskGuard: RiskGuardMode = "layered"): TuiFeatureSelection {
@@ -1568,8 +1593,10 @@ function featureOverrides(
   features: TuiFeatureSelection,
   windowTarget: ApplicationSessionWindowTarget | null | undefined,
   windowDeliveryMode: "background" | "foreground" | null | undefined,
+  managedBrowserSelected = false,
 ): ApplicationSessionRunFeatureOverrides {
-  const managedGrounding = isManagedGrounding(features.grounding);
+  const grounding = resolveTuiGrounding(features.grounding, managedBrowserSelected ? "managed-browser" : windowTarget == null ? "desktop" : "host-window");
+  const managedGrounding = isManagedGrounding(grounding);
   return {
     planning: features.planning,
     memory: features.memory,
@@ -1578,7 +1605,7 @@ function featureOverrides(
     contextMode: features.contextMode,
     riskGuard: features.riskGuard,
     monitor: features.monitor,
-    grounding: features.grounding,
+    grounding,
     ...(managedGrounding
       ? { windowTarget: null, windowDeliveryMode: null }
       : {
@@ -1632,6 +1659,7 @@ function formatTuiFeatures(features: TuiFeatureSelection | undefined, defaultRis
 
 function formatCuaTarget(metadata: TuiMetadata): string {
   if (metadata.computer !== "cua") return `${metadata.computer} environment`;
+  if (metadata.managedBrowserSelected === true) return `Harness-managed browser (grounding=${metadata.features?.grounding ?? "off"}; auto resolves to DOM + UIA)`;
   if (metadata.cuaWindowTarget === undefined) return "primary desktop (default)";
   const label = metadata.cuaWindowLabel === undefined ? "selected window" : sanitizeTerminalText(metadata.cuaWindowLabel).slice(0, 96);
   const source = metadata.cuaWindowSelectionSource === "local_match" ? "local goal/name match (not model-selected)" : "host-selected";
@@ -1651,21 +1679,28 @@ function buildTuiFeaturesFrame(
 ): string {
   const width = tuiWidth(columns);
   const terminalRows = Math.max(12, rows ?? process.stdout.rows ?? 24);
-  const lines = [
+  const header = [
     "Computer Harness TUI  |  FEATURES",
     "─".repeat(width),
     `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}   Target: ${formatCuaTarget(metadata)}`,
     "Choose features for the next Run. Changes apply when the next goal starts.",
     "Arrow keys/J-K move   Space toggles   Left/Right changes   Enter saves   Esc cancels",
-    "",
-    ...tuiFeatureRows.map((row, index) => `${index === cursor ? "❯" : " "} ${row.label.padEnd(20, " ")} ${featureValue(features, index)}`),
-    "",
-    `Risk Guard: ${features.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${features.riskGuard}; applies to the next Run)`,
-    "Each Run gets fresh tools, Context, Memory and Monitor state.",
-    `Embedding config: ${metadata.embeddingReady === true ? "ready" : "not configured (hybrid cannot start)"}`,
-    ...(isManagedGrounding(features.grounding) ? [managedBrowserFeatureLine(metadata)] : []),
-    uiFeatureHint(features, metadata),
   ];
+  const footer = [
+    `Risk Guard: ${features.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${features.riskGuard}; applies to the next Run)`,
+    ...(terminalRows >= 18 ? [
+      `Embedding config: ${metadata.embeddingReady === true ? "ready" : "not configured (hybrid cannot start)"}`,
+      ...(isManagedGrounding(features.grounding) ? [managedBrowserFeatureLine(metadata)] : []),
+    ] : []),
+    clip(uiFeatureHint(features, metadata), width),
+  ];
+  const visibleCount = Math.max(1, Math.min(tuiFeatureRows.length, terminalRows - header.length - footer.length - 1));
+  const first = Math.min(Math.max(0, cursor - Math.floor(visibleCount / 2)), tuiFeatureRows.length - visibleCount);
+  const visibleRows = tuiFeatureRows.slice(first, first + visibleCount).map((row, offset) => {
+    const index = first + offset;
+    return `${index === cursor ? "❯" : " "} ${row.label.padEnd(20, " ")} ${featureValue(features, index)}`;
+  });
+  const lines = [...header, `Feature ${cursor + 1} of ${tuiFeatureRows.length}; showing ${first + 1}-${first + visibleRows.length}`, ...visibleRows, ...footer];
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
 }
 
@@ -1683,6 +1718,9 @@ function buildTuiWindowsFrame(
   const terminalRows = Math.max(12, rows ?? process.stdout.rows ?? 24);
   const optionLabels = [
     "Primary desktop (no window target)",
+    ...(metadata.managedBrowserUrl !== undefined && isHttpUrl(metadata.managedBrowserUrl) && metadata.features?.grounding === "auto"
+      ? [`Harness-managed browser (${new URL(metadata.managedBrowserUrl).host}; DOM + UIA)`]
+      : []),
     ...targets.map(windowDisplayLabel),
   ];
   const safeCursor = Math.min(Math.max(cursor, 0), optionLabels.length - 1);
@@ -1727,13 +1765,14 @@ function windowDisplayLabel(target: WindowTargetInfo): string {
 function uiFeatureHint(features: TuiFeatureSelection, metadata?: TuiMetadata): string {
   if (features.memory === "off" && features.memoryRetrieval !== "off") return "Memory retrieval requires Memory facts or entities; it will be forced off.";
   if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
+  if (features.grounding === "auto") return "Auto: native window -> UIA; explicitly selected Harness-managed browser -> DOM + UIA; desktop -> off. Ordinary Edge does not grant DOM.";
+  if (isManagedGrounding(features.grounding)) {
+    if (metadata === undefined || !isHttpUrl(metadata.managedBrowserUrl)) return "DOM/Hybrid grounding requires --managed-browser-url <http(s)-url>; the TUI does not edit this value.";
+    return "DOM/Hybrid grounding uses a visible managed browser; personal browser login is not reused. Element references expire after each observation.";
+  }
   if (features.riskGuard === "off") return "Risk Guard is disabled for the next Run; schema/policy/budget/stale checks remain active.";
   if (features.monitor === "guidance") return "Guidance is advisory only; it cannot execute, approve or retry actions.";
   if (features.grounding === "uia-catalog-v1") return "UIA grounding requires an explicit CUA window target; click_element references expire after each observation.";
-  if (isManagedGrounding(features.grounding)) {
-    if (metadata === undefined || !isHttpUrl(metadata.managedBrowserUrl)) return "DOM/Hybrid grounding requires --managed-browser-url <http(s)-url>; the TUI does not edit this value.";
-    return "DOM/Hybrid grounding uses a visible temporary managed-browser profile; personal browser login data is never reused. click_element references expire after each observation.";
-  }
   return "Provider and Computer are selected by the launch command; this page changes Run features only.";
 }
 

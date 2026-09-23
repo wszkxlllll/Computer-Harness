@@ -25,7 +25,7 @@ param(
   [string] $ManagedBrowserProfileLabel,
   [string] $CuaWindowPid,
   [string] $CuaWindowId,
-  [ValidateSet('off', 'uia-catalog-v1', 'dom-catalog-v1', 'hybrid-catalog-v1')]
+  [ValidateSet('off', 'auto', 'uia-catalog-v1', 'dom-catalog-v1', 'hybrid-catalog-v1')]
   [string] $Grounding,
   [ValidateSet('native_tools', 'strict_json')]
   [string] $QwenOutputMode,

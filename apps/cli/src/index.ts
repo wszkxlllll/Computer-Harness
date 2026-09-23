@@ -55,7 +55,7 @@ interface CliOptions {
   cleanupDeadlineMs: number;
   doctorTimeoutMs: number;
   monitor: MonitorPolicyMode;
-  grounding: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+  grounding: TuiFeatureSelection["grounding"];
   /** Explicit URL for the host-owned temporary browser; never a profile/debug endpoint. */
   managedBrowserUrl?: string;
   managedBrowserProfileMode: "ephemeral" | "persistent";
@@ -81,10 +81,11 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   if (monitorValue !== "off" && monitorValue !== "shadow" && monitorValue !== "guidance") throw new Error("--monitor must be off, shadow, or guidance");
   if (doctor && monitorValue !== "off") throw new Error("--doctor does not run Monitor");
   const groundingValue = value("--grounding") ?? "off";
-  if (groundingValue !== "off" && groundingValue !== "uia-catalog-v1" && groundingValue !== "dom-catalog-v1" && groundingValue !== "hybrid-catalog-v1") {
-    throw new Error("--grounding must be off, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
+  if (groundingValue !== "off" && groundingValue !== "auto" && groundingValue !== "uia-catalog-v1" && groundingValue !== "dom-catalog-v1" && groundingValue !== "hybrid-catalog-v1") {
+    throw new Error("--grounding must be off, auto, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
   }
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
+  if (groundingValue === "auto" && (!tui || computer !== "cua")) throw new Error("--grounding auto is available only with --tui --computer cua");
   if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor && !prepareManagedBrowserProfileValue) throw new Error("--goal is required unless --tui opens the interactive home, --doctor runs a read-only CUA diagnostic, or --prepare-managed-browser-profile is used");
   if (doctor && goal !== undefined) throw new Error("--doctor cannot be combined with --goal");
   if (prepareManagedBrowserProfileValue && (doctor || tui || argv.includes("--interactive"))) throw new Error("--prepare-managed-browser-profile cannot be combined with --doctor, --tui, or --interactive");
@@ -250,6 +251,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     validateCliArguments(process.argv.slice(2));
+    process.stdout.write("TUI-only: --grounding auto selects UIA for native windows, DOM + UIA for a selected Harness-managed browser, and off for desktop.\n");
     process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     return;
   }
@@ -348,7 +350,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
-          grounding: options.grounding,
+          grounding: options.grounding === "auto" ? "off" : options.grounding,
           ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
           managedBrowserProfileMode: options.managedBrowserProfileMode,
           ...(options.managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel: options.managedBrowserProfileLabel }),
@@ -376,7 +378,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     riskTimeoutMs: options.riskTimeoutMs,
     cleanupDeadlineMs: options.cleanupDeadlineMs,
     monitor: options.monitor,
-    grounding: options.grounding,
+    grounding: options.grounding === "auto" ? "off" : options.grounding,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
     ...(options.qwenOutputMode === undefined ? {} : { qwenOutputMode: options.qwenOutputMode }),

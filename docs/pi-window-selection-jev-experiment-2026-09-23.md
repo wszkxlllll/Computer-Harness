@@ -1,12 +1,29 @@
 # 选窗策略：本地匹配基线与 Jev 候选实验
 
-状态：设计与实验门槛，**尚未接入 Jev API**。本地匹配切片仍在审查；不能把候选实验写成已验证能力。
+状态：已完成**独立 shadow API 探针**与 TUI 自动 Grounding 离线装配；Jev 仍未接入产品选窗路径，默认关闭，不能写成真实任务成功率。
+
+## 本轮实测（2026-09-23）
+
+用户明确同意把候选窗口应用名和标题发给 TypeSafe。通过 `scripts/jev-window-shadow.mjs` 调用固定的 `jev-1.13.0`，只传 goal、候选 ID、应用名与标题，不传截图、坐标或输入内容；运行脚本只输出场景 ID、选择、概率、耗时和 token，不输出标题或密钥。
+
+| 样本 | Jev 与预设答案一致 | 本地规则自动选择 | 本地规则错选 | Jev 请求耗时 |
+|---|---:|---:|---:|---:|
+| 19 个构造样例：出行、办公、微信、系统、多窗口、无目标、跨应用与标题注入 | 19/19 | 3/19 | 0 | 中位数 525 ms，首请求约 1.8 s |
+| 当时 CUA 只读列出的 5 个可见窗口派生 4 个样例 | 4/4 | 0/4 | 0 | 热请求约 0.45–0.49 s，首请求约 1.8 s |
+
+本地规则的 `none` 是安全拒判，不是错误；19/19 **不是**模型在随机生活任务上的准确率。真实窗口样例仅覆盖浏览器、系统设置、文件资源管理器和无目标；当时微信、WPS 等虽有进程，但不在 CUA 可见窗口清单，Jev 无从选择。还没有测试 TUI 中由 Jev 自动绑定并完成任务、候选变化时拒绝、误选成本或用户改选率。当前证据只支持继续做 opt-in shadow，不支持设定 active 置信阈值。
+
+复现：先构建；将 `TYPESAFE_API_KEY` 放在单独 env 文件后执行 `node scripts/jev-window-shadow.mjs --env-file <env-file>`。真实窗口样本还需启动隔离的 CUA daemon，再加 `--live --socket <private-socket>`；脚本本身只枚举窗口，不截图或输入。
 
 ## 为什么单列选窗
 
 当前 TUI 的窗口发现发生在 Run 开始前，返回本机可见窗口的应用名、标题和临时 PID/window ID；普通 Agent Run 不拥有任意换窗工具。先确定 `ComputerSession` 的目标，再观察与执行，比让模型先看整桌面、靠点击任务栏寻找目标更符合已有窗口安全合同。自动选择错误会把截图发给 Provider，并可能让动作作用于错误应用，因此选窗不是普通文本分类结果，更不是授权。
 
 ## 推荐的可替换策略
+
+### 窗口选择后的 Grounding 决策
+
+`--grounding auto` 只在 CUA TUI 可选，默认仍是 `off`。其解析发生在**选窗后、创建 Run 前**，不把 `auto` 传给 Computer/Runtime：普通宿主窗口（包括个人 Edge）→ `uia-catalog-v1`；用户在窗口列表显式选择 Harness 管理的浏览器且提供合法起始 URL → `hybrid-catalog-v1`（DOM + UIA）；整桌面 → `off`。用户仍可在功能页显式指定 `off`、UIA、DOM 或 Hybrid。候选的应用名/标题不构成 CDP 所有权证据，Jev 也不能把普通网页窗口升级为 DOM；DOM 只在 `ManagedBrowserHost` 创建并验证其私有浏览器窗口后可用。UIA 查询失败仍保留截图并标记 degraded，不把 `click_element` 误当成已经可用。此逻辑的 Run 配置和工具边界已做离线测试，尚未在真实 TUI 上验收。
 
 以现有 `WindowTargetDiscovery` 为候选生产者，由 TUI/应用层在 Run 前调用一个窄的 `WindowSelectionStrategy`。输入是 goal 和有界、当次发现的候选；输出只能是候选 ID 或 `abstain`，绝不输出任意 PID。Host 在启动 Run 前重新核对选中的 `(pid, windowId)`，实际 `Computer` 仍负责后续目标身份、几何和前台校验。用户手选窗口或整桌面始终优先；多应用切换需另设显式边界，不能复用旧 Observation。
 

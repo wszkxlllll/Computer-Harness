@@ -232,6 +232,8 @@ TUI 手选或唯一可信本地匹配的窗口使用 foreground 预览；可用�
 
 ### UIA / DOM grounding 状态
 
+CUA TUI 可选 `--grounding auto`（默认仍为 `off`）：选中普通宿主窗口，包括个人 Edge，下一 Run 使用 UIA；若启动时提供 `--managed-browser-url`，在 `W` 窗口列表明确选择 Harness-managed browser 后使用 DOM + UIA；选整桌面则关闭 Grounding。这个选择只在 Run 创建前解析，不会让普通浏览器标题自动获得 CDP/DOM 权限。Jev 选窗目前仅有独立 shadow API 探针，**未接入 TUI 的自动选窗**；本地唯一匹配仍是默认策略。证据与限制见[选窗/Jev 实验](./docs/pi-window-selection-jev-experiment-2026-09-23.md)。
+
 UIA/Accessibility 与 DOM 都是默认关闭的可选 Grounding 生产者。UIA 仅用于显式 CUA window target，以 depth 16、最多 256 个安全候选读取 Accessibility；DOM/Hybrid 只用于 Harness 自己启动的 managed Edge profile 和 loopback CDP，profile 可按 Run 选择临时或 Harness-owned 持久模式，不附加个人现有浏览器。Runtime 对 UIA/DOM 候选去重、融合和有界召回，每轮最多向 Context 投影 16 个 hot elements；最近失败区域、用户纠正和低信任 `declaredEffect/assistantText` 只用于召回，不是事实或授权。Provider 仍只从统一 ToolRegistry 获取 `click_element`；截图和普通坐标 `click` 始终保留，Canvas/WebGL/iframe 等边界不伪造 DOM ref。
 
 在 TUI 体验 managed DOM/Hybrid 时，启动命令必须显式提供一个 HTTP(S) 起始 URL，然后在 `F` 页面选择 `dom-catalog-v1` 或 `hybrid-catalog-v1`：

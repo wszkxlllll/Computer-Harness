@@ -446,6 +446,58 @@ describe("TUI renderer", () => {
     await tui;
   });
 
+  it("resolves auto grounding to UIA for a uniquely selected ordinary browser window", async () => {
+    const target = { pid: 22, windowId: 33, appName: "Microsoft Edge", title: "Inbox" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows: async () => [target] }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-auto-grounding/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-auto-grounding", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true,
+      features: { planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", riskGuard: "layered", monitor: "off", grounding: "auto" },
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    fixture.input.emit("keypress", "Open Microsoft Edge and inspect the page", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+    const started = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(started.grounding).toBe("uia-catalog-v1");
+    expect(started.computer).toMatchObject({ kind: "cua", windowTarget: { pid: 22, windowId: 33 } });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("resolves auto grounding to hybrid only after explicitly selecting the managed browser", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows: async () => [{ pid: 22, windowId: 33, appName: "Microsoft Edge", title: "Inbox" }] }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-managed-auto/screenshots",
+      managedBrowserUrl: "https://example.test/inbox",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-managed-auto", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true, managedBrowserUrl: "https://example.test/inbox",
+      features: { planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", riskGuard: "layered", monitor: "off", grounding: "auto" },
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "w" });
+    await waitForTui(() => fixture.outputText.join("").includes("Option 1 of 3") && fixture.outputText.join("").includes("Harness-managed browser (example.test; DOM + UIA)"));
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("Harness-managed browser selected"));
+    fixture.input.emit("keypress", "Open the saved browser page", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+    const started = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(started.grounding).toBe("hybrid-catalog-v1");
+    expect(started.computer).not.toHaveProperty("windowTarget");
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
   it("shows managed browser mode and host only on the feature page", async () => {
     const fixture = makePendingCorrectionFixture(async () => undefined, undefined, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-dom-display/screenshots" });
     const tui = runApplicationTui(fixture.session, {
@@ -475,6 +527,25 @@ describe("TUI renderer", () => {
     expect(rendered).toContain("do not operate this window concurrently");
     expect(rendered).toContain("example.test");
     expect(rendered).not.toContain("secret=should-not-render");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("keeps the selected Grounding row visible on a 12-row terminal", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-narrow-features/screenshots" });
+    fixture.output.rows = 12;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-narrow-features", profile: "live-interactive", riskGuard: "layered",
+      features: { planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", riskGuard: "layered", monitor: "off", grounding: "auto" },
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "f" });
+    for (let index = 0; index < 7; index += 1) fixture.input.emit("keypress", "", { name: "down" });
+    const frame = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(frame).toContain("Feature 8 of 8");
+    expect(frame).toContain("❯ Grounding");
+    expect(frame).toContain("Risk Guard: ENABLED");
     fixture.input.emit("keypress", "", { name: "escape" });
     fixture.input.emit("keypress", "", { name: "q" });
     await tui;
