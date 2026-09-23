@@ -98,44 +98,78 @@ export async function captureWindow(
   binding: CuaWindowBinding,
   signal: AbortSignal,
 ): Promise<CuaWindowCapture> {
-  const predicate = StatePredicate.new({
-    window: WindowPredicate.new({
-      exists: true,
-      bounds: BoundsExpectation.new({
-        x: binding.bounds.x,
-        y: binding.bounds.y,
-        width: binding.bounds.width,
-        height: binding.bounds.height,
-        tolerancePx: 0,
-      }),
-    }),
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const predicate = StatePredicate.new({
+        window: WindowPredicate.new({
+          exists: true,
+          bounds: BoundsExpectation.new({
+            x: binding.bounds.x,
+            y: binding.bounds.y,
+            width: binding.bounds.width,
+            height: binding.bounds.height,
+            tolerancePx: 0,
+          }),
+        }),
+      });
+      const result = await driver.verifyState(VerifyStateInput.new({
+        pid: BigInt(binding.target.pid),
+        windowId: BigInt(binding.target.windowId),
+        expect: [predicate],
+        session,
+        timeoutMs: BigInt(0),
+        stableSamples: BigInt(1),
+        includeScreenshot: true,
+      }), { signal });
+      if (result.isError) throw new WindowContractError("WINDOW_CAPTURE_REFUSED", "configured CUA window capture was refused");
+      if (result.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window capture is degraded");
+      const verification = result.verification;
+      if (verification === undefined || verification.status !== 0 || verification.stable !== true) {
+        throw new WindowContractError("WINDOW_GEOMETRY_UNCONFIRMED", "configured CUA window geometry was not verified");
+      }
+      if (result.images.length !== 1 || result.images[0]?.mimeType !== "image/png") {
+        throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture did not return one PNG image");
+      }
+      const data = decodeBase64Png(result.images[0].dataBase64);
+      const dimensions = readPngDimensions(data);
+      if (dimensions === undefined) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture returned an invalid PNG");
+      return {
+        binding,
+        viewport: { ...dimensions, coordinateSpace: "physical" },
+        data,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1 || !isTransientWindowCaptureFailure(error)) throw error;
+      await waitForCaptureRetry(signal);
+    }
+  }
+  throw lastError;
+}
+
+export function isTransientWindowCaptureFailure(error: unknown): boolean {
+  if (error instanceof WindowContractError) {
+    return error.code === "WINDOW_CAPTURE_SCHEMA" || error.code === "WINDOW_GEOMETRY_UNCONFIRMED";
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /frame\s*mismatch|window\s*geometry|png|image\s*capture/iu.test(message);
+}
+
+async function waitForCaptureRetry(signal: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, 25);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new Error("capture retry aborted"));
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
   });
-  const result = await driver.verifyState(VerifyStateInput.new({
-    pid: BigInt(binding.target.pid),
-    windowId: BigInt(binding.target.windowId),
-    expect: [predicate],
-    session,
-    timeoutMs: BigInt(0),
-    stableSamples: BigInt(1),
-    includeScreenshot: true,
-  }), { signal });
-  if (result.isError) throw new WindowContractError("WINDOW_CAPTURE_REFUSED", "configured CUA window capture was refused");
-  if (result.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window capture is degraded");
-  const verification = result.verification;
-  if (verification === undefined || verification.status !== 0 || verification.stable !== true) {
-    throw new WindowContractError("WINDOW_GEOMETRY_UNCONFIRMED", "configured CUA window geometry was not verified");
-  }
-  if (result.images.length !== 1 || result.images[0]?.mimeType !== "image/png") {
-    throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture did not return one PNG image");
-  }
-  const data = decodeBase64Png(result.images[0].dataBase64);
-  const dimensions = readPngDimensions(data);
-  if (dimensions === undefined) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA window capture returned an invalid PNG");
-  return {
-    binding,
-    viewport: { ...dimensions, coordinateSpace: "physical" },
-    data,
-  };
 }
 
 export function sameWindowGeometry(left: CuaWindowGeometry, right: CuaWindowGeometry): boolean {

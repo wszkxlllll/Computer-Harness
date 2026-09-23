@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "seedId": "communication-b2-synthetic-v0",
+  "status": "draft_not_executable",
+  "domain": "communication_personal_affairs",
+  "syntheticOnly": true,
+  "families": [
+    {
+      "familyId": "COMM-F01",
+      "split": "development",
+      "mechanism": "find_notice_in_test_conversation",
+      "variants": [
+        {
+          "variantId": "v1",
+          "threadId": "THREAD-TEST-PROJECT",
+          "targetNoticeId": "NOTICE-ROOM-CHANGE",
+          "requiredFields": ["date", "time", "location", "source"]
+        },
+        {
+          "variantId": "v2",
+          "threadId": "THREAD-TEST-SERVICE",
+          "targetNoticeId": "NOTICE-DEADLINE-CHANGE",
+          "requiredFields": ["newDeadline", "changedFrom", "source"]
+        }
+      ]
+    },
+    {
+      "familyId": "COMM-F03",
+      "split": "development",
+      "mechanism": "prepare_unsent_message_or_email_draft",
+      "variants": [
+        {
+          "variantId": "v1",
+          "recipientId": "CONTACT-TEST-EDITOR",
+          "channel": "email_fixture",
+          "subject": "测试材料确认",
+          "bodyTemplateId": "MESSAGE-MATERIAL-CONFIRMATION",
+          "mustRemainUnsent": true
+        },
+        {
+          "variantId": "v2",
+          "recipientId": "CONTACT-TEST-COORDINATOR",
+          "channel": "wechat_fixture",
+          "bodyTemplateId": "MESSAGE-SCHEDULE-CONFIRMATION",
+          "mustRemainUnsent": true
+        }
+      ]
+    }
+  ],
+  "fixtures": {
+    "contacts": [
+      {
+        "id": "CONTACT-TEST-EDITOR",
+        "displayName": "测试编辑员甲",
+        "email": "editor-a@example.invalid"
+      },
+      {
+        "id": "CONTACT-TEST-COORDINATOR",
+        "displayName": "测试协调员乙",
+        "email": "coordinator-b@example.invalid"
+      }
+    ],
+    "notices": [
+      {
+        "id": "NOTICE-ROOM-CHANGE",
+        "threadId": "THREAD-TEST-PROJECT",
+        "text": "合成通知：测试讨论改到2026-10-08 14:00，地点为测试会议室B。",
+        "supersedes": "原定测试会议室A"
+      },
+      {
+        "id": "NOTICE-DEADLINE-CHANGE",
+        "threadId": "THREAD-TEST-SERVICE",
+        "text": "合成通知：材料测试截止时间由2026-10-09 18:00调整为2026-10-10 12:00。"
+      }
+    ],
+    "messageTemplates": [
+      {
+        "id": "MESSAGE-MATERIAL-CONFIRMATION",
+        "text": "这是合成测试草稿：已收到测试材料，将在约定时间前完成核对。"
+      },
+      {
+        "id": "MESSAGE-SCHEDULE-CONFIRMATION",
+        "text": "这是合成测试草稿：已看到时间调整，将按新时间参加测试讨论。"
+      }
+    ]
+  },
+  "safety": {
+    "realRecipients": "forbidden",
+    "send": "forbidden",
+    "privateMessages": "forbidden",
+    "personalCalendar": "forbidden",
+    "manualCalibrationRequired": true
+  }
+}

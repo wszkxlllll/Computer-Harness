@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B3 购物开发测试台</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: #20242a; background: #f2f4f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { padding: 18px 28px; color: white; background: #264e70; }
+    header h1 { margin: 0; font-size: 21px; }
+    header p { margin: 5px 0 0; color: #dbe8f2; font-size: 13px; }
+    main { max-width: 1120px; margin: 22px auto; padding: 0 20px 36px; }
+    .notice { padding: 11px 14px; border: 1px solid #e6c36a; border-radius: 7px; background: #fff8df; }
+    .toolbar, .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .toolbar { justify-content: space-between; margin: 16px 0; }
+    .panel { padding: 18px; border: 1px solid #d9dee5; border-radius: 9px; background: white; box-shadow: 0 2px 7px #1c283308; }
+    h2 { margin: 0 0 10px; font-size: 18px; }
+    h3 { margin: 0 0 8px; font-size: 16px; }
+    h4 { margin: 13px 0 5px; font-size: 15px; }
+    button, input { font: inherit; }
+    button { min-height: 36px; padding: 6px 12px; border: 1px solid #aeb8c3; border-radius: 6px; background: #fff; color: inherit; cursor: pointer; }
+    button:hover:not(:disabled) { background: #edf4fa; }
+    button:disabled { color: #737b84; background: #e7e9ec; cursor: not-allowed; }
+    input { padding: 7px 9px; border: 1px solid #aeb8c3; border-radius: 5px; }
+    input[type="number"] { width: 88px; }
+    input[type="text"] { width: min(280px, 80vw); }
+    label { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+    .muted { color: #626c77; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 12px; margin-top: 14px; }
+    .card { padding: 14px; border: 1px solid #d9dee5; border-radius: 7px; background: #fff; }
+    .card.selected { border-color: #316b9a; background: #f1f7fc; }
+    .specs { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 10px 0; }
+    .specs dt { color: #626c77; }
+    .specs dd { margin: 0; }
+    .rule { margin: 12px 0; padding: 10px 12px; border-left: 4px solid #678dad; background: #f4f7fa; }
+    .summary { margin-top: 16px; padding: 13px; border: 1px dashed #97a7b6; border-radius: 6px; background: #f7f9fb; }
+    .summary table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 6px 8px; border-bottom: 1px solid #d9dee5; text-align: left; }
+    .status { min-height: 25px; margin-top: 10px; color: #275c40; }
+    .warning { color: #7b4b00; }
+    .danger { color: #9b2c2c; }
+    .event { margin-top: 12px; padding: 10px; border: 1px solid #d9dee5; border-radius: 6px; background: #fafbfd; }
+    [hidden] { display: none !important; }
+    @media (max-width: 640px) { main { margin-top: 14px; padding: 0 12px 24px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>B3 购物开发测试台</h1>
+    <p>离线模拟环境 · 页面只使用本地合成数据 · 没有真实商店、订单、付款或库存锁定功能</p>
+  </header>
+  <main>
+    <div class="notice" role="note">这是可重置的测试页面。可以查看商品、核对价格、形成购物车草稿和方案；任何“保存”都只写入本机当前测试实例，不能下单或付款。</div>
+    <div class="toolbar">
+      <div><strong id="instance-label">B3 测试实例</strong><div class="muted">页面版本：member-b-b3-shopping-fixture-v0</div></div>
+      <button id="reset-button" type="button">重置本实例</button>
+    </div>
+
+    <section id="task-panel" class="panel">
+      <h2 id="task-title">测试任务</h2>
+      <p id="task-description" class="muted"></p>
+      <div id="task-rule" class="rule"></div>
+    </section>
+
+    <section id="catalog-panel" class="panel" style="margin-top:16px">
+      <h2>测试商品目录</h2>
+      <p class="muted">商品、价格、库存和规格均为虚构数据。请以当前页面显示值为准。</p>
+      <div id="product-list" class="grid"></div>
+    </section>
+
+    <section id="cart-panel" class="panel" style="margin-top:16px" hidden>
+      <h2>购物车草稿核对</h2>
+      <p class="muted">数量输入只用于生成本地测试草稿，不能创建订单。</p>
+      <div id="cart-summary" class="summary"></div>
+      <button id="save-cart-button" type="button">保存购物车草稿</button>
+      <div id="cart-status" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="promo-panel" class="panel" style="margin-top:16px" hidden>
+      <h2>优惠与页面显示总价</h2>
+      <div class="row">
+        <label for="promo-code">测试优惠码 <input id="promo-code" type="text" autocomplete="off" placeholder="请输入页面提供的优惠码"></label>
+        <button id="apply-promo-button" type="button">核对优惠</button>
+      </div>
+      <div id="promo-summary" class="summary" aria-live="polite"></div>
+    </section>
+
+    <section id="combo-panel" class="panel" style="margin-top:16px" hidden>
+      <h2>多商品预算方案</h2>
+      <p class="muted">勾选商品形成测试方案；这不是购物车，也不会提交订单。</p>
+      <div id="combo-summary" class="summary" aria-live="polite"></div>
+    </section>
+
+    <section id="refresh-panel" class="panel" style="margin-top:16px" hidden>
+      <h2>价格/库存变化</h2>
+      <p class="muted">先记录初始状态，再点击一次刷新；刷新后只使用当前价格和库存重新判断。</p>
+      <div id="refresh-summary" class="summary" aria-live="polite"></div>
+      <button id="refresh-button" type="button">刷新价格/库存</button>
+      <div id="refresh-event" class="event" hidden></div>
+    </section>
+  </main>
+  <script>
+    const instance = new URLSearchParams(location.search).get("instance") || "SHOP-F04-v1";
+    const storageKey = `member-b3-shopping-fixture:${instance}`;
+    const products = [
+      { id: "PRODUCT-AURORA-14", name: "Aurora 14 测试笔记本", model: "A14-SYN", kind: "笔记本", screenSize: "14 英寸", memory: "16 GB", storage: "512 GB", weight: "1.38 kg", displayedPriceCny: 4999, stock: 8, stylusSupport: false },
+      { id: "PRODUCT-BIRCH-15", name: "Birch 15 测试笔记本", model: "B15-SYN", kind: "笔记本", screenSize: "15.6 英寸", memory: "16 GB", storage: "512 GB", weight: "1.72 kg", displayedPriceCny: 4799, stock: 6, stylusSupport: false },
+      { id: "PRODUCT-CEDAR-PAD", name: "Cedar 测试平板", model: "C11-SYN", kind: "平板", screenSize: "11 英寸", storage: "256 GB", battery: "8600 mAh", weight: "0.52 kg", displayedPriceCny: 2899, stock: 4, stylusSupport: true },
+      { id: "PRODUCT-DELTA-PAD", name: "Delta 测试平板", model: "D12-SYN", kind: "平板", screenSize: "12 英寸", storage: "128 GB", battery: "9000 mAh", weight: "0.61 kg", displayedPriceCny: 2599, stock: 5, stylusSupport: true },
+    ];
+    const configs = {
+      "SHOP-F04-v1": { title: "F04-v1 · 规格、数量与购物车草稿", mode: "cart", description: "准备 Aurora 14（A14-SYN）2件和 Cedar（C11-SYN）1件的本地购物车草稿。", rule: "目标数量：A14-SYN × 2；C11-SYN × 1。请核对型号、页面显示价、规格和小计。", visible: ["PRODUCT-AURORA-14", "PRODUCT-CEDAR-PAD"] },
+      "SHOP-F04-v2": { title: "F04-v2 · 规格、数量与购物车草稿", mode: "cart", description: "准备 Birch 15（B15-SYN）1件和 Delta（D12-SYN）2件的本地购物车草稿。", rule: "目标数量：B15-SYN × 1；D12-SYN × 2。请核对型号、页面显示价、规格和小计。", visible: ["PRODUCT-BIRCH-15", "PRODUCT-DELTA-PAD"] },
+      "SHOP-F06-v1": { title: "F06-v1 · 优惠条件与页面总价", mode: "promo", description: "核对 A14-SYN 使用页面优惠码后的显示总价。", rule: "优惠码：SAVE500；条件：笔记本商品小计满4500元。只核对显示金额，不付款。", visible: ["PRODUCT-AURORA-14"], promoItems: [{ id: "PRODUCT-AURORA-14", quantity: 1 }], promo: { code: "SAVE500", discount: 500, condition: "笔记本商品小计满4500元" } },
+      "SHOP-F06-v2": { title: "F06-v2 · 组合优惠与页面总价", mode: "promo", description: "核对 C11-SYN 和 D12-SYN 各1件的组合优惠和显示总价。", rule: "优惠码：BUNDLE200；条件：两件平板商品各1件。只核对显示金额，不付款。", visible: ["PRODUCT-CEDAR-PAD", "PRODUCT-DELTA-PAD"], promoItems: [{ id: "PRODUCT-CEDAR-PAD", quantity: 1 }, { id: "PRODUCT-DELTA-PAD", quantity: 1 }], promo: { code: "BUNDLE200", discount: 200, condition: "两件平板商品各1件" } },
+      "SHOP-F08-v1": { title: "F08-v1 · 多商品预算与硬约束", mode: "combo", description: "组合1台笔记本和1台平板，总预算不超过8000元。", rule: "笔记本：内存至少16 GB、重量不超过1.5 kg；平板：存储至少256 GB且支持手写笔。预算：8000元。", visible: products.map((p) => p.id), budget: 8000, comboRule: "laptopAndTablet" },
+      "SHOP-F08-v2": { title: "F08-v2 · 多商品预算与硬约束", mode: "combo", description: "组合两种不同平板各1台，总预算不超过5600元。", rule: "两种不同平板各1台；每台存储至少128 GB；至少一台支持手写笔。预算：5600元。", visible: ["PRODUCT-CEDAR-PAD", "PRODUCT-DELTA-PAD"], budget: 5600, comboRule: "twoDifferentTablets" },
+      "SHOP-F09-v1": { title: "F09-v1 · 价格变化后修正方案", mode: "refresh", description: "选择预算内有库存且价格最低的笔记本，刷新后重新判断。", rule: "预算：5200元；内存至少16 GB；必须有库存；选择价格最低者。刷新后以当前页面为准。", visible: ["PRODUCT-AURORA-14", "PRODUCT-BIRCH-15"], refresh: { changedId: "PRODUCT-BIRCH-15", oldPrice: 4799, newPrice: 5299 } },
+      "SHOP-F09-v2": { title: "F09-v2 · 库存变化后修正方案", mode: "refresh", description: "选择预算内有库存且价格最低的平板，刷新后重新判断。", rule: "预算：3000元；存储至少128 GB；支持手写笔；必须有库存；选择价格最低者。刷新后以当前页面为准。", visible: ["PRODUCT-CEDAR-PAD", "PRODUCT-DELTA-PAD"], refresh: { changedId: "PRODUCT-DELTA-PAD", oldStock: 5, newStock: 0 } },
+    };
+    const config = configs[instance];
+    const state = JSON.parse(localStorage.getItem(storageKey) || "null") || { quantities: {}, selected: [], promoApplied: false, refreshed: false, saved: false };
+    const $ = (selector) => document.querySelector(selector);
+    const yuan = (value) => `${value} 元`;
+    const currentProduct = (product) => {
+      const copy = { ...product };
+      if (state.refreshed && instance === "SHOP-F09-v1" && product.id === "PRODUCT-BIRCH-15") copy.displayedPriceCny = 5299;
+      if (state.refreshed && instance === "SHOP-F09-v2" && product.id === "PRODUCT-DELTA-PAD") copy.stock = 0;
+      return copy;
+    };
+    const visibleProducts = () => (config?.visible || []).map((id) => products.find((p) => p.id === id)).filter(Boolean).map(currentProduct);
+    const saveState = () => localStorage.setItem(storageKey, JSON.stringify(state));
+    function specsFor(product) {
+      const fields = [["型号", product.model], ["类型", product.kind], ["屏幕", product.screenSize], ["内存", product.memory], ["存储", product.storage], ["重量", product.weight], ["电池", product.battery], ["手写笔", product.stylusSupport ? "支持" : "不支持"], ["页面显示价", yuan(product.displayedPriceCny)], ["库存", `${product.stock} 件`]];
+      return fields.filter(([, value]) => value !== undefined).map(([name, value]) => `<dt>${name}</dt><dd>${value}</dd>`).join("");
+    }
+    function renderCatalog() {
+      const list = $("#product-list");
+      list.replaceChildren(...visibleProducts().map((product) => {
+        const card = document.createElement("article");
+        card.className = "card";
+        card.dataset.productId = product.id;
+        const heading = document.createElement("h3");
+        heading.textContent = product.name;
+        const details = document.createElement("dl");
+        details.className = "specs";
+        details.innerHTML = specsFor(product);
+        card.append(heading, details);
+        if (config.mode === "cart") {
+          const label = document.createElement("label");
+          label.textContent = "数量";
+          const input = document.createElement("input");
+          input.type = "number"; input.min = "0"; input.max = String(product.stock); input.value = String(state.quantities[product.id] || 0); input.dataset.quantityFor = product.id;
+          input.addEventListener("input", () => { state.quantities[product.id] = Math.max(0, Number(input.value) || 0); state.saved = false; saveState(); renderCart(); });
+          label.append(input); card.append(label);
+        } else if (config.mode === "combo") {
+          const label = document.createElement("label");
+          const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = state.selected.includes(product.id); checkbox.dataset.selectProduct = product.id;
+          checkbox.addEventListener("change", () => { state.selected = [...document.querySelectorAll("[data-select-product]:checked")].map((input) => input.dataset.selectProduct); saveState(); renderCombo(); renderCatalog(); });
+          label.append(checkbox, document.createTextNode("纳入方案")); card.append(label);
+        }
+        return card;
+      }));
+    }
+    function renderCart() {
+      if (config.mode !== "cart") return;
+      const entries = visibleProducts().filter((p) => Number(state.quantities[p.id]) > 0);
+      const subtotal = entries.reduce((sum, p) => sum + p.displayedPriceCny * Number(state.quantities[p.id]), 0);
+      $("#cart-summary").innerHTML = entries.length ? `<table><thead><tr><th>型号</th><th>规格</th><th>单价</th><th>数量</th><th>小计</th></tr></thead><tbody>${entries.map((p) => `<tr><td>${p.model}</td><td>${p.screenSize}；${p.memory || p.storage}</td><td>${yuan(p.displayedPriceCny)}</td><td>${state.quantities[p.id]}</td><td>${yuan(p.displayedPriceCny * Number(state.quantities[p.id]))}</td></tr>`).join("")}</tbody><tfoot><tr><th colspan="4">页面显示小计</th><th>${yuan(subtotal)}</th></tr></tfoot></table>` : "还没有加入商品。请先填写数量。";
+      $("#cart-status").textContent = state.saved ? "购物车草稿已保存（仅本地测试状态，未提交订单）。" : "";
+    }
+    function renderPromo() {
+      if (config.mode !== "promo") return;
+      const items = config.promoItems.map(({ id, quantity }) => ({ product: currentProduct(products.find((p) => p.id === id)), quantity }));
+      const subtotal = items.reduce((sum, { product, quantity }) => sum + product.displayedPriceCny * quantity, 0);
+      const applied = state.promoApplied;
+      const discount = applied ? config.promo.discount : 0;
+      const total = subtotal - discount;
+      $("#promo-summary").innerHTML = `<table><tbody>${items.map(({ product, quantity }) => `<tr><th>${product.model}</th><td>${yuan(product.displayedPriceCny)} × ${quantity}</td></tr>`).join("")}<tr><th>优惠条件</th><td>${config.promo.condition}</td></tr><tr><th>原价小计</th><td>${yuan(subtotal)}</td></tr><tr><th>优惠金额</th><td>${yuan(discount)}</td></tr><tr><th>页面显示总价</th><td>${yuan(total)}</td></tr></tbody></table><p class="${applied ? "" : "warning"}">${applied ? "页面显示：优惠已应用。" : "尚未应用优惠，请输入页面提供的优惠码后核对。"}</p>`;
+    }
+    function comboQualifies(selected) {
+      const chosen = selected.map((id) => currentProduct(products.find((p) => p.id === id))).filter(Boolean);
+      const total = chosen.reduce((sum, p) => sum + p.displayedPriceCny, 0);
+      let rules = [];
+      let qualifies = total <= config.budget;
+      if (config.comboRule === "laptopAndTablet") {
+        rules = [chosen.filter((p) => p.kind === "笔记本").length === 1, chosen.filter((p) => p.kind === "平板").length === 1, chosen.some((p) => p.kind === "笔记本" && Number.parseFloat(p.memory) >= 16), chosen.some((p) => p.kind === "笔记本" && Number.parseFloat(p.weight) <= 1.5), chosen.some((p) => p.kind === "平板" && Number.parseFloat(p.storage) >= 256), chosen.some((p) => p.kind === "平板" && p.stylusSupport)];
+      } else {
+        rules = [chosen.length === 2, chosen.every((p) => p.kind === "平板"), new Set(chosen.map((p) => p.model)).size === 2, chosen.every((p) => Number.parseFloat(p.storage) >= 128), chosen.some((p) => p.stylusSupport)];
+      }
+      qualifies = qualifies && rules.every(Boolean);
+      return { chosen, total, qualifies };
+    }
+    function renderCombo() {
+      if (config.mode !== "combo") return;
+      const { chosen, total, qualifies } = comboQualifies(state.selected);
+      $("#combo-summary").innerHTML = `<p>已选：${chosen.length ? chosen.map((p) => `${p.model}（${yuan(p.displayedPriceCny)}）`).join("、") : "无"}</p><p>当前合计：${yuan(total)}；预算：${yuan(config.budget)}</p><p class="${qualifies ? "" : "warning"}">${qualifies ? "当前组合满足页面列出的全部硬约束。" : "当前组合尚未满足全部预算或硬约束。"}</p>`;
+    }
+    function chooseRefreshPlan() {
+      const candidates = visibleProducts().filter((p) => p.stock > 0 && p.displayedPriceCny <= (instance === "SHOP-F09-v1" ? 5200 : 3000));
+      return candidates.sort((a, b) => a.displayedPriceCny - b.displayedPriceCny)[0];
+    }
+    function renderRefresh() {
+      if (config.mode !== "refresh") return;
+      const plan = chooseRefreshPlan();
+      $("#refresh-summary").innerHTML = `<p>状态：${state.refreshed ? "已刷新" : "初始状态"}</p><p>当前建议：${plan ? `${plan.model}，${yuan(plan.displayedPriceCny)}，库存${plan.stock}件` : "没有符合条件的有库存商品"}</p>`;
+      $("#refresh-button").disabled = state.refreshed;
+      if (state.refreshed) {
+        const changed = currentProduct(products.find((p) => p.id === config.refresh.changedId));
+        const old = products.find((p) => p.id === config.refresh.changedId);
+        $("#refresh-event").hidden = false;
+        $("#refresh-event").innerHTML = config.refresh.newPrice ? `刷新记录：${changed.model} 页面显示价由${yuan(old.displayedPriceCny)}变为${yuan(changed.displayedPriceCny)}；库存仍为${changed.stock}件。` : `刷新记录：${changed.model} 库存由${old.stock}件变为${changed.stock}件。`;
+      }
+    }
+    function render() { renderCatalog(); renderCart(); renderPromo(); renderCombo(); renderRefresh(); }
+    if (!config) {
+      $("#instance-label").textContent = "未知测试实例";
+      $("#task-description").textContent = "无效实例ID，请使用SHOP-F04/F06/F08/F09的development实例。";
+    } else {
+      $("#instance-label").textContent = `测试实例：${instance}`;
+      $("#task-title").textContent = config.title;
+      $("#task-description").textContent = config.description;
+      $("#task-rule").textContent = config.rule;
+      $("#cart-panel").hidden = config.mode !== "cart";
+      $("#promo-panel").hidden = config.mode !== "promo";
+      $("#combo-panel").hidden = config.mode !== "combo";
+      $("#refresh-panel").hidden = config.mode !== "refresh";
+      if (config.mode === "promo") $("#promo-code").placeholder = `输入 ${config.promo.code}`;
+      render();
+    }
+    $("#save-cart-button").addEventListener("click", () => { state.saved = true; saveState(); renderCart(); });
+    $("#apply-promo-button").addEventListener("click", () => { state.promoApplied = $("#promo-code").value.trim() === config.promo.code; saveState(); renderPromo(); });
+    $("#refresh-button").addEventListener("click", () => { state.refreshed = true; saveState(); render(); });
+    $("#reset-button").addEventListener("click", () => { localStorage.removeItem(storageKey); location.reload(); });
+  </script>
+</body>
+</html>

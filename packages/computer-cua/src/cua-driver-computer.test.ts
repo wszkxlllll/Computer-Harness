@@ -36,6 +36,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let bounds = { ...initialBounds };
   let image = { ...initialImage };
   let missing = false;
+  let transientMissingResponses = 0;
+  let captureFailures = 0;
+  let visibleWindowId = 5678;
+  let additionalVisibleWindowIds: number[] = [];
   let groundingState: Record<string, unknown> | undefined;
   let abortGrounding = false;
   const target = { pid: 1234, windowId: 5678 };
@@ -45,6 +49,12 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     async shutdown() { calls.push({ name: "shutdown" }); },
     async verifyState() {
       calls.push({ name: "verifyState" });
+      if (captureFailures > 0) {
+        captureFailures -= 1;
+        return result({
+          verification: { status: 1, stable: false, elapsedMs: 0n, samples: 1n, predicates: [] },
+        });
+      }
       return result({
         images: [{ mimeType: "image/png", dataBase64: pngWithDimensions(image.width, image.height) }],
         verification: { status: 0, stable: true, elapsedMs: 0n, samples: 1n, predicates: [] },
@@ -54,7 +64,15 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       const input = JSON.parse(inputJson) as Record<string, unknown>;
       calls.push({ name, input });
       if (name === "list_windows") {
-        return result({ structuredJson: JSON.stringify({ windows: missing ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds }] }) });
+        const transientMissing = transientMissingResponses > 0;
+        if (transientMissing) transientMissingResponses -= 1;
+        const windows = missing || transientMissing
+          ? []
+          : [
+              { pid: target.pid, window_id: visibleWindowId, title: "Safe fixture", app_name: "Computer Harness", bounds },
+              ...additionalVisibleWindowIds.map((windowId) => ({ pid: target.pid, window_id: windowId, title: "Sibling fixture", app_name: "Computer Harness", bounds })),
+            ];
+        return result({ structuredJson: JSON.stringify({ windows }) });
       }
       if (name === "get_screen_size") {
         return result({ structuredJson: JSON.stringify({ width: 1512, height: 982, scale_factor: displayScaleFactor }) });
@@ -73,6 +91,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     calls,
     setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
     setMissing(value: boolean) { missing = value; },
+    setTransientMissingResponses(value: number) { transientMissingResponses = value; },
+    setReplacementWindowId(value: number) { visibleWindowId = value; },
+    setAdditionalVisibleWindowIds(value: number[]) { additionalVisibleWindowIds = [...value]; },
+    setCaptureFailures(value: number) { captureFailures = value; },
     setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; },
     setGroundingAbort(value: boolean) { abortGrounding = value; },
   };
@@ -1070,6 +1092,49 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("retains the confirmed click focus point across a stable re-observation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-type-focus-observe-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const clickObservation = "window-type-focus-click-observation" as ObservationId;
+      await computer.observe(session, clickObservation, new AbortController().signal);
+      const click = await computer.execute(session, {
+        actionId: "window-type-focus-observe-click" as ActionId,
+        basedOn: clickObservation,
+        kind: "click",
+        point: { x: 100, y: 200 },
+      }, new AbortController().signal);
+      expect(click.status).toBe("completed");
+      const typeObservation = "window-type-focus-after-observe" as ObservationId;
+      await computer.observe(session, typeObservation, new AbortController().signal);
+      const type = await computer.execute(session, {
+        actionId: "window-type-focus-after-observe-type" as ActionId,
+        basedOn: typeObservation,
+        kind: "type",
+        text: "after-observe",
+      }, new AbortController().signal);
+      expect(type.status).toBe("completed");
+      const clickInput = fake.calls.find((call) => call.name === "click")?.input;
+      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({
+        x: clickInput?.x,
+        y: clickInput?.y,
+        text: "after-observe",
+        delivery_mode: "foreground",
+      });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps foreground window delivery an explicit host choice", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-foreground-"));
     const fake = windowDriver();
@@ -1125,6 +1190,24 @@ describe("CuaDriverComputer", () => {
       }, new AbortController().signal);
       expect(current.status).toBe("completed");
       expect(oldObservation.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("re-discovers the same window once after transient capture geometry failure", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-reobserve-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      fake.setCaptureFailures(2);
+      const capture = await computer.observe(session, "window-reobserve" as ObservationId, new AbortController().signal);
+      expect(capture.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(3);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(4);
+      expect(fake.calls.filter((call) => call.name === "get_desktop_state")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1231,6 +1314,148 @@ describe("CuaDriverComputer", () => {
       expect(closed).toMatchObject({ status: "refused", driverCode: "WINDOW_TARGET_NOT_FOUND" });
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
       expect(fake.calls.some((call) => call.name === "get_desktop_state")).toBe(false);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retries one transient target disappearance without selecting another window", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-target-retry-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "window-target-retry" as ObservationId;
+      await computer.observe(session, observationId, new AbortController().signal);
+      fake.setTransientMissingResponses(1);
+      const receipt = await computer.execute(session, {
+        actionId: "window-target-retry-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "completed" });
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(4);
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ target: { kind: "window", pid: 1234, window_id: 5678 } });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rebinds once to the unique managed-browser window of the same PID and waits for a fresh observation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-managed-rebind-"));
+    const fake = windowDriver();
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "edge",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      grounding: "uia-catalog-v1",
+      browserTarget,
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const oldObservation = "managed-rebind-old" as ObservationId;
+      await computer.observe(session, oldObservation, new AbortController().signal);
+      const oldFocus = await computer.execute(session, {
+        actionId: "managed-rebind-old-focus" as ActionId,
+        basedOn: oldObservation,
+        kind: "click",
+        point: { x: 100, y: 200 },
+      }, new AbortController().signal);
+      expect(oldFocus).toMatchObject({ status: "completed" });
+      fake.setReplacementWindowId(6789);
+      fake.setTransientMissingResponses(2);
+      const stale = await computer.execute(session, {
+        actionId: "managed-rebind-stale" as ActionId,
+        basedOn: oldObservation,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(stale).toMatchObject({ status: "refused", driverCode: "WINDOW_TARGET_REBOUND" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      const oldRetry = await computer.execute(session, {
+        actionId: "managed-rebind-old-retry" as ActionId,
+        basedOn: oldObservation,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(oldRetry).toMatchObject({ status: "refused", driverCode: "OBSERVATION_NOT_FOUND" });
+
+      const freshObservation = "managed-rebind-fresh" as ObservationId;
+      await computer.observe(session, freshObservation, new AbortController().signal);
+      const typeWithoutFreshFocus = await computer.execute(session, {
+        actionId: "managed-rebind-type-without-fresh-focus" as ActionId,
+        basedOn: freshObservation,
+        kind: "type",
+        text: "must-not-reuse-old-window-focus",
+      }, new AbortController().signal);
+      expect(typeWithoutFreshFocus).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "type_text")?.input).not.toHaveProperty("x");
+      expect(fake.calls.find((call) => call.name === "type_text")?.input).not.toHaveProperty("y");
+      const current = await computer.execute(session, {
+        actionId: "managed-rebind-current" as ActionId,
+        basedOn: freshObservation,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(current).toMatchObject({ status: "completed" });
+      expect(fake.calls.filter((call) => call.name === "click").at(-1)?.input).toMatchObject({ target: { kind: "window", pid: 1234, window_id: 6789 } });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rebind a managed browser when same-PID candidates are not unique", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-managed-rebind-sibling-"));
+    const fake = windowDriver();
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "edge",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      grounding: "uia-catalog-v1",
+      browserTarget,
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "managed-rebind-sibling" as ObservationId;
+      await computer.observe(session, observationId, new AbortController().signal);
+      fake.setReplacementWindowId(6789);
+      fake.setAdditionalVisibleWindowIds([6790]);
+      fake.setTransientMissingResponses(2);
+      const receipt = await computer.execute(session, {
+        actionId: "managed-rebind-sibling-action" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_TARGET_NOT_FOUND" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      await expect(computer.observe(session, "managed-rebind-sibling-after" as ObservationId, new AbortController().signal)).rejects.toThrow(/identity was invalidated/iu);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

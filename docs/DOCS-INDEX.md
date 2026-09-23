@@ -2,6 +2,8 @@
 
 日期：2026-09-21
 
+**2026-09-24 成员B B2+B3校准收尾**：购物与通信/个人事务 B3 的16个新实例、64个校准控制项已完成本地合成页面走查；B2 的8个开发实例也已完成 macOS 受控浏览器复位。B2 8/8、B3 16/16，合计24个唯一实例均已有真实本地复位凭证并通过校验；绑定审计和不含答案字段的候选清单审计通过。GLM 额度恢复后，16/16 个 B3 实例均已完成串行模型运行并通过本地 evaluator（无安全违规、无真实下单/付款/发信/日历写入）。本轮最终扫描 60/60 份复位凭证通过；36 个 formal 运行目录累计 350 步、389 次模型请求、3,731,787 input + 202,369 output = 3,934,156 tokens（包含重试与诊断）。evaluator 语义回归、全量离线测试、typecheck 和 diff-check 均通过。当前入口见[成员B B3校准收尾与评测门禁](./member-b-b3-calibration-closeout-2026-09-22.md)。
+
 **2026-09-21 Jev / System One 调研**：Jev 不支持截图，也不是通用 GUI grounder 或 planner；它只适合在 UIA/DOM/视觉生产者已经形成有界 `GroundingCatalog` 后，尝试做低延迟候选判断。当前仅批准离线与在线 shadow 实验，不批准替换 GLM/Qwen、重构 Runtime 或获得直接执行权。实验边界、指标、回退与停止条件见[Jev / System One 适配性审计](./jev-system-one-fit-assessment-2026-09-21.md)。
 
 **2026-09-22 macOS DOM/Hybrid 更新**：macOS 已在 Harness-owned Chrome 受控页面完成从启动、窗口/进程绑定、11个DOM候选、未降级Hybrid目录到Retina精确点击、输入、滚动和零残留清理的整链路。本地一键验证为 `pnpm harness dom-probe --allow-input`。这不等于真实购物/通信站点已通过；详见[macOS Managed DOM / Hybrid 落地与真机验证](./macos-managed-dom-hybrid-results-2026-09-22.md)。
@@ -22,6 +24,8 @@
 ## 下一阶段开发必读
 
 当前先执行[上海出行票务试点准备](./travel-pilot-preparation-2026-09-20.md)：12306、携程与地图路线。[20题及反馈表](./travel-task-cards-and-feedback.md)、逐题启动和模块指标采集已完成初次离线验收；TUI自由goal入口用F调整下一Run功能，运行中可纠正，每Run独立保存原文报告、实际配置、指标和人工表。最新T01样例的Runtime成功不等于业务成功，人工走查仍待填写；它已证明人工纠正和Run内Memory闭环可工作，同时显示Planning/Batch未触发、Monitor只能阻断完全相同动作，详见[轨迹审计](./travel-trajectory-review-2026-09-20.md)。research默认开启Plan/Memory/Context/Batch/Monitor但关闭Risk Guard；Guard可用启动参数或TUI的F页面按Run打开。上级[三人评测实施方案](./scenario-evaluation-and-three-person-plan-2026-09-19.md)的六域120实例是后续扩展建议，不要求同时启动；当前任务集仍是候选草案，不修改既有OSWorld清单。
+
+成员B负责购物与通信/个人事务时，以[成员B个人实施计划](./member-b-shopping-communication-implementation-plan-2026-09-21.md)为个人入口；当前本机事实和待确认项见[成员B预检记录](./member-b-shopping-communication-preflight-2026-09-21.md)。先随出行试点对齐共享合同，再完成两域入口走查和8个开发实例的人工闭环；通过门槛后才扩到24个开发实例、16个留出实例及6个真实迁移任务。该计划不授权批量模型运行、真实交易或消息发送。
 
 CUA 0.22.2 的 UIA 探针与产品化实验分别记录在[UIA 只读能力探针结果](./dev-2-uia-readonly-probe-results-2026-09-20.md)和[UIA Grounding 实施结果](./dev-2-uia-grounding-implementation-results-2026-09-21.md)：私有 daemon 与自有 WinForms fixture 已验证 `list_windows/get_window_state/verify_state`；当前默认关闭的 `uia-catalog-v1` 仅允许显式 CUA window target，Adapter 使用 depth16、最多256个安全候选，Runtime 用确定性 selector 落盘最多16个 hot elements，Context/GLM/Qwen共用 `click_element`，旧ref/resize/查询失败会拒绝或显式降级。高德实验已证明站点建议文本能通过 UIA 定位并完成 `click_element` 4/4，也证明“换乘少”自定义控件在 depth16/24/32 的完整只读对照中均未暴露；UIA 是有界补充，不是 DOM 的替代。
 

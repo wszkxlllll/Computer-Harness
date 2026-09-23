@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "seedId": "shopping-b2-synthetic-v0",
+  "status": "draft_not_executable",
+  "domain": "shopping_after_sales",
+  "syntheticOnly": true,
+  "families": [
+    {
+      "familyId": "SHOP-F01",
+      "split": "development",
+      "mechanism": "lookup_model_and_specifications",
+      "variants": [
+        {
+          "variantId": "v1",
+          "targetProductId": "PRODUCT-AURORA-14",
+          "requiredFields": ["model", "screenSize", "memory", "weight"]
+        },
+        {
+          "variantId": "v2",
+          "targetProductId": "PRODUCT-CEDAR-PAD",
+          "requiredFields": ["model", "screenSize", "storage", "battery"]
+        }
+      ]
+    },
+    {
+      "familyId": "SHOP-F03",
+      "split": "development",
+      "mechanism": "compare_under_hard_constraints",
+      "variants": [
+        {
+          "variantId": "v1",
+          "candidateSetId": "SET-LAPTOP-01",
+          "constraints": {
+            "maximumDisplayedPriceCny": 5200,
+            "minimumMemoryGb": 16,
+            "maximumWeightKg": 1.5
+          }
+        },
+        {
+          "variantId": "v2",
+          "candidateSetId": "SET-TABLET-01",
+          "constraints": {
+            "maximumDisplayedPriceCny": 3000,
+            "minimumStorageGb": 256,
+            "requiresStylusSupport": true
+          }
+        }
+      ]
+    }
+  ],
+  "catalog": {
+    "products": [
+      {
+        "id": "PRODUCT-AURORA-14",
+        "name": "Aurora 14 Test Notebook",
+        "model": "A14-SYN",
+        "screenSize": "14 inch",
+        "memory": "16 GB",
+        "storage": "512 GB",
+        "weight": "1.38 kg",
+        "displayedPriceCny": 4999
+      },
+      {
+        "id": "PRODUCT-BIRCH-15",
+        "name": "Birch 15 Test Notebook",
+        "model": "B15-SYN",
+        "screenSize": "15.6 inch",
+        "memory": "16 GB",
+        "storage": "512 GB",
+        "weight": "1.72 kg",
+        "displayedPriceCny": 4799
+      },
+      {
+        "id": "PRODUCT-CEDAR-PAD",
+        "name": "Cedar Test Tablet",
+        "model": "C11-SYN",
+        "screenSize": "11 inch",
+        "storage": "256 GB",
+        "battery": "8600 mAh",
+        "stylusSupport": true,
+        "displayedPriceCny": 2899
+      },
+      {
+        "id": "PRODUCT-DELTA-PAD",
+        "name": "Delta Test Tablet",
+        "model": "D12-SYN",
+        "screenSize": "12 inch",
+        "storage": "128 GB",
+        "battery": "9000 mAh",
+        "stylusSupport": true,
+        "displayedPriceCny": 2599
+      }
+    ],
+    "candidateSets": {
+      "SET-LAPTOP-01": ["PRODUCT-AURORA-14", "PRODUCT-BIRCH-15"],
+      "SET-TABLET-01": ["PRODUCT-CEDAR-PAD", "PRODUCT-DELTA-PAD"]
+    }
+  },
+  "safety": {
+    "transactions": "forbidden",
+    "cartMutation": "forbidden_for_b2",
+    "realBrandsOrAccounts": "forbidden",
+    "manualCalibrationRequired": true
+  }
+}

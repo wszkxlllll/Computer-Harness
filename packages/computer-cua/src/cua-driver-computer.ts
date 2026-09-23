@@ -30,11 +30,14 @@ import {
 import {
   captureWindow,
   discoverWindow,
+  isTransientWindowCaptureFailure,
+  listWindowTargets,
   sameWindowGeometry,
   validateWindowTarget,
   windowActionTarget,
   type CuaWindowBinding,
   type CuaWindowGeometry,
+  type CuaWindowInfo,
   type CuaWindowTarget,
   WindowContractError,
 } from "./window-contract.js";
@@ -88,6 +91,8 @@ interface PrivateSession {
   descriptor: ComputerSessionDescriptor;
   active: boolean;
   windowBinding?: CuaWindowBinding;
+  /** At most one managed-browser same-PID window rebind is allowed per session. */
+  windowRecoveryUsed: boolean;
   /** One confirmed click point that may establish renderer focus for the next type action. */
   pendingWindowTypePoint?: { x: number; y: number };
   /** Last confirmed click point used to focus a renderer before a window hotkey. */
@@ -273,6 +278,7 @@ export class CuaDriverComputer implements Computer {
         descriptor,
         active: true,
         windowIdentityInvalidated: false,
+        windowRecoveryUsed: false,
         ...(windowBinding === undefined ? {} : { windowBinding }),
         ...(this.options.browserTarget === undefined ? {} : { browserTarget: this.options.browserTarget }),
       };
@@ -296,12 +302,29 @@ export class CuaDriverComputer implements Computer {
         throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session"), "observe");
       }
       try {
-        const liveBinding = await discoverWindow(current.driver, current.label, current.windowBinding.target, signal);
-        if (!sameWindowGeometry(liveBinding.bounds, current.windowBinding.bounds)) {
-          delete current.pendingWindowTypePoint;
-          delete current.windowHotkeyPoint;
+        let liveBinding: CuaWindowBinding | undefined;
+        let capture: Awaited<ReturnType<typeof captureWindow>> | undefined;
+        // A scroll, resize, or native popup can move the same window between
+        // list_windows and verifyState. Re-discover once after a transient
+        // capture failure, but keep the explicit PID/windowId and exact bounds
+        // contract; this never selects a sibling/recreated window.
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const candidate = await discoverWindowWithTransientRetry(current.driver, current.label, current.windowBinding.target, signal);
+          if (!sameWindowGeometry(candidate.bounds, current.windowBinding.bounds)) {
+            delete current.pendingWindowTypePoint;
+            delete current.windowHotkeyPoint;
+          }
+          try {
+            capture = await captureWindow(current.driver, current.label, candidate, signal);
+            liveBinding = candidate;
+            break;
+          } catch (error) {
+            if (attempt === 1 || !isTransientWindowCaptureFailure(error)) throw error;
+          }
         }
-        const capture = await captureWindow(current.driver, current.label, liveBinding, signal);
+        if (liveBinding === undefined || capture === undefined) {
+          throw new WindowContractError("WINDOW_GEOMETRY_UNCONFIRMED", "configured CUA window geometry was not verified");
+        }
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
         const grounding = await readWindowGrounding(
@@ -422,7 +445,7 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_GEOMETRY_UNKNOWN", "window action is not bound to verified window geometry");
       }
       try {
-        const liveBinding = await discoverWindow(current.driver, current.label, current.windowBinding.target, signal);
+        const liveBinding = await discoverWindowWithTransientRetry(current.driver, current.label, current.windowBinding.target, signal);
         if (!sameWindowGeometry(liveBinding.bounds, decisionObservation.geometry)) {
           return refused(action.actionId, "WINDOW_GEOMETRY_CHANGED", "window geometry changed since the action observation");
         }
@@ -431,7 +454,14 @@ export class CuaDriverComputer implements Computer {
         const details = driverErrorDetails(error);
         if (details.tag === "Transport") current.active = false;
         if (error instanceof WindowContractError) {
-          if (error.code === "WINDOW_TARGET_NOT_FOUND") current.windowIdentityInvalidated = true;
+          if (error.code === "WINDOW_TARGET_NOT_FOUND") {
+            const rebound = await this.rebindManagedBrowserWindow(current, signal);
+            if (rebound !== undefined) {
+              return refused(action.actionId, "WINDOW_TARGET_REBOUND", "managed browser window identity changed; action was not sent; observe again before continuing");
+            }
+            current.windowIdentityInvalidated = true;
+            return refused(action.actionId, error.code, "configured CUA window target disappeared after a bounded same-target retry; close and open a new session; no alternate window was selected");
+          }
           return refused(action.actionId, error.code, error.message);
         }
         return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
@@ -581,6 +611,41 @@ export class CuaDriverComputer implements Computer {
     }
     return current;
   }
+
+  private async rebindManagedBrowserWindow(current: PrivateSession, signal: AbortSignal): Promise<CuaWindowBinding | undefined> {
+    if (current.windowRecoveryUsed || current.windowBinding === undefined) return undefined;
+    const browserTarget = current.browserTarget ?? this.options.browserTarget;
+    if (browserTarget === undefined || browserTarget.windowTarget.pid !== current.windowBinding.target.pid) return undefined;
+    current.windowRecoveryUsed = true;
+    let candidates: readonly CuaWindowInfo[];
+    try {
+      candidates = await listWindowTargets(current.driver, current.label, signal, current.windowBinding.target.pid);
+    } catch {
+      return undefined;
+    }
+    if (candidates.length !== 1 || candidates[0]!.target.windowId === current.windowBinding.target.windowId) return undefined;
+    const rebound = candidates[0]!;
+    try {
+      // Capture before changing the binding. The old observation remains
+      // invalid for this action; only the next observation may use rebound.
+      const capture = await captureWindow(current.driver, current.label, rebound, signal);
+      current.windowBinding = rebound;
+      current.descriptor = { ...current.descriptor, viewport: capture.viewport };
+      current.browserTarget = { ...browserTarget, windowTarget: rebound.target };
+      // Every observation and grounding was attested to the old window
+      // identity. Retain no stale action or focus path; the caller must
+      // observe again and establish focus in the rebound window explicitly.
+      this.observations.clear();
+      this.groundings.clear();
+      this.latestObservationId = undefined;
+      delete current.pendingWindowTypePoint;
+      delete current.windowHotkeyPoint;
+      delete current.windowInputScale;
+      return rebound;
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 function actionRequest(
@@ -618,13 +683,13 @@ function actionRequest(
       };
     case "keypress":
       return action.keys.length === 1
-        ? { name: "press_key", arguments: { session, target, key: action.keys[0], delivery_mode: deliveryMode } }
+        ? { name: "press_key", arguments: { session, target, key: normalizeCuaKeyName(action.keys[0]!), delivery_mode: deliveryMode } }
         : {
             name: "hotkey",
             arguments: {
               session,
               target,
-              keys: action.keys,
+              keys: action.keys.map(normalizeCuaKeyName),
               delivery_mode: deliveryMode,
               ...(windowBinding === undefined || windowHotkeyPoint === undefined ? {} : windowHotkeyPoint),
             },
@@ -638,6 +703,30 @@ function actionRequest(
     }
     default:
       return assertNever(action);
+  }
+}
+
+/** Keep model key spellings compatible with the CUA driver's canonical names. */
+function normalizeCuaKeyName(key: string): string {
+  return key === "BACK_SPACE" ? "BACKSPACE" : key;
+}
+
+async function discoverWindowWithTransientRetry(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+): Promise<CuaWindowBinding> {
+  try {
+    return await discoverWindow(driver, session, target, signal);
+  } catch (error) {
+    if (!(error instanceof WindowContractError) || error.code !== "WINDOW_TARGET_NOT_FOUND") throw error;
+    // A native popup, resize, or compositor transition may make the same
+    // target briefly absent from list_windows. Retry only that exact identity;
+    // a persistent miss remains a latched failure and never selects another
+    // window or reuses a recreated PID/windowId later in the session.
+    await waitWithAbort(25, signal);
+    return discoverWindow(driver, session, target, signal);
   }
 }
 

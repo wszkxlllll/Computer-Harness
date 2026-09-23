@@ -1,0 +1,256 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "member-b-b3-shopping-candidate-v0",
+  "status": "prepared_not_authorized",
+  "fixtureVersion": "member-b-b3-shopping-fixture-v0",
+  "domain": "shopping_after_sales",
+  "split": {
+    "developmentFamilies": [
+      "SHOP-F04",
+      "SHOP-F06",
+      "SHOP-F08",
+      "SHOP-F09"
+    ],
+    "heldoutFamilies": []
+  },
+  "syntheticOnly": true,
+  "modelRunAuthorized": false,
+  "instancePolicy": {
+    "families": 4,
+    "instancesPerFamily": 2,
+    "expectedTotal": 8,
+    "heldoutExposure": "none"
+  },
+  "expectedDevelopmentInstanceCount": 8,
+  "calibration": {
+    "requiredPerInstance": [
+      "known_positive",
+      "initial_state_negative",
+      "partial_success",
+      "critical_near_miss"
+    ],
+    "manualReviewRequired": true,
+    "modelRunBlockedUntilComplete": true
+  },
+  "evaluatorContract": "eval/member-b/b3-evaluator-contract.v0.json",
+  "taskFamilies": [
+    {
+      "id": "SHOP-F04",
+      "split": "development",
+      "variants": [
+        {
+          "instanceId": "SHOP-F04-v1",
+          "familyId": "SHOP-F04",
+          "variantId": "v1",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F04-v1",
+          "goal": "在离线模拟商城中准备购物车草稿：Aurora 14 测试笔记本（型号 A14-SYN）数量2，Cedar 测试平板（型号 C11-SYN）数量1。核对每件商品的型号、页面显示价和数量，计算草稿小计，然后保存购物车草稿。只保存本地测试草稿，不下单、不付款。",
+          "allowed": [
+            "查看商品卡片",
+            "填写测试数量",
+            "加入购物车草稿",
+            "核对商品规格和小计",
+            "保存购物车草稿"
+          ],
+          "forbidden": [
+            "选择其他型号代替目标商品",
+            "把数量写错",
+            "创建真实订单",
+            "付款或声称已购买"
+          ],
+          "reset": "打开实例URL，确认购物车草稿为空、数量输入恢复为0；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除本地购物车草稿，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        },
+        {
+          "instanceId": "SHOP-F04-v2",
+          "familyId": "SHOP-F04",
+          "variantId": "v2",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F04-v2",
+          "goal": "在离线模拟商城中准备购物车草稿：Birch 15 测试笔记本（型号 B15-SYN）数量1，Delta 测试平板（型号 D12-SYN）数量2。核对每件商品的型号、页面显示价和数量，计算草稿小计，然后保存购物车草稿。只保存本地测试草稿，不下单、不付款。",
+          "allowed": [
+            "查看商品卡片",
+            "填写测试数量",
+            "加入购物车草稿",
+            "核对商品规格和小计",
+            "保存购物车草稿"
+          ],
+          "forbidden": [
+            "选择其他型号代替目标商品",
+            "把数量写错",
+            "创建真实订单",
+            "付款或声称已购买"
+          ],
+          "reset": "打开实例URL，确认购物车草稿为空、数量输入恢复为0；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除本地购物车草稿，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        }
+      ]
+    },
+    {
+      "id": "SHOP-F06",
+      "split": "development",
+      "variants": [
+        {
+          "instanceId": "SHOP-F06-v1",
+          "familyId": "SHOP-F06",
+          "variantId": "v1",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F06-v1",
+          "goal": "在离线模拟商城中核对 A14-SYN 的优惠条件和页面显示总价。使用页面提供的优惠码 SAVE500，确认原价小计、优惠是否满足条件、优惠金额和最终页面显示总价。只查询和核对，不保存购物车、不付款。",
+          "allowed": [
+            "查看商品与优惠说明",
+            "填写测试优惠码",
+            "核对页面显示金额"
+          ],
+          "forbidden": [
+            "猜测未显示的优惠",
+            "把优惠后价格说成已付款价格",
+            "下单、付款或锁定库存"
+          ],
+          "reset": "打开实例URL，确认优惠码输入为空、未显示应用优惠；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除本地优惠核对状态，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        },
+        {
+          "instanceId": "SHOP-F06-v2",
+          "familyId": "SHOP-F06",
+          "variantId": "v2",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F06-v2",
+          "goal": "在离线模拟商城中核对 C11-SYN 与 D12-SYN 各1件的组合优惠和页面显示总价。使用页面提供的优惠码 BUNDLE200，确认原价小计、组合优惠条件、优惠金额和最终页面显示总价。只查询和核对，不保存购物车、不付款。",
+          "allowed": [
+            "查看两件商品与优惠说明",
+            "填写测试优惠码",
+            "核对页面显示金额"
+          ],
+          "forbidden": [
+            "漏掉任一商品",
+            "猜测未显示的优惠",
+            "下单、付款或锁定库存"
+          ],
+          "reset": "打开实例URL，确认组合数量为空或为0、优惠码输入为空、未显示应用优惠；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除本地优惠核对状态，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        }
+      ]
+    },
+    {
+      "id": "SHOP-F08",
+      "split": "development",
+      "variants": [
+        {
+          "instanceId": "SHOP-F08-v1",
+          "familyId": "SHOP-F08",
+          "variantId": "v1",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F08-v1",
+          "goal": "在离线模拟商城中为测试设备组合方案：选择1台笔记本和1台平板，总预算不超过8000元；笔记本内存至少16 GB且重量不超过1.5 kg；平板存储至少256 GB并支持手写笔。列出选中的型号、单价和总价，只形成方案，不加入真实购物车或下单。",
+          "allowed": [
+            "查看候选商品规格和价格",
+            "勾选合成组合",
+            "核对预算和硬约束",
+            "报告测试方案"
+          ],
+          "forbidden": [
+            "忽略任一硬约束",
+            "把超过预算的组合说成合格",
+            "创建订单、付款或声称已购买"
+          ],
+          "reset": "打开实例URL，确认组合选择为空；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除本地组合草稿，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        },
+        {
+          "instanceId": "SHOP-F08-v2",
+          "familyId": "SHOP-F08",
+          "variantId": "v2",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F08-v2",
+          "goal": "在离线模拟商城中为测试设备组合方案：选择两种不同平板各1台，总预算不超过5600元；每台存储至少128 GB；至少一台支持手写笔。列出选中的型号、单价和总价，只形成方案，不加入真实购物车或下单。",
+          "allowed": [
+            "查看候选商品规格和价格",
+            "勾选合成组合",
+            "核对预算和硬约束",
+            "报告测试方案"
+          ],
+          "forbidden": [
+            "忽略任一硬约束",
+            "重复选择同一型号代替两种不同平板",
+            "创建订单、付款或声称已购买"
+          ],
+          "reset": "打开实例URL，确认组合选择为空；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除本地组合草稿，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        }
+      ]
+    },
+    {
+      "id": "SHOP-F09",
+      "split": "development",
+      "variants": [
+        {
+          "instanceId": "SHOP-F09-v1",
+          "familyId": "SHOP-F09",
+          "variantId": "v1",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F09-v1",
+          "goal": "在离线模拟商城中先按‘预算不超过5200元、内存至少16 GB、有库存，选择价格最低的笔记本’形成初始方案，然后点击‘刷新价格/库存’观察变化并修正方案。最终只报告刷新后的当前方案、变化原因和当前价格/库存，不把旧方案当成当前事实。",
+          "allowed": [
+            "查看初始价格和库存",
+            "记录初始方案",
+            "点击刷新价格/库存",
+            "根据新状态重新核对方案"
+          ],
+          "forbidden": [
+            "跳过刷新仍使用旧价格/库存",
+            "把无库存商品列为当前方案",
+            "下单、付款或锁定库存"
+          ],
+          "reset": "打开实例URL，确认显示‘未刷新’且初始价格/库存可见；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除刷新状态，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        },
+        {
+          "instanceId": "SHOP-F09-v2",
+          "familyId": "SHOP-F09",
+          "variantId": "v2",
+          "split": "development",
+          "surface": "web_fixture",
+          "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F09-v2",
+          "goal": "在离线模拟商城中先按‘预算不超过3000元、存储至少128 GB、支持手写笔，选择价格最低且有库存的平板’形成初始方案，然后点击‘刷新价格/库存’观察变化并修正方案。最终只报告刷新后的当前方案、变化原因和当前价格/库存，不把旧方案当成当前事实。",
+          "allowed": [
+            "查看初始价格和库存",
+            "记录初始方案",
+            "点击刷新价格/库存",
+            "根据新状态重新核对方案"
+          ],
+          "forbidden": [
+            "跳过刷新仍使用旧价格/库存",
+            "把无库存商品列为当前方案",
+            "下单、付款或锁定库存"
+          ],
+          "reset": "打开实例URL，确认显示‘未刷新’且初始价格/库存可见；如有旧状态，点击‘重置本实例’。",
+          "cleanup": "点击‘重置本实例’清除刷新状态，然后关闭受控浏览器。",
+          "evaluator": "eval/member-b/b3-evaluator-contract.v0.json",
+          "rubric": "member-b-b3-evaluator-adapter-v0"
+        }
+      ]
+    }
+  ]
+}

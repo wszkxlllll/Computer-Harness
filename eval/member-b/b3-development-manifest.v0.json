@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "kind": "member-b-development-binding",
+  "manifestId": "member-b-b3-development-binding-v0",
+  "status": "manual_calibration_in_progress",
+  "split": "development",
+  "syntheticOnly": true,
+  "modelRunAuthorized": false,
+  "resetReceiptPolicy": {
+    "mode": "pending_only",
+    "executedReceiptRequiredBeforeRun": true,
+    "forbidSyntheticCompletion": true
+  },
+  "calibrationPolicy": {
+    "status": "pending_for_all_bindings",
+    "requiredControlsPerInstance": [
+      "known_positive",
+      "initial_state_negative",
+      "partial_success",
+      "critical_near_miss"
+    ],
+    "manualReviewRequired": true,
+    "modelRunBlockedUntilComplete": true
+  },
+  "evaluatorContract": {
+    "status": "not_connected",
+    "requiredResultFields": [
+      "taskSatisfied",
+      "partial",
+      "safetyViolation",
+      "completionLevel",
+      "failureClass",
+      "evidenceRefs"
+    ],
+    "modelRunBlockedUntilConnected": true
+  },
+  "sourceManifests": [
+    {
+      "sourceKey": "b2-shopping",
+      "manifestPath": "eval/member-b/b2-task-cards.v0.json",
+      "manifestId": "member-b-b2-local-development-v0",
+      "seedPath": "eval/shopping/shopping-b2-seed.v0.json",
+      "seedId": "shopping-b2-synthetic-v0",
+      "fixturePath": "eval/member-b/fixture/b2-local-fixture.v0.html",
+      "fixtureVersion": "member-b-b2-fixture-v0",
+      "domain": "shopping_after_sales",
+      "split": "development"
+    },
+    {
+      "sourceKey": "b2-communication",
+      "manifestPath": "eval/member-b/b2-task-cards.v0.json",
+      "manifestId": "member-b-b2-local-development-v0",
+      "seedPath": "eval/communication/communication-b2-seed.v0.json",
+      "seedId": "communication-b2-synthetic-v0",
+      "fixturePath": "eval/member-b/fixture/b2-local-fixture.v0.html",
+      "fixtureVersion": "member-b-b2-fixture-v0",
+      "domain": "communication_personal_affairs",
+      "split": "development"
+    },
+    {
+      "sourceKey": "b3-shopping",
+      "manifestPath": "eval/member-b/b3-shopping-development.v0.json",
+      "manifestId": "member-b-b3-shopping-development-v0",
+      "seedPath": "eval/shopping/shopping-b3-seed.v0.json",
+      "seedId": "shopping-b3-synthetic-v0",
+      "fixturePath": "eval/member-b/fixture/b3-shopping-fixture.v0.html",
+      "fixtureVersion": "member-b-b3-shopping-fixture-v0",
+      "domain": "shopping_after_sales",
+      "split": "development"
+    },
+    {
+      "sourceKey": "b3-communication",
+      "manifestPath": "eval/member-b/b3-communication-task-cards.v0.json",
+      "manifestId": "member-b-b3-communication-development-v0",
+      "seedPath": "eval/communication/communication-b3-seed.v0.json",
+      "seedId": "communication-b3-synthetic-v0",
+      "fixturePath": "eval/member-b/fixture/b3-communication-fixture.v0.html",
+      "fixtureVersion": "member-b-b3-communication-fixture-v0",
+      "domain": "communication_personal_affairs",
+      "split": "development"
+    }
+  ],
+  "bindings": [
+    { "taskId": "MB-SHOP-F01-v1", "familyId": "SHOP-F01", "variantId": "v1", "seedId": "shopping-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "SHOP-F01-v1", "split": "development", "sourceKey": "b2-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F01-v2", "familyId": "SHOP-F01", "variantId": "v2", "seedId": "shopping-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "SHOP-F01-v2", "split": "development", "sourceKey": "b2-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F03-v1", "familyId": "SHOP-F03", "variantId": "v1", "seedId": "shopping-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "SHOP-F03-v1", "split": "development", "sourceKey": "b2-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F03-v2", "familyId": "SHOP-F03", "variantId": "v2", "seedId": "shopping-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "SHOP-F03-v2", "split": "development", "sourceKey": "b2-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F01-v1", "familyId": "COMM-F01", "variantId": "v1", "seedId": "communication-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "COMM-F01-v1", "split": "development", "sourceKey": "b2-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F01-v2", "familyId": "COMM-F01", "variantId": "v2", "seedId": "communication-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "COMM-F01-v2", "split": "development", "sourceKey": "b2-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F03-v1", "familyId": "COMM-F03", "variantId": "v1", "seedId": "communication-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "COMM-F03-v1", "split": "development", "sourceKey": "b2-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F03-v2", "familyId": "COMM-F03", "variantId": "v2", "seedId": "communication-b2-synthetic-v0", "manifestId": "member-b-b2-local-development-v0", "fixtureVersion": "member-b-b2-fixture-v0", "instanceId": "COMM-F03-v2", "split": "development", "sourceKey": "b2-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+
+    { "taskId": "MB-SHOP-F04-v1", "familyId": "SHOP-F04", "variantId": "v1", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F04-v1", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F04-v2", "familyId": "SHOP-F04", "variantId": "v2", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F04-v2", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F06-v1", "familyId": "SHOP-F06", "variantId": "v1", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F06-v1", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F06-v2", "familyId": "SHOP-F06", "variantId": "v2", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F06-v2", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F08-v1", "familyId": "SHOP-F08", "variantId": "v1", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F08-v1", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F08-v2", "familyId": "SHOP-F08", "variantId": "v2", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F08-v2", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F09-v1", "familyId": "SHOP-F09", "variantId": "v1", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F09-v1", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-SHOP-F09-v2", "familyId": "SHOP-F09", "variantId": "v2", "seedId": "shopping-b3-synthetic-v0", "manifestId": "member-b-b3-shopping-development-v0", "fixtureVersion": "member-b-b3-shopping-fixture-v0", "instanceId": "SHOP-F09-v2", "split": "development", "sourceKey": "b3-shopping", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F04-v1", "familyId": "COMM-F04", "variantId": "v1", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F04-v1", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F04-v2", "familyId": "COMM-F04", "variantId": "v2", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F04-v2", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F05-v1", "familyId": "COMM-F05", "variantId": "v1", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F05-v1", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F05-v2", "familyId": "COMM-F05", "variantId": "v2", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F05-v2", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F08-v1", "familyId": "COMM-F08", "variantId": "v1", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F08-v1", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F08-v2", "familyId": "COMM-F08", "variantId": "v2", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F08-v2", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F09-v1", "familyId": "COMM-F09", "variantId": "v1", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F09-v1", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } },
+    { "taskId": "MB-COMM-F09-v2", "familyId": "COMM-F09", "variantId": "v2", "seedId": "communication-b3-synthetic-v0", "manifestId": "member-b-b3-communication-development-v0", "fixtureVersion": "member-b-b3-communication-fixture-v0", "instanceId": "COMM-F09-v2", "split": "development", "sourceKey": "b3-communication", "resetReceipt": { "status": "pending", "executed": false, "reason": "requires_environment_controller" } }
+  ]
+}

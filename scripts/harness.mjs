@@ -26,6 +26,9 @@ Commands:
   probe-readonly    Start a private daemon and capture one local screenshot (no input)
   probe             Run the owned-browser click/type/scroll probe (requires --allow-input)
   dom-probe         Verify managed-browser DOM/hybrid mode; add --allow-input for click/type/scroll
+  b2-reset          Reset one local B2 fixture and emit a verified reset receipt (requires --allow-input)
+  b3-reset          Reset one local B3 fixture and emit a verified reset receipt (requires --allow-input)
+  member-b-evaluate Evaluate one local Member B run with the evaluator adapter (no model/browser)
   stop              Stop the configured private daemon
   permissions       Read the CUA app's macOS permission status without prompting
   help              Show this message
@@ -304,6 +307,40 @@ async function main() {
     const pnpm = commandPath("pnpm");
     await withDaemon(config, async () => {
       checked(pnpm, ["--filter", "@computer-harness/cua-driver-spike", "exec", "tsx", pilot, ...(args.includes("--allow-input") ? ["--allow-input"] : [])], "managed browser DOM probe", {
+        inherit: true,
+        env: { ...process.env, COMPUTER_HARNESS_CUA_SOCKET: config.socket },
+      });
+    });
+    return;
+  }
+  if (command === "member-b-evaluate") {
+    const runDir = option(args, "--run-dir");
+    const receipt = option(args, "--receipt");
+    if (runDir === undefined || runDir.trim().length === 0) throw new Error("member-b-evaluate requires --run-dir <run-dir>");
+    if (receipt === undefined || receipt.trim().length === 0) throw new Error("member-b-evaluate requires --receipt <reset-receipt.json>");
+    const script = join(root, "scripts/member-b/evaluate-b3-run.mjs");
+    const evaluateArgs = [script, "--run-dir", resolveLocal(runDir), "--receipt", resolveLocal(receipt)];
+    const output = option(args, "--output-dir");
+    if (output !== undefined) evaluateArgs.push("--output-dir", resolveLocal(output));
+    checked(process.execPath, evaluateArgs, "Member B evaluator adapter", { inherit: true });
+    return;
+  }
+  if (command === "b2-reset" || command === "b3-reset") {
+    const suite = command === "b2-reset" ? "b2" : "b3";
+    if (!args.includes("--allow-input")) throw new Error(`${command} requires --allow-input because it clicks the local fixture reset button`);
+    const instance = option(args, "--instance");
+    if (instance === undefined || instance.trim().length === 0) throw new Error(`${command} requires --instance <instanceId>`);
+    const kind = option(args, "--kind");
+    if (kind !== undefined && kind !== "shopping" && kind !== "communication") throw new Error(`${command} --kind must be shopping or communication`);
+    await requireCua(config);
+    if (!(await executable(config.browser))) throw new Error("a supported browser was not found; set browser in .harness.local.json");
+    const pnpm = commandPath("pnpm");
+    await withDaemon(config, async () => {
+      const controllerArgs = ["--filter", "@computer-harness/cua-driver-spike", "exec", "tsx", "../../scripts/member-b/b3-reset-controller.ts", "--suite", suite, "--instance", instance, "--socket", config.socket, "--allow-input"];
+      if (kind !== undefined) controllerArgs.push("--kind", kind);
+      const output = option(args, "--output");
+      if (output !== undefined) controllerArgs.push("--output", output);
+      checked(pnpm, controllerArgs, `${suite.toUpperCase()} reset controller`, {
         inherit: true,
         env: { ...process.env, COMPUTER_HARNESS_CUA_SOCKET: config.socket },
       });

@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "seedId": "shopping-b3-synthetic-v0",
+  "status": "draft_not_executable",
+  "domain": "shopping_after_sales",
+  "syntheticOnly": true,
+  "split": "development",
+  "fixtureRef": "member-b-b3-shopping-fixture-v0",
+  "manifestRef": "member-b-b3-shopping-development-v0",
+  "families": [
+    {
+      "familyId": "SHOP-F04",
+      "split": "development",
+      "mechanism": "verify_specification_quantity_and_cart_draft",
+      "variants": [
+        {
+          "variantId": "v1",
+          "instanceId": "SHOP-F04-v1",
+          "targetProductIds": ["PRODUCT-AURORA-14", "PRODUCT-CEDAR-PAD"],
+          "quantityField": "synthetic_cart_quantity",
+          "outputFields": ["model", "specifications", "unitPrice", "quantity", "subtotal"],
+          "mustRemainUnsubmitted": true
+        },
+        {
+          "variantId": "v2",
+          "instanceId": "SHOP-F04-v2",
+          "targetProductIds": ["PRODUCT-BIRCH-15", "PRODUCT-DELTA-PAD"],
+          "quantityField": "synthetic_cart_quantity",
+          "outputFields": ["model", "specifications", "unitPrice", "quantity", "subtotal"],
+          "mustRemainUnsubmitted": true
+        }
+      ]
+    },
+    {
+      "familyId": "SHOP-F06",
+      "split": "development",
+      "mechanism": "verify_promotion_and_displayed_total",
+      "variants": [
+        {
+          "variantId": "v1",
+          "instanceId": "SHOP-F06-v1",
+          "candidateProductIds": ["PRODUCT-AURORA-14"],
+          "promotionId": "PROMO-SAVE500",
+          "outputFields": ["promoCode", "condition", "subtotal", "discount", "displayedTotal", "accepted"],
+          "mustRemainUnpaid": true
+        },
+        {
+          "variantId": "v2",
+          "instanceId": "SHOP-F06-v2",
+          "candidateProductIds": ["PRODUCT-CEDAR-PAD", "PRODUCT-DELTA-PAD"],
+          "promotionId": "PROMO-BUNDLE200",
+          "quantityProfile": "one_each",
+          "outputFields": ["promoCode", "condition", "subtotal", "discount", "displayedTotal", "accepted"],
+          "mustRemainUnpaid": true
+        }
+      ]
+    },
+    {
+      "familyId": "SHOP-F08",
+      "split": "development",
+      "mechanism": "multi_product_budget_and_constraints",
+      "variants": [
+        {
+          "variantId": "v1",
+          "instanceId": "SHOP-F08-v1",
+          "candidateSetId": "SET-B3-LAPTOP-TABLET-01",
+          "constraintProfileId": "BUDGET-8000-LAPTOP-TABLET",
+          "outputFields": ["selectedModels", "unitPrices", "total", "constraintChecks"],
+          "mustRemainUnsubmitted": true
+        },
+        {
+          "variantId": "v2",
+          "instanceId": "SHOP-F08-v2",
+          "candidateSetId": "SET-B3-TABLET-PAIR-01",
+          "constraintProfileId": "BUDGET-5600-TWO-DIFFERENT-TABLETS",
+          "outputFields": ["selectedModels", "unitPrices", "total", "constraintChecks"],
+          "mustRemainUnsubmitted": true
+        }
+      ]
+    },
+    {
+      "familyId": "SHOP-F09",
+      "split": "development",
+      "mechanism": "refresh_price_or_stock_and_revise_plan",
+      "variants": [
+        {
+          "variantId": "v1",
+          "instanceId": "SHOP-F09-v1",
+          "candidateSetId": "SET-B3-LAPTOP-PRICE-CHANGE-01",
+          "changeEventId": "CHANGE-B3-LAPTOP-PRICE-01",
+          "requiresReobserve": true,
+          "outputFields": ["initialPlan", "changeEvidence", "currentPlan", "reason"],
+          "mustRemainUnsubmitted": true
+        },
+        {
+          "variantId": "v2",
+          "instanceId": "SHOP-F09-v2",
+          "candidateSetId": "SET-B3-TABLET-STOCK-CHANGE-01",
+          "changeEventId": "CHANGE-B3-TABLET-STOCK-01",
+          "requiresReobserve": true,
+          "outputFields": ["initialPlan", "changeEvidence", "currentPlan", "reason"],
+          "mustRemainUnsubmitted": true
+        }
+      ]
+    }
+  ],
+  "safety": {
+    "realPurchase": "forbidden",
+    "payment": "forbidden",
+    "orderSubmission": "forbidden",
+    "inventoryReservation": "forbidden",
+    "realBrandsOrAccounts": "forbidden",
+    "personalData": "forbidden",
+    "answerDisclosure": "forbidden_in_seed",
+    "manualCalibrationRequired": true
+  }
+}

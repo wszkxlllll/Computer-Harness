@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>生活服务合成测试台</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; color: #20242a; background: #f2f4f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { padding: 18px 28px; color: white; background: #264e70; }
+    header h1 { margin: 0; font-size: 21px; }
+    header p { margin: 5px 0 0; color: #dbe8f2; font-size: 13px; }
+    main { max-width: 1040px; margin: 22px auto; padding: 0 20px 36px; }
+    .notice { padding: 11px 14px; border: 1px solid #e6c36a; border-radius: 7px; background: #fff8df; }
+    .toolbar, .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .toolbar { justify-content: space-between; margin: 16px 0; }
+    .panel { padding: 18px; border: 1px solid #d9dee5; border-radius: 9px; background: white; box-shadow: 0 2px 7px #1c283308; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    h3 { margin: 0 0 8px; font-size: 16px; }
+    button, input, select, textarea { font: inherit; }
+    button { min-height: 36px; padding: 6px 12px; border: 1px solid #aeb8c3; border-radius: 6px; background: #fff; color: inherit; cursor: pointer; }
+    button:hover:not(:disabled) { background: #edf4fa; }
+    button:disabled { color: #737b84; background: #e7e9ec; cursor: not-allowed; }
+    input, select, textarea { padding: 8px 10px; border: 1px solid #aeb8c3; border-radius: 5px; }
+    input[type="search"] { width: min(360px, 65vw); }
+    label { display: grid; gap: 5px; margin: 12px 0; font-weight: 600; }
+    label input, label select, label textarea { font-weight: 400; }
+    .muted { color: #626c77; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 12px; }
+    .card { padding: 14px; border: 1px solid #d9dee5; border-radius: 7px; background: #fff; }
+    .specs { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 10px 0 0; }
+    .specs dt { color: #626c77; }
+    .specs dd { margin: 0; }
+    .messages { display: grid; gap: 10px; margin-top: 14px; }
+    .message { max-width: 760px; padding: 12px 14px; border-radius: 8px; background: #edf3f7; }
+    .message time, .message .source { display: block; color: #626c77; font-size: 12px; }
+    .message p { margin: 6px 0 0; }
+    .conversation-layout { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 16px; }
+    .thread-list { display: grid; align-content: start; gap: 7px; }
+    .thread-list button { text-align: left; }
+    .status { min-height: 25px; margin-top: 10px; color: #275c40; }
+    .draft-preview { margin-top: 14px; padding: 12px; border: 1px dashed #97a7b6; border-radius: 6px; background: #f7f9fb; }
+    [hidden] { display: none !important; }
+    @media (max-width: 640px) { main { margin-top: 14px; padding: 0 12px 24px; } .conversation-layout { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>生活服务合成测试台</h1>
+    <p>离线模拟环境 · 页面只使用本地合成数据 · 不连接真实商店、联系人或账号</p>
+  </header>
+  <main>
+    <div class="notice" role="note">这是可重置的测试页面。购物任务只查询和比较；通信任务仅可保存草稿。发送按钮已禁用。</div>
+    <div class="toolbar">
+      <div><strong id="instance-label">测试实例</strong><div class="muted">页面版本：member-b-b2-fixture-v0</div></div>
+      <button id="reset-button" type="button">重置本实例</button>
+    </div>
+
+    <section id="shopping-view" class="panel" hidden>
+      <h2>云杉测试商城</h2>
+      <p class="muted">以下商品、型号、价格和规格均为虚构测试数据。此页面没有购物车、下单或付款功能。</p>
+      <div class="row">
+        <label for="product-search">按型号或商品名称搜索</label>
+        <input id="product-search" type="search" autocomplete="off" placeholder="输入型号，例如 A14-SYN">
+        <button id="search-button" type="button">搜索</button>
+        <button id="clear-search-button" type="button">显示全部</button>
+      </div>
+      <div id="product-list" class="grid" aria-live="polite"></div>
+      <p id="empty-products" class="muted" hidden>没有找到符合关键词的商品。</p>
+    </section>
+
+    <section id="notice-view" class="panel" hidden>
+      <h2>测试消息</h2>
+      <p class="muted">仅包含本题合成通知；查看通知不会发送消息。</p>
+      <div class="conversation-layout">
+        <nav id="thread-list" class="thread-list" aria-label="测试会话"></nav>
+        <div>
+          <strong id="thread-title">请选择一个测试会话</strong>
+          <div id="message-list" class="messages" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="draft-view" class="panel" hidden>
+      <h2 id="draft-title">测试草稿</h2>
+      <p class="muted">收件人和正文均为虚构内容。保存只写入本机当前测试实例的临时草稿。</p>
+      <label for="recipient">测试收件人
+        <select id="recipient"></select>
+      </label>
+      <label id="subject-row" for="subject">主题
+        <input id="subject" autocomplete="off">
+      </label>
+      <label for="body">草稿正文
+        <textarea id="body" rows="5"></textarea>
+      </label>
+      <div class="row">
+        <button id="save-draft-button" type="button">保存草稿</button>
+        <button id="send-button" type="button" disabled aria-disabled="true">发送（测试中禁用）</button>
+      </div>
+      <div id="draft-status" class="status" role="status" aria-live="polite"></div>
+      <div id="draft-preview" class="draft-preview" hidden></div>
+    </section>
+  </main>
+  <script>
+    const products = [
+      { id: "PRODUCT-AURORA-14", name: "Aurora 14 测试笔记本", model: "A14-SYN", screenSize: "14 英寸", memory: "16 GB", storage: "512 GB", weight: "1.38 kg", displayedPriceCny: "4999 元" },
+      { id: "PRODUCT-BIRCH-15", name: "Birch 15 测试笔记本", model: "B15-SYN", screenSize: "15.6 英寸", memory: "16 GB", storage: "512 GB", weight: "1.72 kg", displayedPriceCny: "4799 元" },
+      { id: "PRODUCT-CEDAR-PAD", name: "Cedar 测试平板", model: "C11-SYN", screenSize: "11 英寸", storage: "256 GB", battery: "8600 mAh", stylusSupport: "支持", displayedPriceCny: "2899 元" },
+      { id: "PRODUCT-DELTA-PAD", name: "Delta 测试平板", model: "D12-SYN", screenSize: "12 英寸", storage: "128 GB", battery: "9000 mAh", stylusSupport: "支持", displayedPriceCny: "2599 元" },
+    ];
+    const messages = {
+      "THREAD-TEST-PROJECT": {
+        title: "测试项目讨论组",
+        items: [
+          { time: "2026-10-01 09:15", source: "项目协调员（合成联系人）", text: "合成通知：本周测试讨论原定在测试会议室A。" },
+          { time: "2026-10-02 16:40", source: "项目协调员（合成联系人）", text: "合成通知：测试讨论改到2026-10-08 14:00，地点为测试会议室B。" },
+        ],
+      },
+      "THREAD-TEST-SERVICE": {
+        title: "测试服务通知",
+        items: [
+          { time: "2026-10-03 10:00", source: "测试服务台（合成联系人）", text: "合成通知：材料测试截止时间原为2026-10-09 18:00。" },
+          { time: "2026-10-04 11:20", source: "测试服务台（合成联系人）", text: "合成通知：材料测试截止时间由2026-10-09 18:00调整为2026-10-10 12:00。" },
+        ],
+      },
+    };
+    const contacts = [
+      { id: "CONTACT-TEST-EDITOR", name: "测试编辑员甲", email: "editor-a@example.invalid" },
+      { id: "CONTACT-TEST-COORDINATOR", name: "测试协调员乙", email: "coordinator-b@example.invalid" },
+    ];
+    const params = new URLSearchParams(location.search);
+    const instance = params.get("instance") || "SHOP-F01-v1";
+    const storageKey = `member-b-fixture:${instance}`;
+    const label = document.querySelector("#instance-label");
+    const shoppingView = document.querySelector("#shopping-view");
+    const noticeView = document.querySelector("#notice-view");
+    const draftView = document.querySelector("#draft-view");
+    label.textContent = `测试实例：${instance}`;
+
+    function productCard(product) {
+      const card = document.createElement("article");
+      card.className = "card";
+      card.dataset.productId = product.id;
+      const title = document.createElement("h3");
+      title.textContent = product.name;
+      const specs = document.createElement("dl");
+      specs.className = "specs";
+      const fieldLabels = { model: "型号", screenSize: "屏幕", memory: "内存", storage: "存储", weight: "重量", battery: "电池", stylusSupport: "手写笔", displayedPriceCny: "页面显示价" };
+      for (const [key, value] of Object.entries(product)) {
+        if (key === "id" || key === "name") continue;
+        const dt = document.createElement("dt");
+        dt.textContent = fieldLabels[key] || key;
+        const dd = document.createElement("dd");
+        dd.textContent = value;
+        specs.append(dt, dd);
+      }
+      card.append(title, specs);
+      return card;
+    }
+
+    function renderProducts(query = "") {
+      const filtered = products.filter((product) => {
+        if (instance === "SHOP-F03-v1" && !["PRODUCT-AURORA-14", "PRODUCT-BIRCH-15"].includes(product.id)) return false;
+        if (instance === "SHOP-F03-v2" && !["PRODUCT-CEDAR-PAD", "PRODUCT-DELTA-PAD"].includes(product.id)) return false;
+        return `${product.name} ${product.model}`.toLocaleLowerCase().includes(query.toLocaleLowerCase());
+      });
+      const list = document.querySelector("#product-list");
+      list.replaceChildren(...filtered.map(productCard));
+      document.querySelector("#empty-products").hidden = filtered.length > 0;
+    }
+    document.querySelector("#search-button").addEventListener("click", () => renderProducts(document.querySelector("#product-search").value.trim()));
+    document.querySelector("#product-search").addEventListener("keydown", (event) => { if (event.key === "Enter") renderProducts(event.currentTarget.value.trim()); });
+    document.querySelector("#clear-search-button").addEventListener("click", () => { document.querySelector("#product-search").value = ""; renderProducts(); });
+
+    function selectThread(threadId) {
+      const thread = messages[threadId];
+      document.querySelector("#thread-title").textContent = thread.title;
+      const list = document.querySelector("#message-list");
+      list.replaceChildren(...thread.items.map((item) => {
+        const article = document.createElement("article");
+        article.className = "message";
+        const time = document.createElement("time");
+        time.textContent = item.time;
+        const source = document.createElement("span");
+        source.className = "source";
+        source.textContent = `来源：${item.source}`;
+        const text = document.createElement("p");
+        text.textContent = item.text;
+        article.append(time, source, text);
+        return article;
+      }));
+    }
+
+    function renderNoticeThreads() {
+      const nav = document.querySelector("#thread-list");
+      nav.replaceChildren(...Object.entries(messages).map(([id, thread]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = thread.title;
+        button.addEventListener("click", () => selectThread(id));
+        return button;
+      }));
+    }
+
+    function renderDraft() {
+      const recipient = document.querySelector("#recipient");
+      const prompt = document.createElement("option");
+      prompt.value = "";
+      prompt.textContent = "请选择测试收件人";
+      recipient.replaceChildren(prompt, ...contacts.map((contact) => {
+        const option = document.createElement("option");
+        option.value = contact.id;
+        option.textContent = `${contact.name}（${contact.email}）`;
+        return option;
+      }));
+      recipient.value = "";
+      const email = instance === "COMM-F03-v1";
+      document.querySelector("#draft-title").textContent = email ? "合成邮件草稿" : "合成微信草稿";
+      document.querySelector("#subject-row").hidden = !email;
+      document.querySelector("#subject").value = "";
+      document.querySelector("#body").value = "";
+      const status = document.querySelector("#draft-status");
+      const preview = document.querySelector("#draft-preview");
+      const existing = JSON.parse(localStorage.getItem(storageKey) || "null");
+      if (existing?.kind === "draft") showDraft(existing, status, preview);
+      document.querySelector("#save-draft-button").addEventListener("click", () => {
+        const saved = { kind: "draft", instance, channel: email ? "email_fixture" : "wechat_fixture", recipientId: recipient.value, subject: email ? document.querySelector("#subject").value.trim() : "", body: document.querySelector("#body").value.trim(), sent: false };
+        localStorage.setItem(storageKey, JSON.stringify(saved));
+        showDraft(saved, status, preview);
+      });
+    }
+
+    function showDraft(saved, status, preview) {
+      const contact = contacts.find((entry) => entry.id === saved.recipientId);
+      status.textContent = "草稿已保存，状态：未发送。";
+      preview.hidden = false;
+      preview.replaceChildren();
+      const heading = document.createElement("strong");
+      heading.textContent = `草稿箱 · ${contact?.name || "未知联系人"} · 未发送`;
+      const details = document.createElement("p");
+      details.textContent = [saved.subject, saved.body].filter(Boolean).join("｜");
+      preview.append(heading, details);
+    }
+
+    document.querySelector("#reset-button").addEventListener("click", () => {
+      localStorage.removeItem(storageKey);
+      location.reload();
+    });
+    if (instance.startsWith("SHOP-")) {
+      shoppingView.hidden = false;
+      renderProducts();
+    } else if (instance.startsWith("COMM-F01-")) {
+      noticeView.hidden = false;
+      renderNoticeThreads();
+    } else if (instance.startsWith("COMM-F03-")) {
+      draftView.hidden = false;
+      renderDraft();
+    } else {
+      label.textContent = "未知测试实例";
+      document.querySelector("main").insertAdjacentHTML("beforeend", "<p role=alert>无效实例ID，请使用B2 development实例。</p>");
+    }
+  </script>
+</body>
+</html>

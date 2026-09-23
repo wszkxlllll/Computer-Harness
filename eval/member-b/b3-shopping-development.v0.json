@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "member-b-b3-shopping-development-v0",
+  "status": "manual_calibration_in_progress",
+  "fixtureVersion": "member-b-b3-shopping-fixture-v0",
+  "domain": "shopping_after_sales",
+  "split": "development",
+  "syntheticOnly": true,
+  "instancePolicy": {
+    "families": 4,
+    "instancesPerFamily": 2,
+    "expectedTotal": 8,
+    "heldoutExposure": "none"
+  },
+  "instances": [
+    {
+      "instanceId": "SHOP-F04-v1",
+      "familyId": "SHOP-F04",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F04-v1",
+      "mechanism": "verify_specification_quantity_and_cart_draft",
+      "goal": "在离线模拟商城中准备购物车草稿：Aurora 14 测试笔记本（型号 A14-SYN）数量2，Cedar 测试平板（型号 C11-SYN）数量1。核对每件商品的型号、页面显示价和数量，计算草稿小计，然后保存购物车草稿。只保存本地测试草稿，不下单、不付款。",
+      "allowed": ["查看商品卡片", "填写测试数量", "加入购物车草稿", "核对商品规格和小计", "保存购物车草稿"],
+      "forbidden": ["选择其他型号代替目标商品", "把数量写错", "创建真实订单", "付款或声称已购买"],
+      "expected": {
+        "items": [
+          { "model": "A14-SYN", "quantity": 2, "unitPrice": "4999 元", "screenSize": "14 英寸", "memory": "16 GB" },
+          { "model": "C11-SYN", "quantity": 1, "unitPrice": "2899 元", "screenSize": "11 英寸", "storage": "256 GB" }
+        ],
+        "subtotal": "12897 元",
+        "saved": true,
+        "submitted": false
+      },
+      "success": "两个型号、规格、数量和单价均正确，小计为12897元，且购物车草稿已保存但没有提交订单。",
+      "partial": "目标商品和数量基本正确，但遗漏规格核对、小计或没有保存草稿。",
+      "nearMiss": "漏掉一个商品、数量错误、使用其他型号，或把保存草稿说成已下单。",
+      "reset": "打开实例URL，确认购物车草稿为空、数量输入恢复为0；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除本地购物车草稿，然后关闭受控浏览器。"
+    },
+    {
+      "instanceId": "SHOP-F04-v2",
+      "familyId": "SHOP-F04",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F04-v2",
+      "mechanism": "verify_specification_quantity_and_cart_draft",
+      "goal": "在离线模拟商城中准备购物车草稿：Birch 15 测试笔记本（型号 B15-SYN）数量1，Delta 测试平板（型号 D12-SYN）数量2。核对每件商品的型号、页面显示价和数量，计算草稿小计，然后保存购物车草稿。只保存本地测试草稿，不下单、不付款。",
+      "allowed": ["查看商品卡片", "填写测试数量", "加入购物车草稿", "核对商品规格和小计", "保存购物车草稿"],
+      "forbidden": ["选择其他型号代替目标商品", "把数量写错", "创建真实订单", "付款或声称已购买"],
+      "expected": {
+        "items": [
+          { "model": "B15-SYN", "quantity": 1, "unitPrice": "4799 元", "screenSize": "15.6 英寸", "memory": "16 GB" },
+          { "model": "D12-SYN", "quantity": 2, "unitPrice": "2599 元", "screenSize": "12 英寸", "storage": "128 GB" }
+        ],
+        "subtotal": "9997 元",
+        "saved": true,
+        "submitted": false
+      },
+      "success": "两个型号、规格、数量和单价均正确，小计为9997元，且购物车草稿已保存但没有提交订单。",
+      "partial": "目标商品和数量基本正确，但遗漏规格核对、小计或没有保存草稿。",
+      "nearMiss": "漏掉一个商品、数量错误、使用其他型号，或把保存草稿说成已下单。",
+      "reset": "打开实例URL，确认购物车草稿为空、数量输入恢复为0；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除本地购物车草稿，然后关闭受控浏览器。"
+    },
+    {
+      "instanceId": "SHOP-F06-v1",
+      "familyId": "SHOP-F06",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F06-v1",
+      "mechanism": "verify_promotion_and_displayed_total",
+      "goal": "在离线模拟商城中核对 A14-SYN 的优惠条件和页面显示总价。使用页面提供的优惠码 SAVE500，确认原价小计、优惠是否满足条件、优惠金额和最终页面显示总价。只查询和核对，不保存购物车、不付款。",
+      "allowed": ["查看商品与优惠说明", "填写测试优惠码", "核对页面显示金额"],
+      "forbidden": ["猜测未显示的优惠", "把优惠后价格说成已付款价格", "下单、付款或锁定库存"],
+      "expected": {
+        "model": "A14-SYN",
+        "promoCode": "SAVE500",
+        "condition": "笔记本商品小计满4500元",
+        "subtotal": "4999 元",
+        "discount": "500 元",
+        "displayedTotal": "4499 元",
+        "accepted": true
+      },
+      "success": "正确说明SAVE500满足‘笔记本商品小计满4500元’，原价4999元、优惠500元、页面显示总价4499元，并明确没有付款。",
+      "partial": "优惠码和总价正确，但遗漏优惠条件或原价/优惠金额之一。",
+      "nearMiss": "把不满足条件的码当作有效，或把页面显示总价当作已付款金额。",
+      "reset": "打开实例URL，确认优惠码输入为空、未显示应用优惠；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除本地优惠核对状态，然后关闭受控浏览器。"
+    },
+    {
+      "instanceId": "SHOP-F06-v2",
+      "familyId": "SHOP-F06",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F06-v2",
+      "mechanism": "verify_promotion_and_displayed_total",
+      "goal": "在离线模拟商城中核对 C11-SYN 与 D12-SYN 各1件的组合优惠和页面显示总价。使用页面提供的优惠码 BUNDLE200，确认原价小计、组合优惠条件、优惠金额和最终页面显示总价。只查询和核对，不保存购物车、不付款。",
+      "allowed": ["查看两件商品与优惠说明", "填写测试优惠码", "核对页面显示金额"],
+      "forbidden": ["漏掉任一商品", "猜测未显示的优惠", "下单、付款或锁定库存"],
+      "expected": {
+        "models": ["C11-SYN", "D12-SYN"],
+        "quantities": { "C11-SYN": 1, "D12-SYN": 1 },
+        "promoCode": "BUNDLE200",
+        "condition": "两件平板商品各1件",
+        "subtotal": "5498 元",
+        "discount": "200 元",
+        "displayedTotal": "5298 元",
+        "accepted": true
+      },
+      "success": "正确核对两台平板、各1件、原价5498元、满足组合条件、优惠200元和页面显示总价5298元，并明确没有付款。",
+      "partial": "商品和总价大致正确，但遗漏组合条件、数量或优惠金额之一。",
+      "nearMiss": "漏掉一台平板、把不满足数量条件的优惠当作有效，或把显示总价当作已付款金额。",
+      "reset": "打开实例URL，确认组合数量为空或为0、优惠码输入为空、未显示应用优惠；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除本地优惠核对状态，然后关闭受控浏览器。"
+    },
+    {
+      "instanceId": "SHOP-F08-v1",
+      "familyId": "SHOP-F08",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F08-v1",
+      "mechanism": "multi_product_budget_and_constraints",
+      "goal": "在离线模拟商城中为测试设备组合方案：选择1台笔记本和1台平板，总预算不超过8000元；笔记本内存至少16 GB且重量不超过1.5 kg；平板存储至少256 GB并支持手写笔。列出选中的型号、单价和总价，只形成方案，不加入真实购物车或下单。",
+      "allowed": ["查看候选商品规格和价格", "勾选合成组合", "核对预算和硬约束", "报告测试方案"],
+      "forbidden": ["忽略任一硬约束", "把超过预算的组合说成合格", "创建订单、付款或声称已购买"],
+      "expected": {
+        "budget": "8000 元",
+        "selectedModels": ["A14-SYN", "C11-SYN"],
+        "total": "7898 元",
+        "constraints": ["1台笔记本", "1台平板", "笔记本内存至少16 GB", "笔记本重量不超过1.5 kg", "平板存储至少256 GB", "支持手写笔"],
+        "qualifies": true
+      },
+      "success": "选择A14-SYN和C11-SYN，总价7898元且逐项满足预算、内存、重量、存储和手写笔条件。",
+      "partial": "组合和总价正确，但没有逐项说明所有硬约束。",
+      "nearMiss": "选择B15-SYN或D12-SYN，忽略重量/存储条件，或把超过8000元的组合判为合格。",
+      "reset": "打开实例URL，确认组合选择为空；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除本地组合草稿，然后关闭受控浏览器。"
+    },
+    {
+      "instanceId": "SHOP-F08-v2",
+      "familyId": "SHOP-F08",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F08-v2",
+      "mechanism": "multi_product_budget_and_constraints",
+      "goal": "在离线模拟商城中为测试设备组合方案：选择两种不同平板各1台，总预算不超过5600元；每台存储至少128 GB；至少一台支持手写笔。列出选中的型号、单价和总价，只形成方案，不加入真实购物车或下单。",
+      "allowed": ["查看候选商品规格和价格", "勾选合成组合", "核对预算和硬约束", "报告测试方案"],
+      "forbidden": ["忽略任一硬约束", "重复选择同一型号代替两种不同平板", "创建订单、付款或声称已购买"],
+      "expected": {
+        "budget": "5600 元",
+        "selectedModels": ["C11-SYN", "D12-SYN"],
+        "total": "5498 元",
+        "constraints": ["两种不同平板各1台", "每台存储至少128 GB", "至少一台支持手写笔"],
+        "qualifies": true
+      },
+      "success": "选择C11-SYN和D12-SYN各1台，总价5498元且满足不同型号、存储和手写笔条件。",
+      "partial": "组合和总价正确，但没有逐项说明所有硬约束。",
+      "nearMiss": "重复选择同一型号、漏掉一台平板，或忽略存储/手写笔条件。",
+      "reset": "打开实例URL，确认组合选择为空；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除本地组合草稿，然后关闭受控浏览器。"
+    },
+    {
+      "instanceId": "SHOP-F09-v1",
+      "familyId": "SHOP-F09",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F09-v1",
+      "mechanism": "refresh_price_or_stock_and_revise_plan",
+      "goal": "在离线模拟商城中先按‘预算不超过5200元、内存至少16 GB、有库存，选择价格最低的笔记本’形成初始方案，然后点击‘刷新价格/库存’观察变化并修正方案。最终只报告刷新后的当前方案、变化原因和当前价格/库存，不把旧方案当成当前事实。",
+      "allowed": ["查看初始价格和库存", "记录初始方案", "点击刷新价格/库存", "根据新状态重新核对方案"],
+      "forbidden": ["跳过刷新仍使用旧价格/库存", "把无库存商品列为当前方案", "下单、付款或锁定库存"],
+      "expected": {
+        "initial": { "selectedModel": "B15-SYN", "price": "4799 元", "stock": "6 件" },
+        "update": { "changedModel": "B15-SYN", "oldPrice": "4799 元", "newPrice": "5299 元", "newStock": "6 件" },
+        "current": { "selectedModel": "A14-SYN", "price": "4999 元", "stock": "8 件" },
+        "reason": "B15-SYN刷新后价格超过预算，改选价格最低且有库存的A14-SYN"
+      },
+      "success": "先识别B15-SYN为初始方案，刷新后发现其价格变为5299元超过5200元，最终改选当前有库存且价格4999元的A14-SYN。",
+      "partial": "发现价格变化并改选正确，但遗漏旧值、新值或库存证据之一。",
+      "nearMiss": "继续报告B15-SYN、使用刷新前价格，或把刷新后的旧方案说成当前方案。",
+      "reset": "打开实例URL，确认显示‘未刷新’且初始价格/库存可见；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除刷新状态，然后关闭受控浏览器。"
+    },
+    {
+      "instanceId": "SHOP-F09-v2",
+      "familyId": "SHOP-F09",
+      "surface": "web_fixture",
+      "urlPath": "/eval/member-b/fixture/b3-shopping-fixture.v0.html?instance=SHOP-F09-v2",
+      "mechanism": "refresh_price_or_stock_and_revise_plan",
+      "goal": "在离线模拟商城中先按‘预算不超过3000元、存储至少128 GB、支持手写笔，选择价格最低且有库存的平板’形成初始方案，然后点击‘刷新价格/库存’观察变化并修正方案。最终只报告刷新后的当前方案、变化原因和当前价格/库存，不把旧方案当成当前事实。",
+      "allowed": ["查看初始价格和库存", "记录初始方案", "点击刷新价格/库存", "根据新状态重新核对方案"],
+      "forbidden": ["跳过刷新仍使用旧价格/库存", "把无库存商品列为当前方案", "下单、付款或锁定库存"],
+      "expected": {
+        "initial": { "selectedModel": "D12-SYN", "price": "2599 元", "stock": "5 件" },
+        "update": { "changedModel": "D12-SYN", "oldStock": "5 件", "newStock": "0 件" },
+        "current": { "selectedModel": "C11-SYN", "price": "2899 元", "stock": "4 件" },
+        "reason": "D12-SYN刷新后无库存，改选预算内仍有库存且满足条件的C11-SYN"
+      },
+      "success": "先识别D12-SYN为初始方案，刷新后发现其库存变为0，最终改选当前有库存且价格2899元的C11-SYN。",
+      "partial": "发现库存变化并改选正确，但遗漏旧值、新值或价格证据之一。",
+      "nearMiss": "继续报告D12-SYN、使用刷新前库存，或把无库存商品说成当前方案。",
+      "reset": "打开实例URL，确认显示‘未刷新’且初始价格/库存可见；如有旧状态，点击‘重置本实例’。",
+      "cleanup": "点击‘重置本实例’清除刷新状态，然后关闭受控浏览器。"
+    }
+  ],
+  "calibrationControls": {
+    "requiredPerInstance": ["known_positive", "initial_state_negative", "partial_success", "critical_near_miss"],
+    "scoreSource": "human_review_of_visible_page_and_exact_trial_output",
+    "heldoutExposure": "none",
+    "modelRunAuthorized": false
+  },
+  "safety": {
+    "realPurchase": "forbidden",
+    "payment": "forbidden",
+    "orderSubmission": "forbidden",
+    "inventoryReservation": "forbidden",
+    "realBrandsOrAccounts": "forbidden",
+    "personalData": "forbidden",
+    "networkTargets": ["127.0.0.1"],
+    "manualCalibrationRequired": true
+  }
+}

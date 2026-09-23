@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "baselineId": "member-b-macos-preflight-20260921",
+  "status": "ready_for_controlled_fixture_not_authorized_to_run",
+  "ownerRole": "B",
+  "domains": [
+    "shopping_after_sales",
+    "communication_personal_affairs"
+  ],
+  "code": {
+    "head": "39fcc678a3651bf86cef130b6f08acf3868ec8db",
+    "upstreamMain": "941b5f3",
+    "workingTreeExpectedDirty": true,
+    "note": "Uncommitted member-B planning and preflight documents are intentionally present. Freeze a clean shared SHA before model evaluation."
+  },
+  "host": {
+    "platform": "macos",
+    "version": "26.4",
+    "architecture": "arm64",
+    "displayPhysical": {
+      "width": 3024,
+      "height": 1964,
+      "retina": true
+    },
+    "locale": "zh_CN",
+    "node": "22.17.0",
+    "pnpm": "11.19.0",
+    "cuaDriver": "0.22.2",
+    "chrome": "153.0.8010.48",
+    "wechat": "4.1.7"
+  },
+  "verified": {
+    "typecheck": "passed",
+    "workspaceTestFiles": 44,
+    "workspaceTests": 511,
+    "localHarnessTests": 3,
+    "cuaDoctor": "supported",
+    "macOwnedBrowserInputProbe": "passed",
+    "macManagedBrowserDomPilot": {
+      "status": "passed",
+      "candidateCount": 11,
+      "windowBinding": "passed",
+      "persistentProfileState": "passed",
+      "ownedProcessesAfterClose": 0,
+      "modelCalls": 0,
+      "desktopInputCalls": 4,
+      "actions": {
+        "clickElement": "passed",
+        "typeText": "passed",
+        "scroll": "passed",
+        "postActionDomVerification": "passed"
+      },
+      "retinaCoordinateCalibration": "browser_attested_device_pixel_ratio"
+    },
+    "macAccessibilityHybridPilot": {
+      "status": "passed",
+      "accessibilityAdvertised": true,
+      "groundingSource": "hybrid",
+      "degraded": false,
+      "elementCount": 46,
+      "domElementCount": 11,
+      "documentRegionObserved": true
+    },
+    "glmAdapterRealApi": "passed_before_merge_and_preserved_by_tests"
+  },
+  "firstControlledRunCandidate": {
+    "authorized": false,
+    "model": "glm-5.3-flash",
+    "computer": "cua",
+    "surface": "controlled_fixture",
+    "grounding": "off",
+    "planning": false,
+    "memory": "off",
+    "memoryRetrieval": "off",
+    "batching": "off",
+    "contextMode": "raw",
+    "monitor": "off",
+    "riskGuard": "layered",
+    "maxSteps": 20,
+    "maxModelRequests": 20,
+    "note": "This is a proposed infrastructure baseline, not a launch command. User approval and a manually calibrated fixture are required first."
+  },
+  "platformGaps": [
+    {
+      "capability": "managed_dom_or_hybrid_grounding",
+      "status": "verified_on_macos_controlled_fixture",
+      "reason": "The runtime now selects Chrome/Chromium on macOS, discovers native executable paths and tracks the owned POSIX process tree. The production hybrid path passed a local controlled fixture trial: Accessibility was advertised, the document region was observed, the catalog source was hybrid without degradation, 46 total elements included 11 DOM elements, Retina coordinates used the browser-attested device pixel ratio, DOM click/type/scroll effects were confirmed by fresh DOM observations, and cleanup left zero owned browser processes."
+    },
+    {
+      "capability": "wechat_desktop_miniprogram",
+      "status": "installed_client_capability_unknown",
+      "reason": "WeChat is installed but has not been opened or manually audited for the selected test workflow."
+    }
+  ],
+  "safety": {
+    "realPurchase": "forbidden",
+    "payment": "forbidden",
+    "realMessageSend": "forbidden",
+    "realAfterSalesSubmit": "forbidden",
+    "personalData": "forbidden",
+    "heldoutExposure": "forbidden_during_preflight"
+  }
+}
