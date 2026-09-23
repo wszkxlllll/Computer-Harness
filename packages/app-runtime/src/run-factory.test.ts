@@ -1,11 +1,11 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, type MemoryRunModule, type MemoryStore } from "@computer-harness/memory";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { EventId, JsonValue, MemoryMutation, RunId, RuntimeEvent, ToolCallId, Viewport } from "@computer-harness/protocol";
-import type { Computer, MemoryRecallService, NonComputerToolDefinition, PlanningTaskMutation, ProviderAdapter } from "@computer-harness/runtime";
+import { createDefaultToolRegistry, type Computer, type MemoryRecallService, type ModelInput, type NonComputerToolDefinition, type PlanningTaskMutation, type ProviderAdapter } from "@computer-harness/runtime";
 import { createPlanningRunModule, FilePlanStore, InMemoryPlanStore, type PlanningRunModule } from "@computer-harness/planning";
 import { readRuntimeEvents, reduceRuntimeEvents } from "@computer-harness/trajectory";
 import { createRun, createRunFactory, writeRunReport, type ResolvedRunConfig } from "./index.js";
@@ -444,6 +444,60 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("hides and rejects an unverified custom Computer tool on a grounded CUA window Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-window-custom-tool-"));
+    const calls = { open: 0, observe: 0, close: 0 };
+    const inputs: ModelInput[] = [];
+    const registry = createDefaultToolRegistry();
+    const click = registry.get("click");
+    if (click === undefined || click.category !== "computer") throw new Error("default registry is missing click");
+    const customToAction = vi.fn(click.toAction);
+    registry.register({ ...click, name: "unverified_click", toAction: customToAction });
+    let request = 0;
+    const provider: ProviderAdapter = {
+      id: "fixture-provider",
+      async generate(input) {
+        inputs.push(input);
+        request += 1;
+        if (request === 1) {
+          return {
+            type: "tool_calls",
+            calls: [{ id: "unverified-window-click" as ToolCallId, name: "unverified_click", arguments: { x: 10, y: 10 } }],
+          };
+        }
+        return { type: "finish", summary: "The unverified action was rejected." };
+      },
+    };
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        computer: {
+          kind: "cua",
+          socketPath: "fixture.sock",
+          screenshotDir: "screenshots",
+          windowTarget: { pid: 1234, windowId: 5678 },
+        },
+        grounding: "uia-catalog-v1",
+      }, {
+        createProvider: () => provider,
+        createComputer: () => Promise.resolve(fakeComputer(calls)),
+        createToolRegistry: () => registry,
+      });
+
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const projectedNames = inputs[0]?.tools.map((tool) => tool.name) ?? [];
+      expect(projectedNames).toContain("click_element");
+      expect(projectedNames).not.toContain("unverified_click");
+      const report = await handle.report();
+      const rejection = report.events.find((event) => event.type === "tool.call.rejected" && event.callId === "unverified-window-click");
+      expect(rejection).toMatchObject({ reason: "tool unverified_click is disabled for this run" });
+      expect(customToAction).not.toHaveBeenCalled();
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("registers click_element only for an explicit CUA window grounding Run", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-grounding-"));
     const groundingConfig: ResolvedRunConfig = {
@@ -467,10 +521,14 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it("rejects grounding configuration without an explicit CUA window before creating a Run", async () => {
+  it("rejects grounding configuration before Run resources are created", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-grounding-gate-"));
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
     try {
-      await expect(createRun({ ...config(outputDir), grounding: "uia-catalog-v1" })).rejects.toThrow(/explicit CUA window target/iu);
+      await expect(createRun({ ...config(outputDir), grounding: "uia-catalog-v1" }, { createProvider }))
+        .rejects.toThrow(/explicit CUA window target/iu);
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

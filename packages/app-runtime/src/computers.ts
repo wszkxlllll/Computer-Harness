@@ -1,6 +1,6 @@
 import { CuaWindowDiscovery, ManagedBrowserHost, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
-import type { Computer, ComputerExecuteOptions, ComputerOpenOptions } from "@computer-harness/runtime";
+import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
 import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ObservationCapture, ObservationId } from "@computer-harness/protocol";
 import type { WindowTargetDiscovery } from "./application-session.js";
 
@@ -33,6 +33,106 @@ export type ComputerBackendConfig =
       kind: "osworld";
       bridgeUrl: string;
     };
+
+/**
+ * Per-Run policy owned by the application Computer assembly boundary.
+ * Backend-specific grounding tools and model-visible tool limits stay beside
+ * the backend configuration that requires them.
+ */
+export interface ComputerRunAssemblyPolicy {
+  readonly config: ComputerBackendConfig;
+  readonly groundingTools: readonly ToolDefinition[];
+  enabledToolNames(registry: ToolRegistry): readonly string[] | undefined;
+}
+
+export function prepareComputerRunAssembly(
+  config: ComputerBackendConfig,
+  grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
+): ComputerRunAssemblyPolicy {
+  const effectiveConfig = effectiveComputerConfig(config, grounding);
+  validateComputerGrounding(effectiveConfig, grounding);
+
+  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
+  const windowScoped = effectiveConfig.kind === "cua" && (effectiveConfig.windowTarget !== undefined || managedGrounding);
+  const groundingTools = grounding === "off"
+    ? []
+    : groundingComputerTools({ includeSelectOption: managedGrounding });
+
+  return {
+    config: effectiveConfig,
+    groundingTools,
+    enabledToolNames(registry) {
+      if (!windowScoped || effectiveConfig.kind !== "cua") return undefined;
+      const allowedComputerTools = new Set(["click", "wait"]);
+      if (effectiveConfig.windowDeliveryMode === "foreground") {
+        allowedComputerTools.add("type");
+        allowedComputerTools.add("keypress");
+        allowedComputerTools.add("hotkey");
+        allowedComputerTools.add("drag");
+        allowedComputerTools.add("scroll");
+      }
+      if (grounding !== "off") allowedComputerTools.add("click_element");
+      if (managedGrounding) allowedComputerTools.add("select_option");
+      return registry.list()
+        .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
+        .map((definition) => definition.name);
+    },
+  };
+}
+
+function effectiveComputerConfig(
+  computer: ComputerBackendConfig,
+  grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
+): ComputerBackendConfig {
+  if (computer.kind !== "cua") return computer;
+  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
+  return {
+    ...computer,
+    grounding,
+    ...(managedGrounding ? { windowDeliveryMode: "foreground" as const } : {}),
+  };
+}
+
+function validateComputerGrounding(
+  config: ComputerBackendConfig,
+  grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
+): void {
+  if (grounding === "off") return;
+  if (config.kind === "external") {
+    throw new Error(`external Computer '${config.id}' does not use app-managed CUA/UIA/DOM grounding; set grounding to off`);
+  }
+  if (grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1") {
+    if (config.kind !== "cua") {
+      throw new Error(`grounding ${grounding} requires the CUA computer and its explicit socket`);
+    }
+    validateManagedBrowserConfig(config, grounding);
+    return;
+  }
+  if (config.kind !== "cua" || config.windowTarget === undefined) {
+    throw new Error("grounding uia-catalog-v1 requires an explicit CUA window target");
+  }
+}
+
+function validateManagedBrowserConfig(
+  config: Extract<ComputerBackendConfig, { kind: "cua" }>,
+  grounding?: "dom-catalog-v1" | "hybrid-catalog-v1",
+): void {
+  const label = grounding === undefined ? "DOM/hybrid grounding" : `grounding ${grounding}`;
+  if (!isManagedBrowserUrl(config.managedBrowserUrl)) {
+    throw new Error(`${label} requires an explicit managedBrowserUrl (http/https)`);
+  }
+  if (config.socketPath.trim().length === 0) throw new Error(`${label} requires a non-empty CUA socket`);
+  if (config.windowTarget !== undefined) {
+    throw new Error(`${label} owns its temporary browser window; omit the preselected CUA window target`);
+  }
+  const profileMode = config.managedBrowserProfileMode ?? "ephemeral";
+  if (profileMode !== "ephemeral" && profileMode !== "persistent") {
+    throw new Error("managed browser profile mode must be ephemeral or persistent");
+  }
+  if (profileMode === "persistent" && (config.managedBrowserProfileLabel === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(config.managedBrowserProfileLabel) || config.managedBrowserProfileRoot === undefined || config.managedBrowserProfileRoot.trim().length === 0)) {
+    throw new Error("persistent managed browser mode requires a bounded profile label and explicit profile root");
+  }
+}
 
 interface CuaComputerModule {
   CuaDriverComputer: new (options: CuaDriverComputerOptions) => Computer;
@@ -87,18 +187,7 @@ export async function createComputer(
   }
 
   const managedBrowser = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
-  if (managedBrowser) {
-    if (!isManagedBrowserUrl(config.managedBrowserUrl)) {
-      throw new Error("DOM/hybrid grounding requires an explicit managedBrowserUrl (http/https)");
-    }
-    if (config.socketPath.trim().length === 0) throw new Error("DOM/hybrid grounding requires a non-empty CUA socket");
-    if (config.windowTarget !== undefined) throw new Error("managed DOM/hybrid grounding owns its temporary browser window; do not pass a preselected window target");
-    const profileMode = config.managedBrowserProfileMode ?? "ephemeral";
-    if (profileMode !== "ephemeral" && profileMode !== "persistent") throw new Error("managed browser profile mode must be ephemeral or persistent");
-    if (profileMode === "persistent" && (config.managedBrowserProfileLabel === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(config.managedBrowserProfileLabel) || config.managedBrowserProfileRoot === undefined || config.managedBrowserProfileRoot.trim().length === 0)) {
-      throw new Error("persistent managed browser mode requires a bounded profile label and explicit profile root");
-    }
-  }
+  if (managedBrowser) validateManagedBrowserConfig(config);
 
   const importCuaComputer = dependencies.importCuaComputer ?? defaultCuaImporter;
   let cuaModule: CuaComputerModule;

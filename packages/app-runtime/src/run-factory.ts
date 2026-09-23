@@ -10,7 +10,6 @@ import {
   DefaultRuntimePolicy,
   RunController,
   createDefaultToolRegistry,
-  groundingComputerTools,
   type ActionPolicy,
   type CleanupDiagnostic,
   type CleanupOperation,
@@ -25,7 +24,7 @@ import {
 } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, type AssetStore, type RunEventWriter } from "@computer-harness/trajectory";
 import type { AssetReader } from "@computer-harness/runtime";
-import { createComputer } from "./computers.js";
+import { createComputer, prepareComputerRunAssembly } from "./computers.js";
 import { createProvider } from "./providers.js";
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
@@ -34,39 +33,21 @@ import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunDe
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
   const runId = input.runId ?? generatedRunId();
   const grounding = input.grounding ?? "off";
-  const config: ResolvedRunConfig = {
+  const baseConfig: ResolvedRunConfig = {
     ...input,
     runId,
     grounding,
     outputDir: resolve(input.outputDir),
-    computer: effectiveComputerConfig(input.computer, grounding),
   };
-  validateExternalSelections(config, dependencies);
+  validateExternalSelections(baseConfig, dependencies);
+  const computerAssembly = prepareComputerRunAssembly(input.computer, grounding);
+  const config: ResolvedRunConfig = {
+    ...baseConfig,
+    computer: computerAssembly.config,
+  };
   validateRunModuleFactories(config, dependencies);
   if (!Number.isInteger(config.cleanupDeadlineMs) || config.cleanupDeadlineMs <= 0) {
     throw new Error("cleanupDeadlineMs must be a positive integer");
-  }
-  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
-  if (managedGrounding) {
-    if (config.computer.kind !== "cua") {
-      throw new Error(`grounding ${grounding} requires the CUA computer and its explicit socket`);
-    }
-    if (!isManagedBrowserUrl(config.computer.managedBrowserUrl)) {
-      throw new Error(`grounding ${grounding} requires an explicit managedBrowserUrl (http/https)`);
-    }
-    if (config.computer.socketPath.trim().length === 0) {
-      throw new Error(`grounding ${grounding} requires a non-empty CUA socket`);
-    }
-    if (config.computer.windowTarget !== undefined) {
-      throw new Error(`grounding ${grounding} owns its temporary browser window; omit the preselected CUA window target`);
-    }
-    const profileMode = config.computer.managedBrowserProfileMode ?? "ephemeral";
-    if (profileMode !== "ephemeral" && profileMode !== "persistent") {
-      throw new Error("managed browser profile mode must be ephemeral or persistent");
-    }
-    if (profileMode === "persistent" && (config.computer.managedBrowserProfileLabel === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(config.computer.managedBrowserProfileLabel) || config.computer.managedBrowserProfileRoot === undefined || config.computer.managedBrowserProfileRoot.trim().length === 0)) {
-      throw new Error("persistent managed browser mode requires a bounded profile label and explicit profile root");
-    }
   }
   const credentials = dependencies.credentials ?? {};
   const cleanupDiagnostics: CleanupDiagnostic[] = [];
@@ -96,14 +77,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         .filter((event) => event.sequence <= upToSequence),
     });
     const tools = dependencies.createToolRegistry?.() ?? createDefaultToolRegistry();
-    if (config.grounding === "uia-catalog-v1") {
-      if (config.computer.kind !== "cua" || config.computer.windowTarget === undefined) {
-        throw new Error("grounding uia-catalog-v1 requires an explicit CUA window target");
-      }
-    }
-    if (config.grounding !== "off") {
-      tools.registerMany(groundingComputerTools({ includeSelectOption: managedGrounding }));
-    }
+    tools.registerMany(computerAssembly.groundingTools);
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
     const usesCompleteMemoryModule = config.memory !== "off" && dependencies.createMemoryModule !== undefined;
@@ -192,28 +166,12 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(credentials.osworldBridgeToken === undefined ? {} : { osworldBridgeToken: credentials.osworldBridgeToken }),
     })))(
       {
-        config: config.computer,
+        config: computerAssembly.config,
         credentials,
       },
     );
     computer = createdComputer;
-    const windowTargetToolNames = config.computer.kind === "cua" && (config.computer.windowTarget !== undefined || managedGrounding)
-      ? (() => {
-        const allowedComputerTools = new Set(["click", "wait"]);
-        if (config.computer.windowDeliveryMode === "foreground") {
-          allowedComputerTools.add("type");
-          allowedComputerTools.add("keypress");
-          allowedComputerTools.add("hotkey");
-          allowedComputerTools.add("drag");
-          allowedComputerTools.add("scroll");
-        }
-        if (config.grounding !== "off") allowedComputerTools.add("click_element");
-        if (managedGrounding) allowedComputerTools.add("select_option");
-        return tools.list()
-          .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
-          .map((definition) => definition.name);
-      })()
-      : undefined;
+    const enabledToolNames = computerAssembly.enabledToolNames(tools);
     controller = new RunController({
       runId,
       provider,
@@ -230,7 +188,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
       ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),
-      ...(windowTargetToolNames === undefined ? {} : { enabledToolNames: windowTargetToolNames }),
+      ...(enabledToolNames === undefined ? {} : { enabledToolNames }),
       ...(dependencies.clock === undefined ? {} : { clock: dependencies.clock }),
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
     });
@@ -415,9 +373,6 @@ function validateExternalSelections(config: ResolvedRunConfig, dependencies: Run
     if (dependencies.createComputer === undefined) {
       throw new Error(`external Computer '${config.computer.id}' requires RunDependencies.createComputer`);
     }
-    if (config.grounding !== "off") {
-      throw new Error(`external Computer '${config.computer.id}' does not use app-managed CUA/UIA/DOM grounding; set grounding to off`);
-    }
   }
 }
 
@@ -501,34 +456,6 @@ async function attemptOwnedCleanup(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * Normalize the single public Run grounding switch into the adapter config.
- * Application/TUI feature overrides change `config.grounding`; the Computer
- * factory must never consume a stale nested value from the previous Run.
- */
-function effectiveComputerConfig(
-  computer: ResolvedRunConfig["computer"],
-  grounding: NonNullable<ResolvedRunConfig["grounding"]>,
-): ResolvedRunConfig["computer"] {
-  if (computer.kind !== "cua") return computer;
-  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
-  return {
-    ...computer,
-    grounding,
-    ...(managedGrounding ? { windowDeliveryMode: "foreground" as const } : {}),
-  };
-}
-
-function isManagedBrowserUrl(value: string | undefined): value is string {
-  if (value === undefined || value.trim().length === 0) return false;
-  try {
-    const parsed = new URL(value);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
-  } catch {
-    return false;
-  }
 }
 
 function createContextMemoryRecall(service: HybridMemoryRecallService): MemoryRecallService {
