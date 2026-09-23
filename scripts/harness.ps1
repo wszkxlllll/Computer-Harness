@@ -84,11 +84,13 @@ $cuaSocket = Require-Config 'CuaSocket'
 $selectedModel = if ($Model) { $Model } else { Require-Config 'Model' }
 $selectedPreset = if ($Preset) { $Preset } elseif ($config['Preset']) { [string] $config['Preset'] } else { 'assisted' }
 $selectedRiskGuard = if ($RiskGuard) { $RiskGuard } elseif ($selectedPreset -eq 'research') { 'off' } else { 'layered' }
+$selectedBrowserMode = if ($ManagedBrowserProfileMode) { $ManagedBrowserProfileMode } else { [string] $config['ManagedBrowserProfileMode'] }
+$selectedBrowserLabel = if ($ManagedBrowserProfileLabel) { $ManagedBrowserProfileLabel } else { [string] $config['ManagedBrowserProfileLabel'] }
 function Get-ManagedBrowserArguments {
   if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) {
     $profileOnly = [System.Collections.Generic.List[string]]::new()
-    if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { [void]$profileOnly.Add('--managed-browser-profile-mode'); [void]$profileOnly.Add($ManagedBrowserProfileMode) }
-    if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { [void]$profileOnly.Add('--managed-browser-profile-label'); [void]$profileOnly.Add($ManagedBrowserProfileLabel) }
+    if (-not [string]::IsNullOrWhiteSpace($selectedBrowserMode)) { [void]$profileOnly.Add('--managed-browser-profile-mode'); [void]$profileOnly.Add($selectedBrowserMode) }
+    if (-not [string]::IsNullOrWhiteSpace($selectedBrowserLabel)) { [void]$profileOnly.Add('--managed-browser-profile-label'); [void]$profileOnly.Add($selectedBrowserLabel) }
     return $profileOnly.ToArray()
   }
   $parsed = $null
@@ -97,8 +99,8 @@ function Get-ManagedBrowserArguments {
   }
   $result = [System.Collections.Generic.List[string]]::new()
   [void]$result.Add('--managed-browser-url'); [void]$result.Add($ManagedBrowserUrl.Trim())
-  if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { [void]$result.Add('--managed-browser-profile-mode'); [void]$result.Add($ManagedBrowserProfileMode) }
-  if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { [void]$result.Add('--managed-browser-profile-label'); [void]$result.Add($ManagedBrowserProfileLabel) }
+  if (-not [string]::IsNullOrWhiteSpace($selectedBrowserMode)) { [void]$result.Add('--managed-browser-profile-mode'); [void]$result.Add($selectedBrowserMode) }
+  if (-not [string]::IsNullOrWhiteSpace($selectedBrowserLabel)) { [void]$result.Add('--managed-browser-profile-label'); [void]$result.Add($selectedBrowserLabel) }
   return $result.ToArray()
 }
 $cuaWindowArguments = Get-CuaWindowArguments
@@ -290,7 +292,7 @@ if ($Command -eq 'doctor') {
 
 if ($Command -eq 'browser-login') {
   if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) { throw "-Command browser-login requires -ManagedBrowserUrl <http(s)-url>." }
-  if ($ManagedBrowserProfileMode -ne 'persistent' -or [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) {
+  if ($selectedBrowserMode -ne 'persistent' -or [string]::IsNullOrWhiteSpace($selectedBrowserLabel)) {
     throw "-Command browser-login requires -ManagedBrowserProfileMode persistent and -ManagedBrowserProfileLabel <label>."
   }
   if (-not (Test-CuaReady)) { throw 'CUA daemon is not ready; start it explicitly before browser-login.' }

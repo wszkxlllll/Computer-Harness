@@ -23,7 +23,7 @@
 
 ### 窗口选择后的 Grounding 决策
 
-`--grounding auto` 只在 CUA TUI 可选，默认仍是 `off`。其解析发生在**选窗后、创建 Run 前**，不把 `auto` 传给 Computer/Runtime：普通宿主窗口（包括个人 Edge）→ `uia-catalog-v1`；用户在窗口列表显式选择 Harness 管理的浏览器且提供合法起始 URL → `hybrid-catalog-v1`（DOM + UIA）；整桌面 → `off`。用户仍可在功能页显式指定 `off`、UIA、DOM 或 Hybrid。候选的应用名/标题不构成 CDP 所有权证据，Jev 也不能把普通网页窗口升级为 DOM；DOM 只在 `ManagedBrowserHost` 创建并验证其私有浏览器窗口后可用。UIA 查询失败仍保留截图并标记 degraded，不把 `click_element` 误当成已经可用。此逻辑的 Run 配置和工具边界已做离线测试，尚未在真实 TUI 上验收。
+`--grounding auto` 只在 CUA TUI 可选，默认仍是 `off`。其解析发生在**选窗后、创建 Run 前**，不把 `auto` 传给 Computer/Runtime：普通宿主窗口（包括个人 Edge）→ `uia-catalog-v1`；用户在窗口列表显式选择 Harness 管理的浏览器后，在 TUI 中输入或复用合法起始 URL → `hybrid-catalog-v1`（DOM + UIA）；整桌面 → `off`。用户仍可在功能页显式指定 `off`、UIA、DOM 或 Hybrid。候选的应用名/标题不构成 CDP 所有权证据，Jev 也不能把普通网页窗口升级为 DOM；DOM 只在 `ManagedBrowserHost` 创建并验证其私有浏览器窗口后可用。UIA 查询失败仍保留截图并标记 degraded，不把 `click_element` 误当成已经可用。Run 配置与工具边界已做离线测试；Windows PowerShell 实际启动、TUI 选托管浏览器、输入网址和退出清理已验证，但未提交真实 GUI 任务或验证 DOM/UIA 业务效果。
 
 以现有 `WindowTargetDiscovery` 为候选生产者，由 TUI/应用层在 Run 前调用一个窄的 `WindowSelectionStrategy`。输入是 goal 和有界、当次发现的候选；输出只能是候选 ID 或 `abstain`，绝不输出任意 PID。Host 在启动 Run 前重新核对选中的 `(pid, windowId)`，实际 `Computer` 仍负责后续目标身份、几何和前台校验。用户手选窗口或整桌面始终优先；多应用切换需另设显式边界，不能复用旧 Observation。
 

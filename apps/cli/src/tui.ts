@@ -35,7 +35,7 @@ export interface TuiMetadata {
   features?: TuiFeatureSelection;
   /** True only when the explicit endpoint and independent key are present. */
   embeddingReady?: boolean;
-  /** Explicit managed-browser URL; only its host is rendered in the TUI. */
+  /** Managed-browser URL; only its host is rendered outside the URL editor. */
   managedBrowserUrl?: string;
   /** Managed profile lifecycle; paths are never rendered. */
   managedBrowserProfileMode?: "ephemeral" | "persistent";
@@ -77,7 +77,7 @@ export interface ApplicationTuiOptions {
   lifecycleWaitMs?: number;
 }
 
-type TuiMode = "home" | "home_details" | "features" | "windows" | "run";
+type TuiMode = "home" | "home_details" | "features" | "windows" | "browser_url" | "run";
 type TuiFeedState = "live" | "resync_required" | "closed";
 
 interface PendingCorrection {
@@ -119,6 +119,7 @@ export async function runApplicationTui(
   let featureCursor = 0;
   let windowCursor = 0;
   let windowTargets: readonly WindowTargetInfo[] = [];
+  let browserUrlDraft = "";
   let windowLoading = false;
   let windowError = "";
   let windowMatchReason = "";
@@ -179,6 +180,10 @@ export async function runApplicationTui(
     }
     if (mode === "windows") {
       write(`\u001b[H\u001b[2J${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, windowMatchReason, output.columns, output.rows)}\n`);
+      return;
+    }
+    if (mode === "browser_url") {
+      write(`\u001b[H\u001b[2J${buildTuiBrowserUrlFrame(activeMetadata, browserUrlDraft, inputValue, notice, output.columns, output.rows)}\n`);
       return;
     }
     if (mode === "home_details") {
@@ -419,7 +424,7 @@ export async function runApplicationTui(
     render();
     invoke(async () => {
       try {
-        const handle = await session.startRun(goal, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode, managedBrowserSelected));
+        const handle = await session.startRun(goal, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode, managedBrowserSelected, activeMetadata.managedBrowserUrl));
         goalSubmissionPending = false;
         attachRun(handle, goal);
       } catch (error) {
@@ -597,16 +602,14 @@ export async function runApplicationTui(
       notice = inputValue.trim().length > 0
         ? "Primary desktop selected; goal draft kept. Press I, then Enter to start."
         : "Primary desktop selected for subsequent Runs.";
-    } else if (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) && windowCursor === 1) {
-      managedBrowserSelected = true;
-      selectedWindowTarget = null;
-      selectedWindowDeliveryMode = null;
-      windowChoiceExplicit = true;
-      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...previousMetadata } = activeMetadata;
-      activeMetadata = { ...previousMetadata, managedBrowserSelected: true };
-      notice = "Harness-managed browser selected; auto grounding will use DOM + UIA. Goal draft kept.";
+    } else if (featureSelection.grounding === "auto" && windowCursor === 1) {
+      browserUrlDraft = "";
+      mode = "browser_url";
+      notice = "Enter a browser start URL, or press Enter to reuse the previous URL. Goal draft kept.";
+      render();
+      return;
     } else {
-      const selected = windowTargets[windowCursor - 1 - (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) ? 1 : 0)];
+      const selected = windowTargets[windowCursor - 1 - (featureSelection.grounding === "auto" ? 1 : 0)];
       if (selected === undefined) {
         notice = "That window is no longer available; press R to refresh.";
         render();
@@ -874,6 +877,41 @@ export async function runApplicationTui(
       }
       return;
     }
+    if (mode === "browser_url") {
+      if (keyName === "escape") {
+        browserUrlDraft = "";
+        mode = "windows";
+        notice = "Browser URL entry cancelled; previous target and goal draft kept.";
+        render();
+        return;
+      }
+      if (keyName === "backspace") { browserUrlDraft = removeLastTuiGrapheme(browserUrlDraft); requestRender(); return; }
+      if (keyName === "return") {
+        const browserUrl = browserUrlDraft.trim() || activeMetadata.managedBrowserUrl;
+        if (!isHttpUrl(browserUrl)) {
+          notice = "Enter a complete http(s) URL without embedded credentials; no Run started.";
+          render();
+          return;
+        }
+        managedBrowserSelected = true;
+        selectedWindowTarget = null;
+        selectedWindowDeliveryMode = null;
+        windowChoiceExplicit = true;
+        browserUrlDraft = "";
+        const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...previousMetadata } = activeMetadata;
+        activeMetadata = { ...previousMetadata, managedBrowserUrl: browserUrl.trim(), managedBrowserSelected: true };
+        mode = "home";
+        editMode = false;
+        notice = `Harness-managed browser selected (${new URL(browserUrl).host}); auto grounding will use DOM + UIA. Goal draft kept.`;
+        render();
+        return;
+      }
+      if (!key.ctrl && printable.length > 0) {
+        browserUrlDraft = limitTuiInput(`${browserUrlDraft}${printable.replace(/[\r\n]+/gu, " ")}`, 2048).value;
+        requestRender();
+      }
+      return;
+    }
     if (keyName === "pageup" || keyName === "pagedown") {
       if (mode === "home") {
         mode = "home_details";
@@ -1009,13 +1047,13 @@ export async function runApplicationTui(
         return;
       }
       if (keyName === "up" || keyName === "k") {
-        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) ? 1 : 0);
+        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" ? 1 : 0);
         windowCursor = (windowCursor + optionCount - 1) % optionCount;
         render();
         return;
       }
       if (keyName === "down" || keyName === "j") {
-        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" && isHttpUrl(activeMetadata.managedBrowserUrl) ? 1 : 0);
+        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" ? 1 : 0);
         windowCursor = (windowCursor + 1) % optionCount;
         render();
         return;
@@ -1594,6 +1632,7 @@ function featureOverrides(
   windowTarget: ApplicationSessionWindowTarget | null | undefined,
   windowDeliveryMode: "background" | "foreground" | null | undefined,
   managedBrowserSelected = false,
+  managedBrowserUrl?: string,
 ): ApplicationSessionRunFeatureOverrides {
   const grounding = resolveTuiGrounding(features.grounding, managedBrowserSelected ? "managed-browser" : windowTarget == null ? "desktop" : "host-window");
   const managedGrounding = isManagedGrounding(grounding);
@@ -1606,6 +1645,7 @@ function featureOverrides(
     riskGuard: features.riskGuard,
     monitor: features.monitor,
     grounding,
+    ...(managedBrowserSelected && managedBrowserUrl !== undefined ? { managedBrowserUrl } : {}),
     ...(managedGrounding
       ? { windowTarget: null, windowDeliveryMode: null }
       : {
@@ -1704,6 +1744,32 @@ function buildTuiFeaturesFrame(
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
 }
 
+function buildTuiBrowserUrlFrame(
+  metadata: TuiMetadata,
+  draft: string,
+  goalDraft: string,
+  notice: string,
+  columns?: number,
+  rows?: number,
+): string {
+  const width = tuiWidth(columns);
+  const currentHost = isHttpUrl(metadata.managedBrowserUrl) ? new URL(metadata.managedBrowserUrl).host : "none";
+  const profile = metadata.managedBrowserProfileMode === "persistent"
+    ? `persistent (${metadata.managedBrowserProfileLabel ?? "label missing"})`
+    : "temporary";
+  const lines = [
+    "Computer Harness TUI  |  MANAGED BROWSER",
+    "─".repeat(width),
+    `Current start site: ${currentHost}   Profile: ${profile}`,
+    "Enter a complete http(s) URL. Enter reuses the current site if input is blank; Esc returns to window selection.",
+    `Goal draft kept: ${clip(goalDraft || "(empty)", Math.max(1, width - 17))}`,
+    `> ${tailTuiInput(draft, Math.max(1, width - 2))}`,
+    clip(notice, width),
+    "This does not attach to a personal browser. The new Run opens a Harness-owned browser window.",
+  ];
+  return `${lines.slice(0, Math.max(12, rows ?? process.stdout.rows ?? 24)).join("\n")}\n`;
+}
+
 function buildTuiWindowsFrame(
   metadata: TuiMetadata,
   targets: readonly WindowTargetInfo[],
@@ -1718,8 +1784,8 @@ function buildTuiWindowsFrame(
   const terminalRows = Math.max(12, rows ?? process.stdout.rows ?? 24);
   const optionLabels = [
     "Primary desktop (no window target)",
-    ...(metadata.managedBrowserUrl !== undefined && isHttpUrl(metadata.managedBrowserUrl) && metadata.features?.grounding === "auto"
-      ? [`Harness-managed browser (${new URL(metadata.managedBrowserUrl).host}; DOM + UIA)`]
+    ...(metadata.features?.grounding === "auto"
+      ? [`Harness-managed browser (${isHttpUrl(metadata.managedBrowserUrl) ? new URL(metadata.managedBrowserUrl).host : "enter URL"}; DOM + UIA)`]
       : []),
     ...targets.map(windowDisplayLabel),
   ];
@@ -1729,7 +1795,7 @@ function buildTuiWindowsFrame(
     "─".repeat(width),
     `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}`,
     `Current: ${formatCuaTarget(metadata)}`,
-    "Choose a fully visible, unobscured host window for subsequent Runs. Window layout is user-managed; Harness does not move/resize windows.",
+    "Native windows should be fully visible, unobscured; choose one, desktop or managed browser. Window layout is user-managed; Harness does not move/resize windows.",
     "Foreground delivery may activate the target; occlusion support is limited and focus restoration is not guaranteed.",
     ...(matchReason.length > 0 ? [`Status: ${clip(matchReason, width - 8)}`] : []),
     ...(error.length > 0 ? [`Window discovery error: ${clip(error, width - 24)}`] : []),
@@ -1767,7 +1833,7 @@ function uiFeatureHint(features: TuiFeatureSelection, metadata?: TuiMetadata): s
   if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
   if (features.grounding === "auto") return "Auto: native window -> UIA; explicitly selected Harness-managed browser -> DOM + UIA; desktop -> off. Ordinary Edge does not grant DOM.";
   if (isManagedGrounding(features.grounding)) {
-    if (metadata === undefined || !isHttpUrl(metadata.managedBrowserUrl)) return "DOM/Hybrid grounding requires --managed-browser-url <http(s)-url>; the TUI does not edit this value.";
+    if (metadata === undefined || !isHttpUrl(metadata.managedBrowserUrl)) return "DOM/Hybrid requires a start URL. Switch Grounding to auto, choose Managed browser in W, and enter the URL.";
     return "DOM/Hybrid grounding uses a visible managed browser; personal browser login is not reused. Element references expire after each observation.";
   }
   if (features.riskGuard === "off") return "Risk Guard is disabled for the next Run; schema/policy/budget/stale checks remain active.";
@@ -1780,11 +1846,11 @@ function isManagedGrounding(grounding: TuiFeatureSelection["grounding"]): boolea
   return grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
 }
 
-function isHttpUrl(value: string | undefined): boolean {
+function isHttpUrl(value: string | undefined): value is string {
   if (value === undefined || value.trim().length === 0) return false;
   try {
     const parsed = new URL(value);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0 && parsed.username.length === 0 && parsed.password.length === 0;
   } catch {
     return false;
   }

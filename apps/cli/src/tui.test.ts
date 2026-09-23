@@ -484,6 +484,8 @@ describe("TUI renderer", () => {
     await waitForTui(() => fixture.outputText.join("").includes("Option 1 of 3") && fixture.outputText.join("").includes("Harness-managed browser (example.test; DOM + UIA)"));
     fixture.input.emit("keypress", "", { name: "down" });
     fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("MANAGED BROWSER"));
+    fixture.input.emit("keypress", "", { name: "return" });
     await waitForTui(() => fixture.outputText.join("").includes("Harness-managed browser selected"));
     fixture.input.emit("keypress", "Open the saved browser page", {});
     fixture.input.emit("keypress", "", { name: "return" });
@@ -491,6 +493,46 @@ describe("TUI renderer", () => {
     const started = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
     expect(started.grounding).toBe("hybrid-catalog-v1");
     expect(started.computer).not.toHaveProperty("windowTarget");
+    expect(started.computer).toMatchObject({ managedBrowserUrl: "https://example.test/inbox" });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("accepts a managed browser URL inside TUI and preserves the goal draft", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows: async () => [] }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-browser-url/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-browser-url", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true,
+      features: { planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", riskGuard: "layered", monitor: "off", grounding: "auto" },
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const goal = "Find a route in the browser";
+    fixture.input.emit("keypress", goal, {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("No confident local match"));
+    fixture.input.emit("keypress", "", { name: "down" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("MANAGED BROWSER"));
+    fixture.input.emit("keypress", "file:///local", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    expect(fixture.createRun).not.toHaveBeenCalled();
+    expect(fixture.outputText.join("")).toContain("Enter a complete http(s) URL");
+    for (let index = 0; index < "file:///local".length; index += 1) fixture.input.emit("keypress", "", { name: "backspace" });
+    fixture.input.emit("keypress", "https://map.example.test/route", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("Harness-managed browser selected (map.example.test)"));
+    expect(fixture.outputText.join("")).toContain("Goal draft kept");
+    fixture.input.emit("keypress", "", { name: "i" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+    const started = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(started.goal).toBe(goal);
+    expect(started.grounding).toBe("hybrid-catalog-v1");
+    expect(started.computer).toMatchObject({ managedBrowserUrl: "https://map.example.test/route" });
     fixture.input.emit("keypress", "", { name: "a" });
     await waitForTui(() => fixture.session.status === "idle");
     fixture.input.emit("keypress", "", { name: "escape" });

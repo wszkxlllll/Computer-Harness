@@ -11,6 +11,10 @@
   Preset = 'assisted'
   OutputRoot = 'runs\local'
 
+  # Optional: reuse a Harness-owned browser login without passing profile flags per start.
+  ManagedBrowserProfileMode = ''
+  ManagedBrowserProfileLabel = ''
+
   # Required only when selecting hybrid Memory retrieval.
   MemoryEmbeddingEndpoint = ''
 }

@@ -31,7 +31,7 @@ export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
   "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding"
->> & { windowTarget?: ApplicationSessionWindowTarget | null; windowDeliveryMode?: "background" | "foreground" | null };
+>> & { windowTarget?: ApplicationSessionWindowTarget | null; windowDeliveryMode?: "background" | "foreground" | null; managedBrowserUrl?: string };
 
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";
 
@@ -121,7 +121,7 @@ export class ApplicationSession {
     if (goal.trim().length === 0) throw new Error("application session requires a non-empty goal");
     if (this.active !== undefined) throw new Error("application session already has an active Run");
     const runId = `run-${Date.now()}-${randomUUID().slice(0, 12)}` as RunId;
-    const { windowTarget, windowDeliveryMode, ...featureConfig } = featureOverrides;
+    const { windowTarget, windowDeliveryMode, managedBrowserUrl, ...featureConfig } = featureOverrides;
     const config: ResolvedRunConfig = {
       ...this.config,
       ...featureConfig,
@@ -141,6 +141,10 @@ export class ApplicationSession {
           ...(windowDeliveryMode === undefined ? {} : { windowDeliveryMode }),
         };
       }
+    }
+    if (managedBrowserUrl !== undefined) {
+      if (config.computer.kind !== "cua") throw new Error("managed browser URL requires the CUA computer");
+      config.computer = { ...config.computer, managedBrowserUrl };
     }
     const lease = this.owner.acquire(this.environmentIdentity, runId);
     let handle: RunHandle;
