@@ -4,7 +4,7 @@
 
 第二切片的当前合同见[Planning / Run Memory 模块装配](./pi-module-composition-2026-09-23.md)与[TUI 体验结果](./pi-tui-ux-results-2026-09-23.md)：模块仍使用现有状态/Event 协议；TUI 窄屏全文入口已作离线验证，真实读屏和桌面快捷方式点击尚未验收。
 
-第三切片的 Computer 装配边界、离线审查和真实 GLM＋CUA 烟测见[第三切片结果](./pi-computer-assembly-results-2026-09-23.md)。真实任务到达动作执行，但被既有前台窗口安全闸门拒绝；这不是正向任务通过证据。TUI 的 Run 前本地匹配见[自动选窗切片结果](./pi-goal-window-selection-results-2026-09-23.md)，尚未做真实桌面验收；Jev 是[默认关闭的候选实验](./pi-window-selection-jev-experiment-2026-09-23.md)，不是当前选窗实现。
+第三切片的 Computer 装配边界、离线审查和真实 GLM＋CUA 烟测见[第三切片结果](./pi-computer-assembly-results-2026-09-23.md)：整桌面找被遮挡窗口的任务失败，但精确窗口 background 单击→复观察的受控任务通过。TUI 的 Run 前本地匹配见[自动选窗切片结果](./pi-goal-window-selection-results-2026-09-23.md)，尚未做真实桌面验收；Jev 是[默认关闭的候选实验](./pi-window-selection-jev-experiment-2026-09-23.md)，不是当前选窗实现。
 
 日期：2026-09-23
 

@@ -1,6 +1,6 @@
 # Pi 第三切片：Computer 装配边界与实机烟测
 
-状态：装配边界已实施，离线定向审查通过；真实 GLM＋CUA 任务进入模型和动作链路，但因前台目标未确认而失败，不能宣称实机任务验收通过。
+状态：装配边界已实施，离线定向审查通过；真实 GLM＋CUA 的精确窗口 background 单击闭环通过。此前整桌面任务因目标前台未确认而失败；TUI 自动选窗、foreground 键盘输入和普通业务应用仍未实机验收。
 
 ## 本次改动
 
@@ -17,12 +17,13 @@
 - `run-02`：daemon 子检查仍超时；仅延长总启动时间不足以解决该脚本问题，模型未启动。
 - `run-03`：daemon 与 fixture 启动，但测试清单误填了 fixture 初始文本，runner 在调用模型前拒绝继续。清单已修正。
 - `run-04`：完整进入 CLI→CUA observation→GLM→ToolCall→Runtime 校验→CUA action receipt→复观察。10 次模型请求、8 次 GUI 动作均收到 `CUA_TOOL_REFUSED/foreground_unavailable`，随后 2 次调用因动作预算被拒，最终 `runtimeOutcome=budget_exhausted`、fixture 精确文本评分 `false`。Provider 请求未报传输错误；fixture 文本保持原值，未发生误输入。daemon 和 fixture 均由 runner 清理；CUA 的 `kill_app` 返回 `foreign_process_termination_denied`，runner 使用其自有 PID 的兜底结束，未留下该 fixture 进程。
+- 后续 `window-bound-ae8930fa`：独立启动专用 fixture 与私有 CUA daemon，以当次进程 PID/真实 HWND 显式绑定窗口，限制模型为单击文本区、不得输入或保存。Run 报告显示窗口模式 `background`，只暴露 `click/wait` 两项 Computer 工具；GLM 用 2 次请求完成一次 click。轨迹顺序为首次观察→`tool.call.received(click)`→`action.execution.completed`（receipt=`completed`）→再次观察→`run.finished(succeeded)`。fixture 自有状态为 `event=mouse_up`、`eventSequence=4`，文本仍为 `READY\n`；无 Provider/工具/Runtime 错误，CLI 退出码 0。测试窗口进程与本轮 daemon 均已退出。原始截图和 Provider exchange 仅保留于 Git 忽略的本机运行目录；截图随 GLM 请求发送。这是一次精确窗口的受控 background 单击正例，不是 TUI 自动匹配、foreground `type` 或业务应用成功率证据。
 
 ## 判断与下一步
 
 这次失败不指向新装配策略本身。旧 Stage-4 runner 使用整桌面观察；测试时目标 fixture 被别的窗口遮住，模型从整桌面截图无法定位目标，尝试切换窗口。CUA 随后无法确认目标窗口处于前台，按原有安全规则拒绝派发动作。这证明拒绝路径和预算路径保持工作，但没有证明窗口模式的正向操作链路。
 
-下一次正向验收应使用 runner 自己发现的精确 fixture PID/window ID，把 Run 显式绑定到该窗口；测试目标和评分应只依赖 fixture 自有状态。若需 `type`，必须显式选择并实测 foreground delivery，不能暗中将 background 放宽。测试期间确保目标窗口未被其他窗口抢占；若前台确认仍失败，记录为平台/驱动边界，不通过降低校验强行通过。完成该受控正向验收后，再以独立任务检验 TUI、真实应用与用户体验。
+精确窗口 background 单击已通过；下一步应独立验收 TUI 的本地自动选窗是否能实际绑到目标、选错或候选变化时是否阻止 Run，以及 foreground `type` 的焦点/前台可靠性。不能把 background 放宽来追求输入成功。业务应用与多窗口/跨应用任务仍须独立测试，不能从一次 fixture 单击外推。
 
 ## 直接输入 goal 的窗口发现边界
 
