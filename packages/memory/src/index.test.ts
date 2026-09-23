@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ComputerSessionId, EventId, MemoryEntity, MemoryFact, MemoryState, RunId } from "@computer-harness/protocol";
-import { FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, createMemoryTools } from "./index.js";
+import type { ComputerSessionId, EventId, MemoryEntity, MemoryFact, MemoryState, RunId, RuntimeEvent } from "@computer-harness/protocol";
+import { FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, createMemoryRunModule, createMemoryTools } from "./index.js";
 
 const runId = "memory-test" as RunId;
 
@@ -45,6 +45,38 @@ async function readPersistedMemory(value: unknown): Promise<MemoryState> {
 }
 
 describe("Run memory", () => {
+  it("bundles Run-scoped tools, mutation materialization, offline recovery, and Context projection", async () => {
+    const store = new InMemoryMemoryStore();
+    const module = createMemoryRunModule(runId, store, {
+      mode: "facts",
+      projectContext: (memory) => ({ ...memory, facts: memory.facts.map((item) => ({ ...item, value: `Context: ${item.value}` })) }),
+    });
+    const write = module.tools.find((tool) => tool.name === "memory_write_fact");
+    if (write?.memoryMutationFromResult === undefined) throw new Error("module memory_write_fact mutation hook missing");
+    expect(write.afterMemoryCommit).toBeUndefined();
+    const toolContext = { runId, session: {} as never, signal: new AbortController().signal };
+    await expect(write.execute({ key: "target_file", value: "wrong run" }, { ...toolContext, runId: "wrong-run" as RunId })).rejects.toThrow(/cannot execute a tool/);
+    const mutation = write.memoryMutationFromResult(await write.execute({ key: "target_file", value: "report.odt" }, toolContext), toolContext);
+    if (mutation === undefined) throw new Error("memory write did not produce a mutation");
+    await module.apply(mutation);
+    expect((await store.get(runId)).facts[0]?.value).toBe("report.odt");
+    expect(await module.projectContext(await store.get(runId), undefined)).toMatchObject({ facts: [{ value: "Context: report.odt" }] });
+
+    const otherRun = "memory-module-other" as RunId;
+    const otherMutation = { operation: "upsert_fact", fact: fact({ id: "other-fact", key: "other", value: "other run", sourceEventId: "other-event" as EventId }) } as const;
+    const events: RuntimeEvent[] = [
+      { runId, eventId: "memory-event" as EventId, sequence: 2, occurredAt: "2026-09-23T00:00:00.000Z", type: "memory.updated", source: "tool", mutation },
+      { runId: otherRun, eventId: "other-memory-event" as EventId, sequence: 1, occurredAt: "2026-09-23T00:00:00.000Z", type: "memory.updated", source: "tool", mutation: otherMutation },
+    ];
+    const replayStore = new InMemoryMemoryStore();
+    const replayA = createMemoryRunModule(runId, replayStore, { mode: "facts" });
+    const replayB = createMemoryRunModule(otherRun, replayStore, { mode: "facts" });
+    await replayA.restoreFromEvents(events);
+    await replayB.restoreFromEvents(events);
+    expect((await replayStore.get(runId)).facts.map((item) => item.id)).toEqual(["m1"]);
+    expect((await replayStore.get(otherRun)).facts.map((item) => item.id)).toEqual(["other-fact"]);
+  });
+
   it("writes, updates and rebuilds a fact without sharing state across runs", async () => {
     const store = new InMemoryMemoryStore();
     const write = createMemoryTools(store).find((tool) => tool.name === "memory_write_fact");

@@ -7,6 +7,7 @@ import {
   type MemoryEntity,
   type MemoryFact,
   type MemoryMutation,
+  type RunId,
   type MemorySubject,
 } from "@computer-harness/protocol";
 import type { NonComputerToolDefinition } from "@computer-harness/runtime";
@@ -40,10 +41,15 @@ export type MemoryToolMode = "facts" | "entities";
 export interface MemoryToolOptions {
   /** When present, exposes the bounded model-facing memory_search tool. */
   readonly retrieval?: HybridMemoryRecallService;
+  /** Let app-runtime route committed mutations through the Run module. */
+  readonly afterMemoryCommit?: false | ((runId: RunId, mutation: MemoryMutation) => Promise<void>);
 }
 
 /** Model proposes semantic changes; Runtime supplies IDs and event provenance. */
 export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "facts", options: MemoryToolOptions = {}): readonly NonComputerToolDefinition[] {
+  const afterMemoryCommit = options.afterMemoryCommit === false
+    ? undefined
+    : options.afterMemoryCommit ?? (async (runId: RunId, mutation: MemoryMutation) => { await applyMemoryMutation(store, options.retrieval, runId, mutation); });
   const tools: NonComputerToolDefinition[] = [
     {
       name: "memory_get",
@@ -142,7 +148,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
           : { operation: "supersede_fact", factId: existing.id, replacement: fact }) as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readFactMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     },
     {
       name: "memory_mark_fact_needs_check",
@@ -169,7 +175,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         return { operation: "mark_fact_needs_check", factId, reason: "manual_review" } as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readFactMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     },
   ];
   if (options.retrieval !== undefined) {
@@ -252,7 +258,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         return { operation: "upsert_entity", entity } as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readEntityMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     });
     tools.push({
       name: "memory_list",
@@ -302,7 +308,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         if (mutation.operation !== "invalidate_entity") throw new Error("memory entity invalidation has invalid mutation");
         return mutation;
       },
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     });
   }
   return tools;

@@ -10,6 +10,8 @@
 
 `createToolRegistry` 提供的是应用工具组合的起点。启用 Planning、Memory、Execution Segment 或 CUA Grounding 时，app-runtime 会在工厂返回的 registry 上追加对应内置工具；这个入口不能替换或移除这些已启用模块的工具。要关闭它们应使用各自的 Run 配置开关，并避免自定义注册同名工具。
 
+第二切片新增 `createPlanningModule` 与 `createMemoryModule`，可在现有状态/Event 合同内替换启用模块的工具、物化和 Context 行为；详见[模块装配说明](./pi-module-composition-2026-09-23.md)。这与仅替换 `createToolRegistry` 不同，旧 Store 工厂不能与同一模块的新入口同时启用。
+
 ```ts
 import { createRunFactory, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import { DefaultContextCompiler } from "@computer-harness/context";

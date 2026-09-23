@@ -113,7 +113,7 @@ export interface RunControllerDependencies {
   onEventCommitted?: CommittedEventListener;
 }
 
-export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close";
+export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close" | "planning_module.close" | "memory_module.close";
 export type CleanupDiagnosticStatus = "timed_out";
 
 export interface CleanupDiagnostic {

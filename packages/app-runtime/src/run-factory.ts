@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import { createMemoryTools, FileMemoryStore, HybridMemoryRecallService, QwenTextEmbeddingProvider, type MemoryEmbeddingProvider } from "@computer-harness/memory";
-import { createExecutionSegmentTools, createPlanningTools, FilePlanStore } from "@computer-harness/planning";
+import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, QwenTextEmbeddingProvider, type MemoryEmbeddingProvider, type MemoryRunModule } from "@computer-harness/memory";
+import { createExecutionSegmentTools, createPlanningRunModule, FilePlanStore, type PlanningRunModule } from "@computer-harness/planning";
 import type { MemoryMutation, RunId, RunOutcome } from "@computer-harness/protocol";
 import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
 import {
@@ -16,6 +16,7 @@ import {
   type CleanupOperation,
   type Computer,
   type ContextCompiler,
+  type ContextCompileInput,
   type MemoryRecallService,
   type ProviderAdapter,
   type RunFeatureConfig,
@@ -41,6 +42,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     computer: effectiveComputerConfig(input.computer, grounding),
   };
   validateExternalSelections(config, dependencies);
+  validateRunModuleFactories(config, dependencies);
   if (!Number.isInteger(config.cleanupDeadlineMs) || config.cleanupDeadlineMs <= 0) {
     throw new Error("cleanupDeadlineMs must be a positive integer");
   }
@@ -81,6 +83,8 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   let eventWriter: RunEventWriter | undefined;
   let eventFeed: CommittedEventFeed | undefined;
   let controller: RunController | undefined;
+  let planningModule: PlanningRunModule | undefined;
+  let memoryModule: MemoryRunModule | undefined;
   try {
     await mkdir(config.outputDir, { recursive: true });
     const assetStore = (dependencies.createAssetStore ?? ((rootDir) => new FileAssetStore(rootDir)))(resolve(config.outputDir, "assets"));
@@ -102,10 +106,11 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     }
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
-    const configuredEmbeddingProvider = memoryRetrievalMode === "hybrid"
+    const usesCompleteMemoryModule = config.memory !== "off" && dependencies.createMemoryModule !== undefined;
+    const configuredEmbeddingProvider = !usesCompleteMemoryModule && memoryRetrievalMode === "hybrid"
       ? dependencies.createMemoryEmbeddingProvider?.({ config, credentials })
       : undefined;
-    const memoryRetrievalService = config.memory === "off" || memoryRetrievalMode === "off"
+    const memoryRetrievalService = config.memory === "off" || usesCompleteMemoryModule || memoryRetrievalMode === "off"
       ? undefined
       : (dependencies.createMemoryRecallService?.({
           config,
@@ -114,21 +119,31 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         }) ?? createMemoryRecallService(config, credentials, configuredEmbeddingProvider));
     if (config.planning) {
       const planRoot = resolve(config.outputDir, "plan-store");
-      const planStore = (dependencies.createPlanStore ?? ((rootDir) => new FilePlanStore(rootDir)))(planRoot);
-      tools.registerMany(createPlanningTools(planStore));
+      planningModule = dependencies.createPlanningModule?.({ runId, rootDir: planRoot })
+        ?? createPlanningRunModule(runId, (dependencies.createPlanStore ?? ((rootDir) => new FilePlanStore(rootDir)))(planRoot));
+      validatePlanningRunModule(planningModule, runId);
+      tools.registerMany(coordinatePlanningTools(planningModule));
     }
     if (config.executionSegments === "segments-v1") {
       tools.registerMany(createExecutionSegmentTools());
     }
     if (config.memory !== "off") {
       const memoryRoot = resolve(config.outputDir, "memory-store");
-      const memoryStore = (dependencies.createMemoryStore ?? ((rootDir) => new FileMemoryStore(rootDir)))(memoryRoot);
-      tools.registerMany(createMemoryTools(memoryStore, config.memory, {
-        ...(memoryRetrievalService === undefined ? {} : { retrieval: memoryRetrievalService }),
-      }));
+      if (dependencies.createMemoryModule !== undefined) {
+        memoryModule = dependencies.createMemoryModule({ runId, rootDir: memoryRoot, mode: config.memory, config, credentials });
+      } else {
+        const memoryStore = (dependencies.createMemoryStore ?? ((rootDir) => new FileMemoryStore(rootDir)))(memoryRoot);
+        memoryModule = createMemoryRunModule(runId, memoryStore, {
+          mode: config.memory,
+          ...(memoryRetrievalService === undefined ? {} : { retrieval: memoryRetrievalService, recall: createContextMemoryRecall(memoryRetrievalService) }),
+        });
+      }
+      validateMemoryRunModule(memoryModule, runId);
+      tools.registerMany(coordinateMemoryTools(memoryModule));
       memoryMutationApplier = async (targetRunId, mutation) => {
-        const next = await memoryStore.apply(targetRunId, mutation);
-        memoryRetrievalService?.syncState(next);
+        assertModuleRunId(memoryModule!.runId, targetRunId, "Memory");
+        const next = await memoryModule!.apply(structuredClone(mutation));
+        assertModuleRunId(memoryModule!.runId, next.runId, "Memory mutation result");
       };
     }
 
@@ -163,14 +178,15 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ? createActionPolicy(config, riskProvider)
       : dependencies.createActionPolicy(config, riskProvider);
     const features = featureConfig(config);
-    const contextMemoryRecall = memoryRetrievalService === undefined ? undefined : createContextMemoryRecall(memoryRetrievalService);
-    const contextCompiler = dependencies.createContextCompiler?.(tools, features, config, contextMemoryRecall) ?? new DefaultContextCompiler(tools, {
+    const contextMemoryRecall = memoryModule?.recall === undefined ? undefined : scopeMemoryRecall(memoryModule, runId);
+    const baseContextCompiler = dependencies.createContextCompiler?.(tools, features, config, contextMemoryRecall) ?? new DefaultContextCompiler(tools, {
       mode: config.contextMode,
       maxHistoryEvents: config.contextMaxHistoryEvents,
       features,
       ...(contextMemoryRecall === undefined ? {} : { memoryRecall: contextMemoryRecall }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
     });
+    const contextCompiler = projectModuleContext(baseContextCompiler, runId, planningModule, memoryModule);
     const createdComputer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {
       ...dependencies.computerFactoryDependencies,
       ...(credentials.osworldBridgeToken === undefined ? {} : { osworldBridgeToken: credentials.osworldBridgeToken }),
@@ -233,6 +249,8 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       (includeComputer) => releaseAdapters({
         providers: ownedProviders,
         ...(computer === undefined ? {} : { computer }),
+        ...(planningModule === undefined ? {} : { planningModule }),
+        ...(memoryModule === undefined ? {} : { memoryModule }),
         includeComputer,
         deadlineMs: config.cleanupDeadlineMs,
         onCleanupError: recordCleanupError,
@@ -247,6 +265,8 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     cleanupFailures.push(...await releaseAdapters({
       providers: ownedProviders,
       ...(computer === undefined ? {} : { computer }),
+      ...(planningModule === undefined ? {} : { planningModule }),
+      ...(memoryModule === undefined ? {} : { memoryModule }),
       includeComputer: true,
       deadlineMs: config.cleanupDeadlineMs,
       onCleanupError: recordCleanupError,
@@ -256,6 +276,131 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     }
     throw error;
   }
+}
+
+function validateRunModuleFactories(config: ResolvedRunConfig, dependencies: RunDependencies): void {
+  if (config.planning && dependencies.createPlanningModule !== undefined && dependencies.createPlanStore !== undefined) {
+    throw new Error("Planning is configured by both createPlanningModule and legacy createPlanStore; choose one Run-scoped entry");
+  }
+  if (config.memory !== "off" && dependencies.createMemoryModule !== undefined && (
+    dependencies.createMemoryStore !== undefined
+    || dependencies.createMemoryRecallService !== undefined
+    || dependencies.createMemoryEmbeddingProvider !== undefined
+  )) {
+    throw new Error("Memory is configured by createMemoryModule and legacy Memory factories; choose one Run-scoped entry");
+  }
+}
+
+function validatePlanningRunModule(module: PlanningRunModule, runId: RunId): void {
+  if (module.runId !== runId) throw new Error(`PlanningRunModule for '${module.runId}' cannot be used by Run '${runId}'`);
+  if (typeof module.apply !== "function" || typeof module.restoreFromEvents !== "function" || typeof module.projectContext !== "function") {
+    throw new Error("PlanningRunModule must provide apply, restoreFromEvents, and projectContext");
+  }
+  if (!Array.isArray(module.tools) || module.tools.some((tool) => tool.category !== "planning")) {
+    throw new Error("PlanningRunModule must provide planning-category tools");
+  }
+  if (module.tools.some((tool) => tool.planMutationFromResult !== undefined && tool.afterPlanCommit !== undefined)) {
+    throw new Error("PlanningRunModule mutation tools must leave afterPlanCommit to app-runtime");
+  }
+}
+
+function validateMemoryRunModule(module: MemoryRunModule, runId: RunId): void {
+  if (module.runId !== runId) throw new Error(`MemoryRunModule for '${module.runId}' cannot be used by Run '${runId}'`);
+  if (typeof module.apply !== "function" || typeof module.restoreFromEvents !== "function" || typeof module.projectContext !== "function") {
+    throw new Error("MemoryRunModule must provide apply, restoreFromEvents, and projectContext");
+  }
+  if (module.recall !== undefined && typeof module.recall.search !== "function") {
+    throw new Error("MemoryRunModule recall must provide search");
+  }
+  if (!Array.isArray(module.tools) || module.tools.some((tool) => tool.category !== "side")) {
+    throw new Error("MemoryRunModule must provide side-category tools");
+  }
+  if (module.tools.some((tool) => tool.memoryMutationFromResult !== undefined && tool.afterMemoryCommit !== undefined)) {
+    throw new Error("MemoryRunModule mutation tools must leave afterMemoryCommit to app-runtime");
+  }
+}
+
+function coordinatePlanningTools(module: PlanningRunModule): readonly import("@computer-harness/runtime").NonComputerToolDefinition[] {
+  return module.tools.map((tool) => ({
+    ...tool,
+    execute: async (args, context) => {
+      assertModuleRunId(module.runId, context.runId, "Planning tool");
+      return tool.execute(args, context);
+    },
+    ...(tool.planMutationFromResult === undefined ? {} : {
+      afterPlanCommit: async (mutation, context) => {
+        assertModuleRunId(module.runId, context.runId, "Planning");
+        const next = await module.apply(structuredClone(mutation));
+        assertModuleRunId(module.runId, next.runId, "Planning mutation result");
+      },
+    }),
+  }));
+}
+
+function coordinateMemoryTools(module: MemoryRunModule): readonly import("@computer-harness/runtime").NonComputerToolDefinition[] {
+  return module.tools.map((tool) => ({
+    ...tool,
+    execute: async (args, context) => {
+      assertModuleRunId(module.runId, context.runId, "Memory tool");
+      return tool.execute(args, context);
+    },
+    ...(tool.memoryMutationFromResult === undefined ? {} : {
+      afterMemoryCommit: async (mutation, context) => {
+        assertModuleRunId(module.runId, context.runId, "Memory");
+        const next = await module.apply(structuredClone(mutation));
+        assertModuleRunId(module.runId, next.runId, "Memory mutation result");
+      },
+    }),
+  }));
+}
+
+function projectModuleContext(
+  compiler: ContextCompiler,
+  runId: RunId,
+  planning: PlanningRunModule | undefined,
+  memory: MemoryRunModule | undefined,
+): ContextCompiler {
+  if (planning === undefined && memory === undefined) return compiler;
+  return {
+    async compile(input: ContextCompileInput, signal: AbortSignal) {
+      assertModuleRunId(runId, input.runId, "Context");
+      let plan = input.plan;
+      if (planning !== undefined && plan !== undefined) {
+        assertModuleRunId(planning.runId, plan.runId, "Planning Context");
+        plan = structuredClone(await planning.projectContext(structuredClone(plan)));
+        assertModuleRunId(runId, plan.runId, "Planning Context projection");
+      }
+      let projectedMemory = input.memory;
+      if (memory !== undefined && projectedMemory !== undefined) {
+        assertModuleRunId(memory.runId, projectedMemory.runId, "Memory Context");
+        projectedMemory = structuredClone(await memory.projectContext(
+          structuredClone(projectedMemory),
+          plan === undefined ? undefined : structuredClone(plan),
+        ));
+        assertModuleRunId(runId, projectedMemory.runId, "Memory Context projection");
+      }
+      return compiler.compile({
+        ...input,
+        ...(plan === undefined ? {} : { plan }),
+        ...(projectedMemory === undefined ? {} : { memory: projectedMemory }),
+      }, signal);
+    },
+  };
+}
+
+function scopeMemoryRecall(module: MemoryRunModule, runId: RunId): MemoryRecallService | undefined {
+  if (module.recall === undefined) return undefined;
+  return {
+    search(state, query, signal) {
+      assertModuleRunId(runId, query.runId, "Memory recall query");
+      assertModuleRunId(runId, state.runId, "Memory recall state");
+      return module.recall!.search(state, query, signal);
+    },
+  };
+}
+
+function assertModuleRunId(expected: RunId, actual: RunId, label: string): void {
+  if (actual !== expected) throw new Error(`${label} for Run '${actual}' does not match module Run '${expected}'`);
 }
 
 function validateExternalSelections(config: ResolvedRunConfig, dependencies: RunDependencies): void {
@@ -285,6 +430,8 @@ function validateExternalId(id: string, label: string): void {
 interface AdapterReleaseOptions {
   readonly providers: readonly ProviderAdapter[];
   readonly computer?: Computer;
+  readonly planningModule?: PlanningRunModule;
+  readonly memoryModule?: MemoryRunModule;
   readonly includeComputer: boolean;
   readonly deadlineMs: number;
   readonly onCleanupError: (diagnostic: CleanupDiagnostic) => void;
@@ -306,6 +453,15 @@ async function releaseAdapters(options: AdapterReleaseOptions): Promise<unknown[
     if (provider.close === undefined || closed.has(provider)) continue;
     closed.add(provider);
     failures.push(...await attemptOwnedCleanup("provider.close", () => provider.close!(), deadline, options.onCleanupError));
+  }
+  const closedModules = new Set<object>();
+  for (const entry of [
+    { operation: "memory_module.close" as const, module: options.memoryModule },
+    { operation: "planning_module.close" as const, module: options.planningModule },
+  ]) {
+    if (entry.module?.close === undefined || closedModules.has(entry.module)) continue;
+    closedModules.add(entry.module);
+    failures.push(...await attemptOwnedCleanup(entry.operation, () => entry.module!.close!(), deadline, options.onCleanupError));
   }
   return failures;
 }

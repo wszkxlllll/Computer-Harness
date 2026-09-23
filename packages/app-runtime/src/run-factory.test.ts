@@ -2,11 +2,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { HybridMemoryRecallService, InMemoryMemoryStore, type MemoryStore } from "@computer-harness/memory";
+import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, type MemoryRunModule, type MemoryStore } from "@computer-harness/memory";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import type { RunId, ToolCallId, Viewport } from "@computer-harness/protocol";
-import type { Computer, ProviderAdapter } from "@computer-harness/runtime";
-import { createRun, writeRunReport, type ResolvedRunConfig } from "./index.js";
+import type { EventId, JsonValue, MemoryMutation, RunId, RuntimeEvent, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { Computer, MemoryRecallService, NonComputerToolDefinition, PlanningTaskMutation, ProviderAdapter } from "@computer-harness/runtime";
+import { createPlanningRunModule, FilePlanStore, InMemoryPlanStore, type PlanningRunModule } from "@computer-harness/planning";
+import { readRuntimeEvents, reduceRuntimeEvents } from "@computer-harness/trajectory";
+import { createRun, createRunFactory, writeRunReport, type ResolvedRunConfig } from "./index.js";
 
 function config(outputDir: string): ResolvedRunConfig {
   return {
@@ -64,6 +66,271 @@ function fakeComputer(calls: { open: number; observe: number; close: number }): 
 }
 
 describe("app-runtime RunHandle", () => {
+  it("keeps the default Planning and Memory module tools and Context path working", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-default-modules-"));
+    let request = 0;
+    let finalContext = "";
+    const provider: ProviderAdapter = {
+      id: "default-module-regression-provider",
+      async generate(input, options) {
+        options.signal.throwIfAborted();
+        request += 1;
+        if (request === 1) return { type: "tool_calls", calls: [{ id: "default-plan-create" as ToolCallId, name: "task_create", arguments: { subject: "default phase" } }] };
+        if (request === 2) return { type: "tool_calls", calls: [{ id: "default-memory-write" as ToolCallId, name: "memory_write_fact", arguments: { key: "default_marker", value: "default context fact" } }] };
+        finalContext = JSON.stringify(input.messages);
+        return { type: "finish", summary: "default module path complete" };
+      },
+    };
+    try {
+      const handle = await createRun({ ...config(outputDir), planning: true, memory: "facts" }, {
+        createProvider: () => provider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(request).toBe(3);
+      expect(finalContext).toContain("Current run plan");
+      expect(finalContext).toContain("default context fact");
+      expect(report.events.some((event) => event.type === "planning.task.updated")).toBe(true);
+      expect(report.events.some((event) => event.type === "memory.updated" && event.source === "tool")).toBe(true);
+      expect((await new FilePlanStore(join(outputDir, "plan-store")).get("app-runtime-test" as RunId)).tasks[0]?.subject).toBe("default phase");
+      expect((await new FileMemoryStore(join(outputDir, "memory-store")).get("app-runtime-test" as RunId)).facts[0]?.value).toBe("default context fact");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("runs custom Planning and Memory tools through their coordinated Run modules and Context projections", async () => {
+    const outputA = await mkdtemp(join(tmpdir(), "harness-app-modules-a-"));
+    const outputB = await mkdtemp(join(tmpdir(), "harness-app-modules-b-"));
+    const planStores = new Map<RunId, InMemoryPlanStore>();
+    const memoryStores = new Map<RunId, InMemoryMemoryStore>();
+    const planningModules = new Map<RunId, PlanningRunModule>();
+    const memoryModules = new Map<RunId, MemoryRunModule>();
+    const capturedContexts = new Map<RunId, string>();
+    const evidenceByRun = new Map<RunId, {
+      liveSnapshot: ReturnType<typeof reduceRuntimeEvents>;
+      controllerEvents: RuntimeEvent[];
+      fileEvents: RuntimeEvent[];
+    }>();
+    const planningCloseCalls: RunId[] = [];
+    const memoryCloseCalls: RunId[] = [];
+    const recallInputs: Array<{ runId: RunId; value?: string }> = [];
+    const recall: MemoryRecallService = {
+      async search(state, query, signal) {
+        signal.throwIfAborted();
+        recallInputs.push({ runId: query.runId, value: state.facts[0]?.value });
+        return {
+          method: "lexical",
+          semanticStatus: "disabled",
+          stateStable: true,
+          embeddingBudgetUsed: 0,
+          embeddingBudgetLimit: 0,
+          admitted: state.facts.map((fact) => ({ id: fact.id, score: 1, match: "exact" })),
+          revalidation: [],
+          excluded: [],
+        };
+      },
+    };
+    const createPlanningTool = (targetRunId: RunId): NonComputerToolDefinition => ({
+      name: "custom_plan_create",
+      description: "Create a custom phase in the active Run module.",
+      category: "planning",
+      inputSchema: { type: "object", properties: { subject: { type: "string" } }, required: ["subject"], additionalProperties: false },
+      validate(args) {
+        if (typeof args !== "object" || args === null || Array.isArray(args) || typeof args.subject !== "string") throw new Error("subject required");
+      },
+      async execute(args) {
+        if (typeof args !== "object" || args === null || Array.isArray(args) || typeof args.subject !== "string") throw new Error("subject required");
+        return { operation: "created", task: { id: "custom-plan", subject: `${args.subject}-${targetRunId}`, status: "pending" } } as unknown as JsonValue;
+      },
+      planMutationFromResult(output) { return output as unknown as PlanningTaskMutation; },
+    });
+    const createMemoryTool = (targetRunId: RunId): NonComputerToolDefinition => ({
+      name: "custom_memory_write",
+      description: "Write a custom Run Memory fact.",
+      category: "side",
+      inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
+      validate(args) {
+        if (typeof args !== "object" || args === null || Array.isArray(args) || typeof args.value !== "string") throw new Error("value required");
+      },
+      async execute(args) {
+        if (typeof args !== "object" || args === null || Array.isArray(args) || typeof args.value !== "string") throw new Error("value required");
+        return {
+          operation: "upsert_fact",
+          fact: {
+            id: "custom-memory",
+            subject: { type: "run" },
+            key: "custom_marker",
+            value: `${args.value}-${targetRunId}`,
+            sourceEventId: "pending:custom-memory" as EventId,
+            status: "active",
+            scope: { kind: "run" },
+            retentionClass: "stable",
+            updatedSequence: 0,
+          },
+        } as unknown as JsonValue;
+      },
+      memoryMutationFromResult(output) { return output as unknown as MemoryMutation; },
+    });
+    const runFactory = createRunFactory({
+      createProvider: ({ config: resolved }) => {
+        const targetRunId = resolved.runId!;
+        let request = 0;
+        return {
+          id: "custom-module-provider",
+          async generate(input, options) {
+            options.signal.throwIfAborted();
+            request += 1;
+            if (request === 1) {
+              expect(input.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["custom_plan_create", "custom_memory_write"]));
+              return { type: "tool_calls", calls: [{ id: `plan-${targetRunId}` as ToolCallId, name: "custom_plan_create", arguments: { subject: "module-plan" } }] };
+            }
+            if (request === 2) {
+              return { type: "tool_calls", calls: [{ id: `memory-${targetRunId}` as ToolCallId, name: "custom_memory_write", arguments: { value: "module-memory" } }] };
+            }
+            capturedContexts.set(targetRunId, JSON.stringify(input.messages));
+            return { type: "finish", summary: `module run ${targetRunId} complete` };
+          },
+        };
+      },
+      createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      createPlanningModule: ({ runId }) => {
+        const store = new InMemoryPlanStore();
+        planStores.set(runId, store);
+        const baseModule = createPlanningRunModule(runId, store, {
+          tools: [createPlanningTool(runId)],
+          projectContext: (plan) => {
+            for (const task of plan.tasks) task.subject = `context-plan:${task.subject}`;
+            return plan;
+          },
+          close: async () => { planningCloseCalls.push(runId); },
+        });
+        const module: PlanningRunModule = {
+          ...baseModule,
+          async apply(mutation) {
+            const applied = await store.apply(runId, mutation);
+            mutation.task.subject = `apply-mutated:${mutation.task.subject}`;
+            return applied;
+          },
+        };
+        planningModules.set(runId, module);
+        return module;
+      },
+      createMemoryModule: ({ runId, mode }) => {
+        const store = new InMemoryMemoryStore();
+        memoryStores.set(runId, store);
+        const baseModule = createMemoryRunModule(runId, store, {
+          mode,
+          tools: [createMemoryTool(runId)],
+          recall,
+          projectContext: (memory) => {
+            for (const fact of memory.facts) fact.value = `context-memory:${fact.value}`;
+            return memory;
+          },
+          close: async () => { memoryCloseCalls.push(runId); },
+        });
+        const module: MemoryRunModule = {
+          ...baseModule,
+          async apply(mutation) {
+            const applied = await store.apply(runId, mutation);
+            if (mutation.operation === "upsert_fact") mutation.fact.value = `apply-mutated:${mutation.fact.value}`;
+            return applied;
+          },
+        };
+        memoryModules.set(runId, module);
+        return module;
+      },
+    });
+    const reports: Array<{ events: RuntimeEvent[] }> = [];
+    try {
+      for (const [targetRunId, outputDir] of [["module-run-a" as RunId, outputA], ["module-run-b" as RunId, outputB]] as const) {
+        const handle = await runFactory({ ...config(outputDir), runId: targetRunId, planning: true, memory: "facts" });
+        await expect(handle.start()).resolves.toBe("succeeded");
+        reports.push(await handle.report());
+        evidenceByRun.set(targetRunId, {
+          liveSnapshot: handle.controller.getSnapshot(),
+          controllerEvents: [...handle.controller.getEvents()],
+          fileEvents: await readRuntimeEvents(join(outputDir, "trajectory.jsonl")),
+        });
+        expect(planningCloseCalls.filter((id) => id === targetRunId)).toHaveLength(1);
+        expect(memoryCloseCalls.filter((id) => id === targetRunId)).toHaveLength(1);
+        await handle.close();
+      }
+
+      for (const targetRunId of ["module-run-a", "module-run-b"] as RunId[]) {
+        const serialized = capturedContexts.get(targetRunId) ?? "";
+        expect(serialized).toContain(`context-plan:module-plan-${targetRunId}`);
+        expect(serialized).toContain(`context-memory:module-memory-${targetRunId}`);
+        const otherRunId = targetRunId === "module-run-a" ? "module-run-b" : "module-run-a";
+        expect(serialized).not.toContain(otherRunId);
+        expect((await planStores.get(targetRunId)!.get(targetRunId)).tasks[0]?.subject).toBe(`module-plan-${targetRunId}`);
+        expect((await memoryStores.get(targetRunId)!.get(targetRunId)).facts[0]?.value).toBe(`module-memory-${targetRunId}`);
+
+        const evidence = evidenceByRun.get(targetRunId)!;
+        expect(evidence.liveSnapshot.plan.tasks[0]?.subject).toBe(`module-plan-${targetRunId}`);
+        expect(evidence.liveSnapshot.memory.facts[0]?.value).toBe(`module-memory-${targetRunId}`);
+        const controllerPlanEvent = evidence.controllerEvents.find((event) => event.type === "planning.task.updated");
+        const controllerMemoryEvent = evidence.controllerEvents.find((event) => event.type === "memory.updated" && event.source === "tool");
+        expect(controllerPlanEvent).toMatchObject({ mutation: { task: { subject: `module-plan-${targetRunId}` } } });
+        expect(controllerMemoryEvent).toMatchObject({ mutation: { fact: { value: `module-memory-${targetRunId}` } } });
+        const filePlanEvent = evidence.fileEvents.find((event) => event.type === "planning.task.updated");
+        const fileMemoryEvent = evidence.fileEvents.find((event) => event.type === "memory.updated" && event.source === "tool");
+        expect(filePlanEvent).toMatchObject({ mutation: { task: { subject: `module-plan-${targetRunId}` } } });
+        expect(fileMemoryEvent).toMatchObject({ mutation: { fact: { value: `module-memory-${targetRunId}` } } });
+        const replayedFileSnapshot = reduceRuntimeEvents(evidence.fileEvents, targetRunId);
+        expect(replayedFileSnapshot.plan.tasks[0]?.subject).toBe(`module-plan-${targetRunId}`);
+        expect(replayedFileSnapshot.memory.facts[0]?.value).toBe(`module-memory-${targetRunId}`);
+      }
+      expect(recallInputs).toEqual(expect.arrayContaining([
+        { runId: "module-run-a", value: "context-memory:module-memory-module-run-a" },
+        { runId: "module-run-b", value: "context-memory:module-memory-module-run-b" },
+      ]));
+
+      const allEvents = reports.flatMap((report) => report.events);
+      for (const targetRunId of ["module-run-a", "module-run-b"] as RunId[]) {
+        await planningModules.get(targetRunId)!.restoreFromEvents(allEvents);
+        await memoryModules.get(targetRunId)!.restoreFromEvents(allEvents);
+        expect((await planStores.get(targetRunId)!.get(targetRunId)).tasks[0]?.subject).toBe(`module-plan-${targetRunId}`);
+        expect((await memoryStores.get(targetRunId)!.get(targetRunId)).facts[0]?.value).toBe(`module-memory-${targetRunId}`);
+      }
+    } finally {
+      await rm(outputA, { recursive: true, force: true });
+      await rm(outputB, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects competing module and legacy factories, and does not construct disabled modules", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-modules-disabled-"));
+    const createPlanningModule = vi.fn(() => { throw new Error("disabled Planning module must not be created"); });
+    const createMemoryModule = vi.fn(() => { throw new Error("disabled Memory module must not be created"); });
+    try {
+      await expect(createRun({ ...config(outputDir), planning: true }, {
+        createPlanningModule,
+        createPlanStore: () => new InMemoryPlanStore(),
+      })).rejects.toThrow(/createPlanningModule and legacy createPlanStore/iu);
+      await expect(createRun({ ...config(outputDir), memory: "facts" }, {
+        createMemoryModule,
+        createMemoryStore: () => new InMemoryMemoryStore(),
+      })).rejects.toThrow(/createMemoryModule and legacy Memory factories/iu);
+
+      const handle = await createRun(config(outputDir), {
+        createProvider: () => ({ id: "disabled-module-provider", async generate() { return { type: "finish", summary: "modules off" }; } }),
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+        createPlanningModule,
+        createMemoryModule,
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(createPlanningModule).not.toHaveBeenCalled();
+      expect(createMemoryModule).not.toHaveBeenCalled();
+      expect((await handle.report()).summary.tools).not.toContain("custom_memory_write");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not expose ExecutionSegment unless explicitly opted in", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-segment-default-"));
     const provider: ProviderAdapter = { id: "fixture-provider", async generate() { return { type: "finish", summary: "unused" }; } };
@@ -414,10 +681,63 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("closes a custom Memory module once when its committed tool mutation fails", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-module-run-failure-"));
+    const backingStore = new InMemoryMemoryStore();
+    const failingStore: MemoryStore = {
+      get: (runId) => backingStore.get(runId),
+      apply: async () => { throw new Error("injected module materialization failure"); },
+      rebuild: (runId, mutations) => backingStore.rebuild(runId, mutations),
+    };
+    const moduleClose = vi.fn(async () => undefined);
+    const provider: ProviderAdapter = {
+      id: "module-run-failure-provider",
+      async generate() {
+        return { type: "tool_calls", calls: [{ id: "module-write-failure" as ToolCallId, name: "memory_write_fact", arguments: { key: "failure_marker", value: "should fail to materialize" } }] };
+      },
+    };
+    try {
+      const handle = await createRun({ ...config(outputDir), memory: "facts" }, {
+        createProvider: () => provider,
+        createMemoryModule: ({ runId, mode }) => createMemoryRunModule(runId, failingStore, { mode, close: moduleClose }),
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      expect((await handle.report()).events).toContainEqual(expect.objectContaining({ type: "runtime.error", category: "memory_materialization_failed" }));
+      expect(moduleClose).toHaveBeenCalledOnce();
+      await handle.close();
+      expect(moduleClose).toHaveBeenCalledOnce();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds a hanging module close and records its cleanup diagnostic once", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-module-close-timeout-"));
+    const moduleClose = vi.fn(() => new Promise<void>(() => undefined));
+    try {
+      const handle = await createRun({ ...config(outputDir), memory: "facts", cleanupDeadlineMs: 50 }, {
+        createProvider: () => ({ id: "module-close-timeout-provider", async generate() { return { type: "finish", summary: "finished before module timeout" }; } }),
+        createMemoryModule: ({ runId, mode }) => createMemoryRunModule(runId, new InMemoryMemoryStore(), { mode, close: moduleClose }),
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(moduleClose).toHaveBeenCalledOnce();
+      expect(report.summary.cleanupDiagnostics).toContainEqual(expect.objectContaining({ operation: "memory_module.close", status: "timed_out" }));
+      await handle.close();
+      expect(moduleClose).toHaveBeenCalledOnce();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("closes the writer and already-created Provider when later Computer construction fails", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-failure-"));
     const close = vi.fn(async () => undefined);
     const providerClose = vi.fn(async () => undefined);
+    const planningModuleClose = vi.fn(async () => undefined);
+    const memoryModuleClose = vi.fn(async () => undefined);
     const computerError = new Error("computer fixture failed");
     const provider: ProviderAdapter & { close: () => Promise<void> } = {
       id: "fixture-provider",
@@ -426,7 +746,7 @@ describe("app-runtime RunHandle", () => {
     };
     const computerFactory = vi.fn(async () => { throw computerError; });
     try {
-      await expect(createRun(config(outputDir), {
+      await expect(createRun({ ...config(outputDir), planning: true, memory: "facts" }, {
         createEventWriter: () => ({
           append: async () => { throw new Error("append must not run"); },
           flush: async () => undefined,
@@ -434,10 +754,14 @@ describe("app-runtime RunHandle", () => {
         }),
         createProvider: () => provider,
         createComputer: computerFactory,
+        createPlanningModule: ({ runId }) => createPlanningRunModule(runId, new InMemoryPlanStore(), { close: planningModuleClose }),
+        createMemoryModule: ({ runId, mode }) => createMemoryRunModule(runId, new InMemoryMemoryStore(), { mode, close: memoryModuleClose }),
       })).rejects.toBe(computerError);
       expect(close).toHaveBeenCalledOnce();
       expect(computerFactory).toHaveBeenCalledOnce();
       expect(providerClose).toHaveBeenCalledOnce();
+      expect(planningModuleClose).toHaveBeenCalledOnce();
+      expect(memoryModuleClose).toHaveBeenCalledOnce();
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }
@@ -468,18 +792,24 @@ describe("app-runtime RunHandle", () => {
   it("disposes a not-yet-started handle without touching an unstarted Computer", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-dispose-"));
     const calls = { open: 0, observe: 0, close: 0 };
+    const planningModuleClose = vi.fn(async () => undefined);
+    const memoryModuleClose = vi.fn(async () => undefined);
     try {
-      const handle = await createRun(config(outputDir), {
+      const handle = await createRun({ ...config(outputDir), planning: true, memory: "facts" }, {
         createProvider: () => ({
           id: "fixture-provider",
           async generate() { return { type: "finish", summary: "unused" }; },
         }),
         createComputer: () => Promise.resolve(fakeComputer(calls)),
+        createPlanningModule: ({ runId }) => createPlanningRunModule(runId, new InMemoryPlanStore(), { close: planningModuleClose }),
+        createMemoryModule: ({ runId, mode }) => createMemoryRunModule(runId, new InMemoryMemoryStore(), { mode, close: memoryModuleClose }),
       });
       await handle.close();
       await handle.close();
       await expect(handle.start()).rejects.toThrow(/already closed/iu);
       expect(calls).toEqual({ open: 0, observe: 0, close: 0 });
+      expect(planningModuleClose).toHaveBeenCalledOnce();
+      expect(memoryModuleClose).toHaveBeenCalledOnce();
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

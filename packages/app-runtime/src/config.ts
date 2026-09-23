@@ -1,5 +1,5 @@
-import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
-import type { PlanStore } from "@computer-harness/planning";
+import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryRunModule, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
+import type { PlanStore, PlanningRunModule } from "@computer-harness/planning";
 import type { RunId, RunOutcome } from "@computer-harness/protocol";
 import type {
   ActionPolicy,
@@ -31,6 +31,19 @@ export interface ExternalProviderDescriptor {
 }
 export type RunModel = AppRuntimeModel | ExternalProviderDescriptor;
 export type MemoryRetrievalMode = "off" | "lexical" | "hybrid";
+
+export interface PlanningRunModuleFactoryOptions {
+  readonly runId: RunId;
+  readonly rootDir: string;
+}
+
+export interface MemoryRunModuleFactoryOptions {
+  readonly runId: RunId;
+  readonly rootDir: string;
+  readonly mode: MemoryToolMode;
+  readonly config: ResolvedRunConfig;
+  readonly credentials: ProviderCredentials;
+}
 
 /** JSON-safe configuration after CLI parsing and environment resolution. */
 export interface ResolvedRunConfig {
@@ -117,7 +130,13 @@ export interface RunDependencies {
   computerFactoryDependencies?: ComputerFactoryDependencies;
   createEventWriter?: (path: string, runId: RunId) => RunEventWriter;
   createAssetStore?: (rootDir: string) => AssetStore & AssetReader;
+  /** Return a fresh Run-owned module. app-runtime calls its optional close() through bounded cleanup. */
+  createPlanningModule?: (options: PlanningRunModuleFactoryOptions) => PlanningRunModule;
+  /** Return a fresh Run-owned module; app-runtime closes it through bounded cleanup. */
+  createMemoryModule?: (options: MemoryRunModuleFactoryOptions) => MemoryRunModule;
+  /** Legacy persistence seam. Prefer createPlanningModule to replace tools, materialization and Context together. */
   createPlanStore?: (rootDir: string) => PlanStore;
+  /** Legacy persistence seam. Prefer createMemoryModule to replace tools, materialization and Context together. */
   createMemoryStore?: (rootDir: string) => MemoryStore;
   /** Application-bound provider seam; Runtime does not construct a default Memory backend. */
   createMemoryEmbeddingProvider?: (options: {

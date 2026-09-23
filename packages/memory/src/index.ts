@@ -1,4 +1,5 @@
 export { FileMemoryStore, InMemoryMemoryStore, type MemoryStore } from "./store.js";
+export { createMemoryRunModule, memoryMutationsFromEvents, type MemoryRunModule, type MemoryRunModuleOptions } from "./run-module.js";
 export { createMemoryTools, type MemoryToolMode, type MemoryToolOptions } from "./tools.js";
 export { HybridMemoryRecallService } from "./retrieval/hybrid-recall.js";
 export { QwenEmbeddingError, QwenTextEmbeddingProvider } from "./retrieval/qwen-embedding.js";

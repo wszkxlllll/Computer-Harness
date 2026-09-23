@@ -76,6 +76,63 @@ export interface PlanStore {
   rebuild(runId: RunId, mutations: readonly PlanningTaskMutation[]): Promise<PlanState>;
 }
 
+/**
+ * One Run's coordinated Planning behavior. Tool mutation hooks are rebound by
+ * app-runtime to this module's apply method. restoreFromEvents is an explicit
+ * offline recovery API; app-runtime does not invoke it to resume a Run.
+ */
+export interface PlanningRunModule {
+  readonly runId: RunId;
+  readonly tools: readonly NonComputerToolDefinition[];
+  apply(mutation: PlanningTaskMutation): Promise<PlanState>;
+  /** Explicit offline recovery from committed Events; not used to resume a live Run. */
+  restoreFromEvents(events: readonly RuntimeEvent[]): Promise<PlanState>;
+  projectContext(plan: PlanState): PlanState | Promise<PlanState>;
+  /** Release module-owned resources when the app-runtime Run closes. */
+  close?(): Promise<void>;
+}
+
+export interface PlanningRunModuleOptions {
+  readonly tools?: readonly NonComputerToolDefinition[];
+  readonly projectContext?: (plan: PlanState) => PlanState | Promise<PlanState>;
+  readonly close?: () => Promise<void>;
+}
+
+export interface PlanningToolOptions {
+  /** Let app-runtime route committed mutations through the Run module. */
+  readonly afterPlanCommit?: false | ((runId: RunId, mutation: PlanningTaskMutation) => Promise<void>);
+}
+
+/** Assemble a Run-scoped Planning module around a store and optional tools or
+ * Context projection. The default behavior is the existing Planning package. */
+export function createPlanningRunModule(
+  runId: RunId,
+  store: PlanStore,
+  options: PlanningRunModuleOptions = {},
+): PlanningRunModule {
+  const tools = options.tools ?? createPlanningTools(store, { afterPlanCommit: false });
+  if (tools.some((tool) => tool.category !== "planning")) {
+    throw new Error("PlanningRunModule tools must use the planning category");
+  }
+  if (tools.some((tool) => tool.planMutationFromResult !== undefined && tool.afterPlanCommit !== undefined)) {
+    throw new Error("PlanningRunModule mutation tools must leave afterPlanCommit to app-runtime");
+  }
+  return {
+    runId,
+    tools: tools.map((tool) => ({
+      ...tool,
+      async execute(args, context) {
+        if (context.runId !== runId) throw new Error(`PlanningRunModule for '${runId}' cannot execute a tool for Run '${context.runId}'`);
+        return tool.execute(args, context);
+      },
+    })),
+    apply: (mutation) => store.apply(runId, mutation),
+    restoreFromEvents: (events) => rebuildPlanFromEvents(store, runId, events),
+    projectContext: options.projectContext ?? ((plan) => clonePlan(plan)),
+    ...(options.close === undefined ? {} : { close: options.close }),
+  };
+}
+
 export class InMemoryPlanStore implements PlanStore {
   private readonly states = new Map<RunId, PlanState>();
 
@@ -153,7 +210,10 @@ export async function rebuildPlanFromEvents(store: PlanStore, runId: RunId, even
   return store.rebuild(runId, planningMutationsFromEvents(events, runId));
 }
 
-export function createPlanningTools(store: PlanStore): readonly NonComputerToolDefinition[] {
+export function createPlanningTools(store: PlanStore, options: PlanningToolOptions = {}): readonly NonComputerToolDefinition[] {
+  const afterPlanCommit = options.afterPlanCommit === false
+    ? undefined
+    : options.afterPlanCommit ?? (async (targetRunId: RunId, mutation: PlanningTaskMutation) => { await store.apply(targetRunId, mutation); });
   return [
     {
       name: "task_create",
@@ -181,7 +241,7 @@ export function createPlanningTools(store: PlanStore): readonly NonComputerToolD
         return { operation: "created", task } as unknown as JsonValue;
       },
       planMutationFromResult: (output) => readMutation(output),
-      afterPlanCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      ...(afterPlanCommit === undefined ? {} : { afterPlanCommit: async (mutation, context) => { await afterPlanCommit(context.runId, mutation); } }),
     },
     {
       name: "task_update",
@@ -225,7 +285,7 @@ export function createPlanningTools(store: PlanStore): readonly NonComputerToolD
         return { operation: "updated", task } as unknown as JsonValue;
       },
       planMutationFromResult: (output) => readMutation(output),
-      afterPlanCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      ...(afterPlanCommit === undefined ? {} : { afterPlanCommit: async (mutation, context) => { await afterPlanCommit(context.runId, mutation); } }),
     },
     {
       name: "task_list",
