@@ -7,7 +7,11 @@ if (process.env.CI === "true") {
 }
 
 function run(command, args) {
-  const result = spawnSync(command, args, { stdio: "inherit" });
+  // Node 24+ on Windows cannot spawn a .cmd shim directly (EINVAL). Only
+  // this script's fixed pnpm arguments are sent through cmd.exe.
+  const executable = process.platform === "win32" && command.endsWith(".cmd") ? "cmd.exe" : command;
+  const invocation = executable === "cmd.exe" ? ["/d", "/s", "/c", [command, ...args].join(" ")] : args;
+  const result = spawnSync(executable, invocation, { stdio: "inherit" });
   if (result.error !== undefined) {
     console.error(result.error);
     process.exit(1);
