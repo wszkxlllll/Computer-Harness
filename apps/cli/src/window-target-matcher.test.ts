@@ -8,9 +8,9 @@ describe("local goal to window matcher", () => {
       { pid: 2, windowId: 20, appName: "Visual Studio Code", title: "notes.ts" },
     ];
 
-    expect(matchGoalToWindow("Open Google Chrome and inspect the current page", targets)).toMatchObject({
+    expect(matchGoalToWindow("Open Google Chrome and inspect the current page", targets)).toEqual({
       kind: "matched",
-      match: { target: targets[0], evidence: ["app: google chrome"] },
+      match: { target: targets[0] },
     });
   });
 
@@ -20,9 +20,9 @@ describe("local goal to window matcher", () => {
       { pid: 8, windowId: 80, appName: "浏览器", title: "笔记首页" },
     ];
 
-    expect(matchGoalToWindow("整理项目管理查询结果", targets)).toMatchObject({
+    expect(matchGoalToWindow("整理项目管理查询结果", targets)).toEqual({
       kind: "matched",
-      match: { target: targets[0], evidence: ["title: 项目管理"] },
+      match: { target: targets[0] },
     });
   });
 
@@ -33,7 +33,7 @@ describe("local goal to window matcher", () => {
     { goal: "Open Google Chrome and inspect the page", appName: "Google Chrome" },
   ])("matches an exact everyday app identity for $appName", ({ goal, appName }) => {
     const target = { pid: 10, windowId: 100, appName, title: "Untitled" };
-    expect(matchGoalToWindow(goal, [target])).toMatchObject({ kind: "matched", match: { target } });
+    expect(matchGoalToWindow(goal, [target])).toEqual({ kind: "matched", match: { target } });
   });
 
   it.each([
@@ -41,10 +41,7 @@ describe("local goal to window matcher", () => {
     { goal: "Open Excel workbook", appName: "Microsoft Excel" },
   ])("accepts a distinctive trailing app name when it is the goal's sole identity term", ({ goal, appName }) => {
     const target = { pid: 10, windowId: 100, appName, title: "Untitled" };
-    expect(matchGoalToWindow(goal, [target])).toMatchObject({
-      kind: "matched",
-      match: { target, evidence: [`app suffix: ${appName.split(" ").at(-1)!.toLocaleLowerCase()}`] },
-    });
+    expect(matchGoalToWindow(goal, [target])).toEqual({ kind: "matched", match: { target } });
   });
 
   it("accepts an exact two-character CJK application name as app identity", () => {
@@ -53,17 +50,14 @@ describe("local goal to window matcher", () => {
       { pid: 2, windowId: 20, appName: "浏览器", title: "新标签页" },
     ];
 
-    expect(matchGoalToWindow("打开微信并查看消息", targets)).toMatchObject({
-      kind: "matched",
-      match: { target: targets[0], evidence: ["app: 微信"] },
-    });
-    expect(matchGoalToWindow("打开微信读书并阅读", [targets[0]!]).kind).toBe("none");
+    expect(matchGoalToWindow("打开微信并查看消息", targets)).toEqual({ kind: "matched", match: { target: targets[0] } });
+    expect(matchGoalToWindow("打开微信读书并阅读", [targets[0]!])).toEqual({ kind: "none" });
   });
 
   it("requires a complete longer CJK title identity instead of a partial brand mention", () => {
     const targets = [{ pid: 1, windowId: 10, appName: "浏览器", title: "携程旅行" }];
 
-    expect(matchGoalToWindow("查看携程的订单", targets).kind).toBe("none");
+    expect(matchGoalToWindow("查看携程的订单", targets)).toEqual({ kind: "none" });
   });
 
   it("does not auto-select when multiple visible windows confidently match", () => {
@@ -73,8 +67,7 @@ describe("local goal to window matcher", () => {
     ];
 
     const result = matchGoalToWindow("Use Google Chrome to check the report", targets);
-    expect(result.kind).toBe("ambiguous");
-    if (result.kind === "ambiguous") expect(result.candidates.map(({ target }) => target.windowId)).toEqual([10, 20]);
+    expect(result).toEqual({ kind: "ambiguous" });
   });
 
   it("does not treat generic window or task language as a confident match", () => {
@@ -83,7 +76,7 @@ describe("local goal to window matcher", () => {
       { pid: 2, windowId: 20, appName: "Browser", title: "Untitled" },
     ];
 
-    expect(matchGoalToWindow("Look at the browser window and search the page", targets).kind).toBe("none");
+    expect(matchGoalToWindow("Look at the browser window and search the page", targets)).toEqual({ kind: "none" });
   });
 
   it("does not match a short Han location or task word from an arbitrary title", () => {
@@ -92,7 +85,7 @@ describe("local goal to window matcher", () => {
       { pid: 2, windowId: 20, appName: "Task Manager", title: "Processes" },
     ];
 
-    expect(matchGoalToWindow("处理订单任务", targets).kind).toBe("none");
+    expect(matchGoalToWindow("处理订单任务", targets)).toEqual({ kind: "none" });
   });
 
   it("keeps two windows for the same named app ambiguous", () => {
@@ -102,23 +95,22 @@ describe("local goal to window matcher", () => {
     ];
 
     const result = matchGoalToWindow("Open Google Chrome and review the orders", targets);
-    expect(result.kind).toBe("ambiguous");
-    if (result.kind === "ambiguous") expect(result.candidates.map(({ target }) => target.windowId)).toEqual([10, 20]);
+    expect(result).toEqual({ kind: "ambiguous" });
   });
 
   it("rejects shared Latin words when they are not complete app or title identities", () => {
     const visualStudioCode = { pid: 1, windowId: 10, appName: "Visual Studio Code", title: "Chrome extension" };
     const googleChrome = { pid: 2, windowId: 20, appName: "Google Chrome", title: "New Tab" };
 
-    expect(matchGoalToWindow("Open Chrome", [visualStudioCode]).kind).toBe("none");
-    expect(matchGoalToWindow("Open Google Calendar", [googleChrome]).kind).toBe("none");
+    expect(matchGoalToWindow("Open Chrome", [visualStudioCode])).toEqual({ kind: "none" });
+    expect(matchGoalToWindow("Open Google Calendar", [googleChrome])).toEqual({ kind: "none" });
   });
 
   it("accepts complete leading title evidence", () => {
     const target = { pid: 1, windowId: 10, appName: "Visual Studio Code", title: "Chrome extension" };
-    expect(matchGoalToWindow("Open the Chrome extension", [target])).toMatchObject({
+    expect(matchGoalToWindow("Open the Chrome extension", [target])).toEqual({
       kind: "matched",
-      match: { target, evidence: ["title: chrome extension"] },
+      match: { target },
     });
   });
 
@@ -130,10 +122,10 @@ describe("local goal to window matcher", () => {
       title: "Budget Report — Visual Studio Code",
     };
 
-    expect(matchGoalToWindow("Open Budget Report in Microsoft Excel", [target]).kind).toBe("none");
-    expect(matchGoalToWindow("Open Budget Report", [target])).toMatchObject({
+    expect(matchGoalToWindow("Open Budget Report in Microsoft Excel", [target])).toEqual({ kind: "none" });
+    expect(matchGoalToWindow("Open Budget Report", [target])).toEqual({
       kind: "matched",
-      match: { target, evidence: ["title: budget report"] },
+      match: { target },
     });
   });
 
@@ -144,7 +136,7 @@ describe("local goal to window matcher", () => {
       { pid: 3, windowId: 30, appName: "Calendar", title: "Today" },
     ];
 
-    expect(matchGoalToWindow("Type the plan in Notepad", targets)).toMatchObject({
+    expect(matchGoalToWindow("Type the plan in Notepad", targets)).toEqual({
       kind: "matched",
       match: { target: targets[1] },
     });

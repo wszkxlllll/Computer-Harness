@@ -1,15 +1,14 @@
 import type { WindowTargetInfo } from "@computer-harness/app-runtime";
 
-export interface RankedWindowTarget {
+interface ScoredWindowTarget {
   readonly target: WindowTargetInfo;
   readonly score: number;
-  readonly evidence: readonly string[];
 }
 
 export type WindowGoalMatch =
-  | { readonly kind: "matched"; readonly match: RankedWindowTarget; readonly ranked: readonly RankedWindowTarget[] }
-  | { readonly kind: "ambiguous"; readonly candidates: readonly RankedWindowTarget[]; readonly ranked: readonly RankedWindowTarget[] }
-  | { readonly kind: "none"; readonly ranked: readonly RankedWindowTarget[] };
+  | { readonly kind: "matched"; readonly match: { readonly target: WindowTargetInfo } }
+  | { readonly kind: "ambiguous" }
+  | { readonly kind: "none" };
 
 const MIN_CONFIDENT_SCORE = 4;
 
@@ -42,13 +41,12 @@ export function matchGoalToWindow(goal: string, targets: readonly WindowTargetIn
   const goalLatinTerms = extractLatinTerms(normalizedGoal);
   const goalCompact = normalizedGoal.replace(/[\s\p{P}\p{S}]/gu, "");
 
-  const ranked = targets
-    .map((target): RankedWindowTarget => scoreTarget(target, normalizedGoal, goalLatinTerms, goalCompact))
-    .sort((left, right) => right.score - left.score || compareTargetIdentity(left.target, right.target));
-  const confident = ranked.filter((candidate) => candidate.score >= MIN_CONFIDENT_SCORE);
-  if (confident.length === 1) return { kind: "matched", match: confident[0]!, ranked };
-  if (confident.length > 1) return { kind: "ambiguous", candidates: confident, ranked };
-  return { kind: "none", ranked };
+  const confident = targets
+    .map((target) => scoreTarget(target, normalizedGoal, goalLatinTerms, goalCompact))
+    .filter((candidate) => candidate.score >= MIN_CONFIDENT_SCORE);
+  if (confident.length === 1) return { kind: "matched", match: { target: confident[0]!.target } };
+  if (confident.length > 1) return { kind: "ambiguous" };
+  return { kind: "none" };
 }
 
 function scoreTarget(
@@ -56,7 +54,7 @@ function scoreTarget(
   normalizedGoal: string,
   goalLatinTerms: readonly string[],
   goalCompact: string,
-): RankedWindowTarget {
+): ScoredWindowTarget {
   const appName = target.appName ?? "";
   const appLatinTerms = extractLatinTerms(appName);
   const titleIdentity = leadingTitleIdentity(target.title ?? "");
@@ -70,20 +68,13 @@ function scoreTarget(
   const matchedAppHan = appHanTerms.filter((term) => containsBoundedHanIdentity(normalizedGoal, term));
   const matchedTitleHan = titleHanTerms.filter((term) => goalCompact.includes(term));
 
-  const evidence = [
-    ...(matchedFullAppLatin ? [`app: ${appLatinTerms.join(" ")}`] : []),
-    ...(matchedAppSuffix ? [`app suffix: ${appLatinTerms.at(-1)}`] : []),
-    ...(matchedTitleLatin ? [`title: ${titleLatinTerms.join(" ")}`] : []),
-    ...matchedAppHan.map((term) => `app: ${term}`),
-    ...matchedTitleHan.map((term) => `title: ${term}`),
-  ];
   const score =
     (matchedFullAppLatin ? latinIdentityScore(appLatinTerms) : 0) +
     (matchedAppSuffix ? Math.min(appLatinTerms.at(-1)!.length, 8) : 0) +
     (matchedTitleLatin ? latinIdentityScore(titleLatinTerms) : 0) +
     matchedAppHan.reduce((total, term) => total + 2 + Math.min(term.length, 6), 0) +
     matchedTitleHan.reduce((total, term) => total + 2 + Math.min(term.length, 6), 0);
-  return { target, score, evidence };
+  return { target, score };
 }
 
 function extractLatinTerms(value: string): string[] {
@@ -177,8 +168,4 @@ function containsBoundedHanIdentity(goal: string, identity: string): boolean {
 
 function leadingTitleIdentity(value: string): string {
   return value.normalize("NFKC").split(/[|｜–—\-:：·]/u, 1)[0] ?? value;
-}
-
-function compareTargetIdentity(left: WindowTargetInfo, right: WindowTargetInfo): number {
-  return left.pid - right.pid || left.windowId - right.windowId;
 }
