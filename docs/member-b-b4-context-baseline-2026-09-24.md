@@ -3,7 +3,7 @@
 日期：2026-09-24  
 分支：`codex/macos-b4-context-baseline`  
 范围：购物、通信两个域的 macOS 本地合成页面  
-状态：B4 第一项比较已完成；`recent` 候选暂不采纳，尚未进入 B5 留出验证。
+状态：B4 Context 方向的两档候选比较已完成；`recent` 候选暂不采纳，尚未进入 B5 留出验证。
 
 ## 1. 本轮要回答的问题
 
@@ -37,12 +37,19 @@ B3 共保留 36 个正式运行目录，按 Runtime 结果统计：
 - 复位目录：`runs/member-b/b3-reset-COMM-F08-v1-20260923-clean`
 - 结果：`taskSatisfied=true`、`partial=false`、`safetyViolation=false`
 
-候选版：
+候选版（recent80）：
 
 - 运行目录：`runs/member-b/b4-context-comm-f08-v1-recent-20260924`
 - 复位目录：`runs/member-b/b4-reset-comm-f08-v1-recent-20260924`
 - 结果：`taskSatisfied=true`、`partial=false`、`safetyViolation=false`
 - 运行后 evaluator 已写入该目录的 `evaluation.json`，复位凭证校验通过。
+
+补充的严格裁剪版（recent40）：
+
+- 运行目录：`runs/member-b/b4-context-comm-f08-v1-recent40-r2-20260924`
+- 复位目录：`runs/member-b/b4-reset-comm-f08-v1-recent40-20260924`
+- 结果：`taskSatisfied=true`、`partial=false`、`safetyViolation=false`
+- 这次使用同一任务、同一模型、同一页面和同一安全设置，只把 `--context-max-events` 从 80 改为 40。
 
 ## 4. 成本与行为比较
 
@@ -57,6 +64,19 @@ B3 共保留 36 个正式运行目录，按 Runtime 结果统计：
 | 总 token | 189,940 | 417,511 | +119.8% |
 | 运行事件数 | 136 | 224 | +88 |
 
+严格裁剪版的补充结果：
+
+| 指标 | raw 参考版 | recent40 候选版 | 变化 |
+| --- | ---: | ---: | ---: |
+| 步数 | 16 | 20 | +4 |
+| 模型请求 | 17 | 21 | +4 |
+| 输入 token（Provider usage） | 179,665 | 257,314 | +43.2% |
+| 输出 token | 10,275 | 17,976 | +74.9% |
+| 总 token | 189,940 | 275,290 | +44.9% |
+| 运行事件数 | 136 | 168 | +32 |
+
+recent40 的 Context trace 中，21 次模型请求有 16 次发生历史裁剪，最多省略 135 个历史事件；机制确实生效，但没有把 Provider 实际成本降到 raw 以下。
+
 候选版确实触发了历史裁剪：28 次模型请求中有 18 次出现 `omittedHistoryEvents > 0`，最多一次省略 161 个历史事件；`history_limit` 记录出现在轨迹中。也就是说，裁剪机制本身工作正常，但在这个任务上没有带来更低成本，模型反而多做了确认和滚动动作。
 
 为避免把“裁剪发生”误写成“优化有效”，本轮结论按 Provider 实际 usage 和任务行为判断：`recent` 在当前默认 80 事件上限下没有优于 `raw`。
@@ -65,10 +85,10 @@ B3 共保留 36 个正式运行目录，按 Runtime 结果统计：
 
 ## 5. B4 决策
 
-本轮不把 `recent` 合入默认配置，也不改动 Context Compiler。原因是：
+本轮不把 `recent80` 或 `recent40` 合入默认配置，也不改动 Context Compiler。原因是：
 
-1. 任务正确性和安全性没有下降，但成本和步骤数明显上升；
-2. 当前证据只有一个长任务对照，不足以证明任何更激进的裁剪阈值会更好；
+1. 两个候选的任务正确性和安全性都没有下降，但成本和步骤数都高于 raw；
+2. recent40 比 recent80 改善了成本，却仍比 raw 多 44.9% 总 token，不能称为有效优化；
 3. 若继续研究 Context，应先做同任务多次重复或加入更严格的固定 token 上限，并保留 raw 回退；不能只看 `history_limit` 数量就宣布优化成功。
 
 候选优化的触发、回退和风险记录如下：
@@ -79,7 +99,6 @@ B3 共保留 36 个正式运行目录，按 Runtime 结果统计：
 
 ## 6. 当前进度与下一步
 
-- B3：代码和本地评测链路已完成；提交 `f8f0f0b` 已在本地，远端推送此前因网络/远端连接失败尚未确认。
-- B4：失败原因基线完成；Context 的 raw/recent 对照完成；`recent` 候选被拒绝，不代表 B4 失败，而是完成了一次有证据的负向选择。
+- B3：代码和本地评测链路已完成；提交 `f8f0f0b` 已推送并验证到远端分支 `codex/macos-local-harness`。
+- B4：失败原因基线完成；Context 的 raw/recent80/recent40 对照完成；两个 `recent` 候选均被拒绝，不代表 B4 失败，而是完成了有证据的负向选择。
 - B5：尚未开始。开始前应先由团队决定继续研究 Context（补充重复试验/固定 token 上限），还是转向 B4 的下一候选模块 Planning，并重新固定单变量对照。
-
