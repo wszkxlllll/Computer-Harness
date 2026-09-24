@@ -3,7 +3,7 @@
 日期：2026-09-24  
 分支：`codex/macos-b4-context-baseline`  
 范围：购物、通信两个域的 macOS 本地合成页面  
-状态：B4 Context 方向的两档候选比较已完成；`recent` 候选暂不采纳，尚未进入 B5 留出验证。
+状态：B4 的 Context 与 Planning 候选比较已完成；当前保留 raw 基线，尚未进入 B5 留出验证。
 
 ## 1. 本轮要回答的问题
 
@@ -83,13 +83,24 @@ recent40 的 Context trace 中，21 次模型请求有 16 次发生历史裁剪�
 
 另外，先前的 `SHOP-F08-v1` 短任务 raw/recent 试跑只有几十个事件，没有真正触发裁剪，不能作为 Context 效果证据；因此本记录只采用真正触发裁剪的 `COMM-F08-v1` 长任务作为主要比较。
 
+## 4.1 Planning 单变量比较
+
+Context 候选均未达到成本门槛后，按计划对 Planning 做了一个跨应用长任务对照，并用一个简单查询作为负对照。两组都保持 `context-mode=raw`，只改变 `--planning` 开关。
+
+| 任务 | Planning off | Planning on | 结论 |
+| --- | --- | --- | --- |
+| `COMM-F08-v1` 跨应用长任务 | 16 步、17 请求、189,940 token | 20 步、21 请求、262,407 token | 两者均通过；Planning 总 token +38.2%，没有成本收益 |
+| `SHOP-F01-v1` 简单查询 | 3 步、4 请求、23,279 token | 3 步、4 请求、28,361 token | 两者均通过；步数/请求不变，但总 token +21.8% |
+
+两个 Planning 运行均通过 evaluator：`taskSatisfied=true`、`partial=false`、`safetyViolation=false`。Planning 版额外暴露了 `task_create`、`task_update`、`task_list`、`task_get`，并写入独立 `plan-store`；没有产生真实副作用，但也没有减少操作步骤或 Provider 成本。
+
 ## 5. B4 决策
 
-本轮不把 `recent80` 或 `recent40` 合入默认配置，也不改动 Context Compiler。原因是：
+本轮不把 `recent80`、`recent40` 或 Planning 合入默认配置，也不改动 Context Compiler/Planning 默认行为。原因是：
 
-1. 两个候选的任务正确性和安全性都没有下降，但成本和步骤数都高于 raw；
-2. recent40 比 recent80 改善了成本，却仍比 raw 多 44.9% 总 token，不能称为有效优化；
-3. 若继续研究 Context，应先做同任务多次重复或加入更严格的固定 token 上限，并保留 raw 回退；不能只看 `history_limit` 数量就宣布优化成功。
+1. Context 的两个候选和 Planning 的两个对照都保持正确性与安全性，但成本没有优于 raw；
+2. recent40 比 recent80 改善了成本，却仍比 raw 多 44.9% 总 token；Planning 在长任务上多 38.2% 总 token，在简单任务上多 21.8%；
+3. 本轮没有找到值得合入默认配置的优化，raw 作为回退和当前基线；不能只看 `history_limit` 或计划对象存在就宣布优化成功。
 
 候选优化的触发、回退和风险记录如下：
 
@@ -100,5 +111,5 @@ recent40 的 Context trace 中，21 次模型请求有 16 次发生历史裁剪�
 ## 6. 当前进度与下一步
 
 - B3：代码和本地评测链路已完成；提交 `f8f0f0b` 已推送并验证到远端分支 `codex/macos-local-harness`。
-- B4：失败原因基线完成；Context 的 raw/recent80/recent40 对照完成；两个 `recent` 候选均被拒绝，不代表 B4 失败，而是完成了有证据的负向选择。
-- B5：尚未开始。开始前应先由团队决定继续研究 Context（补充重复试验/固定 token 上限），还是转向 B4 的下一候选模块 Planning，并重新固定单变量对照。
+- B4：失败原因基线完成；Context 的 raw/recent80/recent40 与 Planning on/off（含简单负对照）均完成；所有候选均被拒绝，raw 保持基线。这是有证据的负向选择，不是运行链路失败。
+- B5：尚未开始。下一步可在 raw 基线不变的前提下进入留出验证，或另行设计有明确收益假设的优化实验。
