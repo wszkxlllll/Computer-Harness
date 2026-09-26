@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRun, listRuns, listWindowTargets } from "./api";
 import { HomeScreen } from "./HomeScreen";
@@ -13,6 +13,7 @@ vi.mock("./api", async (importOriginal) => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  window.history.replaceState(null, "", "/");
 });
 
 describe("home window-target selection", () => {
@@ -31,7 +32,9 @@ describe("home window-target selection", () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
     render(<HomeScreen />);
 
-    const goal = await screen.findByLabelText("你想让电脑完成什么？");
+    expect(screen.getByRole("heading", { name: "新任务" })).toBeDefined();
+    expect(screen.queryByText(/电脑来完成/)).toBeNull();
+    const goal = await screen.findByLabelText("想让电脑做什么？");
     const startButton = screen.getByRole("button", { name: "开始任务" });
     fireEvent.change(goal, { target: { value: "Compare the contacts" } });
     await screen.findByRole("radio", { name: /Browser.*Contacts/ });
@@ -43,6 +46,22 @@ describe("home window-target selection", () => {
     fireEvent.click(startButton);
 
     await waitFor(() => expect(createRun).toHaveBeenCalledWith("Compare the contacts", expect.any(String), "opaque-a"));
+  });
+
+  it("tracks the selected task tab when navigating to the recent-tasks anchor", () => {
+    render(<HomeScreen />);
+    const navigation = within(screen.getByRole("navigation", { name: "手机主导航" }));
+    const newTask = navigation.getByRole("link", { name: "新任务" });
+    const tasks = navigation.getByRole("link", { name: "任务" });
+    const settings = navigation.getByRole("link", { name: "设置" });
+    expect(newTask.getAttribute("aria-current")).toBe("page");
+    expect(tasks.getAttribute("href")).toBe("/#recent-tasks");
+    expect(settings.getAttribute("href")).toBe("/preferences");
+
+    window.history.replaceState(null, "", "/#recent-tasks");
+    fireEvent(window, new Event("hashchange"));
+    expect(tasks.getAttribute("aria-current")).toBe("page");
+    expect(newTask.getAttribute("aria-current")).toBeNull();
   });
 
   it("preserves the goal draft and requires re-selection after a stale-window error", async () => {
@@ -62,7 +81,7 @@ describe("home window-target selection", () => {
     ));
     render(<HomeScreen />);
 
-    const goal = await screen.findByLabelText("你想让电脑完成什么？");
+    const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Keep this draft while refreshing" } });
     fireEvent.click(await screen.findByRole("radio", { name: /Browser.*Contacts/ }));
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));

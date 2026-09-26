@@ -99,12 +99,11 @@ export function ConnectPhoneScreen() {
     <>
       <BrandHeader mode="computer" />
       <main className="page-shell connect-page">
-        <p className="eyebrow">电脑端 · 连接管理</p>
-        <h1 className="page-title">连接手机</h1>
-        <div className="prototype-banner" role="note">
-          <strong>配对说明</strong>
-          <span>手机会访问二维码中显示的地址；跨网络配对取决于该地址对应的 Relay 是否可达，以及 HTTPS 证书是否受手机信任。每次配对仍需在电脑本机确认。</span>
-        </div>
+        <h1 className="page-title">连接管理</h1>
+        <details className="connection-guide">
+          <summary>连接说明</summary>
+          <p>手机访问二维码中的地址；跨网络连接需该地址可达且 HTTPS 证书受手机信任。每次配对都要在电脑本机确认。</p>
+        </details>
 
         {!localOnly && (
           <div className="notice notice-warning" role="alert">

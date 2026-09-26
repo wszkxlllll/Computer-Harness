@@ -27,8 +27,8 @@ export function WindowTargetPicker({
     <section className="window-target-section" aria-labelledby="window-target-heading">
       <div className="window-target-heading-row">
         <div>
-          <h2 id="window-target-heading">选择运行窗口</h2>
-          <p className="window-target-help">电脑会在开始前再次核对这个窗口；不会自动选择其他窗口。</p>
+          <h2 id="window-target-heading">操作窗口</h2>
+          <p className="window-target-help sr-only">开始前会再次核对所选窗口。</p>
         </div>
         <button className="button button-secondary" type="button" disabled={disabled || loading} onClick={onRefresh}>
           {loading ? "正在刷新…" : "刷新窗口列表"}
@@ -43,7 +43,7 @@ export function WindowTargetPicker({
 
       {!loading && !error && candidates.length > 0 && (
         <fieldset className="window-target-fieldset" disabled={disabled || expired}>
-          <legend>可用窗口（{candidates.length}）</legend>
+          <legend>可选窗口（{candidates.length}）</legend>
           <div className="window-target-list">
             {candidates.map((candidate, index) => (
               <label className="window-target-option" htmlFor={`window-target-${index}`} key={candidate.token}>
@@ -67,7 +67,7 @@ export function WindowTargetPicker({
       )}
 
       {expiresAt && !expired && !error && (
-        <p id="window-target-expiry" className="window-target-expiry" role="status">
+        <p id="window-target-expiry" className="window-target-expiry sr-only" role="status">
           此窗口列表有效至 {formatExpiry(expiresAt)}。刷新后需要重新选择。
         </p>
       )}

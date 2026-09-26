@@ -55,6 +55,7 @@ export interface PendingRequestBase {
   reason?: string;
   question?: string;
   reasonCode?: "foreground_mismatch" | "new_window_detected" | string;
+  requiresVisualReview?: boolean;
   preview?: ApprovalActionPreview;
   candidates?: WindowCandidate[];
 }
@@ -66,6 +67,19 @@ export interface ApprovalActionPreview {
     summary: string;
     verified: false;
   };
+  evidence?: ApprovalEvidence;
+}
+
+export interface ApprovalEvidence {
+  assetId: string;
+  observationId: string;
+  capturedAt: string;
+  viewport: {
+    width: number;
+    height: number;
+    coordinateSpace: "physical" | "logical" | "reference";
+  };
+  decisionObservationId: string;
 }
 
 export interface ApprovalActionPreviewItem {

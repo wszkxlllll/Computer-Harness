@@ -10,7 +10,7 @@ export interface RunFeedState {
   events: RemoteEvent[];
   connection: FeedConnection;
   error?: string;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<RunSnapshot>;
 }
 
 function decodeEvent(message: MessageEvent<string>, runId: string): RemoteEvent | undefined {
@@ -60,6 +60,7 @@ export function useRunFeed(runId: string): RunFeedState {
       const next = await getRun(runId);
       acceptSnapshot(next);
       restartFeedRef.current?.(reconnectCursor(next.sequence));
+      return next;
     } catch (caught) {
       setConnection("offline");
       setError(caught instanceof Error ? caught.message : "暂时无法刷新任务状态。");
