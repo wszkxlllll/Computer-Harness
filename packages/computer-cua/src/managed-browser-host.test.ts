@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { access, mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import { acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, clearManagedBrowserDevToolsPort, cleanupManagedBrowser, closeManagedBrowserGracefully, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, cleanupManagedBrowser, closeManagedBrowserGracefully, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
   it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {
@@ -294,15 +294,52 @@ describe("managed browser host pilot", () => {
   it("clears only stale DevToolsActivePort and accepts the next fresh port file", async () => {
     const root = await mkdtemp(join(tmpdir(), "computer-harness-devtools-fresh-"));
     const child = { exitCode: null } as unknown as ChildProcess;
+    const portFile = join(root, "DevToolsActivePort");
     try {
-      await writeFile(join(root, "DevToolsActivePort"), "1111\nstale-browser\n", "utf8");
+      await writeFile(portFile, "1111\nstale-browser\n", "utf8");
       await writeFile(join(root, "Cookies"), "login-state-must-remain", "utf8");
-      const notBefore = Date.now();
-      await clearManagedBrowserDevToolsPort(root);
-      await expect(access(join(root, "DevToolsActivePort"))).rejects.toThrow();
-      await writeFile(join(root, "DevToolsActivePort"), "2222\nfresh-browser\n", "utf8");
-      await expect(waitForDevToolsPort(root, child, 300, new AbortController().signal, notBefore)).resolves.toEqual({ port: 2222 });
+      const freshnessBoundaryMs = await prepareManagedBrowserDevToolsLaunch(root);
+      await expect(access(portFile)).rejects.toThrow();
+      await writeFile(portFile, "2222\nfresh-browser\n", "utf8");
+      // Real filesystem I/O stays covered, but this test allows normal CI
+      // scheduling delays instead of treating 300 ms as a startup contract.
+      await expect(waitForDevToolsPort(root, child, 2_000, new AbortController().signal, freshnessBoundaryMs)).resolves.toEqual({ port: 2222 });
       await expect(readFile(join(root, "Cookies"), "utf8")).resolves.toBe("login-state-must-remain");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("continues rejecting a DevTools port file whose explicit mtime predates launch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-devtools-old-mtime-"));
+    const portFile = join(root, "DevToolsActivePort");
+    const child = { exitCode: null } as unknown as ChildProcess;
+    try {
+      await writeFile(portFile, "3333\nstale-browser\n", "utf8");
+      const freshnessBoundaryMs = await prepareManagedBrowserDevToolsLaunch(root);
+      await writeFile(portFile, "3333\nstale-browser\n", "utf8");
+      const oldTime = new Date(freshnessBoundaryMs - 60_000);
+      await utimes(portFile, oldTime, oldTime);
+      await expect(waitForDevToolsPort(root, child, 150, new AbortController().signal, freshnessBoundaryMs))
+        .rejects.toThrow(/startup timed out/iu);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("handles a missing port file, an exited browser, abort, and bounded timeout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-devtools-unavailable-"));
+    const child = { exitCode: null } as unknown as ChildProcess;
+    try {
+      await expect(waitForDevToolsPort(root, child, 100, new AbortController().signal))
+        .rejects.toThrow(/startup timed out/iu);
+      await expect(waitForDevToolsPort(root, { exitCode: 1 } as unknown as ChildProcess, 1_000, new AbortController().signal))
+        .rejects.toThrow(/exited before DevTools became ready/iu);
+
+      const controller = new AbortController();
+      const pending = waitForDevToolsPort(root, child, 1_000, controller.signal);
+      setTimeout(() => controller.abort(new Error("fixture abort")), 20);
+      await expect(pending).rejects.toThrow("fixture abort");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -623,13 +623,12 @@ export class ManagedBrowserHost {
         "--new-window",
         ...launchUrls,
       ];
-      const launchStartedAt = Date.now();
-      await clearManagedBrowserDevToolsPort(profileRoot);
+      const freshnessBoundaryMs = await prepareManagedBrowserDevToolsLaunch(profileRoot);
       child = spawn(executablePath, args, { stdio: "ignore", windowsHide: false });
       const processId = child.pid;
       if (processId === undefined || !Number.isSafeInteger(processId) || processId <= 0) throw new DomGroundingUnavailableError("managed browser process did not expose a valid PID");
       const ownedProcessId = processId;
-      const devTools = await waitForDevToolsPort(profileRoot, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal, launchStartedAt);
+      const devTools = await waitForDevToolsPort(profileRoot, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal, freshnessBoundaryMs);
       const browserEndpoint = await waitForDevToolsBrowserEndpoint(devTools.port, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal);
       browserWebSocketDebuggerUrl = browserEndpoint;
       const startupPageSet = await waitForManagedBrowserStartupPageSet(
@@ -1132,12 +1131,37 @@ export async function clearManagedBrowserDevToolsPort(profileRoot: string): Prom
   await rm(join(profileRoot, "DevToolsActivePort"), { force: true });
 }
 
+/**
+ * Remove any previous port file, then take a short-lived filesystem timestamp
+ * anchor before spawning Chromium. Comparing filesystem mtime with Date.now()
+ * can reject a file created moments later because those clocks may differ.
+ * This timestamp is only a freshness boundary; process and window ownership
+ * are still established by the existing PID, CDP, and CUA checks.
+ */
+export async function prepareManagedBrowserDevToolsLaunch(profileRoot: string): Promise<number> {
+  await clearManagedBrowserDevToolsPort(profileRoot);
+  const markerPath = join(profileRoot, `.computer-harness-devtools-launch-${randomBytes(16).toString("hex")}`);
+  const marker = await open(markerPath, "wx");
+  try {
+    await marker.writeFile(randomBytes(16));
+    return (await marker.stat()).mtimeMs;
+  } finally {
+    await marker.close().catch(() => undefined);
+    await rm(markerPath, { force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Wait for a valid DevTools port file. When supplied, freshnessBoundaryMs
+ * must come from this profile filesystem after its prior port file was cleared;
+ * filesystem mtimes must not be compared with Date.now().
+ */
 export async function waitForDevToolsPort(
   profileRoot: string,
   child: ChildProcess,
   timeoutMs: number,
   signal: AbortSignal,
-  notBeforeMs = 0,
+  freshnessBoundaryMs = 0,
 ): Promise<{ readonly port: number }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1146,7 +1170,7 @@ export async function waitForDevToolsPort(
     try {
       const portFile = join(profileRoot, "DevToolsActivePort");
       const metadata = await stat(portFile);
-      if (notBeforeMs > 0 && metadata.mtimeMs < notBeforeMs) {
+      if (freshnessBoundaryMs > 0 && metadata.mtimeMs < freshnessBoundaryMs) {
         await wait(50, signal);
         continue;
       }

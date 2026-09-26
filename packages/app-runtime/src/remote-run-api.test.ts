@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type {
   Computer,
@@ -456,6 +456,83 @@ describe("ApplicationRemoteRunApi", () => {
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads valid local assets when path and handle stats expose different identity fields", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "harness-remote-asset-stat-"));
+    const assetRoot = join(tempRoot, "assets");
+    const assetPath = join(assetRoot, "snapshot.png");
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    await mkdir(assetRoot, { recursive: true });
+    await writeFile(assetPath, bytes);
+
+    try {
+      const pathStat = await lstat(assetPath);
+      const pathBigIntStat = await lstat(assetPath, { bigint: true });
+      const { number: handleStat, bigint: handleBigIntStat } = await (async () => {
+        const file = await open(assetPath, "r");
+        try {
+          const [number, bigint] = await Promise.all([file.stat(), file.stat({ bigint: true })] as const);
+          return { number, bigint };
+        } finally {
+          await file.close();
+        }
+      })();
+      const resolvedRoot = await realpath(assetRoot);
+      const resolvedAsset = await realpath(assetPath);
+      const relativeAsset = relative(resolvedRoot, resolvedAsset);
+      const contained = relativeAsset !== "" && relativeAsset !== ".." &&
+        !relativeAsset.startsWith(".." + sep) && !isAbsolute(relativeAsset);
+      const diagnostics = JSON.stringify({
+        node: process.version,
+        platform: process.platform,
+        numberStats: {
+          lstat: { dev: pathStat.dev, ino: pathStat.ino, size: pathStat.size, isFile: pathStat.isFile() },
+          fileStat: { dev: handleStat.dev, ino: handleStat.ino, size: handleStat.size, isFile: handleStat.isFile() },
+        },
+        bigintStats: {
+          lstat: { dev: pathBigIntStat.dev.toString(), ino: pathBigIntStat.ino.toString(), size: pathBigIntStat.size.toString() },
+          fileStat: { dev: handleBigIntStat.dev.toString(), ino: handleBigIntStat.ino.toString(), size: handleBigIntStat.size.toString() },
+        },
+        containment: { relativeAsset, contained },
+      });
+      if (process.platform === "win32") console.info(`[remote-asset-stat] ${diagnostics}`);
+
+      expect(pathStat.isFile(), diagnostics).toBe(true);
+      expect(handleStat.isFile(), diagnostics).toBe(true);
+      expect(pathBigIntStat.size, diagnostics).toBe(4n);
+      expect(handleBigIntStat.size, diagnostics).toBe(4n);
+      expect(contained, diagnostics).toBe(true);
+
+      const ref: AssetRef = {
+        assetId: "asset-stat" as AssetId,
+        relativePath: "snapshot.png",
+        mediaType: "image/png",
+        byteLength: bytes.byteLength,
+      };
+      await expect(createFileRemoteAssetReader(assetRoot).read(ref, new AbortController().signal)).resolves.toEqual(bytes);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects remote assets whose stored byte length differs from the file", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "harness-remote-asset-length-"));
+    const assetRoot = join(tempRoot, "assets");
+    await mkdir(assetRoot, { recursive: true });
+    await writeFile(join(assetRoot, "snapshot.png"), new Uint8Array([1, 2, 3, 4]));
+    try {
+      const ref: AssetRef = {
+        assetId: "asset-wrong-length" as AssetId,
+        relativePath: "snapshot.png",
+        mediaType: "image/png",
+        byteLength: 3,
+      };
+      await expect(createFileRemoteAssetReader(assetRoot).read(ref, new AbortController().signal))
+        .rejects.toThrow(/metadata does not match/iu);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
     }
   });
 

@@ -84,7 +84,9 @@ export function createFileRemoteAssetReader(rootDir: string): AssetReader {
     async read(ref, signal) {
       signal.throwIfAborted();
       const segments = normalizeRemoteAssetPath(ref.relativePath);
+      if (!Number.isSafeInteger(ref.byteLength) || ref.byteLength < 0) throw new Error("remote asset byte length is invalid");
       if (ref.byteLength > MAX_ASSET_BYTES) throw new Error("remote asset exceeds the transfer limit");
+      const expectedByteLength = BigInt(ref.byteLength);
       const root = await realpath(allowedRoot);
       const destination = resolve(root, ...segments);
       if (!isContainedPath(root, destination)) throw new Error("remote asset path is outside its run asset directory");
@@ -97,17 +99,22 @@ export function createFileRemoteAssetReader(rootDir: string): AssetReader {
         if (index < segments.length - 1 && !component.isDirectory()) throw new Error("remote asset path contains a non-directory component");
       }
 
-      const beforeOpen = await lstat(destination);
-      if (!beforeOpen.isFile() || beforeOpen.size !== ref.byteLength) throw new Error("remote asset metadata does not match its stored reference");
+      const beforeOpen = await lstat(destination, { bigint: true });
+      if (!beforeOpen.isFile() || beforeOpen.size !== expectedByteLength) throw new Error("remote asset metadata does not match its stored reference");
       // Portable Node APIs do not expose openat/O_NOFOLLOW on every target OS.
       // Rechecking the path after opening and reading from this handle narrows
       // local-writer races; it cannot eliminate a hostile local TOCTOU race.
       const file = await open(destination, "r");
       try {
-        const [openedStat, resolvedPath] = await Promise.all([file.stat(), realpath(destination)]);
+        const [openedStat, resolvedPath] = await Promise.all([file.stat({ bigint: true }), realpath(destination)]);
         signal.throwIfAborted();
-        if (!openedStat.isFile() || openedStat.size !== ref.byteLength ||
-            (beforeOpen.ino !== 0 && openedStat.ino !== 0 && (beforeOpen.dev !== openedStat.dev || beforeOpen.ino !== openedStat.ino)) ||
+        // On Windows, lstat may expose an unknown device id (dev=0) even when
+        // fstat on the opened handle reports the volume serial. Compare each
+        // identity field independently when both calls provide it. BigInt
+        // stats also preserve the full 64-bit file id.
+        const deviceChanged = beforeOpen.dev !== 0n && openedStat.dev !== 0n && beforeOpen.dev !== openedStat.dev;
+        const fileIdChanged = beforeOpen.ino !== 0n && openedStat.ino !== 0n && beforeOpen.ino !== openedStat.ino;
+        if (!openedStat.isFile() || openedStat.size !== expectedByteLength || deviceChanged || fileIdChanged ||
             !isContainedPath(root, resolvedPath)) {
           throw new Error("remote asset changed while it was being opened");
         }
