@@ -72,6 +72,23 @@ Copy-Item .harness.local.example.psd1 .harness.local.psd1
 
 `Grounding auto` 按所选目标解析：普通窗口使用 UIA，Harness 托管浏览器使用 DOM + UIA，整桌面关闭 Grounding。它不会让个人浏览器自动开放 DOM 权限。登录与持久浏览器配置见[启动器说明](./docs/local-launcher.md)。
 
+## 可选：Jev 辅助选窗
+
+Jev 只负责从窗口候选中做选择，任务执行仍由 GLM / Qwen 决策。先在 `.harness.local.psd1` 的 `EnvFile` 指向的私有文件中添加 TypeSafe 密钥（默认是仓库根目录 `.env`），保留原来的主模型密钥：
+
+```dotenv
+ZHIPUAI_API_KEY=your_glm_key
+TYPESAFE_API_KEY=your_typesafe_key
+```
+
+上例使用 GLM；使用 Qwen 时主模型密钥改为 `DASHSCOPE_API_KEY`，其他配置见[模型环境变量](./docs/getting-started.md)。不要把真实密钥提交到仓库。
+
+```powershell
+.\scripts\harness.ps1 start -Grounding auto -WindowSelector jev -ShareWindowTitles
+```
+
+这会允许发送 **goal、候选应用名和窗口标题** 给 TypeSafe；不会向 Jev 发送截图。密钥存在并不会自动启用该功能。常驻配置、关闭方法和故障排查见[Jev 配置指南](./docs/local-launcher.md#jev-辅助选窗可选)。目前仅支持 CUA TUI，不是手机 Host 或通用动作 fast path。
+
 ## 手机控制
 
 手机浏览器是同一套 Harness 的另一入口：发任务、看进度与截图、补充要求、处理审批和查看结果。Provider 与桌面执行仍在电脑端，服务器只承担中继。

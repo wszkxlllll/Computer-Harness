@@ -73,6 +73,42 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 
 把 `.harness.local.psd1` 中的 `ManagedBrowserProfileMode` 设为 `persistent`、`ManagedBrowserProfileLabel` 设为 `daily`，日常启动便无需重复这些参数。默认临时 profile 不保留登录。Harness 不自动登录，不读取或输出密码、cookie 或 localStorage；不要把个人浏览器 profile 作为托管目录。
 
+## Jev 辅助选窗（可选）
+
+当前默认 `local` 是本地选窗；Jev 是独立的文本候选选择服务，不替代 GLM/Qwen，不直接执行点击，也不授予 DOM 权限。该入口仅用于 CUA TUI，手机 Host 不会因为设置这些字段就启用 Jev。
+
+1. 检查 `.harness.local.psd1` 的 `EnvFile`。`EnvFile = '.env'` 表示读取仓库根目录 `.env`；如果指向其他私有文件，就编辑那个文件。不需要在每个 PowerShell 中重复设置环境变量。
+2. 在该文件添加 `TYPESAFE_API_KEY=your_typesafe_key`，保留已有主模型配置。GLM 使用 `ZHIPUAI_API_KEY`；Qwen 使用 `DASHSCOPE_API_KEY` 及所需 endpoint 配置。两种服务密钥不能互相替代。不要覆盖已有 `.env` 或将密钥写进命令行。
+3. 在仓库根目录显式启动：
+
+```powershell
+.\scripts\harness.ps1 start -Grounding auto -WindowSelector jev -ShareWindowTitles
+```
+
+`-ShareWindowTitles` 表示允许向 TypeSafe 发送 goal、候选窗口的应用名与标题，标题可能包含文档名等隐私信息。当前 Jev 请求不含截图、cookie 或输入框值。主 Provider 的截图传输是另一条独立链路。
+
+希望下次不再输入开关，可在 `.harness.local.psd1` 原有配置块内修改以下字段（不要另建第二个 `@{}`）：
+
+```powershell
+WindowSelector = 'jev'
+ShareWindowTitles = $true
+```
+
+随后仍使用 `.\scripts\harness.ps1 start -Grounding auto`。这些字段是启动时配置，不是运行中热切换；修改后重启 TUI。
+
+启动后应看到 `Jev enabled` 提示。输入目标后按 Enter，选中候选还会重新核验窗口身份；不确定、请求失败、候选过多或目标变化时进入手选，不静默改为整桌面。显式手选目标优先，因此不是每次任务都必然请求 Jev。窗口交接仍受 Host 安全条件与人工确认约束。
+
+| 情况 | 检查方式 |
+| --- | --- |
+| `TYPESAFE_API_KEY is required` | 检查 `EnvFile` 路径及键名；已有进程环境变量优先于 env 文件，不打印密钥排查。 |
+| 要求允许分享标题 | 同时提供 `-ShareWindowTitles`，或配置 `ShareWindowTitles = $true`。 |
+| `Jev abstained (unavailable)` | 当前客户端将请求/响应错误归为不可用；可能是网络、凭据或服务响应，不代表 GUI 执行失败。先手选，不连续重试。 |
+| `uncertain` / `none` / `too_many` | 没有可信的唯一选择或候选超过上限；手选是预期回退，不降低阈值强行执行。 |
+
+当前代码固定使用 `jev-1.13.0` 和 `https://api.typesafe.ai/v1/systemone`；没有可配置的 Jev model/base URL 环境变量。没有证据表明它已稳定降低整任务延迟。
+
+关闭可单次使用 `.\scripts\harness.ps1 start -Grounding auto -WindowSelector local`，或把本机配置改回 `WindowSelector = 'local'`、`ShareWindowTitles = $false`。保留 TypeSafe key 不会触发请求。
+
 ## 排查命令
 
 ```powershell
