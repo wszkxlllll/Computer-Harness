@@ -14,6 +14,7 @@ import type {
   ObservationFrame,
   ObservationId,
   RunId,
+  RuntimeEvent,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -723,6 +724,20 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error("condition was not reached during the deterministic test window");
+}
+
+function committedApprovalSignal(occurrence = 1) {
+  let observed = 0;
+  let resolve!: (event: Extract<RuntimeEvent, { type: "approval.requested" }>) => void;
+  const requested = new Promise<Extract<RuntimeEvent, { type: "approval.requested" }>>((complete) => {
+    resolve = complete;
+  });
+  return {
+    requested,
+    onEventCommitted(event: RuntimeEvent): void {
+      if (event.type === "approval.requested" && ++observed === occurrence) resolve(event);
+    },
+  };
 }
 
 describe("RunController ExecutionSegment lifecycle", () => {
@@ -1841,6 +1856,7 @@ describe("RunController command inbox and control semantics", () => {
   });
 
   it("marks non-computer approvals as not requiring visual review", async () => {
+    const approvalSignal = committedApprovalSignal();
     const registry = new ToolRegistry();
     registry.register({
       name: "publish_report",
@@ -1854,12 +1870,13 @@ describe("RunController command inbox and control semantics", () => {
       { type: "tool_calls", calls: [{ id: "publish-report-call" as ToolCallId, name: "publish_report", arguments: null }] },
       { type: "finish", summary: "published" },
     ]);
-    const created = await makeController(provider, new FakeComputer(true), registry, new ApprovalSideEffectPolicy());
+    const created = await makeController(provider, new FakeComputer(true), registry, new ApprovalSideEffectPolicy(), {
+      onEventCommitted: approvalSignal.onEventCommitted,
+    });
     const running = created.controller.start("publish only after approval");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    const approval = created.controller.getEvents().find((event) => event.type === "approval.requested");
+    const approval = await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
     expect(approval).toMatchObject({ type: "approval.requested", requiresVisualReview: false });
-    if (approval?.type !== "approval.requested") throw new Error("expected a non-computer approval");
     expect(approval.evidence).toBeUndefined();
     expect(approval.actions).toBeUndefined();
     await created.controller.resolveApproval(approval.requestId, true);
@@ -2167,6 +2184,7 @@ describe("RunController S2-4 failure boundaries", () => {
   });
 
   it("binds pixel-only screen changes to one fresh-frame approval without a tolerance", async () => {
+    const approvalSignal = committedApprovalSignal();
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["financial"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2177,10 +2195,13 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "tool_calls", calls: [{ ...clickCall("approval-screen-changed"), declaredEffect: { effects: ["financial"], target: "Confirm payment", summary: "Pay for the order" } }] },
       { type: "finish", summary: "screen changed" },
     ]);
-    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      actionPolicy,
+      onEventCommitted: approvalSignal.onEventCommitted,
+    });
     const running = created.controller.start("review the current screen before approving the click");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    const requested = created.controller.getEvents().find((event) => event.type === "approval.requested");
+    const requested = await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
     expect(requested).toMatchObject({
       type: "approval.requested",
       requiresVisualReview: true,
@@ -2231,6 +2252,7 @@ describe("RunController S2-4 failure boundaries", () => {
   });
 
   it("does not treat screenshot media encoding changes as a target change", async () => {
+    const approvalSignal = committedApprovalSignal();
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["financial"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2241,10 +2263,14 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "tool_calls", calls: [{ ...clickCall("approval-media-changed"), declaredEffect: { effects: ["financial"], target: "Confirm payment", summary: "Pay for the order" } }] },
       { type: "finish", summary: "media changed" },
     ]);
-    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      actionPolicy,
+      onEventCommitted: approvalSignal.onEventCommitted,
+    });
     const running = created.controller.start("review the fresh screenshot before approving");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    expect(created.controller.getEvents().find((event) => event.type === "approval.requested")).toMatchObject({
+    const requested = await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
+    expect(requested).toMatchObject({
       evidence: { viewport },
     });
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
@@ -2351,6 +2377,8 @@ describe("RunController S2-4 failure boundaries", () => {
   });
 
   it("keeps each explicit approval bound to its own fresh action screenshot", async () => {
+    const firstApprovalSignal = committedApprovalSignal();
+    const secondApprovalSignal = committedApprovalSignal(2);
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2362,11 +2390,20 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "tool_calls", calls: [{ ...clickCall("approval-second"), declaredEffect: { effects: ["external_commitment"], target: "Submit order", summary: "Submit the order" } }] },
       { type: "finish", summary: "approved after re-observation" },
     ]);
-    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      actionPolicy,
+      onEventCommitted: (event) => {
+        firstApprovalSignal.onEventCommitted(event);
+        secondApprovalSignal.onEventCommitted(event);
+      },
+    });
     const running = created.controller.start("approve each action against its current screenshot");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
-    await waitUntil(() => created.controller.getEvents().filter((event) => event.type === "approval.requested").length === 2);
+    const firstApproval = await firstApprovalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
+    await created.controller.resolveApproval(firstApproval.requestId, true);
+    const secondApproval = await secondApprovalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
+    expect(secondApproval.requestId).not.toBe(firstApproval.requestId);
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("succeeded");
     expect(created.controller.getEvents().filter((event) => event.type === "approval.requested")).toHaveLength(2);
@@ -2376,6 +2413,7 @@ describe("RunController S2-4 failure boundaries", () => {
   });
 
   it("lets one screenshot-bound approval authorize keyboard input after honest focus disclosure", async () => {
+    const approvalSignal = committedApprovalSignal();
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2385,12 +2423,15 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "tool_calls", calls: [{ ...typeCall("approval-keyboard", "send this"), declaredEffect: { effects: ["external_commitment"], target: "Message editor", summary: "Submit the message" } }] },
       { type: "finish", summary: "user handled keyboard step" },
     ]);
-    const created = await makeController(provider, new FakeComputer(true), batchRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const created = await makeController(provider, new FakeComputer(true), batchRegistry(), new DefaultRuntimePolicy(), {
+      actionPolicy,
+      onEventCommitted: approvalSignal.onEventCommitted,
+    });
     const running = created.controller.start("ask the user to check the current keyboard target");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    const approval = created.controller.getEvents().find((event) => event.type === "approval.requested");
-    expect(approval?.type === "approval.requested" ? approval.reason : "").toContain("cannot verify which control has focus");
-    expect(approval?.type === "approval.requested" ? approval.evidence : undefined).toBeDefined();
+    const approval = await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
+    expect(approval.reason).toContain("cannot verify which control has focus");
+    expect(approval.evidence).toBeDefined();
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("succeeded");
     expect(created.controller.getEvents().filter((event) => event.type === "approval.requested")).toHaveLength(1);
@@ -2401,6 +2442,7 @@ describe("RunController S2-4 failure boundaries", () => {
   });
 
   it("invalidates the exact pending approval when the user submits a correction", async () => {
+    const approvalSignal = committedApprovalSignal();
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2410,10 +2452,14 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "tool_calls", calls: [{ ...clickCall("approval-correction-pending"), declaredEffect: { effects: ["external_commitment"], target: "Submit order", summary: "Submit the order" } }] },
       { type: "finish", summary: "corrected" },
     ]);
-    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
+      actionPolicy,
+      onEventCommitted: approvalSignal.onEventCommitted,
+    });
     const running = created.controller.start("do not submit after a correction");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    const requestId = created.controller.getSnapshot().pendingApproval?.requestId;
+    const approval = await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
+    const requestId = approval.requestId;
     await created.controller.submitUserInput("Do not submit this order.", requestId);
     await expect(running).resolves.toBe("succeeded");
     const events = created.controller.getEvents();
@@ -2425,6 +2471,7 @@ describe("RunController S2-4 failure boundaries", () => {
   });
 
   it("does not execute a screenshot-bound approval after Abort", async () => {
+    const approvalSignal = committedApprovalSignal();
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2433,9 +2480,13 @@ describe("RunController S2-4 failure boundaries", () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [{ ...clickCall("approval-abort-pending"), declaredEffect: { effects: ["external_commitment"], target: "Submit order", summary: "Submit the order" } }] },
     ]);
-    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
+      actionPolicy,
+      onEventCommitted: approvalSignal.onEventCommitted,
+    });
     const running = created.controller.start("abort before approving this action");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
     created.controller.cancel("abort pending approval");
     await expect(running).resolves.toBe("cancelled");
     expect(created.controller.getEvents().some((event) => event.type === "action.proposed")).toBe(false);

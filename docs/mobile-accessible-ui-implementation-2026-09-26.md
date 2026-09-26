@@ -116,3 +116,9 @@ Luna 最终 Web 验证：17 文件 51 项通过，类型检查与生产构建通
 服务器侧及本机公网检查：HTTPS 首页、新 JS/CSS 均为 200，首页引用新版资源，Relay 为 active。本机通过 `scripts/mobile.ps1 start` 启动新版 Host/CUA，4317 连接页可用；按浏览器相同 JSON 请求方式创建配对成功，二维码目标为配置的公网 HTTPS origin。首次手工探测遗漏 JSON Content-Type，返回 HOST_ERROR；补齐请求后成功，不将该探测错误认定为页面故障。
 
 电脑打开 `http://localhost:4317/connect` 生成二维码，手机扫码后在电脑确认。Host 本轮重新启动，可能需要重新配对。此处验证部署与配对注册，不代表再次完成真实桌面任务或真机无障碍验收。
+
+## PR #15 Windows CI 复核
+
+首次 CI（36260060727）中，Linux 两个 Node 版本和 macOS 通过；Windows Node 22.13.0 为 755/756 项通过。唯一失败为 `does not execute a screenshot-bound approval after Abort`：测试在到达审批状态之前耗尽 `waitUntil` 的 5000 次 `setImmediate`，日志耗时仅约 72ms。该等待次数不是文件 I/O 完成的保证，不能据此判断 Abort 保护失效。整改针对测试事件同步，保留取消结果、无动作提议与零驱动执行断言；修复后的远端 CI 结果另行核验。
+
+整改将同批七项审批测试切换为提交事件的 Promise 信号，收到事件后显式断言 waiting_approval；两次审批分别等待对应事件。业务代码未改。主 Agent 在 Windows、隔离 Node 24.19.0 下独立运行 Runtime 85/85 项通过，TypeScript project build 通过；Sol 审阅确认没有漏事件、死锁或削弱断言。实施 Agent 的 Node 18 运行仅为辅助证据，不代替支持版本验证。
