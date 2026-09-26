@@ -22,7 +22,7 @@ TLS 已从自签切换为 **Let's Encrypt 短期 IP 证书（160 小时，自动
 - SSH：root 与 zhaiyx（同密码，存本机 `LightSpeaker/password2`，不进仓库）
 - 已有服务：nginx 80 端口托管 zhaiyx 静态站 myweb（`/var/www/myweb`，`server_name _` 通配，**IP 直访**），部署全程未影响
 - 网络出口：registry.npmjs.org / codeload.github.com / nodejs.org / pypi.org 可达；**github.com 主站超时不可达**（部署改走 git bundle）
-- 阿里云安全组 443 已放行、8787 未放行（本轮用第三方节点与服务器抓包双重留证，见 §5.1）
+- 阿里云安全组 443 已放行、8787 未放行（本轮用第三方节点与服务器抓包双重留证，见 §4.4）
 
 ## 2. L0 构建与测试（已完成）
 
@@ -45,7 +45,7 @@ TLS 已从自签切换为 **Let's Encrypt 短期 IP 证书（160 小时，自动
 - **负向测试实证**：chmod 0644 → `systemctl start` → Relay 拒绝启动（`permissions are too broad`），journalctl 留证；恢复 0600 后正常
 - systemd：`computer-harness-relay.service`（ProtectSystem=strict / PrivateTmp / UMask 0077 / NoNewPrivileges）**enable + active**，常驻内存约 18 MiB
 - healthz：`curl -H 'Host: 47.108.197.221' http://127.0.0.1:8787/healthz` → `{"status":"ok"}`；仅监听 loopback
-- 发布结构：`/opt/computer-harness/current` → symlink → `releases/2026-09-26-01`（原子切换，回滚见 §7）
+- 发布结构：`/opt/computer-harness/current` → symlink → `releases/2026-09-26-01`（原子切换，回滚见 §8）
 
 ## 4. L2 Nginx / TLS（已完成）
 
@@ -56,7 +56,7 @@ TLS 已从自签切换为 **Let's Encrypt 短期 IP 证书（160 小时，自动
 - **服务器修改**：模板原文 `location /api/runs/`（尾斜杠）导致 `/api/runs` 被 nginx 以 301 重定向到 `/api/runs/`，手机端"任务列表"与"开始任务"全部失败（见 §6.1）。已改为 `location /api/runs`（无尾斜杠）。注意 `systemctl reload nginx` 后旧 worker 仍可能服务存量连接，需 `restart` 才能可靠验证。
 - myweb 追加 `location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }`（LE HTTP-01 用）；原配置备份 `/root/myweb.nginx.bak-20260926`；80 端口 myweb 行为不变
 
-### 4.2 日志红线留证（§5.1 原计划第 1、3 项）
+### 4.2 日志红线留证
 
 - 配置层：全量 grep `request_body|http_cookie` 无匹配；`log_format harness_relay_safe` 只含 `$remote_addr $request_method $uri $status $body_bytes_sent`
 - 行为层：经外网 443 发送 6 个测试请求（`GET /pair?token=…`、`POST /pair` 带 Cookie+body、`GET /healthz?secret=…`、`GET /api/runs/abc123?token=…`、`GET /api/pair/requests?x=…`、`GET /` 带 Cookie），对照 access log 新增行：
@@ -64,7 +64,7 @@ TLS 已从自签切换为 **Let's Encrypt 短期 IP 证书（160 小时，自动
   - 其余路径只记录 `$uri`，query（secret/token/x）、cookie、body 全部未出现
   - 全量 grep `redline|token|secret|cookie|session` 在 access log 无匹配
 
-### 4.3 LE 短期 IP 证书（§5.2 原计划，已完成）
+### 4.3 LE 短期 IP 证书（已完成）
 
 1. apt 的 certbot 4.0.0 **没有 `--ip-address`**，对 IP 请求直接报 "will not issue certificates for a bare IP address"（客户端侧过时拦截）
 2. 服务器 pypi.org 可达 → `apt install python3.14-venv` + `python3 -m venv /opt/certbot-venv` 装 **certbot 5.8.0**（pip 版），确认支持 `--ip-address`
@@ -77,7 +77,7 @@ TLS 已从自签切换为 **Let's Encrypt 短期 IP 证书（160 小时，自动
    - deploy hook：`/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh`（`systemctl reload nginx`），续期成功后自动生效
    - 验证：`renew --dry-run` 模拟续期成功；手动触发 `certbot-renew.service` exit 0（未到期不动作）；timer 已 enable（首跑次日 06:00）
 
-### 4.4 外网 8787 扫描留证（§5.1 原计划第 2 项）
+### 4.4 外网 8787 扫描留证
 
 - 第三方视角（check-host.net 三节点，纯外部网络）：**8787 全部 `Connection timed out`**（de1/it2/pl2）；对照 443 三节点全部连通（ca1/cy1/id1）。安全组未放行 8787，符合预期
 - 服务器侧 tcpdump（`port 8787 and not host 127.0.0.1`）在本机发起连接尝试的同时段 **捕获 0 包**，两方证据一致
@@ -203,3 +203,182 @@ userdel computer-harness-relay
 - L3 的"手机"为本机 Chrome 模拟；L4 已用**实体安卓机 + 真实网络（Wi-Fi/蜂窝）**跑完矩阵主体，结论表述为"安卓 Chrome 跨网络扫码即用已实测通过"
 - **PHONE-PUBLIC 门槛**：安卓 Chrome 已过矩阵主体；iPhone Safari 未测、真机审批流未覆盖，是否放行由组长/团队按发布标准判定，本文档不代作结论
 - `publicOrigin` 现为 IP；域名到位后改 `relay-config.json` + nginx `server_name` + 证书，重启即可，其余不动
+
+## 附录 A：关键配置文件（2026-09-26 部署后实况，只读抓取）
+
+凭据字段已在服务器端脱敏后导出，真值只存在于服务器交接文件与 Host 侧副本（见 §9）。
+
+### A.1 Relay 配置
+
+`/etc/computer-harness/relay-config.json`（0600，属主 computer-harness-relay）：
+
+```json
+{
+  "publicOrigin": "https://47.108.197.221",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "webRoot": "/opt/computer-harness/current/apps/web/dist",
+  "requestTimeoutMs": 45000,
+  "hostCredentials": [
+    {
+      "hostId": "<REDACTED>",
+      "credential": "<REDACTED>"
+    }
+  ]
+}
+```
+
+### A.2 Relay systemd 单元
+
+`/etc/systemd/system/computer-harness-relay.service`：
+
+```ini
+[Unit]
+Description=Computer Harness Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=computer-harness-relay
+Group=computer-harness-relay
+WorkingDirectory=/opt/computer-harness/current/apps/relay
+Environment=RELAY_CONFIG_FILE=/etc/computer-harness/relay-config.json
+ExecStart=/opt/node-v24.19.0/bin/node /opt/computer-harness/current/apps/relay/dist/index.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### A.3 证书续期单元（本轮新建）
+
+`/etc/systemd/system/certbot-renew.service`：
+
+```ini
+[Unit]
+Description=Certbot renewal (venv 5.8, IP shortlived cert)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot-venv/bin/certbot -q renew
+```
+
+`/etc/systemd/system/certbot-renew.timer`：
+
+```ini
+[Unit]
+Description=Run certbot renew twice daily
+
+[Timer]
+OnCalendar=*-*-* 06,17:00:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh`（0755）：
+
+```sh
+#!/bin/sh
+systemctl reload nginx
+```
+
+### A.4 nginx 站点实况
+
+`/etc/nginx/sites-available/harness-relay`（sites-enabled 已链；相对 README 模板有两处部署修改：`location /api/runs` 去尾斜杠、证书指向 LE）：
+
+```nginx
+# Computer-Harness Relay - TLS termination for 47.108.197.221
+# Let's Encrypt short-lived IP cert (160h), renewed by certbot-renew.timer + deploy hook. Self-signed backup kept in /etc/nginx/ssl/.
+# Log red lines: $uri only (no query), /pair logging off, no cookie/body logging.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+limit_req_zone $binary_remote_addr zone=harness_pairing:10m rate=10r/m;
+log_format harness_relay_safe '$remote_addr $request_method $uri $status $body_bytes_sent';
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name 47.108.197.221;
+
+    ssl_certificate     /etc/letsencrypt/live/47.108.197.221/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/47.108.197.221/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    access_log /var/log/nginx/harness-relay-access.log harness_relay_safe;
+    error_log /var/log/nginx/harness-relay-error.log crit;
+
+    location = /pair {
+        access_log off;
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+    }
+
+    location = /api/pair/requests {
+        limit_req zone=harness_pairing burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /v1/host {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        proxy_buffering off;
+    }
+
+    location /api/runs {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1h;
+        proxy_buffering off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### A.5 备份与交接文件（服务器留存）
+
+| 路径 | 用途 |
+|---|---|
+| `/root/myweb.nginx.bak-20260926` | myweb 站点原配置（追加 acme location 前） |
+| `/root/harness-relay.bak-pre301test` | 301 对照实验前的站点配置 |
+| `/etc/nginx/ssl/harness-relay-selfsigned.{crt,key}` | 自签证书（回退用） |
+| `/root/computer-harness-relay-host-credential.txt` | Host 凭据交接（0600） |
