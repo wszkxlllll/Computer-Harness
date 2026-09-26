@@ -6,7 +6,7 @@
 
 API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、CUA 路径和默认功能组合保存在同样被忽略的 `.harness.local.psd1` 中。这样不会覆盖本机其他 Node/OpenClaw 项目，也不会把密钥写进 Windows 用户或系统环境变量。
 
-首次配置时复制 `.harness.local.example.psd1` 为 `.harness.local.psd1`，填写当前机器的路径。当前机器已经使用仓库内隔离目录：
+首次配置时复制 `.harness.local.example.psd1` 为 `.harness.local.psd1`，填写当前机器的路径。可采用以下隔离目录布局（工具须自行准备）：
 
 - `.tools/node/24.19.0/node.exe`；
 - `.tools/cua-driver/0.22.2/bin/cua-driver.exe`；
@@ -52,6 +52,26 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 ```
 
 两个参数必须成对提供；它们是脚本/调试接口，不要求日常用户手填编号，显式编号入口默认 background。日常 TUI 可直接输入 goal；唯一可信窗口由本地匹配自动绑定，多个/没有匹配时保留草稿并进入可滚动的选择列表。也可先按 `Esc` 退出编辑、按 `W` 手选；手选窗口或 desktop 后不会被自动覆盖。菜单选窗使用 foreground 预览，可能激活目标且不保证自动恢复原前台。列表不可用或窗口关闭会明确报错，不自动改成 desktop；直接 `run` 命令未启用 TUI 自动选窗。窗口动作能力以[最新实测边界](./travel-pilot-preparation-2026-09-20.md#115-无人工输入的窗口重测与放行边界)为准。
+
+## 托管浏览器与登录状态
+
+希望先进入界面再选浏览器，可运行：
+
+```powershell
+.\scripts\harness.ps1 start -Grounding auto
+```
+
+在首页按 `W` 选择 Harness-managed browser，再输入 HTTP(S) 起始网址；目标编辑中先按 `Esc` 保留草稿。普通窗口使用 UIA，托管浏览器使用 DOM + UIA，整桌面不启用 Grounding。个人浏览器不会因此开放 DOM 权限。
+
+需要保留登录状态时，先确保 CUA daemon 已运行；若未运行，在另一个终端执行 `.\scripts\harness.ps1 daemon` 并保持打开。然后手动登录 Harness 自己的持久 profile：
+
+```powershell
+.\scripts\harness.ps1 browser-login -ManagedBrowserUrl "https://example.com" -ManagedBrowserProfileMode persistent -ManagedBrowserProfileLabel daily
+```
+
+登录完成后回到终端按 Enter 关闭并保留 profile。可使用同一 label 为其他站点重复此步骤；只登记最多 8 个去重后的 HTTP(S) origin/path，剥离 query/fragment，不读取个人浏览器历史。同一 profile 的后续 Run 恢复已登记站点，登录能否继续有效仍取决于站点会话。
+
+把 `.harness.local.psd1` 中的 `ManagedBrowserProfileMode` 设为 `persistent`、`ManagedBrowserProfileLabel` 设为 `daily`，日常启动便无需重复这些参数。默认临时 profile 不保留登录。Harness 不自动登录，不读取或输出密码、cookie 或 localStorage；不要把个人浏览器 profile 作为托管目录。
 
 ## 排查命令
 
