@@ -5,7 +5,7 @@
 状态：调研后建议，等待团队确认；尚未建环境、出齐题目或运行模型评测。  
 代码核查基线：`4fc1812e01b6c502250faf7e159bf67e4cebbbfd`，当前分支 `codex/dev3-context-memory-guard`。  
 范围：政务、就医、购物、出行、社区缴费、通信与个人事务；覆盖原生桌面应用、桌面微信小程序、浏览器及跨应用工作流。现实需求驱动、受控环境定量评测、真实入口迁移。替代本文件先前“办公五类、15+10 小题”的建议，不改长期 DEV 编号，不改既有 OSWorld manifest。  
-相关入口：[DOCS-INDEX](./DOCS-INDEX.md)、[本机体验审计](./local-experience-audit-2026-09-19.md)、[集成收尾](./dev-3-5-integration-closeout.md)。
+相关入口：[DOCS-INDEX](../../../DOCS-INDEX.md)、[本机体验审计](./local-experience-audit-2026-09-19.md)、[集成收尾](./dev-3-5-integration-closeout.md)。
 
 ## 1. 推荐决策
 

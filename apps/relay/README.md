@@ -69,7 +69,19 @@ check 验证 Node/env/model 配置并报告 Host/Web 构建文件状态，不启
 
 ### Linux 构建与凭据
 
-本轮 Relay/Connector 集成测试使用 Node.js `24.19.0`；可将其作为可复现的 staging 基线。面向公网前，应从 [Node.js 官方发布页](https://nodejs.org/en/about/previous-releases)选择当前仍受维护且获运维批准的 Node 24 补丁版本、校验发行文件，并在升级后重跑构建与测试。项目声明最低版本为 `22.13.0`；仓库的 `package.json` 将 pnpm 锁为 `11.19.0`。本次部署使用交付的 `computer-harness-mobile-source-20260926-r2.zip`（补全项目交接文档与已静态审查的诊断脚本，生产代码仍对应725项测试检查点），不要用 GitHub 旧远端或默认分支替代。先在存放 ZIP 与校验文件的 Linux 构建目录执行下列命令，再进入解压后的源码目录：
+本轮 Relay/Connector 集成测试使用 Node.js `24.19.0`；可将其作为可复现的 staging 基线。面向公网前，应从 [Node.js 官方发布页](https://nodejs.org/en/about/previous-releases)选择当前仍受维护且获运维批准的 Node 24 补丁版本、校验发行文件，并在升级后重跑构建与测试。项目声明最低版本为 `22.13.0`；仓库的 `package.json` 将 pnpm 锁为 `11.19.0`。
+
+GitHub 协作者使用独立交接分支，不使用尚未合并这些改动的默认分支。先克隆到新的目录并记录部署 SHA：
+
+```sh
+git clone --branch codex/mobile-control-handoff-20260926 --single-branch https://github.com/wszkxlllll/Computer-Harness.git computer-harness-mobile
+cd computer-harness-mobile
+git rev-parse HEAD
+```
+
+然后执行下方从 `node --version` 开始的安装、构建和测试命令。部署到 systemd 时，将已验证源码放入新的 versioned release 目录，并记录上述 SHA。
+
+可选的离线来源是已交付的 `computer-harness-mobile-source-20260926-r2.zip`，它是归档前的冻结检查点，不包含本次文档迁移与 CI 修正，不随分支更新。该 ZIP 不保存在 Git 仓库；仅持有 ZIP 及配套校验文件时才使用以下解压步骤：
 
 ```sh
 sha256sum -c SHA256SUMS.txt

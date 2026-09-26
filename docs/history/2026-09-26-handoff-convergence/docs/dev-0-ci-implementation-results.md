@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-DEV-0 的 CI 工作流已经写入 [.github/workflows/ci.yml](../.github/workflows/ci.yml)，等待一次真实 PR 或 `workflow_dispatch` Hosted 运行验证。工作流只使用当前仓库已有脚本和锁文件，不传模型密钥、不连接真实桌面、不上传 `runs/`、截图、`.env` 或 Provider 原始交换。
+DEV-0 的 CI 工作流已经写入 [.github/workflows/ci.yml](../../../../.github/workflows/ci.yml)，等待一次真实 PR 或 `workflow_dispatch` Hosted 运行验证。工作流只使用当前仓库已有脚本和锁文件，不传模型密钥、不连接真实桌面、不上传 `runs/`、截图、`.env` 或 Provider 原始交换。
 
 `verify` 是四项 Hosted 矩阵：Ubuntu 24.04 x64、Windows Server 2025 x64、macOS 15 arm64 使用同一 Node `22.13.0` 基线；Ubuntu 24.04 x64 另用 Node `24.19.0` 做兼容性检查。`required` 的稳定检查名为 `ci-required`，通过 `needs.verify.result` 只接受完整矩阵的 `success`，失败、取消和跳过均返回失败。没有设置分支保护，因此该检查目前尚未成为远端合并规则。
 

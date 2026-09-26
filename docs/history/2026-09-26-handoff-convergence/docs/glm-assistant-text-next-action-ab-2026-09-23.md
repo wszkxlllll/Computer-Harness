@@ -28,6 +28,6 @@
 
 一句提示提高了合成样本的文字出现率，但格式遵循只有 5/12。具体下一动作的覆盖为 1/6，且这例伴随一个本可省去的当前点击；本实验没有观察到节省主 Provider 请求。平均 token 多约 82，平均耗时多约 0.81 秒；样本太小，不能将耗时差认定为稳定因果效应。真实任务中已有 39/39 非空，因此这次文字出现率提升本身也不是产品收益。
 
-另有现存消费者边界：[RunController 的 recovery 意图](../packages/runtime/src/run-controller.ts)会把整段 `assistantText` 当作本次失败动作的提示。若全局改成“当前 + 下一步”，下一目标可能混入当前动作的恢复检索。未来若再研究，应先定义结构化、可失效的两段语义及独立消费者，并用真实任务证明减少模型轮次；本轮不修改生产 Context、Provider 或 Runtime。
+另有现存消费者边界：[RunController 的 recovery 意图](../../../../packages/runtime/src/run-controller.ts)会把整段 `assistantText` 当作本次失败动作的提示。若全局改成“当前 + 下一步”，下一目标可能混入当前动作的恢复检索。未来若再研究，应先定义结构化、可失效的两段语义及独立消费者，并用真实任务证明减少模型轮次；本轮不修改生产 Context、Provider 或 Runtime。
 
 实验脚本：[GLM A/B 探针](../scripts/glm-assistant-text-ab-probe.mjs)；离线测试：[探针测试](../scripts/glm-assistant-text-ab-probe.test.mjs)。

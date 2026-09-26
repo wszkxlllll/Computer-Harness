@@ -6,7 +6,7 @@
 本地复核修订：2026-09-17，已将会话、接管、环境所有权、指令/Memory合同及实验分组意见并入正文；修订文档不表示对应能力已经实现。
 仓库入口：保留既有 Stage 6 作为共同入口；本路线使用 `DEV-0..DEV-8`，实机门槛使用 `LIVE-0..LIVE-6`，不占用正式评测准备的 G0 名称。
 
-当前入口：[Stage 6](./stage-6-convergence-and-start-state-2026-09-15.md)。配套：[阶段验收清单](./development-acceptance-v2.md)。原始证据按需查[历史索引](./history/2026-09-17-roadmap-consolidation/README.md)，实施时以本文件和验收清单为准。
+当前入口：[Stage 6](./stage-6-convergence-and-start-state-2026-09-15.md)。配套：[阶段验收清单](./development-acceptance-v2.md)。原始证据按需查[历史索引](../../2026-09-17-roadmap-consolidation/README.md)，实施时以本文件和验收清单为准。
 
 ## 1. 对复核报告的结论
 

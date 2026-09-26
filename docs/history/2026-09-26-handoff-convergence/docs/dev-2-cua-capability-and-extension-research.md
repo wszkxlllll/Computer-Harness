@@ -30,11 +30,11 @@
 
 本轮只读了仓库固定基线、已安装 `0.22.2` 声明、CUA 官方固定 tag/commit、npm 官方元数据。没有读取 `.env`、用户图片或 ignored `runs/`，没有安装/升级依赖，也没有运行 probe。
 
-版本事实：仓库 `package.json` 与 lockfile都精确锁定 `0.22.2`，六个 macOS/Windows/Linux native optional package 也同版。[本地 package](../packages/computer-cua/package.json)；[0.22.2 manifest](https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/contract/manifest.json)。2026-09-17 查询 npm `latest=0.28.2`；官方 tag 指向 `fc188250...`。[npm](https://www.npmjs.com/package/@trycua/cua-driver)；[0.28.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.28.2)。
+版本事实：仓库 `package.json` 与 lockfile都精确锁定 `0.22.2`，六个 macOS/Windows/Linux native optional package 也同版。[本地 package](../../../../packages/computer-cua/package.json)；[0.22.2 manifest](https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/contract/manifest.json)。2026-09-17 查询 npm `latest=0.28.2`；官方 tag 指向 `fc188250...`。[npm](https://www.npmjs.com/package/@trycua/cua-driver)；[0.28.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.28.2)。
 
 ## 3. 当前 Harness 实际能力，不把候选当实现
 
-固定基线的 [CuaDriverComputer](../packages/computer-cua/src/cua-driver-computer.ts) 实际行为：
+固定基线的 [CuaDriverComputer](../../../../packages/computer-cua/src/cua-driver-computer.ts) 实际行为：
 
 - `open`：连接显式 daemon socket，`startSession`，再调用 `get_screen_size`；将截图/指针/键盘硬编码为 true、accessibility 为 false。
 - `observe`：调用 `get_desktop_state` 写 PNG，再读入内存；只校验 PNG/structured 尺寸与打开时 viewport 一致。
@@ -43,11 +43,11 @@
 - 错误：明确 Tool error 映射为 refused；Transport/Abort/未知错误不制造终态，由 Runtime 保留 unknown outcome；不自动重试 GUI 副作用。
 - close：为 `endSession/shutdown` 设置总 deadline；清理未确认时保留 owner 并阻止同实例重新 open。这是重要的执行所有权基础，但不是跨进程恢复。
 
-现有测试是 Fake Driver 合同测试，覆盖 mapping、stale observation、本地 explicit refusal、transport 后 session 失效、close hang 和 pending cleanup；它不证明真实窗口、DPI、焦点或跨平台支持。[测试](../packages/computer-cua/src/cua-driver-computer.test.ts)。
+现有测试是 Fake Driver 合同测试，覆盖 mapping、stale observation、本地 explicit refusal、transport 后 session 失效、close hang 和 pending cleanup；它不证明真实窗口、DPI、焦点或跨平台支持。[测试](../../../../packages/computer-cua/src/cua-driver-computer.test.ts)。
 
-已有 spike 分层合理：capability probe 读取 `metadata/listToolsJson/session/health_report/check_permissions`；action/adapter/runtime probes 使用隔离 WinForms fixture，并将 driver 接受与 fixture-owned state change 分开；runtime probe 还设计了 20 轮观察绑定和 daemon 断连 `outcome_unknown`。但固定基线没有提交对应本机原始结果，故本文只将其视为**可复用实验入口和历史作者设计证据**，不声称本轮通过。[probe 入口](../spikes/cua-driver/README.md)。
+已有 spike 分层合理：capability probe 读取 `metadata/listToolsJson/session/health_report/check_permissions`；action/adapter/runtime probes 使用隔离 WinForms fixture，并将 driver 接受与 fixture-owned state change 分开；runtime probe 还设计了 20 轮观察绑定和 daemon 断连 `outcome_unknown`。但固定基线没有提交对应本机原始结果，故本文只将其视为**可复用实验入口和历史作者设计证据**，不声称本轮通过。[probe 入口](../../../../spikes/cua-driver/README.md)。
 
-OSWorld 当前只提供 Harness 新 session id、desktop PNG、physical viewport、动作后捕获和 viewport 尺寸更新；capabilities 中 accessibility 固定 false。它没有窗口、focus、target generation 或 geometry revision 生产者。[OsworldComputer](../packages/computer-osworld/src/osworld-computer.ts)。
+OSWorld 当前只提供 Harness 新 session id、desktop PNG、physical viewport、动作后捕获和 viewport 尺寸更新；capabilities 中 accessibility 固定 false。它没有窗口、focus、target generation 或 geometry revision 生产者。[OsworldComputer](../../../../packages/computer-osworld/src/osworld-computer.ts)。
 
 ## 4. `0.22.2` 与 `0.28.2` 的确切差异
 
@@ -276,7 +276,7 @@ Browser 只在 exact binding 时允许 typed mutation，Safari/Firefox 仍走 na
 
 ## 11. 官方与仓库依据
 
-- Harness：[路线 DEV-2/4/5/6](./full-development-roadmap-v2.md)、[重构施工表](./module-refactoring-work-plan.md)、[现有 CUA Adapter](../packages/computer-cua/src/cua-driver-computer.ts)、[OSWorld Adapter](../packages/computer-osworld/src/osworld-computer.ts)、[历史 CUA 审计](./history/2026-09-17-roadmap-consolidation/audit-2026-09-16-cua-capabilities-upgrade.md)。
+- Harness：[路线 DEV-2/4/5/6](./full-development-roadmap-v2.md)、[重构施工表](./module-refactoring-work-plan.md)、[现有 CUA Adapter](../../../../packages/computer-cua/src/cua-driver-computer.ts)、[OSWorld Adapter](../../../../packages/computer-osworld/src/osworld-computer.ts)、[历史 CUA 审计](../../2026-09-17-roadmap-consolidation/audit-2026-09-16-cua-capabilities-upgrade.md)。
 - CUA `0.22.2`：[manifest](https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/contract/manifest.json)、[SDK README](https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/typescript/README.md)、[动作实证矩阵](https://github.com/trycua/cua/blob/d114f35fec05ecd37bf529e5587be86852205b64/libs/cua-driver/docs/action-support.md)。
 - CUA `0.28.2`：[manifest](https://github.com/trycua/cua/blob/fc188250b4ca8549b8e61f937fdb1fb560770e86/libs/cua-driver/contract/manifest.json)、[窗口合同源码](https://github.com/trycua/cua/blob/fc188250b4ca8549b8e61f937fdb1fb560770e86/libs/cua-driver/rust/crates/cua-driver-contract/src/windows.rs)、[接口合同](https://github.com/trycua/cua/blob/fc188250b4ca8549b8e61f937fdb1fb560770e86/docs/content/docs/reference/cua-driver/contracts.mdx)、[平台支持](https://github.com/trycua/cua/blob/fc188250b4ca8549b8e61f937fdb1fb560770e86/docs/content/docs/reference/cua-driver/platform-support.mdx)、[进程模型](https://github.com/trycua/cua/blob/fc188250b4ca8549b8e61f937fdb1fb560770e86/docs/content/docs/reference/cua-driver/process-model.mdx)、[权限模式](https://github.com/trycua/cua/blob/fc188250b4ca8549b8e61f937fdb1fb560770e86/docs/content/docs/reference/cua-driver/permission-modes.mdx)、[已知限制](https://github.com/trycua/cua/blob/fc188250b4ca8549b8e61f937fdb1fb560770e86/docs/content/docs/reference/cua-driver/limits.mdx)。
 

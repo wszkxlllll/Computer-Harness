@@ -13,6 +13,7 @@ corepack enable
 corepack install --global pnpm@11.19.0
 pnpm install --frozen-lockfile
 pnpm run build
+pnpm --filter @computer-harness/web build
 pnpm test
 ```
 
@@ -155,6 +156,7 @@ TUI 必须将焦点放在当前终端，不注册全局热键；visible input �
 
 ```text
 pnpm run build
+pnpm --filter @computer-harness/web build
 pnpm test
 ```
 

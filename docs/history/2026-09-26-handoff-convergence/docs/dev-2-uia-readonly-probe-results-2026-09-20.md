@@ -4,7 +4,7 @@
 
 本记录只覆盖 CUA 0.22.2 的只读观察能力。探针使用独立 named pipe 和本探针编译的 WinForms fixture，只调用 `launch_app` 启动自有 fixture、`list_windows`、`get_window_state` 和 `verify_state`；没有调用 `click`、`type_text`、`press_key`、`hotkey`、`scroll`、`drag`、`bring_to_front` 或 `set_window_frame`。没有模型/API 请求、没有读取 `.env`、没有访问用户 Edge/微信/账号窗口，也没有保存截图、窗口标题、原始 UIA value 或完整 UIA 树。
 
-证据摘要保存在被忽略的 [uia-readonly-summary.json](../runs/uia-readonly-probe-20260920-r3/uia-readonly-summary.json)，探针源码为 [uia-readonly-probe.ts](../spikes/cua-driver/uia-readonly-probe.ts)，fixture 为 [UiaReadonlyFixture.cs](../spikes/cua-driver/fixture/UiaReadonlyFixture.cs)。
+证据摘要保存在被忽略的 [uia-readonly-summary.json](../../../../runs/uia-readonly-probe-20260920-r3/uia-readonly-summary.json)，探针源码为 [uia-readonly-probe.ts](../../../../spikes/cua-driver/uia-readonly-probe.ts)，fixture 为 [UiaReadonlyFixture.cs](../../../../spikes/cua-driver/fixture/UiaReadonlyFixture.cs)。
 
 ## 1. 实际 daemon 能力
 

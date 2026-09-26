@@ -16,7 +16,7 @@
 
 PR #1 已由用户合并，DEV-0 Hosted CI 与 DEV-1 的确定性修复已进入 main。当前批次在 `a8580ea` 基线上完成最小受控 TUI、提交后事件 feed、单活跃 Run/session、同进程环境 owner，以及显式 host-only CUA window observe/click 适配；Sol 已对本批有限放行。Runtime、两 Provider、两 Computer Adapter、Planning、Run Memory、Context、Batch 和实验性 Risk Guard 已有实现；不能把它们视为所有边界均验收通过。
 
-2026-09-17 已在 Windows/Node 24.19.0/pnpm 11.19.0 执行类型检查及 179 项测试，另 9 项实际实现探针复现了未覆盖问题。详细证据见[归档复核](./history/2026-09-17-roadmap-consolidation/external-audit-confirmation-2026-09-17.md)。这些是历史基线，本轮文档整理没有新测试或业务修复。
+2026-09-17 已在 Windows/Node 24.19.0/pnpm 11.19.0 执行类型检查及 179 项测试，另 9 项实际实现探针复现了未覆盖问题。详细证据见[归档复核](../../2026-09-17-roadmap-consolidation/external-audit-confirmation-2026-09-17.md)。这些是历史基线，本轮文档整理没有新测试或业务修复。
 
 唯一开发路线：[完整路线 V2](./full-development-roadmap-v2.md)。配套：[验收清单](./development-acceptance-v2.md)。它们已直接吸收复核意见，不必先读所有旧审计。
 
@@ -48,7 +48,7 @@ REL-1 通过即可持续低风险体验，不必等 Context V2、Memory 生命�
 
 ## 5. 评测与结果记录
 
-G0 当前资料从[文档索引](./DOCS-INDEX.md)进入，校准、预算和分集未冻结前不开始正式 Validation。保留 P/C/B/M1/M2/N，产品里程碑改称 REL，避免重名。
+G0 当前资料从[文档索引](../../../DOCS-INDEX.md)进入，校准、预算和分集未冻结前不开始正式 Validation。保留 P/C/B/M1/M2/N，产品里程碑改称 REL，避免重名。
 
 DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实验；不等全部功能完成才首次验证效果，也不反复用 Validation 调参。
 
@@ -116,7 +116,7 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 ### 第六批增量：CUA capability doctor 与显式窗口目标（代码完成，Sol 有限放行；真实结果有限且保守）
 
-本批在 `f7f7357` 上增加脱敏、只读的 `--doctor` 入口，并在当前 `a8580ea` 基线上加入显式 host-only CUA window opt-in：`computer-cua` 读取 metadata、tool inventory、session、health 和 permission 的结构化状态，app-runtime 保持 native CUA 动态加载，CLI 在无 goal、无 model、无 `.env`/provider credentials 时可运行。错误、缺失、超时和未确认 cleanup 统一标为 `unknown`；SDK/daemon 声明与 fixture 实证分离。CI 的 direct CLI 复核确认 metadata/inventory（57 tools）可读，但 session 的 desktop capture scope 未确认，health/permissions 与 cleanup 保持 unknown，整体退出码为 1；正式 pnpm wrapper 另有 transport unknown 限制。窗口模式只在 `--cua-window-pid <pid> --cua-window-id <windowId>` 成对显式提供时启用，生产 adapter 只开放 window-local PNG observe、background single-click 与 wait，keyboard、其他 pointer primitive、模型自由选窗及默认 desktop/OSWorld 路径不变。目标丢失后 identity latch 只允许 close 后新 session 恢复；preflight 与 driver click 非原子，不能写成通用 focus/安全或业务成功证明。通用 CLI 模板见 [DOCS-INDEX](./DOCS-INDEX.md)；合同、fake 测试和限制见[窗口目标实施记录](./dev-2-window-target-implementation-results.md)、[TUI bounded UX 实施记录](./dev-2-tui-preview-implementation-results.md)与[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)；真实窄证据与边界见 worker_ci 验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。本批最终离线全量为 32 files/320 tests，root typecheck 通过；worker 本轮未调用 model API、桌面或 VM；这些结果不等 doctor 整体通过、完整 model Run 或 REL-1。
+本批在 `f7f7357` 上增加脱敏、只读的 `--doctor` 入口，并在当前 `a8580ea` 基线上加入显式 host-only CUA window opt-in：`computer-cua` 读取 metadata、tool inventory、session、health 和 permission 的结构化状态，app-runtime 保持 native CUA 动态加载，CLI 在无 goal、无 model、无 `.env`/provider credentials 时可运行。错误、缺失、超时和未确认 cleanup 统一标为 `unknown`；SDK/daemon 声明与 fixture 实证分离。CI 的 direct CLI 复核确认 metadata/inventory（57 tools）可读，但 session 的 desktop capture scope 未确认，health/permissions 与 cleanup 保持 unknown，整体退出码为 1；正式 pnpm wrapper 另有 transport unknown 限制。窗口模式只在 `--cua-window-pid <pid> --cua-window-id <windowId>` 成对显式提供时启用，生产 adapter 只开放 window-local PNG observe、background single-click 与 wait，keyboard、其他 pointer primitive、模型自由选窗及默认 desktop/OSWorld 路径不变。目标丢失后 identity latch 只允许 close 后新 session 恢复；preflight 与 driver click 非原子，不能写成通用 focus/安全或业务成功证明。通用 CLI 模板见 [DOCS-INDEX](../../../DOCS-INDEX.md)；合同、fake 测试和限制见[窗口目标实施记录](./dev-2-window-target-implementation-results.md)、[TUI bounded UX 实施记录](./dev-2-tui-preview-implementation-results.md)与[CUA 窗口能力盘点](./dev-2-cua-target-integration-assessment.md)；真实窄证据与边界见 worker_ci 验证记录[第11节](./dev-2-tui-preview-validation-results.md#11-2026-09-18-t10-真实-tui--glm--cua-synthetic-fixture-闭环)、[第12节](./dev-2-tui-preview-validation-results.md#12-2026-09-18-0222-窗口发现framefocus局部-capture-与关闭拒绝)、[第13节](./dev-2-tui-preview-validation-results.md#13-2026-09-18-cli-cua-doctor-最终实机验收)。本批最终离线全量为 32 files/320 tests，root typecheck 通过；worker 本轮未调用 model API、桌面或 VM；这些结果不等 doctor 整体通过、完整 model Run 或 REL-1。
 
 ### 第一批证据（已合并，2026-09-17）
 
@@ -134,7 +134,7 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 第一批收口后下一批优先DEV-1A Context/Memory与独立的诊断整改，继续先反例、后修复、Sol审计；共享Runtime合同不并发修改。190/194/198项均为整改中间版本，最终本地全量结果为200项。主Agent未实施或审查业务代码，仅记录Luna执行和Sol独立审查结论。第一批实现收口时尚未提交；当前Git检查点见下，不能据此宣称远端CI或分支保护已生效。
 
-本地Git留痕已建立：用户要求的本地检查点分为三笔提交。前两批已在 `codex/dev0-dev1-checkpoint` 完成：Risk修复 `8d9f430`、CI配置 `4f131a5`；第三笔记录剩余文档/归档整理（本段随第三笔提交，故无需在此填写自身hash）。提交由Luna执行，Sol已检查敏感内容；随后仅按用户授权push工作分支并创建 PR #1，未合并main。Hosted run [35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 对应 head `d57d9a8c`，四矩阵和 `ci-required` 均通过；本次补充证据随新的独立文档提交落盘，具体 hash见Git日志，无需在此填写自身hash。后续按[开发文档规范第8节](./development-documentation-standard.md#8-本地检查点与远端交付)实行每工单commit、小批次分支PR交付，具体提交结果见Git日志与交接。
+本地Git留痕已建立：用户要求的本地检查点分为三笔提交。前两批已在 `codex/dev0-dev1-checkpoint` 完成：Risk修复 `8d9f430`、CI配置 `4f131a5`；第三笔记录剩余文档/归档整理（本段随第三笔提交，故无需在此填写自身hash）。提交由Luna执行，Sol已检查敏感内容；随后仅按用户授权push工作分支并创建 PR #1，未合并main。Hosted run [35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 对应 head `d57d9a8c`，四矩阵和 `ci-required` 均通过；本次补充证据随新的独立文档提交落盘，具体 hash见Git日志，无需在此填写自身hash。后续按[开发文档规范第8节](../../../development-documentation-standard.md#8-本地检查点与远端交付)实行每工单commit、小批次分支PR交付，具体提交结果见Git日志与交接。
 
 ## 6. 分块重构复核（2026-09-17）
 

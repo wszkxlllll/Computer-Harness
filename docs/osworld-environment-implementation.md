@@ -3,7 +3,7 @@
 日期：2026-09-07
 文档角色：入口 / 结果摘要
 状态：当前环境路线摘要
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+历史入口：[Stage 6 收敛与下一阶段起始状态](./history/2026-09-26-handoff-convergence/docs/stage-6-convergence-and-start-state-2026-09-15.md)
 基线：OSWorld commit `fc31a9049664292fcb35d6e501ee1dc839f2cf6d`；推荐快照 `osworld_initial_1920x1080_clean_r4_20260906`
 范围：DesktopEnv Bridge、OSWorld Computer、官方 evaluator、Provider 真实任务
 

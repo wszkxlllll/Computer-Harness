@@ -4,6 +4,12 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 
 当前仓库面向试用和贡献者，不是托管服务，也不是“任意桌面都安全可控”的成品。真实模型、桌面权限、焦点、窗口几何和 OSWorld VM 都必须单独预检；仓库内的 Fake、协议测试和受控 fixture 不能替代这些验证。
 
+## 当前交接入口（2026-09-26）
+
+当前 Pi 工作树正在推进可替换模块、TUI/窗口体验和手机 Web＋Host＋Relay。接手开发请从[全项目交接说明](./docs/PROJECT-HANDOFF.md)开始，再读其链接的架构、安全合同、模块状态、开发与测试四份文档；它们覆盖整个项目，不要求先阅读全部历史实验。
+
+最新本地检查点为 725 项 Vitest 通过、TAP 19 通过/1 跳过及构建通过；这不是远端 CI 或全部 GUI 场景成功声明。原生输入、弹层捕获、完整跨窗口任务及实体手机公网验收仍有未解决/未验证项，详见交接入口。手机快速操作与服务器配置另见[专题指南](./docs/mobile-control-guide-2026-09-26.md)和[Relay 部署指南](./apps/relay/README.md)。
+
 ## 当前能力
 
 | 能力 | 当前状态 |
@@ -18,7 +24,9 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 | Monitor | 可选 off/shadow/guidance；记录动作前后 transition，guidance 可阻断同一观察后的完全相同重复动作，但不替模型重新定位 |
 | 诊断 | `--doctor` 无模型、无截图/输入窗口动作且脱敏；会建立并结束临时诊断 session，cleanup 未确认时返回 `unknown` |
 
-## 开发进度（2026-09-20）
+## 历史开发基线（2026-09-20）
+
+本节保留当时的 PR/测试证据，不代表 2026-09-26 未提交工作树的完整状态；当前施工顺序和完成判定以上方交接入口为准。
 
 当前仓库已形成可运行的 V1 开发基线。Context、Run Memory、Monitor、Planning、受限 Action Batch、Risk Guard、双 Provider、CUA/OSWorld Adapter 和 TUI 均已接入统一 Runtime；TUI 还支持按 Run 选择这些实验功能，本地 Windows 有隔离启动器。
 
@@ -29,7 +37,7 @@ Computer Harness 是一个 **Provider-neutral 的 GUI runtime 开发预览**：�
 - GitHub CI：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 均通过；
 - GLM/Qwen 合成 Memory 协议探针均完成 `search → admitted/revalidation → admitted-only terminate`，没有真实桌面动作。
 
-这些证据证明的是工程链路和协议边界，不是完整产品效果。真实本机 Run 仍可能出现模型坐标偏移、重复尝试、前台失配、Provider 延迟或业务结果不完整；坐标映射能保证截图坐标投影到窗口几何，不保证模型点中控件中心。Monitor 只阻断同一观察后的完全相同动作，不能自动修正“相邻但错误”的点击。详见[本机真实体验审计](./docs/local-experience-audit-2026-09-19.md)、[最新出行轨迹审计](./docs/travel-trajectory-review-2026-09-20.md)和[出行票务试点准备](./docs/travel-pilot-preparation-2026-09-20.md)。
+这些证据证明的是工程链路和协议边界，不是完整产品效果。真实本机 Run 仍可能出现模型坐标偏移、重复尝试、前台失配、Provider 延迟或业务结果不完整；坐标映射能保证截图坐标投影到窗口几何，不保证模型点中控件中心。Monitor 只阻断同一观察后的完全相同动作，不能自动修正“相邻但错误”的点击。详见[本机真实体验审计归档](./docs/history/2026-09-26-handoff-convergence/docs/local-experience-audit-2026-09-19.md)、[出行轨迹审计归档](./docs/history/2026-09-26-handoff-convergence/docs/travel-trajectory-review-2026-09-20.md)和[出行票务试点准备](./docs/travel-pilot-preparation-2026-09-20.md)。
 
 下一阶段不是继续无条件增加模块，而是冻结 20 个真实开发场景（简单、中等、困难均包含），用可验证结果、模型轮次、GUI 动作、重复动作、tokens、延迟、人工接管、审批和恢复率驱动 Context、Planning、Memory、Monitor、Guard 与 CUA 体验优化。跨 Run 长期 Memory、Subagent、Sandbox、后台异步任务、语音和更广 Accessibility 能力仍属于后续阶段。
 
@@ -83,6 +91,7 @@ pnpm install --frozen-lockfile
 
 # 根 workspace 构建/类型检查，而不是只构建 CLI
 pnpm run build
+pnpm --filter @computer-harness/web build
 pnpm test
 
 # 构建后查看真实 CLI 入口；--help 不读取 .env，不调用 Provider
@@ -234,7 +243,7 @@ TUI 手选或唯一可信本地匹配的窗口使用 foreground 预览；可用�
 
 CUA TUI 可选 `--grounding auto`（默认仍为 `off`）：选中普通宿主窗口，包括个人 Edge，下一 Run 使用 UIA；在 `W` 窗口列表选择 Harness-managed browser 后，TUI 会要求输入 HTTP(S) 起始 URL，也可复用之前输入的 URL，此时使用 DOM + UIA；选整桌面则关闭 Grounding。目标草稿在选浏览器和输入 URL 时保留。这个选择只在 Run 创建前解析，不会让普通浏览器标题自动获得 CDP/DOM 权限。
 
-窗口选择默认是完全本地的保守匹配。可显式启用 `--window-selection jev --allow-window-title-sharing` 并在私有 `.env` 中配置 `TYPESAFE_API_KEY`：本地无法唯一匹配时，才把当前可见候选的应用名、标题和 goal 发给 TypeSafe；Jev 返回当次候选后，Host 重新枚举并核对窗口身份，高置信且未变化才自动绑定，否则让用户手选，不退回整桌面。Jev 不执行 GUI 操作，不决定 DOM 权限。此入口在本机通过了选窗 API、TUI 离线链路和启动测试，尚无真实 GUI 任务成功率结论。证据与限制见[选窗/Jev 实验](./docs/pi-window-selection-jev-experiment-2026-09-23.md)。
+窗口选择默认是完全本地的保守匹配。可显式启用 `--window-selection jev --allow-window-title-sharing` 并在私有 `.env` 中配置 `TYPESAFE_API_KEY`：本地无法唯一匹配时，才把当前可见候选的应用名、标题和 goal 发给 TypeSafe；Jev 返回当次候选后，Host 重新枚举并核对窗口身份，高置信且未变化才自动绑定，否则让用户手选，不退回整桌面。Jev 不执行 GUI 操作，不决定 DOM 权限。此入口在本机通过了选窗 API、TUI 离线链路和启动测试，尚无真实 GUI 任务成功率结论。证据与限制见[选窗/Jev 历史实验](./docs/history/2026-09-26-handoff-convergence/docs/pi-window-selection-jev-experiment-2026-09-23.md)。
 
 UIA/Accessibility 与 DOM 都是默认关闭的可选 Grounding 生产者。UIA 仅用于显式 CUA window target，以 depth 16、最多 256 个安全候选读取 Accessibility；DOM/Hybrid 只用于 Harness 自己启动的 managed Edge profile 和 loopback CDP，profile 可按 Run 选择临时或 Harness-owned 持久模式，不附加个人现有浏览器。Runtime 对 UIA/DOM 候选去重、融合和有界召回，每轮最多向 Context 投影 16 个 hot elements；最近失败区域、用户纠正和低信任 `declaredEffect/assistantText` 只用于召回，不是事实或授权。Provider 仍只从统一 ToolRegistry 获取 `click_element`；截图和普通坐标 `click` 始终保留，Canvas/WebGL/iframe 等边界不伪造 DOM ref。
 
@@ -270,7 +279,7 @@ UIA/Accessibility 与 DOM 都是默认关闭的可选 Grounding 生产者。UIA 
 
 同一个 label 可以多次执行 `browser-login` 登记不同站点；Harness 只在自己的 profile 元数据中保留最多 8 个去重后的 HTTP(S) origin/path，默认剥离 query 和 fragment，不读取 Edge 历史、cookie 或 storage。之后的 persistent Run 会把本次 `-ManagedBrowserUrl` 作为初始活动页，并在同一个 Harness-owned Edge window 中恢复已登记站点为后台 tabs；如果 profile 还没有登记清单，则只打开本次 URL。新 tab 不会被 DOM transport 混入当前活动 tab，且不能依赖 Edge session restore。
 
-Managed 模式会自动启动可见 Edge、用 CUA 严格解析 Harness-owned browser window，并使用 foreground 交付以开放 type/keypress/hotkey/scroll/drag。profile mode 默认 `ephemeral`（临时 profile，Run 结束清理）；`persistent` 只接受 Harness-owned 的显式 label/profile root，用户需在可见 managed 浏览器中手动登录一次，Harness 不自动登录、不读取或输出 cookie/localStorage/password/input value，也不会静默回退个人 profile。运行时不要与 Agent 并发操作该窗口。DOM 每次观察都会在 Harness-owned browser window 内重新枚举 page targets：同一 tab 的跨站导航继续收集 DOM；同一 browser window 内切换到唯一 `visibilityState=visible` tab 会刷新 Adapter 私有 generation；popup/新 browser window、关闭 tab 或 0/多个可见 tab 一律降级为 UIA/视觉，不会把旧 tab 的 DOM 错配给新活动窗口。当前真实 fixture 只读 pilot 已验证 custom div/button/input/open shadow 可发现，但高德“换乘少”真实 DOM 命中与动作仍待下一轮人工观察验证。详见 [DOM Grounding 基础实施与门禁](./docs/dev-2-dom-grounding-foundation-2026-09-21.md)。
+Managed 模式会自动启动可见 Edge、用 CUA 严格解析 Harness-owned browser window，并使用 foreground 交付以开放 type/keypress/hotkey/scroll/drag。profile mode 默认 `ephemeral`（临时 profile，Run 结束清理）；`persistent` 只接受 Harness-owned 的显式 label/profile root，用户需在可见 managed 浏览器中手动登录一次，Harness 不自动登录、不读取或输出 cookie/localStorage/password/input value，也不会静默回退个人 profile。运行时不要与 Agent 并发操作该窗口。DOM 每次观察都会在 Harness-owned browser window 内重新枚举 page targets：同一 tab 的跨站导航继续收集 DOM；同一 browser window 内切换到唯一 `visibilityState=visible` tab 会刷新 Adapter 私有 generation；popup/新 browser window、关闭 tab 或 0/多个可见 tab 一律降级为 UIA/视觉，不会把旧 tab 的 DOM 错配给新活动窗口。当前真实 fixture 只读 pilot 已验证 custom div/button/input/open shadow 可发现，但高德“换乘少”真实 DOM 命中与动作仍待下一轮人工观察验证。详见 [DOM Grounding 历史验证记录](./docs/history/2026-09-26-handoff-convergence/docs/dev-2-dom-grounding-foundation-2026-09-21.md)。
 
 ## Provider 与环境变量
 
@@ -307,12 +316,12 @@ CLI/SDK 负责组装和注入依赖，Provider 不反向依赖 CLI；贡献时�
 
 ## 当前证据与限制
 
-- 离线基线：Node 24 下最近一次 `pnpm test` 为 49 个 Vitest 文件、563 项 Vitest 测试通过，另有 20 个 Node TAP 子测试（19 通过、1 个 Windows 符号链接限制跳过）；`pnpm run typecheck` 通过。测试不代表真实模型效果。
-- CI 矩阵：Ubuntu Node 22/24、Windows Node 22、macOS Node 22 已通过；CI 通过只证明构建和协议测试跨平台可运行，不等于真实 Mac/Linux 桌面已验收。
+- 提交前离线复验：Node 24.19.0 / pnpm 11.19.0，构建与 Web 构建通过；74 个 Vitest 文件、725 项测试在低并发下全部通过，TAP 19 通过、1 项 Windows 符号链接权限跳过。默认并发曾出现一次 Relay 联合测试 5 秒超时，单独及低并发全量复测通过，未放宽断言或超时；详见[验证记录](./docs/mobile-control-technical-report-2026-09-26.md#9-归档与分支提交前复验)。
+- CI 配置覆盖 Ubuntu Node 22/24、Windows Node 22、macOS Node 22，已补 Web 构建先决条件；本分支尚无本轮远端 CI 通过声明。离线 CI 也不等于真实 Mac/Linux 桌面验收。
 - 真实 API 窄证据：GLM/Qwen 各完成两轮合成 Memory 协议消费，无 GUI action；这不证明语义检索质量、长任务质量或真实用户数据安全。
 - 本机真实体验：已观察到模型坐标偏差、重复尝试、前台失配和高 Context/token 成本；这说明产品体验仍需优化，不能把 `runtimeOutcome=succeeded` 当作任务成功。
 - `--doctor` 是无模型、无截图/输入窗口动作的诊断，但会建立/结束临时 session，仍可能 cleanup `unknown`；不能把 metadata/inventory 支持误读成 session、权限或 cleanup 全部通过。
-- UIA 只读 probe、UIA Grounding 和 managed DOM/Hybrid fixture pilot 分别见[UIA 能力探针记录](./docs/dev-2-uia-readonly-probe-results-2026-09-20.md)、[UIA Grounding 实施结果](./docs/dev-2-uia-grounding-implementation-results-2026-09-21.md)和[DOM Grounding 基础实施与门禁](./docs/dev-2-dom-grounding-foundation-2026-09-21.md)；真实 fixture 通过不代表高德/携程业务操作已通过。
+- UIA 只读 probe、UIA Grounding 和 managed DOM/Hybrid fixture pilot 分别见[UIA 能力探针归档](./docs/history/2026-09-26-handoff-convergence/docs/dev-2-uia-readonly-probe-results-2026-09-20.md)、[UIA Grounding 实施归档](./docs/history/2026-09-26-handoff-convergence/docs/dev-2-uia-grounding-implementation-results-2026-09-21.md)和[DOM Grounding 验证归档](./docs/history/2026-09-26-handoff-convergence/docs/dev-2-dom-grounding-foundation-2026-09-21.md)；真实 fixture 通过不代表高德/携程业务操作已通过。
 - Provider transport failure、CUA refusal、真实焦点、登录/OTP 审批和 OSWorld 业务结果需按独立验证记录解释；本 README 不把它们包装成已解决或成熟安全保证。
 
 ## 继续阅读与贡献
@@ -320,13 +329,14 @@ CLI/SDK 负责组装和注入依赖，Provider 不反向依赖 CLI；贡献时�
 - [开发者上手指南](./docs/getting-started.md)：安装、平台排查、daemon/OSWorld 准备。
 - [CUA 探针说明](./spikes/cua-driver/README.md)：只读探针、显式输入探针和隐私边界。
 - [文档唯一入口](./docs/DOCS-INDEX.md)：当前阶段、验证边界和历史证据索引。
-- [完整开发路线 V2](./docs/full-development-roadmap-v2.md)
-- [验收清单 V2](./docs/development-acceptance-v2.md)
+- [完整开发路线 V2（历史）](./docs/history/2026-09-26-handoff-convergence/docs/full-development-roadmap-v2.md)
+- [验收清单 V2（历史）](./docs/history/2026-09-26-handoff-convergence/docs/development-acceptance-v2.md)
 
 提交改动前至少运行：
 
 ```text
 pnpm run build
+pnpm --filter @computer-harness/web build
 pnpm test
 ```
 

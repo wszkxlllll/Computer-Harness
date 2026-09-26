@@ -3,7 +3,7 @@
 日期：2026-09-15
 文档角色：结果 / 交接
 状态：当前执行（主集动态预检已完成，尚未冻结）
-当前入口：[Stage 6 收敛与下一阶段起始状态](./stage-6-convergence-and-start-state-2026-09-15.md)
+历史入口：[Stage 6 收敛与下一阶段起始状态](./history/2026-09-26-handoff-convergence/docs/stage-6-convergence-and-start-state-2026-09-15.md)
 基线：Harness 仓库工作树（提交 `db06ddb`）；OSWorld `fc31a9049664292fcb35d6e501ee1dc839f2cf6d`；VM 快照 `osworld_initial_1920x1080_clean_r4_20260906`
 范围：候选任务的静态核查、部分无模型动态 reset/observe/wait/evaluate/cleanup；不包含模型效果评测、模块开发或正式对照实验。
 

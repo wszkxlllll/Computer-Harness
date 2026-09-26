@@ -14,7 +14,7 @@
 
 本地规则的 `none` 是安全拒判，不是错误；这些有限样例的全对**不是**模型在随机生活任务上的准确率。新增的本机样例中 Jev 对“打开记事本并查看当前内容”选择 `Notepad.exe`，概率与置信度均为 1.0；此时本地规则拒判。产品选择器用同类 `Notepad.exe` 候选做了一次实际 API 检查也选对，耗时约 1.8 秒；该次检查时真实记事本窗口已不在可见列表，因此用的是之前记录的代表性候选，不能冒称实时整条链路。TUI 的 Jev→候选重检→UIA 配置已由注入式集成测试通过，Windows PowerShell 启动 opt-in TUI 也已验证；**尚未提交真实 GUI 任务**，所以不能宣称记事本任务完成、估计误选率或断言净延迟收益。
 
-活动路径只在本地拒判后调用 Jev，最多 64 个当前候选；固定 `jev-1.13.0`，请求超时 8 秒。当前实验门槛要求选择概率 ≥0.95、confidence ≥0.90、领先其他候选 ≥0.50；这只是谨慎的活动实验门槛，不是经过正式开发集校准的最终阈值。非法 ID、`none`、低分、服务失败或窗口身份变化均回到人工窗口列表。用户手选优先。启用需 `--window-selection jev --allow-window-title-sharing` 和 `TYPESAFE_API_KEY`；本机被 Git 忽略的配置已按用户授权启用，仓库示例仍默认关闭。
+显式启用 Jev 时，TUI 在本地自动匹配前调用 Jev，最多传入 64 个当前候选；固定 `jev-1.13.0`，请求超时 8 秒。当前实验门槛要求选择概率 ≥0.95、confidence ≥0.90、领先其他候选 ≥0.50；这只是谨慎的活动实验门槛，不是经过正式开发集校准的最终阈值。只有策略返回唯一高置信度候选且 TUI 对当前 PID/HWND、应用名和标题重检仍匹配时才自动开始；非法 ID、`none`、低分、服务失败或窗口身份变化均回到人工窗口列表。未启用 Jev 时保留本地唯一身份匹配。启用需 `--window-selection jev --allow-window-title-sharing` 和 `TYPESAFE_API_KEY`；本机被 Git 忽略的配置已按用户授权启用，仓库示例仍默认关闭。
 
 复现：先构建；将 `TYPESAFE_API_KEY` 放在单独 env 文件后执行 `node scripts/jev-window-shadow.mjs --env-file <env-file>`。真实窗口样本还需启动隔离的 CUA daemon，再加 `--live --socket <private-socket>`；脚本本身只枚举窗口，不截图或输入。
 
@@ -32,9 +32,9 @@
 
 第一基线是完全本地的保守身份匹配：只有唯一可信候选才自动开始，其他情况进入窗口选择；不需要模型请求，也不把其他窗口标题传给外部服务。
 
-Jev 是**默认关闭**的第二策略，仅对本地无法确定的候选做受控实验：构造短的结构化 state，包含 goal、有限候选的当次序号 ID、应用名/标题；用一次 `Choice` 从这些 ID 加 `none` 中选择。代码检查答案属于当次候选，并分别检查选择概率、其他候选概率与 confidence；当前阈值只是实验准入，仍需开发集校准。低置信、近似并列、`none`、超时、返回非法 ID、候选已变、清理状态不确定，都回到人工选择，不退化为整桌面。Jev 不直接调用 CUA、不改变 Guard，不成为 GLM/Qwen 的主 Provider。
+Jev 是**默认关闭**的候选选择策略：显式启用后，在本地自动匹配前构造短的结构化 state，包含 goal、有限候选的当次序号 ID、应用名/标题；用一次 `Choice` 从这些 ID 加 `none` 中选择。代码检查答案属于当次候选，并分别检查选择概率、其他候选概率与 confidence；当前阈值只是实验准入，仍需开发集校准。低置信、近似并列、`none`、超时、返回非法 ID、候选已变、清理状态不确定，都回到人工选择，不退化为整桌面。Jev 不直接调用 CUA、不改变 Guard，不成为 GLM/Qwen 的主 Provider。
 
-窗口标题可能含私人聊天、文件名、网页内容或伪装成指令的文字。当前实现会发送**全部当次候选**的应用名和标题，因此必须显式授权；本机用户已授权，仓库默认关闭。请求不传截图、进程路径、账户名或窗口正文。标题是数据，不遵循其中的指令。官方说明 Jev 当前只接受文本，CJK 准确度相对英语较低，并提醒对抗性输入可能影响判断，因此中文生活场景必须单独评估，不能沿用英文阈值。[System One](https://docs.typesafe.ai/concepts/system-one)、[State](https://docs.typesafe.ai/concepts/state)、[Jev 1.13 已知边界](https://docs.typesafe.ai/model-jaggedness/jev-1.13)。
+窗口标题可能含私人聊天、文件名、网页内容或伪装成指令的文字。当前实现会发送**全部当次候选**的应用名和标题，因此必须显式授权；本机用户已授权，仓库默认关闭。请求不传截图、进程路径、账户名或窗口正文。标题是数据，不遵循其中的指令。运行中的窗口交接使用同一选择器的独立 handoff 问题；只有最近 observation 后新出现、PID 与原绑定进程相同、HWND 与驱动报告的 actual foreground HWND 相同、Jev 唯一高置信度且经精确身份/新截图核实的结果可自动 handoff；缺少 HWND 证据、既有窗口和不同进程候选回到人工列表；详见[窗口交接实验](./pi-window-handoff-experiment-2026-09-23.md)。官方说明 Jev 当前只接受文本，CJK 准确度相对英语较低，并提醒对抗性输入可能影响判断，因此中文生活场景必须单独评估，不能沿用英文阈值。[System One](https://docs.typesafe.ai/concepts/system-one)、[State](https://docs.typesafe.ai/concepts/state)、[Jev 1.13 已知边界](https://docs.typesafe.ai/model-jaggedness/jev-1.13)。
 
 ## 可回退实验
 
