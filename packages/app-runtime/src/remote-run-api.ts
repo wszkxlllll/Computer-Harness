@@ -6,7 +6,7 @@ import type { AssetReader } from "@computer-harness/runtime";
 import type { ApplicationSession, WindowTargetInfo } from "./application-session.js";
 import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
-import { projectApprovalPreview } from "./approval-preview.js";
+import { approvalRequiresVisualReview, projectApprovalPreview } from "./approval-preview.js";
 import {
   type RemoteAsset,
   type RemoteCommand,
@@ -565,11 +565,13 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
   private pendingRequest(record: ManagedRemoteRun, snapshot: ReturnType<RunHandle["controller"]["getSnapshot"]>): RemotePendingRequest | undefined {
     if (snapshot.pendingApproval !== undefined) {
       const pending = snapshot.pendingApproval;
-      const preview = projectApprovalPreview(record.handle.controller.getEvents(), pending.requestId, pending.callId);
+      const events = record.handle.controller.getEvents();
+      const preview = projectApprovalPreview(events, pending.requestId, pending.callId);
       return {
         requestId: pending.requestId,
         kind: "approval",
         reason: boundedText(pending.reason, 2_000) ?? "Approval required.",
+        requiresVisualReview: approvalRequiresVisualReview(events, pending.requestId, pending.callId),
         ...(preview === undefined ? {} : { preview }),
       };
     }
@@ -706,6 +708,7 @@ function publicRequest(request: RemotePendingRequest): JsonValue {
     kind: request.kind,
     requestId: request.requestId,
     reason: request.reason,
+    requiresVisualReview: request.requiresVisualReview,
     ...(request.preview === undefined ? {} : {
       preview: {
         actions: request.preview.actions.map((action) => ({
@@ -715,6 +718,19 @@ function publicRequest(request: RemotePendingRequest): JsonValue {
           ...(action.keys === undefined ? {} : { keys: [...action.keys] }),
           ...(action.typedCharacterCount === undefined ? {} : { typedCharacterCount: action.typedCharacterCount }),
         })),
+        ...(request.preview.evidence === undefined ? {} : {
+          evidence: {
+            assetId: request.preview.evidence.assetId,
+            observationId: request.preview.evidence.observationId,
+            decisionObservationId: request.preview.evidence.decisionObservationId,
+            capturedAt: request.preview.evidence.capturedAt,
+            viewport: {
+              width: request.preview.evidence.viewport.width,
+              height: request.preview.evidence.viewport.height,
+              coordinateSpace: request.preview.evidence.viewport.coordinateSpace,
+            },
+          },
+        }),
         ...(request.preview.modelDeclaredEffect === undefined ? {} : {
           modelDeclaredEffect: {
             target: request.preview.modelDeclaredEffect.target,

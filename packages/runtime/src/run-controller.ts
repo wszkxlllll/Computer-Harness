@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
   ActionId,
+  ApprovalEvidence,
   ComputerWindowCandidate,
   ActionEffectDeclaration,
   ActionIntent,
@@ -258,6 +259,7 @@ interface PendingApproval {
   definition: ToolDefinition;
   session: ComputerSession;
   preparedAction?: PreparedComputerAction;
+  executionObservationId?: ObservationId;
 }
 
 interface PreparedComputerAction {
@@ -1194,6 +1196,137 @@ export class RunController {
     }
   }
 
+  private async requestApproval(candidate: Omit<PendingApproval, "requestId">, baseReason: string): Promise<void> {
+    let preparedAction = candidate.preparedAction;
+    let executionObservationId: ObservationId | undefined;
+    let evidence: ApprovalEvidence | undefined;
+    let actions: import("@computer-harness/protocol").ActionGuardActionSummary[] | undefined;
+    let reason = baseReason;
+
+    if (candidate.definition.category === "computer") {
+      const decisionObservationId = preparedAction?.decisionObservationId ?? this.snapshot.latestObservationId;
+      if (preparedAction === undefined) {
+        try {
+          preparedAction = this.prepareComputerAction(
+            candidate.call,
+            candidate.definition,
+            {
+              runId: this.runId,
+              session: candidate.session,
+              signal: this.abortController.signal,
+              ...this.currentExecutionObservationContext(),
+            },
+            decisionObservationId,
+          );
+        } catch (error) {
+          await this.rejectToolCall(candidate.call.id, `invalid GUI action before approval: ${errorMessage(error)}`);
+          return;
+        }
+      }
+      if (decisionObservationId === undefined) {
+        await this.rejectToolCall(candidate.call.id, "approval evidence is unavailable; the computer action was not offered or executed");
+        return;
+      }
+      const decisionObservation = this.events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> =>
+        event.type === "observation.created" && event.observation.id === decisionObservationId,
+      )?.observation;
+      if (decisionObservation === undefined) {
+        await this.rejectToolCall(candidate.call.id, "the action's decision observation is unavailable; the computer action was not offered or executed");
+        return;
+      }
+      if (preparedAction.action.kind !== "wait" && preparedAction.action.basedOn !== decisionObservationId) {
+        await this.rejectToolCall(candidate.call.id, "the prepared action does not match its decision observation; the computer action was not offered or executed");
+        return;
+      }
+
+      const beforeCapture = await this.drainCommands();
+      if (beforeCapture.correction || this.snapshot.status !== "running") {
+        await this.rejectToolCall(candidate.call.id, "approval request was superseded by a user control command before evidence capture; no computer action was executed");
+        return;
+      }
+
+      let evidenceObservation: ObservationFrame;
+      try {
+        // Capture the exact frame before asking for approval so the user can
+        // review the coordinate/action against the image that will be used at
+        // dispatch. The action itself remains bound to its original decision
+        // observation; the adapter receives this fresh execution observation.
+        evidenceObservation = await this.observeAndCommit(candidate.session);
+      } catch (error) {
+        if (this.abortController.signal.aborted) throw error;
+        if (!(error instanceof ObservationCaptureError)) throw error;
+        this.pendingReobserve = true;
+        await this.rejectToolCall(
+          candidate.call.id,
+          `approval screenshot could not be captured; the computer action was not offered or executed: ${errorMessage(error)}`,
+        );
+        return;
+      }
+
+      const afterCapture = await this.drainCommands();
+      this.throwIfAborted();
+      if (afterCapture.correction || this.snapshot.status !== "running") {
+        await this.rejectToolCall(candidate.call.id, "approval request was superseded by a user control command during evidence capture; no computer action was executed");
+        return;
+      }
+      if (this.activeComputerSession?.id !== candidate.session.id
+        || this.snapshot.computerSession?.id !== candidate.session.id
+        || decisionObservation.computerSessionId !== candidate.session.id
+        || evidenceObservation.computerSessionId !== candidate.session.id) {
+        await this.rejectToolCall(candidate.call.id, "computer session identity changed while preparing approval; the action must be proposed again on the current target");
+        return;
+      }
+      if (!sameViewport(decisionObservation.viewport, evidenceObservation.viewport)) {
+        await this.rejectToolCall(candidate.call.id, "computer viewport or coordinate space changed while preparing approval; the action must be proposed again against the current screen");
+        return;
+      }
+
+      const executionObservation = this.currentExecutionObservation();
+      try {
+        if (executionObservation === undefined || executionObservation.id !== evidenceObservation.id) {
+          throw new Error("fresh approval observation is not current");
+        }
+        validateActionIntent(preparedAction.action, {
+          capabilities: candidate.session.capabilities,
+          observation: executionObservation,
+          executionObservationId: evidenceObservation.id,
+        });
+      } catch (error) {
+        await this.rejectToolCall(candidate.call.id, `computer action is invalid against the exact approval screenshot: ${errorMessage(error)}`);
+        return;
+      }
+
+      executionObservationId = evidenceObservation.id;
+      evidence = {
+        observationId: evidenceObservation.id,
+        decisionObservationId,
+        assetId: evidenceObservation.screenshot.assetId,
+        capturedAt: evidenceObservation.capturedAt,
+        viewport: { ...evidenceObservation.viewport },
+      };
+      actions = [summarizeGuardAction(preparedAction.action)];
+      reason = approvalHumanReviewReason(baseReason, preparedAction.action);
+    }
+
+    this.throwIfAborted();
+    const requestId = this.idFactory.eventId();
+    await this.commitEvent({
+      type: "approval.requested",
+      requestId,
+      callId: candidate.call.id,
+      reason,
+      requiresVisualReview: candidate.definition.category === "computer",
+      ...(evidence === undefined ? {} : { evidence }),
+      ...(actions === undefined ? {} : { actions }),
+    });
+    this.pendingApproval = {
+      ...candidate,
+      requestId,
+      ...(preparedAction === undefined ? {} : { preparedAction }),
+      ...(executionObservationId === undefined ? {} : { executionObservationId }),
+    };
+  }
+
   private async executeApprovedCall(pending: PendingApproval): Promise<void> {
     let context: ToolExecutionContext = {
       runId: this.runId,
@@ -1202,62 +1335,28 @@ export class RunController {
       ...this.currentExecutionObservationContext(),
     };
     if (pending.definition.category === "computer") {
-      if (pending.preparedAction !== undefined) {
-        const originalId = pending.preparedAction.decisionObservationId;
-        const originalFingerprint = originalId === undefined || this.latestObservationFingerprint?.observationId !== originalId
-          ? undefined
-          : this.latestObservationFingerprint.fingerprint;
-        let freshObservation: ObservationFrame;
-        try {
-          // Approval is a pause in the control boundary. Re-observe before a
-          // side effect so an external page/content change cannot silently
-          // reuse the old coordinate decision. This does not prove hidden
-          // keyboard focus; type/keypress are handled conservatively below.
-          // The observation ID is intentionally not used as the equality test:
-          // every observe creates a new ID.
-          freshObservation = await this.observeAndCommit(pending.session);
-        } catch (error) {
-          if (this.abortController.signal.aborted) throw error;
-          if (!(error instanceof ObservationCaptureError)) throw error;
-          this.pendingReobserve = true;
-          await this.rejectToolCall(
-            pending.call.id,
-            `approval context could not be re-observed; action was not executed: ${errorMessage(error)}`,
-          );
-          return;
-        }
-        const freshFingerprint = this.latestObservationFingerprint?.observationId === freshObservation.id
-          ? this.latestObservationFingerprint.fingerprint
-          : undefined;
-        if (originalFingerprint === undefined || freshFingerprint === undefined || !sameObservationFingerprint(originalFingerprint, freshFingerprint)) {
-          await this.rejectToolCall(
-            pending.call.id,
-            "screen changed while approval was pending or approval evidence was unavailable; action was not executed; observe the current screen and propose the action again",
-          );
-          return;
-        }
-        context = { ...context, observation: freshObservation, ...this.currentExecutionObservationContext() };
-        if (pending.preparedAction.action.kind === "type" || pending.preparedAction.action.kind === "keypress") {
-          await this.rejectToolCall(
-            pending.call.id,
-            "approval context was re-observed, but this Computer backend has no independent keyboard-focus evidence; action was not executed; confirm focus manually, then use TUI I to tell the agent to continue",
-          );
-          await this.commitEvent({
-            type: "user.input.requested",
-            question: "Keyboard focus could not be independently verified, so the approved keyboard action was not executed. Manually confirm or perform the intended input, then press I and describe the current screen/state; the agent will not retry it automatically.",
-          });
-          return;
-        }
-        const commandEffects = await this.drainCommands();
-        this.throwIfAborted();
-        if (commandEffects.correction || this.snapshot.status !== "running") {
-          await this.rejectToolCall(
-            pending.call.id,
-            "approval context was superseded by a user control command; action was not executed; observe the current screen and propose it again",
-          );
-          return;
-        }
+      const observation = this.latestObservation;
+      const executionObservationId = pending.executionObservationId;
+      if (pending.preparedAction === undefined || executionObservationId === undefined
+        || observation === undefined || observation.id !== executionObservationId
+        || observation.computerSessionId !== pending.session.id
+        || this.activeComputerSession?.id !== pending.session.id) {
+        await this.rejectToolCall(
+          pending.call.id,
+          "the request-bound approval screenshot is no longer the current observation; the computer action was not executed",
+        );
+        return;
       }
+      const commandEffects = await this.drainCommands();
+      this.throwIfAborted();
+      if (commandEffects.correction || this.snapshot.status !== "running") {
+        await this.rejectToolCall(
+          pending.call.id,
+          "approval was superseded by a user control command; the computer action was not executed",
+        );
+        return;
+      }
+      context = { ...context, ...this.currentExecutionObservationContext() };
       await this.executeComputerCall(pending.call, pending.definition, context, undefined, pending.preparedAction);
     } else if (pending.definition.category === "control") {
       await this.rejectToolCall(pending.call.id, "control decisions must be mapped by the Provider, not executed as tools");
@@ -1587,9 +1686,12 @@ export class RunController {
           return { correction: false };
         }
         const entry = computerPreflight[0]!;
-        const requestId = this.idFactory.eventId();
-        await this.commitEvent({ type: "approval.requested", requestId, callId: entry.call.id, reason: guardDecision.reason });
-        this.pendingApproval = { requestId, call: entry.call, definition: entry.definition, session, preparedAction: entry.preparedAction };
+        await this.requestApproval({
+          call: entry.call,
+          definition: entry.definition,
+          session,
+          preparedAction: entry.preparedAction,
+        }, guardDecision.reason);
         return { correction: false };
       }
     }
@@ -1598,20 +1700,12 @@ export class RunController {
       (entry) => entry.rejection === undefined && entry.decision?.decision === "require_approval",
     );
     if (approvalEntry !== undefined && approvalEntry.definition !== undefined && approvalEntry.decision?.decision === "require_approval") {
-      const requestId = this.idFactory.eventId();
-      await this.commitEvent({
-        type: "approval.requested",
-        requestId,
-        callId: approvalEntry.call.id,
-        reason: approvalEntry.decision.reason,
-      });
-      this.pendingApproval = {
-        requestId,
+      await this.requestApproval({
         call: approvalEntry.call,
         definition: approvalEntry.definition,
         session,
         ...(approvalEntry.preparedAction === undefined ? {} : { preparedAction: approvalEntry.preparedAction }),
-      };
+      }, approvalEntry.decision.reason);
       return { correction: false };
     }
 
@@ -2725,6 +2819,19 @@ function sameObservationFingerprint(left: ObservationFingerprint, right: Observa
     && left.viewport.height === right.viewport.height
     && left.viewport.coordinateSpace === right.viewport.coordinateSpace
     && left.digest === right.digest;
+}
+
+function sameViewport(left: ObservationFrame["viewport"], right: ObservationFrame["viewport"]): boolean {
+  return left.width === right.width
+    && left.height === right.height
+    && left.coordinateSpace === right.coordinateSpace;
+}
+
+function approvalHumanReviewReason(reason: string, action: ActionIntent): string {
+  const review = action.kind === "type" || action.kind === "keypress"
+    ? "Inspect the shown current screenshot and independently verify the intended target and keyboard focus before approving this one action. The computer backend cannot verify which control has focus."
+    : "Inspect the shown current screenshot and the displayed action coordinates before approving this one action.";
+  return `${reason} ${review}`;
 }
 
 function pointInBox(point: { x: number; y: number }, box: GroundingBoundingBox): boolean {

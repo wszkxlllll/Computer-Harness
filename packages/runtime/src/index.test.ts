@@ -311,6 +311,13 @@ class ApprovalComputerPolicy extends DefaultRuntimePolicy {
   }
 }
 
+class ApprovalSideEffectPolicy extends DefaultRuntimePolicy {
+  public override async evaluateToolCall(context: Parameters<RuntimePolicy["evaluateToolCall"]>[0]) {
+    if (context.tool.category === "side") return { decision: "require_approval" as const, reason: "Side effect requires approval." };
+    return { decision: "allow" as const };
+  }
+}
+
 /** Runtime tests use a local contract double; the real Context package is tested separately. */
 class TestContextCompiler implements ContextCompiler {
   public constructor(private readonly registry: ToolRegistry) {}
@@ -1833,6 +1840,34 @@ describe("RunController command inbox and control semantics", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("marks non-computer approvals as not requiring visual review", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "publish_report",
+      description: "Publish a prepared report.",
+      category: "side",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      validate: (args) => { if (args !== null) throw new Error("publish_report accepts null arguments"); },
+      execute: async () => ({ published: true }),
+    });
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "publish-report-call" as ToolCallId, name: "publish_report", arguments: null }] },
+      { type: "finish", summary: "published" },
+    ]);
+    const created = await makeController(provider, new FakeComputer(true), registry, new ApprovalSideEffectPolicy());
+    const running = created.controller.start("publish only after approval");
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    const approval = created.controller.getEvents().find((event) => event.type === "approval.requested");
+    expect(approval).toMatchObject({ type: "approval.requested", requiresVisualReview: false });
+    if (approval?.type !== "approval.requested") throw new Error("expected a non-computer approval");
+    expect(approval.evidence).toBeUndefined();
+    expect(approval.actions).toBeUndefined();
+    await created.controller.resolveApproval(approval.requestId, true);
+    await expect(running).resolves.toBe("succeeded");
+    expect(created.controller.getEvents().some((event) => event.type === "tool.call.completed" && event.result.callId === "publish-report-call")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("records approval denial as a terminal rejected ToolResult before replanning", async () => {
     let approvalSeenResolve: (() => void) | undefined;
     const approvalSeen = new Promise<void>((resolve) => {
@@ -2131,7 +2166,7 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("rejects an approved action when the fresh approval screenshot changes", async () => {
+  it("binds pixel-only screen changes to one fresh-frame approval without a tolerance", async () => {
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["financial"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2143,18 +2178,38 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "finish", summary: "screen changed" },
     ]);
     const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
-    const running = created.controller.start("approve only if the screen is unchanged");
+    const running = created.controller.start("review the current screen before approving the click");
     await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    const requested = created.controller.getEvents().find((event) => event.type === "approval.requested");
+    expect(requested).toMatchObject({
+      type: "approval.requested",
+      requiresVisualReview: true,
+      evidence: {
+        observationId: expect.any(String),
+        decisionObservationId: expect.any(String),
+        assetId: expect.any(String),
+        viewport,
+      },
+      actions: [{ kind: "click", point: { x: 40, y: 50 } }],
+    });
+    if (requested?.type !== "approval.requested" || requested.evidence === undefined) throw new Error("expected request-bound approval evidence");
+    expect(requested.evidence.observationId).not.toBe(requested.evidence.decisionObservationId);
+    expect(requested.reason).toContain("displayed action coordinates");
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("succeeded");
     const events = created.controller.getEvents();
-    expect(events.some((event) => event.type === "action.proposed")).toBe(false);
-    expect(events.find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("screen changed") });
-    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    const proposed = events.find((event) => event.type === "action.proposed");
+    expect(proposed).toMatchObject({ executionObservationId: requested.evidence.observationId });
+    if (proposed?.type !== "action.proposed") throw new Error("expected the approved action to be proposed");
+    expect(proposed.action.basedOn).toBe(requested.evidence.decisionObservationId);
+    expect(events.filter((event) => event.type === "approval.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+    expect(events.some((event) => event.type === "tool.call.rejected")).toBe(false);
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("rejects an approved action when only the fresh viewport changes", async () => {
+  it("does not offer a coordinate action for approval when the viewport changes before evidence capture", async () => {
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2167,16 +2222,15 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "finish", summary: "viewport changed" },
     ]);
     const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
-    const running = created.controller.start("approve only if the viewport is unchanged");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
+    const running = created.controller.start("do not use coordinates after a viewport change");
     await expect(running).resolves.toBe("succeeded");
-    expect(created.controller.getEvents().find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("screen changed") });
+    expect(created.controller.getEvents().some((event) => event.type === "approval.requested")).toBe(false);
+    expect(created.controller.getEvents().find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("viewport or coordinate space changed") });
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("rejects an approved action when the fresh screenshot media changes", async () => {
+  it("does not treat screenshot media encoding changes as a target change", async () => {
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["financial"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2188,16 +2242,19 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "finish", summary: "media changed" },
     ]);
     const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
-    const running = created.controller.start("approve only if the screenshot representation is unchanged");
+    const running = created.controller.start("review the fresh screenshot before approving");
     await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    expect(created.controller.getEvents().find((event) => event.type === "approval.requested")).toMatchObject({
+      evidence: { viewport },
+    });
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("succeeded");
-    expect(created.controller.getEvents().find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("screen changed") });
-    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected")).toBe(false);
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("fails closed when approval re-observation fails and does not reuse the old observation", async () => {
+  it("fails closed when request-bound approval evidence cannot be captured", async () => {
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["financial"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2209,11 +2266,10 @@ describe("RunController S2-4 failure boundaries", () => {
     ]);
     const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
     const running = created.controller.start("do not execute without a fresh observation");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("failed");
     const events = created.controller.getEvents();
-    expect(events.find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("could not be re-observed") });
+    expect(events.find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("screenshot could not be captured") });
+    expect(events.some((event) => event.type === "approval.requested")).toBe(false);
     expect(events.some((event) => event.type === "action.proposed")).toBe(false);
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     await rm(created.directory, { recursive: true, force: true });
@@ -2239,17 +2295,16 @@ describe("RunController S2-4 failure boundaries", () => {
     ]);
     const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy, assetStore });
     const running = created.controller.start("fail closed when observation persistence is unavailable");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("failed");
     const events = created.controller.getEvents();
+    expect(events.some((event) => event.type === "approval.requested")).toBe(false);
     expect(events.some((event) => event.type === "tool.call.rejected")).toBe(false);
     expect(events.some((event) => event.type === "action.proposed")).toBe(false);
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("does not execute an approved action when Abort arrives during fresh observation", async () => {
+  it("does not offer or execute an action when Abort arrives during fresh approval evidence capture", async () => {
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["financial"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2260,14 +2315,13 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "tool_calls", calls: [{ ...clickCall("approval-abort"), declaredEffect: { effects: ["financial"], target: "Confirm payment", summary: "Pay for the order" } }] },
     ]);
     const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
-    const running = created.controller.start("abort during approval revalidation");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
+    const running = created.controller.start("abort while preparing approval evidence");
     await computer.entered;
     created.controller.cancel("abort approval revalidation");
     await expect(running).resolves.toBe("cancelled");
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     expect(created.controller.getEvents().some((event) => event.type === "action.proposed")).toBe(false);
+    expect(created.controller.getEvents().some((event) => event.type === "approval.requested")).toBe(false);
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -2288,16 +2342,15 @@ describe("RunController S2-4 failure boundaries", () => {
       correction = created.controller.submitUserInput("The screen changed; do not execute the approved click.");
     };
     const running = created.controller.start("invalidate approval when the user corrects it");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
-    await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("succeeded");
     await correction;
+    expect(created.controller.getEvents().some((event) => event.type === "approval.requested")).toBe(false);
     expect(created.controller.getEvents().find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("user control command") });
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("requires a new approval after a changed-screen rejection", async () => {
+  it("keeps each explicit approval bound to its own fresh action screenshot", async () => {
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2310,19 +2363,19 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "finish", summary: "approved after re-observation" },
     ]);
     const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
-    const running = created.controller.start("require a fresh approval after a stale action");
+    const running = created.controller.start("approve each action against its current screenshot");
     await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await waitUntil(() => created.controller.getEvents().filter((event) => event.type === "approval.requested").length === 2);
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
     await expect(running).resolves.toBe("succeeded");
     expect(created.controller.getEvents().filter((event) => event.type === "approval.requested")).toHaveLength(2);
-    expect(created.controller.getEvents().filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
-    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
+    expect(created.controller.getEvents().filter((event) => event.type === "action.execution.completed")).toHaveLength(2);
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("hands approved keyboard actions to the user when focus cannot be independently verified", async () => {
+  it("lets one screenshot-bound approval authorize keyboard input after honest focus disclosure", async () => {
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
@@ -2333,15 +2386,59 @@ describe("RunController S2-4 failure boundaries", () => {
       { type: "finish", summary: "user handled keyboard step" },
     ]);
     const created = await makeController(provider, new FakeComputer(true), batchRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
-    const running = created.controller.start("ask the user before keyboard side effects");
+    const running = created.controller.start("ask the user to check the current keyboard target");
     await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    const approval = created.controller.getEvents().find((event) => event.type === "approval.requested");
+    expect(approval?.type === "approval.requested" ? approval.reason : "").toContain("cannot verify which control has focus");
+    expect(approval?.type === "approval.requested" ? approval.evidence : undefined).toBeDefined();
     await created.controller.resolveApproval(created.controller.getSnapshot().pendingApproval?.requestId ?? "", true);
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_user");
-    const question = created.controller.getSnapshot().pendingUserQuestion;
-    expect(question?.toLowerCase()).toContain("keyboard focus");
-    await created.controller.submitUserInput("I manually handled the keyboard step and confirmed the current state.");
     await expect(running).resolves.toBe("succeeded");
-    expect(created.controller.getEvents().find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("keyboard-focus") });
+    expect(created.controller.getEvents().filter((event) => event.type === "approval.requested")).toHaveLength(1);
+    expect(created.controller.getEvents().some((event) => event.type === "user.input.requested")).toBe(false);
+    expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected")).toBe(false);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("invalidates the exact pending approval when the user submits a correction", async () => {
+    const actionPolicy: ActionPolicy = {
+      async evaluate() {
+        return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
+      },
+    };
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ ...clickCall("approval-correction-pending"), declaredEffect: { effects: ["external_commitment"], target: "Submit order", summary: "Submit the order" } }] },
+      { type: "finish", summary: "corrected" },
+    ]);
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const running = created.controller.start("do not submit after a correction");
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    const requestId = created.controller.getSnapshot().pendingApproval?.requestId;
+    await created.controller.submitUserInput("Do not submit this order.", requestId);
+    await expect(running).resolves.toBe("succeeded");
+    const events = created.controller.getEvents();
+    expect(events.some((event) => event.type === "approval.resolved" && event.requestId === requestId && event.approved === false)).toBe(true);
+    expect(events.find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: "superseded by user correction" });
+    expect(events.some((event) => event.type === "action.proposed")).toBe(false);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not execute a screenshot-bound approval after Abort", async () => {
+    const actionPolicy: ActionPolicy = {
+      async evaluate() {
+        return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
+      },
+    };
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ ...clickCall("approval-abort-pending"), declaredEffect: { effects: ["external_commitment"], target: "Submit order", summary: "Submit the order" } }] },
+    ]);
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    const running = created.controller.start("abort before approving this action");
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    created.controller.cancel("abort pending approval");
+    await expect(running).resolves.toBe("cancelled");
+    expect(created.controller.getEvents().some((event) => event.type === "action.proposed")).toBe(false);
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     await rm(created.directory, { recursive: true, force: true });
   });
