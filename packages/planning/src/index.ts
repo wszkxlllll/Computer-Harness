@@ -3,6 +3,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   JsonValue,
+  ExecutionSegment,
+  ExecutionSegmentMutation,
   PlanState,
   PlanningTask,
   PlanningTaskMutation,
@@ -14,10 +16,121 @@ import type { NonComputerToolDefinition } from "@computer-harness/runtime";
 
 export type { PlanState, PlanningTask, PlanningTaskMutation, PlanningTaskStatus, TaskSpec } from "@computer-harness/protocol";
 
+/** Experimental short-lived local execution tools. These do not mutate the
+ * global PlanningTask chain and do not claim task completion. */
+export function createExecutionSegmentTools(): readonly NonComputerToolDefinition[] {
+  let nextSegment = 1;
+  return [{
+    name: "execution_segment_set",
+    description: "Define a short-lived local GUI execution segment for the NEXT observations only. This is not task_create/task_update: PlanningTask tracks handoff-sized global phases, while an execution segment contains 2-4 predictable click micro-steps inside the current stable interface. Use it only when the same ModelTurn can describe the current click and at least one later click well enough to replace a future main-provider turn. Call it immediately before the first GUI click. Do not use it for simple one-click screens, type/keypress/scroll/drag/wait, uncertain or open-ended work, cross-application transitions, or sensitive actions. Every step needs observable completion evidence; the segment does not prove progress, authorize actions, or replace re-observation.",
+    category: "side",
+    inputSchema: {
+      type: "object",
+      properties: {
+        objective: { type: "string", minLength: 1, maxLength: 320, description: "Local interface objective, not the complete user goal." },
+        steps: {
+          type: "array", minItems: 2, maxItems: 4,
+          items: {
+            type: "object",
+            properties: {
+              intent: { type: "string", minLength: 1, maxLength: 240, description: "One semantic click step; do not provide coordinates or element ids." },
+              completion: {
+                type: "object",
+                properties: {
+                  kind: { type: "string", enum: ["element_present", "element_selected", "element_expanded", "element_focused"] },
+                  text: { type: "string", minLength: 1, maxLength: 160, description: "Observable UI text identifying the completion evidence." },
+                },
+                required: ["kind", "text"], additionalProperties: false,
+              },
+            },
+            required: ["intent", "completion"], additionalProperties: false,
+          },
+        },
+      },
+      required: ["objective", "steps"], additionalProperties: false,
+    },
+    validate: validateExecutionSegmentArgs,
+    execute: async (args, context) => {
+      const input = executionSegmentArgs(args);
+      if (context.observation === undefined) throw new Error("execution_segment_set requires a current observation");
+      const segmentId = `s${nextSegment++}`;
+      const segment: ExecutionSegment = {
+        id: segmentId,
+        objective: input.objective,
+        steps: input.steps.map((step, index) => ({ id: `${segmentId}.${index + 1}`, intent: step.intent, allowedAction: "click", completion: step.completion })),
+        cursor: 0,
+        status: "active",
+        sourceObservationId: context.observation.id,
+        computerSessionId: context.session.id,
+        attemptedStepIds: [],
+      };
+      return { operation: "set", segment } as unknown as JsonValue;
+    },
+    executionSegmentMutationFromResult: (output) => readExecutionSegmentMutation(output),
+  }];
+}
+
 export interface PlanStore {
   get(runId: RunId): Promise<PlanState>;
   apply(runId: RunId, mutation: PlanningTaskMutation): Promise<PlanState>;
   rebuild(runId: RunId, mutations: readonly PlanningTaskMutation[]): Promise<PlanState>;
+}
+
+/**
+ * One Run's coordinated Planning behavior. Tool mutation hooks are rebound by
+ * app-runtime to this module's apply method. restoreFromEvents is an explicit
+ * offline recovery API; app-runtime does not invoke it to resume a Run.
+ */
+export interface PlanningRunModule {
+  readonly runId: RunId;
+  readonly tools: readonly NonComputerToolDefinition[];
+  apply(mutation: PlanningTaskMutation): Promise<PlanState>;
+  /** Explicit offline recovery from committed Events; not used to resume a live Run. */
+  restoreFromEvents(events: readonly RuntimeEvent[]): Promise<PlanState>;
+  projectContext(plan: PlanState): PlanState | Promise<PlanState>;
+  /** Release module-owned resources when the app-runtime Run closes. */
+  close?(): Promise<void>;
+}
+
+export interface PlanningRunModuleOptions {
+  readonly tools?: readonly NonComputerToolDefinition[];
+  readonly projectContext?: (plan: PlanState) => PlanState | Promise<PlanState>;
+  readonly close?: () => Promise<void>;
+}
+
+export interface PlanningToolOptions {
+  /** Let app-runtime route committed mutations through the Run module. */
+  readonly afterPlanCommit?: false | ((runId: RunId, mutation: PlanningTaskMutation) => Promise<void>);
+}
+
+/** Assemble a Run-scoped Planning module around a store and optional tools or
+ * Context projection. The default behavior is the existing Planning package. */
+export function createPlanningRunModule(
+  runId: RunId,
+  store: PlanStore,
+  options: PlanningRunModuleOptions = {},
+): PlanningRunModule {
+  const tools = options.tools ?? createPlanningTools(store, { afterPlanCommit: false });
+  if (tools.some((tool) => tool.category !== "planning")) {
+    throw new Error("PlanningRunModule tools must use the planning category");
+  }
+  if (tools.some((tool) => tool.planMutationFromResult !== undefined && tool.afterPlanCommit !== undefined)) {
+    throw new Error("PlanningRunModule mutation tools must leave afterPlanCommit to app-runtime");
+  }
+  return {
+    runId,
+    tools: tools.map((tool) => ({
+      ...tool,
+      async execute(args, context) {
+        if (context.runId !== runId) throw new Error(`PlanningRunModule for '${runId}' cannot execute a tool for Run '${context.runId}'`);
+        return tool.execute(args, context);
+      },
+    })),
+    apply: (mutation) => store.apply(runId, mutation),
+    restoreFromEvents: (events) => rebuildPlanFromEvents(store, runId, events),
+    projectContext: options.projectContext ?? ((plan) => clonePlan(plan)),
+    ...(options.close === undefined ? {} : { close: options.close }),
+  };
 }
 
 export class InMemoryPlanStore implements PlanStore {
@@ -97,17 +210,20 @@ export async function rebuildPlanFromEvents(store: PlanStore, runId: RunId, even
   return store.rebuild(runId, planningMutationsFromEvents(events, runId));
 }
 
-export function createPlanningTools(store: PlanStore): readonly NonComputerToolDefinition[] {
+export function createPlanningTools(store: PlanStore, options: PlanningToolOptions = {}): readonly NonComputerToolDefinition[] {
+  const afterPlanCommit = options.afterPlanCommit === false
+    ? undefined
+    : options.afterPlanCommit ?? (async (targetRunId: RunId, mutation: PlanningTaskMutation) => { await store.apply(targetRunId, mutation); });
   return [
     {
       name: "task_create",
-      description: "Create one optional planning task for a handoff-sized phase of the current run. Use it at a phase boundary, when a real blocker appears, or when the goal changes—not for every click. The program generates a short stable task id (such as t1); wait for the result before calling task_update. The description should contain the phase goal and necessary unfinished work, not the full user task or reasoning.",
+      description: "Handoff-sized current phase for multi-stage/cross-interface/compare/summarize GUI tasks: same ModelTurn before first GUI action, create before the first GUI action, then at completion (when the Goal remains unfinished) task_update the completed phase and task_create exactly the next handoff phase in the same ModelTurn, with at most two Planning/Memory writes total. Describe only this phase and unfinished work; do not copy the original Goal, final deliverables, reasoning, or future stages. skip simple screens/every-click plans.",
       category: "planning",
       inputSchema: {
         type: "object",
         properties: {
-          subject: { type: "string", minLength: 1, description: "Short task title." },
-          description: { type: "string", description: "Optional details and completion intent." },
+          subject: { type: "string", minLength: 1, description: "Short title for the current handoff-sized phase; do not restate the original Goal or final delivery." },
+          description: { type: "string", description: "Only this phase's goal and necessary unfinished work (for example, fill the current form); omit final requirements and future stages." },
         },
         required: ["subject"],
         additionalProperties: false,
@@ -125,18 +241,18 @@ export function createPlanningTools(store: PlanStore): readonly NonComputerToolD
         return { operation: "created", task } as unknown as JsonValue;
       },
       planMutationFromResult: (output) => readMutation(output),
-      afterPlanCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      ...(afterPlanCommit === undefined ? {} : { afterPlanCommit: async (mutation, context) => { await afterPlanCommit(context.runId, mutation); } }),
     },
     {
       name: "task_update",
-      description: "Update one existing planning task at a phase boundary, after a real blocker, or when the goal changes. Use the short id returned by task_create or task_list. Keep the description to the phase goal and necessary unfinished work; status is the model's declared planning state, not proof of GUI completion.",
+      description: "Update the current handoff-sized phase on stage/blocker/goal changes. When it completes while the Goal remains unfinished, use task_update status completed followed by task_create for exactly the next phase in the same ModelTurn (at most two Planning/Memory writes total). Use the id from task_create/task_list; keep only current-phase unfinished work, not the full Goal/future stages. Status is declared plan state, not GUI proof; no every-click updates.",
       category: "planning",
       inputSchema: {
         type: "object",
         properties: {
-          taskId: { type: "string", minLength: 1, description: "Existing task id returned by task_create or task_list." },
-          subject: { type: "string", minLength: 1 },
-          description: { type: "string" },
+          taskId: { type: "string", minLength: 1, description: "Existing phase id returned by task_create or task_list." },
+          subject: { type: "string", minLength: 1, description: "Replacement title for this current phase only; do not copy the full Goal." },
+          description: { type: "string", description: "Replacement description for this phase's unfinished work only; omit future stages and final delivery text." },
           status: { type: "string", enum: ["pending", "in_progress", "completed", "blocked"] },
           blockedBy: { type: "array", items: { type: "string", minLength: 1 } },
         },
@@ -169,7 +285,7 @@ export function createPlanningTools(store: PlanStore): readonly NonComputerToolD
         return { operation: "updated", task } as unknown as JsonValue;
       },
       planMutationFromResult: (output) => readMutation(output),
-      afterPlanCommit: async (mutation, context) => { await store.apply(context.runId, mutation); },
+      ...(afterPlanCommit === undefined ? {} : { afterPlanCommit: async (mutation, context) => { await afterPlanCommit(context.runId, mutation); } }),
     },
     {
       name: "task_list",
@@ -267,6 +383,42 @@ function assertAllowedKeys(args: JsonValue, name: string, allowed: readonly stri
 function readMutation(value: JsonValue): PlanningTaskMutation {
   if (!isRecord(value) || (value.operation !== "created" && value.operation !== "updated") || !isPlanningTask(value.task)) throw new Error("planning tool result has an invalid mutation");
   return { operation: value.operation, task: value.task };
+}
+
+function validateExecutionSegmentArgs(args: JsonValue): void {
+  executionSegmentArgs(args);
+}
+
+function executionSegmentArgs(args: JsonValue): {
+  objective: string;
+  steps: { intent: string; completion: ExecutionSegment["steps"][number]["completion"] }[];
+} {
+  assertAllowedKeys(args, "execution_segment_set", ["objective", "steps"]);
+  if (!isRecord(args) || typeof args.objective !== "string" || args.objective.trim().length === 0 || args.objective.length > 320) throw new Error("execution_segment_set.objective must be 1..320 characters");
+  if (!Array.isArray(args.steps) || args.steps.length < 2 || args.steps.length > 4) throw new Error("execution_segment_set.steps must contain 2..4 steps; do not create a segment for a single click");
+  const steps = args.steps.map((raw, index) => {
+    if (!isRecord(raw)) throw new Error(`execution_segment_set.steps[${index}] must be an object`);
+    assertAllowedKeys(raw, `execution_segment_set.steps[${index}]`, ["intent", "completion"]);
+    if (typeof raw.intent !== "string" || raw.intent.trim().length === 0 || raw.intent.length > 240) throw new Error(`execution_segment_set.steps[${index}].intent must be 1..240 characters`);
+    if (!isRecord(raw.completion)) throw new Error(`execution_segment_set.steps[${index}].completion must be an object`);
+    assertAllowedKeys(raw.completion, `execution_segment_set.steps[${index}].completion`, ["kind", "text"]);
+    const kind = raw.completion.kind;
+    const text = raw.completion.text;
+    if (kind !== "element_present" && kind !== "element_selected" && kind !== "element_expanded" && kind !== "element_focused") throw new Error(`execution_segment_set.steps[${index}].completion.kind is invalid`);
+    if (typeof text !== "string" || text.trim().length === 0 || text.length > 160) throw new Error(`execution_segment_set.steps[${index}].completion.text must be 1..160 characters`);
+    return { intent: raw.intent.trim(), completion: { kind: kind as ExecutionSegment["steps"][number]["completion"]["kind"], text: text.trim() } };
+  });
+  return { objective: args.objective.trim(), steps };
+}
+
+function readExecutionSegmentMutation(value: JsonValue): ExecutionSegmentMutation {
+  if (!isRecord(value) || value.operation !== "set" || !isExecutionSegment(value.segment)) throw new Error("execution segment tool result has an invalid mutation");
+  return { operation: "set", segment: value.segment };
+}
+
+function isExecutionSegment(value: unknown): value is ExecutionSegment {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.objective !== "string" || !Array.isArray(value.steps) || typeof value.sourceObservationId !== "string" || typeof value.computerSessionId !== "string") return false;
+  return value.cursor === 0 && value.status === "active" && Array.isArray(value.attemptedStepIds) && value.attemptedStepIds.length === 0 && value.steps.length >= 2 && value.steps.length <= 4;
 }
 
 function parsePlan(value: unknown): PlanState {

@@ -16,6 +16,7 @@ export {
 } from "./capability-doctor.js";
 export {
   listWindowTargets,
+  type WindowCaptureRetryOptions,
   type CuaWindowInfo,
   type CuaWindowTarget,
 } from "./window-contract.js";
@@ -27,12 +28,15 @@ export {
 export {
   DomGroundingUnavailableError,
   createMockDomGroundingTransport,
+  domCandidateFingerprint,
   materializeDomGrounding,
   projectDomCssFrame,
   validateManagedBrowserTarget,
   type DomGroundingCollectRequest,
   type DomGroundingContentRect,
   type DomGroundingRawCandidate,
+  type DomSelectOptionRequest,
+  type DomSelectOptionResult,
   type DomGroundingTransport,
   type DomGroundingTransportResult,
   type DomGroundingViewportMetrics,

@@ -213,7 +213,11 @@ async function waitForDaemon(options: Options, daemon: DaemonProcess, signal: Ab
     if (daemon.exitCode !== null || daemon.signalCode !== null) {
       throw new Error("CUA daemon exited before readiness: " + (last.stderr || "no stderr"));
     }
-    last = await runExternal(options.binary, ["status", "--socket", options.socket], repoRoot, 2000);
+    // The Windows daemon can be listening before a piped `status` subprocess
+    // finishes its startup/update check; keep this probe within the overall
+    // startup deadline without rejecting a healthy daemon after two seconds.
+    const probeTimeoutMs = Math.min(8000, Math.max(1, deadline - Date.now()));
+    last = await runExternal(options.binary, ["status", "--socket", options.socket], repoRoot, probeTimeoutMs);
     if (last.code === 0 && /daemon is running/i.test(last.stdout)) return;
     await new Promise((done) => setTimeout(done, 250));
   }

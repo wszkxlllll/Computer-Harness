@@ -8,6 +8,7 @@ coverage/
 .env
 .env.*
 !.env.example
+apps/relay/relay-config.json
 *.log
 *.tsbuildinfo
 __pycache__/
@@ -24,10 +25,13 @@ cache/
 # Downloaded CUA binaries and daemon logs are local stage-0 evidence.
 .stage0/
 
-# Historical planning/audit documents stay local for provenance and are not tracked.
+# Historical archives are local by default; only reviewed subtrees are tracked.
 docs/history/*
 !docs/history/2026-09-17-roadmap-consolidation/
 !docs/history/2026-09-17-roadmap-consolidation/**
+!docs/history/2026-09-26-handoff-convergence/
+!docs/history/2026-09-26-handoff-convergence/**
+!docs/history/2026-09-26-readme-before-refresh.md
 scripts/history/
 
 .stage4-qwen38-fixture-alpha

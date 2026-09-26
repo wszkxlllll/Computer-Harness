@@ -75,6 +75,39 @@ describe("managed DOM grounding transport gate", () => {
     expect(materialized.privateElements.values().next().value?.point).toEqual({ x: 542.5, y: 515 });
   });
 
+  it("projects only bounded native-select option text and enabled state", () => {
+    const materialized = materializeDomGrounding(request, {
+      complete: true,
+      candidates: [{
+        tagName: "select",
+        ariaRole: "combobox",
+        name: "Departure",
+        frame: { x: 100, y: 100, width: 120, height: 28 },
+        visible: true,
+        interactive: true,
+        options: [{ text: "08:00", enabled: true }, { text: "09:00", enabled: false }, { text: "secret-value", enabled: true }],
+        optionsTruncated: false,
+        state: { enabled: true },
+      }],
+    });
+    expect(materialized.catalog.elements[0]).toMatchObject({ options: [{ text: "08:00", enabled: true }, { text: "09:00", enabled: false }, { text: "secret-value", enabled: true }], optionsTruncated: false });
+    expect(materialized.catalog.elements[0]).not.toHaveProperty("value");
+    const truncated = materializeDomGrounding(request, {
+      complete: true,
+      candidates: [{
+        tagName: "select",
+        ariaRole: "combobox",
+        frame: { x: 100, y: 100, width: 120, height: 28 },
+        visible: true,
+        interactive: true,
+        options: Array.from({ length: 33 }, (_, index) => ({ text: `option-${index}`, enabled: true })),
+        optionsTruncated: true,
+      }],
+    });
+    expect(truncated.catalog.elements[0]?.options).toHaveLength(32);
+    expect(truncated.catalog.elements[0]?.optionsTruncated).toBe(true);
+  });
+
   it("recomputes the projection after a resize or DPI change", () => {
     const resized = projectDomCssFrame(
       { x: 352, y: 317, width: 164, height: 30 },

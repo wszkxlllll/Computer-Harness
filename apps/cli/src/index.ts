@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ApplicationSession, createRun, createWindowTargetDiscovery, prepareManagedBrowserProfile, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, prepareManagedBrowserProfile, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
@@ -12,6 +12,8 @@ import { resolveRiskConfig, type ResolvedRiskConfig } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 import { resolveCuaWindowTargetOptions } from "./window-target-options.js";
 import { defaultManagedBrowserProfileRoot } from "./managed-browser-profile.js";
+import { validateCliArguments } from "./argument-parser.js";
+import { createJevWindowSelector } from "./window-selection-jev.js";
 
 type ModelName = AppRuntimeModel;
 type MemoryToolMode = "facts" | "entities";
@@ -54,7 +56,8 @@ interface CliOptions {
   cleanupDeadlineMs: number;
   doctorTimeoutMs: number;
   monitor: MonitorPolicyMode;
-  grounding: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+  grounding: TuiFeatureSelection["grounding"];
+  windowSelection: "local" | "jev";
   /** Explicit URL for the host-owned temporary browser; never a profile/debug endpoint. */
   managedBrowserUrl?: string;
   managedBrowserProfileMode: "ephemeral" | "persistent";
@@ -65,7 +68,7 @@ interface CliOptions {
 function parseArgs(rawArgv: readonly string[]): CliOptions {
   // pnpm's `start -- ...` forwards the separator as a literal argv entry;
   // treat it as transport syntax, not as a CLI option.
-  const argv = rawArgv[0] === "--" ? rawArgv.slice(1) : rawArgv;
+  const argv = validateCliArguments(rawArgv);
   const value = (name: string): string | undefined => {
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] : undefined;
@@ -80,10 +83,17 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   if (monitorValue !== "off" && monitorValue !== "shadow" && monitorValue !== "guidance") throw new Error("--monitor must be off, shadow, or guidance");
   if (doctor && monitorValue !== "off") throw new Error("--doctor does not run Monitor");
   const groundingValue = value("--grounding") ?? "off";
-  if (groundingValue !== "off" && groundingValue !== "uia-catalog-v1" && groundingValue !== "dom-catalog-v1" && groundingValue !== "hybrid-catalog-v1") {
-    throw new Error("--grounding must be off, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
+  if (groundingValue !== "off" && groundingValue !== "auto" && groundingValue !== "uia-catalog-v1" && groundingValue !== "dom-catalog-v1" && groundingValue !== "hybrid-catalog-v1") {
+    throw new Error("--grounding must be off, auto, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
   }
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
+  const windowSelectionValue = value("--window-selection") ?? "local";
+  if (windowSelectionValue !== "local" && windowSelectionValue !== "jev") throw new Error("--window-selection must be local or jev");
+  if (windowSelectionValue === "jev" && (!tui || computer !== "cua" || !argv.includes("--allow-window-title-sharing"))) {
+    throw new Error("Jev window selection requires --tui --computer cua and explicit --allow-window-title-sharing");
+  }
+  if (argv.includes("--allow-window-title-sharing") && windowSelectionValue !== "jev") throw new Error("--allow-window-title-sharing requires --window-selection jev");
+  if (groundingValue === "auto" && (!tui || computer !== "cua")) throw new Error("--grounding auto is available only with --tui --computer cua");
   if ((goal === undefined || goal.trim().length === 0) && !tui && !doctor && !prepareManagedBrowserProfileValue) throw new Error("--goal is required unless --tui opens the interactive home, --doctor runs a read-only CUA diagnostic, or --prepare-managed-browser-profile is used");
   if (doctor && goal !== undefined) throw new Error("--doctor cannot be combined with --goal");
   if (prepareManagedBrowserProfileValue && (doctor || tui || argv.includes("--interactive"))) throw new Error("--prepare-managed-browser-profile cannot be combined with --doctor, --tui, or --interactive");
@@ -233,6 +243,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     doctorTimeoutMs,
     monitor: monitorValue,
     grounding: groundingValue as CliOptions["grounding"],
+    windowSelection: windowSelectionValue,
     ...(managedBrowserUrl === undefined ? {} : { managedBrowserUrl }),
     managedBrowserProfileMode: managedBrowserProfileModeValue,
     ...(managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel }),
@@ -247,8 +258,16 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--recover-environment")) {
+    await runEnvironmentLeaseRecovery(process.argv.slice(2));
+    return;
+  }
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\nWhen --prepare-managed-browser-profile is used, no Run, Provider, screenshot, desktop input, cookie, storage, or credential read is performed; it only keeps a visible managed browser open for a manual login and retains the Harness-owned persistent profile after Enter/Ctrl+C. When --tui is used without --goal, the home screen accepts a pasted goal and starts fresh Runs. Press F on the home screen to choose next-Run features, including Risk Guard off/layered and grounding off/uia-catalog-v1/dom-catalog-v1/hybrid-catalog-v1. DOM/Hybrid grounding requires an explicit http(s) managed-browser URL and the shared CUA socket. Profile mode defaults to ephemeral; persistent mode uses a Harness-owned labeled profile, requires a one-time manual login by the user, never reads or prints cookie/localStorage/password/input values, and never falls back to a personal profile. Guard off skips risk evaluation, approvals and risk-model requests, but leaves schema/policy/budget/Abort/stale/window checks active. --doctor performs only redacted CUA daemon checks and never reads provider credentials. Monitor is off by default; guidance is a low-confidence proposal consumed by Runtime. Explicit --cua-window-pid/--cua-window-id use restricted background delivery (click/wait only). In TUI, press Esc then W to choose a CUA window for foreground preview; click/type/keypress/hotkey/scroll/drag/wait are available there. Window position and size are user-managed; Harness does not move/resize windows. Keep the target visible and unobscured; occlusion support and focus restoration are limited. UIA/DOM grounding is opt-in and uses the shared observation-bound click_element tool; raw UIA/DOM values, selectors, backend tokens and browser profile details remain private. Hybrid Memory retrieval requires an independent MEMORY_EMBEDDING_API_KEY and never reuses chat credentials.\n");
+    validateCliArguments(process.argv.slice(2));
+    process.stdout.write("TUI-only: --grounding auto selects UIA for native windows, DOM + UIA for a selected Harness-managed browser, and off for desktop.\n");
+    process.stdout.write("TUI-only: --window-selection jev requires --allow-window-title-sharing and TYPESAFE_API_KEY; default is local.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
+    process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
@@ -287,6 +306,9 @@ async function main(): Promise<void> {
   }
   if (options.envFile !== undefined) await loadEnvFile(options.envFile);
   if (options.tui) {
+    const windowSelector = options.windowSelection === "jev"
+      ? createJevWindowSelector(process.env.TYPESAFE_API_KEY ?? "")
+      : undefined;
     const config = toResolvedRunConfig(options, options.goal ?? "");
     const { goal: _goal, runId: _runId, ...sessionConfig } = config;
     const windowDiscovery = createWindowTargetDiscovery(sessionConfig.computer);
@@ -320,19 +342,99 @@ async function main(): Promise<void> {
         grounding: options.grounding,
       } satisfies TuiFeatureSelection,
       embeddingReady: options.memoryEmbeddingEndpoint !== undefined && (process.env.MEMORY_EMBEDDING_API_KEY?.trim().length ?? 0) > 0,
-    }, options.goal === undefined ? {} : { initialGoal: options.goal });
+    }, {
+      ...(options.goal === undefined ? {} : { initialGoal: options.goal }),
+      ...(windowSelector === undefined ? {} : { windowSelector }),
+    });
     return;
   }
   const config = toResolvedRunConfig(options, options.goal!);
-  const handle = await createRun(config, { credentials: readProviderCredentials() });
+  const { goal, runId: _runId, ...sessionConfig } = config;
+  const session = new ApplicationSession({
+    config: sessionConfig,
+    dependencies: { credentials: readProviderCredentials() },
+  });
   try {
-    await handle.start((controller, goal, markControllerStarted) => runWithCliControls(controller, goal, options.interactive, markControllerStarted));
+    const handle = await session.startRun(
+      goal,
+      {},
+      (controller, activeGoal, markControllerStarted) => runWithCliControls(controller, activeGoal, options.interactive, markControllerStarted),
+    );
+    await session.waitForActiveRun();
     const report = await handle.report();
     await writeRunReport(report, config.outputDir);
     process.stdout.write(`${JSON.stringify(report.summary, null, 2)}\n`);
   } finally {
-    await handle.close().catch(() => undefined);
+    await session.close().catch(() => undefined);
   }
+}
+
+async function runEnvironmentLeaseRecovery(rawArgs: readonly string[]): Promise<void> {
+  const valueOptions = new Set([
+    "--recovery-identity",
+    "--recovery-run-id",
+    "--recovery-lease-hash",
+    "--recovery-state",
+    "--recovery-operator",
+    "--recovery-inspection-note",
+  ]);
+  const values = new Map<string, string>();
+  let hasCommand = false;
+  let hasExternalStateAttestation = false;
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const argument = rawArgs[index];
+    if (argument === "--recover-environment") {
+      if (hasCommand) throw new Error("--recover-environment must be provided once");
+      hasCommand = true;
+      continue;
+    }
+    if (argument === "--external-state-inspected") {
+      if (hasExternalStateAttestation) throw new Error("--external-state-inspected must be provided once");
+      hasExternalStateAttestation = true;
+      continue;
+    }
+    if (argument === undefined || !valueOptions.has(argument)) throw new Error(`unsupported recovery argument: ${argument ?? "<missing>"}`);
+    if (values.has(argument)) throw new Error(`${argument} must be provided once`);
+    const value = rawArgs[index + 1];
+    if (value === undefined || value.length === 0 || value.startsWith("--")) throw new Error(`${argument} requires a non-empty value`);
+    values.set(argument, value);
+    index += 1;
+  }
+  if (!hasCommand) throw new Error("--recover-environment is required");
+  if (!hasExternalStateAttestation) throw new Error("--external-state-inspected is required after inspecting current desktop and prior Run evidence");
+  for (const name of valueOptions) if (!values.has(name)) throw new Error(`${name} is required for recovery`);
+
+  const identity = values.get("--recovery-identity")!;
+  const expectedIdentity = environmentIdentityForConfig({ kind: "cua", socketPath: "recovery-check", screenshotDir: "recovery-check" });
+  if (identity !== expectedIdentity) throw new Error(`recovery identity must match this OS physical desktop (${expectedIdentity})`);
+  const expectedRunId = values.get("--recovery-run-id")!;
+  if (!/^[a-zA-Z0-9._-]{1,160}$/u.test(expectedRunId)) throw new Error("--recovery-run-id must contain only letters, digits, dot, underscore, or hyphen");
+  if (!/^[a-f0-9]{64}$/u.test(values.get("--recovery-lease-hash")!)) throw new Error("--recovery-lease-hash must be 64 lowercase hexadecimal characters");
+  const expectedState = values.get("--recovery-state");
+  if (expectedState !== "active" && expectedState !== "pending_cleanup") throw new Error("--recovery-state must be active or pending_cleanup");
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("lease recovery requires an interactive terminal for the final confirmation");
+
+  const terminal = createInterface({ input: process.stdin, output: process.stdout });
+  let answer: string;
+  try {
+    answer = await new Promise<string>((resolveAnswer) => {
+      terminal.question(`After confirming the prior Run is disconnected and external state is reconciled, type RECOVER ${expectedRunId}: `, resolveAnswer);
+    });
+  } finally {
+    terminal.close();
+  }
+  if (answer.trim() !== `RECOVER ${expectedRunId}`) throw new Error("recovery confirmation did not match the expected Run ID");
+
+  const result = new ProcessSharedEnvironmentOwner().recoverLease({
+    identity,
+    expectedRunId,
+    expectedLeaseHash: values.get("--recovery-lease-hash")!,
+    expectedState,
+    operator: values.get("--recovery-operator")!,
+    inspectionNote: values.get("--recovery-inspection-note")!,
+    externalStateInspected: true,
+  });
+  process.stdout.write(`Lease quarantine created for Run ${result.runId}; prior lease preserved at ${result.quarantinePath}. Audit record: ${result.auditPath}. The prior Run outcome is unchanged and is not reported as successful.\n`);
 }
 
 function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConfig {
@@ -346,7 +448,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
-          grounding: options.grounding,
+          grounding: options.grounding === "auto" ? "off" : options.grounding,
           ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
           managedBrowserProfileMode: options.managedBrowserProfileMode,
           ...(options.managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel: options.managedBrowserProfileLabel }),
@@ -374,7 +476,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     riskTimeoutMs: options.riskTimeoutMs,
     cleanupDeadlineMs: options.cleanupDeadlineMs,
     monitor: options.monitor,
-    grounding: options.grounding,
+    grounding: options.grounding === "auto" ? "off" : options.grounding,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
     ...(options.qwenOutputMode === undefined ? {} : { qwenOutputMode: options.qwenOutputMode }),

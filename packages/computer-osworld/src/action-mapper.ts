@@ -21,6 +21,11 @@ export function mapActionIntent(action: ActionIntent, viewport: Viewport, keyboa
       return { kind: "type", text: action.text };
     case "keypress":
       return mapKeys(action.keys, keyboardKeys);
+    case "select_option":
+      throw new OsworldActionMappingError(
+        "select_option requires managed-browser DOM grounding and is unavailable on OSWorld",
+        "OSWORLD_SELECT_OPTION_UNSUPPORTED",
+      );
     case "scroll":
       if (!Number.isInteger(action.ticks) || action.ticks <= 0) {
         throw new OsworldActionMappingError("scroll.ticks must be a positive integer");

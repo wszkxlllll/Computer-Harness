@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import type {
   ActionId,
+  ComputerWindowCandidate,
+  ActionEffectDeclaration,
   ActionIntent,
   AssetId,
   EventId,
   GroundingBoundingBox,
+  GroundingCatalog,
   GroundingRecoveryHint,
   JsonValue,
   ModelTurn,
@@ -60,7 +63,7 @@ import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.
 import type { CommittedEventListener } from "./committed-events.js";
 import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange, type ProgressMonitorState } from "./progress-monitor.js";
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
-import { DeterministicGroundingSelector, type GroundingSelector } from "./grounding-selector.js";
+import { DeterministicGroundingSelector, type GroundingSelector, type GroundingSelectionQuery, type GroundingStructuredToolHint } from "./grounding-selector.js";
 import { finishSummaryRejectionReason } from "./finish-summary.js";
 
 const MAX_PROVIDER_RETRIES = 1;
@@ -109,9 +112,10 @@ export interface RunControllerDependencies {
    * are isolated from the run when their callback throws.
    */
   onEventCommitted?: CommittedEventListener;
+  windowHandoff?: "off" | "confirm-v1";
 }
 
-export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close";
+export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close" | "planning_module.close" | "memory_module.close";
 export type CleanupDiagnosticStatus = "timed_out";
 
 export interface CleanupDiagnostic {
@@ -120,12 +124,19 @@ export interface CleanupDiagnostic {
   status?: CleanupDiagnosticStatus;
 }
 
+class CleanupOperationFailure extends Error {
+  public constructor(public readonly operation: CleanupOperation, public readonly original: unknown) {
+    super(errorMessage(original), { cause: original });
+  }
+}
+
 type CallState = "received" | "proposed" | "executing" | "completed" | "failed" | "rejected";
 
 type RuntimeCommand =
   | {
       kind: "user_input";
       text: string;
+      expectedPendingRequestId?: string;
       resolve: () => void;
       reject: (error: unknown) => void;
     }
@@ -144,6 +155,19 @@ type RuntimeCommand =
     }
   | {
       kind: "resume";
+      resolve: () => void;
+      reject: (error: unknown) => void;
+    }
+  | {
+      kind: "window_handoff";
+      candidate: ComputerWindowCandidate;
+      expectedRequestId?: string;
+      resolve: () => void;
+      reject: (error: unknown) => void;
+    }
+  | {
+      kind: "ignore_new_window";
+      expectedRequestId?: string;
       resolve: () => void;
       reject: (error: unknown) => void;
     };
@@ -279,6 +303,8 @@ export class RunController {
   private readonly runId: RunId;
   private readonly provider: ProviderAdapter;
   private readonly computer: Computer;
+  private readonly windowHandoff: "off" | "confirm-v1";
+  private activeComputerSession: ComputerSession | undefined;
   private readonly contextCompiler: ContextCompiler;
   private readonly toolRegistry: ToolRegistry;
   private readonly policy: RuntimePolicy;
@@ -341,6 +367,7 @@ export class RunController {
     this.runId = dependencies.runId;
     this.provider = dependencies.provider;
     this.computer = dependencies.computer;
+    this.windowHandoff = dependencies.windowHandoff ?? "off";
     this.contextCompiler = dependencies.contextCompiler;
     this.toolRegistry = dependencies.toolRegistry;
     this.policy = dependencies.policy;
@@ -408,13 +435,14 @@ export class RunController {
     this.abortController.abort(new Error(reason));
   }
 
-  public submitUserInput(text: string): Promise<void> {
+  public submitUserInput(text: string, expectedPendingRequestId?: string): Promise<void> {
     if (text.trim().length === 0) {
       return Promise.reject(new Error("submitUserInput requires non-empty text"));
     }
     return this.enqueueCommand((resolve, reject) => ({
       kind: "user_input",
       text,
+      ...(expectedPendingRequestId === undefined ? {} : { expectedPendingRequestId }),
       resolve,
       reject,
     }));
@@ -439,6 +467,40 @@ export class RunController {
 
   public resume(): Promise<void> {
     return this.enqueueCommand((resolve, reject) => ({ kind: "resume", resolve, reject }));
+  }
+
+  public async listWindowHandoffCandidates(signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.listWindowHandoffCandidates === undefined) {
+      throw new Error("no window handoff is waiting for candidate discovery");
+    }
+    return this.computer.listWindowHandoffCandidates(this.activeComputerSession, signal);
+  }
+
+  public async listNewWindowHandoffCandidates(signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.listWindowHandoffCandidates === undefined) {
+      throw new Error("no window handoff is waiting for candidate discovery");
+    }
+    if (this.computer.listNewWindowHandoffCandidates === undefined) return [];
+    return this.computer.listNewWindowHandoffCandidates(this.activeComputerSession, signal);
+  }
+
+  public handoffWindow(candidate: ComputerWindowCandidate, expectedRequestId?: string): Promise<void> {
+    return this.enqueueCommand((resolve, reject) => ({
+      kind: "window_handoff",
+      candidate,
+      ...(expectedRequestId === undefined ? {} : { expectedRequestId }),
+      resolve,
+      reject,
+    }));
+  }
+
+  public ignoreNewWindowAndContinueOnCurrentTarget(expectedRequestId?: string): Promise<void> {
+    return this.enqueueCommand((resolve, reject) => ({
+      kind: "ignore_new_window",
+      ...(expectedRequestId === undefined ? {} : { expectedRequestId }),
+      resolve,
+      reject,
+    }));
   }
 
   public getSnapshot(): RunSnapshot {
@@ -474,14 +536,16 @@ export class RunController {
         throw new Error("Computer instance has unresolved cleanup from an earlier Run");
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
+      this.activeComputerSession = session;
       const restrictedToolNames = restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, this.enabledToolNames === undefined ? undefined : [...this.enabledToolNames]);
       this.enabledToolNames = restrictedToolNames === undefined ? undefined : new Set(restrictedToolNames);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 
       while (this.snapshot.status !== "finished") {
-        if (this.snapshot.status === "paused" || this.snapshot.status === "waiting_user" || this.snapshot.status === "waiting_approval") {
+        if (this.snapshot.status === "paused" || this.snapshot.status === "waiting_user" || this.snapshot.status === "waiting_approval" || this.snapshot.status === "waiting_window") {
           await this.waitForControlCommand();
+          session = this.activeComputerSession ?? session;
           if ((this.snapshot.status as string) === "running") {
             // A resume can release the waiter before a correction enqueued in
             // the same user turn is drained.  Apply queued control commands
@@ -551,6 +615,7 @@ export class RunController {
           }
           turn = pendingModelTurn.turn;
         } else {
+          if (turn === undefined) {
           const context = await this.contextCompiler.compile(
             {
               runId: this.runId,
@@ -558,6 +623,7 @@ export class RunController {
               recentEvents: this.events,
               enabledCategories: [...this.enabledCategories],
               ...(this.planningEnabled ? { plan: this.snapshot.plan } : {}),
+              ...(this.snapshot.executionSegment === undefined ? {} : { executionSegment: this.snapshot.executionSegment }),
               ...(this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
               ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
               features: this.features,
@@ -720,6 +786,7 @@ export class RunController {
             }
             continue;
           }
+          }
         }
         if (turn.type === "finish") {
           const beforeFinish = await this.drainCommands();
@@ -772,6 +839,7 @@ export class RunController {
           continue;
         }
         await this.processToolCalls(session, turn.calls);
+        // A planning/memory-only turn does not create a new Observation. Give
         if ((this.snapshot.status as string) === "paused") {
           continue;
         }
@@ -816,6 +884,7 @@ export class RunController {
     } finally {
       this.commandInbox.close();
       await this.cleanup(session);
+      this.activeComputerSession = undefined;
     }
   }
 
@@ -823,12 +892,44 @@ export class RunController {
     const deadline = Date.now() + this.cleanupDeadlineMs;
     await this.cleanupOperation("event_writer.flush", () => this.eventWriter.flush(), deadline);
     await this.cleanupOperation("event_writer.close", () => this.eventWriter.close(), deadline);
-    if (session !== undefined) {
-      await this.cleanupOperation("computer.close", () => this.computer.close(session), deadline, () => {
+    if (session !== undefined || this.computer.dispose !== undefined) {
+      const operation = session === undefined ? "computer.dispose" : "computer.close";
+      await this.cleanupOperation(operation, () => this.closeComputerResources(session), deadline, () => {
         cleanupPendingComputers.add(this.computer);
       });
     }
     this.latestObservationFingerprint = undefined;
+  }
+
+  private async closeComputerResources(session: ComputerSession | undefined): Promise<void> {
+    let closeFailure: unknown;
+    let hasCloseFailure = false;
+    let disposeFailure: unknown;
+    let hasDisposeFailure = false;
+    if (session !== undefined) {
+      try {
+        await this.computer.close(session);
+      } catch (error) {
+        closeFailure = error;
+        hasCloseFailure = true;
+      }
+    }
+    if (this.computer.dispose !== undefined) {
+      try {
+        await this.computer.dispose();
+      } catch (error) {
+        disposeFailure = error;
+        hasDisposeFailure = true;
+      }
+    }
+    if (hasCloseFailure && hasDisposeFailure) {
+      throw new AggregateError(
+        [closeFailure, disposeFailure],
+        `computer.close: ${errorMessage(closeFailure)}; computer.dispose: ${errorMessage(disposeFailure)}`,
+      );
+    }
+    if (hasCloseFailure) throw closeFailure;
+    if (hasDisposeFailure) throw new CleanupOperationFailure("computer.dispose", disposeFailure);
   }
 
   private async cleanupOperation(
@@ -855,13 +956,15 @@ export class RunController {
     if (timer !== undefined) clearTimeout(timer);
     if (result.status === "completed") return;
     if (result.status === "failed") {
-      if (operation === "computer.close") cleanupPendingComputers.add(this.computer);
-      this.reportCleanupError({ operation, message: errorMessage(result.error) });
+      const failedOperation = result.error instanceof CleanupOperationFailure ? result.error.operation : operation;
+      const message = result.error instanceof CleanupOperationFailure ? errorMessage(result.error.original) : errorMessage(result.error);
+      if (failedOperation === "computer.close" || failedOperation === "computer.dispose") cleanupPendingComputers.add(this.computer);
+      this.reportCleanupError({ operation: failedOperation, message });
       return;
     }
     onTimeout?.();
     this.reportCleanupError({ operation, message: `cleanup deadline exceeded during ${operation}`, status: "timed_out" });
-    if (operation === "computer.close") {
+    if (operation === "computer.close" || operation === "computer.dispose") {
       void settled.then((lateResult) => {
         if (lateResult.status === "completed") cleanupPendingComputers.delete(this.computer);
       });
@@ -937,11 +1040,18 @@ export class RunController {
   private async applyCommand(command: RuntimeCommand): Promise<CommandEffects> {
     // A correction/approval/explicit pause-resume changes the control
     // boundary.  Never carry a guidance or deferred-help proposal across it.
-    if (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause" || command.kind === "resume") {
+    if (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause" || command.kind === "resume" || command.kind === "window_handoff" || command.kind === "ignore_new_window") {
       this.clearMonitorPendingRecommendations();
     }
     switch (command.kind) {
       case "user_input":
+        if (command.expectedPendingRequestId !== undefined) {
+          const currentApprovalId = this.snapshot.pendingApproval?.requestId;
+          const currentQuestionId = this.snapshot.pendingUserInputRequestId;
+          if (currentApprovalId !== command.expectedPendingRequestId && currentQuestionId !== command.expectedPendingRequestId) {
+            throw new Error("user input request does not match the pending request");
+          }
+        }
         if (this.approvedPendingApproval !== undefined) {
           const approved = this.approvedPendingApproval;
           this.approvedPendingApproval = undefined;
@@ -968,6 +1078,9 @@ export class RunController {
           throw new Error(`user input is not accepted while run is ${this.snapshot.status}`);
         }
         await this.commitEvent({ type: "user.input.received", text: command.text });
+        if (this.snapshot.executionSegment?.status === "active") {
+          await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: this.snapshot.executionSegment.id, reason: "superseded_by_user_correction" } });
+        }
         this.pendingReobserve = true;
         if (this.pendingModelTurn !== undefined) {
           // Invalidation follows the deferred decision, not the transient
@@ -1020,6 +1133,64 @@ export class RunController {
         }
         await this.commitEvent({ type: "run.resumed" });
         return { correction: false };
+      case "window_handoff":
+        if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.handoffWindow === undefined) {
+          throw new Error("no window handoff is awaiting confirmation");
+        }
+        if (command.expectedRequestId !== undefined && this.snapshot.pendingWindowHandoff?.sourceActionId !== command.expectedRequestId) {
+          throw new Error("window handoff request does not match the pending request");
+        }
+        {
+          const session = await this.computer.handoffWindow(this.activeComputerSession, command.candidate, this.abortController.signal);
+          try {
+            await this.commitEvent({ type: "computer.window.handoff.completed", target: { pid: command.candidate.pid, windowId: command.candidate.windowId }, session });
+          } catch (error) {
+            // The private binding has changed. If the durable handoff event is
+            // missing, fail closed instead of accepting another GUI command.
+            this.abortController.abort(new Error("window handoff could not be recorded", { cause: error }));
+            throw error;
+          }
+          this.activeComputerSession = session;
+          this.latestObservation = undefined;
+          this.latestObservationFingerprint = undefined;
+          this.groundingCandidates.clear();
+          this.groundingRecoveryHint = undefined;
+          if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
+          if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+          this.pendingReobserve = true;
+          return { correction: true };
+        }
+      case "ignore_new_window":
+        if (this.snapshot.status !== "waiting_window" || this.snapshot.pendingWindowHandoff?.reasonCode !== "new_window_detected" ||
+            this.activeComputerSession === undefined) {
+          throw new Error("only a proactively detected window may be ignored; foreground mismatch requires choosing a target or aborting");
+        }
+        if (command.expectedRequestId !== undefined && this.snapshot.pendingWindowHandoff.sourceActionId !== command.expectedRequestId) {
+          throw new Error("window handoff request does not match the pending request");
+        }
+        {
+          const session = this.activeComputerSession;
+          const sourceActionId = this.snapshot.pendingWindowHandoff.sourceActionId;
+          await this.commitEvent({ type: "computer.window.handoff.ignored", sourceActionId });
+          // Drop every old frame/grounding reference before observing the
+          // still-bound target. No action from the completed decision is replayed.
+          this.latestObservation = undefined;
+          this.latestObservationFingerprint = undefined;
+          this.groundingCandidates.clear();
+          this.groundingRecoveryHint = undefined;
+          if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
+          if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+          this.pendingReobserve = false;
+          try {
+            await this.observeAndCommit(session);
+          } catch (error) {
+            // The waiting frame was invalidated by the ignore decision; do
+            // not let the Provider run without a replacement observation.
+            this.abortController.abort(new Error("fresh observation after ignoring a newly surfaced window failed", { cause: error }));
+            throw error;
+          }
+          return { correction: true };
+        }
     }
   }
 
@@ -1028,7 +1199,7 @@ export class RunController {
       runId: this.runId,
       session: pending.session,
       signal: this.abortController.signal,
-       ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
+      ...this.currentExecutionObservationContext(),
     };
     if (pending.definition.category === "computer") {
       if (pending.preparedAction !== undefined) {
@@ -1065,7 +1236,7 @@ export class RunController {
           );
           return;
         }
-        context = { ...context, observation: freshObservation };
+        context = { ...context, observation: freshObservation, ...this.currentExecutionObservationContext() };
         if (pending.preparedAction.action.kind === "type" || pending.preparedAction.action.kind === "keypress") {
           await this.rejectToolCall(
             pending.call.id,
@@ -1094,6 +1265,171 @@ export class RunController {
       await this.executeNonComputerCall(pending.call, pending.definition, context);
     }
     await this.flushDeferredMonitorHelp();
+  }
+
+  private isToolEnabled(name: string): boolean {
+    return this.enabledToolNames === undefined || this.enabledToolNames.has(name);
+  }
+
+  /** Internal execution view: the model still sees only the hot projection. */
+  private currentExecutionObservationContext(): Pick<ToolExecutionContext, "observation" | "rawGrounding"> {
+    const observation = this.latestObservation;
+    if (observation === undefined) return {};
+    const rawGrounding = this.groundingCandidates.get(String(observation.id));
+    return {
+      observation: this.observationForContext(observation),
+      ...(rawGrounding === undefined ? {} : { rawGrounding }),
+    };
+  }
+
+  private currentExecutionObservation(): ObservationFrame | undefined {
+    const observation = this.latestObservation;
+    if (observation === undefined) return undefined;
+    const rawGrounding = this.groundingCandidates.get(String(observation.id));
+    return rawGrounding === undefined ? this.observationForContext(observation) : { ...observation, grounding: rawGrounding };
+  }
+
+  /**
+   * Bind only a semantically matching main-provider click to the current
+   * local Segment step.  Segment intent is deliberately checked against the
+   * observation's public grounding label; a coordinate without a grounded
+   * label cannot silently claim that it attempted the step.
+   */
+  private matchCurrentExecutionSegmentAction(action: ActionIntent): { segmentId: string; stepId: string } | undefined {
+    const segment = this.snapshot.executionSegment;
+    if (segment === undefined || segment.status !== "active") return undefined;
+    const step = segment.steps[segment.cursor];
+    if (step === undefined || segment.attemptedStepIds.includes(step.id) || action.kind !== "click") return undefined;
+    const sourceObservation = this.events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> =>
+      event.type === "observation.created" && event.observation.id === action.basedOn,
+    )?.observation;
+    const catalog = this.groundingCandidates.get(String(action.basedOn)) ?? sourceObservation?.grounding;
+    if (catalog === undefined) return undefined;
+    const candidates = catalog.elements.filter((element) => element.bbox !== undefined && element.bbox.width > 0 && element.bbox.height > 0 && element.state?.enabled !== false);
+    const target = action.groundingRef === undefined
+      ? candidates
+        .filter((element) => pointInBox(action.point, element.bbox!))
+        .sort((left, right) => boxArea(left.bbox!) - boxArea(right.bbox!))[0]
+      : candidates.find((element) => element.elementRef === action.groundingRef);
+    if (target === undefined) return undefined;
+    const targetText = [target.name, target.description].filter((value): value is string => value !== undefined).join(" ");
+    return executionSegmentTextMatches([step.intent, step.completion.text].join(" "), targetText)
+      ? { segmentId: segment.id, stepId: step.id }
+      : undefined;
+  }
+
+  /**
+   * Advance only from observation-bound evidence.  Evidence by itself is not
+   * an attempt: the current step must first be bound to a real main-provider
+   * GUI action.  This prevents a pre-existing label on the page from making a
+   * Segment advance before the model actually clicked it.
+   */
+  private async reconcileExecutionSegment(observation: ObservationFrame, catalog?: import("@computer-harness/protocol").GroundingCatalog): Promise<void> {
+    const segment = this.snapshot.executionSegment;
+    if (segment === undefined || segment.status !== "active") return;
+    if (segment.computerSessionId !== observation.computerSessionId) {
+      await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: segment.id, reason: "computer_session_changed" } });
+      return;
+    }
+    const sourceObservation = this.events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> =>
+      event.type === "observation.created" && event.observation.id === segment.sourceObservationId,
+    )?.observation;
+    if (sourceObservation !== undefined) {
+      if (sourceObservation.viewport.width !== observation.viewport.width
+        || sourceObservation.viewport.height !== observation.viewport.height
+        || sourceObservation.viewport.coordinateSpace !== observation.viewport.coordinateSpace) {
+        await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: segment.id, reason: "observation_partition_changed" } });
+        return;
+      }
+    }
+    const step = segment.steps[segment.cursor];
+    if (step === undefined) {
+      await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "advanced", segmentId: segment.id, cursor: segment.steps.length, status: "completed" } });
+      return;
+    }
+    if (!segment.attemptedStepIds.includes(step.id)) return;
+    const evidenceMatched = catalog === undefined ? false : executionEvidenceMatches(step.completion, catalog);
+    if (!evidenceMatched) {
+      await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: segment.id, reason: "completion_evidence_not_observed" } });
+      return;
+    }
+    const cursor = segment.cursor + 1;
+    await this.commitEvent({
+      type: "execution.segment.updated",
+      source: "runtime",
+      mutation: { operation: "advanced", segmentId: segment.id, cursor, status: cursor >= segment.steps.length ? "completed" : "active" },
+    });
+  }
+
+  /** Redacted upper-bound diagnostic: could this coordinate click have been
+   * represented by the authoritative grounding catalog? */
+  private coordinateCoverageEvent(action: ActionIntent): Extract<RuntimeEventData, { type: "grounding.coordinate_coverage" }> | undefined {
+    if (action.kind !== "click" && action.kind !== "double_click" && action.kind !== "right_click") return undefined;
+    const observation = this.events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> => event.type === "observation.created" && event.observation.id === action.basedOn)?.observation;
+    if (observation === undefined) return undefined;
+    const catalog = this.groundingCandidates.get(String(action.basedOn)) ?? observation.grounding;
+    if (catalog === undefined) return undefined;
+    const candidates = catalog.elements.filter((candidate) => candidate.bbox !== undefined && candidate.bbox.width > 0 && candidate.bbox.height > 0 && candidate.state?.enabled !== false);
+    const containing = candidates.filter((candidate) => pointInBox(action.point, candidate.bbox!)).sort((left, right) => boxArea(left.bbox!) - boxArea(right.bbox!));
+    const matched = containing[0];
+    if (matched !== undefined) return {
+      type: "grounding.coordinate_coverage",
+      actionId: action.actionId,
+      observationId: observation.id,
+      decisionSource: "main_provider",
+      mapping: "containment",
+      matchedElementRef: matched.elementRef,
+      inHotProjection: observation.grounding?.elements.some((candidate) => candidate.elementRef === matched.elementRef) === true,
+      normalizedDistance: 0,
+    };
+    const nearest = candidates.map((candidate) => ({ candidate, distance: pointDistance(action.point, candidate.bbox!) })).sort((left, right) => left.distance - right.distance)[0];
+    const normalizedDistance = nearest === undefined ? undefined : nearest.distance / Math.max(1, Math.hypot(observation.viewport.width, observation.viewport.height));
+    if (nearest !== undefined && normalizedDistance !== undefined && normalizedDistance <= 0.12) return {
+      type: "grounding.coordinate_coverage",
+      actionId: action.actionId,
+      observationId: observation.id,
+      decisionSource: "main_provider",
+      mapping: "nearest",
+      matchedElementRef: nearest.candidate.elementRef,
+      inHotProjection: observation.grounding?.elements.some((candidate) => candidate.elementRef === nearest.candidate.elementRef) === true,
+      normalizedDistance,
+    };
+    return {
+      type: "grounding.coordinate_coverage",
+      actionId: action.actionId,
+      observationId: observation.id,
+      decisionSource: "main_provider",
+      mapping: "none",
+      inHotProjection: false,
+      ...(normalizedDistance === undefined ? {} : { normalizedDistance }),
+    };
+  }
+
+  /**
+   * Project only the selected raw element's public metadata to ActionPolicy.
+   * The evidence is explicitly untrusted: it helps a semantic assessor
+   * understand what was selected, but it never authorizes the action or
+   * changes the declared effect.
+   */
+  private groundingEvidenceForActions(actions: readonly ActionIntent[]): import("./contracts.js").GroundingEvidenceSummary[] {
+    const evidence: import("./contracts.js").GroundingEvidenceSummary[] = [];
+    for (const action of actions) {
+      if (!("groundingRef" in action) || action.groundingRef === undefined) continue;
+      const observation = this.events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> =>
+        event.type === "observation.created" && event.observation.id === action.basedOn)?.observation;
+      const catalog = this.groundingCandidates.get(String(action.basedOn)) ?? observation?.grounding;
+      const element = catalog?.elements.find((candidate) => candidate.elementRef === action.groundingRef);
+      if (element === undefined) continue;
+      evidence.push({
+        role: boundedUIEvidence(element.role, 64),
+        ...(element.name === undefined ? {} : { name: boundedUIEvidence(element.name, 160) }),
+        ...(element.description === undefined ? {} : { description: boundedUIEvidence(element.description, 240) }),
+        ...(element.source === undefined ? {} : { source: element.source }),
+        ...(element.browserRegion === undefined ? {} : { browserRegion: element.browserRegion }),
+        untrusted: true,
+      });
+    }
+    return evidence;
   }
 
   private async processToolCalls(session: ComputerSession, calls: readonly ToolCall[]): Promise<CommandEffects> {
@@ -1163,7 +1499,7 @@ export class RunController {
         runId: this.runId,
         session,
         signal: this.abortController.signal,
-         ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
+        ...this.currentExecutionObservationContext(),
       };
       for (const entry of preflight) {
         if (entry.rejection !== undefined || entry.definition?.category !== "computer") continue;
@@ -1220,6 +1556,7 @@ export class RunController {
           actions: computerPreflight.map((entry) => entry.preparedAction.action),
           decisionObservation,
           session,
+          groundingEvidence: this.groundingEvidenceForActions(computerPreflight.map((entry) => entry.preparedAction.action)),
         },
         snapshot: this.getSnapshot(),
       }, this.abortController.signal);
@@ -1322,7 +1659,7 @@ export class RunController {
         runId: this.runId,
         session: pendingTurn.session,
         signal: this.abortController.signal,
-         ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
+        ...this.currentExecutionObservationContext(),
       };
       this.throwIfAborted();
       if (entry.definition.category === "computer") {
@@ -1340,7 +1677,14 @@ export class RunController {
             return { correction: false };
           }
         }
-        await this.executeComputerCall(entry.call, entry.definition, context, pendingTurn.decisionObservationId, entry.preparedAction);
+        await this.executeComputerCall(
+          entry.call,
+          entry.definition,
+          context,
+          pendingTurn.decisionObservationId,
+          entry.preparedAction,
+          () => this.rejectPendingEntries(pendingTurn.entries, index + 1, "window handoff requested; remaining ToolCalls were not executed"),
+        );
       } else if (entry.definition.category === "control") {
         await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
@@ -1351,6 +1695,9 @@ export class RunController {
       // terminal ToolResult and post-action observation before status changes
       // to waiting_user.
       await this.flushDeferredMonitorHelp();
+      if (this.snapshot.status === "waiting_window") {
+        return { correction: false };
+      }
       if (this.snapshot.status === "waiting_user") {
         // Stop a multi-tool turn at the Inbox boundary.  The completed entry
         // is not replayed; remaining entries resume from this watermark or
@@ -1461,6 +1808,12 @@ export class RunController {
           }
         }
       }
+      if (definition.executionSegmentMutationFromResult !== undefined) {
+        const mutation = definition.executionSegmentMutationFromResult(output, context);
+        if (mutation !== undefined) {
+          await this.commitEvent({ type: "execution.segment.updated", source: "tool", callId: call.id, mutation });
+        }
+      }
       const result: ToolResult = { callId: call.id, status: "completed", output };
       await this.commitEvent({ type: "tool.call.completed", result });
       this.callStates.set(call.id, "completed");
@@ -1481,6 +1834,7 @@ export class RunController {
     context: ToolExecutionContext,
     decisionObservationId: ObservationId | undefined = this.snapshot.latestObservationId,
     prepared?: PreparedComputerAction,
+    beforeWindowHandoff?: () => Promise<void>,
   ): Promise<void> {
     this.throwIfAborted();
     const executionObservationId = this.snapshot.latestObservationId;
@@ -1489,9 +1843,10 @@ export class RunController {
     try {
       candidate = prepared ?? this.prepareComputerAction(call, definition, context, decisionObservationId);
       const action = candidate.action;
+      const executionObservation = this.currentExecutionObservation();
       validateActionIntent(action, {
         capabilities: context.session.capabilities,
-       ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
+        ...(executionObservation === undefined ? {} : { observation: executionObservation }),
         ...(executionObservationId === undefined ? {} : { executionObservationId }),
       });
     } catch (error) {
@@ -1502,6 +1857,15 @@ export class RunController {
       return;
     }
     const action = candidate.action;
+    const segmentBinding = this.matchCurrentExecutionSegmentAction(action);
+    const activeSegment = this.snapshot.executionSegment;
+    if (activeSegment?.status === "active" && segmentBinding === undefined) {
+      // A real main-provider GUI action is a replan unless it semantically
+      // targets the current Segment click step.  This is deliberately done
+      // after action preparation/validation: rejected malformed calls do not
+      // erase a still-valid local demand before they can execute anything.
+      await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: activeSegment.id, reason: "main_provider_replanned" } });
+    }
     if (this.monitorMode === "guidance" && this.monitorState !== undefined && shouldRejectRepeatedNoChange(this.monitorState, action)) {
       await this.rejectToolCall(
         call.id,
@@ -1521,6 +1885,8 @@ export class RunController {
       action,
       ...(executionObservationId === undefined ? {} : { executionObservationId }),
     });
+    const coordinateCoverage = this.coordinateCoverageEvent(action);
+    if (coordinateCoverage !== undefined) await this.commitEvent(coordinateCoverage);
     this.callStates.set(call.id, "proposed");
     this.actionCallIds.set(action.actionId, call.id);
     if (this.actionCallIds.get(action.actionId) !== call.id) {
@@ -1532,12 +1898,22 @@ export class RunController {
       action,
       ...(executionObservationId === undefined ? {} : { executionObservationId }),
     });
+    if (segmentBinding !== undefined) {
+      await this.commitEvent({
+        type: "execution.segment.updated",
+        source: "runtime",
+        mutation: { operation: "step_attempted", segmentId: segmentBinding.segmentId, stepId: segmentBinding.stepId },
+      });
+    }
     this.callStates.set(call.id, "executing");
 
     let receipt: import("@computer-harness/protocol").ActionReceipt;
     try {
       const executeOptions: ComputerExecuteOptions = executionObservationId === undefined ? {} : { executionObservationId };
-      receipt = await this.computer.execute(context.session, action, this.abortController.signal, executeOptions);
+      receipt = await this.computer.execute(context.session, action, this.abortController.signal, {
+        ...executeOptions,
+        ...(this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
+      });
     } catch (error) {
       await this.commitEvent({
         type: "runtime.error",
@@ -1572,6 +1948,28 @@ export class RunController {
     } else {
       await this.commitEvent({ type: "tool.call.failed", result });
       this.callStates.set(call.id, "failed");
+      if (this.snapshot.executionSegment?.status === "active") {
+        await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: this.snapshot.executionSegment.id, reason: "bound_computer_action_failed" } });
+      }
+    }
+    if (receipt.status === "refused" && receipt.driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
+        this.windowHandoff === "confirm-v1" && this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined) {
+      await beforeWindowHandoff?.();
+      await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "foreground_mismatch" });
+      return;
+    }
+    if (receipt.status === "completed" && action.kind !== "wait" && this.windowHandoff === "confirm-v1" &&
+        this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined &&
+        this.computer.detectNewWindowHandoffCandidates !== undefined) {
+      // Action and ToolCall receipts are durable before this read-only diff.
+      // A discovered window pauses the run; the completed action is never replayed.
+      const surfaced = await this.computer.detectNewWindowHandoffCandidates(context.session, this.abortController.signal);
+      this.throwIfAborted();
+      if (surfaced.length > 0) {
+        await beforeWindowHandoff?.();
+        await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "new_window_detected" });
+        return;
+      }
     }
     // The action and ToolCall facts are durable before taking the follow-up
     // observation. If observing the post-action state fails, the Run can be
@@ -1629,9 +2027,10 @@ export class RunController {
     this.throwIfAborted();
     const executionObservationId = this.snapshot.latestObservationId;
     const action = makeActionIntent(this.idFactory.actionId(), decisionObservationId, draft);
+    const executionObservation = this.currentExecutionObservation();
     validateActionIntent(action, {
       capabilities: context.session.capabilities,
-      ...(this.latestObservation === undefined ? {} : { observation: this.observationForContext(this.latestObservation) }),
+      ...(executionObservation === undefined ? {} : { observation: executionObservation }),
       ...(executionObservationId === undefined ? {} : { executionObservationId }),
     });
     return { action, ...(decisionObservationId === undefined ? {} : { decisionObservationId }) };
@@ -1776,23 +2175,10 @@ export class RunController {
         this.groundingCandidates.delete(oldest);
       }
     }
+    const groundingQuery = capture.grounding === undefined ? undefined : this.groundingSelectionQuery(capture.grounding);
     const grounding = capture.grounding === undefined
       ? undefined
-      : this.groundingSelector.select(capture.grounding, {
-          goal: this.goal ?? "",
-          latestUserCorrections: this.events
-            .filter((event): event is Extract<RuntimeEvent, { type: "user.input.received" }> => event.type === "user.input.received")
-            .slice(-4)
-            .map((event) => event.text),
-          ...(() => {
-            const activePlanText = this.snapshot.plan.tasks
-              .filter((task) => task.status !== "completed")
-              .map((task) => `${task.subject}: ${task.description}`)
-              .join("\n");
-            return activePlanText.length === 0 ? {} : { activePlanText };
-          })(),
-          ...(this.groundingRecoveryHint === undefined ? {} : { recoveryHint: this.groundingRecoveryHint }),
-        });
+      : this.groundingSelector.select(capture.grounding, groundingQuery!);
     const extension = capture.screenshot.mediaType === "image/jpeg" ? "jpg" : "png";
     const asset = await this.assetStore.put({
       assetId,
@@ -1818,22 +2204,40 @@ export class RunController {
       observationId,
       fingerprint: fingerprintObservation(session.id, capture),
     };
+    // A completed GUI action must first become an attempted Segment step and
+    // then be checked against fresh evidence.  Keeping this reconciliation at
+    // the observation boundary makes the same rule hold for either Computer backend.
+    if (capture.grounding !== undefined) {
+      await this.reconcileExecutionSegment(persisted.observation, capture.grounding);
+    } else {
+      await this.reconcileExecutionSegment(persisted.observation);
+    }
     return persisted.observation;
   }
 
   /**
-   * Re-project the already committed latest catalog with the current
-   * short-lived recovery hint.  This keeps the durable Observation immutable
-   * while allowing the next Context request to prefer the failed-action
-   * neighborhood; click_element refs remain valid because the adapter's
-   * private map is observation/session bound and contains the same refs.
+   * Build the selector query from the same enabled Registry projection that
+   * feeds Context/Provider. Structured hints are omitted unless the current
+   * catalog advertises the corresponding backend source; in particular a
+   * UIA-only/OSWorld catalog cannot manufacture a DOM select hint.
    */
-  private observationForContext(observation: ObservationFrame): ObservationFrame {
-    if (this.groundingRecoveryHint === undefined) return observation;
-    const candidates = this.groundingCandidates.get(String(observation.id));
-    const sourceCatalog = candidates ?? observation.grounding;
-    if (sourceCatalog === undefined) return observation;
-    const grounding = this.groundingSelector.select(sourceCatalog, {
+  private groundingSelectionQuery(catalog: GroundingCatalog): GroundingSelectionQuery {
+    const availableSources = catalog.source === "hybrid"
+      ? new Set(["dom", "uia"])
+      : new Set([catalog.source]);
+    const hints: GroundingStructuredToolHint[] = [];
+    for (const definition of this.toolRegistry.list()) {
+      if (hints.length >= 8 || definition.category !== "computer" || !this.enabledCategories.has("computer") || !this.isToolEnabled(definition.name)) continue;
+      const visible = this.toolRegistry.getForAudience(definition.name, this.toolAudience);
+      const hint = visible?.category === "computer" ? visible.groundingHint : undefined;
+      if (hint === undefined) continue;
+      const preferredSources = hint.preferredSources.filter((source) => availableSources.has(source)).slice(0, 2);
+      const preferredRoles = hint.preferredRoles.filter((role) => typeof role === "string" && role.trim().length > 0).slice(0, 8);
+      if (preferredSources.length === 0 || preferredRoles.length === 0) continue;
+      hints.push({ toolName: definition.name, preferredRoles, preferredSources });
+    }
+    const preferredRoles = [...new Set(hints.flatMap((hint) => hint.preferredRoles))].slice(0, 16);
+    return {
       goal: this.goal ?? "",
       latestUserCorrections: this.events
         .filter((event): event is Extract<RuntimeEvent, { type: "user.input.received" }> => event.type === "user.input.received")
@@ -1846,13 +2250,40 @@ export class RunController {
           .join("\n");
         return activePlanText.length === 0 ? {} : { activePlanText };
       })(),
-      recoveryHint: this.groundingRecoveryHint,
-    });
+      ...(() => {
+        const segment = this.snapshot.executionSegment;
+        const step = segment?.status === "active" ? segment.steps[segment.cursor] : undefined;
+        return step === undefined ? {} : { localExecutionIntent: `${segment?.objective ?? ""}: ${step.intent}` };
+      })(),
+      ...(preferredRoles.length === 0 ? {} : { preferredRoles }),
+      ...(hints.length === 0 ? {} : { structuredToolHints: hints }),
+      ...(this.groundingRecoveryHint === undefined ? {} : { recoveryHint: this.groundingRecoveryHint }),
+    };
+  }
+
+  /**
+   * Re-project the already committed latest catalog with the current
+   * short-lived recovery hint.  This keeps the durable Observation immutable
+   * while allowing the next Context request to prefer the failed-action
+   * neighborhood; click_element refs remain valid because the adapter's
+   * private map is observation/session bound and contains the same refs.
+   */
+  private observationForContext(observation: ObservationFrame): ObservationFrame {
+    const segment = this.snapshot.executionSegment;
+    const segmentStep = segment?.status === "active" ? segment.steps[segment.cursor] : undefined;
+    if (this.groundingRecoveryHint === undefined && segmentStep === undefined) return observation;
+    const candidates = this.groundingCandidates.get(String(observation.id));
+    const sourceCatalog = candidates ?? observation.grounding;
+    if (sourceCatalog === undefined) return observation;
+    const grounding = this.groundingSelector.select(sourceCatalog, this.groundingSelectionQuery(sourceCatalog));
     return { ...observation, grounding };
   }
 
   private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
     let outcome = data.outcome;
+    if (this.snapshot.executionSegment?.status === "active") {
+      await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: this.snapshot.executionSegment.id, reason: "run_finished" } });
+    }
     try {
       await this.markSessionMemoryScopeEnded();
     } catch (error) {
@@ -2032,20 +2463,11 @@ export class RunController {
    */
   private updateGroundingRecoveryHint(event: RuntimeEvent, output: import("./progress-monitor.js").ProgressMonitorOutput): void {
     if (event.type === "user.input.received") {
-      if (this.groundingRecoveryHint !== undefined) {
-        const localIntent = boundedRecoveryIntent(event.text);
-        if (localIntent === undefined) {
-          const { localIntent: _oldIntent, localIntentSource: _oldSource, ...withoutIntent } = this.groundingRecoveryHint;
-          this.groundingRecoveryHint = { ...withoutIntent, attempt: 1 };
-        } else {
-          this.groundingRecoveryHint = {
-            ...this.groundingRecoveryHint,
-            attempt: 1,
-            localIntent,
-            localIntentSource: "user_correction",
-          };
-        }
-      }
+      // A correction changes the local intent and invalidates the failed
+      // action's region.  Keep the correction in the normal selector query;
+      // never combine it with the old actionId/bbox and let a delegated policy
+      // request inherit that stale binding.
+      this.groundingRecoveryHint = undefined;
       return;
     }
     if (event.type === "planning.task.updated" || event.type === "run.finished") {
@@ -2053,7 +2475,10 @@ export class RunController {
       return;
     }
     if (event.type === "observation.created") {
-      if (output.evidence.some((evidence) => evidence.kind === "partition_changed")) this.groundingRecoveryHint = undefined;
+      // Every observation receives a new frame-bound grounding namespace.
+      // A prior recovery region/action is therefore stale even when the
+      // monitor fingerprint says the pixels are unchanged.
+      this.groundingRecoveryHint = undefined;
       return;
     }
     if (event.type === "monitor.transition") {
@@ -2087,7 +2512,8 @@ export class RunController {
   ): void {
     const region = action === undefined ? undefined : this.groundingRecoveryRegion(action);
     const prior = this.groundingRecoveryHint;
-    const sameRegion = region !== undefined && prior?.region !== undefined && groundingBoxesOverlap(region, prior.region) >= 0.45;
+    const sameAction = prior?.actionId !== undefined && prior.actionId === actionId;
+    const sameRegion = sameAction && region !== undefined && prior?.region !== undefined && groundingBoxesOverlap(region, prior.region) >= 0.45;
     const attempt = sameRegion && prior.reason === reason ? Math.min(16, prior.attempt + 1) : 1;
     // Monitor's own guidance/help budget remains authoritative. Grounding gets
     // at most three local attempts before it falls back to ordinary visual/UIA
@@ -2301,6 +2727,71 @@ function sameObservationFingerprint(left: ObservationFingerprint, right: Observa
     && left.digest === right.digest;
 }
 
+function pointInBox(point: { x: number; y: number }, box: GroundingBoundingBox): boolean {
+  return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+}
+
+function executionEvidenceMatches(
+  completion: import("@computer-harness/protocol").ExecutionSegmentStep["completion"],
+  catalog: import("@computer-harness/protocol").GroundingCatalog,
+): boolean {
+  const expected = normalizeExecutionEvidenceText(completion.text);
+  if (expected.length === 0) return false;
+  return catalog.elements.some((element) => {
+    const visible = normalizeExecutionEvidenceText([element.name, element.description].filter((value): value is string => value !== undefined).join(" "));
+    if (!visible.includes(expected)) return false;
+    if (completion.kind === "element_present") return true;
+    if (completion.kind === "element_selected") return element.state?.selected === true;
+    if (completion.kind === "element_expanded") return element.state?.expanded === true;
+    return element.state?.focused === true;
+  });
+}
+
+function normalizeExecutionEvidenceText(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]/gu, " ").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+}
+
+function executionSegmentTextMatches(queryText: string, targetText: string): boolean {
+  const query = normalizeExecutionEvidenceText(queryText);
+  const target = normalizeExecutionEvidenceText(targetText);
+  if (query.length < 2 || target.length < 2) return false;
+  if (query.includes(target) || target.includes(query)) return true;
+  const targetTokens = new Set(executionSegmentTokens(target));
+  const meaningfulQuery = executionSegmentTokens(query).filter((token) => !EXECUTION_SEGMENT_STOPWORDS.has(token));
+  return meaningfulQuery.some((token) => targetTokens.has(token));
+}
+
+const EXECUTION_SEGMENT_STOPWORDS = new Set([
+  "click", "double", "right", "open", "select", "choose", "expand", "focus", "press", "button", "control", "selector", "menu", "item", "station", "field", "option", "page", "window",
+  "点击", "双击", "右键", "打开", "选择", "展开", "聚焦", "按钮", "控件", "下拉", "菜单", "项目",
+]);
+
+function executionSegmentTokens(value: string): string[] {
+  const tokens: string[] = [];
+  for (const match of value.matchAll(/[\p{Script=Han}]+|[^\p{Script=Han}\p{P}\p{S}\s]+/gu)) {
+    const part = match[0]!;
+    if (/^\p{Script=Han}+$/u.test(part)) {
+      for (const size of [2, 3]) {
+        if (part.length < size) continue;
+        for (let index = 0; index <= part.length - size; index += 1) tokens.push(part.slice(index, index + size));
+      }
+    } else if (part.length >= 2) {
+      tokens.push(part);
+    }
+  }
+  return [...new Set(tokens)];
+}
+
+function boxArea(box: GroundingBoundingBox): number {
+  return box.width * box.height;
+}
+
+function pointDistance(point: { x: number; y: number }, box: GroundingBoundingBox): number {
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+  return Math.hypot(point.x - centerX, point.y - centerY);
+}
+
 function boundedRecoveryIntent(value: string): string | undefined {
   const normalized = value
     .replace(/[\u0000-\u001F\u007F]/gu, " ")
@@ -2309,6 +2800,11 @@ function boundedRecoveryIntent(value: string): string | undefined {
     .replace(/\s+/gu, " ")
     .trim();
   return normalized.length === 0 ? undefined : normalized.slice(0, 160);
+}
+
+function boundedUIEvidence(value: string, limit: number): string {
+  const normalized = value.replace(/[\u0000-\u001F\u007F]/gu, " ").replace(/\s+/gu, " ").trim();
+  return normalized.slice(0, limit);
 }
 
 function groundingBoxesOverlap(
@@ -2381,8 +2877,8 @@ function validateCompositeCallOrder(entries: readonly PreflightEntry[]): string 
   for (let index = 0; index < firstComputer; index += 1) {
     const definition = entries[index]?.definition;
     if (definition === undefined || definition.category === "control" || definition.category === "computer" ||
-      (definition.planMutationFromResult === undefined && definition.memoryMutationFromResult === undefined)) {
-      return "only Planning/Memory write calls may precede a GUI action; read tools must use a later ModelTurn";
+      (definition.planMutationFromResult === undefined && definition.memoryMutationFromResult === undefined && definition.executionSegmentMutationFromResult === undefined)) {
+      return "only Planning/Memory/ExecutionSegment write calls may precede a GUI action; read tools must use a later ModelTurn";
     }
   }
   for (let index = firstComputer; index < entries.length; index += 1) {
@@ -2417,6 +2913,7 @@ function providerRetryDelayMs(retryCount: number): number {
     PROVIDER_RETRY_DELAY_CAP_MS,
   );
 }
+
 
 function providerFailureMessage(error: unknown, retry: boolean, attempt: number): string {
   const reason = errorMessage(error);

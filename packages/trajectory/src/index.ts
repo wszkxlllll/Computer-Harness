@@ -15,6 +15,7 @@ import type {
   RunOutcome,
   RunStatus,
   PlanState,
+  ExecutionSegment,
   MemoryState,
   RuntimeEvent,
   RuntimeEventDraft,
@@ -34,6 +35,8 @@ export interface RunSnapshot {
   latestObservationId?: ObservationId;
   pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
+  pendingUserInputRequestId?: EventId;
+  pendingWindowHandoff?: { sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" };
   unresolvedActionId?: ActionId;
   createdAt?: string;
   computerOpenStartedAt?: string;
@@ -44,11 +47,21 @@ export interface RunSnapshot {
   reportedStatus?: "success" | "failure";
   modelUsage?: ModelUsage;
   plan: PlanState;
+  executionSegment?: ExecutionSegment;
   memory: MemoryState;
 }
 
 export function initialRunSnapshot(runId: RunId): RunSnapshot {
-  return { runId, status: "created", stepCount: 0, modelRequestCount: 0, guardEvaluationCount: 0, riskModelRequestCount: 0, plan: { runId, tasks: [] }, memory: { runId, facts: [], entities: [] } };
+  return {
+    runId,
+    status: "created",
+    stepCount: 0,
+    modelRequestCount: 0,
+    guardEvaluationCount: 0,
+    riskModelRequestCount: 0,
+    plan: { runId, tasks: [] },
+    memory: { runId, facts: [], entities: [] },
+  };
 }
 
 export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunSnapshot {
@@ -94,6 +107,29 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         throw new Error("computer.open.completed was already committed for this run");
       }
       return { ...snapshot, computerSession: event.session };
+    case "computer.window.handoff.requested":
+      if (snapshot.status !== "running" || snapshot.unresolvedActionId !== undefined || snapshot.computerSession === undefined) {
+        throw new Error("window handoff requires a settled action in a running Computer session");
+      }
+      return { ...snapshot, status: "waiting_window", pendingWindowHandoff: { sourceActionId: event.sourceActionId, reasonCode: event.reasonCode } };
+    case "computer.window.handoff.completed":
+      if (snapshot.status !== "waiting_window" || snapshot.pendingWindowHandoff === undefined || snapshot.computerSession === undefined ||
+          snapshot.computerSession.id === event.session.id || snapshot.computerSession.backend !== event.session.backend) {
+        throw new Error("window handoff completion requires the pending Computer session");
+      }
+      {
+        const { pendingWindowHandoff: _pendingWindowHandoff, latestObservationId: _latestObservationId, ...rest } = snapshot;
+        return { ...rest, status: "running", computerSession: event.session };
+      }
+    case "computer.window.handoff.ignored":
+      if (snapshot.status !== "waiting_window" || snapshot.pendingWindowHandoff?.reasonCode !== "new_window_detected" ||
+          snapshot.pendingWindowHandoff.sourceActionId !== event.sourceActionId) {
+        throw new Error("only the matching proactive window detection may be ignored");
+      }
+      {
+        const { pendingWindowHandoff: _pendingWindowHandoff, latestObservationId: _latestObservationId, ...rest } = snapshot;
+        return { ...rest, status: "running" };
+      }
     case "observation.created":
       if (event.observation.runId !== event.runId) {
         throw new Error(
@@ -135,6 +171,10 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
     case "tool.call.completed":
     case "tool.call.failed":
     case "action.proposed":
+      if (snapshot.status !== "running") {
+        throw new Error(`${event.type} requires running status, got ${snapshot.status}`);
+      }
+    case "grounding.coordinate_coverage":
       if (snapshot.status !== "running") {
         throw new Error(`${event.type} requires running status, got ${snapshot.status}`);
       }
@@ -242,6 +282,33 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       else tasks[index] = event.mutation.task;
       return { ...snapshot, plan: { runId: snapshot.runId, tasks } };
     }
+    case "execution.segment.updated": {
+      if (snapshot.status !== "running") {
+        throw new Error(`execution.segment.updated requires running status, got ${snapshot.status}`);
+      }
+      const mutation = event.mutation;
+      if (mutation.operation === "set") {
+        if (mutation.segment.steps.length < 1 || mutation.segment.steps.length > 4) throw new Error("execution segment must contain 1..4 steps");
+        return { ...snapshot, executionSegment: mutation.segment };
+      }
+      const current = snapshot.executionSegment;
+      if (current === undefined || current.id !== mutation.segmentId) throw new Error(`execution segment ${mutation.segmentId} is not active`);
+      if (mutation.operation === "step_attempted") {
+        if (current.steps[current.cursor]?.id !== mutation.stepId) throw new Error(`execution segment step ${mutation.stepId} is not current`);
+        return { ...snapshot, executionSegment: { ...current, attemptedStepIds: [...new Set([...current.attemptedStepIds, mutation.stepId])] } };
+      }
+      if (mutation.operation === "advanced") {
+        if (mutation.cursor < current.cursor || mutation.cursor > current.steps.length) throw new Error("execution segment cursor is invalid");
+        if (mutation.cursor > current.cursor) {
+          const currentStep = current.steps[current.cursor];
+          if (currentStep !== undefined && !current.attemptedStepIds.includes(currentStep.id)) {
+            throw new Error(`execution segment step ${currentStep.id} cannot advance before an attempted action`);
+          }
+        }
+        return { ...snapshot, executionSegment: { ...current, cursor: mutation.cursor, status: mutation.status } };
+      }
+      return { ...snapshot, executionSegment: { ...current, status: "invalidated", invalidReason: mutation.reason } };
+    }
     case "memory.updated":
       if (snapshot.status !== "running") {
         throw new Error(`memory.updated requires running status, got ${snapshot.status}`);
@@ -322,6 +389,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         ...snapshot,
         status: "waiting_user",
         pendingUserQuestion: event.question,
+        pendingUserInputRequestId: event.eventId,
       };
     case "user.input.received":
       if (snapshot.status === "waiting_approval") {
@@ -331,7 +399,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         throw new Error(`user.input.received requires running, paused, or waiting_user status, got ${snapshot.status}`);
       }
       {
-        const { pendingUserQuestion: _pendingUserQuestion, ...withoutPendingUserQuestion } = snapshot;
+        const {
+          pendingUserQuestion: _pendingUserQuestion,
+          pendingUserInputRequestId: _pendingUserInputRequestId,
+          ...withoutPendingUserQuestion
+        } = snapshot;
         return {
           ...withoutPendingUserQuestion,
           status: snapshot.status === "waiting_user" ? "running" : snapshot.status,
@@ -349,7 +421,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       ) {
         throw new Error("a succeeded run must be running with no pending interaction");
       }
-      const { pendingApproval: _pendingApproval, pendingUserQuestion: _pendingUserQuestion, ...withoutPending } =
+        const { pendingApproval: _pendingApproval, pendingUserQuestion: _pendingUserQuestion, pendingWindowHandoff: _pendingWindowHandoff, ...withoutPending } =
         snapshot;
       return {
         ...withoutPending,
@@ -623,6 +695,10 @@ const computerSessionSchema = z.object({
   }),
   openedAt: nonEmptyString,
 });
+const computerWindowIdentitySchema = z.object({
+  pid: z.number().int().positive(),
+  windowId: z.number().int().positive(),
+});
 const assetRefSchema = z.object({
   assetId: nonEmptyString,
   relativePath: nonEmptyString,
@@ -644,6 +720,10 @@ const groundingElementStateSchema = z.object({
   selected: z.boolean().optional(),
   valuePresent: z.boolean().optional(),
 });
+const groundingOptionSchema = z.object({
+  text: nonEmptyString.max(160),
+  enabled: z.boolean(),
+});
 const groundingElementSchema = z.object({
   elementRef: nonEmptyString.max(96),
   role: nonEmptyString.max(64),
@@ -653,6 +733,8 @@ const groundingElementSchema = z.object({
   state: groundingElementStateSchema.optional(),
   source: z.enum(["uia", "dom"]).optional(),
   browserRegion: z.enum(["content", "chrome", "unknown"]).optional(),
+  options: z.array(groundingOptionSchema).max(32).optional(),
+  optionsTruncated: z.boolean().optional(),
 });
 const groundingSelectionTraceSchema = z.object({
   strategy: z.enum(["deterministic-lexical-v1", "bounded-fusion-v1"]),
@@ -758,6 +840,12 @@ const actionIntentSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     ...actionBaseSchema,
+    kind: z.literal("select_option"),
+    groundingRef: nonEmptyString.max(96),
+    optionText: nonEmptyString.max(160),
+  }),
+  z.object({
+    ...actionBaseSchema,
     kind: z.literal("scroll"),
     point: pointSchema,
     direction: z.enum(["up", "down", "left", "right"]),
@@ -783,6 +871,32 @@ const planningTaskSchema = z.object({
   status: z.enum(["pending", "in_progress", "completed", "blocked"]),
   blockedBy: z.array(nonEmptyString).optional(),
 });
+const executionSegmentStepSchema = z.object({
+  id: nonEmptyString,
+  intent: nonEmptyString.max(240),
+  allowedAction: z.literal("click"),
+  completion: z.object({
+    kind: z.enum(["element_present", "element_selected", "element_expanded", "element_focused"]),
+    text: nonEmptyString.max(160),
+  }),
+});
+const executionSegmentSchema = z.object({
+  id: nonEmptyString,
+  objective: nonEmptyString.max(320),
+  steps: z.array(executionSegmentStepSchema).min(1).max(4),
+  cursor: z.number().int().nonnegative(),
+  status: z.enum(["active", "completed", "invalidated"]),
+  sourceObservationId: nonEmptyString,
+  computerSessionId: nonEmptyString,
+  attemptedStepIds: z.array(nonEmptyString).max(4),
+  invalidReason: z.string().max(240).optional(),
+});
+const executionSegmentMutationSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("set"), segment: executionSegmentSchema }),
+  z.object({ operation: z.literal("step_attempted"), segmentId: nonEmptyString, stepId: nonEmptyString }),
+  z.object({ operation: z.literal("advanced"), segmentId: nonEmptyString, cursor: z.number().int().nonnegative(), status: z.enum(["active", "completed"]) }),
+  z.object({ operation: z.literal("invalidated"), segmentId: nonEmptyString, reason: nonEmptyString.max(240) }),
+]);
 const memoryFactSchema = z.object({
   id: nonEmptyString,
   subject: z.union([
@@ -824,6 +938,7 @@ const actionGuardSummarySchema = z.discriminatedUnion("kind", [
   z.object({ ...actionBaseSchema, kind: z.literal("right_click"), point: pointSchema }),
   z.object({ ...actionBaseSchema, kind: z.literal("type"), textLength: z.number().int().nonnegative() }),
   z.object({ ...actionBaseSchema, kind: z.literal("keypress"), keys: z.array(nonEmptyString).min(1) }),
+  z.object({ ...actionBaseSchema, kind: z.literal("select_option"), groundingRef: nonEmptyString.max(96), optionText: nonEmptyString.max(160) }),
   z.object({ ...actionBaseSchema, kind: z.literal("scroll"), point: pointSchema, direction: z.enum(["up", "down", "left", "right"]), ticks: z.number().int().positive() }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
@@ -839,7 +954,7 @@ const contextTraceSchema = z.object({
   runId: nonEmptyString,
   stablePrefixHash: nonEmptyString,
   fixedBlocks: z.array(z.object({
-    name: z.enum(["system", "goal", "tools", "plan", "memory"]),
+    name: z.enum(["system", "goal", "tools", "plan", "execution_segment", "memory"]),
     estimatedTokens: z.number().int().nonnegative(),
     included: z.boolean(),
   })),
@@ -916,6 +1031,9 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("computer.open.completed"),
     session: computerSessionSchema,
   }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.requested"), sourceActionId: nonEmptyString, reasonCode: z.enum(["foreground_mismatch", "new_window_detected"]) }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.completed"), target: computerWindowIdentitySchema, session: computerSessionSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.ignored"), sourceActionId: nonEmptyString }),
   z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),
   z.object({
     ...eventBaseSchema,
@@ -998,6 +1116,17 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     ...eventBaseSchema,
+    type: z.literal("grounding.coordinate_coverage"),
+    actionId: nonEmptyString,
+    observationId: nonEmptyString,
+    decisionSource: z.literal("main_provider").optional(),
+    mapping: z.enum(["containment", "nearest", "none"]),
+    matchedElementRef: nonEmptyString.max(96).optional(),
+    inHotProjection: z.boolean(),
+    normalizedDistance: z.number().finite().nonnegative().optional(),
+  }),
+  z.object({
+    ...eventBaseSchema,
     type: z.literal("action.guard.evaluated"),
     callIds: z.array(nonEmptyString).min(1),
     actions: z.array(actionGuardSummarySchema).min(1),
@@ -1033,6 +1162,13 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       z.object({ operation: z.literal("created"), task: planningTaskSchema }),
       z.object({ operation: z.literal("updated"), task: planningTaskSchema }),
     ]),
+  }),
+  z.object({
+    ...eventBaseSchema,
+    type: z.literal("execution.segment.updated"),
+    callId: nonEmptyString.optional(),
+    source: z.enum(["tool", "runtime"]),
+    mutation: executionSegmentMutationSchema,
   }),
   z.object({
     ...eventBaseSchema,

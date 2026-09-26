@@ -23,8 +23,15 @@ param(
   [ValidateSet('ephemeral', 'persistent')]
   [string] $ManagedBrowserProfileMode,
   [string] $ManagedBrowserProfileLabel,
+  [ValidateSet('local', 'jev')]
+  [string] $WindowSelector,
+  [switch] $ShareWindowTitles,
   [string] $CuaWindowPid,
   [string] $CuaWindowId,
+  [ValidateSet('off', 'auto', 'uia-catalog-v1', 'dom-catalog-v1', 'hybrid-catalog-v1')]
+  [string] $Grounding,
+  [ValidateSet('native_tools', 'strict_json')]
+  [string] $QwenOutputMode,
   [switch] $AllowExistingOutputDir,
   [switch] $Build
 )
@@ -34,7 +41,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $repoRoot '.harness.local.psd1'
 
 if (-not (Test-Path -LiteralPath $configPath)) {
-  throw "Missing .harness.local.psd1. Copy .harness.local.example.psd1 and fill the machine-local paths."
+  throw "Missing .harness.local.psd1. From the repository root run 'Copy-Item .harness.local.example.psd1 .harness.local.psd1', then set NodePath, EnvFile, CuaBinary, CuaSocket, Model and OutputRoot in the copy. Keep API keys in the referenced .env file."
 }
 
 $config = Import-PowerShellDataFile -LiteralPath $configPath
@@ -80,11 +87,15 @@ $cuaSocket = Require-Config 'CuaSocket'
 $selectedModel = if ($Model) { $Model } else { Require-Config 'Model' }
 $selectedPreset = if ($Preset) { $Preset } elseif ($config['Preset']) { [string] $config['Preset'] } else { 'assisted' }
 $selectedRiskGuard = if ($RiskGuard) { $RiskGuard } elseif ($selectedPreset -eq 'research') { 'off' } else { 'layered' }
+$selectedWindowSelector = if ($WindowSelector) { $WindowSelector } elseif ($config['WindowSelector']) { [string] $config['WindowSelector'] } else { 'local' }
+$selectedShareWindowTitles = $ShareWindowTitles -or $config['ShareWindowTitles'] -eq $true
+$selectedBrowserMode = if ($ManagedBrowserProfileMode) { $ManagedBrowserProfileMode } else { [string] $config['ManagedBrowserProfileMode'] }
+$selectedBrowserLabel = if ($ManagedBrowserProfileLabel) { $ManagedBrowserProfileLabel } else { [string] $config['ManagedBrowserProfileLabel'] }
 function Get-ManagedBrowserArguments {
   if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) {
     $profileOnly = [System.Collections.Generic.List[string]]::new()
-    if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { [void]$profileOnly.Add('--managed-browser-profile-mode'); [void]$profileOnly.Add($ManagedBrowserProfileMode) }
-    if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { [void]$profileOnly.Add('--managed-browser-profile-label'); [void]$profileOnly.Add($ManagedBrowserProfileLabel) }
+    if (-not [string]::IsNullOrWhiteSpace($selectedBrowserMode)) { [void]$profileOnly.Add('--managed-browser-profile-mode'); [void]$profileOnly.Add($selectedBrowserMode) }
+    if (-not [string]::IsNullOrWhiteSpace($selectedBrowserLabel)) { [void]$profileOnly.Add('--managed-browser-profile-label'); [void]$profileOnly.Add($selectedBrowserLabel) }
     return $profileOnly.ToArray()
   }
   $parsed = $null
@@ -93,8 +104,8 @@ function Get-ManagedBrowserArguments {
   }
   $result = [System.Collections.Generic.List[string]]::new()
   [void]$result.Add('--managed-browser-url'); [void]$result.Add($ManagedBrowserUrl.Trim())
-  if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileMode)) { [void]$result.Add('--managed-browser-profile-mode'); [void]$result.Add($ManagedBrowserProfileMode) }
-  if (-not [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) { [void]$result.Add('--managed-browser-profile-label'); [void]$result.Add($ManagedBrowserProfileLabel) }
+  if (-not [string]::IsNullOrWhiteSpace($selectedBrowserMode)) { [void]$result.Add('--managed-browser-profile-mode'); [void]$result.Add($selectedBrowserMode) }
+  if (-not [string]::IsNullOrWhiteSpace($selectedBrowserLabel)) { [void]$result.Add('--managed-browser-profile-label'); [void]$result.Add($selectedBrowserLabel) }
   return $result.ToArray()
 }
 $cuaWindowArguments = Get-CuaWindowArguments
@@ -210,8 +221,10 @@ function Get-PresetArguments([string] $Name) {
 
 function Get-ModelArguments {
   if ($selectedModel -eq 'qwen3.8-flash') {
-    return @('--qwen-coordinate-mode', 'normalized_1000', '--qwen-thinking', 'low', '--qwen-output-mode', 'strict_json')
+    $outputMode = if ([string]::IsNullOrWhiteSpace($QwenOutputMode)) { 'strict_json' } else { $QwenOutputMode }
+    return @('--qwen-coordinate-mode', 'normalized_1000', '--qwen-thinking', 'low', '--qwen-output-mode', $outputMode)
   }
+  if (-not [string]::IsNullOrWhiteSpace($QwenOutputMode)) { throw '-QwenOutputMode is only valid with qwen3.8-flash.' }
   return @()
 }
 
@@ -249,6 +262,7 @@ function Show-Check {
   Write-Output "Model      : $selectedModel"
   Write-Output "Preset     : $selectedPreset"
   Write-Output "Risk Guard : $selectedRiskGuard"
+  Write-Output "Window selection: $selectedWindowSelector; title sharing: $selectedShareWindowTitles"
   Write-Output "Output root: $outputRoot"
   Write-Output "Secrets are loaded from the local env file; no system-wide variables are required."
 }
@@ -284,7 +298,7 @@ if ($Command -eq 'doctor') {
 
 if ($Command -eq 'browser-login') {
   if ([string]::IsNullOrWhiteSpace($ManagedBrowserUrl)) { throw "-Command browser-login requires -ManagedBrowserUrl <http(s)-url>." }
-  if ($ManagedBrowserProfileMode -ne 'persistent' -or [string]::IsNullOrWhiteSpace($ManagedBrowserProfileLabel)) {
+  if ($selectedBrowserMode -ne 'persistent' -or [string]::IsNullOrWhiteSpace($selectedBrowserLabel)) {
     throw "-Command browser-login requires -ManagedBrowserProfileMode persistent and -ManagedBrowserProfileLabel <label>."
   }
   if (-not (Test-CuaReady)) { throw 'CUA daemon is not ready; start it explicitly before browser-login.' }
@@ -357,6 +371,11 @@ $arguments = @(
   '--risk-guard', $selectedRiskGuard
 )
 if ($selectedRiskGuard -eq 'off') { $arguments += '--confirm-risk-guard-off' }
+if (-not [string]::IsNullOrWhiteSpace($Grounding)) { $arguments += @('--grounding', $Grounding) }
+if ($selectedWindowSelector -eq 'jev' -and $Command -eq 'tui') {
+  if (-not $selectedShareWindowTitles) { throw 'Jev window selection requires explicit -ShareWindowTitles or local ShareWindowTitles = $true.' }
+  $arguments += @('--window-selection', 'jev', '--allow-window-title-sharing')
+}
 $arguments += Get-ModelArguments
 $arguments += Get-PresetArguments $selectedPreset
 $arguments += $cuaWindowArguments
@@ -369,7 +388,9 @@ if (-not [string]::IsNullOrWhiteSpace($embeddingEndpoint)) {
 
 if ($Command -eq 'tui') {
   $arguments += '--tui'
-  Write-Output "Starting TUI with preset '$selectedPreset' and Risk Guard '$selectedRiskGuard'. Press F on the home screen to change the next Run."
+  $guardState = if ($selectedRiskGuard -eq 'layered') { 'ON (layered)' } else { 'OFF (explicit)' }
+  Write-Output "TUI setup: model '$selectedModel', preset '$selectedPreset', Risk Guard $guardState."
+  Write-Output "Home: enter a goal and press Enter; D or PageDown opens details (Esc returns); F reviews advanced options. To choose a CUA window, press Esc then W."
   $tuiExit = 1
   try {
     & $nodePath @arguments

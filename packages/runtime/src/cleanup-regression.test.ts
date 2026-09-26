@@ -119,6 +119,23 @@ class UnknownSideEffectComputer extends ControlledComputer {
   }
 }
 
+class LateDisposeComputer extends ControlledComputer {
+  public disposeMode: "normal" | "late" = "late";
+  private lateDisposeResolve: (() => void) | undefined;
+
+  public async dispose(): Promise<void> {
+    if (this.disposeMode === "late") {
+      await new Promise<void>((resolve) => { this.lateDisposeResolve = resolve; });
+    }
+  }
+
+  public finishLateDispose(): void {
+    const resolve = this.lateDisposeResolve;
+    this.lateDisposeResolve = undefined;
+    resolve?.();
+  }
+}
+
 const assets: AssetStore = {
   async put(input) {
     return { assetId: input.assetId, relativePath: input.relativePath, mediaType: input.mediaType, byteLength: input.data.length };
@@ -244,6 +261,23 @@ describe("RunController cleanup deadlines", () => {
     computer.closeMode = "normal";
     const reusable = makeController(new ScriptedProvider([{ type: "finish", summary: "reusable" }]), computer, new ControlledWriter());
     await expect(reusable.start("reuse after close completed")).resolves.toBe("succeeded");
+    expect(computer.openCalls).toBe(2);
+  });
+
+  it("allows reuse after a timed-out Computer.dispose eventually completes", async () => {
+    vi.useFakeTimers();
+    const computer = new LateDisposeComputer();
+    const first = makeController(new ScriptedProvider([{ type: "finish", summary: "done" }]), computer, new ControlledWriter());
+    const firstOutcome = first.start("late dispose");
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(firstOutcome).resolves.toBe("succeeded");
+
+    computer.finishLateDispose();
+    await Promise.resolve();
+    await Promise.resolve();
+    computer.disposeMode = "normal";
+    const reusable = makeController(new ScriptedProvider([{ type: "finish", summary: "reused" }]), computer, new ControlledWriter());
+    await expect(reusable.start("reuse after dispose completed")).resolves.toBe("succeeded");
     expect(computer.openCalls).toBe(2);
   });
 

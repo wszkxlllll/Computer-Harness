@@ -28,18 +28,24 @@ export async function buildRunReport(
   const fixture = await readFixtureResult(config.fixtureResult);
   const memoryRetrieval = config.memory === "off" ? "off" : config.memoryRetrieval ?? "lexical";
   const managedGrounding = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
+  const externalComputer = config.computer.kind === "external" ? config.computer : undefined;
+  const completedWindowHandoffs = events.filter((event): event is Extract<RuntimeEvent, { type: "computer.window.handoff.completed" }> => event.type === "computer.window.handoff.completed");
+  const finalWindow = completedWindowHandoffs.at(-1)?.target;
   const summary = {
     runId,
     goal: config.goal,
-    model: config.model,
-    computer: config.computer.kind,
-    computerTarget: config.computer.kind === "cua"
+    model: typeof config.model === "string" ? config.model : { kind: config.model.kind, id: config.model.id },
+    computer: externalComputer === undefined ? config.computer.kind : { kind: externalComputer.kind, id: externalComputer.id },
+    computerTarget: externalComputer !== undefined
+      ? { mode: "external", id: externalComputer.id }
+      : config.computer.kind === "cua"
       ? managedGrounding
         ? { mode: "managed-browser", deliveryMode: config.computer.windowDeliveryMode ?? "foreground" }
         : config.computer.windowTarget === undefined
         ? { mode: "desktop" }
         : { mode: "window", pid: config.computer.windowTarget.pid, windowId: config.computer.windowTarget.windowId, deliveryMode: config.computer.windowDeliveryMode ?? "background" }
       : { mode: "osworld" },
+    ...(finalWindow === undefined ? {} : { finalComputerTarget: { mode: "window", ...finalWindow } }),
     maxSteps: config.maxSteps,
     maxModelRequests: config.maxModelRequests,
     coordinateMode: config.qwenCoordinateMode ?? null,
@@ -52,6 +58,7 @@ export async function buildRunReport(
     batching: config.batching,
     monitor: config.monitor ?? "off",
     grounding: config.grounding ?? "off",
+    windowHandoff: config.windowHandoff ?? "off",
     cleanupDeadlineMs: config.cleanupDeadlineMs,
     riskProfile: config.riskProfile,
     riskGuard: config.riskGuard,
@@ -86,6 +93,8 @@ export async function buildRunReport(
       budgetRuntimeErrors: events.filter((event) => event.type === "runtime.error" && event.category === "budget").length,
       argumentRejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected" && /invalid arguments|invalid GUI action/iu.test(event.reason)).length,
       toolExecutionFailed: events.filter((event) => event.type === "tool.call.failed").length,
+      windowHandoffsRequested: events.filter((event) => event.type === "computer.window.handoff.requested").length,
+      windowHandoffsCompleted: completedWindowHandoffs.length,
       providerFailed: events.filter((event) => event.type === "model.request.failed").length,
       runtimeErrors: events.filter((event) => event.type === "runtime.error").length,
       providerErrors: events

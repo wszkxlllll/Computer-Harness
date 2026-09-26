@@ -7,6 +7,7 @@ import {
   type MemoryEntity,
   type MemoryFact,
   type MemoryMutation,
+  type RunId,
   type MemorySubject,
 } from "@computer-harness/protocol";
 import type { NonComputerToolDefinition } from "@computer-harness/runtime";
@@ -40,10 +41,15 @@ export type MemoryToolMode = "facts" | "entities";
 export interface MemoryToolOptions {
   /** When present, exposes the bounded model-facing memory_search tool. */
   readonly retrieval?: HybridMemoryRecallService;
+  /** Let app-runtime route committed mutations through the Run module. */
+  readonly afterMemoryCommit?: false | ((runId: RunId, mutation: MemoryMutation) => Promise<void>);
 }
 
 /** Model proposes semantic changes; Runtime supplies IDs and event provenance. */
 export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "facts", options: MemoryToolOptions = {}): readonly NonComputerToolDefinition[] {
+  const afterMemoryCommit = options.afterMemoryCommit === false
+    ? undefined
+    : options.afterMemoryCommit ?? (async (runId: RunId, mutation: MemoryMutation) => { await applyMemoryMutation(store, options.retrieval, runId, mutation); });
   const tools: NonComputerToolDefinition[] = [
     {
       name: "memory_get",
@@ -99,17 +105,17 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
     },
     {
       name: "memory_write_fact",
-      description: "Remember one concise fact needed later in this run. Use only for durable task constraints or GUI facts that may leave the recent context; do not duplicate plan progress or record every click.",
+      description: "Visible state is not stable. Write only context-loss, cross-stage, or final compare/summary facts; do not copy the original Goal or Plan. If the same ModelTurn creates a task, do not use task retention until task_create returns an id; then pass it in relatedTaskIds. Skip the write or use non-task retention only for a truly run-stable fact. Independent same-turn GUI writes remain allowed; skip clicks.",
       category: "side",
       inputSchema: {
         type: "object",
         properties: {
-          key: { type: "string", minLength: 1, maxLength: MAX_MEMORY_KEY_LENGTH, description: "Stable fact key, such as target_file or saved." },
-          value: { type: "string", maxLength: MAX_MEMORY_VALUE_LENGTH, description: "Short factual value." },
+          key: { type: "string", minLength: 1, maxLength: MAX_MEMORY_KEY_LENGTH, description: "Key for an observed result, entity, or option needed after recent context; do not restate the original Goal or Plan." },
+          value: { type: "string", maxLength: MAX_MEMORY_VALUE_LENGTH, description: "Short observed value for later cross-stage use or final comparison; do not copy Goal/Plan text or click progress." },
           scope: { type: "string", enum: ["run", "computer_session"], description: "Applicability scope; Runtime supplies the real session id." },
-          retentionClass: { type: "string", enum: ["stable", "task", "short_lived"], description: "Recall policy classification, not truth or authorization." },
+          retentionClass: { type: "string", enum: ["stable", "task", "short_lived"], description: "Recall policy, not truth or authorization. A task value requires a task id returned by task_create in relatedTaskIds; do not use task retention in that create turn." },
           entityId: { type: "string", minLength: 1, maxLength: MAX_MEMORY_ID_LENGTH, description: "Optional entity id; omit for a run-level fact." },
-          relatedTaskIds: { type: "array", maxItems: MAX_RELATED_TASK_IDS, items: { type: "string", minLength: 1, maxLength: MAX_RELATED_TASK_ID_LENGTH } },
+          relatedTaskIds: { type: "array", maxItems: MAX_RELATED_TASK_IDS, description: "Existing ids returned by task_create/task_list; use them only after the task-create result.", items: { type: "string", minLength: 1, maxLength: MAX_RELATED_TASK_ID_LENGTH } },
         },
         required: ["key", "value"],
         additionalProperties: false,
@@ -142,7 +148,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
           : { operation: "supersede_fact", factId: existing.id, replacement: fact }) as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readFactMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     },
     {
       name: "memory_mark_fact_needs_check",
@@ -169,7 +175,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         return { operation: "mark_fact_needs_check", factId, reason: "manual_review" } as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readFactMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     },
   ];
   if (options.retrieval !== undefined) {
@@ -252,7 +258,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         return { operation: "upsert_entity", entity } as unknown as JsonValue;
       },
       memoryMutationFromResult: (output) => readEntityMutation(output),
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     });
     tools.push({
       name: "memory_list",
@@ -302,7 +308,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
         if (mutation.operation !== "invalidate_entity") throw new Error("memory entity invalidation has invalid mutation");
         return mutation;
       },
-      afterMemoryCommit: async (mutation, context) => { await applyMemoryMutation(store, options.retrieval, context.runId, mutation); },
+      ...(afterMemoryCommit === undefined ? {} : { afterMemoryCommit: async (mutation, context) => { await afterMemoryCommit(context.runId, mutation); } }),
     });
   }
   return tools;

@@ -1,0 +1,15 @@
+{
+  "publicOrigin": "https://relay.example.com",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "webRoot": "../web/dist",
+  "requestTimeoutMs": 45000,
+  "hostCredentials": [
+    {
+      "hostId": "replace-with-a-random-host-id",
+      "credential": "REPLACE_WITH_A_RANDOM_32_BYTE_BASE64URL_SECRET"
+    }
+  ]
+}

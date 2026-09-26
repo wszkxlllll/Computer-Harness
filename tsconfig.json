@@ -11,7 +11,10 @@
     { "path": "packages/provider-glm" },
     { "path": "packages/provider-qwen" },
     { "path": "packages/app-runtime" },
+    { "path": "packages/relay-connector" },
     { "path": "apps/cli" },
+    { "path": "apps/relay" },
+    { "path": "apps/host" },
     { "path": "packages/computer-cua" },
     { "path": "packages/computer-osworld" }
   ]

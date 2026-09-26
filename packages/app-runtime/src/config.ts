@@ -1,5 +1,5 @@
-import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
-import type { PlanStore } from "@computer-harness/planning";
+import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryRunModule, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
+import type { PlanStore, PlanningRunModule } from "@computer-harness/planning";
 import type { RunId, RunOutcome } from "@computer-harness/protocol";
 import type {
   ActionPolicy,
@@ -24,18 +24,39 @@ import type { RunEventFeed } from "./event-feed.js";
 
 export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash";
 export type AppRuntimeRiskModel = "off" | "same" | AppRuntimeModel;
+/** Explicit adapter identity for a Provider supplied by the application. */
+export interface ExternalProviderDescriptor {
+  readonly kind: "external";
+  readonly id: string;
+}
+export type RunModel = AppRuntimeModel | ExternalProviderDescriptor;
 export type MemoryRetrievalMode = "off" | "lexical" | "hybrid";
+
+export interface PlanningRunModuleFactoryOptions {
+  readonly runId: RunId;
+  readonly rootDir: string;
+}
+
+export interface MemoryRunModuleFactoryOptions {
+  readonly runId: RunId;
+  readonly rootDir: string;
+  readonly mode: MemoryToolMode;
+  readonly config: ResolvedRunConfig;
+  readonly credentials: ProviderCredentials;
+}
 
 /** JSON-safe configuration after CLI parsing and environment resolution. */
 export interface ResolvedRunConfig {
   runId?: RunId;
   goal: string;
-  model: AppRuntimeModel;
+  model: RunModel;
   computer: ComputerBackendConfig;
   outputDir: string;
   maxSteps: number;
   maxModelRequests: number;
   planning: boolean;
+  /** Explicit opt-in for the unfinished local execution-segment experiment. */
+  executionSegments?: "off" | "segments-v1";
   memory: "off" | MemoryToolMode;
   /** Optional for backwards-compatible fixtures; app defaults to lexical when Memory is enabled. */
   memoryRetrieval?: MemoryRetrievalMode;
@@ -50,6 +71,8 @@ export interface ResolvedRunConfig {
   riskGuard: "off" | "layered";
   /** Defaults to off; DOM/hybrid require an explicit managedBrowserUrl. */
   grounding?: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+  /** Interactive native-window handoff; off unless a host explicitly opts in. */
+  windowHandoff?: "off" | "confirm-v1";
   riskModel: AppRuntimeRiskModel;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;
@@ -75,7 +98,7 @@ export interface ProviderCredentials {
 }
 
 export interface ProviderFactoryOptions {
-  model: AppRuntimeModel;
+  model: RunModel;
   config: ResolvedRunConfig;
   assetReader: AssetReader;
   outputDir: string;
@@ -102,12 +125,20 @@ export type ComputerFactory = (options: ComputerFactoryOptions) => Promise<impor
 
 export interface RunDependencies {
   credentials?: ProviderCredentials;
+  /** Returned Providers belong to one Run; create fresh adapters and self-clean if construction rejects. */
   createProvider?: ProviderFactory;
+  /** Returned Computers belong to one Run; self-clean rejected construction and use Computer.dispose for failed-open resources. */
   createComputer?: ComputerFactory;
   computerFactoryDependencies?: ComputerFactoryDependencies;
   createEventWriter?: (path: string, runId: RunId) => RunEventWriter;
   createAssetStore?: (rootDir: string) => AssetStore & AssetReader;
+  /** Return a fresh Run-owned module. app-runtime calls its optional close() through bounded cleanup. */
+  createPlanningModule?: (options: PlanningRunModuleFactoryOptions) => PlanningRunModule;
+  /** Return a fresh Run-owned module; app-runtime closes it through bounded cleanup. */
+  createMemoryModule?: (options: MemoryRunModuleFactoryOptions) => MemoryRunModule;
+  /** Legacy persistence seam. Prefer createPlanningModule to replace tools, materialization and Context together. */
   createPlanStore?: (rootDir: string) => PlanStore;
+  /** Legacy persistence seam. Prefer createMemoryModule to replace tools, materialization and Context together. */
   createMemoryStore?: (rootDir: string) => MemoryStore;
   /** Application-bound provider seam; Runtime does not construct a default Memory backend. */
   createMemoryEmbeddingProvider?: (options: {

@@ -1,0 +1,21 @@
+{
+  "name": "@computer-harness/relay-connector",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./protocol": "./dist/protocol.js",
+    "./routing": "./dist/routing.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@computer-harness/app-runtime": "workspace:*",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1"
+  }
+}

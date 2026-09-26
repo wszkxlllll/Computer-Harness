@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Computer } from "@computer-harness/runtime";
+import { createDefaultToolRegistry, type Computer } from "@computer-harness/runtime";
 import type { ComputerSessionDescriptor } from "@computer-harness/protocol";
 import type { DomGroundingTransport, ManagedBrowserHost, ManagedBrowserHostOptions, ManagedBrowserTarget, CuaBootstrapSession } from "@computer-harness/computer-cua";
-import { createComputer } from "./computers.js";
+import { createComputer, prepareComputerRunAssembly } from "./computers.js";
 
 const managedTarget: ManagedBrowserTarget = {
   kind: "managed-chromium",
@@ -21,6 +21,80 @@ const managedSession: ComputerSessionDescriptor = {
   capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
   openedAt: "2026-09-21T00:00:00.000Z",
 };
+
+describe("prepareComputerRunAssembly", () => {
+  it("keeps CUA grounding and window tool limits with Computer assembly", () => {
+    const registry = createDefaultToolRegistry();
+    const click = registry.get("click");
+    if (click === undefined) throw new Error("default registry is missing click");
+    registry.register({ ...click, name: "unverified_computer_tool" });
+
+    const desktop = prepareComputerRunAssembly({ kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots" }, "off");
+    expect(desktop.enabledToolNames(registry)).toBeUndefined();
+    expect(desktop.groundingTools).toEqual([]);
+
+    const backgroundWindow = prepareComputerRunAssembly({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      windowTarget: { pid: 1234, windowId: 5678 },
+    }, "off");
+    const backgroundNames = backgroundWindow.enabledToolNames(registry);
+    expect(backgroundNames).toEqual(expect.arrayContaining(["click", "wait", "terminate"]));
+    expect(backgroundNames).not.toContain("type");
+    expect(backgroundNames).not.toContain("double_click");
+    expect(backgroundNames).not.toContain("unverified_computer_tool");
+
+    const foregroundWindow = prepareComputerRunAssembly({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      windowTarget: { pid: 1234, windowId: 5678 },
+      windowDeliveryMode: "foreground",
+    }, "off");
+    const foregroundNames = foregroundWindow.enabledToolNames(registry);
+    expect(foregroundNames).toEqual(expect.arrayContaining(["click", "wait", "type", "keypress", "hotkey", "drag", "scroll"]));
+    expect(foregroundNames).not.toContain("double_click");
+    expect(foregroundNames).not.toContain("unverified_computer_tool");
+
+    const uia = prepareComputerRunAssembly({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      windowTarget: { pid: 1234, windowId: 5678 },
+    }, "uia-catalog-v1");
+    expect(uia.groundingTools.map((tool) => tool.name)).toEqual(["click_element"]);
+    const uiaRegistry = createDefaultToolRegistry();
+    uiaRegistry.registerMany(uia.groundingTools);
+    expect(uia.enabledToolNames(uiaRegistry)).toContain("click_element");
+    expect(uia.enabledToolNames(uiaRegistry)).not.toContain("select_option");
+
+    const managed = prepareComputerRunAssembly({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      managedBrowserUrl: "https://example.test",
+    }, "dom-catalog-v1");
+    expect(managed.config).toMatchObject({ grounding: "dom-catalog-v1", windowDeliveryMode: "foreground" });
+    expect(managed.groundingTools.map((tool) => tool.name).sort()).toEqual(["click_element", "select_option"]);
+    const managedRegistry = createDefaultToolRegistry();
+    const managedClick = managedRegistry.get("click");
+    if (managedClick === undefined) throw new Error("default registry is missing click");
+    managedRegistry.register({ ...managedClick, name: "unverified_computer_tool" });
+    managedRegistry.registerMany(managed.groundingTools);
+    expect(managed.enabledToolNames(managedRegistry)).toEqual(expect.arrayContaining(["click", "wait", "type", "click_element", "select_option"]));
+    expect(managed.enabledToolNames(managedRegistry)).not.toContain("unverified_computer_tool");
+  });
+
+  it("rejects unsupported grounding before Computer or Run resources are created", () => {
+    expect(() => prepareComputerRunAssembly({ kind: "osworld", bridgeUrl: "http://127.0.0.1:5000" }, "dom-catalog-v1"))
+      .toThrow(/requires the CUA computer/iu);
+    expect(() => prepareComputerRunAssembly({ kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots" }, "uia-catalog-v1"))
+      .toThrow(/explicit CUA window target/iu);
+    expect(() => prepareComputerRunAssembly({ kind: "external", id: "mock" }, "uia-catalog-v1"))
+      .toThrow(/external Computer/iu);
+  });
+});
 
 function managedFixture(options: { failStart?: boolean; abortDelegateOpen?: boolean } = {}) {
   const calls: { bootstrapOpen: number; bootstrapClose: number; hostConstruct: number; hostStart: number; hostClose: number; delegateConstruct: number; delegateOpen: number; delegateClose: number; delegateWindowDeliveryMode?: unknown } = { bootstrapOpen: 0, bootstrapClose: 0, hostConstruct: 0, hostStart: 0, hostClose: 0, delegateConstruct: 0, delegateOpen: 0, delegateClose: 0 };

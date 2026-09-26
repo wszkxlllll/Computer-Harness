@@ -18,13 +18,42 @@ import {
   type ProviderAdapter,
 } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, readRuntimeEvents, reduceRuntimeEvents, type RunEventWriter } from "@computer-harness/trajectory";
-import { FilePlanStore, InMemoryPlanStore, createPlanningTools, rebuildPlanFromEvents, type PlanStore } from "./index.js";
+import { FilePlanStore, InMemoryPlanStore, createExecutionSegmentTools, createPlanningRunModule, createPlanningTools, rebuildPlanFromEvents, type PlanStore } from "./index.js";
 
 const runId = "planning-test" as RunId;
 const context = { runId, session: {} as never, signal: new AbortController().signal };
 
 const loopRunId = "planning-loop" as RunId;
 const loopViewport: Viewport = { width: 100, height: 100, coordinateSpace: "physical" };
+
+describe("ExecutionSegment tools", () => {
+  it("creates a short-lived segment that is distinct from PlanningTask state", async () => {
+    const tool = createExecutionSegmentTools()[0]!;
+    expect(tool.name).toBe("execution_segment_set");
+    expect(tool.description).toContain("not task_create/task_update");
+    const args = {
+      objective: "筛选出发时间",
+      steps: [
+        { intent: "展开时间筛选", completion: { kind: "element_present", text: "发车时间" } },
+        { intent: "选择早班时段", completion: { kind: "element_selected", text: "08:00-10:00" } },
+      ],
+    };
+    tool.validate(args);
+    const output = await tool.execute(args, {
+      runId,
+      session: { id: "segment-session" as ComputerSessionId } as never,
+      observation: { id: "segment-observation" as ObservationId } as never,
+      signal: new AbortController().signal,
+    });
+    const mutation = tool.executionSegmentMutationFromResult?.(output, {
+      runId,
+      session: { id: "segment-session" as ComputerSessionId } as never,
+      observation: { id: "segment-observation" as ObservationId } as never,
+      signal: new AbortController().signal,
+    });
+    expect(mutation).toMatchObject({ operation: "set", segment: { objective: "筛选出发时间", cursor: 0, status: "active", steps: [{ intent: "展开时间筛选", allowedAction: "click" }, { intent: "选择早班时段", allowedAction: "click" }] } });
+  });
+});
 
 class NoGuiComputer implements Computer {
   public readonly session: ComputerSession = {
@@ -127,6 +156,37 @@ class PlanningEventRejectingWriter implements RunEventWriter {
 }
 
 describe("Planning tools and PlanStore", () => {
+  it("bundles Run-scoped tools, mutation materialization, offline recovery, and Context projection", async () => {
+    const store = new InMemoryPlanStore();
+    const module = createPlanningRunModule(runId, store, {
+      projectContext: (plan) => ({ ...plan, tasks: plan.tasks.map((task) => ({ ...task, subject: `Context: ${task.subject}` })) }),
+    });
+    const create = module.tools.find((tool) => tool.name === "task_create");
+    if (create?.planMutationFromResult === undefined) throw new Error("module task_create mutation hook missing");
+    expect(create.afterPlanCommit).toBeUndefined();
+    await expect(create.execute({ subject: "wrong run" }, { ...context, runId: "wrong-run" as RunId })).rejects.toThrow(/cannot execute a tool/);
+    const mutation = create.planMutationFromResult(await create.execute({ subject: "Open Writer" }, context));
+    await module.apply(mutation);
+    expect((await store.get(runId)).tasks[0]).toMatchObject({ id: "t1", subject: "Open Writer" });
+    expect(await module.projectContext(await store.get(runId))).toMatchObject({ tasks: [{ subject: "Context: Open Writer" }] });
+
+    const otherRun = "planning-module-other" as RunId;
+    const otherModule = createPlanningRunModule(otherRun, store);
+    const otherCreate = otherModule.tools.find((tool) => tool.name === "task_create");
+    if (otherCreate?.planMutationFromResult === undefined) throw new Error("other module task_create mutation hook missing");
+    await otherModule.apply(otherCreate.planMutationFromResult(await otherCreate.execute({ subject: "Other Run" }, { ...context, runId: otherRun })));
+    expect((await store.get(runId)).tasks).toHaveLength(1);
+    expect((await store.get(otherRun)).tasks[0]?.subject).toBe("Other Run");
+
+    const replay = new InMemoryPlanStore();
+    const replayModule = createPlanningRunModule(runId, replay);
+    await replayModule.restoreFromEvents([
+      { runId, eventId: "plan-event" as never, sequence: 1, occurredAt: "2026-09-23T00:00:00.000Z", type: "planning.task.updated", callId: "plan-call" as never, mutation },
+      { runId: otherRun, eventId: "other-plan-event" as never, sequence: 0, occurredAt: "2026-09-23T00:00:00.000Z", type: "planning.task.updated", callId: "other-plan-call" as never, mutation: { operation: "created", task: { id: "other", subject: "must be excluded", status: "pending" } } },
+    ]);
+    expect((await replay.get(runId)).tasks).toEqual([{ id: "t1", subject: "Open Writer", status: "pending" }]);
+  });
+
   it("creates a program id, persists after the event hook, and exposes the next snapshot", async () => {
     const store = new InMemoryPlanStore();
     const tools = createPlanningTools(store);
@@ -134,6 +194,9 @@ describe("Planning tools and PlanStore", () => {
     const update = tools.find((tool) => tool.name === "task_update");
     const list = tools.find((tool) => tool.name === "task_list");
     if (create?.category !== "planning" || update?.category !== "planning" || list?.category !== "planning") throw new Error("planning tools missing");
+    expect(create.description).toContain("same ModelTurn before first GUI action");
+    expect(create.description).toContain("skip simple screens");
+    expect(update.description).toContain("stage/blocker/goal changes");
     const created = await create.execute({ subject: "Open Writer" }, context);
     const mutation = create.planMutationFromResult?.(created);
     if (mutation === undefined || create.afterPlanCommit === undefined) throw new Error("create mutation hooks missing");
@@ -212,6 +275,16 @@ describe("Planning tools and PlanStore", () => {
     const create = tools.find((tool) => tool.name === "task_create");
     const update = tools.find((tool) => tool.name === "task_update");
     const get = tools.find((tool) => tool.name === "task_get");
+    expect(create?.description).toContain("current phase");
+    expect(create?.description).toContain("original Goal");
+    expect(create?.description).toContain("future stages");
+    expect(create?.inputSchema).toMatchObject({
+      properties: {
+        subject: { description: expect.stringContaining("current") },
+        description: { description: expect.stringContaining("unfinished work") },
+      },
+    });
+    expect(update?.description).toContain("full Goal/future stages");
     expect(update?.inputSchema).toMatchObject({ anyOf: expect.arrayContaining([{ required: ["subject"] }, { required: ["status"] }]) });
     expect(() => create?.validate({ subject: "   " })).toThrow(/non-empty/);
     expect(() => update?.validate({ taskId: "task-1" })).toThrow(/at least one/);
@@ -336,6 +409,43 @@ describe("Planning tools and PlanStore", () => {
       });
       await expect(controller.start("event append failure")).resolves.toBe("budget_exhausted");
       expect((await store.get("planning-event-failure" as RunId)).tasks).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs an ExecutionSegment state write without mutating the global PlanningTask chain", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-segment-loop-"));
+    try {
+      const registry = createDefaultToolRegistry();
+      registry.registerMany(createExecutionSegmentTools());
+      const inputs: ModelInput[] = [];
+      const provider: ProviderAdapter = {
+        id: "segment-loop-provider",
+        async generate(input, options) {
+          options.signal.throwIfAborted();
+          inputs.push(input);
+          if (inputs.length === 1) return { type: "tool_calls", calls: [{ id: "segment-set" as ToolCallId, name: "execution_segment_set", arguments: { objective: "筛选时间", steps: [{ intent: "展开筛选", completion: { kind: "element_present", text: "发车时间" } }, { intent: "选择早班时段", completion: { kind: "element_selected", text: "08:00-10:00" } }] } }] };
+          return { type: "finish", summary: "Segment remained separate from the global plan." };
+        },
+      };
+      const output = join(root, "run");
+      const controller = new RunController({
+        runId: loopRunId,
+        provider,
+        computer: new NoGuiComputer(),
+        contextCompiler: new DefaultContextCompiler(registry, { features: { planning: "off", executionSegments: "segments-v1", memory: "off", batching: "off" } }),
+        toolRegistry: registry,
+        policy: new DefaultRuntimePolicy(5, 5),
+        eventWriter: new JsonlRunEventWriter(join(output, "trajectory.jsonl"), loopRunId),
+        assetStore: new FileAssetStore(join(output, "assets")),
+        features: { planning: "off", executionSegments: "segments-v1", memory: "off", batching: "off" },
+      });
+      await expect(controller.start("test a local segment")).resolves.toBe("succeeded");
+      expect(controller.getSnapshot().plan.tasks).toEqual([]);
+      expect(inputs[1]?.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("NOT the global PlanningTask chain")))).toBe(true);
+      const events = await readRuntimeEvents(join(output, "trajectory.jsonl"));
+      expect(events.filter((event) => event.type === "execution.segment.updated").map((event) => event.mutation.operation)).toEqual(["set", "invalidated"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

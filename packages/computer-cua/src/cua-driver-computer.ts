@@ -11,7 +11,9 @@ import type {
   ActionIntent,
   ActionReceipt,
   ComputerSessionDescriptor,
+  ComputerWindowCandidate,
   GroundingCatalog,
+  GroundingBrowserRegion,
   GroundingElement,
   ObservationCapture,
   ObservationId,
@@ -24,22 +26,91 @@ import {
   validateManagedBrowserTarget,
   type DomGroundingContentRect,
   type DomGroundingTransport,
+  type DomSelectOptionRequest,
   type ManagedBrowserTarget,
 } from "./dom-grounding.js";
 import {
-  captureWindow,
+  captureWindowWithRetry,
   discoverWindow,
+  listWindowTargets,
   sameWindowGeometry,
   validateWindowTarget,
   windowActionTarget,
   type CuaWindowBinding,
   type CuaWindowGeometry,
   type CuaWindowTarget,
+  type WindowCaptureRetryOptions,
   WindowContractError,
 } from "./window-contract.js";
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 const CLEANUP_POLL_INTERVAL_MS = 50;
+
+function windowIdentityKey(target: { readonly pid: number; readonly windowId: number }): string {
+  return `${target.pid}:${target.windowId}`;
+}
+
+function windowRefusalCode(code: string | undefined, message: string): string {
+  // CUA 0.22.2 reports the exact-HWND foreground refusal in Tool text rather
+  // than a dedicated error code. Require explicit evidence that it sent no
+  // input; the prefix alone is not enough to make an action retry-safe.
+  const foregroundRefusal = /^foreground_unavailable:/iu.test(message);
+  const noInputEvidence = hasExplicitNoInputEvidence(message);
+  if (foregroundRefusal || code === "WINDOW_FOREGROUND_MISMATCH") {
+    return noInputEvidence ? "WINDOW_FOREGROUND_MISMATCH" : "CUA_TOOL_REFUSED";
+  }
+  return code ?? "CUA_TOOL_REFUSED";
+}
+
+function hasExplicitNoInputEvidence(message: string): boolean {
+  return /\bno (?:mouse |keyboard )?input (?:was|has been) (?:sent|dispatched|performed|injected)\b|\binput (?:was|has been) not (?:sent|dispatched|performed|injected)\b/iu.test(message);
+}
+
+function parseActualForegroundWindowId(message: string): number | undefined {
+  if (!/^foreground_unavailable:/iu.test(message) || !hasExplicitNoInputEvidence(message)) return undefined;
+  const rawHandle = /\bactual foreground HWND\s+(0x[0-9a-f]+|\d+)\b/iu.exec(message)?.[1];
+  if (rawHandle === undefined) return undefined;
+  try {
+    const parsed = BigInt(rawHandle);
+    return parsed > 0n && parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function bringWindowToFrontOnce(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  const result = await driver.callTool("bring_to_front", JSON.stringify({
+    pid: target.pid,
+    window_id: target.windowId,
+    session,
+  }), { signal });
+  signal.throwIfAborted();
+  if (result.isError) {
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
+  }
+  if (result.degraded) {
+    throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
+  }
+  if (typeof result.structuredJson === "string") {
+    try {
+      const payload: unknown = JSON.parse(result.structuredJson);
+      if (payload !== null && typeof payload === "object" && !Array.isArray(payload) &&
+          "landed_on_target" in payload && payload.landed_on_target === false) {
+        throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
+      }
+    } catch (error) {
+      if (error instanceof WindowContractError) throw error;
+      // An unavailable optional result field is not focus evidence; the
+      // retained per-action foreground guard remains authoritative.
+    }
+  }
+}
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
 export type CuaWindowDeliveryMode = "background" | "foreground";
@@ -79,6 +150,8 @@ export interface CuaDriverComputerOptions {
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
   driverFactory?: CuaDriverFactory;
+  /** Test seam for capture retry timing; production uses bounded real delays. */
+  windowCaptureRetry?: WindowCaptureRetryOptions;
 }
 
 interface PrivateSession {
@@ -88,6 +161,19 @@ interface PrivateSession {
   active: boolean;
   windowBinding?: CuaWindowBinding;
   windowIdentityInvalidated: boolean;
+  handoffGeneration: number;
+  /** Full visible-window baseline from the last successful target observation. */
+  visibleWindowBaseline: ReadonlySet<string> | undefined;
+  /** Fresh inventory immediately before an opted-in foreground GUI action. */
+  preActionWindowBaseline: ReadonlySet<string> | undefined;
+  /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
+  newlySurfacedWindowKeys: ReadonlySet<string>;
+  /** Candidate snapshot produced by the immediately preceding list call. */
+  newHandoffCandidates: readonly ComputerWindowCandidate[];
+  /** Exact HWND reported by CUA as foreground for the current no-input refusal. */
+  foregroundMismatchWindowId: number | undefined;
+  /** True only when the last completed action produced a pre/post inventory diff. */
+  proactiveHandoffCandidatesReady: boolean;
   /** Adapter-private active managed tab; never serialized to Runtime. */
   browserTarget?: ManagedBrowserTarget;
 }
@@ -117,6 +203,9 @@ interface PrivateGrounding {
   readonly elements: ReadonlyMap<string, {
     readonly element: GroundingElement;
     readonly point: { readonly x: number; readonly y: number };
+    readonly candidateFingerprint?: string;
+    readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+    readonly selectable?: boolean;
     readonly geometry?: CuaWindowGeometry;
   }>;
 }
@@ -207,10 +296,16 @@ export class CuaDriverComputer implements Computer {
         }
         viewport = { ...dimensions, coordinateSpace: "physical" };
       } else {
-        windowBinding = await discoverWindow(driver, label, this.options.windowTarget, signal);
+        // Foreground mode gets a one-time activation assist for this exact
+        // PID/HWND. Background delivery keeps its existing behavior unchanged.
+        if (this.options.windowDeliveryMode === "foreground") {
+          await bringWindowToFrontOnce(driver, label, this.options.windowTarget, signal);
+        }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
-        viewport = (await captureWindow(driver, label, windowBinding, signal)).viewport;
+        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry);
+        windowBinding = capture.binding;
+        viewport = capture.viewport;
       }
       if (options.viewport !== undefined &&
           (options.viewport.width !== viewport.width || options.viewport.height !== viewport.height || options.viewport.coordinateSpace !== viewport.coordinateSpace)) {
@@ -240,6 +335,13 @@ export class CuaDriverComputer implements Computer {
         descriptor,
         active: true,
         windowIdentityInvalidated: false,
+        handoffGeneration: 0,
+        visibleWindowBaseline: undefined,
+        preActionWindowBaseline: undefined,
+        newlySurfacedWindowKeys: new Set(),
+        newHandoffCandidates: [],
+        foregroundMismatchWindowId: undefined,
+        proactiveHandoffCandidatesReady: false,
         ...(windowBinding === undefined ? {} : { windowBinding }),
         ...(this.options.browserTarget === undefined ? {} : { browserTarget: this.options.browserTarget }),
       };
@@ -263,10 +365,32 @@ export class CuaDriverComputer implements Computer {
         throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session"), "observe");
       }
       try {
-        const liveBinding = await discoverWindow(current.driver, current.label, current.windowBinding.target, signal);
-        const capture = await captureWindow(current.driver, current.label, liveBinding, signal);
+        const capture = await captureWindowWithRetry(current.driver, current.label, current.windowBinding.target, signal, this.options.windowCaptureRetry);
+        const liveBinding = capture.binding;
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
+        if (this.options.windowDeliveryMode === "foreground") {
+          try {
+            const visibleWindows = await listWindowTargets(current.driver, current.label, signal);
+            const visibleWindowKeys = new Set(visibleWindows.map((window) => windowIdentityKey(window.target)));
+            current.newlySurfacedWindowKeys = current.visibleWindowBaseline === undefined
+              ? new Set()
+              : new Set([...visibleWindowKeys].filter((key) => !current.visibleWindowBaseline!.has(key)));
+            current.visibleWindowBaseline = visibleWindowKeys;
+          } catch (error) {
+            signal.throwIfAborted();
+            // Inventory is optional handoff evidence. A failed read keeps this
+            // observation usable but disables automatic candidate selection.
+            current.visibleWindowBaseline = undefined;
+            current.newlySurfacedWindowKeys = new Set();
+          }
+        } else {
+          current.visibleWindowBaseline = undefined;
+          current.newlySurfacedWindowKeys = new Set();
+        }
+        current.newHandoffCandidates = [];
+        current.preActionWindowBaseline = undefined;
+        current.proactiveHandoffCandidatesReady = false;
         const grounding = await readWindowGrounding(
           this.options.grounding,
           current.driver,
@@ -337,6 +461,113 @@ export class CuaDriverComputer implements Computer {
     }
   }
 
+  public async listWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    const current = this.requireSession(session);
+    if (current.windowBinding === undefined || this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") {
+      throw new Error("window handoff is available only for an explicitly bound native window");
+    }
+    const windows = await listWindowTargets(current.driver, current.label, signal);
+    const candidates = windows.map((window) => ({
+      pid: window.target.pid,
+      windowId: window.target.windowId,
+      ...(window.appName === undefined ? {} : { appName: window.appName }),
+      ...(window.title === undefined ? {} : { title: window.title }),
+    }));
+    const newlySurfacedKeys = new Set(current.newlySurfacedWindowKeys);
+    if (current.visibleWindowBaseline !== undefined) {
+      for (const window of windows) {
+        const key = windowIdentityKey(window.target);
+        if (!current.visibleWindowBaseline.has(key)) newlySurfacedKeys.add(key);
+      }
+    }
+    current.newHandoffCandidates = candidates.filter((candidate) => newlySurfacedKeys.has(windowIdentityKey(candidate)));
+    return candidates;
+  }
+
+  public async listNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    const current = this.requireSession(session);
+    signal.throwIfAborted();
+    if (current.proactiveHandoffCandidatesReady) return current.newHandoffCandidates;
+    const foregroundWindowId = current.foregroundMismatchWindowId;
+    if (foregroundWindowId === undefined) return [];
+    return current.newHandoffCandidates.filter((candidate) => candidate.windowId === foregroundWindowId);
+  }
+
+  public async detectNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    const current = this.requireSession(session);
+    const baseline = current.preActionWindowBaseline;
+    current.proactiveHandoffCandidatesReady = false;
+    current.newHandoffCandidates = [];
+    current.newlySurfacedWindowKeys = new Set();
+    if (baseline === undefined || current.windowBinding === undefined || this.options.windowDeliveryMode !== "foreground") return [];
+    const readDiff = async (): Promise<ComputerWindowCandidate[]> => {
+      signal.throwIfAborted();
+      const windows = await listWindowTargets(current.driver, current.label, signal);
+      signal.throwIfAborted();
+      return windows
+        .filter((window) => !baseline.has(windowIdentityKey(window.target)))
+        .map((window) => ({
+          pid: window.target.pid,
+          windowId: window.target.windowId,
+          ...(window.appName === undefined ? {} : { appName: window.appName }),
+          ...(window.title === undefined ? {} : { title: window.title }),
+        }));
+    };
+    let candidates = await readDiff();
+    // Some native dialogs appear just after the initiating tool returns. One
+    // short abort-aware poll catches that case without a long pause or retry.
+    if (candidates.length === 0) {
+      await waitWithAbort(80, signal);
+      candidates = await readDiff();
+    }
+    current.newHandoffCandidates = candidates;
+    current.newlySurfacedWindowKeys = new Set(candidates.map(windowIdentityKey));
+    current.proactiveHandoffCandidatesReady = candidates.length > 0;
+    return candidates;
+  }
+
+  public async handoffWindow(session: ComputerSessionDescriptor, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
+    const current = this.requireSession(session);
+    if (current.windowBinding === undefined || this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") {
+      throw new Error("window handoff is available only for an explicitly bound native window");
+    }
+    validateWindowTarget(candidate);
+    if (current.windowBinding.target.pid === candidate.pid && current.windowBinding.target.windowId === candidate.windowId) {
+      throw new Error("window handoff target must differ from the current window");
+    }
+    signal.throwIfAborted();
+    const windows = await listWindowTargets(current.driver, current.label, signal);
+    const fresh = windows.find((window) => window.target.pid === candidate.pid && window.target.windowId === candidate.windowId);
+    if (fresh === undefined || candidate.appName !== undefined && candidate.appName !== fresh.appName || candidate.title !== undefined && candidate.title !== fresh.title) {
+      throw new WindowContractError("WINDOW_HANDOFF_STALE", "window handoff candidate changed before confirmation");
+    }
+    if (this.options.windowDeliveryMode === "foreground") {
+      await bringWindowToFrontOnce(current.driver, current.label, candidate, signal);
+    }
+    const capture = await captureWindowWithRetry(current.driver, current.label, candidate, signal, this.options.windowCaptureRetry);
+    signal.throwIfAborted();
+    // No GUI input is sent here. Commit the new binding only after a fresh,
+    // exact-identity capture; old frame and element references cannot survive.
+    current.windowBinding = capture.binding;
+    current.handoffGeneration += 1;
+    current.descriptor = {
+      ...current.descriptor,
+      id: `${current.label}-handoff-${current.handoffGeneration}` as ComputerSessionDescriptor["id"],
+      viewport: capture.viewport,
+      openedAt: new Date().toISOString(),
+    };
+    this.observations.clear();
+    this.groundings.clear();
+    this.latestObservationId = undefined;
+    current.visibleWindowBaseline = undefined;
+    current.preActionWindowBaseline = undefined;
+    current.newlySurfacedWindowKeys = new Set();
+    current.newHandoffCandidates = [];
+    current.foregroundMismatchWindowId = undefined;
+    current.proactiveHandoffCandidatesReady = false;
+    return current.descriptor;
+  }
+
   public async execute(
     session: ComputerSessionDescriptor,
     action: ActionIntent,
@@ -344,6 +575,9 @@ export class CuaDriverComputer implements Computer {
     options?: ComputerExecuteOptions,
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
+    current.foregroundMismatchWindowId = undefined;
+    current.preActionWindowBaseline = undefined;
+    current.proactiveHandoffCandidatesReady = false;
     signal.throwIfAborted();
     let decisionObservation: PrivateObservation | undefined;
     if (action.kind !== "wait") {
@@ -398,6 +632,90 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
       }
     }
+    if (action.kind === "select_option") {
+      const privateGrounding = this.groundings.get(String(action.basedOn));
+      const resolved = privateGrounding?.elements.get(action.groundingRef);
+      if (privateGrounding === undefined || resolved === undefined) {
+        return refused(action.actionId, "GROUNDING_REF_STALE", "DOM select reference is stale or unavailable; observe again and choose a current element");
+      }
+      if (privateGrounding.catalog.source !== "dom" && privateGrounding.catalog.source !== "hybrid") {
+        return refused(action.actionId, "SELECT_OPTION_DOM_REQUIRED", "select_option requires managed-browser DOM/hybrid grounding");
+      }
+      if (resolved.element.source !== "dom" || resolved.selectable !== true || !isSelectLikeRole(resolved.element.role)) {
+        return refused(action.actionId, "SELECT_OPTION_ROLE_UNSUPPORTED", "select_option supports only native HTML select elements");
+      }
+      if (resolved.element.state?.enabled === false) {
+        return refused(action.actionId, "GROUNDING_ELEMENT_DISABLED", "DOM select is explicitly disabled and cannot receive a selection");
+      }
+      if (resolved.element.bbox === undefined || resolved.element.bbox.width <= 0 || resolved.element.bbox.height <= 0) {
+        return refused(action.actionId, "GROUNDING_BBOX_UNAVAILABLE", "DOM select bounds are unavailable");
+      }
+      if (resolved.element.options === undefined) {
+        return refused(action.actionId, "SELECT_OPTION_OPTIONS_UNAVAILABLE", "current native select did not publish its bounded options list");
+      }
+      if (resolved.element.optionsTruncated === true) {
+        return refused(action.actionId, "SELECT_OPTION_OPTIONS_TRUNCATED", "current native select options list is incomplete");
+      }
+      const matchingOptions = resolved.element.options.filter((option) => normalizeSelectOptionText(option.text) === normalizeSelectOptionText(action.optionText));
+      if (matchingOptions.length === 0) {
+        return refused(action.actionId, "SELECT_OPTION_OPTION_MISSING", "optionText is not listed in the current observation");
+      }
+      if (matchingOptions.length > 1) {
+        return refused(action.actionId, "SELECT_OPTION_OPTION_AMBIGUOUS", "optionText matches multiple listed options");
+      }
+      if (matchingOptions[0]?.enabled !== true) {
+        return refused(action.actionId, "SELECT_OPTION_OPTION_DISABLED", "optionText is listed but disabled");
+      }
+      if (resolved.geometry !== undefined && decisionObservation?.geometry !== undefined && !sameWindowGeometry(resolved.geometry, decisionObservation.geometry)) {
+        return refused(action.actionId, "GROUNDING_GEOMETRY_CHANGED", "DOM select reference was created for an older window geometry");
+      }
+      const target = privateGrounding.browserTarget;
+      const transport = this.options.domGroundingTransport;
+      if (target === undefined || transport?.selectOption === undefined || resolved.candidateFingerprint === undefined) {
+        return refused(action.actionId, "SELECT_OPTION_UNSUPPORTED", "managed-browser DOM select delivery is unavailable");
+      }
+      if (action.optionText.trim().length === 0 || action.optionText.length > 160) {
+        return refused(action.actionId, "SELECT_OPTION_INVALID", "select_option optionText must be non-empty and at most 160 characters");
+      }
+      const request: DomSelectOptionRequest = {
+        observationId: action.basedOn,
+        computerSessionId: session.id,
+        viewport: decisionObservation?.viewport ?? session.viewport,
+        browserTarget: target,
+        candidate: {
+          role: resolved.element.role,
+          ...(resolved.element.name === undefined ? {} : { name: resolved.element.name }),
+          ...(resolved.element.description === undefined ? {} : { description: resolved.element.description }),
+          bbox: {
+            x: resolved.element.bbox.x,
+            y: resolved.element.bbox.y,
+            width: resolved.element.bbox.width,
+            height: resolved.element.bbox.height,
+          },
+          ...(resolved.candidateFrame === undefined ? {} : { frame: resolved.candidateFrame }),
+          fingerprint: resolved.candidateFingerprint,
+        },
+        optionText: action.optionText.trim(),
+      };
+      try {
+        const result = await transport.selectOption(request, signal);
+        if (result.status === "completed" && (result.tabId !== target.tabId || result.generation !== target.generation)) {
+          return refused(action.actionId, "SELECT_OPTION_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before selecting");
+        }
+        if (result.status === "completed") {
+          return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
+        }
+        if (result.status === "refused") {
+          return refused(action.actionId, result.driverCode ?? "SELECT_OPTION_REFUSED", result.message ?? "managed-browser select_option was refused");
+        }
+        return { actionId: action.actionId, status: "failed", driverCode: result.driverCode ?? "SELECT_OPTION_FAILED", ...(result.message === undefined ? {} : { message: result.message }) };
+      } catch (error) {
+        const details = driverErrorDetails(error);
+        if (details.tag === "Transport") current.active = false;
+        if (details.tag === "Tool") return refused(action.actionId, details.errorCode ?? "SELECT_OPTION_REFUSED", details.message);
+        throw normalizeDriverError(error, "execute");
+      }
+    }
     let requestAction = action;
     if (action.groundingRef !== undefined) {
       if (action.kind !== "click") {
@@ -434,10 +752,31 @@ export class CuaDriverComputer implements Computer {
       }
       throw error;
     }
+    if (options?.detectNewWindowHandoff === true && current.windowBinding !== undefined && this.options.windowDeliveryMode === "foreground") {
+      try {
+        const visibleWindows = await listWindowTargets(current.driver, current.label, signal);
+        signal.throwIfAborted();
+        const visibleKeys = new Set(visibleWindows.map((window) => windowIdentityKey(window.target)));
+        if (!visibleKeys.has(windowIdentityKey(current.windowBinding.target))) {
+          return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "bound target was missing from visible-window inventory; no input was sent");
+        }
+        current.preActionWindowBaseline = visibleKeys;
+        current.visibleWindowBaseline = visibleKeys;
+        current.newlySurfacedWindowKeys = new Set();
+        current.newHandoffCandidates = [];
+      } catch (error) {
+        signal.throwIfAborted();
+        return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "visible-window inventory failed before action; no input was sent");
+      }
+    }
     try {
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
-        return refused(action.actionId, result.errorCode ?? "CUA_TOOL_REFUSED", result.text);
+        const driverCode = windowRefusalCode(result.errorCode, result.text);
+        if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
+          current.foregroundMismatchWindowId = parseActualForegroundWindowId(result.text);
+        }
+        return refused(action.actionId, driverCode, result.text);
       }
       if (result.degraded) {
         return { actionId: action.actionId, status: "failed", driverCode: "CUA_DEGRADED", message: result.text };
@@ -453,7 +792,11 @@ export class CuaDriverComputer implements Computer {
       // records the unresolved action as outcome_unknown. Only explicit
       // structured Tool errors are safe to classify as a refusal.
       if (details.tag === "Tool") {
-        return refused(action.actionId, details.errorCode ?? "CUA_TOOL_REFUSED", details.message);
+        const driverCode = windowRefusalCode(details.errorCode, details.message);
+        if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
+          current.foregroundMismatchWindowId = parseActualForegroundWindowId(details.message);
+        }
+        return refused(action.actionId, driverCode, details.message);
       }
       throw normalizeDriverError(error, "execute");
     }
@@ -563,6 +906,8 @@ function actionRequest(
       const to = point(action.to);
       return { name: "drag", arguments: { session, target, from_x: from.x, from_y: from.y, to_x: to.x, to_y: to.y, delivery_mode: deliveryMode } };
     }
+    case "select_option":
+      throw new WindowCoordinateMappingError("SELECT_OPTION_DOM_REQUIRED", "select_option must use managed-browser DOM delivery");
     default:
       return assertNever(action);
   }
@@ -587,14 +932,14 @@ async function readWindowGrounding(
   signal: AbortSignal,
 ): Promise<PrivateGrounding | undefined> {
   if (mode === undefined || mode === "off") return undefined;
-  if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal);
+  if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, false);
   if (browserTarget === undefined || domTransport === undefined) {
     // Constructor validation normally prevents this branch. Preserve an
     // observable degraded DOM sidecar if an untyped host boundary mutates it.
     return emptyDomGrounding(observationId, computerSessionId);
   }
   const uia = mode === "hybrid-catalog-v1"
-    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal)
+    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, browserTarget !== undefined)
     : undefined;
   // DOM-only has no trusted producer for the browser content origin. Keep the
   // capability explicitly fail-closed until a future browser-native content
@@ -627,9 +972,23 @@ async function readDomGroundingCatalog(
     if (!isBoundedBrowserIdentity(result.tabId) || !isBoundedBrowserIdentity(result.generation)) return emptyDomGrounding(observationId, computerSessionId);
     const activeBrowserTarget: ManagedBrowserTarget = { ...browserTarget, tabId: result.tabId, generation: result.generation };
     const materialized = materializeDomGrounding({ observationId, computerSessionId, viewport, browserTarget: activeBrowserTarget }, result, GROUNDING_MAX_ELEMENTS, trustedContentRect);
-    const elements = new Map<string, { readonly element: GroundingElement; readonly point: { readonly x: number; readonly y: number }; readonly geometry?: CuaWindowGeometry }>();
+    const elements = new Map<string, {
+      readonly element: GroundingElement;
+      readonly point: { readonly x: number; readonly y: number };
+      readonly candidateFingerprint: string;
+      readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+      readonly selectable: boolean;
+      readonly geometry?: CuaWindowGeometry;
+    }>();
     for (const [elementRef, privateElement] of materialized.privateElements) {
-      elements.set(elementRef, { element: privateElement.element, point: privateElement.point, geometry: binding.bounds });
+      elements.set(elementRef, {
+        element: privateElement.element,
+        point: privateElement.point,
+        candidateFingerprint: privateElement.candidateFingerprint,
+        ...(privateElement.candidateFrame === undefined ? {} : { candidateFrame: privateElement.candidateFrame }),
+        selectable: privateElement.selectable,
+        geometry: binding.bounds,
+      });
     }
     return {
       catalog: materialized.catalog,
@@ -669,6 +1028,15 @@ function emptyDomGrounding(
 
 function isBoundedBrowserIdentity(value: string | undefined): value is string {
   return value !== undefined && /^[A-Za-z0-9._:-]{1,128}$/u.test(value);
+}
+
+function isSelectLikeRole(role: string): boolean {
+  const normalized = role.normalize("NFKC").toLocaleLowerCase().replace(/[\s_-]+/gu, "").trim();
+  return normalized === "select" || normalized === "combobox";
+}
+
+function normalizeSelectOptionText(value: string): string {
+  return value.normalize("NFKC").replace(/[\u0000-\u001F\u007F]/gu, " ").replace(/\s+/gu, " ").trim();
 }
 
 /** Fairly merge the two bounded producers before Runtime applies its hot cap. */
@@ -723,6 +1091,7 @@ async function readGroundingCatalog(
   observationId: ObservationId,
   computerSessionId: ComputerSessionDescriptor["id"],
   signal: AbortSignal,
+  managedBrowserHybrid: boolean,
 ): Promise<PrivateGrounding> {
   const empty = (completeness: "partial" | "unknown", degraded: boolean): PrivateGrounding => ({
     catalog: {
@@ -759,8 +1128,22 @@ async function readGroundingCatalog(
   const parsed = rawElements.flatMap((value, index) => parseGroundingCandidate(value, index, binding, viewport));
   parsed.sort((left, right) => left.priority - right.priority || left.sortKey.localeCompare(right.sortKey));
   const selected = parsed.slice(0, GROUNDING_MAX_ELEMENTS);
+  const selectedRecords = selected.map((candidate) => ({
+    element: candidate.element,
+    point: candidate.point,
+  }));
+  const contentRect = trustedContentRectFromUia(selectedRecords.map((candidate) => candidate.element), viewport);
+  const annotatedRecords = managedBrowserHybrid && contentRect !== undefined
+    ? selectedRecords.map((candidate) => ({
+      ...candidate,
+      element: {
+        ...candidate.element,
+        browserRegion: classifyUiaBrowserRegion(candidate.element, contentRect, viewport),
+      },
+    }))
+    : selectedRecords;
   const elements = new Map<string, { readonly element: GroundingElement; readonly point: { readonly x: number; readonly y: number }; readonly geometry: CuaWindowGeometry }>();
-  const publicElements = selected.map((candidate, index) => {
+  const publicElements = annotatedRecords.map((candidate, index) => {
     const elementRef = `uia-${groundingObservationDiscriminator(observationId)}-${index + 1}`;
     const element: GroundingElement = { ...candidate.element, elementRef };
     elements.set(elementRef, { element, point: candidate.point, geometry: binding.bounds });
@@ -769,7 +1152,6 @@ async function readGroundingCatalog(
   const explicitlyComplete = structured?.complete === true || structured?.elements_complete === true;
   const truncated = structured?.truncated === true || structured?.degraded === true || rawElements.length > GROUNDING_MAX_ELEMENTS;
   const completeness = explicitlyComplete && !truncated ? "complete" : "partial";
-  const contentRect = trustedContentRectFromUia(publicElements, viewport);
   return {
     catalog: {
       version: "uia-catalog-v1",
@@ -786,8 +1168,94 @@ async function readGroundingCatalog(
   };
 }
 
+/**
+ * Classify UIA elements only after the same observation has proven a managed
+ * browser content rectangle from a UIA Document.  The tolerance is bounded
+ * to account for integer rounding at a content edge; it is not a browser
+ * chrome-height or DPI guess.  An element which crosses the boundary by more
+ * than that tolerance remains unknown rather than being promoted to either
+ * side.  The returned label is attached to the exact object used by both the
+ * public catalog and the private delivery map.
+ */
+const UIA_BROWSER_REGION_TOLERANCE_PX = 2;
+
+function classifyUiaBrowserRegion(
+  element: { readonly bbox?: GroundingElement["bbox"] },
+  contentRect: DomGroundingContentRect,
+  viewport: Viewport,
+): GroundingBrowserRegion {
+  const bbox = element.bbox;
+  if (bbox === undefined || bbox.coordinateSpace !== "physical" || !validGroundingRect(bbox, viewport) || !validContentRectForRegion(contentRect, viewport)) {
+    return "unknown";
+  }
+  const contentRight = contentRect.x + contentRect.width;
+  const contentBottom = contentRect.y + contentRect.height;
+  const bboxRight = bbox.x + bbox.width;
+  const bboxBottom = bbox.y + bbox.height;
+  const fullyInside = bbox.x >= contentRect.x - UIA_BROWSER_REGION_TOLERANCE_PX
+    && bbox.y >= contentRect.y - UIA_BROWSER_REGION_TOLERANCE_PX
+    && bboxRight <= contentRight + UIA_BROWSER_REGION_TOLERANCE_PX
+    && bboxBottom <= contentBottom + UIA_BROWSER_REGION_TOLERANCE_PX;
+  const centerInside = bbox.x + bbox.width / 2 >= contentRect.x
+    && bbox.x + bbox.width / 2 <= contentRight
+    && bbox.y + bbox.height / 2 >= contentRect.y
+    && bbox.y + bbox.height / 2 <= contentBottom;
+  if (fullyInside && centerInside) return "content";
+
+  const overlapsContent = bbox.x < contentRight
+    && bboxRight > contentRect.x
+    && bbox.y < contentBottom
+    && bboxBottom > contentRect.y;
+  if (overlapsContent) {
+    // Permit a center-inside element whose only boundary crossing is within
+    // the bounded measurement tolerance; larger crossings are ambiguous.
+    const crossing = Math.max(
+      Math.max(0, contentRect.x - bbox.x),
+      Math.max(0, contentRect.y - bbox.y),
+      Math.max(0, bboxRight - contentRight),
+      Math.max(0, bboxBottom - contentBottom),
+    );
+    return centerInside && crossing <= UIA_BROWSER_REGION_TOLERANCE_PX ? "content" : "unknown";
+  }
+
+  const separatedFromContent = bboxRight <= contentRect.x - UIA_BROWSER_REGION_TOLERANCE_PX
+    || bbox.x >= contentRight + UIA_BROWSER_REGION_TOLERANCE_PX
+    || bboxBottom <= contentRect.y - UIA_BROWSER_REGION_TOLERANCE_PX
+    || bbox.y >= contentBottom + UIA_BROWSER_REGION_TOLERANCE_PX;
+  return separatedFromContent ? "chrome" : "unknown";
+}
+
+function validGroundingRect(
+  bbox: NonNullable<GroundingElement["bbox"]>,
+  viewport: Viewport,
+): boolean {
+  return Number.isFinite(bbox.x)
+    && Number.isFinite(bbox.y)
+    && Number.isFinite(bbox.width)
+    && Number.isFinite(bbox.height)
+    && bbox.width > 0
+    && bbox.height > 0
+    && bbox.x >= 0
+    && bbox.y >= 0
+    && bbox.x + bbox.width <= viewport.width + UIA_BROWSER_REGION_TOLERANCE_PX
+    && bbox.y + bbox.height <= viewport.height + UIA_BROWSER_REGION_TOLERANCE_PX;
+}
+
+function validContentRectForRegion(rect: DomGroundingContentRect, viewport: Viewport): boolean {
+  return Number.isFinite(rect.x)
+    && Number.isFinite(rect.y)
+    && Number.isFinite(rect.width)
+    && Number.isFinite(rect.height)
+    && rect.width > 0
+    && rect.height > 0
+    && rect.x >= 0
+    && rect.y >= 0
+    && rect.x + rect.width <= viewport.width + UIA_BROWSER_REGION_TOLERANCE_PX
+    && rect.y + rect.height <= viewport.height + UIA_BROWSER_REGION_TOLERANCE_PX;
+}
+
 function trustedContentRectFromUia(
-  elements: readonly GroundingElement[],
+  elements: readonly { readonly role: string; readonly bbox?: GroundingElement["bbox"] }[],
   viewport: Viewport,
 ): DomGroundingContentRect | undefined {
   const candidates = elements

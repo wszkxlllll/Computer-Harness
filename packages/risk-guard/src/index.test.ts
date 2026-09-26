@@ -15,10 +15,10 @@ const observation = {
 };
 const session = { id: observation.computerSessionId, backend: "fake", viewport: observation.viewport, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false }, openedAt: observation.capturedAt };
 
-function context(effect: "navigate" | "financial" | "local_edit" | "unknown", target = "Details", summary = "Open details", kind: "click" | "type" = "click"): ActionPolicyContext {
-  const call = { id: "call-1" as ToolCallId, name: kind, arguments: kind === "click" ? { x: 10, y: 20 } : { text: "hello" }, declaredEffect: { effects: [effect], target, summary } };
+function context(effect: "navigate" | "financial" | "local_edit" | "unknown", target = "Details", summary = "Open details", kind: "click" | "type" = "click", groundingRef?: string): ActionPolicyContext {
+  const call = { id: "call-1" as ToolCallId, name: groundingRef === undefined ? kind : "click_element", arguments: groundingRef === undefined ? kind === "click" ? { x: 10, y: 20 } : { text: "hello" } : { elementRef: groundingRef }, declaredEffect: { effects: [effect], target, summary } };
   const action = kind === "click"
-    ? { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "click" as const, point: { x: 10, y: 20 } }
+    ? { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "click" as const, point: { x: 10, y: 20 }, ...(groundingRef === undefined ? {} : { groundingRef }) }
     : { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "type" as const, text: "hello" };
   const snapshot = initialRunSnapshot(runId);
   return { runId, goal: "Inspect a product and buy it only after confirmation", recentUserInputs: [], candidate: { calls: [call], actions: [action], decisionObservation: observation, session }, snapshot };
@@ -133,6 +133,24 @@ describe("LayeredRiskGuard", () => {
     const assessor = new ScriptedRiskAssessor({ effects: ["local_edit"], alignment: "aligned", evidence: "Synthetic low-risk review" });
     await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown"), new AbortController().signal)).resolves.toMatchObject({ decision: "allow", path: "model", modelRequestCount: 1 });
     await expect(new LayeredRiskGuard({ assessor }).evaluate(context("navigate", "Confirm payment", "Click Confirm payment"), new AbortController().signal)).resolves.toMatchObject({ decision: "allow", path: "model", modelRequestCount: 1 });
+  });
+
+  it("fails closed when a grounded unknown-effect click loses its raw evidence", async () => {
+    let reviewerCalls = 0;
+    const assessor = {
+      id: "low-risk-reviewer",
+      async classify() {
+        reviewerCalls += 1;
+        return { effects: ["navigate"] as const, alignment: "aligned" as const, evidence: "Synthetic low-risk review" };
+      },
+    };
+    await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown", "Details", "Open details", "click", "element-ref"), new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval",
+      path: "local",
+      reasonCode: "unknown_grounding_evidence_unavailable",
+      modelRequestCount: 0,
+    });
+    expect(reviewerCalls).toBe(0);
   });
 
   it("fails closed when semantic review errors, times out, or exhausts its budget", async () => {

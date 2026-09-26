@@ -12,3 +12,12 @@
   5. **操作边界**：简述本次是否修改代码、消费模型额度或操作桌面；不为显得完整而增加无关工作。
 - 文档保留详细证据、代码位置、修正原则及验收条件；最终回复优先呈现用户需要作决定的信息。
 - Windows 下文本编辑使用 `apply_patch`；中文写入后显式按 UTF-8 读回，检查连续问号、替换字符和路径损坏，不依赖 PowerShell 默认编码。
+
+# Exact-window activation and handoff
+
+- For a host-selected native CUA window in `foreground` delivery mode, call `bring_to_front` once with the exact PID/HWND before the first fresh identity/geometry capture. Do not activate in background mode. Treat the call as an activation attempt, not proof of continuing focus; keep the per-action foreground refusal guard.
+- Do not reactivate a bound window before every action, and never retry an action whose outcome may be unknown. A `WINDOW_FOREGROUND_MISMATCH` handoff is permitted only for the driver's explicit refusal that says no input was sent.
+- After that refusal, re-enumerate visible windows and run the configured Jev selector against newly surfaced candidates from the current task. Auto-handoff only for a uniquely high-confidence candidate proven new since the prior target observation, in the bound process, and equal to the exact foreground HWND reported by the driver; then recheck exact identity and capture a fresh frame. Missing HWND evidence, existing windows, and different-process candidates stay in the manual picker; do not replay the refused action.
+- In an opted-in native foreground Run, a completed GUI action may trigger a read-only visible-window diff against a fresh pre-action baseline. If it finds a new window, emit `computer.window.handoff.requested` with `new_window_detected`; Jev may highlight a suggestion, but this route always requires explicit Enter confirmation. Do not activate automatically without exact driver-reported foreground/ownership evidence. Inventory failure must prevent input before dispatch or fail the Run after a completed receipt; never replay the action.
+- For `new_window_detected` only, the host may explicitly choose `C` to ignore an incidental popup and continue on the bound target. This records `computer.window.handoff.ignored`, clears the pending handoff and old observation, and requires a fresh target observation before the Provider continues. Never offer this escape for `foreground_mismatch`; that route requires choosing a target or aborting.
+- Window discovery uses the driver's on-screen inventory. Minimized-window restore is unsupported unless a future CUA capability is independently verified; state this limitation instead of inferring it from `bring_to_front`.

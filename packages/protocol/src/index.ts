@@ -27,6 +27,36 @@ export interface PlanState {
   tasks: PlanningTask[];
 }
 
+/** Short-lived, observation-driven execution guidance. Unlike PlanState this
+ * never represents global task progress or durable completion. */
+export interface ExecutionSegmentStep {
+  id: string;
+  intent: string;
+  allowedAction: "click";
+  completion: {
+    kind: "element_present" | "element_selected" | "element_expanded" | "element_focused";
+    text: string;
+  };
+}
+
+export interface ExecutionSegment {
+  id: string;
+  objective: string;
+  steps: ExecutionSegmentStep[];
+  cursor: number;
+  status: "active" | "completed" | "invalidated";
+  sourceObservationId: ObservationId;
+  computerSessionId: ComputerSessionId;
+  attemptedStepIds: string[];
+  invalidReason?: string;
+}
+
+export type ExecutionSegmentMutation =
+  | { operation: "set"; segment: ExecutionSegment }
+  | { operation: "step_attempted"; segmentId: string; stepId: string }
+  | { operation: "advanced"; segmentId: string; cursor: number; status: "active" | "completed" }
+  | { operation: "invalidated"; segmentId: string; reason: string };
+
 export type MemorySubject = { type: "run" } | { type: "entity"; entityId: string };
 
 export type MemoryScope =
@@ -445,6 +475,17 @@ export interface GroundingElementState {
 }
 
 /**
+ * A bounded native-select option projection. It contains only visible text
+ * and effective enabled state; option values, ids and selectors never cross
+ * the adapter boundary. The list is observation-bound and expires with its
+ * parent GroundingElement.
+ */
+export interface GroundingOption {
+  readonly text: string;
+  readonly enabled: boolean;
+}
+
+/**
  * A model-facing element reference. It is minted by a Computer adapter and is
  * valid only for this observation/session/target geometry. It is not a CUA
  * token, PID, HWND, selector, or other backend identity.
@@ -460,6 +501,10 @@ export interface GroundingElement {
   readonly source?: GroundingElementSource;
   /** Browser content vs browser chrome/native UI; omitted for non-browser UIA. */
   readonly browserRegion?: GroundingBrowserRegion;
+  /** Produced only for native DOM <select> elements; omitted for UIA/ARIA. */
+  readonly options?: readonly GroundingOption[];
+  /** True when more than the bounded visible-option projection was present. */
+  readonly optionsTruncated?: boolean;
 }
 
 export type GroundingCompleteness = "complete" | "partial" | "unknown";
@@ -638,7 +683,7 @@ export type ModelTurn =
 export interface GuiActionBase {
   actionId: ActionId;
   basedOn: ObservationId;
-  /** Adapter-validated opaque grounding reference, when click_element was used. */
+  /** Adapter-validated opaque grounding reference, when a grounded action was used. */
   groundingRef?: string;
 }
 
@@ -648,6 +693,7 @@ export type ActionIntent =
   | (GuiActionBase & { kind: "right_click"; point: Point })
   | (GuiActionBase & { kind: "type"; text: string })
   | (GuiActionBase & { kind: "keypress"; keys: string[] })
+  | (GuiActionBase & { kind: "select_option"; groundingRef: string; optionText: string })
   | (GuiActionBase & {
       kind: "scroll";
       point: Point;
@@ -694,11 +740,23 @@ export interface ComputerSessionDescriptor {
   readonly openedAt: string;
 }
 
+/** Host window identity and its current human-readable picker metadata. */
+export interface ComputerWindowIdentity {
+  readonly pid: number;
+  readonly windowId: number;
+}
+
+export interface ComputerWindowCandidate extends ComputerWindowIdentity {
+  readonly appName?: string;
+  readonly title?: string;
+}
+
 export type RunStatus =
   | "created"
   | "starting"
   | "running"
   | "waiting_user"
+  | "waiting_window"
   | "waiting_approval"
   | "paused"
   | "finished";
@@ -794,7 +852,7 @@ export interface ContextTrace {
   runId: RunId;
   stablePrefixHash: string;
   fixedBlocks: readonly {
-    name: "system" | "goal" | "tools" | "plan" | "memory";
+    name: "system" | "goal" | "tools" | "plan" | "execution_segment" | "memory";
     estimatedTokens: number;
     included: boolean;
   }[];
@@ -821,6 +879,9 @@ export type RuntimeEventData =
   | { type: "run.started" }
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
+  | { type: "computer.window.handoff.requested"; sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" }
+  | { type: "computer.window.handoff.completed"; target: ComputerWindowIdentity; session: ComputerSessionDescriptor }
+  | { type: "computer.window.handoff.ignored"; sourceActionId: ActionId }
   | { type: "observation.created"; observation: ObservationFrame }
   | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
@@ -843,6 +904,17 @@ export type RuntimeEventData =
     }
   | { type: "action.proposed"; callId: ToolCallId; action: ActionIntent; executionObservationId?: ObservationId }
   | {
+      type: "grounding.coordinate_coverage";
+      actionId: ActionId;
+      observationId: ObservationId;
+      /** Decision producer. Historical events may omit this field. */
+      decisionSource?: "main_provider";
+      mapping: "containment" | "nearest" | "none";
+      matchedElementRef?: string;
+      inHotProjection: boolean;
+      normalizedDistance?: number;
+    }
+  | {
       type: "action.guard.evaluated";
       callIds: ToolCallId[];
       actions: ActionGuardActionSummary[];
@@ -863,6 +935,7 @@ export type RuntimeEventData =
   | { type: "action.execution.completed"; receipt: ActionReceipt }
   | { type: "action.execution.failed"; receipt: ActionReceipt }
   | { type: "planning.task.updated"; callId: ToolCallId; mutation: PlanningTaskMutation }
+  | { type: "execution.segment.updated"; callId?: ToolCallId; source: "tool" | "runtime"; mutation: ExecutionSegmentMutation }
   | { type: "memory.updated"; callId?: ToolCallId; source?: "tool" | "lifecycle"; mutation: MemoryMutation }
   | {
       type: "monitor.proposal";
@@ -912,6 +985,9 @@ export const runtimeEventTypes = [
   "run.started",
   "computer.open.started",
   "computer.open.completed",
+  "computer.window.handoff.requested",
+  "computer.window.handoff.completed",
+  "computer.window.handoff.ignored",
   "observation.created",
   "model.request.started",
   "model.response.received",
@@ -921,11 +997,13 @@ export const runtimeEventTypes = [
   "tool.call.completed",
   "tool.call.failed",
   "action.proposed",
+  "grounding.coordinate_coverage",
   "action.guard.evaluated",
   "action.execution.started",
   "action.execution.completed",
   "action.execution.failed",
   "planning.task.updated",
+  "execution.segment.updated",
   "memory.updated",
   "monitor.proposal",
   "monitor.transition",

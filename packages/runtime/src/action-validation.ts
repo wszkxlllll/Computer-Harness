@@ -27,8 +27,8 @@ export function validateActionIntent(
     return;
   }
 
-  if (action.groundingRef !== undefined && action.kind !== "click") {
-    throw new Error("groundingRef is only valid for click actions");
+  if (action.groundingRef !== undefined && action.kind !== "click" && action.kind !== "select_option") {
+    throw new Error("groundingRef is only valid for grounded click/select_option actions");
   }
 
   const observation = context.observation;
@@ -84,6 +84,14 @@ export function validateActionIntent(
       requireCapability(context.capabilities.keyboard, action.kind, "keyboard");
       if (action.keys.length === 0 || action.keys.some((key) => key.trim().length === 0)) {
         throw new Error("keypress requires at least one non-empty key");
+      }
+      return;
+    case "select_option":
+      if (action.groundingRef.trim().length === 0 || action.groundingRef.length > 96) {
+        throw new Error("select_option groundingRef must be a non-empty string of at most 96 characters");
+      }
+      if (action.optionText.trim().length === 0 || action.optionText.length > 160) {
+        throw new Error("select_option optionText must be a non-empty string of at most 160 characters");
       }
       return;
     default:

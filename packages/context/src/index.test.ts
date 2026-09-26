@@ -121,12 +121,14 @@ describe("DefaultContextCompiler", () => {
         maxElements: 16,
         elements: [{
           elementRef: "dom-1",
-          role: "button",
-          name: "Route options",
+          role: "combobox",
+          name: "Departure time",
           source: "dom" as const,
           browserRegion: "content" as const,
           bbox: { x: 100, y: 200, width: 80, height: 24, coordinateSpace: "physical" as const },
           state: { enabled: true },
+          options: [{ text: "08:00", enabled: true }, { text: "09:00", enabled: false }],
+          optionsTruncated: false,
         }],
         selection: {
           strategy: "bounded-fusion-v1" as const,
@@ -142,12 +144,13 @@ describe("DefaultContextCompiler", () => {
     };
     const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
       runId,
-      goal: "choose a route",
+      goal: "choose a departure time",
       recentEvents: [event(0, { type: "observation.created", observation: latest })],
       latestObservation: latest,
     }, new AbortController().signal);
     const grounding = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("UIA+DOM grounding")));
     expect(grounding?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("source=dom/content") });
+    expect(grounding?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("options=[08:00:enabled | 09:00:disabled]") });
     expect(input.contextBudget?.trace?.grounding).toMatchObject({ source: "hybrid", strategy: "bounded-fusion-v1", deduplicatedElementCount: 1, recovery: { reason: "no_observed_change", attempt: 1, localIntentSource: "user_correction" } });
   });
 
@@ -414,9 +417,38 @@ describe("DefaultContextCompiler", () => {
     expect(off.system).toContain("Do not return only a status");
     expect(off.system).not.toContain("recalled Run Memory");
     expect(off.system).toContain("at most one Computer tool call");
-    const batch = await compiler.compile({ runId, goal: "batch", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
+    expect(off.system).not.toContain("same ModelTurn");
+    expect(off.system).not.toContain("first GUI action");
+    const batch = await compiler.compile({ runId, goal: "batch", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", executionSegments: "segments-v1", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
+    expect(batch.system).toContain("same ModelTurn as the first GUI action");
+    expect(batch.system).toContain("one handoff-sized current phase");
+    expect(batch.system).toContain("do not copy the original Goal");
+    expect(batch.system).toContain("task_update with status completed followed by task_create");
+    expect(batch.system).toContain("exactly the next handoff-sized phase");
+    expect(batch.system).toContain("at most two Planning/Memory writes total");
+    expect(batch.system).toContain("1-2 key facts in the same ModelTurn");
+    expect(batch.system).toContain("do not write task-retention Memory");
+    expect(batch.system).toContain("relatedTaskIds");
+    expect(batch.system).toContain("same-turn writes alongside GUI");
     expect(batch.system).toContain("state writes");
     expect(batch.system).toContain("click→type");
+    expect(batch.system).toContain("2-4 predictable click micro-steps");
+    expect(batch.system).toContain("Call it immediately before the first GUI click");
+    expect(batch.system).toContain("Do not create one for a simple one-click screen or every click");
+    expect(batch.system).toContain("never use it for type/keypress/scroll/drag/wait");
+    const planningOnly = await compiler.compile({ runId, goal: "planning only", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "off", batching: "same-control-input-v1" } }, new AbortController().signal);
+    expect(planningOnly.system).toContain("same ModelTurn as the first GUI action");
+    expect(planningOnly.system).toContain("do not copy the original Goal");
+    expect(planningOnly.system).not.toContain("Run Memory");
+    expect(planningOnly.system).not.toContain("1-2 key facts");
+    expect(planningOnly.system).not.toContain("2-4 predictable click micro-steps");
+    const memoryOnly = await compiler.compile({ runId, goal: "memory only", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
+    expect(memoryOnly.system).toContain("leave recent context");
+    expect(memoryOnly.system).toContain("1-2 key facts in the same ModelTurn");
+    expect(memoryOnly.system).toContain("Do not copy the original Goal or Plan");
+    expect(memoryOnly.system).toContain("do not write task-retention Memory");
+    expect(memoryOnly.system).toContain("relatedTaskIds");
+    expect(memoryOnly.system).not.toContain("Planning tools");
     const guarded = await compiler.compile({ runId, goal: "guard", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" } }, new AbortController().signal);
     expect(guarded.system).toContain("_harnessEffect");
     expect(guarded.tools.find((tool) => tool.category === "computer")?.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });

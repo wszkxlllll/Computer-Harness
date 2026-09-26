@@ -93,6 +93,35 @@ describe("ApplicationSession", () => {
     }
   });
 
+  it("keeps a direct CLI starter inside the ApplicationSession owner lifecycle", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-cli-starter-"));
+    const owner = new InProcessEnvironmentOwner();
+    let handle: RunHandle | undefined;
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const created = fakeHandle(config, "succeeded");
+      created.start = vi.fn((starter) => starter === undefined
+        ? Promise.resolve("succeeded")
+        : starter({} as RunController, config.goal, () => undefined));
+      handle = created;
+      return created;
+    });
+    const starter = vi.fn(async (_controller: RunController, goal: string) => {
+      expect(goal).toBe("direct CLI task");
+      return "succeeded" as const;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      const started = await session.startRun("direct CLI task", {}, starter);
+      expect(started).toBe(handle);
+      await expect(session.waitForActiveRun()).resolves.toBe("succeeded");
+      expect(handle?.start).toHaveBeenCalledTimes(1);
+      expect(starter).toHaveBeenCalledTimes(1);
+      expect(owner.inspect(session.environmentId)).toBeUndefined();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("wires the real createRun Controller into the session feed without an API or desktop", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-real-"));
     const owner = new InProcessEnvironmentOwner();
@@ -217,11 +246,13 @@ describe("ApplicationSession", () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-grounding-"));
     const owner = new InProcessEnvironmentOwner();
     const capturedGrounding: Array<string | undefined> = [];
+    const capturedBrowserUrls: Array<string | undefined> = [];
     const viewport: Viewport = { width: 2, height: 2, coordinateSpace: "physical" };
     const provider: ProviderAdapter = { id: "grounding-fixture-provider", async generate() { return { type: "finish", summary: "done" }; } };
     const createComputer = vi.fn(async (options: { config: ResolvedRunConfig["computer"] }) => {
       if (options.config.kind !== "cua") throw new Error("expected CUA config");
       capturedGrounding.push(options.config.grounding);
+      capturedBrowserUrls.push(options.config.managedBrowserUrl);
       const computerSession: ComputerSession = {
         id: `grounding-session-${capturedGrounding.length}` as ComputerSessionId,
         backend: "fixture",
@@ -251,9 +282,12 @@ describe("ApplicationSession", () => {
       await session.waitForActiveRun();
       await session.startRun("grounding off Run", { grounding: "off" });
       await session.waitForActiveRun();
-      expect(capturedGrounding).toEqual(["uia-catalog-v1", "off"]);
+      await session.startRun("managed browser Run", { windowTarget: null, grounding: "hybrid-catalog-v1", managedBrowserUrl: "https://example.test/route" });
+      await session.waitForActiveRun();
+      expect(capturedGrounding).toEqual(["uia-catalog-v1", "off", "hybrid-catalog-v1"]);
+      expect(capturedBrowserUrls).toEqual([undefined, undefined, "https://example.test/route"]);
       await expect(session.startRun("missing target", { windowTarget: null, grounding: "uia-catalog-v1" })).rejects.toThrow(/explicit CUA window target/iu);
-      expect(capturedGrounding).toEqual(["uia-catalog-v1", "off"]);
+      expect(capturedGrounding).toEqual(["uia-catalog-v1", "off", "hybrid-catalog-v1"]);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

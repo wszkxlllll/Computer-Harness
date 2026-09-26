@@ -122,6 +122,47 @@ describe("RunSnapshot reducer", () => {
     expect(snapshot.plan).toEqual({ runId, tasks: [{ ...task, status: "completed" }] });
   });
 
+  it("tracks a short-lived ExecutionSegment separately from global PlanState", () => {
+    const segment = {
+      id: "s1",
+      objective: "筛选出发时间",
+      steps: [{ id: "s1.1", intent: "展开筛选", allowedAction: "click" as const, completion: { kind: "element_present" as const, text: "08:00-10:00" } }],
+      cursor: 0,
+      status: "active" as const,
+      sourceObservationId: observationId,
+      computerSessionId: session.id,
+      attemptedStepIds: [],
+    };
+    const snapshot = [
+      ...runningEvents(),
+      event(5, { type: "execution.segment.updated", source: "tool", callId, mutation: { operation: "set", segment } }),
+      event(6, { type: "execution.segment.updated", source: "runtime", mutation: { operation: "step_attempted", segmentId: "s1", stepId: "s1.1" } }),
+      event(7, { type: "execution.segment.updated", source: "runtime", mutation: { operation: "advanced", segmentId: "s1", cursor: 1, status: "completed" } }),
+    ].reduce(reduceRunEvent, initialRunSnapshot(runId));
+    expect(snapshot.plan.tasks).toEqual([]);
+    expect(snapshot.executionSegment).toMatchObject({ id: "s1", cursor: 1, status: "completed", attemptedStepIds: ["s1.1"] });
+  });
+
+  it("rejects replayed completion evidence that has no attempted action", () => {
+    const segment = {
+      id: "s-unattempted",
+      objective: "筛选出发时间",
+      steps: [
+        { id: "s-unattempted.1", intent: "展开筛选", allowedAction: "click" as const, completion: { kind: "element_present" as const, text: "发车时间" } },
+      ],
+      cursor: 0,
+      status: "active" as const,
+      sourceObservationId: observationId,
+      computerSessionId: session.id,
+      attemptedStepIds: [],
+    };
+    const events = [
+      ...runningEvents(),
+      event(5, { type: "execution.segment.updated", source: "tool", callId, mutation: { operation: "set", segment } }),
+    ];
+    expect(() => events.concat(event(6, { type: "execution.segment.updated", source: "runtime", mutation: { operation: "advanced", segmentId: segment.id, cursor: 1, status: "completed" } })).reduce(reduceRunEvent, initialRunSnapshot(runId))).toThrow(/cannot advance before an attempted action/u);
+  });
+
   it("rebuilds Run Memory from its event stream", () => {
     const snapshot = [
       ...runningEvents(),
@@ -166,6 +207,39 @@ describe("RunSnapshot reducer", () => {
       runId,
     );
     expect(observed.latestObservationId).toBe(observationId);
+  });
+
+  it("clears only a matching proactive handoff and invalidates its old observation until a fresh capture", () => {
+    const sourceActionId = "proactive-action" as ActionId;
+    const waiting = reduceRuntimeEvents([
+      ...runningEvents(),
+      event(5, { type: "computer.window.handoff.requested", sourceActionId, reasonCode: "new_window_detected" }),
+    ], runId);
+    expect(waiting.status).toBe("waiting_window");
+    const ignored = reduceRunEvent(waiting, event(6, { type: "computer.window.handoff.ignored", sourceActionId }));
+    expect(ignored.status).toBe("running");
+    expect(ignored.pendingWindowHandoff).toBeUndefined();
+    expect(ignored.latestObservationId).toBeUndefined();
+    expect(() => reduceRunEvent(
+      reduceRuntimeEvents([
+        ...runningEvents(),
+        event(5, { type: "computer.window.handoff.requested", sourceActionId, reasonCode: "foreground_mismatch" }),
+      ], runId),
+      event(6, { type: "computer.window.handoff.ignored", sourceActionId }),
+    )).toThrow(/only the matching proactive window detection may be ignored/u);
+    const freshObservationId = "fresh-after-ignore" as ObservationId;
+    const refreshed = reduceRunEvent(ignored, event(7, {
+      type: "observation.created",
+      observation: {
+        id: freshObservationId,
+        runId,
+        computerSessionId: session.id,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "asset-fresh" as AssetId, relativePath: "assets/fresh.png", mediaType: "image/png", byteLength: 1 },
+      },
+    }));
+    expect(refreshed.latestObservationId).toBe(freshObservationId);
   });
 
   it.each([
@@ -281,6 +355,7 @@ describe("RunSnapshot reducer", () => {
     );
     expect(waiting.status).toBe("waiting_user");
     expect(waiting.pendingUserQuestion).toBe("Where should I save it?");
+    expect(waiting.pendingUserInputRequestId).toBe("event-5");
 
     const resumed = reduceRuntimeEvents(
       [
@@ -292,6 +367,7 @@ describe("RunSnapshot reducer", () => {
     );
     expect(resumed.status).toBe("running");
     expect(resumed.pendingUserQuestion).toBeUndefined();
+    expect(resumed.pendingUserInputRequestId).toBeUndefined();
 
     const corrected = reduceRuntimeEvents(
       [...runningEvents(), event(5, { type: "user.input.received", text: "Do not save yet." })],
@@ -477,6 +553,41 @@ describe("JsonlRunEventWriter", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("round-trips managed-browser select_option actions and receipts through JSONL", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-select-option-trajectory-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+    const selectAction = { actionId: "select-action" as ActionId, basedOn: observationId, kind: "select_option" as const, groundingRef: "dom-select-1", optionText: "08:00" };
+    await writer.append({ runId, type: "observation.created", observation: {
+      id: observationId,
+      runId,
+      computerSessionId: session.id,
+      capturedAt: "2026-01-01T00:00:00.000Z",
+      viewport: session.viewport,
+      screenshot: { assetId: "asset-select" as AssetId, relativePath: "assets/select.png", mediaType: "image/png", byteLength: 1 },
+      grounding: {
+        version: "grounding-catalog-v2",
+        source: "dom",
+        observationId,
+        computerSessionId: session.id,
+        completeness: "complete",
+        degraded: false,
+        maxElements: 16,
+        elements: [{ elementRef: "dom-select-1", role: "combobox", source: "dom", bbox: { x: 1, y: 1, width: 10, height: 10, coordinateSpace: "physical" }, options: [{ text: "08:00", enabled: true }, { text: "09:00", enabled: false }], optionsTruncated: false }],
+      },
+    } });
+    await writer.append({ runId, type: "action.proposed", callId, action: selectAction });
+    await writer.append({ runId, type: "action.execution.started", action: selectAction });
+    await writer.append({ runId, type: "action.execution.failed", receipt: { actionId: selectAction.actionId, status: "refused", driverCode: "SELECT_OPTION_OPTION_MISSING", message: "option not found" } });
+    await writer.close();
+    await expect(readRuntimeEvents(filePath)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "action.proposed", action: selectAction }),
+      expect.objectContaining({ type: "action.execution.started", action: selectAction }),
+      expect.objectContaining({ type: "action.execution.failed", receipt: expect.objectContaining({ actionId: selectAction.actionId, status: "refused" }) }),
+    ]));
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("refuses to append a new writer to an existing trajectory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
     const filePath = join(directory, "trajectory.jsonl");
@@ -608,6 +719,9 @@ describe("readRuntimeEvents", () => {
       runStarted(0),
       event(0, { type: "computer.open.started" }),
       event(0, { type: "computer.open.completed", session }),
+      event(0, { type: "computer.window.handoff.requested", sourceActionId: actionId, reasonCode: "new_window_detected" }),
+      event(0, { type: "computer.window.handoff.completed", target: { pid: 1234, windowId: 5678 }, session }),
+      event(0, { type: "computer.window.handoff.ignored", sourceActionId: actionId }),
       event(0, {
         type: "observation.created",
         observation: {
@@ -643,12 +757,13 @@ describe("readRuntimeEvents", () => {
       event(0, {
         type: "action.proposed",
         callId,
-        action: { actionId, kind: "wait", durationMs: 1 },
+        action: { actionId: "select-action" as ActionId, basedOn: observationId, kind: "select_option", groundingRef: "dom-select-1", optionText: "08:00" },
       }),
+      event(0, { type: "grounding.coordinate_coverage", actionId, observationId, mapping: "containment", matchedElementRef: "element-1", inHotProjection: true, normalizedDistance: 0 }),
       event(0, {
         type: "action.guard.evaluated",
         callIds: [callId],
-        actions: [{ actionId, kind: "wait", durationMs: 1 }],
+        actions: [{ actionId: "select-action" as ActionId, basedOn: observationId, kind: "select_option", groundingRef: "dom-select-1", optionText: "08:00" }],
         decision: "allow",
         categories: [],
         reasonCode: "fixture_allow",
@@ -667,6 +782,7 @@ describe("readRuntimeEvents", () => {
         receipt: { actionId, status: "failed" },
       }),
       event(0, { type: "planning.task.updated", callId, mutation: { operation: "created", task: { id: "task-1", subject: "Open the app", status: "pending" } } }),
+      event(0, { type: "execution.segment.updated", source: "tool", callId, mutation: { operation: "set", segment: { id: "s1", objective: "Open filters", steps: [{ id: "s1.1", intent: "Expand time filters", allowedAction: "click", completion: { kind: "element_present", text: "08:00-10:00" } }], cursor: 0, status: "active", sourceObservationId: observationId, computerSessionId: session.id, attemptedStepIds: [] } } }),
       event(0, { type: "memory.updated", callId, mutation: { operation: "upsert_fact", fact: { id: "m1", subject: { type: "run" }, key: "target", value: "demo", sourceEventId: "event-source" as EventId, status: "active", updatedSequence: 12 } } }),
       event(0, {
         type: "monitor.proposal",

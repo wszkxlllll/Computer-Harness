@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type {
   ActionId,
   ActionIntent,
+  ComputerWindowCandidate,
   AssetId,
   ComputerSessionId,
   EventId,
@@ -43,6 +44,7 @@ import {
   type ActionPolicy,
   type ContextCompiler,
   validateActionIntent,
+  groundingComputerTools,
 } from "./index.js";
 
 const runId = "runtime-test" as RunId;
@@ -273,6 +275,39 @@ class ScriptedProvider implements ProviderAdapter {
       throw new Error("fake provider script exhausted");
     }
     return turn;
+  }
+}
+
+class RawOnlyGroundingComputer extends FakeComputer {
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal): Promise<import("@computer-harness/protocol").ObservationCapture> {
+    const capture = await super.observe(session, observationId, signal);
+    const elements = Array.from({ length: 20 }, (_, index) => ({
+      elementRef: index === 19 ? "raw-only-target" : `raw-generic-${index}`,
+      role: "Button",
+      name: index === 19 ? "Raw only target" : `Generic ${index}`,
+      bbox: { x: index * 10, y: 40, width: 20, height: 20, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    return {
+      ...capture,
+      grounding: {
+        version: "grounding-catalog-v2",
+        source: "uia",
+        observationId,
+        computerSessionId: session.id,
+        completeness: "complete",
+        degraded: false,
+        maxElements: 256,
+        elements,
+      },
+    };
+  }
+}
+
+class ApprovalComputerPolicy extends DefaultRuntimePolicy {
+  public override async evaluateToolCall(context: Parameters<RuntimePolicy["evaluateToolCall"]>[0]) {
+    if (context.tool.category === "computer") return { decision: "require_approval" as const, reason: "test approval" };
+    return { decision: "allow" as const };
   }
 }
 
@@ -547,6 +582,70 @@ function clickRegistry(): ToolRegistry {
   return registry;
 }
 
+function waitRegistry(): ToolRegistry {
+  const registry = clickRegistry();
+  registry.registerMany(groundingComputerTools());
+  registry.register({
+    name: "wait",
+    description: "Wait for the current GUI to settle.",
+    category: "computer",
+    inputSchema: { type: "object", properties: { durationMs: { type: "number" } }, required: ["durationMs"], additionalProperties: false },
+    validate: (args) => {
+      if (typeof args !== "object" || args === null || Array.isArray(args) || typeof (args as { durationMs?: unknown }).durationMs !== "number") throw new Error("wait.durationMs must be a number");
+    },
+    toAction: (args) => ({ kind: "wait", durationMs: (args as { durationMs: number }).durationMs }),
+  });
+  return registry;
+}
+
+function planningOnlyRegistry(): ToolRegistry {
+  const registry = clickElementRegistry();
+  registry.register({
+    name: "note",
+    description: "Record a local planning note.",
+    category: "side",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    validate: () => undefined,
+    execute: async () => ({ ok: true }),
+  });
+  return registry;
+}
+
+function clickElementRegistry(): ToolRegistry {
+  const registry = clickRegistry();
+  registry.registerMany(groundingComputerTools());
+  return registry;
+}
+
+function segmentLifecycleRegistry(options: { intent: string; completionText: string }): ToolRegistry {
+  const registry = clickElementRegistry();
+  registry.register({
+    name: "execution_segment_set",
+    description: "Set a short-lived two-step click segment.",
+    category: "side",
+    inputSchema: { type: "object", properties: {}, additionalProperties: true },
+    validate: () => undefined,
+    execute: async (_args, context) => ({
+      operation: "set",
+      segment: {
+        id: "lifecycle-segment",
+        objective: "choose a departure control",
+        cursor: 0,
+        status: "active",
+        sourceObservationId: context.observation!.id,
+        computerSessionId: context.session.id,
+        attemptedStepIds: [],
+        steps: [
+          { id: "lifecycle-segment.1", intent: options.intent, allowedAction: "click", completion: { kind: "element_present", text: options.completionText } },
+          { id: "lifecycle-segment.2", intent: "choose the next departure option", allowedAction: "click", completion: { kind: "element_selected", text: "Shanghai" } },
+        ],
+      },
+    }),
+    executionSegmentMutationFromResult: (output) => output as never,
+  });
+  return registry;
+}
+
 function validateClickArgs(args: import("@computer-harness/protocol").JsonValue): { x: number; y: number } {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
     throw new Error("click arguments must be an object");
@@ -574,6 +673,7 @@ async function makeController(
     onEventCommitted?: (event: import("@computer-harness/protocol").RuntimeEvent) => void;
     actionPolicy?: ActionPolicy;
     features?: RunFeatureConfig;
+    windowHandoff?: "off" | "confirm-v1";
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -603,6 +703,7 @@ async function makeController(
     ...(overrides.batching === undefined ? {} : { batching: overrides.batching }),
     ...(overrides.enabledCategories === undefined ? {} : { enabledCategories: overrides.enabledCategories }),
     ...(overrides.enabledToolNames === undefined ? {} : { enabledToolNames: overrides.enabledToolNames }),
+    ...(overrides.windowHandoff === undefined ? {} : { windowHandoff: overrides.windowHandoff }),
   });
   return { controller, computer: activeComputer, directory };
 }
@@ -616,6 +717,162 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   }
   throw new Error("condition was not reached during the deterministic test window");
 }
+
+describe("RunController ExecutionSegment lifecycle", () => {
+  it("marks a semantically matching main-provider click attempted before evidence advances", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "segment-set" as ToolCallId, name: "execution_segment_set", arguments: {} }] },
+      { type: "tool_calls", calls: [{ id: "main-click" as ToolCallId, name: "click_element", arguments: { elementRef: "uia-source-target" } }] },
+      { type: "finish", summary: "departure control observed" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      new ManyGroundingComputer(),
+      segmentLifecycleRegistry({ intent: "open departure station", completionText: "Departure station" }),
+      new DefaultRuntimePolicy(5, 4),
+    );
+    await expect(controller.start("open the departure station")).resolves.toBe("succeeded");
+    const events = controller.getEvents();
+    expect(events.filter((event) => event.type === "execution.segment.updated").map((event) => event.mutation.operation)).toEqual(["set", "step_attempted", "advanced", "invalidated"]);
+    expect(events.find((event) => event.type === "execution.segment.updated" && event.mutation.operation === "invalidated")).toMatchObject({ mutation: { reason: "run_finished" } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("invalidates a segment when the main provider clicks a different semantic target", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ id: "segment-set" as ToolCallId, name: "execution_segment_set", arguments: {} }] },
+      { type: "tool_calls", calls: [{ id: "main-click" as ToolCallId, name: "click_element", arguments: { elementRef: "uia-source-target" } }] },
+      { type: "finish", summary: "replanned" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      new ManyGroundingComputer(),
+      segmentLifecycleRegistry({ intent: "open arrival station", completionText: "Arrival station" }),
+      new DefaultRuntimePolicy(5, 4),
+    );
+    await expect(controller.start("open the arrival station")).resolves.toBe("succeeded");
+    const segmentEvents = controller.getEvents().filter((event) => event.type === "execution.segment.updated");
+    expect(segmentEvents.map((event) => event.mutation.operation)).toEqual(["set", "invalidated"]);
+    expect(segmentEvents[1]).toMatchObject({ mutation: { reason: "main_provider_replanned" } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+});
+
+describe("RunController confirmed window handoff", () => {
+  it("lets the host ignore a cross-process incidental popup after a fresh observation, without replay", async () => {
+    class ProactiveHandoffComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal, options?: import("./contracts.js").ComputerExecuteOptions) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}:${String(options?.detectNewWindowHandoff)}`);
+        return { actionId: action.actionId, status: "completed" as const };
+      }
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        this.calls.push("detect-new-window");
+        return [{ pid: 999, windowId: 89, appName: "Popup", title: "Unrelated notice" }];
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [{ pid: 999, windowId: 89, appName: "Popup", title: "Unrelated notice" }];
+      }
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        this.calls.push("handoff");
+        return { ...session, id: "proactive-window" as ComputerSessionId };
+      }
+    }
+    const computer = new ProactiveHandoffComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("proactive-first"), typeCall("proactive-stale-second")] },
+      { type: "finish", summary: "continued after popup was ignored" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1", batching: "same-control-input-v1" });
+    let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      run = controller.start("save in the dialog that appears");
+      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents().map((event) => event.type === "tool.call.rejected" ? event.reason : event.type) })).toBe("waiting_window");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click:true"]);
+      expect(computer.calls).toContain("detect-new-window");
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(1);
+      expect(controller.getSnapshot().pendingWindowHandoff).toMatchObject({ reasonCode: "new_window_detected" });
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested" && event.reasonCode === "new_window_detected")).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "proactive-stale-second")).toBe(true);
+      expect(controller.getEvents().filter((event) => event.type === "tool.call.completed")).toHaveLength(1);
+      const beforeIgnore = controller.getSnapshot();
+      const candidates = await controller.listWindowHandoffCandidates(new AbortController().signal);
+      expect(candidates).toEqual([{ pid: 999, windowId: 89, appName: "Popup", title: "Unrelated notice" }]);
+      await controller.ignoreNewWindowAndContinueOnCurrentTarget();
+      expect(await run).toBe("succeeded");
+      expect(controller.getSnapshot().pendingWindowHandoff).toBeUndefined();
+      expect(controller.getSnapshot().computerSession?.id).toBe(beforeIgnore.computerSession?.id);
+      expect(controller.getSnapshot().latestObservationId).not.toBe(beforeIgnore.latestObservationId);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.ignored" && event.sourceActionId === beforeIgnore.pendingWindowHandoff?.sourceActionId)).toBe(true);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click:true"]);
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+      expect(computer.calls).not.toContain("handoff");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await run?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("waits after a no-input foreground refusal, never retries it, and observes the confirmed target", async () => {
+    class HandoffComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return { actionId: action.actionId, status: "refused" as const, driverCode: "WINDOW_FOREGROUND_MISMATCH", message: "no input was sent" };
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [{ pid: 42, windowId: 88, appName: "Editor", title: "Save As" }];
+      }
+      public async handoffWindow(session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        expect(candidate).toMatchObject({ pid: 42, windowId: 88 });
+        this.calls.push("handoff");
+        return { ...session, id: "handoff-computer" as ComputerSessionId, viewport: { width: 640, height: 480, coordinateSpace: "physical" } };
+      }
+    }
+    const computer = new HandoffComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("handoff-refused")] },
+      { type: "finish", summary: "continued after re-observation" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      run = controller.start("save in new dialog");
+      await waitUntil(() => controller.getSnapshot().status === "waiting_window");
+      await expect(controller.ignoreNewWindowAndContinueOnCurrentTarget()).rejects.toThrow(/only a proactively detected window may be ignored/u);
+      expect(controller.getSnapshot().pendingWindowHandoff).toMatchObject({ reasonCode: "foreground_mismatch" });
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(1);
+      const candidates = await controller.listWindowHandoffCandidates(new AbortController().signal);
+      expect(candidates).toHaveLength(1);
+      await controller.handoffWindow(candidates[0]!);
+      expect(await run).toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+      const events = controller.getEvents();
+      expect(events.map((event) => event.type)).toContain("computer.window.handoff.completed");
+      const observations = events.filter((event): event is Extract<(typeof events)[number], { type: "observation.created" }> => event.type === "observation.created");
+      expect(observations).toHaveLength(2);
+      expect(observations[0]?.observation.computerSessionId).not.toBe(observations[1]?.observation.computerSessionId);
+      const completed = events.find((event) => event.type === "computer.window.handoff.completed");
+      expect(completed?.type === "computer.window.handoff.completed" ? completed.target : undefined).toEqual({ pid: 42, windowId: 88 });
+      expect(controller.getSnapshot().computerSession?.viewport).toMatchObject({ width: 640, height: 480 });
+      expect(controller.getSnapshot().pendingWindowHandoff).toBeUndefined();
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await run?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("RunController S2-2 happy path", () => {
   it("selects a bounded goal-relevant grounding hot set before persistence", async () => {
@@ -1220,7 +1477,14 @@ describe("RunController command inbox and control semantics", () => {
     await firstRequest;
     await waitUntil(() => controller.getSnapshot().status === "waiting_user");
 
-    await expect(controller.submitUserInput("Save it in Documents")).resolves.toBeUndefined();
+    const pendingInputRequest = controller.getEvents().find((event) => event.type === "user.input.requested");
+    expect(pendingInputRequest?.type).toBe("user.input.requested");
+    if (pendingInputRequest?.type !== "user.input.requested") throw new Error("expected a pending input request");
+    expect(controller.getSnapshot().pendingUserInputRequestId).toBe(pendingInputRequest.eventId);
+    await expect(controller.submitUserInput("stale answer", "different-request")).rejects.toThrow(/does not match the pending request/iu);
+    expect(controller.getSnapshot().pendingUserQuestion).toBe("Where should I save it?");
+
+    await expect(controller.submitUserInput("Save it in Documents", pendingInputRequest.eventId)).resolves.toBeUndefined();
     await expect(running).resolves.toBe("succeeded");
     expect(provider.inputs[1]?.messages.some((message) =>
       message.content.some((content) => content.type === "text" && content.text.includes("Documents")),

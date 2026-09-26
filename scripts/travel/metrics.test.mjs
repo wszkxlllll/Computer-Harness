@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { collectTrial } from "./metrics.mjs";
+import { collectMetrics, collectTrial } from "./metrics.mjs";
 
 const runId = "travel-run-a";
 
@@ -43,7 +43,7 @@ function completeEvents() {
           degraded: false,
           maxElements: 16,
           elements: [{ elementRef: "uia-ref-1", role: "Edit", name: "origin", bbox: { x: 1, y: 2, width: 10, height: 10, coordinateSpace: "physical" }, state: { enabled: true, editable: true } }],
-          selection: { strategy: "deterministic-lexical-v1", candidateElementCount: 20, selectedElementRefs: ["uia-ref-1"], truncated: true, reasons: [{ elementRef: "uia-ref-1", codes: ["query_match", "editable"] }] },
+          selection: { strategy: "deterministic-lexical-v1", candidateElementCount: 20, selectedElementRefs: ["uia-ref-1"], truncated: true, reasons: [{ elementRef: "uia-ref-1", codes: ["query_match", "plan_match", "editable"] }] },
         },
       },
     }),
@@ -96,7 +96,7 @@ function completeEvents() {
             revalidation: [{ id: "fact-recheck", score: 0.5, match: "lexical", reason: "needs_check" }],
           },
           observationIncluded: true,
-          grounding: { present: true, projected: true, truncated: true, completeness: "partial", candidateElementCount: 20, projectedElementCount: 1, estimatedTokens: 25, strategy: "deterministic-lexical-v1", selectedElementRefs: ["uia-ref-1"], selectionReasons: [{ elementRef: "uia-ref-1", codes: ["query_match", "editable"] }] },
+          grounding: { present: true, projected: true, truncated: true, completeness: "partial", candidateElementCount: 20, projectedElementCount: 1, estimatedTokens: 25, strategy: "deterministic-lexical-v1", selectedElementRefs: ["uia-ref-1"], selectionReasons: [{ elementRef: "uia-ref-1", codes: ["query_match", "plan_match", "editable"] }] },
           monitorGuidanceIncluded: true,
           preparedRequest: { payloadHash: "payload-hash", estimate: { estimatedTextTokens: 90, imageCount: 1, estimationMethod: "context_report" } },
         },
@@ -253,6 +253,12 @@ test("collects complete base and module evidence without raw payloads", async (t
   assert.equal(metrics.grounding.estimatedGroundingTokens.total, 25);
   assert.equal(metrics.grounding.selectionStrategies["deterministic-lexical-v1"], 2);
   assert.equal(metrics.grounding.selectionReasonCodes.query_match, 2);
+  assert.equal(metrics.grounding.selectionReasonCodes.plan_match, 2);
+  assert.deepEqual(Object.keys(metrics.usageByComponent).sort(), ["guard", "mainProvider"]);
+  assert.equal(Object.hasOwn(metrics, "localPolicy"), false);
+  assert.equal(Object.hasOwn(metrics.usageByComponent, "localPolicy"), false);
+  assert.equal(metrics.usage.totalTokens, 176);
+  assert.equal(metrics.allModelUsage.totalTokens, metrics.usageByComponent.mainProvider.totalTokens + metrics.usageByComponent.guard.totalTokens);
   assert.equal(await readFile(join(trialDirectory, "manual-review.md"), "utf8"), manual);
   const serialized = JSON.stringify(metrics);
   assert.equal(serialized.includes("typed-secret"), false);
@@ -263,16 +269,22 @@ test("collects complete base and module evidence without raw payloads", async (t
 test("collects click_element lifecycle and refusal codes without payloads", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "travel-metrics-grounding-"));
   t.after(async () => rm(root, { recursive: true, force: true }));
-  const events = completeEvents().map((item) => item.type === "run.finished" ? { ...item, sequence: 38 } : item);
+  const events = completeEvents().map((item) => item.type === "run.finished" ? { ...item, sequence: 44 } : item);
   const finishIndex = events.findIndex((item) => item.type === "run.finished");
   events.splice(finishIndex, 0,
-    event("model.response.received", 31, { requestId: "request-grounding", turn: { type: "tool_calls", calls: [{ id: "click-element-1", name: "click_element", arguments: {} }] } }),
-    event("tool.call.received", 32, { call: { id: "click-element-1", name: "click_element", arguments: {} } }),
-    event("tool.call.completed", 33, { result: { callId: "click-element-1", status: "completed", output: {} } }),
-    event("tool.call.received", 34, { call: { id: "click-element-2", name: "click_element", arguments: {} } }),
-    event("tool.call.failed", 35, { result: { callId: "click-element-2", status: "failed", error: { code: "GROUNDING_REF_STALE", message: "refused" } } }),
-    event("tool.call.received", 36, { call: { id: "click-element-3", name: "click_element", arguments: {} } }),
-    event("tool.call.rejected", 37, { callId: "click-element-3", reason: "refused" }),
+    event("grounding.coordinate_coverage", 30, { actionId: "coordinate-action", observationId: "observation-1", decisionSource: "main_provider", mapping: "containment", matchedElementRef: "uia-ref-1", inHotProjection: true, normalizedDistance: 0 }),
+    event("action.execution.completed", 31, { receipt: { actionId: "coordinate-action", status: "completed" } }),
+    event("grounding.coordinate_coverage", 32, { actionId: "second-coordinate-action", observationId: "observation-1", decisionSource: "main_provider", mapping: "containment", matchedElementRef: "uia-ref-1", inHotProjection: true, normalizedDistance: 0 }),
+    event("action.execution.completed", 33, { receipt: { actionId: "second-coordinate-action", status: "completed" } }),
+    event("grounding.coordinate_coverage", 34, { actionId: "failed-main-action", observationId: "observation-1", decisionSource: "main_provider", mapping: "containment", matchedElementRef: "uia-ref-1", inHotProjection: true, normalizedDistance: 0 }),
+    event("action.execution.failed", 35, { receipt: { actionId: "failed-main-action", status: "failed" } }),
+    event("model.response.received", 36, { requestId: "request-grounding", turn: { type: "tool_calls", calls: [{ id: "click-element-1", name: "click_element", arguments: {} }] } }),
+    event("tool.call.received", 37, { call: { id: "click-element-1", name: "click_element", arguments: {} } }),
+    event("tool.call.completed", 38, { result: { callId: "click-element-1", status: "completed", output: {} } }),
+    event("tool.call.received", 39, { call: { id: "click-element-2", name: "click_element", arguments: {} } }),
+    event("tool.call.failed", 40, { result: { callId: "click-element-2", status: "failed", error: { code: "GROUNDING_REF_STALE", message: "refused" } } }),
+    event("tool.call.received", 41, { call: { id: "click-element-3", name: "click_element", arguments: {} } }),
+    event("tool.call.rejected", 42, { callId: "click-element-3", reason: "refused" }),
   );
   const trialDirectory = await makeTrial(root, {
     summary: { runId, runtimeOutcome: "succeeded", grounding: "uia-catalog-v1" },
@@ -285,6 +297,13 @@ test("collects click_element lifecycle and refusal codes without payloads", asyn
     rejected: 1,
     failed: 1,
     refusalCodes: { GROUNDING_REF_STALE: 1, TOOL_REJECTED: 1 },
+  });
+  assert.deepEqual(metrics.grounding.coordinateCoverage, {
+    events: 3,
+    mappings: { containment: 3 },
+    byDecisionSource: { main_provider: 3 },
+    inHotProjection: { true: 3, false: 0 },
+    primaryRecall: { cohort: 2, evaluated: 2, notEvaluated: 0, exactPresent: 2, exactAbsent: 0, spatialPresent: 2 },
   });
 });
 

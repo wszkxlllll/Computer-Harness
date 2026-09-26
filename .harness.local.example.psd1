@@ -11,6 +11,13 @@
   Preset = 'assisted'
   OutputRoot = 'runs\local'
 
+  # Optional: reuse a Harness-owned browser login without passing profile flags per start.
+  ManagedBrowserProfileMode = ''
+  ManagedBrowserProfileLabel = ''
+  # Jev is off by default. Enabling it sends visible window app names/titles to TypeSafe.
+  WindowSelector = 'local'
+  ShareWindowTitles = $false
+
   # Required only when selecting hybrid Memory retrieval.
   MemoryEmbeddingEndpoint = ''
 }

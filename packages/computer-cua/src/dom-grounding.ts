@@ -4,6 +4,7 @@ import type {
   GroundingCatalog,
   GroundingElement,
   GroundingElementState,
+  GroundingOption,
   ObservationId,
   Viewport,
 } from "@computer-harness/protocol";
@@ -48,6 +49,8 @@ export interface DomGroundingRawCandidate {
   readonly interactive?: unknown;
   readonly tabIndex?: unknown;
   readonly canvasLike?: unknown;
+  readonly options?: unknown;
+  readonly optionsTruncated?: unknown;
   readonly state?: {
     readonly enabled?: unknown;
     readonly focused?: unknown;
@@ -90,10 +93,48 @@ export interface DomGroundingTransportResult {
   readonly viewportMetrics?: DomGroundingViewportMetrics;
 }
 
+export interface DomSelectOptionRequest {
+  readonly observationId: ObservationId;
+  readonly computerSessionId: ComputerSessionId;
+  readonly viewport: Viewport;
+  readonly browserTarget: ManagedBrowserTarget;
+  /** Adapter-private candidate binding; never comes from a Provider directly. */
+  readonly candidate: {
+    readonly role: string;
+    readonly name?: string;
+    readonly description?: string;
+    readonly bbox: {
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+    };
+    /** Fresh DOM CSS frame; adapter-private and never model-facing. */
+    readonly frame?: {
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+    };
+    readonly fingerprint: string;
+  };
+  readonly optionText: string;
+}
+
+export interface DomSelectOptionResult {
+  readonly status: "completed" | "refused" | "failed";
+  readonly driverCode?: string;
+  readonly message?: string;
+  readonly tabId?: string;
+  readonly generation?: string;
+}
+
 export interface DomGroundingTransport {
   readonly kind: "managed-loopback-cdp-v1";
   /** Identity is attested at collection time; unseen navigation requires a fresh observation. */
   collect(request: DomGroundingCollectRequest, signal: AbortSignal): Promise<DomGroundingTransportResult>;
+  /** Re-locates and selects one option without opening the native popup. */
+  readonly selectOption?: (request: DomSelectOptionRequest, signal: AbortSignal) => Promise<DomSelectOptionResult>;
 }
 
 export interface MaterializedDomGrounding {
@@ -102,6 +143,9 @@ export interface MaterializedDomGrounding {
   readonly privateElements: ReadonlyMap<string, {
     readonly element: GroundingElement;
     readonly point: { readonly x: number; readonly y: number };
+    readonly candidateFingerprint: string;
+    readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+    readonly selectable: boolean;
   }>;
 }
 
@@ -130,6 +174,9 @@ export function materializeDomGrounding(
   const privateElements = new Map<string, {
     readonly element: GroundingElement;
     readonly point: { readonly x: number; readonly y: number };
+    readonly candidateFingerprint: string;
+    readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+    readonly selectable: boolean;
   }>();
   const publicElements: GroundingElement[] = [];
   const cssProjection = result.coordinateSpace === "css"
@@ -147,6 +194,7 @@ export function materializeDomGrounding(
     const name = safeLabel(candidate.name, 160);
     const description = safeLabel(candidate.description, 240);
     const state = publicState(candidate.state);
+    const optionProjection = publicNativeSelectOptions(candidate, role);
     const elementRef = `dom-${observationDiscriminator(request.observationId)}-${publicElements.length + 1}`;
     const element: GroundingElement = {
       elementRef,
@@ -157,11 +205,15 @@ export function materializeDomGrounding(
       ...(state === undefined ? {} : { state }),
       source: "dom",
       browserRegion: "content",
+      ...(optionProjection === undefined ? {} : optionProjection),
     };
     const point = { x: clipped.x + clipped.width / 2, y: clipped.y + clipped.height / 2 };
     privateElements.set(elementRef, {
       element,
       point,
+      candidateFingerprint: domCandidateFingerprint(candidate),
+      ...(frame === undefined ? {} : { candidateFrame: frame }),
+      selectable: isSelectLikeCandidate(candidate, role),
     });
     publicElements.push(element);
   }
@@ -179,6 +231,29 @@ export function materializeDomGrounding(
     },
     privateElements,
   };
+}
+
+/**
+ * Stable, bounded identity for re-locating one candidate inside the same
+ * managed tab/generation. Geometry is checked separately with a bounded
+ * tolerance so small layout drift does not turn a stable control into a new
+ * identity. It deliberately excludes DOM node ids, selectors, input values,
+ * cookies and option values.
+ */
+export function domCandidateFingerprint(candidate: DomGroundingRawCandidate): string {
+  const canonical = [
+    normalizedFingerprintPart(publicRole(candidate), 64),
+    normalizedFingerprintPart(candidate.tagName, 32),
+    normalizedFingerprintPart(candidate.ariaRole, 64),
+    normalizedFingerprintPart(candidate.inputType, 32),
+    normalizedFingerprintPart(candidate.name, 160),
+  ].join("\u001f");
+  let hash = 2_166_136_261;
+  for (let index = 0; index < canonical.length; index += 1) {
+    hash ^= canonical.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `domf-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 /**
@@ -284,6 +359,19 @@ function publicRole(candidate: DomGroundingRawCandidate): string | undefined {
   return inferred[tag] ?? (Number.isInteger(candidate.tabIndex) && Number(candidate.tabIndex) >= 0 ? "generic" : undefined);
 }
 
+function isSelectLikeCandidate(candidate: DomGroundingRawCandidate, role: string): boolean {
+  const tag = typeof candidate.tagName === "string" ? candidate.tagName.toLocaleLowerCase() : "";
+  // V1 intentionally supports only native HTMLSelectElement delivery. ARIA
+  // comboboxes remain visible/clickable but are not mutated by this primitive.
+  const normalizedRole = role.normalize("NFKC").toLocaleLowerCase().replace(/[\s_-]+/gu, "").trim();
+  return tag === "select" && (normalizedRole === "select" || normalizedRole === "combobox");
+}
+
+function normalizedFingerprintPart(value: unknown, maxLength: number): string {
+  if (typeof value !== "string") return "";
+  return value.normalize("NFKC").replace(/[\u0000-\u001F\u007F]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, maxLength);
+}
+
 function publicState(value: DomGroundingRawCandidate["state"]): GroundingElementState | undefined {
   if (value === undefined) return undefined;
   const state = {
@@ -295,6 +383,28 @@ function publicState(value: DomGroundingRawCandidate["state"]): GroundingElement
     ...(value.valuePresent === true ? { valuePresent: true } : {}),
   } satisfies GroundingElementState;
   return Object.keys(state).length === 0 ? undefined : state;
+}
+
+function publicNativeSelectOptions(
+  candidate: DomGroundingRawCandidate,
+  role: string,
+): { readonly options: readonly GroundingOption[]; readonly optionsTruncated: boolean } | undefined {
+  const tag = typeof candidate.tagName === "string" ? candidate.tagName.toLocaleLowerCase() : "";
+  const normalizedRole = role.normalize("NFKC").toLocaleLowerCase().replace(/[\s_-]+/gu, "").trim();
+  if (tag !== "select" || (normalizedRole !== "select" && normalizedRole !== "combobox")) return undefined;
+  if (!Array.isArray(candidate.options)) return undefined;
+  const options: GroundingOption[] = [];
+  for (const raw of candidate.options.slice(0, 33)) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const item = raw as Record<string, unknown>;
+    const text = safeLabel(item.text, 160);
+    if (text === undefined || typeof item.enabled !== "boolean") continue;
+    options.push({ text, enabled: item.enabled });
+  }
+  return {
+    options: options.slice(0, 32),
+    optionsTruncated: candidate.optionsTruncated === true || options.length > 32 || candidate.options.length > 32,
+  };
 }
 
 function readFrame(value: unknown): { x: number; y: number; width: number; height: number } | undefined {

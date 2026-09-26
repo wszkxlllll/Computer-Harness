@@ -6,7 +6,11 @@ import type { RunSnapshot } from "@computer-harness/trajectory";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
 import type { RiskGuardMode, RiskProfile } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
-import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput } from "./tui-text.js";
+import { createTuiPainter } from "./tui-painter.js";
+import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
+import { matchGoalToWindow } from "./window-target-matcher.js";
+import { resolveTuiGrounding, type TuiGroundingChoice } from "./window-grounding-policy.js";
+import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 
 const LEGACY_INCREMENTAL_POLL_MS = 250;
 const MAX_TUI_INPUT_LENGTH = 500;
@@ -26,16 +30,20 @@ export interface TuiMetadata {
   cuaWindowDeliveryMode?: "background" | "foreground";
   /** Local-only display label; never serialized into a Provider request/report. */
   cuaWindowLabel?: string;
+  /** Local-only selection provenance for the TUI; never sent to a Provider. */
+  cuaWindowSelectionSource?: "host" | "local_match" | "jev";
   /** False for OSWorld and other environments without host window selection. */
   windowSelectionAvailable?: boolean;
   features?: TuiFeatureSelection;
   /** True only when the explicit endpoint and independent key are present. */
   embeddingReady?: boolean;
-  /** Explicit managed-browser URL; only its host is rendered in the TUI. */
+  /** Managed-browser URL; only its host is rendered outside the URL editor. */
   managedBrowserUrl?: string;
   /** Managed profile lifecycle; paths are never rendered. */
   managedBrowserProfileMode?: "ephemeral" | "persistent";
   managedBrowserProfileLabel?: string;
+  /** A Harness-owned managed browser was explicitly chosen in the picker. */
+  managedBrowserSelected?: boolean;
 }
 
 export interface TuiFeatureSelection {
@@ -46,7 +54,7 @@ export interface TuiFeatureSelection {
   contextMode: "raw" | "recent";
   riskGuard: RiskGuardMode;
   monitor: "off" | "shadow" | "guidance";
-  grounding: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+  grounding: TuiGroundingChoice;
 }
 
 interface TuiInput extends NodeJS.ReadableStream {
@@ -69,9 +77,11 @@ export interface ApplicationTuiOptions {
   initialGoal?: string;
   terminal?: TuiTerminal;
   lifecycleWaitMs?: number;
+  /** Optional explicit external window selector; never used for GUI actions. */
+  windowSelector?: WindowSelectionStrategy;
 }
 
-type TuiMode = "home" | "features" | "windows" | "run";
+type TuiMode = "home" | "home_details" | "features" | "windows" | "handoff" | "browser_url" | "run";
 type TuiFeedState = "live" | "resync_required" | "closed";
 
 interface PendingCorrection {
@@ -113,14 +123,22 @@ export async function runApplicationTui(
   let featureCursor = 0;
   let windowCursor = 0;
   let windowTargets: readonly WindowTargetInfo[] = [];
+  let browserUrlDraft = "";
   let windowLoading = false;
   let windowError = "";
+  let windowMatchReason = "";
   let windowDiscoveryAbort: AbortController | undefined;
+  let handoffDiscoveryAbort: AbortController | undefined;
+  let goalWindowDiscoveryAbort: AbortController | undefined;
+  let goalSubmissionPending = false;
+  let goalSubmissionGeneration = 0;
   let selectedWindowTarget: ApplicationSessionWindowTarget | null | undefined = metadata.cuaWindowTarget;
   let selectedWindowDeliveryMode: "background" | "foreground" | null | undefined = metadata.cuaWindowDeliveryMode;
+  let managedBrowserSelected = metadata.managedBrowserSelected === true;
+  let windowChoiceExplicit = metadata.cuaWindowTarget !== undefined;
   let editMode = true;
   let inputValue = "";
-  let notice = "";
+  let notice = options.windowSelector === undefined ? "" : "Jev enabled: initial selection and handoff may send window names and titles to TypeSafe.";
   let lastReply = "";
   let exiting = false;
   let restored = false;
@@ -131,6 +149,7 @@ export async function runApplicationTui(
   let currentSnapshot: RunSnapshot = initialRunSnapshot(HOME_RUN_ID);
   let currentEvents: RuntimeEvent[] = [];
   let lastSequence = -1;
+  let activeHandoffReasonCode: "foreground_mismatch" | "new_window_detected" | undefined;
   let feedState: TuiFeedState = "live";
   let detailPage = 0;
   let inputLimitReached = false;
@@ -143,11 +162,18 @@ export async function runApplicationTui(
   const write = (value: string): void => {
     try { output.write(value); } catch { /* terminal may disappear during exit */ }
   };
+  // The real console uses row-level painting. Synthetic terminal streams keep
+  // complete frames so tests and embedders can inspect their output directly.
+  const painter = output === process.stdout ? createTuiPainter(write) : undefined;
+  const paint = (frame: string): void => {
+    if (painter !== undefined) painter.paint(frame);
+    else write(`\u001b[H\u001b[2J${frame}`);
+  };
 
   const render = (): void => {
     if (mode === "run" && currentHandle !== undefined) {
       currentSnapshot = currentHandle.controller.getSnapshot();
-      write(`\u001b[H\u001b[2J${buildTuiFrame(currentSnapshot, currentEvents, currentGoal, activeMetadata, {
+      paint(buildTuiFrame(currentSnapshot, currentEvents, currentGoal, activeMetadata, {
         editMode,
         input: inputValue,
         notice,
@@ -158,18 +184,40 @@ export async function runApplicationTui(
         inputLimitReached,
         columns: output.columns,
         rows: output.rows,
-      })}`);
+      }));
       return;
     }
     if (mode === "features") {
-      write(`\u001b[H\u001b[2J${buildTuiFeaturesFrame(activeMetadata, draftFeatureSelection, featureCursor, output.columns, output.rows)}\n`);
+      paint(`${buildTuiFeaturesFrame(activeMetadata, draftFeatureSelection, featureCursor, output.columns, output.rows)}\n`);
       return;
     }
     if (mode === "windows") {
-      write(`\u001b[H\u001b[2J${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, output.columns, output.rows)}\n`);
+      paint(`${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, windowMatchReason, output.columns, output.rows)}\n`);
       return;
     }
-    write(`\u001b[H\u001b[2J${buildTuiHomeFrame(activeMetadata, session, {
+    if (mode === "handoff") {
+      paint(`${buildTuiHandoffFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, windowMatchReason, output.columns, output.rows, currentSnapshot.pendingWindowHandoff?.reasonCode ?? activeHandoffReasonCode)}\n`);
+      return;
+    }
+    if (mode === "browser_url") {
+      paint(`${buildTuiBrowserUrlFrame(activeMetadata, browserUrlDraft, inputValue, notice, output.columns, output.rows)}\n`);
+      return;
+    }
+    if (mode === "home_details") {
+      paint(buildTuiHomeDetailsFrame(activeMetadata, session, {
+        editMode,
+        input: inputValue,
+        notice,
+        feedState,
+        reply: lastReply,
+        detailPage,
+        inputLimitReached,
+        columns: output.columns,
+        rows: output.rows,
+      }));
+      return;
+    }
+    paint(buildTuiHomeFrame(activeMetadata, session, {
       editMode,
       input: inputValue,
       notice,
@@ -179,7 +227,7 @@ export async function runApplicationTui(
       inputLimitReached,
       columns: output.columns,
       rows: output.rows,
-    })}`);
+    }));
   };
 
   // Keypress streams can deliver a large paste as many synchronous events.
@@ -218,6 +266,7 @@ export async function runApplicationTui(
       appendEvents([notification.event]);
       currentSnapshot = handle.controller.getSnapshot();
       render();
+      if (notification.event.type === "computer.window.handoff.requested") void openWindowHandoffPicker(handle);
       return;
     }
     feedState = notification.status;
@@ -248,6 +297,8 @@ export async function runApplicationTui(
     currentGoal = goal;
     currentSnapshot = handle.controller.getSnapshot();
     currentEvents = [];
+    handoffDiscoveryAbort?.abort();
+    handoffDiscoveryAbort = undefined;
     lastSequence = -1;
     feedState = "live";
     detailPage = 0;
@@ -268,6 +319,8 @@ export async function runApplicationTui(
       feedSubscription?.unsubscribe();
       feedSubscription = undefined;
       currentHandle = undefined;
+      handoffDiscoveryAbort?.abort();
+      handoffDiscoveryAbort = undefined;
       mode = "home";
       editMode = true;
       inputValue = "";
@@ -285,14 +338,17 @@ export async function runApplicationTui(
       notice = `Run finished: ${outcome ?? currentSnapshot.outcome ?? "unknown"}`;
       render();
       let reportNotice = "";
+      let reportUnavailable = false;
       try {
         const report = await handle.report();
         await writeRunReport(report, handle.config.outputDir);
         reportNotice = `; report written to ${handle.config.outputDir}`;
       } catch (error) {
-        reportNotice = `; report unavailable: ${errorMessage(error)}`;
+        reportUnavailable = true;
+        reportNotice = "; report unavailable";
       }
       if (mode === "home" && currentHandle === undefined) {
+        if (reportUnavailable) lastReply = `${lastReply}\nRun report unavailable. Check the output path and write permissions.`;
         notice = `${notice}${reportNotice}`;
         render();
       }
@@ -336,17 +392,34 @@ export async function runApplicationTui(
       render();
       return;
     }
+    inputValue = trimmed;
+    editMode = false;
     if (featureSelection.memoryRetrieval === "hybrid" && activeMetadata.embeddingReady !== true) {
       notice = "Hybrid retrieval needs --memory-embedding-endpoint and MEMORY_EMBEDDING_API_KEY before starting.";
       render();
       return;
     }
-    if (featureSelection.grounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
+    if (managedBrowserSelected && featureSelection.grounding !== "auto" && !isManagedGrounding(featureSelection.grounding)) {
+      notice = "The selected managed browser needs auto, DOM or hybrid grounding. Change Grounding in F before starting.";
+      render();
+      return;
+    }
+    const effectiveGrounding = resolveTuiGrounding(featureSelection.grounding, managedBrowserSelected ? "managed-browser" : selectedWindowTarget == null ? "desktop" : "host-window");
+    const managedGrounding = isManagedGrounding(effectiveGrounding);
+    if (!windowChoiceExplicit && !managedGrounding && activeMetadata.computer === "cua") {
+      if (activeMetadata.windowSelectionAvailable !== false) {
+        resolveGoalWindowLocally(trimmed);
+        return;
+      }
+      requireExplicitDesktopChoice();
+      return;
+    }
+    if (effectiveGrounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
       notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
       render();
       return;
     }
-    if (isManagedGrounding(featureSelection.grounding)) {
+    if (isManagedGrounding(effectiveGrounding)) {
       if (activeMetadata.computer !== "cua") {
         notice = "DOM/Hybrid grounding requires the CUA computer and shared CUA socket; choose off/UIA or relaunch with --computer cua.";
         render();
@@ -358,10 +431,301 @@ export async function runApplicationTui(
         return;
       }
     }
+    startRunForGoal(trimmed, "Starting Run…", "Run started");
+  };
+
+  const startRunForGoal = (goal: string, startNotice: string, successNotice: string): void => {
+    const effectiveGrounding = resolveTuiGrounding(featureSelection.grounding, managedBrowserSelected ? "managed-browser" : selectedWindowTarget == null ? "desktop" : "host-window");
+    if (effectiveGrounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
+      notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
+      render();
+      return;
+    }
+    notice = startNotice;
+    goalSubmissionPending = true;
+    render();
     invoke(async () => {
-      const handle = await session.startRun(trimmed, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode));
-      attachRun(handle, trimmed);
-    }, "Run started");
+      try {
+        const handle = await session.startRun(goal, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode, managedBrowserSelected, activeMetadata.managedBrowserUrl));
+        goalSubmissionPending = false;
+        attachRun(handle, goal);
+      } catch (error) {
+        goalSubmissionPending = false;
+        throw error;
+      }
+    }, successNotice);
+  };
+
+  const clearAutomaticWindowSelection = (): void => {
+    if (activeMetadata.cuaWindowSelectionSource !== "local_match" && activeMetadata.cuaWindowSelectionSource !== "jev") return;
+    selectedWindowTarget = undefined;
+    selectedWindowDeliveryMode = undefined;
+    const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...desktopMetadata } = activeMetadata;
+    activeMetadata = desktopMetadata;
+  };
+
+  const applyWindowHandoff = async (handle: RunHandle, candidate: WindowTargetInfo): Promise<void> => {
+    await handle.controller.handoffWindow(candidate);
+    if (currentHandle !== handle) return;
+    selectedWindowTarget = { pid: candidate.pid, windowId: candidate.windowId };
+    activeHandoffReasonCode = undefined;
+    activeMetadata = {
+      ...activeMetadata,
+      cuaWindowTarget: selectedWindowTarget,
+      cuaWindowLabel: windowDisplayLabel(candidate),
+      cuaWindowSelectionSource: "host",
+    };
+    mode = "run";
+    notice = "Window handoff completed; the old frame and element references were discarded. Observing the new window.";
+    render();
+  };
+
+  const ignoreProactiveWindow = (handle: RunHandle): void => {
+    if (currentHandle !== handle || handle.controller.getSnapshot().pendingWindowHandoff?.reasonCode !== "new_window_detected") return;
+    handoffDiscoveryAbort?.abort();
+    handoffDiscoveryAbort = undefined;
+    windowLoading = true;
+    windowError = "";
+    windowMatchReason = "Keeping the bound target. Invalidating the old frame and capturing a fresh observation…";
+    mode = "handoff";
+    render();
+    invoke(async () => {
+      try {
+        await handle.controller.ignoreNewWindowAndContinueOnCurrentTarget();
+        if (currentHandle !== handle) return;
+        mode = "run";
+        activeHandoffReasonCode = undefined;
+        windowTargets = [];
+        notice = "Ignored the new window; the bound target was freshly observed. The completed action was not replayed.";
+      } catch (error) {
+        windowError = errorMessage(error);
+        windowMatchReason = "Could not continue on the current target; choose the new window or abort.";
+      } finally {
+        windowLoading = false;
+        if (currentHandle === handle) render();
+      }
+    }, "");
+  };
+
+  const openWindowHandoffPicker = async (handle: RunHandle): Promise<void> => {
+    if (currentHandle !== handle || handle.controller.getSnapshot().status !== "waiting_window") return;
+    handoffDiscoveryAbort?.abort();
+    const abort = new AbortController();
+    handoffDiscoveryAbort = abort;
+    windowTargets = [];
+    windowCursor = 0;
+    windowLoading = true;
+    windowError = "";
+    const handoffReason = handle.controller.getSnapshot().pendingWindowHandoff?.reasonCode;
+    activeHandoffReasonCode = handoffReason;
+    windowMatchReason = handoffReason === "new_window_detected"
+      ? "A new visible window appeared after the completed action. Review candidates; Jev suggestions always require Enter confirmation."
+      : "Run is paused after an exact foreground refusal; no input was sent. Recheck the next target.";
+    mode = "handoff";
+    render();
+    try {
+      const candidates = await handle.controller.listWindowHandoffCandidates(abort.signal);
+      if (abort.signal.aborted || currentHandle !== handle) return;
+      windowTargets = candidates.filter((candidate) => candidate.pid !== activeMetadata.cuaWindowTarget?.pid || candidate.windowId !== activeMetadata.cuaWindowTarget?.windowId);
+      windowMatchReason = windowTargets.length === 0 ? "No other window is visible. R refreshes; A aborts the Run." : "Select a new window. Enter confirms; Esc keeps the Run waiting.";
+      const surfacedCandidates = await handle.controller.listNewWindowHandoffCandidates(abort.signal);
+      if (abort.signal.aborted || currentHandle !== handle) return;
+      const surfacedWindowTargets = surfacedCandidates.filter((candidate) =>
+        windowTargets.some((visible) => visible.pid === candidate.pid && visible.windowId === candidate.windowId &&
+          visible.appName === candidate.appName && visible.title === candidate.title));
+      if (options.windowSelector !== undefined && surfacedWindowTargets.length > 0) {
+        windowMatchReason = "Jev is comparing the paused task with windows surfaced since the last observation.";
+        render();
+        const decision = await options.windowSelector.select(
+          handoffReason === "new_window_detected"
+            ? `${currentGoal}\nA visible window appeared after the completed action. Suggest which new candidate fits this task; the host will still require manual confirmation.`
+            : `${currentGoal}\nThe previous bound window is no longer the foreground target. Choose a newly opened dialog or window needed to continue this task.`,
+          surfacedWindowTargets,
+          abort.signal,
+          "handoff",
+        );
+        if (abort.signal.aborted || currentHandle !== handle) return;
+        if (decision.kind === "matched") {
+          const surfacedIndex = surfacedWindowTargets.findIndex((candidate) => candidate.pid === decision.target.pid && candidate.windowId === decision.target.windowId && candidate.appName === decision.target.appName && candidate.title === decision.target.title);
+          const index = surfacedIndex < 0 ? -1 : windowTargets.findIndex((candidate) =>
+            candidate.pid === surfacedWindowTargets[surfacedIndex]!.pid &&
+            candidate.windowId === surfacedWindowTargets[surfacedIndex]!.windowId &&
+            candidate.appName === surfacedWindowTargets[surfacedIndex]!.appName &&
+            candidate.title === surfacedWindowTargets[surfacedIndex]!.title);
+          if (surfacedIndex < 0) {
+            windowMatchReason = "Jev suggestion was not in the eligible newly surfaced candidate set; choose manually.";
+          } else if (index >= 0) {
+            windowCursor = index;
+            const candidate = windowTargets[index]!;
+            if (handoffReason === "new_window_detected") {
+              windowMatchReason = "Jev suggests the highlighted candidate; press Enter to confirm manually.";
+            } else if (candidate.pid !== activeMetadata.cuaWindowTarget?.pid) {
+              windowMatchReason = "Automatic handoff is limited to newly surfaced windows in the bound process. Choose manually or abort.";
+            } else {
+              windowLoading = true;
+              windowMatchReason = `Jev selected newly surfaced ${windowDisplayLabel(candidate)} in the bound process; verifying this exact HWND.`;
+              render();
+              try {
+                await applyWindowHandoff(handle, candidate);
+              } catch (error) {
+                windowError = errorMessage(error);
+                windowMatchReason = "Automatic handoff was not applied. Choose a candidate manually or refresh the list.";
+              } finally {
+                windowLoading = false;
+              }
+            }
+          } else {
+            windowMatchReason = "Jev suggestion is no longer in the live candidate list; choose manually.";
+          }
+        } else {
+          windowMatchReason = `Jev abstained (${decision.reason}); choose manually or abort.`;
+        }
+      } else if (windowTargets.length > 0) {
+        windowMatchReason = "No newly surfaced window matches the CUA-reported foreground HWND. Choose manually or abort.";
+      }
+    } catch (error) {
+      if (!abort.signal.aborted && currentHandle === handle) windowError = errorMessage(error);
+    } finally {
+      if (handoffDiscoveryAbort === abort) {
+        handoffDiscoveryAbort = undefined;
+        windowLoading = false;
+        if (mode === "handoff" && currentHandle === handle) render();
+      }
+    }
+  };
+
+  const cancelGoalWindowDiscovery = (): void => {
+    goalSubmissionGeneration += 1;
+    goalWindowDiscoveryAbort?.abort();
+    goalWindowDiscoveryAbort = undefined;
+    goalSubmissionPending = false;
+    clearAutomaticWindowSelection();
+  };
+
+  const requireExplicitDesktopChoice = (): void => {
+    clearAutomaticWindowSelection();
+    windowTargets = [];
+    windowCursor = 0;
+    windowLoading = false;
+    windowError = "";
+    windowMatchReason = "No window list. Explicitly choose Primary desktop; no target was auto-selected.";
+    mode = "windows";
+    editMode = false;
+    render();
+  };
+
+  const resolveGoalWindowLocally = (goal: string): void => {
+    goalWindowDiscoveryAbort?.abort();
+    const abort = new AbortController();
+    const generation = ++goalSubmissionGeneration;
+    goalWindowDiscoveryAbort = abort;
+    goalSubmissionPending = true;
+    windowMatchReason = "";
+    notice = "Matching the goal against visible window names locally…";
+    render();
+
+    void session.listWindowTargets(abort.signal).then(async (targets) => {
+      if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+      let pickerTargets = targets;
+      let jevReason = "";
+      if (options.windowSelector !== undefined) {
+        notice = "Asking Jev to choose from visible windows; their application names and titles are sent to TypeSafe. No GUI action yet.";
+        render();
+        const decision = await options.windowSelector.select(goal, targets, abort.signal, "initial");
+        if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+        // The external choice can take several seconds. Refresh the exact
+        // PID/HWND candidate set before either auto-selection or manual fallback.
+        const currentTargets = await session.listWindowTargets(abort.signal);
+        if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+        pickerTargets = currentTargets;
+        if (decision.kind === "matched") {
+          const selected = currentTargets.find((target) => target.pid === decision.target.pid && target.windowId === decision.target.windowId &&
+            target.appName === decision.target.appName && target.title === decision.target.title);
+          if (selected === undefined) {
+            jevReason = "Jev choice changed before Run start; pick a window manually.";
+          } else {
+            goalWindowDiscoveryAbort = undefined;
+            goalSubmissionPending = false;
+            managedBrowserSelected = false;
+            selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+            selectedWindowDeliveryMode = "foreground";
+            activeMetadata = {
+              ...activeMetadata,
+              cuaWindowTarget: selectedWindowTarget,
+              cuaWindowDeliveryMode: "foreground",
+              cuaWindowLabel: windowDisplayLabel(selected),
+              cuaWindowSelectionSource: "jev",
+              managedBrowserSelected: false,
+            };
+            startRunForGoal(goal, `Jev selected ${windowDisplayLabel(selected)}; exact PID/HWND rechecked. Starting Run…`, "Run started after Jev window selection.");
+            return;
+          }
+        } else {
+          jevReason = `Jev abstained (${decision.reason}); pick a window manually.`;
+        }
+      } else {
+        const result = matchGoalToWindow(goal, targets);
+        if (result.kind === "matched") {
+          const selected = result.match.target;
+          goalWindowDiscoveryAbort = undefined;
+          goalSubmissionPending = false;
+          managedBrowserSelected = false;
+          selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+          selectedWindowDeliveryMode = "foreground";
+          activeMetadata = {
+            ...activeMetadata,
+            cuaWindowTarget: selectedWindowTarget,
+            cuaWindowDeliveryMode: "foreground",
+            cuaWindowLabel: windowDisplayLabel(selected),
+            cuaWindowSelectionSource: "local_match",
+            managedBrowserSelected: false,
+          };
+          const label = windowDisplayLabel(selected);
+          startRunForGoal(
+            goal,
+            `Local goal/name matching selected ${label} (no model selected the window). Starting Run…`,
+            "Run started after a local goal/name match; the model did not select the window.",
+          );
+          return;
+        }
+        jevReason = result.kind === "ambiguous"
+          ? "Ambiguous local match; pick a window. Goal kept; no model chose it."
+          : "No confident local match; pick a window. Goal kept; no model chose it.";
+      }
+
+      goalWindowDiscoveryAbort = undefined;
+      goalSubmissionPending = false;
+      clearAutomaticWindowSelection();
+      windowTargets = pickerTargets;
+      windowCursor = 0;
+      windowError = "";
+      windowMatchReason = jevReason;
+      mode = "windows";
+      editMode = false;
+      render();
+    }).catch((error: unknown) => {
+      const cleanupFailure = error instanceof Error && error.name === "CuaWindowDiscoveryCleanupError";
+      if (exiting) return;
+      if (generation !== goalSubmissionGeneration) {
+        if (abort.signal.aborted && cleanupFailure && mode === "home") {
+          notice = `Window picker cleanup is unconfirmed: ${errorMessage(error)}`;
+          render();
+        }
+        return;
+      }
+      if (abort.signal.aborted && !cleanupFailure) return;
+      goalWindowDiscoveryAbort = undefined;
+      goalSubmissionPending = false;
+      clearAutomaticWindowSelection();
+      windowTargets = [];
+      windowCursor = 0;
+      windowLoading = false;
+      windowError = errorMessage(error);
+      windowMatchReason = "Discovery failed. No Run started; goal kept. Refresh or pick a window.";
+      mode = "windows";
+      editMode = false;
+      render();
+    });
   };
 
   const refreshWindowTargets = (): void => {
@@ -371,6 +735,7 @@ export async function runApplicationTui(
     windowDiscoveryAbort = abort;
     windowLoading = true;
     windowError = "";
+    windowMatchReason = "";
     windowTargets = [];
     windowCursor = 0;
     render();
@@ -409,6 +774,7 @@ export async function runApplicationTui(
     editMode = false;
     windowCursor = 0;
     windowError = "";
+    windowMatchReason = "";
     notice = "Choose a host window for subsequent Runs; the selection persists until changed.";
     render();
     refreshWindowTargets();
@@ -421,30 +787,47 @@ export async function runApplicationTui(
       return;
     }
     if (windowCursor === 0) {
+      managedBrowserSelected = false;
       selectedWindowTarget = null;
       selectedWindowDeliveryMode = null;
-      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, ...desktopMetadata } = activeMetadata;
+      windowChoiceExplicit = true;
+      const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, managedBrowserSelected: _managed, ...desktopMetadata } = activeMetadata;
       activeMetadata = desktopMetadata;
-      notice = "Primary desktop selected for subsequent Runs.";
+      notice = inputValue.trim().length > 0
+        ? "Primary desktop selected; goal draft kept. Press I, then Enter to start."
+        : "Primary desktop selected for subsequent Runs.";
+    } else if (featureSelection.grounding === "auto" && windowCursor === 1) {
+      browserUrlDraft = "";
+      mode = "browser_url";
+      notice = "Enter a browser start URL, or press Enter to reuse the previous URL. Goal draft kept.";
+      render();
+      return;
     } else {
-      const selected = windowTargets[windowCursor - 1];
+      const selected = windowTargets[windowCursor - 1 - (featureSelection.grounding === "auto" ? 1 : 0)];
       if (selected === undefined) {
         notice = "That window is no longer available; press R to refresh.";
         render();
         return;
       }
       selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+      managedBrowserSelected = false;
       selectedWindowDeliveryMode = "foreground";
+      windowChoiceExplicit = true;
       activeMetadata = {
         ...activeMetadata,
         cuaWindowTarget: selectedWindowTarget,
         cuaWindowDeliveryMode: "foreground",
         cuaWindowLabel: windowDisplayLabel(selected),
+        cuaWindowSelectionSource: "host",
+        managedBrowserSelected: false,
       };
-      notice = `Window selected for subsequent Runs: ${windowDisplayLabel(selected)}.`;
+      notice = inputValue.trim().length > 0
+        ? `Window selected; goal draft kept. Press I, then Enter to start: ${windowDisplayLabel(selected)}. A new Save As/dialog window requires your explicit handoff confirmation.`
+        : `Window selected for subsequent Runs: ${windowDisplayLabel(selected)}. A new Save As/dialog window requires your explicit handoff confirmation.`;
     }
     mode = "home";
     windowError = "";
+    windowMatchReason = "";
     render();
   };
 
@@ -576,6 +959,10 @@ export async function runApplicationTui(
     if (finishPromise !== undefined) return;
     exiting = true;
     windowDiscoveryAbort?.abort();
+    goalSubmissionGeneration += 1;
+    goalWindowDiscoveryAbort?.abort();
+    goalWindowDiscoveryAbort = undefined;
+    goalSubmissionPending = false;
     if (pendingCorrection !== undefined) cancelPendingCorrection("Correction draft discarded for exit", false, false);
     commandQueue.length = 0;
     finishPromise = (async () => {
@@ -607,10 +994,34 @@ export async function runApplicationTui(
   const detailPageCount = (): number => {
     const width = tuiWidth(output.columns);
     const rows = Math.max(12, output.rows ?? process.stdout.rows ?? 24);
+    const homeUi = {
+      editMode,
+      input: inputValue,
+      notice,
+      feedState,
+      reply: lastReply,
+      detailPage: 0,
+      inputLimitReached,
+      columns: output.columns,
+      rows: output.rows,
+    };
+    if (mode === "home_details") {
+      const frame = buildTuiHomeDetailsFrame(activeMetadata, session, homeUi);
+      const pageCount = /Details \[1\/(\d+)\]/u.exec(frame)?.[1];
+      return pageCount === undefined ? 1 : Number(pageCount);
+    }
+    if (mode === "home") {
+      const frame = buildTuiHomeFrame(activeMetadata, session, homeUi);
+      const pageCount = /Details \[1\/(\d+)\]/u.exec(frame)?.[1];
+      return pageCount === undefined ? 1 : Number(pageCount);
+    }
     const detail = mode === "run" && currentHandle !== undefined
       ? detailForSnapshot(currentHandle.controller.getSnapshot(), currentEvents)
-      : lastReply.length > 0 ? { label: "Last reply", text: lastReply } : undefined;
-    return detail === undefined ? 1 : paginateTuiText(detail.text, Math.max(1, width - 4), 0, detailLineLimit(rows)).pageCount;
+      : undefined;
+    if (detail === undefined) return 1;
+    return paginateTuiText(detail.text, Math.max(1, width - 4), 0, detailLineLimit(rows, width, {
+      editMode, notice, inputLimitReached,
+    })).pageCount;
   };
 
   const changeDetailPage = (delta: number): void => {
@@ -633,8 +1044,143 @@ export async function runApplicationTui(
       }
       return;
     }
-    if (keyName === "pageup") { changeDetailPage(-1); return; }
-    if (keyName === "pagedown") { changeDetailPage(1); return; }
+    if (goalSubmissionPending) {
+      if (keyName === "q") {
+        requestExit();
+        return;
+      }
+      if (keyName === "escape") {
+        if (goalWindowDiscoveryAbort !== undefined) {
+          cancelGoalWindowDiscovery();
+          mode = "home";
+          editMode = false;
+          windowMatchReason = "";
+          notice = "Local matching cancelled; goal draft kept. Press I then Enter to retry, or W to choose a window.";
+        } else {
+          notice = "Run creation is still in progress. Press Q or Ctrl-C to exit.";
+        }
+        render();
+        return;
+      }
+      if (keyName === "w" && goalWindowDiscoveryAbort !== undefined) {
+        cancelGoalWindowDiscovery();
+        openWindowPicker();
+        return;
+      }
+      if (keyName === "return") {
+        notice = "Goal submission is still in progress; wait for local window matching or the Run start.";
+        render();
+      }
+      return;
+    }
+    if (mode === "browser_url") {
+      if (keyName === "escape") {
+        browserUrlDraft = "";
+        mode = "windows";
+        notice = "Browser URL entry cancelled; previous target and goal draft kept.";
+        render();
+        return;
+      }
+      if (keyName === "backspace") { browserUrlDraft = removeLastTuiGrapheme(browserUrlDraft); requestRender(); return; }
+      if (keyName === "return") {
+        const browserUrl = browserUrlDraft.trim() || activeMetadata.managedBrowserUrl;
+        if (!isHttpUrl(browserUrl)) {
+          notice = "Enter a complete http(s) URL without embedded credentials; no Run started.";
+          render();
+          return;
+        }
+        managedBrowserSelected = true;
+        selectedWindowTarget = null;
+        selectedWindowDeliveryMode = null;
+        windowChoiceExplicit = true;
+        browserUrlDraft = "";
+        const { cuaWindowTarget: _target, cuaWindowDeliveryMode: _deliveryMode, cuaWindowLabel: _label, cuaWindowSelectionSource: _source, ...previousMetadata } = activeMetadata;
+        activeMetadata = { ...previousMetadata, managedBrowserUrl: browserUrl.trim(), managedBrowserSelected: true };
+        mode = "home";
+        editMode = false;
+        notice = `Harness-managed browser selected (${new URL(browserUrl).host}); auto grounding will use DOM + UIA. Goal draft kept.`;
+        render();
+        return;
+      }
+      if (!key.ctrl && printable.length > 0) {
+        browserUrlDraft = limitTuiInput(`${browserUrlDraft}${printable.replace(/[\r\n]+/gu, " ")}`, 2048).value;
+        requestRender();
+      }
+      return;
+    }
+    if (mode === "handoff") {
+      if (keyName === "a" || keyName === "q") {
+        handoffDiscoveryAbort?.abort();
+        handoffDiscoveryAbort = undefined;
+        try { session.abort("window handoff declined from TUI"); } catch { /* finished concurrently */ }
+        notice = "Window handoff declined; abort requested.";
+        mode = "run";
+        render();
+        return;
+      }
+      if (keyName === "escape") {
+        handoffDiscoveryAbort?.abort();
+        handoffDiscoveryAbort = undefined;
+        mode = "run";
+        notice = "Window handoff still waiting. Press H to inspect candidates, or A to abort.";
+        render();
+        return;
+      }
+      if (keyName === "c") {
+        const handle = currentHandle;
+        if (handle?.controller.getSnapshot().pendingWindowHandoff?.reasonCode !== "new_window_detected") {
+          windowMatchReason = "Continuing on the current target is allowed only for a proactive new-window notice; choose a target or abort this mismatch.";
+          render();
+          return;
+        }
+        ignoreProactiveWindow(handle);
+        return;
+      }
+      if (keyName === "up" || keyName === "k") { windowCursor = (windowCursor + windowTargets.length - 1) % Math.max(1, windowTargets.length); render(); return; }
+      if (keyName === "down" || keyName === "j") { windowCursor = (windowCursor + 1) % Math.max(1, windowTargets.length); render(); return; }
+      if (keyName === "r") { if (currentHandle !== undefined) void openWindowHandoffPicker(currentHandle); return; }
+      if (keyName === "return") {
+        if (windowLoading) { windowMatchReason = "Wait for the window list before confirming."; render(); return; }
+        const candidate = windowTargets[windowCursor];
+        const handle = currentHandle;
+        if (candidate === undefined || handle === undefined) { windowMatchReason = "No candidate selected; press R to refresh."; render(); return; }
+        windowLoading = true;
+        windowMatchReason = "Confirming exact window identity and capturing a fresh frame…";
+        render();
+        invoke(async () => {
+          try {
+            await applyWindowHandoff(handle, candidate);
+          } catch (error) {
+            windowError = errorMessage(error);
+            windowMatchReason = "Handoff failed without replaying the refused action. Refresh or choose another candidate.";
+          } finally {
+            windowLoading = false;
+          }
+        }, "");
+      }
+      return;
+    }
+    if (keyName === "pageup" || keyName === "pagedown") {
+      if (mode === "home") {
+        mode = "home_details";
+        detailPage = 0;
+        render();
+      } else if (mode === "home_details") {
+        changeDetailPage(keyName === "pageup" ? -1 : 1);
+      } else {
+        changeDetailPage(keyName === "pageup" ? -1 : 1);
+      }
+      return;
+    }
+    if (mode === "home_details" && (keyName === "escape" || keyName === "q")) {
+      mode = "home";
+      render();
+      return;
+    }
+    // Details is read-only even when opened from the focused goal editor.
+    // Only the navigation/return keys above and Ctrl-C (handled above) act;
+    // printable input, Backspace and Enter must not mutate or submit a draft.
+    if (mode === "home_details") return;
     if (keyName === "escape" && pendingCorrection !== undefined && !editMode) {
       cancelPendingCorrection("Correction cancelled; draft discarded.");
       return;
@@ -643,11 +1189,18 @@ export async function runApplicationTui(
     // editor is focused. Lowercase f remains ordinary goal text.
     if (mode === "home" && editMode && keyName === "f" && printable === "F") {
       editMode = false;
-      inputValue = "";
-      inputLimitReached = false;
       draftFeatureSelection = { ...featureSelection };
       mode = "features";
       notice = "Choose features for the next Run; arrows move, Space/Left/Right change, Enter saves.";
+      render();
+      return;
+    }
+    // Keep D available from the focused goal editor without making ordinary
+    // lowercase goal text a navigation shortcut. PageDown is the alternate
+    // path for keyboards that cannot send an explicit uppercase character.
+    if (mode === "home" && editMode && keyName === "d" && printable === "D") {
+      mode = "home_details";
+      detailPage = 0;
       render();
       return;
     }
@@ -662,10 +1215,14 @@ export async function runApplicationTui(
           return;
         }
         editMode = false;
-        inputValue = "";
-        inputLimitReached = false;
-        if (mode === "run" && currentHandle?.controller.getSnapshot().status === "paused") {
-          notice = "Correction cancelled; Run remains paused. Press R to resume.";
+        if (mode === "home") {
+          notice = inputValue.trim().length > 0 ? "Goal draft kept." : "Goal editor closed.";
+        } else {
+          inputValue = "";
+          inputLimitReached = false;
+          notice = currentHandle?.controller.getSnapshot().status === "paused"
+            ? "Correction cancelled; Run remains paused. Press R to resume."
+            : "Correction draft discarded.";
         }
         render();
         return;
@@ -678,11 +1235,11 @@ export async function runApplicationTui(
         flushRender();
         const value = inputValue;
         if (mode === "home") {
+          startGoal(value);
+        } else {
           editMode = false;
           inputValue = "";
           inputLimitReached = false;
-          startGoal(value);
-        } else {
           submitCorrection(value);
         }
         render();
@@ -738,13 +1295,13 @@ export async function runApplicationTui(
         return;
       }
       if (keyName === "up" || keyName === "k") {
-        const optionCount = windowTargets.length + 1;
+        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" ? 1 : 0);
         windowCursor = (windowCursor + optionCount - 1) % optionCount;
         render();
         return;
       }
       if (keyName === "down" || keyName === "j") {
-        const optionCount = windowTargets.length + 1;
+        const optionCount = windowTargets.length + 1 + (featureSelection.grounding === "auto" ? 1 : 0);
         windowCursor = (windowCursor + 1) % optionCount;
         render();
         return;
@@ -760,6 +1317,12 @@ export async function runApplicationTui(
       return;
     }
     if (mode === "home") {
+      if (keyName === "d") {
+        mode = "home_details";
+        detailPage = 0;
+        render();
+        return;
+      }
       if (keyName === "f") {
         featureCursor = 0;
         draftFeatureSelection = { ...featureSelection };
@@ -784,6 +1347,15 @@ export async function runApplicationTui(
     }
     const snapshot = currentHandle?.controller.getSnapshot();
     if (snapshot === undefined) return;
+    if (snapshot.status === "waiting_window") {
+      if (keyName === "h") { if (currentHandle !== undefined) void openWindowHandoffPicker(currentHandle); return; }
+      if (keyName === "c" && snapshot.pendingWindowHandoff?.reasonCode === "new_window_detected") {
+        if (currentHandle !== undefined) ignoreProactiveWindow(currentHandle);
+        return;
+      }
+      if (keyName === "a" || keyName === "q") { try { session.abort("window handoff declined from TUI"); } catch { /* finished concurrently */ } notice = "Window handoff declined; abort requested."; render(); }
+      return;
+    }
     if (keyName === "i") {
       const enterCorrection = () => {
         pendingCorrection = undefined;
@@ -833,7 +1405,7 @@ export async function runApplicationTui(
     }
   };
 
-  const onResize = (): void => render();
+  const onResize = (): void => { painter?.invalidate(); render(); };
   const onEnd = (): void => requestExit();
   const onSigint = (): void => onKeypress("", { name: "c", ctrl: true });
   input.on("keypress", onKeypress);
@@ -849,6 +1421,7 @@ export async function runApplicationTui(
     await finishPromise;
   } finally {
     feedSubscription?.unsubscribe();
+    handoffDiscoveryAbort?.abort();
     input.off("keypress", onKeypress);
     input.off("end", onEnd);
     output.off?.("resize", onResize);
@@ -991,12 +1564,17 @@ function approvalDetail(snapshot: RunSnapshot, events: readonly RuntimeEvent[]):
   return lines.join("\n");
 }
 
-function detailLineLimit(rows: number): number {
+function detailLineLimit(rows: number, width: number, ui: Pick<TuiFrameUi, "editMode" | "notice" | "inputLimitReached">): number {
+  if (width < 72 || rows < 22) {
+    const headRows = rows < 16 ? 4 : 6;
+    const footerRows = 1 + (ui.editMode ? 1 : 0) + (ui.inputLimitReached ? 1 : 0) + (ui.notice.length > 0 ? 1 : 0);
+    return Math.max(1, rows - 2 - headRows - footerRows - 1);
+  }
   return Math.max(1, Math.floor(rows) - 20);
 }
 
-function renderDetailBlock(detail: TuiDetail, width: number, rows: number, pageIndex: number): string[] {
-  const page = paginateTuiText(detail.text, Math.max(1, width - 4), pageIndex, detailLineLimit(rows));
+function renderDetailBlock(detail: TuiDetail, width: number, pageIndex: number, linesPerPage: number): string[] {
+  const page = paginateTuiText(detail.text, Math.max(1, width - 4), pageIndex, linesPerPage);
   return [
     clip(`${detail.label} [${page.pageIndex + 1}/${page.pageCount}] (PageUp/PageDown to view):`, width),
     ...page.lines.map((line) => `  ${line}`),
@@ -1016,6 +1594,7 @@ export function buildTuiFrame(
 ): string {
   const width = tuiWidth(ui.columns);
   const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
+  if (width < 72 || rows < 22) return buildCompactTuiFrame(snapshot, events, goal, metadata, ui, width, rows);
   const latestObservation = [...events].reverse().find((event) => event.type === "observation.created");
   const guard = [...events].reverse().find((event) => event.type === "action.guard.evaluated");
   const latestModelRequest = [...events].reverse().find((event) => event.type === "model.request.started");
@@ -1025,9 +1604,10 @@ export function buildTuiFrame(
   const detail = detailForSnapshot(snapshot, events);
   const detailPage = detail === undefined
     ? undefined
-    : paginateTuiText(detail.text, Math.max(1, width - 4), ui.detailPage ?? 0, detailLineLimit(rows));
+    : paginateTuiText(detail.text, Math.max(1, width - 4), ui.detailPage ?? 0, detailLineLimit(rows, width, ui));
   const approvalWaiting = snapshot.status === "waiting_approval" && snapshot.pendingApproval !== undefined;
-  const staticBeforeEvents = 13 + (waitingForModel ? 1 : 0) + (approvalWaiting ? 1 : 0);
+  const handoffWaiting = snapshot.status === "waiting_window";
+  const staticBeforeEvents = 13 + (waitingForModel ? 1 : 0) + (approvalWaiting ? 1 : 0) + (handoffWaiting ? 1 : 0);
   const afterEvents = 1 + (detailPage === undefined ? 0 : 1 + detailPage.lines.length) + 1 +
     (ui.editMode ? 1 : 0) + (ui.inputLimitReached ? 1 : 0) + (ui.notice.length > 0 ? 1 : 0) + 1;
   const maxRecentEvents = Math.max(0, Math.min(10, rows - staticBeforeEvents - afterEvents));
@@ -1043,6 +1623,11 @@ export function buildTuiFrame(
     ...(approvalWaiting
       ? ["APPROVAL REQUIRED: Run is waiting; choose Y/N, correct with I, or abort with A."]
       : []),
+    ...(handoffWaiting
+      ? [snapshot.pendingWindowHandoff?.reasonCode === "new_window_detected"
+        ? "NEW WINDOW: H chooses a target; C keeps the current target after a fresh observation; A aborts."
+        : "FOREGROUND MISMATCH: H chooses a target; A aborts. The refused action is not retried."]
+      : []),
     `Steps: ${snapshot.stepCount}   Model requests: ${snapshot.modelRequestCount}   Guard: ${snapshot.guardEvaluationCount}   Risk model: ${snapshot.riskModelRequestCount}`,
     `Plan: ${snapshot.plan.tasks.filter((task) => task.status !== "completed").length} open / ${snapshot.plan.tasks.length} total   Memory: ${snapshot.memory.facts.length} facts / ${snapshot.memory.entities.length} entities`,
     `Goal: ${clip(goal, width - 6)}`,
@@ -1053,13 +1638,17 @@ export function buildTuiFrame(
     ...(maxRecentEvents === 0 ? [] : events.slice(-maxRecentEvents).map((event) => ` ${String(event.sequence).padStart(4, " ")}  ${formatEvent(event, width - 8)}`)),
     "─".repeat(width),
   ];
-  if (detail !== undefined) lines.push(...renderDetailBlock(detail, width, rows, ui.detailPage ?? 0));
+  if (detail !== undefined) lines.push(...renderDetailBlock(detail, width, ui.detailPage ?? 0, detailLineLimit(rows, width, ui)));
   if (ui.editMode) {
     lines.push("Editing: Enter submit   Esc cancel   Ctrl-C abort");
   } else if (snapshot.status === "waiting_approval") {
     lines.push("Approval controls: Y approve   N reject   I correct   A abort");
   } else if (snapshot.status === "waiting_user") {
     lines.push("Press I to enter a response or correction.");
+  } else if (snapshot.status === "waiting_window") {
+    lines.push(snapshot.pendingWindowHandoff?.reasonCode === "new_window_detected"
+      ? "Keys: H choose new window   C continue current target   A abort   Q exit"
+      : "Keys: H choose new window   A abort   Q exit", TERMINAL_INPUT_SCOPE_NOTICE);
   } else {
     lines.push("Keys: I correction/input   P pause   R resume   A abort   S screenshot   Q exit", TERMINAL_INPUT_SCOPE_NOTICE);
   }
@@ -1070,6 +1659,50 @@ export function buildTuiFrame(
   return `${lines.join("\n")}\n`;
 }
 
+function buildCompactTuiFrame(
+  snapshot: RunSnapshot,
+  events: readonly RuntimeEvent[],
+  goal: string,
+  metadata: TuiMetadata,
+  ui: TuiFrameUi,
+  width: number,
+  rows: number,
+): string {
+  const latestEvent = events.at(-1);
+  const compactStatus = snapshot.status === "waiting_approval"
+    ? "APPROVAL REQUIRED"
+    : snapshot.status === "waiting_window"
+      ? "WINDOW HANDOFF REQUIRED"
+    : snapshot.status === "waiting_user"
+      ? "USER INPUT REQUIRED"
+      : latestEvent === undefined ? snapshot.status : formatEvent(latestEvent, width - 8);
+  const head = [
+    `Harness | ${snapshot.status.toUpperCase()}`,
+    ...(rows >= 16 ? [`Model: ${metadata.provider}`, `Steps: ${snapshot.stepCount}  Requests: ${snapshot.modelRequestCount}`] : []),
+    `Target: ${formatCuaTarget(metadata)}`,
+    `Goal: ${goal}`,
+    `Status: ${compactStatus}`,
+  ];
+  const controls = snapshot.status === "waiting_approval"
+    ? "Y approve  N reject  I correct  A abort"
+    : snapshot.status === "waiting_window"
+      ? "H choose window  A abort"
+    : snapshot.status === "waiting_user"
+      ? "I respond  A abort  Q exit"
+      : ui.editMode ? "Enter submit  Esc cancel" : "I input  P pause  R resume  A abort  Q exit";
+  const footer = [
+    controls,
+    ...(ui.editMode ? [`> ${tailTuiInput(ui.input, Math.max(1, width - 2))}`] : []),
+    ...(ui.inputLimitReached ? [`Max ${MAX_TUI_INPUT_LENGTH} characters reached`] : []),
+    ...(ui.notice.length > 0 ? [`Notice: ${ui.notice}`] : []),
+  ];
+  const detail = detailForSnapshot(snapshot, events);
+  const detailLines = detail === undefined ? [] : renderDetailBlock(
+    detail, width, ui.detailPage ?? 0, detailLineLimit(rows, width, ui),
+  );
+  return `${[...head, ...detailLines, ...footer].map((line) => clipHomeLine(line, width).text).join("\n")}\n`;
+}
+
 function buildTuiHomeFrame(
   metadata: TuiMetadata,
   session: ApplicationSession,
@@ -1077,33 +1710,218 @@ function buildTuiHomeFrame(
 ): string {
   const width = tuiWidth(ui.columns);
   const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
+  // Leave room for the terminal cursor and the newline written on exit.
+  const visibleRows = Math.max(1, rows - 3);
   const last = session.lastRun;
-  const lines = [
-    "Computer Harness TUI  |  HOME",
-    "─".repeat(width),
-    `Profile: ${metadata.profile}   Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${metadata.riskGuard})`,
-    `Session: ${session.status}   Event feed: ${ui.feedState}`,
-    `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}   Target: ${formatCuaTarget(metadata)}`,
-    `Features: ${formatTuiFeatures(metadata.features, metadata.riskGuard)}`,
-    `Focus evidence: ${metadata.computer === "cua" ? "UNKNOWN (generic foreground input is not fixture-verified)" : "UNKNOWN (backend metadata is not focus proof)"}`,
-    TERMINAL_INPUT_SCOPE_NOTICE,
-    "",
-    session.status === "blocked"
-      ? "Environment ownership is held by another Run or pending cleanup; this session cannot start another Run."
-      : "Enter a goal to start a fresh Run. Finished Runs never reuse their Controller, approval, or Memory store.",
-    last === undefined ? "Last Run: none" : `Last Run: ${clip(last.goal, width - 12)} → ${last.outcome ?? last.error ?? "not completed"}`,
-    "",
-    ...(ui.reply === undefined || ui.reply.length === 0 ? [] : renderDetailBlock({ label: "Last reply", text: ui.reply }, width, rows, ui.detailPage ?? 0)),
-    "",
-    ui.editMode
-      ? "Editing: Enter start   Esc cancel   Ctrl-C abort"
-      : `${canSelectWindow(metadata) ? "Keys: W choose window   " : ""}F configure features   I/Enter edit   Esc/Q exit`,
+  const hasGoalDraft = ui.input.trim().length > 0;
+  const goalPrefix = ui.editMode ? "Goal: >" : hasGoalDraft ? "Goal draft:" : "Goal:";
+  const goalBudget = Math.max(1, width - goalPrefix.length - 1);
+  const goalValue = hasGoalDraft
+    ? tailTuiInput(ui.input, goalBudget)
+    : ui.editMode ? "" : "not entered";
+  const goalTruncated = hasGoalDraft && wrapHomeText(ui.input, goalBudget).length > 1;
+  const goal = clipHomeLine(`${goalPrefix}${goalValue.length === 0 ? "" : ` ${goalValue}`}`, width);
+  const targetValue = formatHomeTarget(metadata);
+  const target = clipHomeField("Target", targetValue, width);
+  const safety = clipHomeField("Risk Guard", metadata.riskGuard === "layered" ? "ON" : "OFF", width);
+  // A long notice must never erase the more important ownership barrier.
+  // The complete notice remains available from the keyboard-accessible page.
+  const statusValue = session.status === "blocked"
+    ? "BLOCKED"
+    : ui.inputLimitReached
+      ? `Input limit reached (${MAX_TUI_INPUT_LENGTH} characters)`
+      : ui.notice.length > 0 ? ui.notice : session.status;
+  const status = clipHomeField("Status", statusValue, width);
+  const next = clipHomeField("Next", ui.editMode
+    ? "Enter starts; Esc keeps draft"
+    : hasGoalDraft ? "I resumes; Enter edits" : "I/Enter edits", width);
+  const keysText = ui.editMode
+    ? canSelectWindow(metadata) ? "D details; Esc then W; F options" : "D details; F options; Ctrl-C exit"
+    : canSelectWindow(metadata) ? "D details; F options; W target" : "D details; F options; Esc/Q exit";
+  const keys = clipHomeField("Keys", keysText, width);
+  const scope = clipHomeLine("TTY only; no global hotkeys", width);
+  const model = clipHomeField("Model", metadata.provider, width);
+  const computer = clipHomeField("Computer", metadata.computer, width);
+  const featureSet = clipHomeField("Features", describeTuiFeatureSet(metadata.features), width);
+  const output = clipHomeField("Output", metadata.output, width);
+  const coreLines = [
+    "Harness | HOME",
+    goal.text,
+    model.text,
+    computer.text,
+    target.text,
+    featureSet.text,
+    safety.text,
+    status.text,
+    next.text,
+    keys.text,
+    scope.text,
   ];
-  if (ui.editMode) lines.push(`> ${tailTuiInput(ui.input, Math.max(1, width - 2))}`);
-  if (ui.inputLimitReached) lines.push(`Input is limited to ${MAX_TUI_INPUT_LENGTH} characters; newest characters remain visible.`);
-  if (ui.notice.length > 0) lines.push(`Notice: ${clip(ui.notice, width - 8)}`);
-  lines.push(`Artifacts root: ${clip(metadata.output, width - 17)}`);
+  const needsInlineDetails = status.truncated || ui.notice.length > 0 || (ui.reply?.length ?? 0) > 0 ||
+    ((goal.truncated || goalTruncated) && hasGoalDraft) || target.truncated || ui.inputLimitReached ||
+    next.truncated || keys.truncated || last !== undefined || output.truncated;
+  const details = needsInlineDetails ? buildHomeDetailsText(metadata, session, ui) : [];
+
+  const lines = [...coreLines];
+  const optionalRows = Math.max(0, visibleRows - lines.length);
+  if (last !== undefined && optionalRows > 2) lines.push(clipHomeField("Last Run", last.outcome ?? last.error ?? "not completed", width).text);
+  if (output.truncated === false && optionalRows > 3) lines.push(output.text);
+  const detailLineCount = details.length === 0 ? 0 : Math.max(0, visibleRows - lines.length - 1);
+  if (detailLineCount > 0) {
+    const page = paginateHomeText(details.join("\n\n"), width, ui.detailPage ?? 0, detailLineCount);
+    lines.push(clipHomeLine(`Details [${page.pageIndex + 1}/${page.pageCount}] PageUp/PageDown`, width).text);
+    lines.push(...page.lines);
+  }
   return `${lines.join("\n")}\n`;
+}
+
+function buildHomeDetailsText(
+  metadata: TuiMetadata,
+  session: ApplicationSession,
+  ui: TuiFrameUi & { readonly feedState: TuiFeedState; readonly reply?: string },
+): string[] {
+  const sections: string[] = [];
+  const ownership = session.inspectEnvironment();
+  const notice = ui.notice.trim();
+  const goal = ui.input.trim();
+
+  if (ui.reply !== undefined && ui.reply.length > 0) sections.push(`Last reply:\n${ui.reply}`);
+  sections.push(`Current status / notice:\n${notice.length === 0 ? "No additional status." : notice}`);
+  sections.push(`Full target:\n${formatHomeTarget(metadata)}`);
+  sections.push(`Full goal:\n${goal.length === 0 ? "not entered" : goal}`);
+  sections.push(`Model: ${metadata.provider}`);
+  sections.push(`Computer / environment: ${metadata.computer}`);
+  sections.push(`Preset: ${describeTuiFeatureSet(metadata.features)}\nAdvanced features: ${formatTuiFeatures(metadata.features, metadata.riskGuard)}`);
+  sections.push(formatTuiSafety(metadata));
+  if (session.status === "blocked") {
+    sections.push(`Session status: BLOCKED. Another Run or pending cleanup owns this environment.${ownership?.reason === undefined ? "" : `\nOwnership reason: ${ownership.reason}`}`);
+  } else {
+    sections.push(`Session status: ${session.status}.`);
+  }
+  sections.push(`Next: ${ui.editMode ? "Enter starts the Run; Esc keeps the goal draft." : goal.length > 0 ? "I resumes the goal draft; Enter opens the editor." : "I or Enter opens the goal editor."}`);
+  sections.push(`Keyboard:\nD opens these details; PageDown also opens them. PageUp/PageDown change pages; Esc or Q returns home.\nF opens advanced options.${canSelectWindow(metadata) ? " In the goal editor, Esc then W opens the CUA window chooser; W changes the target from setup." : ""}\nCtrl-C exits from the goal editor.\n${TERMINAL_INPUT_SCOPE_NOTICE}`);
+  if (ui.inputLimitReached) sections.push(`Goal input is limited to ${MAX_TUI_INPUT_LENGTH} characters. The newest characters remain visible in the editor.`);
+  const last = session.lastRun;
+  if (last !== undefined) {
+    sections.push(`Last Run:\n${last.outcome ?? last.error ?? "not completed"}\nGoal: ${last.goal}${last.error === undefined ? "" : `\nError: ${last.error}`}`);
+  }
+  sections.push(`Output directory:\n${metadata.output}`);
+  return sections;
+}
+
+function buildTuiHomeDetailsFrame(
+  metadata: TuiMetadata,
+  session: ApplicationSession,
+  ui: TuiFrameUi & { readonly feedState: TuiFeedState; readonly reply?: string },
+): string {
+  const width = tuiWidth(ui.columns);
+  const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
+  const visibleRows = Math.max(1, rows - 3);
+  const blocked = session.status === "blocked";
+  const notice = ui.notice.trim();
+  // Reserve a fixed, text-only context and return path on every page. The
+  // complete notice is paginated below, never substituted for BLOCKED.
+  const fixedRows = 7;
+  const page = paginateHomeText(
+    buildHomeDetailsText(metadata, session, ui).join("\n\n"),
+    width,
+    ui.detailPage ?? 0,
+    Math.max(1, visibleRows - fixedRows),
+  );
+  const statusText = blocked ? "BLOCKED" : notice.length > 0 ? notice : session.status;
+  const lines = [
+    clipHomeLine("Harness | DETAILS", width).text,
+    clipHomeField("Risk Guard", metadata.riskGuard === "layered" ? "ON" : "OFF", width).text,
+    clipHomeField("Session", blocked ? "BLOCKED" : session.status, width).text,
+    clipHomeField("Status", statusText, width).text,
+    clipHomeLine(`Details [${page.pageIndex + 1}/${page.pageCount}]`, width).text,
+    ...page.lines,
+    clipHomeLine("PgUp/PgDn page", width).text,
+    clipHomeLine("Esc/Q: home", width).text,
+  ];
+  return `${lines.slice(0, visibleRows).join("\n")}\n`;
+}
+
+function clipHomeField(label: string, value: string, width: number): { readonly text: string; readonly truncated: boolean } {
+  const prefix = `${label}: `;
+  const clipped = clipHomeLine(value, Math.max(1, width - prefix.length));
+  return { text: `${prefix}${clipped.text}`, truncated: clipped.truncated };
+}
+
+function clipHomeLine(value: string, width: number): { readonly text: string; readonly truncated: boolean } {
+  const normalized = sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
+  if (wrapHomeText(normalized, width).length <= 1) return { text: wrapHomeText(normalized, width)[0] ?? "", truncated: false };
+  const first = wrapHomeText(normalized, Math.max(1, width - 1))[0] ?? "";
+  return { text: `${first}…`, truncated: true };
+}
+
+function paginateHomeText(value: string, width: number, pageIndex: number, linesPerPage: number): { readonly lines: readonly string[]; readonly pageIndex: number; readonly pageCount: number } {
+  const wrapped = value.split(/\r?\n/u).flatMap((line) => wrapHomeText(line, Math.max(1, width)));
+  const pageSize = Math.max(1, Math.floor(linesPerPage));
+  const pageCount = Math.max(1, Math.ceil(wrapped.length / pageSize));
+  const currentPage = Math.min(Math.max(0, Math.floor(pageIndex)), pageCount - 1);
+  return {
+    lines: wrapped.slice(currentPage * pageSize, (currentPage + 1) * pageSize),
+    pageIndex: currentPage,
+    pageCount,
+  };
+}
+
+function wrapHomeText(value: string, width: number): string[] {
+  const normalized = sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
+  if (normalized.length === 0) return [""];
+  const lines: string[] = [];
+  let current = "";
+  for (const word of normalized.split(" ")) {
+    const candidate = current.length === 0 ? word : `${current} ${word}`;
+    const candidateLines = wrapTuiText(candidate, Math.max(1, width));
+    if (candidateLines.length === 1) {
+      current = candidateLines[0]!;
+      continue;
+    }
+    if (current.length > 0) lines.push(current);
+    const wordLines = wrapTuiText(word, Math.max(1, width));
+    lines.push(...wordLines.slice(0, -1));
+    current = wordLines[wordLines.length - 1] ?? "";
+  }
+  if (current.length > 0 || lines.length === 0) lines.push(current);
+  return lines;
+}
+
+function describeTuiFeatureSet(features: TuiFeatureSelection | undefined): string {
+  const selected = normalizeTuiFeatureSelection(features);
+  const matches = (expected: Pick<TuiFeatureSelection, "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "monitor">): boolean =>
+    selected.planning === expected.planning &&
+    selected.memory === expected.memory &&
+    selected.memoryRetrieval === expected.memoryRetrieval &&
+    selected.batching === expected.batching &&
+    selected.contextMode === expected.contextMode &&
+    selected.monitor === expected.monitor &&
+    selected.grounding === "off";
+  if (matches({ planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", monitor: "off" })) return "Baseline";
+  if (matches({ planning: true, memory: "facts", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "shadow" })) return "Assisted";
+  if (matches({ planning: true, memory: "entities", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "guidance" })) return "Research";
+  return "Custom";
+}
+
+function formatTuiSafety(metadata: TuiMetadata): string {
+  const guard = metadata.riskGuard === "layered"
+    ? "Risk Guard ON (layered)"
+    : "Risk Guard OFF; automatic review disabled";
+  return guard;
+}
+
+function formatHomeTarget(metadata: TuiMetadata): string {
+  if (metadata.computer !== "cua") return "N/A";
+  if (metadata.managedBrowserSelected === true) return `Harness-managed browser (${isHttpUrl(metadata.managedBrowserUrl) ? new URL(metadata.managedBrowserUrl!).host : "URL unavailable"}); grounding=${metadata.features?.grounding ?? "off"}`;
+  if (metadata.cuaWindowTarget === undefined) return "Primary desktop (default)";
+  const label = metadata.cuaWindowLabel === undefined
+    ? "Selected window"
+    : sanitizeTerminalText(metadata.cuaWindowLabel).replace(/\s+\(pid=\d+,\s*window=\d+\)$/u, "");
+  const source = metadata.cuaWindowSelectionSource === "local_match"
+    ? "; selected by local goal/name match (not the model)"
+    : metadata.cuaWindowSelectionSource === "jev" ? "; selected by Jev; host rechecked" : "";
+  return `${label}; pid=${metadata.cuaWindowTarget.pid}; window=${metadata.cuaWindowTarget.windowId}; delivery=${metadata.cuaWindowDeliveryMode ?? "background"}${source}`;
 }
 
 const tuiFeatureRows = [
@@ -1114,7 +1932,7 @@ const tuiFeatureRows = [
   { label: "Context history", values: ["raw", "recent"] as const },
   { label: "Risk Guard", values: ["off", "layered"] as const },
   { label: "Progress Monitor", values: ["off", "shadow", "guidance"] as const },
-  { label: "Grounding", values: ["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"] as const },
+  { label: "Grounding", values: ["off", "auto", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"] as const },
 ] as const;
 
 function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined, defaultRiskGuard: RiskGuardMode = "layered"): TuiFeatureSelection {
@@ -1134,8 +1952,11 @@ function featureOverrides(
   features: TuiFeatureSelection,
   windowTarget: ApplicationSessionWindowTarget | null | undefined,
   windowDeliveryMode: "background" | "foreground" | null | undefined,
+  managedBrowserSelected = false,
+  managedBrowserUrl?: string,
 ): ApplicationSessionRunFeatureOverrides {
-  const managedGrounding = isManagedGrounding(features.grounding);
+  const grounding = resolveTuiGrounding(features.grounding, managedBrowserSelected ? "managed-browser" : windowTarget == null ? "desktop" : "host-window");
+  const managedGrounding = isManagedGrounding(grounding);
   return {
     planning: features.planning,
     memory: features.memory,
@@ -1144,7 +1965,9 @@ function featureOverrides(
     contextMode: features.contextMode,
     riskGuard: features.riskGuard,
     monitor: features.monitor,
-    grounding: features.grounding,
+    grounding,
+    windowHandoff: !managedGrounding && windowTarget != null ? "confirm-v1" : "off",
+    ...(managedBrowserSelected && managedBrowserUrl !== undefined ? { managedBrowserUrl } : {}),
     ...(managedGrounding
       ? { windowTarget: null, windowDeliveryMode: null }
       : {
@@ -1166,7 +1989,7 @@ function changeTuiFeature(features: TuiFeatureSelection, rowIndex: number, delta
         : rowIndex === 3
         ? "batching"
         : rowIndex === 4
-          ? "contextMode"
+      ? "contextMode"
           : rowIndex === 5
             ? "riskGuard"
             : rowIndex === 6
@@ -1187,6 +2010,7 @@ function featureValue(features: TuiFeatureSelection, rowIndex: number): string {
   if (rowIndex === 4) return features.contextMode;
   if (rowIndex === 5) return features.riskGuard;
   if (rowIndex === 6) return features.monitor;
+  if (rowIndex === 7) return features.grounding;
   return features.grounding;
 }
 
@@ -1197,9 +2021,13 @@ function formatTuiFeatures(features: TuiFeatureSelection | undefined, defaultRis
 
 function formatCuaTarget(metadata: TuiMetadata): string {
   if (metadata.computer !== "cua") return `${metadata.computer} environment`;
+  if (metadata.managedBrowserSelected === true) return `Harness-managed browser (grounding=${metadata.features?.grounding ?? "off"}; auto resolves to DOM + UIA)`;
   if (metadata.cuaWindowTarget === undefined) return "primary desktop (default)";
   const label = metadata.cuaWindowLabel === undefined ? "selected window" : sanitizeTerminalText(metadata.cuaWindowLabel).slice(0, 96);
-  return `window ${label} pid=${metadata.cuaWindowTarget.pid} id=${metadata.cuaWindowTarget.windowId} (host-selected, delivery=${metadata.cuaWindowDeliveryMode ?? "background"})`;
+  const source = metadata.cuaWindowSelectionSource === "local_match"
+    ? "local goal/name match (not model-selected)"
+    : metadata.cuaWindowSelectionSource === "jev" ? "Jev-selected; host rechecked" : "host-selected";
+  return `window ${label} pid=${metadata.cuaWindowTarget.pid} id=${metadata.cuaWindowTarget.windowId} (${source}, delivery=${metadata.cuaWindowDeliveryMode ?? "background"})`;
 }
 
 function canSelectWindow(metadata: TuiMetadata): boolean {
@@ -1215,22 +2043,55 @@ function buildTuiFeaturesFrame(
 ): string {
   const width = tuiWidth(columns);
   const terminalRows = Math.max(12, rows ?? process.stdout.rows ?? 24);
-  const lines = [
+  const header = [
     "Computer Harness TUI  |  FEATURES",
     "─".repeat(width),
     `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}   Target: ${formatCuaTarget(metadata)}`,
     "Choose features for the next Run. Changes apply when the next goal starts.",
     "Arrow keys/J-K move   Space toggles   Left/Right changes   Enter saves   Esc cancels",
-    "",
-    ...tuiFeatureRows.map((row, index) => `${index === cursor ? "❯" : " "} ${row.label.padEnd(20, " ")} ${featureValue(features, index)}`),
-    "",
-    `Risk Guard: ${features.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${features.riskGuard}; applies to the next Run)`,
-    "Each Run gets fresh tools, Context, Memory and Monitor state.",
-    `Embedding config: ${metadata.embeddingReady === true ? "ready" : "not configured (hybrid cannot start)"}`,
-    ...(isManagedGrounding(features.grounding) ? [managedBrowserFeatureLine(metadata)] : []),
-    uiFeatureHint(features, metadata),
   ];
+  const footer = [
+    `Risk Guard: ${features.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${features.riskGuard}; applies to the next Run)`,
+    ...(terminalRows >= 18 ? [
+      `Embedding config: ${metadata.embeddingReady === true ? "ready" : "not configured (hybrid cannot start)"}`,
+      ...(isManagedGrounding(features.grounding) ? [managedBrowserFeatureLine(metadata)] : []),
+    ] : []),
+    clip(uiFeatureHint(features, metadata), width),
+  ];
+  const visibleCount = Math.max(1, Math.min(tuiFeatureRows.length, terminalRows - header.length - footer.length - 1));
+  const first = Math.min(Math.max(0, cursor - Math.floor(visibleCount / 2)), tuiFeatureRows.length - visibleCount);
+  const visibleRows = tuiFeatureRows.slice(first, first + visibleCount).map((row, offset) => {
+    const index = first + offset;
+    return `${index === cursor ? "❯" : " "} ${row.label.padEnd(20, " ")} ${featureValue(features, index)}`;
+  });
+  const lines = [...header, `Feature ${cursor + 1} of ${tuiFeatureRows.length}; showing ${first + 1}-${first + visibleRows.length}`, ...visibleRows, ...footer];
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
+}
+
+function buildTuiBrowserUrlFrame(
+  metadata: TuiMetadata,
+  draft: string,
+  goalDraft: string,
+  notice: string,
+  columns?: number,
+  rows?: number,
+): string {
+  const width = tuiWidth(columns);
+  const currentHost = isHttpUrl(metadata.managedBrowserUrl) ? new URL(metadata.managedBrowserUrl).host : "none";
+  const profile = metadata.managedBrowserProfileMode === "persistent"
+    ? `persistent (${metadata.managedBrowserProfileLabel ?? "label missing"})`
+    : "temporary";
+  const lines = [
+    "Computer Harness TUI  |  MANAGED BROWSER",
+    "─".repeat(width),
+    `Current start site: ${currentHost}   Profile: ${profile}`,
+    "Enter a complete http(s) URL. Enter reuses the current site if input is blank; Esc returns to window selection.",
+    `Goal draft kept: ${clip(goalDraft || "(empty)", Math.max(1, width - 17))}`,
+    `> ${tailTuiInput(draft, Math.max(1, width - 2))}`,
+    clip(notice, width),
+    "This does not attach to a personal browser. The new Run opens a Harness-owned browser window.",
+  ];
+  return `${lines.slice(0, Math.max(12, rows ?? process.stdout.rows ?? 24)).join("\n")}\n`;
 }
 
 function buildTuiWindowsFrame(
@@ -1239,30 +2100,81 @@ function buildTuiWindowsFrame(
   cursor: number,
   loading: boolean,
   error: string,
+  matchReason: string,
   columns?: number,
   rows?: number,
 ): string {
   const width = tuiWidth(columns);
   const terminalRows = Math.max(12, rows ?? process.stdout.rows ?? 24);
-  const options = [
-    `  ${cursor === 0 ? "❯" : " "} Primary desktop (no window target)`,
-    ...targets.map((target, index) => `  ${cursor === index + 1 ? "❯" : " "} ${clip(windowDisplayLabel(target), width - 4)}`),
+  const optionLabels = [
+    "Primary desktop (no window target)",
+    ...(metadata.features?.grounding === "auto"
+      ? [`Harness-managed browser (${isHttpUrl(metadata.managedBrowserUrl) ? new URL(metadata.managedBrowserUrl).host : "enter URL"}; DOM + UIA)`]
+      : []),
+    ...targets.map(windowDisplayLabel),
   ];
-  const lines = [
+  const safeCursor = Math.min(Math.max(cursor, 0), optionLabels.length - 1);
+  const headerLines = [
     "Computer Harness TUI  |  WINDOW TARGET",
     "─".repeat(width),
     `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}`,
     `Current: ${formatCuaTarget(metadata)}`,
-    "Choose a fully visible, unobscured host window for subsequent Runs. Window layout is user-managed; Harness does not move/resize windows.",
+    "Native windows should be fully visible, unobscured; choose one, desktop or managed browser. Window layout is user-managed; Harness does not move/resize windows.",
     "Foreground delivery may activate the target; occlusion support is limited and focus restoration is not guaranteed.",
-    "Arrow keys/J-K move   Enter selects   R refreshes   Esc cancels",
-    "",
-    ...(loading ? ["Loading visible windows…"] : options),
+    ...(matchReason.length > 0 ? [`Status: ${clip(matchReason, width - 8)}`] : []),
     ...(error.length > 0 ? [`Window discovery error: ${clip(error, width - 24)}`] : []),
-    "",
-    "A closed or invalidated window never falls back to the desktop automatically.",
+    "Arrow keys/J-K move   Enter selects   R refreshes   Esc cancels",
   ];
+  const footerLines = ["A closed or invalidated window never falls back to the desktop automatically."];
+  const reservedRows = headerLines.length + 1 + footerLines.length;
+  const visibleOptionCount = Math.max(1, Math.min(optionLabels.length, terminalRows - reservedRows));
+  const firstVisibleOption = Math.min(
+    Math.max(0, safeCursor - Math.floor(visibleOptionCount / 2)),
+    Math.max(0, optionLabels.length - visibleOptionCount),
+  );
+  const lastVisibleOption = Math.min(optionLabels.length, firstVisibleOption + visibleOptionCount);
+  const positionLine = loading
+    ? "Window options are loading."
+    : `Option ${safeCursor + 1} of ${optionLabels.length}; showing ${firstVisibleOption + 1}-${lastVisibleOption}`;
+  const visibleOptions = loading
+    ? ["  Loading visible windows…"]
+    : optionLabels.slice(firstVisibleOption, lastVisibleOption).map((label, offset) => {
+        const optionIndex = firstVisibleOption + offset;
+        return `  ${safeCursor === optionIndex ? "❯" : " "} ${clip(label, width - 4)}`;
+      });
+  const lines = [...headerLines, positionLine, ...visibleOptions, ...footerLines];
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
+}
+
+function buildTuiHandoffFrame(
+  metadata: TuiMetadata,
+  targets: readonly WindowTargetInfo[],
+  cursor: number,
+  loading: boolean,
+  error: string,
+  reason: string,
+  columns?: number,
+  rows?: number,
+  handoffReasonCode?: "foreground_mismatch" | "new_window_detected",
+): string {
+  const width = tuiWidth(columns);
+  const height = Math.max(12, rows ?? process.stdout.rows ?? 24);
+  const header = [
+    "Harness | WINDOW HANDOFF",
+    handoffReasonCode === "new_window_detected"
+      ? "A GUI action completed and a new visible window appeared."
+      : "Action refused: no mouse input was sent to the other window.",
+    `Previous: ${formatCuaTarget(metadata)}`,
+    `Status: ${error || reason}`,
+  ];
+  const footer = handoffReasonCode === "new_window_detected"
+    ? ["Enter handoff  C keep current target  R refresh  Esc wait  A abort", "Keeping current target invalidates this frame and captures a fresh one."]
+    : ["Enter confirm  R refresh  Esc wait  A abort", "Jev only suggests; your confirmation changes the target."];
+  const capacity = Math.max(1, height - header.length - footer.length - 2);
+  const first = Math.max(0, Math.min(cursor - Math.floor(capacity / 2), targets.length - capacity));
+  const visible = targets.slice(first, first + capacity).map((target, index) => `${first + index === cursor ? "❯" : " "} ${windowDisplayLabel(target)}`);
+  const lines = [...header, loading ? "Searching visible windows…" : `Candidate ${targets.length === 0 ? 0 : cursor + 1}/${targets.length}`, ...visible, ...footer];
+  return lines.slice(0, height - 1).map((line) => clipHomeLine(line, width).text).join("\n");
 }
 
 function windowDisplayLabel(target: WindowTargetInfo): string {
@@ -1274,13 +2186,14 @@ function windowDisplayLabel(target: WindowTargetInfo): string {
 function uiFeatureHint(features: TuiFeatureSelection, metadata?: TuiMetadata): string {
   if (features.memory === "off" && features.memoryRetrieval !== "off") return "Memory retrieval requires Memory facts or entities; it will be forced off.";
   if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
+  if (features.grounding === "auto") return "Auto: native window -> UIA; explicitly selected Harness-managed browser -> DOM + UIA; desktop -> off. Ordinary Edge does not grant DOM.";
+  if (isManagedGrounding(features.grounding)) {
+    if (metadata === undefined || !isHttpUrl(metadata.managedBrowserUrl)) return "DOM/Hybrid requires a start URL. Switch Grounding to auto, choose Managed browser in W, and enter the URL.";
+    return "DOM/Hybrid grounding uses a visible managed browser; personal browser login is not reused. Element references expire after each observation.";
+  }
   if (features.riskGuard === "off") return "Risk Guard is disabled for the next Run; schema/policy/budget/stale checks remain active.";
   if (features.monitor === "guidance") return "Guidance is advisory only; it cannot execute, approve or retry actions.";
   if (features.grounding === "uia-catalog-v1") return "UIA grounding requires an explicit CUA window target; click_element references expire after each observation.";
-  if (isManagedGrounding(features.grounding)) {
-    if (metadata === undefined || !isHttpUrl(metadata.managedBrowserUrl)) return "DOM/Hybrid grounding requires --managed-browser-url <http(s)-url>; the TUI does not edit this value.";
-    return "DOM/Hybrid grounding uses a visible temporary managed-browser profile; personal browser login data is never reused. click_element references expire after each observation.";
-  }
   return "Provider and Computer are selected by the launch command; this page changes Run features only.";
 }
 
@@ -1288,11 +2201,11 @@ function isManagedGrounding(grounding: TuiFeatureSelection["grounding"]): boolea
   return grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
 }
 
-function isHttpUrl(value: string | undefined): boolean {
+function isHttpUrl(value: string | undefined): value is string {
   if (value === undefined || value.trim().length === 0) return false;
   try {
     const parsed = new URL(value);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0 && parsed.username.length === 0 && parsed.password.length === 0;
   } catch {
     return false;
   }
@@ -1311,6 +2224,11 @@ function managedBrowserFeatureLine(metadata: TuiMetadata): string {
 }
 
 function formatEvent(event: RuntimeEvent, width: number): string {
+  if (event.type === "computer.window.handoff.requested") return event.reasonCode === "new_window_detected"
+    ? "window.handoff: new visible window; manual confirmation required"
+    : "window.handoff: foreground mismatch; host confirmation required";
+  if (event.type === "computer.window.handoff.completed") return clip(`window.handoff: pid=${event.target.pid} id=${event.target.windowId}`, width);
+  if (event.type === "computer.window.handoff.ignored") return "window.handoff: popup ignored; current target freshly observed";
   if (event.type === "model.response.received") {
     return clip(event.turn.type === "tool_calls"
       ? `model.response: ${event.turn.calls.map((call) => `${call.name}${call.declaredEffect === undefined ? "" : `[${call.declaredEffect.effects.join("+")}]`}`).join(", ")}`
