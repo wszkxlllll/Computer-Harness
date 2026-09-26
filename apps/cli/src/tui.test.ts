@@ -78,7 +78,7 @@ function makePendingCorrectionFixture(
     owner,
     ...(windowDiscovery === undefined ? {} : { windowDiscovery }),
   });
-  return { input, output, outputText, rawModes, controller, session, handle, runId, createRun, owner };
+  return { input, output, outputText, rawModes, controller, session, handle, eventFeed, runId, createRun, owner, setSnapshot: (next: RunSnapshot) => { snapshot = next; } };
 }
 
 async function waitForTui(predicate: () => boolean): Promise<void> {
@@ -333,6 +333,7 @@ describe("TUI renderer", () => {
     const startedConfig = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig | undefined;
     expect(startedConfig?.goal).toBe(goal);
     expect(startedConfig?.computer).toMatchObject({ kind: "cua", windowTarget: { pid: 1234, windowId: 5678 }, windowDeliveryMode: "foreground" });
+    expect(startedConfig?.windowHandoff).toBe("confirm-v1");
     fixture.input.emit("keypress", "", { name: "a" });
     await waitFor(() => fixture.session.status === "idle");
     await tick();
@@ -699,6 +700,341 @@ describe("TUI renderer", () => {
     fixture.input.emit("keypress", "", { name: "escape" });
     fixture.input.emit("keypress", "", { name: "q" });
     await tui;
+  });
+
+  it("falls back to the live manual picker when Jev is uncertain, even if local matching is possible", async () => {
+    const target = { pid: 1234, windowId: 5678, appName: "Google Chrome", title: "New Tab" };
+    const listWindows = vi.fn(async () => [target]);
+    const select = vi.fn(async () => ({ kind: "abstain" as const, reason: "uncertain" as const }));
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-jev-manual/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-jev-manual", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true,
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    fixture.input.emit("keypress", "Open Google Chrome and inspect the current page", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("WINDOW TARGET") && fixture.outputText.join("").includes("window=5678"));
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(listWindows).toHaveBeenCalledTimes(2);
+    expect(fixture.createRun).not.toHaveBeenCalled();
+    expect(fixture.outputText.join("")).toContain("Jev abstained (uncertain)");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("auto-handoffs only the uniquely matched Jev candidate after fresh target verification", async () => {
+    const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
+    const dialog = { pid: 1234, windowId: 8765, appName: "Editor", title: "Save As" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-handoff/screenshots",
+    });
+    const listWindowHandoffCandidates = vi.fn(async () => [oldTarget, dialog]);
+    const listNewWindowHandoffCandidates = vi.fn(async () => [dialog]);
+    const handoffWindow = vi.fn(async () => {
+      const { pendingWindowHandoff: _pendingWindowHandoff, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running" });
+    });
+    Object.assign(fixture.controller, { listWindowHandoffCandidates, listNewWindowHandoffCandidates, handoffWindow });
+    const select = vi.fn(async () => ({ kind: "matched" as const, target: dialog }));
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-handoff", profile: "live-interactive",
+      riskGuard: "layered", cuaWindowTarget: { pid: oldTarget.pid, windowId: oldTarget.windowId },
+      cuaWindowLabel: "Editor — Document", cuaWindowDeliveryMode: "foreground",
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    try {
+    fixture.input.emit("keypress", "Save this file", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.session.status === "running");
+    fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch" } });
+    fixture.eventFeed.publish({
+      eventId: "handoff-request" as EventId, runId: fixture.runId, sequence: 0,
+      occurredAt: "2026-09-23T00:00:00.000Z", type: "computer.window.handoff.requested",
+      sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch",
+    });
+    await waitForTui(() => select.mock.calls.length === 1 && fixture.outputText.join("").includes("WINDOW HANDOFF"));
+    await waitForTui(() => handoffWindow.mock.calls.length === 1);
+    expect(listWindowHandoffCandidates).toHaveBeenCalledTimes(1);
+    expect(select).toHaveBeenCalledWith(expect.stringContaining("Save this file"), [dialog], expect.any(AbortSignal), "handoff");
+    expect(handoffWindow).toHaveBeenCalledWith(dialog);
+    expect(fixture.outputText.join("")).toContain("Jev selected");
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" });
+      fixture.input.emit("keypress", "", { name: "q" });
+      await tui;
+    }
+  });
+
+  it("keeps handoff manual when Jev abstains, then uses the selected exact candidate", async () => {
+    const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
+    const dialog = { pid: 1234, windowId: 8765, appName: "Editor", title: "Save As" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-handoff-manual/screenshots",
+    });
+    const listWindowHandoffCandidates = vi.fn(async () => [oldTarget, dialog]);
+    const listNewWindowHandoffCandidates = vi.fn(async () => [dialog]);
+    const handoffWindow = vi.fn(async () => {
+      const { pendingWindowHandoff: _pendingWindowHandoff, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running" });
+    });
+    const ignoreNewWindowAndContinueOnCurrentTarget = vi.fn(async () => undefined);
+    Object.assign(fixture.controller, { listWindowHandoffCandidates, listNewWindowHandoffCandidates, handoffWindow, ignoreNewWindowAndContinueOnCurrentTarget });
+    const select = vi.fn(async () => ({ kind: "abstain" as const, reason: "uncertain" as const }));
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-handoff-manual", profile: "live-interactive",
+      riskGuard: "layered", cuaWindowTarget: { pid: oldTarget.pid, windowId: oldTarget.windowId },
+      cuaWindowLabel: "Editor — Document", cuaWindowDeliveryMode: "foreground",
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    try {
+      fixture.input.emit("keypress", "Save this file", {});
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => fixture.session.status === "running");
+      fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch" } });
+      fixture.eventFeed.publish({
+        eventId: "handoff-request-manual" as EventId, runId: fixture.runId, sequence: 0,
+        occurredAt: "2026-09-23T00:00:00.000Z", type: "computer.window.handoff.requested",
+        sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch",
+      });
+      await waitForTui(() => select.mock.calls.length === 1 && fixture.outputText.join("").includes("Jev abstained (uncertain)"));
+      expect(handoffWindow).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "c" });
+      await waitForTui(() => fixture.outputText.join("").includes("only for a proactive new-window notice"));
+      expect(ignoreNewWindowAndContinueOnCurrentTarget).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => handoffWindow.mock.calls.length === 1);
+      expect(handoffWindow).toHaveBeenCalledWith(dialog);
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" });
+      fixture.input.emit("keypress", "", { name: "q" });
+      await tui;
+    }
+  });
+
+  it("uses a Jev proactive suggestion only as a highlight until the user confirms", async () => {
+    const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
+    const dialog = { pid: 4321, windowId: 8765, appName: "Editor", title: "Save As" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-handoff-proactive/screenshots",
+    });
+    const listWindowHandoffCandidates = vi.fn(async () => [oldTarget, dialog]);
+    const listNewWindowHandoffCandidates = vi.fn(async () => [dialog]);
+    const handoffWindow = vi.fn(async () => {
+      const { pendingWindowHandoff: _pendingWindowHandoff, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running" });
+    });
+    Object.assign(fixture.controller, { listWindowHandoffCandidates, listNewWindowHandoffCandidates, handoffWindow });
+    const select = vi.fn(async () => ({ kind: "matched" as const, target: dialog }));
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-handoff-proactive", profile: "live-interactive",
+      riskGuard: "layered", cuaWindowTarget: { pid: oldTarget.pid, windowId: oldTarget.windowId },
+      cuaWindowLabel: "Editor — Document", cuaWindowDeliveryMode: "foreground",
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    try {
+      fixture.input.emit("keypress", "Save this file", {});
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => fixture.session.status === "running");
+      fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "completed-click" as ActionId, reasonCode: "new_window_detected" } });
+      fixture.eventFeed.publish({
+        eventId: "handoff-request-proactive" as EventId, runId: fixture.runId, sequence: 0,
+        occurredAt: "2026-09-24T00:00:00.000Z", type: "computer.window.handoff.requested",
+        sourceActionId: "completed-click" as ActionId, reasonCode: "new_window_detected",
+      });
+      await waitForTui(() => select.mock.calls.length === 1 && fixture.outputText.join("").includes("Jev suggests the highlighted candidate"));
+      expect(handoffWindow).not.toHaveBeenCalled();
+      expect(fixture.outputText.join("")).toContain("new visible window appeared");
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => handoffWindow.mock.calls.length === 1);
+      expect(handoffWindow).toHaveBeenCalledWith(dialog);
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" });
+      fixture.input.emit("keypress", "", { name: "q" });
+      await tui;
+    }
+  });
+
+  it("lets the host ignore a proactive popup and continue only after requesting a fresh observation", async () => {
+    const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
+    const popup = { pid: 4321, windowId: 8765, appName: "Updater", title: "Update available" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-handoff-ignore/screenshots",
+    });
+    const listWindowHandoffCandidates = vi.fn(async () => [oldTarget, popup]);
+    const listNewWindowHandoffCandidates = vi.fn(async () => [popup]);
+    const handoffWindow = vi.fn(async () => undefined);
+    const ignoreNewWindowAndContinueOnCurrentTarget = vi.fn(async () => {
+      const { pendingWindowHandoff: _pendingWindowHandoff, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running", latestObservationId: "fresh-observation" as ObservationId });
+    });
+    Object.assign(fixture.controller, { listWindowHandoffCandidates, listNewWindowHandoffCandidates, handoffWindow, ignoreNewWindowAndContinueOnCurrentTarget });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-handoff-ignore", profile: "live-interactive",
+      riskGuard: "layered", cuaWindowTarget: { pid: oldTarget.pid, windowId: oldTarget.windowId },
+      cuaWindowLabel: "Editor — Document", cuaWindowDeliveryMode: "foreground",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    try {
+      fixture.input.emit("keypress", "Save this file", {});
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => fixture.session.status === "running");
+      fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "completed-click" as ActionId, reasonCode: "new_window_detected" } });
+      fixture.eventFeed.publish({
+        eventId: "handoff-request-ignore" as EventId, runId: fixture.runId, sequence: 0,
+        occurredAt: "2026-09-24T00:00:00.000Z", type: "computer.window.handoff.requested",
+        sourceActionId: "completed-click" as ActionId, reasonCode: "new_window_detected",
+      });
+      await waitForTui(() => fixture.outputText.join("").includes("C keep current target"));
+      expect(handoffWindow).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "c" });
+      await waitForTui(() => ignoreNewWindowAndContinueOnCurrentTarget.mock.calls.length === 1 && fixture.outputText.join("").includes("freshly observed"));
+      expect(handoffWindow).not.toHaveBeenCalled();
+      expect(ignoreNewWindowAndContinueOnCurrentTarget).toHaveBeenCalledTimes(1);
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" });
+      fixture.input.emit("keypress", "", { name: "q" });
+      await tui;
+    }
+  });
+
+  it("does not let Jev auto-select a pre-existing similarly titled unrelated window", async () => {
+    const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
+    const sibling = { pid: 4321, windowId: 8765, appName: "Editor", title: "Save As" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-handoff-existing/screenshots",
+    });
+    const listWindowHandoffCandidates = vi.fn(async () => [oldTarget, sibling]);
+    const listNewWindowHandoffCandidates = vi.fn(async () => []);
+    const handoffWindow = vi.fn(async () => {
+      const { pendingWindowHandoff: _pendingWindowHandoff, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running" });
+    });
+    Object.assign(fixture.controller, { listWindowHandoffCandidates, listNewWindowHandoffCandidates, handoffWindow });
+    const select = vi.fn(async () => ({ kind: "matched" as const, target: sibling }));
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-handoff-existing", profile: "live-interactive",
+      riskGuard: "layered", cuaWindowTarget: { pid: oldTarget.pid, windowId: oldTarget.windowId },
+      cuaWindowLabel: "Editor — Document", cuaWindowDeliveryMode: "foreground",
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    try {
+      fixture.input.emit("keypress", "Save this file", {});
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => fixture.session.status === "running");
+      fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch" } });
+      fixture.eventFeed.publish({
+        eventId: "handoff-request-existing" as EventId, runId: fixture.runId, sequence: 0,
+        occurredAt: "2026-09-23T00:00:00.000Z", type: "computer.window.handoff.requested",
+        sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch",
+      });
+      await waitForTui(() => fixture.outputText.join("").includes("No newly surfaced window matches"));
+      expect(select).not.toHaveBeenCalled();
+      expect(handoffWindow).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => handoffWindow.mock.calls.length === 1);
+      expect(handoffWindow).toHaveBeenCalledWith(sibling);
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" });
+      fixture.input.emit("keypress", "", { name: "q" });
+      await tui;
+    }
+  });
+
+  it("rejects a custom Jev match outside the newly surfaced eligibility set", async () => {
+    const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
+    const existing = { pid: 1234, windowId: 7777, appName: "Editor", title: "Save As" };
+    const newlySurfaced = { pid: 1234, windowId: 8888, appName: "Editor", title: "Open" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-handoff-jev-outside-eligible/screenshots",
+    });
+    const listWindowHandoffCandidates = vi.fn(async () => [oldTarget, existing, newlySurfaced]);
+    const listNewWindowHandoffCandidates = vi.fn(async () => [newlySurfaced]);
+    const handoffWindow = vi.fn(async () => {
+      const { pendingWindowHandoff: _pendingWindowHandoff, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running" });
+    });
+    Object.assign(fixture.controller, { listWindowHandoffCandidates, listNewWindowHandoffCandidates, handoffWindow });
+    const select = vi.fn(async () => ({ kind: "matched" as const, target: existing }));
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-handoff-jev-outside-eligible", profile: "live-interactive",
+      riskGuard: "layered", cuaWindowTarget: { pid: oldTarget.pid, windowId: oldTarget.windowId },
+      cuaWindowLabel: "Editor — Document", cuaWindowDeliveryMode: "foreground",
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    try {
+      fixture.input.emit("keypress", "Save this file", {});
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => fixture.session.status === "running");
+      fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch" } });
+      fixture.eventFeed.publish({
+        eventId: "handoff-request-jev-outside-eligible" as EventId, runId: fixture.runId, sequence: 0,
+        occurredAt: "2026-09-23T00:00:00.000Z", type: "computer.window.handoff.requested",
+        sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch",
+      });
+      await waitForTui(() => fixture.outputText.join("").includes("eligible newly surfaced candidate set"));
+      expect(select).toHaveBeenCalledWith(expect.stringContaining("Save this file"), [newlySurfaced], expect.any(AbortSignal), "handoff");
+      expect(handoffWindow).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => handoffWindow.mock.calls.length === 1);
+      expect(handoffWindow).toHaveBeenCalledWith(existing);
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" });
+      fixture.input.emit("keypress", "", { name: "q" });
+      await tui;
+    }
+  });
+
+  it("requires manual confirmation for a newly surfaced different-process window", async () => {
+    const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
+    const dialog = { pid: 4321, windowId: 8765, appName: "Editor", title: "Save As" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-handoff-other-process/screenshots",
+    });
+    const listWindowHandoffCandidates = vi.fn(async () => [oldTarget, dialog]);
+    const listNewWindowHandoffCandidates = vi.fn(async () => [dialog]);
+    const handoffWindow = vi.fn(async () => {
+      const { pendingWindowHandoff: _pendingWindowHandoff, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running" });
+    });
+    Object.assign(fixture.controller, { listWindowHandoffCandidates, listNewWindowHandoffCandidates, handoffWindow });
+    const select = vi.fn(async () => ({ kind: "matched" as const, target: dialog }));
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-handoff-other-process", profile: "live-interactive",
+      riskGuard: "layered", cuaWindowTarget: { pid: oldTarget.pid, windowId: oldTarget.windowId },
+      cuaWindowLabel: "Editor — Document", cuaWindowDeliveryMode: "foreground",
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    try {
+      fixture.input.emit("keypress", "Save this file", {});
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => fixture.session.status === "running");
+      fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch" } });
+      fixture.eventFeed.publish({
+        eventId: "handoff-request-other-process" as EventId, runId: fixture.runId, sequence: 0,
+        occurredAt: "2026-09-23T00:00:00.000Z", type: "computer.window.handoff.requested",
+        sourceActionId: "failed-click" as ActionId, reasonCode: "foreground_mismatch",
+      });
+      await waitForTui(() => select.mock.calls.length === 1 && fixture.outputText.join("").includes("Automatic handoff is limited"));
+      expect(select).toHaveBeenCalledWith(expect.stringContaining("Save this file"), [dialog], expect.any(AbortSignal), "handoff");
+      expect(handoffWindow).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => handoffWindow.mock.calls.length === 1);
+      expect(handoffWindow).toHaveBeenCalledWith(dialog);
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" });
+      fixture.input.emit("keypress", "", { name: "q" });
+      await tui;
+    }
   });
 
   it("keeps the goal and stops at the picker when a Jev-selected window changes", async () => {
@@ -1375,17 +1711,23 @@ describe("TUI renderer", () => {
     expect(questionFrame).toContain("问题0");
     expect(questionNextPage).toContain("Question [2/");
     expect(questionNextPage).toContain("问题1");
+    expect(questionFrame.trimEnd().split("\n").length).toBeLessThanOrEqual(21);
+    expect(questionFrame.split("\n").every((line) => stringWidth(line) <= 24)).toBe(true);
 
     const approvalFrame = buildTuiFrame({ ...initialRunSnapshot(runId), status: "waiting_approval" as const, pendingApproval: { requestId: "approval-1", callId: "call-1" as ToolCallId, reason: longQuestion } }, [], "长任务", { provider: "glm", computer: "cua", output: "runs/test", profile: "live-interactive", riskGuard: "layered" }, { editMode: false, input: "", notice: "", columns: 24, rows: 22, detailPage: 0 });
     expect(approvalFrame).toContain("Approval [1/");
+    expect(approvalFrame.trimEnd().split("\n").length).toBeLessThanOrEqual(21);
+    expect(approvalFrame.split("\n").every((line) => stringWidth(line) <= 24)).toBe(true);
 
     const inputFrame = buildTuiFrame({ ...initialRunSnapshot(runId), status: "running" as const }, [], "长任务", { provider: "glm", computer: "cua", output: "runs/test", profile: "live-interactive", riskGuard: "layered" }, { editMode: true, input: `前缀很长${"字".repeat(80)}\u001b[2J尾部`, notice: "", inputLimitReached: true, columns: 24, rows: 22, detailPage: 0 });
     expect(inputFrame).toContain("尾部");
     expect(inputFrame).not.toContain("\u001b");
-    expect(inputFrame).toContain("Editing: Enter submit");
+    expect(inputFrame).toContain("Enter submit");
     expect(inputFrame).toContain("Esc cancel");
-    expect(inputFrame).toContain("Input is limited to 500 characters");
+    expect(inputFrame).toContain("Max 500 characters");
     expect(inputFrame).not.toContain("Keys: I correction/input");
+    expect(inputFrame.trimEnd().split("\n").length).toBeLessThanOrEqual(21);
+    expect(inputFrame.split("\n").every((line) => stringWidth(line) <= 24)).toBe(true);
   });
 
   it("explains why an approval is pending without rendering tool arguments", () => {
@@ -1855,12 +2197,23 @@ describe("TUI renderer", () => {
     second.finish();
     await tick();
     await tick();
+    const homeWithReply = outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
+    expect(homeWithReply).toContain("Last reply:");
+    expect(homeWithReply).toContain("第二轮最终回复");
     input.emit("keypress", "", { name: "pagedown" });
     await tick();
     const latestReplyFrame = outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
     expect(latestReplyFrame).toContain("Harness | DETAILS");
     expect(latestReplyFrame).toContain("第二轮最终回复");
     expect(latestReplyFrame).not.toContain("第一轮最终回复");
+    const replyPages = [latestReplyFrame];
+    const replyPageCount = Number(/Details \[1\/(\d+)\]/u.exec(latestReplyFrame)?.[1]);
+    for (let pageIndex = 1; pageIndex < replyPageCount; pageIndex += 1) {
+      input.emit("keypress", "", { name: "pagedown" });
+      await tick();
+      replyPages.push(outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "");
+    }
+    expect(replyPages.join("\n")).toContain("细节17");
     input.emit("keypress", "", { name: "escape" });
     input.emit("keypress", "", { name: "escape" });
     input.emit("keypress", "", { name: "q" });

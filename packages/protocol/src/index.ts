@@ -740,11 +740,23 @@ export interface ComputerSessionDescriptor {
   readonly openedAt: string;
 }
 
+/** Host window identity and its current human-readable picker metadata. */
+export interface ComputerWindowIdentity {
+  readonly pid: number;
+  readonly windowId: number;
+}
+
+export interface ComputerWindowCandidate extends ComputerWindowIdentity {
+  readonly appName?: string;
+  readonly title?: string;
+}
+
 export type RunStatus =
   | "created"
   | "starting"
   | "running"
   | "waiting_user"
+  | "waiting_window"
   | "waiting_approval"
   | "paused"
   | "finished";
@@ -867,6 +879,9 @@ export type RuntimeEventData =
   | { type: "run.started" }
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
+  | { type: "computer.window.handoff.requested"; sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" }
+  | { type: "computer.window.handoff.completed"; target: ComputerWindowIdentity; session: ComputerSessionDescriptor }
+  | { type: "computer.window.handoff.ignored"; sourceActionId: ActionId }
   | { type: "observation.created"; observation: ObservationFrame }
   | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
@@ -970,6 +985,9 @@ export const runtimeEventTypes = [
   "run.started",
   "computer.open.started",
   "computer.open.completed",
+  "computer.window.handoff.requested",
+  "computer.window.handoff.completed",
+  "computer.window.handoff.ignored",
   "observation.created",
   "model.request.started",
   "model.response.received",

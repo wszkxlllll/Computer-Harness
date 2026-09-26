@@ -93,6 +93,35 @@ describe("ApplicationSession", () => {
     }
   });
 
+  it("keeps a direct CLI starter inside the ApplicationSession owner lifecycle", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-cli-starter-"));
+    const owner = new InProcessEnvironmentOwner();
+    let handle: RunHandle | undefined;
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const created = fakeHandle(config, "succeeded");
+      created.start = vi.fn((starter) => starter === undefined
+        ? Promise.resolve("succeeded")
+        : starter({} as RunController, config.goal, () => undefined));
+      handle = created;
+      return created;
+    });
+    const starter = vi.fn(async (_controller: RunController, goal: string) => {
+      expect(goal).toBe("direct CLI task");
+      return "succeeded" as const;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      const started = await session.startRun("direct CLI task", {}, starter);
+      expect(started).toBe(handle);
+      await expect(session.waitForActiveRun()).resolves.toBe("succeeded");
+      expect(handle?.start).toHaveBeenCalledTimes(1);
+      expect(starter).toHaveBeenCalledTimes(1);
+      expect(owner.inspect(session.environmentId)).toBeUndefined();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("wires the real createRun Controller into the session feed without an API or desktop", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-real-"));
     const owner = new InProcessEnvironmentOwner();

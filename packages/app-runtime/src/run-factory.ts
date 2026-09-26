@@ -185,6 +185,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       onCleanupError: recordCleanupError,
       onEventCommitted: eventFeed.publish,
       batching: config.batching,
+      windowHandoff: config.windowHandoff ?? "off",
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
       ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
   ActionId,
+  ComputerWindowCandidate,
   ActionEffectDeclaration,
   ActionIntent,
   AssetId,
@@ -111,6 +112,7 @@ export interface RunControllerDependencies {
    * are isolated from the run when their callback throws.
    */
   onEventCommitted?: CommittedEventListener;
+  windowHandoff?: "off" | "confirm-v1";
 }
 
 export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close" | "planning_module.close" | "memory_module.close";
@@ -134,6 +136,7 @@ type RuntimeCommand =
   | {
       kind: "user_input";
       text: string;
+      expectedPendingRequestId?: string;
       resolve: () => void;
       reject: (error: unknown) => void;
     }
@@ -152,6 +155,19 @@ type RuntimeCommand =
     }
   | {
       kind: "resume";
+      resolve: () => void;
+      reject: (error: unknown) => void;
+    }
+  | {
+      kind: "window_handoff";
+      candidate: ComputerWindowCandidate;
+      expectedRequestId?: string;
+      resolve: () => void;
+      reject: (error: unknown) => void;
+    }
+  | {
+      kind: "ignore_new_window";
+      expectedRequestId?: string;
       resolve: () => void;
       reject: (error: unknown) => void;
     };
@@ -287,6 +303,8 @@ export class RunController {
   private readonly runId: RunId;
   private readonly provider: ProviderAdapter;
   private readonly computer: Computer;
+  private readonly windowHandoff: "off" | "confirm-v1";
+  private activeComputerSession: ComputerSession | undefined;
   private readonly contextCompiler: ContextCompiler;
   private readonly toolRegistry: ToolRegistry;
   private readonly policy: RuntimePolicy;
@@ -349,6 +367,7 @@ export class RunController {
     this.runId = dependencies.runId;
     this.provider = dependencies.provider;
     this.computer = dependencies.computer;
+    this.windowHandoff = dependencies.windowHandoff ?? "off";
     this.contextCompiler = dependencies.contextCompiler;
     this.toolRegistry = dependencies.toolRegistry;
     this.policy = dependencies.policy;
@@ -416,13 +435,14 @@ export class RunController {
     this.abortController.abort(new Error(reason));
   }
 
-  public submitUserInput(text: string): Promise<void> {
+  public submitUserInput(text: string, expectedPendingRequestId?: string): Promise<void> {
     if (text.trim().length === 0) {
       return Promise.reject(new Error("submitUserInput requires non-empty text"));
     }
     return this.enqueueCommand((resolve, reject) => ({
       kind: "user_input",
       text,
+      ...(expectedPendingRequestId === undefined ? {} : { expectedPendingRequestId }),
       resolve,
       reject,
     }));
@@ -447,6 +467,40 @@ export class RunController {
 
   public resume(): Promise<void> {
     return this.enqueueCommand((resolve, reject) => ({ kind: "resume", resolve, reject }));
+  }
+
+  public async listWindowHandoffCandidates(signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.listWindowHandoffCandidates === undefined) {
+      throw new Error("no window handoff is waiting for candidate discovery");
+    }
+    return this.computer.listWindowHandoffCandidates(this.activeComputerSession, signal);
+  }
+
+  public async listNewWindowHandoffCandidates(signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.listWindowHandoffCandidates === undefined) {
+      throw new Error("no window handoff is waiting for candidate discovery");
+    }
+    if (this.computer.listNewWindowHandoffCandidates === undefined) return [];
+    return this.computer.listNewWindowHandoffCandidates(this.activeComputerSession, signal);
+  }
+
+  public handoffWindow(candidate: ComputerWindowCandidate, expectedRequestId?: string): Promise<void> {
+    return this.enqueueCommand((resolve, reject) => ({
+      kind: "window_handoff",
+      candidate,
+      ...(expectedRequestId === undefined ? {} : { expectedRequestId }),
+      resolve,
+      reject,
+    }));
+  }
+
+  public ignoreNewWindowAndContinueOnCurrentTarget(expectedRequestId?: string): Promise<void> {
+    return this.enqueueCommand((resolve, reject) => ({
+      kind: "ignore_new_window",
+      ...(expectedRequestId === undefined ? {} : { expectedRequestId }),
+      resolve,
+      reject,
+    }));
   }
 
   public getSnapshot(): RunSnapshot {
@@ -482,14 +536,16 @@ export class RunController {
         throw new Error("Computer instance has unresolved cleanup from an earlier Run");
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
+      this.activeComputerSession = session;
       const restrictedToolNames = restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, this.enabledToolNames === undefined ? undefined : [...this.enabledToolNames]);
       this.enabledToolNames = restrictedToolNames === undefined ? undefined : new Set(restrictedToolNames);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 
       while (this.snapshot.status !== "finished") {
-        if (this.snapshot.status === "paused" || this.snapshot.status === "waiting_user" || this.snapshot.status === "waiting_approval") {
+        if (this.snapshot.status === "paused" || this.snapshot.status === "waiting_user" || this.snapshot.status === "waiting_approval" || this.snapshot.status === "waiting_window") {
           await this.waitForControlCommand();
+          session = this.activeComputerSession ?? session;
           if ((this.snapshot.status as string) === "running") {
             // A resume can release the waiter before a correction enqueued in
             // the same user turn is drained.  Apply queued control commands
@@ -828,6 +884,7 @@ export class RunController {
     } finally {
       this.commandInbox.close();
       await this.cleanup(session);
+      this.activeComputerSession = undefined;
     }
   }
 
@@ -983,11 +1040,18 @@ export class RunController {
   private async applyCommand(command: RuntimeCommand): Promise<CommandEffects> {
     // A correction/approval/explicit pause-resume changes the control
     // boundary.  Never carry a guidance or deferred-help proposal across it.
-    if (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause" || command.kind === "resume") {
+    if (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause" || command.kind === "resume" || command.kind === "window_handoff" || command.kind === "ignore_new_window") {
       this.clearMonitorPendingRecommendations();
     }
     switch (command.kind) {
       case "user_input":
+        if (command.expectedPendingRequestId !== undefined) {
+          const currentApprovalId = this.snapshot.pendingApproval?.requestId;
+          const currentQuestionId = this.snapshot.pendingUserInputRequestId;
+          if (currentApprovalId !== command.expectedPendingRequestId && currentQuestionId !== command.expectedPendingRequestId) {
+            throw new Error("user input request does not match the pending request");
+          }
+        }
         if (this.approvedPendingApproval !== undefined) {
           const approved = this.approvedPendingApproval;
           this.approvedPendingApproval = undefined;
@@ -1069,6 +1133,64 @@ export class RunController {
         }
         await this.commitEvent({ type: "run.resumed" });
         return { correction: false };
+      case "window_handoff":
+        if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.handoffWindow === undefined) {
+          throw new Error("no window handoff is awaiting confirmation");
+        }
+        if (command.expectedRequestId !== undefined && this.snapshot.pendingWindowHandoff?.sourceActionId !== command.expectedRequestId) {
+          throw new Error("window handoff request does not match the pending request");
+        }
+        {
+          const session = await this.computer.handoffWindow(this.activeComputerSession, command.candidate, this.abortController.signal);
+          try {
+            await this.commitEvent({ type: "computer.window.handoff.completed", target: { pid: command.candidate.pid, windowId: command.candidate.windowId }, session });
+          } catch (error) {
+            // The private binding has changed. If the durable handoff event is
+            // missing, fail closed instead of accepting another GUI command.
+            this.abortController.abort(new Error("window handoff could not be recorded", { cause: error }));
+            throw error;
+          }
+          this.activeComputerSession = session;
+          this.latestObservation = undefined;
+          this.latestObservationFingerprint = undefined;
+          this.groundingCandidates.clear();
+          this.groundingRecoveryHint = undefined;
+          if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
+          if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+          this.pendingReobserve = true;
+          return { correction: true };
+        }
+      case "ignore_new_window":
+        if (this.snapshot.status !== "waiting_window" || this.snapshot.pendingWindowHandoff?.reasonCode !== "new_window_detected" ||
+            this.activeComputerSession === undefined) {
+          throw new Error("only a proactively detected window may be ignored; foreground mismatch requires choosing a target or aborting");
+        }
+        if (command.expectedRequestId !== undefined && this.snapshot.pendingWindowHandoff.sourceActionId !== command.expectedRequestId) {
+          throw new Error("window handoff request does not match the pending request");
+        }
+        {
+          const session = this.activeComputerSession;
+          const sourceActionId = this.snapshot.pendingWindowHandoff.sourceActionId;
+          await this.commitEvent({ type: "computer.window.handoff.ignored", sourceActionId });
+          // Drop every old frame/grounding reference before observing the
+          // still-bound target. No action from the completed decision is replayed.
+          this.latestObservation = undefined;
+          this.latestObservationFingerprint = undefined;
+          this.groundingCandidates.clear();
+          this.groundingRecoveryHint = undefined;
+          if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
+          if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+          this.pendingReobserve = false;
+          try {
+            await this.observeAndCommit(session);
+          } catch (error) {
+            // The waiting frame was invalidated by the ignore decision; do
+            // not let the Provider run without a replacement observation.
+            this.abortController.abort(new Error("fresh observation after ignoring a newly surfaced window failed", { cause: error }));
+            throw error;
+          }
+          return { correction: true };
+        }
     }
   }
 
@@ -1555,7 +1677,14 @@ export class RunController {
             return { correction: false };
           }
         }
-        await this.executeComputerCall(entry.call, entry.definition, context, pendingTurn.decisionObservationId, entry.preparedAction);
+        await this.executeComputerCall(
+          entry.call,
+          entry.definition,
+          context,
+          pendingTurn.decisionObservationId,
+          entry.preparedAction,
+          () => this.rejectPendingEntries(pendingTurn.entries, index + 1, "window handoff requested; remaining ToolCalls were not executed"),
+        );
       } else if (entry.definition.category === "control") {
         await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
@@ -1566,6 +1695,9 @@ export class RunController {
       // terminal ToolResult and post-action observation before status changes
       // to waiting_user.
       await this.flushDeferredMonitorHelp();
+      if (this.snapshot.status === "waiting_window") {
+        return { correction: false };
+      }
       if (this.snapshot.status === "waiting_user") {
         // Stop a multi-tool turn at the Inbox boundary.  The completed entry
         // is not replayed; remaining entries resume from this watermark or
@@ -1702,6 +1834,7 @@ export class RunController {
     context: ToolExecutionContext,
     decisionObservationId: ObservationId | undefined = this.snapshot.latestObservationId,
     prepared?: PreparedComputerAction,
+    beforeWindowHandoff?: () => Promise<void>,
   ): Promise<void> {
     this.throwIfAborted();
     const executionObservationId = this.snapshot.latestObservationId;
@@ -1777,7 +1910,10 @@ export class RunController {
     let receipt: import("@computer-harness/protocol").ActionReceipt;
     try {
       const executeOptions: ComputerExecuteOptions = executionObservationId === undefined ? {} : { executionObservationId };
-      receipt = await this.computer.execute(context.session, action, this.abortController.signal, executeOptions);
+      receipt = await this.computer.execute(context.session, action, this.abortController.signal, {
+        ...executeOptions,
+        ...(this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
+      });
     } catch (error) {
       await this.commitEvent({
         type: "runtime.error",
@@ -1814,6 +1950,25 @@ export class RunController {
       this.callStates.set(call.id, "failed");
       if (this.snapshot.executionSegment?.status === "active") {
         await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: this.snapshot.executionSegment.id, reason: "bound_computer_action_failed" } });
+      }
+    }
+    if (receipt.status === "refused" && receipt.driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
+        this.windowHandoff === "confirm-v1" && this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined) {
+      await beforeWindowHandoff?.();
+      await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "foreground_mismatch" });
+      return;
+    }
+    if (receipt.status === "completed" && action.kind !== "wait" && this.windowHandoff === "confirm-v1" &&
+        this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined &&
+        this.computer.detectNewWindowHandoffCandidates !== undefined) {
+      // Action and ToolCall receipts are durable before this read-only diff.
+      // A discovered window pauses the run; the completed action is never replayed.
+      const surfaced = await this.computer.detectNewWindowHandoffCandidates(context.session, this.abortController.signal);
+      this.throwIfAborted();
+      if (surfaced.length > 0) {
+        await beforeWindowHandoff?.();
+        await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "new_window_detected" });
+        return;
       }
     }
     // The action and ToolCall facts are durable before taking the follow-up

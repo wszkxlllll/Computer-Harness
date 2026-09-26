@@ -6,6 +6,7 @@ import type { RunSnapshot } from "@computer-harness/trajectory";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
 import type { RiskGuardMode, RiskProfile } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
+import { createTuiPainter } from "./tui-painter.js";
 import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
 import { matchGoalToWindow } from "./window-target-matcher.js";
 import { resolveTuiGrounding, type TuiGroundingChoice } from "./window-grounding-policy.js";
@@ -80,7 +81,7 @@ export interface ApplicationTuiOptions {
   windowSelector?: WindowSelectionStrategy;
 }
 
-type TuiMode = "home" | "home_details" | "features" | "windows" | "browser_url" | "run";
+type TuiMode = "home" | "home_details" | "features" | "windows" | "handoff" | "browser_url" | "run";
 type TuiFeedState = "live" | "resync_required" | "closed";
 
 interface PendingCorrection {
@@ -127,6 +128,7 @@ export async function runApplicationTui(
   let windowError = "";
   let windowMatchReason = "";
   let windowDiscoveryAbort: AbortController | undefined;
+  let handoffDiscoveryAbort: AbortController | undefined;
   let goalWindowDiscoveryAbort: AbortController | undefined;
   let goalSubmissionPending = false;
   let goalSubmissionGeneration = 0;
@@ -136,7 +138,7 @@ export async function runApplicationTui(
   let windowChoiceExplicit = metadata.cuaWindowTarget !== undefined;
   let editMode = true;
   let inputValue = "";
-  let notice = options.windowSelector === undefined ? "" : "Jev fallback enabled: unmatched goals may send window names and titles to TypeSafe.";
+  let notice = options.windowSelector === undefined ? "" : "Jev enabled: initial selection and handoff may send window names and titles to TypeSafe.";
   let lastReply = "";
   let exiting = false;
   let restored = false;
@@ -147,6 +149,7 @@ export async function runApplicationTui(
   let currentSnapshot: RunSnapshot = initialRunSnapshot(HOME_RUN_ID);
   let currentEvents: RuntimeEvent[] = [];
   let lastSequence = -1;
+  let activeHandoffReasonCode: "foreground_mismatch" | "new_window_detected" | undefined;
   let feedState: TuiFeedState = "live";
   let detailPage = 0;
   let inputLimitReached = false;
@@ -159,11 +162,18 @@ export async function runApplicationTui(
   const write = (value: string): void => {
     try { output.write(value); } catch { /* terminal may disappear during exit */ }
   };
+  // The real console uses row-level painting. Synthetic terminal streams keep
+  // complete frames so tests and embedders can inspect their output directly.
+  const painter = output === process.stdout ? createTuiPainter(write) : undefined;
+  const paint = (frame: string): void => {
+    if (painter !== undefined) painter.paint(frame);
+    else write(`\u001b[H\u001b[2J${frame}`);
+  };
 
   const render = (): void => {
     if (mode === "run" && currentHandle !== undefined) {
       currentSnapshot = currentHandle.controller.getSnapshot();
-      write(`\u001b[H\u001b[2J${buildTuiFrame(currentSnapshot, currentEvents, currentGoal, activeMetadata, {
+      paint(buildTuiFrame(currentSnapshot, currentEvents, currentGoal, activeMetadata, {
         editMode,
         input: inputValue,
         notice,
@@ -174,23 +184,27 @@ export async function runApplicationTui(
         inputLimitReached,
         columns: output.columns,
         rows: output.rows,
-      })}`);
+      }));
       return;
     }
     if (mode === "features") {
-      write(`\u001b[H\u001b[2J${buildTuiFeaturesFrame(activeMetadata, draftFeatureSelection, featureCursor, output.columns, output.rows)}\n`);
+      paint(`${buildTuiFeaturesFrame(activeMetadata, draftFeatureSelection, featureCursor, output.columns, output.rows)}\n`);
       return;
     }
     if (mode === "windows") {
-      write(`\u001b[H\u001b[2J${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, windowMatchReason, output.columns, output.rows)}\n`);
+      paint(`${buildTuiWindowsFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, windowMatchReason, output.columns, output.rows)}\n`);
+      return;
+    }
+    if (mode === "handoff") {
+      paint(`${buildTuiHandoffFrame(activeMetadata, windowTargets, windowCursor, windowLoading, windowError, windowMatchReason, output.columns, output.rows, currentSnapshot.pendingWindowHandoff?.reasonCode ?? activeHandoffReasonCode)}\n`);
       return;
     }
     if (mode === "browser_url") {
-      write(`\u001b[H\u001b[2J${buildTuiBrowserUrlFrame(activeMetadata, browserUrlDraft, inputValue, notice, output.columns, output.rows)}\n`);
+      paint(`${buildTuiBrowserUrlFrame(activeMetadata, browserUrlDraft, inputValue, notice, output.columns, output.rows)}\n`);
       return;
     }
     if (mode === "home_details") {
-      write(`\u001b[H\u001b[2J${buildTuiHomeDetailsFrame(activeMetadata, session, {
+      paint(buildTuiHomeDetailsFrame(activeMetadata, session, {
         editMode,
         input: inputValue,
         notice,
@@ -200,10 +214,10 @@ export async function runApplicationTui(
         inputLimitReached,
         columns: output.columns,
         rows: output.rows,
-      })}`);
+      }));
       return;
     }
-    write(`\u001b[H\u001b[2J${buildTuiHomeFrame(activeMetadata, session, {
+    paint(buildTuiHomeFrame(activeMetadata, session, {
       editMode,
       input: inputValue,
       notice,
@@ -213,7 +227,7 @@ export async function runApplicationTui(
       inputLimitReached,
       columns: output.columns,
       rows: output.rows,
-    })}`);
+    }));
   };
 
   // Keypress streams can deliver a large paste as many synchronous events.
@@ -252,6 +266,7 @@ export async function runApplicationTui(
       appendEvents([notification.event]);
       currentSnapshot = handle.controller.getSnapshot();
       render();
+      if (notification.event.type === "computer.window.handoff.requested") void openWindowHandoffPicker(handle);
       return;
     }
     feedState = notification.status;
@@ -282,6 +297,8 @@ export async function runApplicationTui(
     currentGoal = goal;
     currentSnapshot = handle.controller.getSnapshot();
     currentEvents = [];
+    handoffDiscoveryAbort?.abort();
+    handoffDiscoveryAbort = undefined;
     lastSequence = -1;
     feedState = "live";
     detailPage = 0;
@@ -302,6 +319,8 @@ export async function runApplicationTui(
       feedSubscription?.unsubscribe();
       feedSubscription = undefined;
       currentHandle = undefined;
+      handoffDiscoveryAbort?.abort();
+      handoffDiscoveryAbort = undefined;
       mode = "home";
       editMode = true;
       inputValue = "";
@@ -445,6 +464,136 @@ export async function runApplicationTui(
     activeMetadata = desktopMetadata;
   };
 
+  const applyWindowHandoff = async (handle: RunHandle, candidate: WindowTargetInfo): Promise<void> => {
+    await handle.controller.handoffWindow(candidate);
+    if (currentHandle !== handle) return;
+    selectedWindowTarget = { pid: candidate.pid, windowId: candidate.windowId };
+    activeHandoffReasonCode = undefined;
+    activeMetadata = {
+      ...activeMetadata,
+      cuaWindowTarget: selectedWindowTarget,
+      cuaWindowLabel: windowDisplayLabel(candidate),
+      cuaWindowSelectionSource: "host",
+    };
+    mode = "run";
+    notice = "Window handoff completed; the old frame and element references were discarded. Observing the new window.";
+    render();
+  };
+
+  const ignoreProactiveWindow = (handle: RunHandle): void => {
+    if (currentHandle !== handle || handle.controller.getSnapshot().pendingWindowHandoff?.reasonCode !== "new_window_detected") return;
+    handoffDiscoveryAbort?.abort();
+    handoffDiscoveryAbort = undefined;
+    windowLoading = true;
+    windowError = "";
+    windowMatchReason = "Keeping the bound target. Invalidating the old frame and capturing a fresh observation…";
+    mode = "handoff";
+    render();
+    invoke(async () => {
+      try {
+        await handle.controller.ignoreNewWindowAndContinueOnCurrentTarget();
+        if (currentHandle !== handle) return;
+        mode = "run";
+        activeHandoffReasonCode = undefined;
+        windowTargets = [];
+        notice = "Ignored the new window; the bound target was freshly observed. The completed action was not replayed.";
+      } catch (error) {
+        windowError = errorMessage(error);
+        windowMatchReason = "Could not continue on the current target; choose the new window or abort.";
+      } finally {
+        windowLoading = false;
+        if (currentHandle === handle) render();
+      }
+    }, "");
+  };
+
+  const openWindowHandoffPicker = async (handle: RunHandle): Promise<void> => {
+    if (currentHandle !== handle || handle.controller.getSnapshot().status !== "waiting_window") return;
+    handoffDiscoveryAbort?.abort();
+    const abort = new AbortController();
+    handoffDiscoveryAbort = abort;
+    windowTargets = [];
+    windowCursor = 0;
+    windowLoading = true;
+    windowError = "";
+    const handoffReason = handle.controller.getSnapshot().pendingWindowHandoff?.reasonCode;
+    activeHandoffReasonCode = handoffReason;
+    windowMatchReason = handoffReason === "new_window_detected"
+      ? "A new visible window appeared after the completed action. Review candidates; Jev suggestions always require Enter confirmation."
+      : "Run is paused after an exact foreground refusal; no input was sent. Recheck the next target.";
+    mode = "handoff";
+    render();
+    try {
+      const candidates = await handle.controller.listWindowHandoffCandidates(abort.signal);
+      if (abort.signal.aborted || currentHandle !== handle) return;
+      windowTargets = candidates.filter((candidate) => candidate.pid !== activeMetadata.cuaWindowTarget?.pid || candidate.windowId !== activeMetadata.cuaWindowTarget?.windowId);
+      windowMatchReason = windowTargets.length === 0 ? "No other window is visible. R refreshes; A aborts the Run." : "Select a new window. Enter confirms; Esc keeps the Run waiting.";
+      const surfacedCandidates = await handle.controller.listNewWindowHandoffCandidates(abort.signal);
+      if (abort.signal.aborted || currentHandle !== handle) return;
+      const surfacedWindowTargets = surfacedCandidates.filter((candidate) =>
+        windowTargets.some((visible) => visible.pid === candidate.pid && visible.windowId === candidate.windowId &&
+          visible.appName === candidate.appName && visible.title === candidate.title));
+      if (options.windowSelector !== undefined && surfacedWindowTargets.length > 0) {
+        windowMatchReason = "Jev is comparing the paused task with windows surfaced since the last observation.";
+        render();
+        const decision = await options.windowSelector.select(
+          handoffReason === "new_window_detected"
+            ? `${currentGoal}\nA visible window appeared after the completed action. Suggest which new candidate fits this task; the host will still require manual confirmation.`
+            : `${currentGoal}\nThe previous bound window is no longer the foreground target. Choose a newly opened dialog or window needed to continue this task.`,
+          surfacedWindowTargets,
+          abort.signal,
+          "handoff",
+        );
+        if (abort.signal.aborted || currentHandle !== handle) return;
+        if (decision.kind === "matched") {
+          const surfacedIndex = surfacedWindowTargets.findIndex((candidate) => candidate.pid === decision.target.pid && candidate.windowId === decision.target.windowId && candidate.appName === decision.target.appName && candidate.title === decision.target.title);
+          const index = surfacedIndex < 0 ? -1 : windowTargets.findIndex((candidate) =>
+            candidate.pid === surfacedWindowTargets[surfacedIndex]!.pid &&
+            candidate.windowId === surfacedWindowTargets[surfacedIndex]!.windowId &&
+            candidate.appName === surfacedWindowTargets[surfacedIndex]!.appName &&
+            candidate.title === surfacedWindowTargets[surfacedIndex]!.title);
+          if (surfacedIndex < 0) {
+            windowMatchReason = "Jev suggestion was not in the eligible newly surfaced candidate set; choose manually.";
+          } else if (index >= 0) {
+            windowCursor = index;
+            const candidate = windowTargets[index]!;
+            if (handoffReason === "new_window_detected") {
+              windowMatchReason = "Jev suggests the highlighted candidate; press Enter to confirm manually.";
+            } else if (candidate.pid !== activeMetadata.cuaWindowTarget?.pid) {
+              windowMatchReason = "Automatic handoff is limited to newly surfaced windows in the bound process. Choose manually or abort.";
+            } else {
+              windowLoading = true;
+              windowMatchReason = `Jev selected newly surfaced ${windowDisplayLabel(candidate)} in the bound process; verifying this exact HWND.`;
+              render();
+              try {
+                await applyWindowHandoff(handle, candidate);
+              } catch (error) {
+                windowError = errorMessage(error);
+                windowMatchReason = "Automatic handoff was not applied. Choose a candidate manually or refresh the list.";
+              } finally {
+                windowLoading = false;
+              }
+            }
+          } else {
+            windowMatchReason = "Jev suggestion is no longer in the live candidate list; choose manually.";
+          }
+        } else {
+          windowMatchReason = `Jev abstained (${decision.reason}); choose manually or abort.`;
+        }
+      } else if (windowTargets.length > 0) {
+        windowMatchReason = "No newly surfaced window matches the CUA-reported foreground HWND. Choose manually or abort.";
+      }
+    } catch (error) {
+      if (!abort.signal.aborted && currentHandle === handle) windowError = errorMessage(error);
+    } finally {
+      if (handoffDiscoveryAbort === abort) {
+        handoffDiscoveryAbort = undefined;
+        windowLoading = false;
+        if (mode === "handoff" && currentHandle === handle) render();
+      }
+    }
+  };
+
   const cancelGoalWindowDiscovery = (): void => {
     goalSubmissionGeneration += 1;
     goalWindowDiscoveryAbort?.abort();
@@ -477,71 +626,71 @@ export async function runApplicationTui(
 
     void session.listWindowTargets(abort.signal).then(async (targets) => {
       if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
-      const result = matchGoalToWindow(goal, targets);
-      if (result.kind === "matched") {
-        const selected = result.match.target;
-        goalWindowDiscoveryAbort = undefined;
-        goalSubmissionPending = false;
-        managedBrowserSelected = false;
-        selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
-        selectedWindowDeliveryMode = "foreground";
-        activeMetadata = {
-          ...activeMetadata,
-          cuaWindowTarget: selectedWindowTarget,
-          cuaWindowDeliveryMode: "foreground",
-          cuaWindowLabel: windowDisplayLabel(selected),
-          cuaWindowSelectionSource: "local_match",
-          managedBrowserSelected: false,
-        };
-        const label = windowDisplayLabel(selected);
-        startRunForGoal(
-          goal,
-          `Local goal/name matching selected ${label} (no model selected the window). Starting Run…`,
-          "Run started after a local goal/name match; the model did not select the window.",
-        );
-        return;
-      }
-
       let pickerTargets = targets;
       let jevReason = "";
       if (options.windowSelector !== undefined) {
         notice = "Asking Jev to choose from visible windows; their application names and titles are sent to TypeSafe. No GUI action yet.";
         render();
-        const decision = await options.windowSelector.select(goal, targets, abort.signal);
+        const decision = await options.windowSelector.select(goal, targets, abort.signal, "initial");
         if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+        // The external choice can take several seconds. Refresh the exact
+        // PID/HWND candidate set before either auto-selection or manual fallback.
+        const currentTargets = await session.listWindowTargets(abort.signal);
+        if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+        pickerTargets = currentTargets;
         if (decision.kind === "matched") {
-          const wasCurrentCandidate = targets.some((target) => target.pid === decision.target.pid && target.windowId === decision.target.windowId &&
+          const selected = currentTargets.find((target) => target.pid === decision.target.pid && target.windowId === decision.target.windowId &&
             target.appName === decision.target.appName && target.title === decision.target.title);
-          if (!wasCurrentCandidate) {
-            jevReason = "Jev returned a window outside the discovered candidates; pick a window manually.";
-          } else {
-            const currentTargets = await session.listWindowTargets(abort.signal);
-            if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
-            pickerTargets = currentTargets;
-            const selected = currentTargets.find((target) => target.pid === decision.target.pid && target.windowId === decision.target.windowId &&
-              target.appName === decision.target.appName && target.title === decision.target.title);
-            if (selected !== undefined) {
-              goalWindowDiscoveryAbort = undefined;
-              goalSubmissionPending = false;
-              managedBrowserSelected = false;
-              selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
-              selectedWindowDeliveryMode = "foreground";
-              activeMetadata = {
-                ...activeMetadata,
-                cuaWindowTarget: selectedWindowTarget,
-                cuaWindowDeliveryMode: "foreground",
-                cuaWindowLabel: windowDisplayLabel(selected),
-                cuaWindowSelectionSource: "jev",
-                managedBrowserSelected: false,
-              };
-              startRunForGoal(goal, `Jev selected ${windowDisplayLabel(selected)}; window identity rechecked. Starting Run…`, "Run started after Jev window selection.");
-              return;
-            }
+          if (selected === undefined) {
             jevReason = "Jev choice changed before Run start; pick a window manually.";
+          } else {
+            goalWindowDiscoveryAbort = undefined;
+            goalSubmissionPending = false;
+            managedBrowserSelected = false;
+            selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+            selectedWindowDeliveryMode = "foreground";
+            activeMetadata = {
+              ...activeMetadata,
+              cuaWindowTarget: selectedWindowTarget,
+              cuaWindowDeliveryMode: "foreground",
+              cuaWindowLabel: windowDisplayLabel(selected),
+              cuaWindowSelectionSource: "jev",
+              managedBrowserSelected: false,
+            };
+            startRunForGoal(goal, `Jev selected ${windowDisplayLabel(selected)}; exact PID/HWND rechecked. Starting Run…`, "Run started after Jev window selection.");
+            return;
           }
         } else {
           jevReason = `Jev abstained (${decision.reason}); pick a window manually.`;
         }
+      } else {
+        const result = matchGoalToWindow(goal, targets);
+        if (result.kind === "matched") {
+          const selected = result.match.target;
+          goalWindowDiscoveryAbort = undefined;
+          goalSubmissionPending = false;
+          managedBrowserSelected = false;
+          selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+          selectedWindowDeliveryMode = "foreground";
+          activeMetadata = {
+            ...activeMetadata,
+            cuaWindowTarget: selectedWindowTarget,
+            cuaWindowDeliveryMode: "foreground",
+            cuaWindowLabel: windowDisplayLabel(selected),
+            cuaWindowSelectionSource: "local_match",
+            managedBrowserSelected: false,
+          };
+          const label = windowDisplayLabel(selected);
+          startRunForGoal(
+            goal,
+            `Local goal/name matching selected ${label} (no model selected the window). Starting Run…`,
+            "Run started after a local goal/name match; the model did not select the window.",
+          );
+          return;
+        }
+        jevReason = result.kind === "ambiguous"
+          ? "Ambiguous local match; pick a window. Goal kept; no model chose it."
+          : "No confident local match; pick a window. Goal kept; no model chose it.";
       }
 
       goalWindowDiscoveryAbort = undefined;
@@ -550,9 +699,7 @@ export async function runApplicationTui(
       windowTargets = pickerTargets;
       windowCursor = 0;
       windowError = "";
-      windowMatchReason = jevReason || (result.kind === "ambiguous"
-        ? "Ambiguous local match; pick a window. Goal kept; no model chose it."
-        : "No confident local match; pick a window. Goal kept; no model chose it.");
+      windowMatchReason = jevReason;
       mode = "windows";
       editMode = false;
       render();
@@ -675,8 +822,8 @@ export async function runApplicationTui(
         managedBrowserSelected: false,
       };
       notice = inputValue.trim().length > 0
-        ? `Window selected; goal draft kept. Press I, then Enter to start: ${windowDisplayLabel(selected)}.`
-        : `Window selected for subsequent Runs: ${windowDisplayLabel(selected)}.`;
+        ? `Window selected; goal draft kept. Press I, then Enter to start: ${windowDisplayLabel(selected)}. A new Save As/dialog window requires your explicit handoff confirmation.`
+        : `Window selected for subsequent Runs: ${windowDisplayLabel(selected)}. A new Save As/dialog window requires your explicit handoff confirmation.`;
     }
     mode = "home";
     windowError = "";
@@ -872,7 +1019,9 @@ export async function runApplicationTui(
       ? detailForSnapshot(currentHandle.controller.getSnapshot(), currentEvents)
       : undefined;
     if (detail === undefined) return 1;
-    return paginateTuiText(detail.text, Math.max(1, width - 4), 0, detailLineLimit(rows)).pageCount;
+    return paginateTuiText(detail.text, Math.max(1, width - 4), 0, detailLineLimit(rows, width, {
+      editMode, notice, inputLimitReached,
+    })).pageCount;
   };
 
   const changeDetailPage = (delta: number): void => {
@@ -956,6 +1105,58 @@ export async function runApplicationTui(
       if (!key.ctrl && printable.length > 0) {
         browserUrlDraft = limitTuiInput(`${browserUrlDraft}${printable.replace(/[\r\n]+/gu, " ")}`, 2048).value;
         requestRender();
+      }
+      return;
+    }
+    if (mode === "handoff") {
+      if (keyName === "a" || keyName === "q") {
+        handoffDiscoveryAbort?.abort();
+        handoffDiscoveryAbort = undefined;
+        try { session.abort("window handoff declined from TUI"); } catch { /* finished concurrently */ }
+        notice = "Window handoff declined; abort requested.";
+        mode = "run";
+        render();
+        return;
+      }
+      if (keyName === "escape") {
+        handoffDiscoveryAbort?.abort();
+        handoffDiscoveryAbort = undefined;
+        mode = "run";
+        notice = "Window handoff still waiting. Press H to inspect candidates, or A to abort.";
+        render();
+        return;
+      }
+      if (keyName === "c") {
+        const handle = currentHandle;
+        if (handle?.controller.getSnapshot().pendingWindowHandoff?.reasonCode !== "new_window_detected") {
+          windowMatchReason = "Continuing on the current target is allowed only for a proactive new-window notice; choose a target or abort this mismatch.";
+          render();
+          return;
+        }
+        ignoreProactiveWindow(handle);
+        return;
+      }
+      if (keyName === "up" || keyName === "k") { windowCursor = (windowCursor + windowTargets.length - 1) % Math.max(1, windowTargets.length); render(); return; }
+      if (keyName === "down" || keyName === "j") { windowCursor = (windowCursor + 1) % Math.max(1, windowTargets.length); render(); return; }
+      if (keyName === "r") { if (currentHandle !== undefined) void openWindowHandoffPicker(currentHandle); return; }
+      if (keyName === "return") {
+        if (windowLoading) { windowMatchReason = "Wait for the window list before confirming."; render(); return; }
+        const candidate = windowTargets[windowCursor];
+        const handle = currentHandle;
+        if (candidate === undefined || handle === undefined) { windowMatchReason = "No candidate selected; press R to refresh."; render(); return; }
+        windowLoading = true;
+        windowMatchReason = "Confirming exact window identity and capturing a fresh frame…";
+        render();
+        invoke(async () => {
+          try {
+            await applyWindowHandoff(handle, candidate);
+          } catch (error) {
+            windowError = errorMessage(error);
+            windowMatchReason = "Handoff failed without replaying the refused action. Refresh or choose another candidate.";
+          } finally {
+            windowLoading = false;
+          }
+        }, "");
       }
       return;
     }
@@ -1146,6 +1347,15 @@ export async function runApplicationTui(
     }
     const snapshot = currentHandle?.controller.getSnapshot();
     if (snapshot === undefined) return;
+    if (snapshot.status === "waiting_window") {
+      if (keyName === "h") { if (currentHandle !== undefined) void openWindowHandoffPicker(currentHandle); return; }
+      if (keyName === "c" && snapshot.pendingWindowHandoff?.reasonCode === "new_window_detected") {
+        if (currentHandle !== undefined) ignoreProactiveWindow(currentHandle);
+        return;
+      }
+      if (keyName === "a" || keyName === "q") { try { session.abort("window handoff declined from TUI"); } catch { /* finished concurrently */ } notice = "Window handoff declined; abort requested."; render(); }
+      return;
+    }
     if (keyName === "i") {
       const enterCorrection = () => {
         pendingCorrection = undefined;
@@ -1195,7 +1405,7 @@ export async function runApplicationTui(
     }
   };
 
-  const onResize = (): void => render();
+  const onResize = (): void => { painter?.invalidate(); render(); };
   const onEnd = (): void => requestExit();
   const onSigint = (): void => onKeypress("", { name: "c", ctrl: true });
   input.on("keypress", onKeypress);
@@ -1211,6 +1421,7 @@ export async function runApplicationTui(
     await finishPromise;
   } finally {
     feedSubscription?.unsubscribe();
+    handoffDiscoveryAbort?.abort();
     input.off("keypress", onKeypress);
     input.off("end", onEnd);
     output.off?.("resize", onResize);
@@ -1353,11 +1564,16 @@ function approvalDetail(snapshot: RunSnapshot, events: readonly RuntimeEvent[]):
   return lines.join("\n");
 }
 
-function detailLineLimit(rows: number): number {
+function detailLineLimit(rows: number, width: number, ui: Pick<TuiFrameUi, "editMode" | "notice" | "inputLimitReached">): number {
+  if (width < 72 || rows < 22) {
+    const headRows = rows < 16 ? 4 : 6;
+    const footerRows = 1 + (ui.editMode ? 1 : 0) + (ui.inputLimitReached ? 1 : 0) + (ui.notice.length > 0 ? 1 : 0);
+    return Math.max(1, rows - 2 - headRows - footerRows - 1);
+  }
   return Math.max(1, Math.floor(rows) - 20);
 }
 
-function renderDetailBlock(detail: TuiDetail, width: number, rows: number, pageIndex: number, linesPerPage = detailLineLimit(rows)): string[] {
+function renderDetailBlock(detail: TuiDetail, width: number, pageIndex: number, linesPerPage: number): string[] {
   const page = paginateTuiText(detail.text, Math.max(1, width - 4), pageIndex, linesPerPage);
   return [
     clip(`${detail.label} [${page.pageIndex + 1}/${page.pageCount}] (PageUp/PageDown to view):`, width),
@@ -1378,6 +1594,7 @@ export function buildTuiFrame(
 ): string {
   const width = tuiWidth(ui.columns);
   const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
+  if (width < 72 || rows < 22) return buildCompactTuiFrame(snapshot, events, goal, metadata, ui, width, rows);
   const latestObservation = [...events].reverse().find((event) => event.type === "observation.created");
   const guard = [...events].reverse().find((event) => event.type === "action.guard.evaluated");
   const latestModelRequest = [...events].reverse().find((event) => event.type === "model.request.started");
@@ -1387,9 +1604,10 @@ export function buildTuiFrame(
   const detail = detailForSnapshot(snapshot, events);
   const detailPage = detail === undefined
     ? undefined
-    : paginateTuiText(detail.text, Math.max(1, width - 4), ui.detailPage ?? 0, detailLineLimit(rows));
+    : paginateTuiText(detail.text, Math.max(1, width - 4), ui.detailPage ?? 0, detailLineLimit(rows, width, ui));
   const approvalWaiting = snapshot.status === "waiting_approval" && snapshot.pendingApproval !== undefined;
-  const staticBeforeEvents = 13 + (waitingForModel ? 1 : 0) + (approvalWaiting ? 1 : 0);
+  const handoffWaiting = snapshot.status === "waiting_window";
+  const staticBeforeEvents = 13 + (waitingForModel ? 1 : 0) + (approvalWaiting ? 1 : 0) + (handoffWaiting ? 1 : 0);
   const afterEvents = 1 + (detailPage === undefined ? 0 : 1 + detailPage.lines.length) + 1 +
     (ui.editMode ? 1 : 0) + (ui.inputLimitReached ? 1 : 0) + (ui.notice.length > 0 ? 1 : 0) + 1;
   const maxRecentEvents = Math.max(0, Math.min(10, rows - staticBeforeEvents - afterEvents));
@@ -1405,6 +1623,11 @@ export function buildTuiFrame(
     ...(approvalWaiting
       ? ["APPROVAL REQUIRED: Run is waiting; choose Y/N, correct with I, or abort with A."]
       : []),
+    ...(handoffWaiting
+      ? [snapshot.pendingWindowHandoff?.reasonCode === "new_window_detected"
+        ? "NEW WINDOW: H chooses a target; C keeps the current target after a fresh observation; A aborts."
+        : "FOREGROUND MISMATCH: H chooses a target; A aborts. The refused action is not retried."]
+      : []),
     `Steps: ${snapshot.stepCount}   Model requests: ${snapshot.modelRequestCount}   Guard: ${snapshot.guardEvaluationCount}   Risk model: ${snapshot.riskModelRequestCount}`,
     `Plan: ${snapshot.plan.tasks.filter((task) => task.status !== "completed").length} open / ${snapshot.plan.tasks.length} total   Memory: ${snapshot.memory.facts.length} facts / ${snapshot.memory.entities.length} entities`,
     `Goal: ${clip(goal, width - 6)}`,
@@ -1415,13 +1638,17 @@ export function buildTuiFrame(
     ...(maxRecentEvents === 0 ? [] : events.slice(-maxRecentEvents).map((event) => ` ${String(event.sequence).padStart(4, " ")}  ${formatEvent(event, width - 8)}`)),
     "─".repeat(width),
   ];
-  if (detail !== undefined) lines.push(...renderDetailBlock(detail, width, rows, ui.detailPage ?? 0));
+  if (detail !== undefined) lines.push(...renderDetailBlock(detail, width, ui.detailPage ?? 0, detailLineLimit(rows, width, ui)));
   if (ui.editMode) {
     lines.push("Editing: Enter submit   Esc cancel   Ctrl-C abort");
   } else if (snapshot.status === "waiting_approval") {
     lines.push("Approval controls: Y approve   N reject   I correct   A abort");
   } else if (snapshot.status === "waiting_user") {
     lines.push("Press I to enter a response or correction.");
+  } else if (snapshot.status === "waiting_window") {
+    lines.push(snapshot.pendingWindowHandoff?.reasonCode === "new_window_detected"
+      ? "Keys: H choose new window   C continue current target   A abort   Q exit"
+      : "Keys: H choose new window   A abort   Q exit", TERMINAL_INPUT_SCOPE_NOTICE);
   } else {
     lines.push("Keys: I correction/input   P pause   R resume   A abort   S screenshot   Q exit", TERMINAL_INPUT_SCOPE_NOTICE);
   }
@@ -1432,6 +1659,50 @@ export function buildTuiFrame(
   return `${lines.join("\n")}\n`;
 }
 
+function buildCompactTuiFrame(
+  snapshot: RunSnapshot,
+  events: readonly RuntimeEvent[],
+  goal: string,
+  metadata: TuiMetadata,
+  ui: TuiFrameUi,
+  width: number,
+  rows: number,
+): string {
+  const latestEvent = events.at(-1);
+  const compactStatus = snapshot.status === "waiting_approval"
+    ? "APPROVAL REQUIRED"
+    : snapshot.status === "waiting_window"
+      ? "WINDOW HANDOFF REQUIRED"
+    : snapshot.status === "waiting_user"
+      ? "USER INPUT REQUIRED"
+      : latestEvent === undefined ? snapshot.status : formatEvent(latestEvent, width - 8);
+  const head = [
+    `Harness | ${snapshot.status.toUpperCase()}`,
+    ...(rows >= 16 ? [`Model: ${metadata.provider}`, `Steps: ${snapshot.stepCount}  Requests: ${snapshot.modelRequestCount}`] : []),
+    `Target: ${formatCuaTarget(metadata)}`,
+    `Goal: ${goal}`,
+    `Status: ${compactStatus}`,
+  ];
+  const controls = snapshot.status === "waiting_approval"
+    ? "Y approve  N reject  I correct  A abort"
+    : snapshot.status === "waiting_window"
+      ? "H choose window  A abort"
+    : snapshot.status === "waiting_user"
+      ? "I respond  A abort  Q exit"
+      : ui.editMode ? "Enter submit  Esc cancel" : "I input  P pause  R resume  A abort  Q exit";
+  const footer = [
+    controls,
+    ...(ui.editMode ? [`> ${tailTuiInput(ui.input, Math.max(1, width - 2))}`] : []),
+    ...(ui.inputLimitReached ? [`Max ${MAX_TUI_INPUT_LENGTH} characters reached`] : []),
+    ...(ui.notice.length > 0 ? [`Notice: ${ui.notice}`] : []),
+  ];
+  const detail = detailForSnapshot(snapshot, events);
+  const detailLines = detail === undefined ? [] : renderDetailBlock(
+    detail, width, ui.detailPage ?? 0, detailLineLimit(rows, width, ui),
+  );
+  return `${[...head, ...detailLines, ...footer].map((line) => clipHomeLine(line, width).text).join("\n")}\n`;
+}
+
 function buildTuiHomeFrame(
   metadata: TuiMetadata,
   session: ApplicationSession,
@@ -1439,7 +1710,8 @@ function buildTuiHomeFrame(
 ): string {
   const width = tuiWidth(ui.columns);
   const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
-  const visibleRows = Math.max(1, Math.min(rows - 1, 21));
+  // Leave room for the terminal cursor and the newline written on exit.
+  const visibleRows = Math.max(1, rows - 3);
   const last = session.lastRun;
   const hasGoalDraft = ui.input.trim().length > 0;
   const goalPrefix = ui.editMode ? "Goal: >" : hasGoalDraft ? "Goal draft:" : "Goal:";
@@ -1513,8 +1785,8 @@ function buildHomeDetailsText(
   const notice = ui.notice.trim();
   const goal = ui.input.trim();
 
-  sections.push(`Current status / notice:\n${notice.length === 0 ? "No additional status." : notice}`);
   if (ui.reply !== undefined && ui.reply.length > 0) sections.push(`Last reply:\n${ui.reply}`);
+  sections.push(`Current status / notice:\n${notice.length === 0 ? "No additional status." : notice}`);
   sections.push(`Full target:\n${formatHomeTarget(metadata)}`);
   sections.push(`Full goal:\n${goal.length === 0 ? "not entered" : goal}`);
   sections.push(`Model: ${metadata.provider}`);
@@ -1544,7 +1816,7 @@ function buildTuiHomeDetailsFrame(
 ): string {
   const width = tuiWidth(ui.columns);
   const rows = Math.max(12, ui.rows ?? process.stdout.rows ?? 24);
-  const visibleRows = Math.max(1, Math.min(rows - 1, 21));
+  const visibleRows = Math.max(1, rows - 3);
   const blocked = session.status === "blocked";
   const notice = ui.notice.trim();
   // Reserve a fixed, text-only context and return path on every page. The
@@ -1694,6 +1966,7 @@ function featureOverrides(
     riskGuard: features.riskGuard,
     monitor: features.monitor,
     grounding,
+    windowHandoff: !managedGrounding && windowTarget != null ? "confirm-v1" : "off",
     ...(managedBrowserSelected && managedBrowserUrl !== undefined ? { managedBrowserUrl } : {}),
     ...(managedGrounding
       ? { windowTarget: null, windowDeliveryMode: null }
@@ -1873,6 +2146,37 @@ function buildTuiWindowsFrame(
   return `${lines.slice(0, terminalRows).join("\n")}\n`;
 }
 
+function buildTuiHandoffFrame(
+  metadata: TuiMetadata,
+  targets: readonly WindowTargetInfo[],
+  cursor: number,
+  loading: boolean,
+  error: string,
+  reason: string,
+  columns?: number,
+  rows?: number,
+  handoffReasonCode?: "foreground_mismatch" | "new_window_detected",
+): string {
+  const width = tuiWidth(columns);
+  const height = Math.max(12, rows ?? process.stdout.rows ?? 24);
+  const header = [
+    "Harness | WINDOW HANDOFF",
+    handoffReasonCode === "new_window_detected"
+      ? "A GUI action completed and a new visible window appeared."
+      : "Action refused: no mouse input was sent to the other window.",
+    `Previous: ${formatCuaTarget(metadata)}`,
+    `Status: ${error || reason}`,
+  ];
+  const footer = handoffReasonCode === "new_window_detected"
+    ? ["Enter handoff  C keep current target  R refresh  Esc wait  A abort", "Keeping current target invalidates this frame and captures a fresh one."]
+    : ["Enter confirm  R refresh  Esc wait  A abort", "Jev only suggests; your confirmation changes the target."];
+  const capacity = Math.max(1, height - header.length - footer.length - 2);
+  const first = Math.max(0, Math.min(cursor - Math.floor(capacity / 2), targets.length - capacity));
+  const visible = targets.slice(first, first + capacity).map((target, index) => `${first + index === cursor ? "❯" : " "} ${windowDisplayLabel(target)}`);
+  const lines = [...header, loading ? "Searching visible windows…" : `Candidate ${targets.length === 0 ? 0 : cursor + 1}/${targets.length}`, ...visible, ...footer];
+  return lines.slice(0, height - 1).map((line) => clipHomeLine(line, width).text).join("\n");
+}
+
 function windowDisplayLabel(target: WindowTargetInfo): string {
   const app = target.appName?.trim() || "Unknown application";
   const title = target.title?.trim() || "Untitled window";
@@ -1920,6 +2224,11 @@ function managedBrowserFeatureLine(metadata: TuiMetadata): string {
 }
 
 function formatEvent(event: RuntimeEvent, width: number): string {
+  if (event.type === "computer.window.handoff.requested") return event.reasonCode === "new_window_detected"
+    ? "window.handoff: new visible window; manual confirmation required"
+    : "window.handoff: foreground mismatch; host confirmation required";
+  if (event.type === "computer.window.handoff.completed") return clip(`window.handoff: pid=${event.target.pid} id=${event.target.windowId}`, width);
+  if (event.type === "computer.window.handoff.ignored") return "window.handoff: popup ignored; current target freshly observed";
   if (event.type === "model.response.received") {
     return clip(event.turn.type === "tool_calls"
       ? `model.response: ${event.turn.calls.map((call) => `${call.name}${call.declaredEffect === undefined ? "" : `[${call.declaredEffect.effects.join("+")}]`}`).join(", ")}`

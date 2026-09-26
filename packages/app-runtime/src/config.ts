@@ -71,6 +71,8 @@ export interface ResolvedRunConfig {
   riskGuard: "off" | "layered";
   /** Defaults to off; DOM/hybrid require an explicit managedBrowserUrl. */
   grounding?: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
+  /** Interactive native-window handoff; off unless a host explicitly opts in. */
+  windowHandoff?: "off" | "confirm-v1";
   riskModel: AppRuntimeRiskModel;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;

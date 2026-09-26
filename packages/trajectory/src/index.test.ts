@@ -209,6 +209,39 @@ describe("RunSnapshot reducer", () => {
     expect(observed.latestObservationId).toBe(observationId);
   });
 
+  it("clears only a matching proactive handoff and invalidates its old observation until a fresh capture", () => {
+    const sourceActionId = "proactive-action" as ActionId;
+    const waiting = reduceRuntimeEvents([
+      ...runningEvents(),
+      event(5, { type: "computer.window.handoff.requested", sourceActionId, reasonCode: "new_window_detected" }),
+    ], runId);
+    expect(waiting.status).toBe("waiting_window");
+    const ignored = reduceRunEvent(waiting, event(6, { type: "computer.window.handoff.ignored", sourceActionId }));
+    expect(ignored.status).toBe("running");
+    expect(ignored.pendingWindowHandoff).toBeUndefined();
+    expect(ignored.latestObservationId).toBeUndefined();
+    expect(() => reduceRunEvent(
+      reduceRuntimeEvents([
+        ...runningEvents(),
+        event(5, { type: "computer.window.handoff.requested", sourceActionId, reasonCode: "foreground_mismatch" }),
+      ], runId),
+      event(6, { type: "computer.window.handoff.ignored", sourceActionId }),
+    )).toThrow(/only the matching proactive window detection may be ignored/u);
+    const freshObservationId = "fresh-after-ignore" as ObservationId;
+    const refreshed = reduceRunEvent(ignored, event(7, {
+      type: "observation.created",
+      observation: {
+        id: freshObservationId,
+        runId,
+        computerSessionId: session.id,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "asset-fresh" as AssetId, relativePath: "assets/fresh.png", mediaType: "image/png", byteLength: 1 },
+      },
+    }));
+    expect(refreshed.latestObservationId).toBe(freshObservationId);
+  });
+
   it.each([
     ["completed", waitCompleted(1)],
     [
@@ -322,6 +355,7 @@ describe("RunSnapshot reducer", () => {
     );
     expect(waiting.status).toBe("waiting_user");
     expect(waiting.pendingUserQuestion).toBe("Where should I save it?");
+    expect(waiting.pendingUserInputRequestId).toBe("event-5");
 
     const resumed = reduceRuntimeEvents(
       [
@@ -333,6 +367,7 @@ describe("RunSnapshot reducer", () => {
     );
     expect(resumed.status).toBe("running");
     expect(resumed.pendingUserQuestion).toBeUndefined();
+    expect(resumed.pendingUserInputRequestId).toBeUndefined();
 
     const corrected = reduceRuntimeEvents(
       [...runningEvents(), event(5, { type: "user.input.received", text: "Do not save yet." })],
@@ -684,6 +719,9 @@ describe("readRuntimeEvents", () => {
       runStarted(0),
       event(0, { type: "computer.open.started" }),
       event(0, { type: "computer.open.completed", session }),
+      event(0, { type: "computer.window.handoff.requested", sourceActionId: actionId, reasonCode: "new_window_detected" }),
+      event(0, { type: "computer.window.handoff.completed", target: { pid: 1234, windowId: 5678 }, session }),
+      event(0, { type: "computer.window.handoff.ignored", sourceActionId: actionId }),
       event(0, {
         type: "observation.created",
         observation: {

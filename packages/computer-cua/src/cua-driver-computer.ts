@@ -11,6 +11,7 @@ import type {
   ActionIntent,
   ActionReceipt,
   ComputerSessionDescriptor,
+  ComputerWindowCandidate,
   GroundingCatalog,
   GroundingBrowserRegion,
   GroundingElement,
@@ -31,6 +32,7 @@ import {
 import {
   captureWindowWithRetry,
   discoverWindow,
+  listWindowTargets,
   sameWindowGeometry,
   validateWindowTarget,
   windowActionTarget,
@@ -43,6 +45,72 @@ import {
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 const CLEANUP_POLL_INTERVAL_MS = 50;
+
+function windowIdentityKey(target: { readonly pid: number; readonly windowId: number }): string {
+  return `${target.pid}:${target.windowId}`;
+}
+
+function windowRefusalCode(code: string | undefined, message: string): string {
+  // CUA 0.22.2 reports the exact-HWND foreground refusal in Tool text rather
+  // than a dedicated error code. Require explicit evidence that it sent no
+  // input; the prefix alone is not enough to make an action retry-safe.
+  const foregroundRefusal = /^foreground_unavailable:/iu.test(message);
+  const noInputEvidence = hasExplicitNoInputEvidence(message);
+  if (foregroundRefusal || code === "WINDOW_FOREGROUND_MISMATCH") {
+    return noInputEvidence ? "WINDOW_FOREGROUND_MISMATCH" : "CUA_TOOL_REFUSED";
+  }
+  return code ?? "CUA_TOOL_REFUSED";
+}
+
+function hasExplicitNoInputEvidence(message: string): boolean {
+  return /\bno (?:mouse |keyboard )?input (?:was|has been) (?:sent|dispatched|performed|injected)\b|\binput (?:was|has been) not (?:sent|dispatched|performed|injected)\b/iu.test(message);
+}
+
+function parseActualForegroundWindowId(message: string): number | undefined {
+  if (!/^foreground_unavailable:/iu.test(message) || !hasExplicitNoInputEvidence(message)) return undefined;
+  const rawHandle = /\bactual foreground HWND\s+(0x[0-9a-f]+|\d+)\b/iu.exec(message)?.[1];
+  if (rawHandle === undefined) return undefined;
+  try {
+    const parsed = BigInt(rawHandle);
+    return parsed > 0n && parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function bringWindowToFrontOnce(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  const result = await driver.callTool("bring_to_front", JSON.stringify({
+    pid: target.pid,
+    window_id: target.windowId,
+    session,
+  }), { signal });
+  signal.throwIfAborted();
+  if (result.isError) {
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
+  }
+  if (result.degraded) {
+    throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
+  }
+  if (typeof result.structuredJson === "string") {
+    try {
+      const payload: unknown = JSON.parse(result.structuredJson);
+      if (payload !== null && typeof payload === "object" && !Array.isArray(payload) &&
+          "landed_on_target" in payload && payload.landed_on_target === false) {
+        throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
+      }
+    } catch (error) {
+      if (error instanceof WindowContractError) throw error;
+      // An unavailable optional result field is not focus evidence; the
+      // retained per-action foreground guard remains authoritative.
+    }
+  }
+}
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
 export type CuaWindowDeliveryMode = "background" | "foreground";
@@ -93,6 +161,19 @@ interface PrivateSession {
   active: boolean;
   windowBinding?: CuaWindowBinding;
   windowIdentityInvalidated: boolean;
+  handoffGeneration: number;
+  /** Full visible-window baseline from the last successful target observation. */
+  visibleWindowBaseline: ReadonlySet<string> | undefined;
+  /** Fresh inventory immediately before an opted-in foreground GUI action. */
+  preActionWindowBaseline: ReadonlySet<string> | undefined;
+  /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
+  newlySurfacedWindowKeys: ReadonlySet<string>;
+  /** Candidate snapshot produced by the immediately preceding list call. */
+  newHandoffCandidates: readonly ComputerWindowCandidate[];
+  /** Exact HWND reported by CUA as foreground for the current no-input refusal. */
+  foregroundMismatchWindowId: number | undefined;
+  /** True only when the last completed action produced a pre/post inventory diff. */
+  proactiveHandoffCandidatesReady: boolean;
   /** Adapter-private active managed tab; never serialized to Runtime. */
   browserTarget?: ManagedBrowserTarget;
 }
@@ -215,6 +296,11 @@ export class CuaDriverComputer implements Computer {
         }
         viewport = { ...dimensions, coordinateSpace: "physical" };
       } else {
+        // Foreground mode gets a one-time activation assist for this exact
+        // PID/HWND. Background delivery keeps its existing behavior unchanged.
+        if (this.options.windowDeliveryMode === "foreground") {
+          await bringWindowToFrontOnce(driver, label, this.options.windowTarget, signal);
+        }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
         const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry);
@@ -249,6 +335,13 @@ export class CuaDriverComputer implements Computer {
         descriptor,
         active: true,
         windowIdentityInvalidated: false,
+        handoffGeneration: 0,
+        visibleWindowBaseline: undefined,
+        preActionWindowBaseline: undefined,
+        newlySurfacedWindowKeys: new Set(),
+        newHandoffCandidates: [],
+        foregroundMismatchWindowId: undefined,
+        proactiveHandoffCandidatesReady: false,
         ...(windowBinding === undefined ? {} : { windowBinding }),
         ...(this.options.browserTarget === undefined ? {} : { browserTarget: this.options.browserTarget }),
       };
@@ -276,6 +369,28 @@ export class CuaDriverComputer implements Computer {
         const liveBinding = capture.binding;
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
+        if (this.options.windowDeliveryMode === "foreground") {
+          try {
+            const visibleWindows = await listWindowTargets(current.driver, current.label, signal);
+            const visibleWindowKeys = new Set(visibleWindows.map((window) => windowIdentityKey(window.target)));
+            current.newlySurfacedWindowKeys = current.visibleWindowBaseline === undefined
+              ? new Set()
+              : new Set([...visibleWindowKeys].filter((key) => !current.visibleWindowBaseline!.has(key)));
+            current.visibleWindowBaseline = visibleWindowKeys;
+          } catch (error) {
+            signal.throwIfAborted();
+            // Inventory is optional handoff evidence. A failed read keeps this
+            // observation usable but disables automatic candidate selection.
+            current.visibleWindowBaseline = undefined;
+            current.newlySurfacedWindowKeys = new Set();
+          }
+        } else {
+          current.visibleWindowBaseline = undefined;
+          current.newlySurfacedWindowKeys = new Set();
+        }
+        current.newHandoffCandidates = [];
+        current.preActionWindowBaseline = undefined;
+        current.proactiveHandoffCandidatesReady = false;
         const grounding = await readWindowGrounding(
           this.options.grounding,
           current.driver,
@@ -346,6 +461,113 @@ export class CuaDriverComputer implements Computer {
     }
   }
 
+  public async listWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    const current = this.requireSession(session);
+    if (current.windowBinding === undefined || this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") {
+      throw new Error("window handoff is available only for an explicitly bound native window");
+    }
+    const windows = await listWindowTargets(current.driver, current.label, signal);
+    const candidates = windows.map((window) => ({
+      pid: window.target.pid,
+      windowId: window.target.windowId,
+      ...(window.appName === undefined ? {} : { appName: window.appName }),
+      ...(window.title === undefined ? {} : { title: window.title }),
+    }));
+    const newlySurfacedKeys = new Set(current.newlySurfacedWindowKeys);
+    if (current.visibleWindowBaseline !== undefined) {
+      for (const window of windows) {
+        const key = windowIdentityKey(window.target);
+        if (!current.visibleWindowBaseline.has(key)) newlySurfacedKeys.add(key);
+      }
+    }
+    current.newHandoffCandidates = candidates.filter((candidate) => newlySurfacedKeys.has(windowIdentityKey(candidate)));
+    return candidates;
+  }
+
+  public async listNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    const current = this.requireSession(session);
+    signal.throwIfAborted();
+    if (current.proactiveHandoffCandidatesReady) return current.newHandoffCandidates;
+    const foregroundWindowId = current.foregroundMismatchWindowId;
+    if (foregroundWindowId === undefined) return [];
+    return current.newHandoffCandidates.filter((candidate) => candidate.windowId === foregroundWindowId);
+  }
+
+  public async detectNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    const current = this.requireSession(session);
+    const baseline = current.preActionWindowBaseline;
+    current.proactiveHandoffCandidatesReady = false;
+    current.newHandoffCandidates = [];
+    current.newlySurfacedWindowKeys = new Set();
+    if (baseline === undefined || current.windowBinding === undefined || this.options.windowDeliveryMode !== "foreground") return [];
+    const readDiff = async (): Promise<ComputerWindowCandidate[]> => {
+      signal.throwIfAborted();
+      const windows = await listWindowTargets(current.driver, current.label, signal);
+      signal.throwIfAborted();
+      return windows
+        .filter((window) => !baseline.has(windowIdentityKey(window.target)))
+        .map((window) => ({
+          pid: window.target.pid,
+          windowId: window.target.windowId,
+          ...(window.appName === undefined ? {} : { appName: window.appName }),
+          ...(window.title === undefined ? {} : { title: window.title }),
+        }));
+    };
+    let candidates = await readDiff();
+    // Some native dialogs appear just after the initiating tool returns. One
+    // short abort-aware poll catches that case without a long pause or retry.
+    if (candidates.length === 0) {
+      await waitWithAbort(80, signal);
+      candidates = await readDiff();
+    }
+    current.newHandoffCandidates = candidates;
+    current.newlySurfacedWindowKeys = new Set(candidates.map(windowIdentityKey));
+    current.proactiveHandoffCandidatesReady = candidates.length > 0;
+    return candidates;
+  }
+
+  public async handoffWindow(session: ComputerSessionDescriptor, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
+    const current = this.requireSession(session);
+    if (current.windowBinding === undefined || this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") {
+      throw new Error("window handoff is available only for an explicitly bound native window");
+    }
+    validateWindowTarget(candidate);
+    if (current.windowBinding.target.pid === candidate.pid && current.windowBinding.target.windowId === candidate.windowId) {
+      throw new Error("window handoff target must differ from the current window");
+    }
+    signal.throwIfAborted();
+    const windows = await listWindowTargets(current.driver, current.label, signal);
+    const fresh = windows.find((window) => window.target.pid === candidate.pid && window.target.windowId === candidate.windowId);
+    if (fresh === undefined || candidate.appName !== undefined && candidate.appName !== fresh.appName || candidate.title !== undefined && candidate.title !== fresh.title) {
+      throw new WindowContractError("WINDOW_HANDOFF_STALE", "window handoff candidate changed before confirmation");
+    }
+    if (this.options.windowDeliveryMode === "foreground") {
+      await bringWindowToFrontOnce(current.driver, current.label, candidate, signal);
+    }
+    const capture = await captureWindowWithRetry(current.driver, current.label, candidate, signal, this.options.windowCaptureRetry);
+    signal.throwIfAborted();
+    // No GUI input is sent here. Commit the new binding only after a fresh,
+    // exact-identity capture; old frame and element references cannot survive.
+    current.windowBinding = capture.binding;
+    current.handoffGeneration += 1;
+    current.descriptor = {
+      ...current.descriptor,
+      id: `${current.label}-handoff-${current.handoffGeneration}` as ComputerSessionDescriptor["id"],
+      viewport: capture.viewport,
+      openedAt: new Date().toISOString(),
+    };
+    this.observations.clear();
+    this.groundings.clear();
+    this.latestObservationId = undefined;
+    current.visibleWindowBaseline = undefined;
+    current.preActionWindowBaseline = undefined;
+    current.newlySurfacedWindowKeys = new Set();
+    current.newHandoffCandidates = [];
+    current.foregroundMismatchWindowId = undefined;
+    current.proactiveHandoffCandidatesReady = false;
+    return current.descriptor;
+  }
+
   public async execute(
     session: ComputerSessionDescriptor,
     action: ActionIntent,
@@ -353,6 +575,9 @@ export class CuaDriverComputer implements Computer {
     options?: ComputerExecuteOptions,
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
+    current.foregroundMismatchWindowId = undefined;
+    current.preActionWindowBaseline = undefined;
+    current.proactiveHandoffCandidatesReady = false;
     signal.throwIfAborted();
     let decisionObservation: PrivateObservation | undefined;
     if (action.kind !== "wait") {
@@ -527,10 +752,31 @@ export class CuaDriverComputer implements Computer {
       }
       throw error;
     }
+    if (options?.detectNewWindowHandoff === true && current.windowBinding !== undefined && this.options.windowDeliveryMode === "foreground") {
+      try {
+        const visibleWindows = await listWindowTargets(current.driver, current.label, signal);
+        signal.throwIfAborted();
+        const visibleKeys = new Set(visibleWindows.map((window) => windowIdentityKey(window.target)));
+        if (!visibleKeys.has(windowIdentityKey(current.windowBinding.target))) {
+          return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "bound target was missing from visible-window inventory; no input was sent");
+        }
+        current.preActionWindowBaseline = visibleKeys;
+        current.visibleWindowBaseline = visibleKeys;
+        current.newlySurfacedWindowKeys = new Set();
+        current.newHandoffCandidates = [];
+      } catch (error) {
+        signal.throwIfAborted();
+        return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "visible-window inventory failed before action; no input was sent");
+      }
+    }
     try {
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
-        return refused(action.actionId, result.errorCode ?? "CUA_TOOL_REFUSED", result.text);
+        const driverCode = windowRefusalCode(result.errorCode, result.text);
+        if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
+          current.foregroundMismatchWindowId = parseActualForegroundWindowId(result.text);
+        }
+        return refused(action.actionId, driverCode, result.text);
       }
       if (result.degraded) {
         return { actionId: action.actionId, status: "failed", driverCode: "CUA_DEGRADED", message: result.text };
@@ -546,7 +792,11 @@ export class CuaDriverComputer implements Computer {
       // records the unresolved action as outcome_unknown. Only explicit
       // structured Tool errors are safe to classify as a refusal.
       if (details.tag === "Tool") {
-        return refused(action.actionId, details.errorCode ?? "CUA_TOOL_REFUSED", details.message);
+        const driverCode = windowRefusalCode(details.errorCode, details.message);
+        if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
+          current.foregroundMismatchWindowId = parseActualForegroundWindowId(details.message);
+        }
+        return refused(action.actionId, driverCode, details.message);
       }
       throw normalizeDriverError(error, "execute");
     }

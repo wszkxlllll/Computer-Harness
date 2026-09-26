@@ -29,6 +29,7 @@ import type {
   RuntimeEvent,
   GroundingBrowserRegion,
   GroundingElementSource,
+  ComputerWindowCandidate,
   ModelUsage,
   ToolCall,
   ToolCallId,
@@ -59,6 +60,14 @@ export interface Computer {
     options?: ComputerExecuteOptions,
   ): Promise<import("@computer-harness/protocol").ActionReceipt>;
   close(session: ComputerSession): Promise<void>;
+  /** Optional, read-only picker surface during an explicit window handoff. */
+  listWindowHandoffCandidates?(session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]>;
+  /** Optional subset proven to have surfaced since the prior target observation. */
+  listNewWindowHandoffCandidates?(session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]>;
+  /** Optional read-only diff after a successful opted-in foreground action. */
+  detectNewWindowHandoffCandidates?(session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]>;
+  /** Rebind the same host ComputerSession only after a host-confirmed handoff. */
+  handoffWindow?(session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession>;
   /**
    * Release Computer-owned resources acquired outside an open session, or
    * during a failed open. RunController invokes this after close when present.
@@ -69,6 +78,8 @@ export interface Computer {
 /** Runtime's current observation for a primitive; backend references stay private. */
 export interface ComputerExecuteOptions {
   executionObservationId?: ObservationId;
+  /** Enables adapter-private pre/post visible-window diffing on supported native foreground targets. */
+  detectNewWindowHandoff?: boolean;
 }
 
 export interface ModelToolSpec {

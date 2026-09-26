@@ -129,7 +129,12 @@ export async function captureWindow(
     stableSamples: BigInt(1),
     includeScreenshot: true,
   }), { signal });
-  if (result.isError) throw new WindowContractError("WINDOW_CAPTURE_REFUSED", "configured CUA window capture was refused");
+  if (result.isError) {
+    throw new WindowContractError(
+      "WINDOW_CAPTURE_REFUSED",
+      captureRefusalMessage("verify_state", binding.target, result.errorCode, result.text),
+    );
+  }
   if (result.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window capture is degraded");
   const verification = result.verification;
   if (verification === undefined || verification.status !== 0 || verification.stable !== true) {
@@ -219,7 +224,12 @@ async function captureWindowFallbackAfterSchema(
   }), { signal });
   signal.throwIfAborted();
   if (!isRecord(result)) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA get_window_state fallback returned an invalid result envelope");
-  if (result.isError) throw new WindowContractError("WINDOW_CAPTURE_REFUSED", "configured CUA window fallback capture was refused");
+  if (result.isError) {
+    throw new WindowContractError(
+      "WINDOW_CAPTURE_REFUSED",
+      captureRefusalMessage("get_window_state fallback", binding.target, result.errorCode, result.text),
+    );
+  }
   if (result.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window fallback capture is degraded");
   const { data, dimensions } = parseWindowCaptureImages(
     result.images,
@@ -267,6 +277,37 @@ function parseWindowCaptureImages(
 const WINDOW_CAPTURE_MAX_ATTEMPTS = 3;
 const WINDOW_CAPTURE_BACKOFF_MS = [75, 150] as const;
 const WINDOW_CAPTURE_MAX_BACKOFF_MS = 300;
+
+const SAFE_CAPTURE_ERROR_CODES = new Map<string, string>([
+  ["timeout", "TIMEOUT"],
+  ["uia_provider_timeout", "UIA_PROVIDER_TIMEOUT"],
+  ["permission_denied", "PERMISSION_DENIED"],
+  ["window_id_not_found", "WINDOW_NOT_FOUND"],
+  ["window_not_found", "WINDOW_NOT_FOUND"],
+  ["window_owner_pid_mismatch", "WINDOW_OWNER_PID_MISMATCH"],
+  ["px_capture_unavailable", "PX_CAPTURE_UNAVAILABLE"],
+  ["px_frame_mismatch", "PX_FRAME_MISMATCH"],
+  ["screen_capture_unavailable", "SCREEN_CAPTURE_UNAVAILABLE"],
+]);
+
+function captureRefusalMessage(
+  tool: string,
+  target: CuaWindowTarget,
+  errorCode: string | undefined,
+  errorText: string,
+): string {
+  const classification = captureFailureClassification(errorCode, errorText);
+  return `configured CUA ${tool} capture was refused for exact target pid=${target.pid}, window_id=${target.windowId}` +
+    (classification === undefined ? "" : ` [${classification}]`);
+}
+
+function captureFailureClassification(errorCode: string | undefined, errorText: string): string | undefined {
+  const normalizedText = errorText.toLowerCase();
+  if (/uia provider unresponsive/u.test(normalizedText) && /timed?\s*out|timeout/u.test(normalizedText)) {
+    return "UIA_PROVIDER_TIMEOUT";
+  }
+  return errorCode === undefined ? undefined : SAFE_CAPTURE_ERROR_CODES.get(errorCode.toLowerCase());
+}
 
 async function discoverWindowChecked(
   driver: CuaDriverLike,

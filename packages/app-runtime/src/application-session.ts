@@ -4,11 +4,11 @@ import type { RunId, RunOutcome } from "@computer-harness/protocol";
 import type { RunReport } from "./reporting.js";
 import { createRun } from "./run-factory.js";
 import {
+  defaultEnvironmentOwner,
   environmentIdentityForConfig,
-  inProcessEnvironmentOwner,
   type EnvironmentLease,
   type EnvironmentLeaseInfo,
-  type InProcessEnvironmentOwner,
+  type EnvironmentOwner,
 } from "./environment-owner.js";
 import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
 
@@ -30,7 +30,7 @@ export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
 /** Feature-only overrides selected by an interactive UI for the next Run. */
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
-  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding"
+  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding" | "windowHandoff"
 >> & { windowTarget?: ApplicationSessionWindowTarget | null; windowDeliveryMode?: "background" | "foreground" | null; managedBrowserUrl?: string };
 
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";
@@ -48,7 +48,7 @@ export interface ApplicationSessionOptions {
   readonly config: ApplicationSessionConfig;
   readonly dependencies?: RunDependencies;
   readonly createRun?: typeof createRun;
-  readonly owner?: InProcessEnvironmentOwner;
+  readonly owner?: EnvironmentOwner;
   readonly windowDiscovery?: WindowTargetDiscovery;
 }
 
@@ -64,7 +64,7 @@ export class ApplicationSession {
   private readonly config: ApplicationSessionConfig;
   private readonly dependencies: RunDependencies;
   private readonly createRunFactory: typeof createRun;
-  private readonly owner: InProcessEnvironmentOwner;
+  private readonly owner: EnvironmentOwner;
   private readonly environmentIdentity: string;
   private readonly windowDiscovery: WindowTargetDiscovery | undefined;
   private readonly records: SessionRunRecord[] = [];
@@ -76,7 +76,7 @@ export class ApplicationSession {
     this.config = options.config;
     this.dependencies = options.dependencies ?? {};
     this.createRunFactory = options.createRun ?? createRun;
-    this.owner = options.owner ?? inProcessEnvironmentOwner;
+    this.owner = options.owner ?? defaultEnvironmentOwner;
     this.windowDiscovery = options.windowDiscovery;
     this.environmentIdentity = environmentIdentityForConfig(this.config.computer);
   }
@@ -116,7 +116,11 @@ export class ApplicationSession {
     return this.windowDiscovery.listWindows(signal);
   }
 
-  public async startRun(goal: string, featureOverrides: ApplicationSessionRunFeatureOverrides = {}): Promise<RunHandle> {
+  public async startRun(
+    goal: string,
+    featureOverrides: ApplicationSessionRunFeatureOverrides = {},
+    starter?: Parameters<RunHandle["start"]>[0],
+  ): Promise<RunHandle> {
     if (this.closed) throw new Error("application session is closed");
     if (goal.trim().length === 0) throw new Error("application session requires a non-empty goal");
     if (this.active !== undefined) throw new Error("application session already has an active Run");
@@ -162,7 +166,7 @@ export class ApplicationSession {
     const record: SessionRunRecord = { runId, goal, outputDir: config.outputDir };
     let completion: Promise<void>;
     try {
-      const outcome = handle.start();
+      const outcome = handle.start(starter);
       completion = this.finishRun(handle, lease, record, outcome);
     } catch (error) {
       lease.release();
@@ -238,11 +242,13 @@ export class ApplicationSession {
       }
       const cleanupDiagnostics = report === undefined ? [] : cleanupDiagnosticsFromReport(report);
       const safeToRelease = outcome !== "outcome_unknown" && cleanupDiagnostics.length === 0 && report !== undefined;
-      if (safeToRelease) {
+      if (safeToRelease && lease.state === "active") {
         lease.release();
         replaceRecord(this.records, record, { outcome, ownerState: "released" });
       } else {
-        lease.markPending(outcome === "outcome_unknown" ? "Run has an unresolved/unknown external side effect" : "Run cleanup is not fully confirmed");
+        if (lease.state !== "pending_cleanup") {
+          lease.markPending(outcome === "outcome_unknown" ? "Run has an unresolved/unknown external side effect" : "Run cleanup is not fully confirmed");
+        }
         replaceRecord(this.records, record, { outcome, ownerState: "pending_cleanup" });
       }
     } catch (error) {

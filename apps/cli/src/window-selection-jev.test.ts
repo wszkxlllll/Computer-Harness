@@ -50,4 +50,14 @@ describe("Jev window candidate selector", () => {
       .toEqual({ kind: "abstain", reason: "too_many" });
     expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it("uses a distinct handoff question so a sequential multi-window task is not automatically rejected", async () => {
+    const fetcher = vi.fn(async () => response("w1", 1, { w1: 1, w2: 0, none: 0 })) as unknown as typeof fetch;
+    const selector = createJevWindowSelector("secret", fetcher);
+    await selector.select("Save As", candidates, new AbortController().signal, "handoff");
+    const call = (fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(call[1].body as string) as { questions: { target: { instructions: string; criteria: { none: string } } } };
+    expect(body.questions.target.instructions).toContain("paused after a foreground window mismatch");
+    expect(body.questions.target.criteria.none).not.toContain("requires multiple windows");
+  });
 });

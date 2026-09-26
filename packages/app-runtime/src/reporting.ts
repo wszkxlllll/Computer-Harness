@@ -29,6 +29,8 @@ export async function buildRunReport(
   const memoryRetrieval = config.memory === "off" ? "off" : config.memoryRetrieval ?? "lexical";
   const managedGrounding = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
   const externalComputer = config.computer.kind === "external" ? config.computer : undefined;
+  const completedWindowHandoffs = events.filter((event): event is Extract<RuntimeEvent, { type: "computer.window.handoff.completed" }> => event.type === "computer.window.handoff.completed");
+  const finalWindow = completedWindowHandoffs.at(-1)?.target;
   const summary = {
     runId,
     goal: config.goal,
@@ -43,6 +45,7 @@ export async function buildRunReport(
         ? { mode: "desktop" }
         : { mode: "window", pid: config.computer.windowTarget.pid, windowId: config.computer.windowTarget.windowId, deliveryMode: config.computer.windowDeliveryMode ?? "background" }
       : { mode: "osworld" },
+    ...(finalWindow === undefined ? {} : { finalComputerTarget: { mode: "window", ...finalWindow } }),
     maxSteps: config.maxSteps,
     maxModelRequests: config.maxModelRequests,
     coordinateMode: config.qwenCoordinateMode ?? null,
@@ -55,6 +58,7 @@ export async function buildRunReport(
     batching: config.batching,
     monitor: config.monitor ?? "off",
     grounding: config.grounding ?? "off",
+    windowHandoff: config.windowHandoff ?? "off",
     cleanupDeadlineMs: config.cleanupDeadlineMs,
     riskProfile: config.riskProfile,
     riskGuard: config.riskGuard,
@@ -89,6 +93,8 @@ export async function buildRunReport(
       budgetRuntimeErrors: events.filter((event) => event.type === "runtime.error" && event.category === "budget").length,
       argumentRejectedToolCalls: events.filter((event) => event.type === "tool.call.rejected" && /invalid arguments|invalid GUI action/iu.test(event.reason)).length,
       toolExecutionFailed: events.filter((event) => event.type === "tool.call.failed").length,
+      windowHandoffsRequested: events.filter((event) => event.type === "computer.window.handoff.requested").length,
+      windowHandoffsCompleted: completedWindowHandoffs.length,
       providerFailed: events.filter((event) => event.type === "model.request.failed").length,
       runtimeErrors: events.filter((event) => event.type === "runtime.error").length,
       providerErrors: events

@@ -35,6 +35,8 @@ export interface RunSnapshot {
   latestObservationId?: ObservationId;
   pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
+  pendingUserInputRequestId?: EventId;
+  pendingWindowHandoff?: { sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" };
   unresolvedActionId?: ActionId;
   createdAt?: string;
   computerOpenStartedAt?: string;
@@ -105,6 +107,29 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         throw new Error("computer.open.completed was already committed for this run");
       }
       return { ...snapshot, computerSession: event.session };
+    case "computer.window.handoff.requested":
+      if (snapshot.status !== "running" || snapshot.unresolvedActionId !== undefined || snapshot.computerSession === undefined) {
+        throw new Error("window handoff requires a settled action in a running Computer session");
+      }
+      return { ...snapshot, status: "waiting_window", pendingWindowHandoff: { sourceActionId: event.sourceActionId, reasonCode: event.reasonCode } };
+    case "computer.window.handoff.completed":
+      if (snapshot.status !== "waiting_window" || snapshot.pendingWindowHandoff === undefined || snapshot.computerSession === undefined ||
+          snapshot.computerSession.id === event.session.id || snapshot.computerSession.backend !== event.session.backend) {
+        throw new Error("window handoff completion requires the pending Computer session");
+      }
+      {
+        const { pendingWindowHandoff: _pendingWindowHandoff, latestObservationId: _latestObservationId, ...rest } = snapshot;
+        return { ...rest, status: "running", computerSession: event.session };
+      }
+    case "computer.window.handoff.ignored":
+      if (snapshot.status !== "waiting_window" || snapshot.pendingWindowHandoff?.reasonCode !== "new_window_detected" ||
+          snapshot.pendingWindowHandoff.sourceActionId !== event.sourceActionId) {
+        throw new Error("only the matching proactive window detection may be ignored");
+      }
+      {
+        const { pendingWindowHandoff: _pendingWindowHandoff, latestObservationId: _latestObservationId, ...rest } = snapshot;
+        return { ...rest, status: "running" };
+      }
     case "observation.created":
       if (event.observation.runId !== event.runId) {
         throw new Error(
@@ -364,6 +389,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         ...snapshot,
         status: "waiting_user",
         pendingUserQuestion: event.question,
+        pendingUserInputRequestId: event.eventId,
       };
     case "user.input.received":
       if (snapshot.status === "waiting_approval") {
@@ -373,7 +399,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         throw new Error(`user.input.received requires running, paused, or waiting_user status, got ${snapshot.status}`);
       }
       {
-        const { pendingUserQuestion: _pendingUserQuestion, ...withoutPendingUserQuestion } = snapshot;
+        const {
+          pendingUserQuestion: _pendingUserQuestion,
+          pendingUserInputRequestId: _pendingUserInputRequestId,
+          ...withoutPendingUserQuestion
+        } = snapshot;
         return {
           ...withoutPendingUserQuestion,
           status: snapshot.status === "waiting_user" ? "running" : snapshot.status,
@@ -391,7 +421,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       ) {
         throw new Error("a succeeded run must be running with no pending interaction");
       }
-      const { pendingApproval: _pendingApproval, pendingUserQuestion: _pendingUserQuestion, ...withoutPending } =
+        const { pendingApproval: _pendingApproval, pendingUserQuestion: _pendingUserQuestion, pendingWindowHandoff: _pendingWindowHandoff, ...withoutPending } =
         snapshot;
       return {
         ...withoutPending,
@@ -664,6 +694,10 @@ const computerSessionSchema = z.object({
     accessibility: z.boolean(),
   }),
   openedAt: nonEmptyString,
+});
+const computerWindowIdentitySchema = z.object({
+  pid: z.number().int().positive(),
+  windowId: z.number().int().positive(),
 });
 const assetRefSchema = z.object({
   assetId: nonEmptyString,
@@ -997,6 +1031,9 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("computer.open.completed"),
     session: computerSessionSchema,
   }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.requested"), sourceActionId: nonEmptyString, reasonCode: z.enum(["foreground_mismatch", "new_window_detected"]) }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.completed"), target: computerWindowIdentitySchema, session: computerSessionSchema }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.ignored"), sourceActionId: nonEmptyString }),
   z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),
   z.object({
     ...eventBaseSchema,
