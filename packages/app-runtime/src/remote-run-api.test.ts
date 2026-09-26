@@ -175,11 +175,26 @@ describe("ApplicationRemoteRunApi", () => {
       const pending = snapshot.pendingRequest;
       expect(pending?.kind).toBe("approval");
       if (pending?.kind !== "approval") throw new Error("expected an approval request");
-      expect(pending.reason).toBe("This action requires approval.");
-      expect(pending.preview).toEqual({
+      expect(pending.requiresVisualReview).toBe(true);
+      expect(pending.reason).toContain("This action requires approval.");
+      expect(pending.preview).toMatchObject({
         actions: [{ operation: "click", kind: "click", points: [{ x: 408, y: 667 }] }],
         modelDeclaredEffect: { target: "查询", summary: "点击查询按钮", verified: false },
+        evidence: {
+          assetId: expect.any(String),
+          observationId: expect.any(String),
+          decisionObservationId: expect.any(String),
+          capturedAt: expect.any(String),
+          viewport: { width: 900, height: 900, coordinateSpace: "physical" },
+        },
       });
+      const evidence = pending.preview?.evidence;
+      expect(evidence).toBeDefined();
+      expect(evidence?.observationId).not.toBe(evidence?.decisionObservationId);
+      const evidenceAsset = await api.getAsset("device-one", started.runId, evidence!.assetId);
+      expect(evidenceAsset).toMatchObject({ mediaType: "image/png" });
+      expect(evidenceAsset?.data.byteLength).toBeGreaterThan(0);
+      expect(await api.getAsset("device-two", started.runId, evidence!.assetId)).toBeUndefined();
       expect(JSON.stringify(pending)).not.toContain("旧页面");
 
       const streamedEvents: unknown[] = [];
@@ -192,6 +207,8 @@ describe("ApplicationRemoteRunApi", () => {
       });
       expect(JSON.stringify(pendingProjection)).toContain('"x":408');
       expect(JSON.stringify(pendingProjection)).toContain('"target":"查询"');
+      expect(JSON.stringify(pendingProjection)).toContain('"requiresVisualReview":true');
+      expect(JSON.stringify(pendingProjection)).toContain('"evidence"');
       expect(JSON.stringify(pendingProjection)).not.toContain("旧页面");
 
       await api.submitCommand("device-one", started.runId, {
@@ -203,6 +220,8 @@ describe("ApplicationRemoteRunApi", () => {
       await session.waitForActiveRun();
       expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
     } finally {
+      session.activeRun?.controller.cancel("approval preview test cleanup");
+      await session.waitForActiveRun();
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
     }

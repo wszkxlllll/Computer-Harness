@@ -97,6 +97,8 @@ Run 的事实来源是 outputDir 中的 `trajectory.jsonl` 与资产目录；还
 
 首版功能是 Goal、目标选择、状态/截图/完整结果、纠正、暂停/恢复/Abort、请求绑定审批/选窗。配对二维码短时单用且需电脑确认；可撤销设备。Remote command accepted 与 applied/rejected/outcome_unknown 分开，远程投影序号不等于 RuntimeEvent.sequence。
 
+2026-09-27 本地新增标准/大字简洁、字号/高对比度/减少动画、站内截图 viewer 及请求绑定审批证据；个人偏好仅本机保存，助手偏好尚未接入 Context，语音默认不可用。电脑仅连接管理。详见 [界面与审批交付](./mobile-accessible-ui-implementation-2026-09-26.md)；此改动尚未发布公网，不能把旧服务器页面作为新版验收。
+
 2核/2GB服务器可作为小规模 staging 起点，不需要GPU。需真实域名/TLS、非root服务账号、仅公开443、正确WSS/SSE代理、受限凭据文件和安全日志。完整可执行步骤、systemd/Nginx及回滚见 [Relay 部署指南](../apps/relay/README.md)。localhost二维码不能供另一台手机连接。
 
 Relay会接触授权明文载荷，当前不是E2EE；重启清空内存配对/session映射，需要重新配对。Host命令去重不承诺跨重启exactly-once。队友后续报告已完成安卓真机的主体网络/控制矩阵，但使用模拟执行后端；真审批、iOS、Windows 实机全链路及 CI 修复仍待完成，见[部署与 CI 复核](./mobile-staging-ci-audit-2026-09-26.md)。

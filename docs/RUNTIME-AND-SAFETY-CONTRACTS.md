@@ -51,7 +51,7 @@ Run 状态包括 created、starting、running、waiting_user、waiting_window、
 
 “命令已接收”与“已经生效”分开。手机失联不代表 Run 自动停止，也不代表已发送命令失败；应先读取状态，不能换一个 ID 重发可能有副作用的请求。
 
-**审批后并不立即执行旧动作。** 当前 Controller 会对准备执行的 Computer action 获取新观察，比较截图 fingerprint；变化或无法取得时拒绝旧动作。即使画面未变，type/keypress 也因缺乏独立焦点证据而拒绝旧动作、转人工核对，不自动重试。这是真实存在的保守边界，可能导致“已经批准但没有输入”，不是永久授权或屏幕 ID 不变就放行。后续改善需要可靠的焦点/上下文证据，不能只删除这一校验。具体见 [Controller 审批恢复路径](../packages/runtime/src/run-controller.ts)。
+**审批采用请求绑定的人工核对。** Controller 在提出 Computer 审批之前采集新观察，检查会话与视口，并将具体动作及证据写入审批事件。手机经鉴权资源接口展示该截图；批准只消费这一 ToolCall，保留原决策 `basedOn`，用审批帧作为 `executionObservationId`。批准后不再因全图编码字节变化强制重提审批，亦不再对所有键盘动作无条件拒绝。用户纠正/Abort、失效帧、驱动实时窗口/几何保护仍可阻止执行，不自动重放。键盘焦点与截图之后的页面语义变化并未获得机器验证：批准是用户对具体动作及画面的核对，不是稳定焦点或全局安全证明。详见 [实施及验收记录](./mobile-accessible-ui-implementation-2026-09-26.md) 和 [Controller](../packages/runtime/src/run-controller.ts)。历史整图 fingerprint 阻塞证据保留在实机失败报告中。
 
 ## 5. 桌面所有权与窗口
 

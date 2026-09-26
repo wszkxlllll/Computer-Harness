@@ -1,4 +1,4 @@
-import type { AssetId, AssetRef, JsonValue, RunId, RunOutcome } from "@computer-harness/protocol";
+import type { AssetId, AssetRef, JsonValue, ObservationId, RunId, RunOutcome, Viewport } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import type { ApplicationSession } from "./application-session.js";
 import type { RunHandle } from "./config.js";
@@ -33,8 +33,18 @@ export interface RemoteApprovalActionPreview {
   readonly typedCharacterCount?: number;
 }
 
+export interface RemoteApprovalEvidence {
+  readonly assetId: AssetId;
+  readonly observationId: ObservationId;
+  readonly decisionObservationId: ObservationId;
+  readonly capturedAt: string;
+  readonly viewport: Readonly<Viewport>;
+}
+
 export interface RemoteApprovalPreview {
   readonly actions: readonly RemoteApprovalActionPreview[];
+  /** Exact request-bound screenshot, fetched through the authenticated run asset route. */
+  readonly evidence?: RemoteApprovalEvidence;
   readonly modelDeclaredEffect?: {
     readonly target: string;
     readonly summary: string;
@@ -43,7 +53,7 @@ export interface RemoteApprovalPreview {
 }
 
 export type RemotePendingRequest =
-  | { readonly requestId: string; readonly kind: "approval"; readonly reason: string; readonly preview?: RemoteApprovalPreview }
+  | { readonly requestId: string; readonly kind: "approval"; readonly reason: string; readonly requiresVisualReview: boolean; readonly preview?: RemoteApprovalPreview }
   | { readonly requestId: string; readonly kind: "user_input"; readonly question: string }
   | {
       readonly requestId: string;

@@ -4,13 +4,25 @@ import { BrandHeader } from "./components/BrandHeader";
 import { ConnectPhoneScreen } from "./ConnectPhoneScreen";
 import { HomeScreen } from "./HomeScreen";
 import { PairingScreen } from "./PairingScreen";
+import { PreferencesScreen } from "./PreferencesScreen";
+import { PreferencesProvider } from "./PreferencesContext";
 import { RunWorkspace } from "./RunWorkspace";
+import type { VoiceCapabilities } from "./voice-capabilities";
 
 const pathname = window.location.pathname;
 
-export function App() {
+export function App({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
+  return (
+    <PreferencesProvider>
+      <AppRoutes voiceCapabilities={voiceCapabilities} />
+    </PreferencesProvider>
+  );
+}
+
+function AppRoutes({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
   if (pathname === "/connect") return <ConnectPhoneScreen />;
   if (pathname === "/pair") return <PairingScreen />;
+  if (pathname === "/preferences") return <PhoneSessionGate><PreferencesScreen voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
   const runMatch = pathname.match(/^\/run\/([^/]+)\/?$/);
   if (runMatch) return <PhoneSessionGate><RunWorkspace runId={decodeURIComponent(runMatch[1])} /></PhoneSessionGate>;
   return <PhoneSessionGate><HomeScreen /></PhoneSessionGate>;

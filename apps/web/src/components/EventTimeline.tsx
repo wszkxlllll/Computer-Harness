@@ -2,14 +2,25 @@ import type { RemoteEvent } from "../types";
 
 interface EventTimelineProps {
   events: RemoteEvent[];
+  simplified?: boolean;
 }
 
-export function EventTimeline({ events }: EventTimelineProps) {
+export function EventTimeline({ events, simplified = false }: EventTimelineProps) {
   const updates = events.flatMap((event) => {
     const label = eventLabel(event);
     return label ? [{ sequence: event.sequence, label }] : [];
   }).slice(-5).reverse();
   if (updates.length === 0) return null;
+  if (simplified) {
+    return (
+      <details className="event-timeline event-timeline-simple">
+        <summary>查看电脑最近的更新（{updates.length}）</summary>
+        <ol aria-label="电脑最近的任务更新">
+          {updates.map((update) => <li key={update.sequence}>{update.label}</li>)}
+        </ol>
+      </details>
+    );
+  }
   return (
     <section className="event-timeline" aria-labelledby="timeline-heading">
       <div className="section-kicker">任务进展</div>

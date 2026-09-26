@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createRun, listRuns, listWindowTargets } from "./api";
 import { shouldClearAfterFailure } from "./command-id-registry";
-import { BrandHeader } from "./components/BrandHeader";
 import { GoalComposer } from "./components/GoalComposer";
-import { StatusLabel, statusTextFor } from "./components/StatusLabel";
+import { PhoneLayout } from "./components/PhoneLayout";
+import { StatusLabel } from "./components/StatusLabel";
 import type { RunStatus, RunSummary, WindowTarget } from "./types";
 
 const activeStatuses = new Set<RunStatus>(["created", "running", "waiting_user", "waiting_window", "waiting_approval", "paused"]);
@@ -124,29 +124,18 @@ export function HomeScreen() {
   }
 
   return (
-    <>
-      <BrandHeader />
+    <PhoneLayout active="new">
       <main className="page-shell home-page">
-        {isLoopback(window.location.hostname) && (
-          <div className="prototype-banner" role="note">
-            <strong>本机演示</strong>
-            <span>手机跨网络连接需要部署并验证中继；当前页面不会声称二维码可从另一台设备访问。</span>
-          </div>
-        )}
-        <section className="home-intro" aria-labelledby="home-title">
-          <p className="eyebrow">电脑执行 · 手机监督</p>
-          <h1 id="home-title">把目标说清楚，<br className="mobile-break" />电脑来完成。</h1>
-          <p className="intro-copy">你可以随时查看进度、补充要求，或处理电脑停下来等待的确认。</p>
-        </section>
+        <h1 id="home-title" className="task-page-title">新任务</h1>
 
         {activeRun && (
-          <section className="active-run-banner" aria-labelledby="active-run-title">
-            <div>
-              <div className="section-kicker">已有任务</div>
-              <h2 id="active-run-title">{statusTextFor(activeRun.status)}</h2>
+          <section className="active-run-row" aria-labelledby="active-run-title">
+            <StatusLabel status={activeRun.status} compact />
+            <div className="active-run-row-copy">
+              <h2 id="active-run-title">正在处理的任务</h2>
               <p>{activeRun.goal}</p>
             </div>
-            <a className="button button-primary" href={`/run/${encodeURIComponent(activeRun.runId)}`}>查看任务</a>
+            <a className="button button-secondary" href={`/run/${encodeURIComponent(activeRun.runId)}`}>查看任务</a>
           </section>
         )}
 
@@ -171,9 +160,9 @@ export function HomeScreen() {
         {activeRun && <p className="field-hint">当前电脑一次处理一个任务；当前任务结束后即可开始新的任务。</p>}
 
         <section className="history-section" aria-labelledby="history-title">
+          <span id="recent-tasks" className="anchor-target" aria-hidden="true" />
           <div className="history-heading">
             <div>
-              <div className="section-kicker">你的电脑任务</div>
               <h2 id="history-title">最近的任务</h2>
             </div>
             <button className="text-button" type="button" disabled={loading} onClick={() => void refresh()}>
@@ -195,12 +184,8 @@ export function HomeScreen() {
           )}
         </section>
       </main>
-    </>
+    </PhoneLayout>
   );
-}
-
-function isLoopback(host: string): boolean {
-  return host === "localhost" || host === "::1" || host === "[::1]" || host.startsWith("127.");
 }
 
 function RunListItem({ run }: { run: RunSummary }) {

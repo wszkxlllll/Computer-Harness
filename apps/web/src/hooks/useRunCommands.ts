@@ -12,7 +12,7 @@ export interface CommandNotice {
 interface UseRunCommandsOptions {
   runId: string;
   snapshot?: RunSnapshot;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<RunSnapshot | void>;
 }
 
 export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptions) {
@@ -44,7 +44,7 @@ export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptio
       }
 
       if (receipt.status === "accepted") {
-        setNotice({ text: "电脑已收到请求，正在确认是否已生效…", tone: "calm" });
+        setNotice({ text: "电脑已收到请求，正在等待处理回执…", tone: "calm" });
         receipt = await waitForReceipt(runId, commandId, receipt);
       }
 
@@ -54,7 +54,7 @@ export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptio
       }
       if (receipt.status === "applied") {
         commandIds.complete(key);
-        setNotice({ text: receipt.message || "电脑已确认这项操作。", tone: "calm" });
+        setNotice({ text: "电脑已回报这项请求已处理。任务状态与结果以最新回报为准。", tone: "calm" });
         await refresh().catch(() => undefined);
         return true;
       }
@@ -64,7 +64,7 @@ export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptio
         return false;
       }
       commandIds.complete(key);
-      setNotice({ text: receipt.message || "电脑没有执行这项操作。请刷新状态后再试。", tone: "error" });
+      setNotice({ text: receipt.message || "电脑没有处理这项请求。请刷新状态后再试。", tone: "error" });
       await refresh().catch(() => undefined);
       return false;
     } catch (caught) {
@@ -151,11 +151,12 @@ export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptio
     await execute(type, command, `已发送${copy}请求，等待电脑回执。`);
   }
 
-  async function refreshStatus() {
+  async function refreshStatus(): Promise<RunSnapshot | undefined> {
     try {
-      await refresh();
+      return await refresh() || undefined;
     } catch (caught) {
       setNotice({ text: caught instanceof Error ? caught.message : "暂时无法刷新任务状态。", tone: "warning" });
+      return undefined;
     }
   }
 

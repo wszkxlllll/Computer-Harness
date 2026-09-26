@@ -579,6 +579,15 @@ export interface ObservationFrame {
   readonly grounding?: GroundingCatalog;
 }
 
+/** Exact persisted observation shown with one computer-action approval. */
+export interface ApprovalEvidence {
+  readonly observationId: ObservationId;
+  readonly decisionObservationId: ObservationId;
+  readonly assetId: AssetId;
+  readonly capturedAt: string;
+  readonly viewport: Viewport;
+}
+
 /** Raw computer output before Runtime persists its screenshot asset. */
 export interface ObservationCapture {
   capturedAt: string;
@@ -960,7 +969,18 @@ export type RuntimeEventData =
     }
   | { type: "run.paused"; reason: string }
   | { type: "run.resumed" }
-  | { type: "approval.requested"; requestId: string; callId: ToolCallId; reason: string }
+  | {
+      type: "approval.requested";
+      requestId: string;
+      callId: ToolCallId;
+      reason: string;
+      /** Trusted approval subject classification; older events omit it. */
+      requiresVisualReview?: boolean;
+      /** Present for computer actions and bound to the exact screenshot shown for approval. */
+      evidence?: ApprovalEvidence;
+      /** Redacted action details; raw typed text is never included. */
+      actions?: ActionGuardActionSummary[];
+    }
   | { type: "approval.resolved"; requestId: string; approved: boolean }
   | { type: "user.input.requested"; question: string }
   | { type: "user.input.received"; text: string }

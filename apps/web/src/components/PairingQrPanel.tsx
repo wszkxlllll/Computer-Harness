@@ -32,7 +32,7 @@ export function PairingQrPanel({ challenge, hasActiveChallenge, busy, loading, o
     <section className="connect-main-panel" aria-labelledby="pairing-heading">
       <div className="section-kicker">一次性授权</div>
       <h2 id="pairing-heading">让手机扫码发起配对</h2>
-      <p className="section-copy">二维码只包含短期配对凭据。扫描后仍要在电脑上确认，这一步不会自动授予访问权限。</p>
+      <p className="section-copy">扫码发起配对后，仍需在电脑本机确认。</p>
       <button className="button button-primary button-large" type="button" disabled={busy || loading} onClick={onIssue}>
         {challenge ? "生成新二维码" : "生成配对二维码"}
       </button>
