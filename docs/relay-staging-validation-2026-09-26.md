@@ -19,7 +19,7 @@ TLS 已从自签切换为 **Let's Encrypt 短期 IP 证书（160 小时，自动
 ## 1. 服务器环境快照
 
 - 阿里云 ECS，公网 IP **47.108.197.221**，Ubuntu 26.04.1 LTS，2 vCPU / 1.7 GiB RAM（无 swap）/ 40 GB 盘（用量 ~4 GB）
-- SSH：root 与 zhaiyx（同密码，存本机 `LightSpeaker/password2`，不进仓库）
+- SSH：通过受控运维账号登录；认证资料仅通过私有渠道交接，不在本文记录凭据或本机存放位置。
 - 已有服务：nginx 80 端口托管 zhaiyx 静态站 myweb（`/var/www/myweb`，`server_name _` 通配，**IP 直访**），部署全程未影响
 - 网络出口：registry.npmjs.org / codeload.github.com / nodejs.org / pypi.org 可达；**github.com 主站超时不可达**（部署改走 git bundle）
 - 阿里云安全组 443 已放行、8787 未放行（本轮用第三方节点与服务器抓包双重留证，见 §4.4）
@@ -89,7 +89,7 @@ TLS 已从自签切换为 **Let's Encrypt 短期 IP 证书（160 小时，自动
 
 - Host 主入口强制 CUA 后端（Linux 真实桌面 CUA 不可用，既有结论），因此用驱动脚本 **`relay-host-l3-worktree/apps/host/l3-fake-host.mjs`**（未跟踪）：以 `dependencies.createProvider/createComputer` 注入 fake 后端（与 `relay-roundtrip.test.ts` 同构），Host server 与 HostRelayConnector 全部用真实实现，Relay 指向公网 `https://47.108.197.221`。**未改动任何仓库代码。**
 - 工作树：`../relay-host-l3-worktree`（detached at `4bf7288`）；`pnpm install --frozen-lockfile` 14.4s（本机 store 复用，trycua optional 依赖为 09-17 修复后的实体，未再空壳）
-- 凭据：`scp root@47.108.197.221:/root/computer-harness-relay-host-credential.txt` → 本机 `LightSpeaker/.relay-host-credential-20260926.txt`（0600）。**解析注意**：文件上半部注释行是 env 变量写法模板（值为占位），底部 `hostId=`/`credential=` 键值行才是真值
+- 凭据通过受控渠道交接到 Host 专用私有文件（0600），不在本文记录交接命令或私有路径。解析时区分注释中的模板占位与实际键值，绝不输出实际值。
 
 ### 5.2 链路证据
 
@@ -136,9 +136,9 @@ README 的 nginx 模板写 `location /api/runs/`（尾斜杠）。在 Ubuntu ngi
 
 ### 6.2 PairingScreen 会话建立成功后 poll 未停（前端缺陷）
 
-`apps/web/src/PairingScreen.tsx`：`poll` 循环在 `establishPairSession` 成功、状态置 `connected` 后未停止；1.6 秒后的下一轮 poll 命中 `GET /api/pair/requests/:id` 404（request 已消费，Relay 设计内删除），`catch` 分支把状态覆盖为 `expired`，页面从"手机已连接 ✓"变为"配对请求已过期"。
+`apps/web/src/PairingScreen.tsx`：真机观察到会话已建立但页面显示过期。最初推断是成功后轮询未停；源码复核发现 effect 已有 connected 终态检查和 interval 清理，因此这个根因尚不能作为定论。重点复现 approved 状态更新触发 effect cleanup、正在建立会话的异步响应被丢弃，以及 interval 请求重叠的竞态，详见后续修复记录。
 实际会话已建立（回主页经 `GET /api/session` 即恢复连接），但首扫用户会看到误导性失败提示并可能重复扫码。
-建议修复：`establishPairSession` 成功后 `clearStoredRequestId()` + 重置 `requestId` 退出循环，或在 connected 状态下跳过 poll。
+修复要求：单一串行轮询、建立会话请求去重、终态后停止、旧异步响应不能覆盖新状态；补慢响应与重挂载测试，不只重复添加已有的 connected 判断。
 
 ### 6.3 小项
 
@@ -147,7 +147,7 @@ README 的 nginx 模板写 `location /api/runs/`（尾斜杠）。在 Ubuntu ngi
 
 ## 7. L4 实体手机矩阵（2026-09-26 晚执行，安卓 Chrome）
 
-环境：用户实体安卓机 Chrome；电脑侧 Host 仍为 fake fixture 后端（10 秒/步慢速模式，便于交互）；网络先后用 Wi-Fi 与蜂窝。手机侧 IP 从服务器日志取证（Wi-Fi 139.227.67.157 → 蜂窝 58.247.23.240）。
+环境：用户实体安卓机 Chrome；电脑侧 Host 仍为 fake fixture 后端（10 秒/步慢速模式，便于交互）；网络先后用 Wi-Fi 与蜂窝。服务器日志确认了网络切换；客户端 IP 仅保留于私有证据，不在交接文档公开。
 
 | 项 | 结果 |
 |---|---|
@@ -183,12 +183,8 @@ rm /etc/nginx/sites-enabled/harness-relay && nginx -t && systemctl restart nginx
 cp /root/myweb.nginx.bak-20260926 /etc/nginx/sites-enabled/myweb && nginx -t && systemctl restart nginx
 # 证书回退自签（自签文件保留在 /etc/nginx/ssl/）
 # 编辑 harness-relay 站点 ssl_certificate 两行指回 harness-relay-selfsigned.{crt,key} → nginx -t → restart
-# 配置与凭据
-rm -rf /etc/computer-harness /etc/letsencrypt /opt/certbot-venv /root/computer-harness-relay-host-credential.txt
-# 源码 release（含 node_modules 约 500 MB）
-rm -rf /opt/computer-harness
-# 服务账号
-userdel computer-harness-relay
+# 不删除共享证书目录、配置目录、历史 release 或服务账号。
+# 保留这些资源便于恢复；彻底卸载必须先确认资源归属并另行审批。
 ```
 
 升级/回滚 release：新版本在新 versioned 目录构建测试后 `ln -sfn <new> /opt/computer-harness/current.next && mv -Tf current.next current && systemctl restart computer-harness-relay`（README 原子切换法）。
@@ -198,7 +194,7 @@ userdel computer-harness-relay
 ## 9. 红线与如实声明
 
 - **Relay 非 E2EE**：TLS 在反代终止，运营者可读明文载荷（任务请求/事件/截图字节），报告不美化
-- 凭据不进聊天/日志/shell 历史/命令行参数；当前存放：Relay 侧 `/etc/computer-harness/relay-config.json`（0600），Host 侧交接文件 `/root/computer-harness-relay-host-credential.txt`（0600），本机副本 `LightSpeaker/.relay-host-credential-20260926.txt`（0600，供后续验证用）
+- 凭据不进聊天/日志/shell 历史/命令行参数；Relay 配置及 Host 私有凭据文件均受限为 0600。私有交接文件位置不在公共文档记录。已公开提交的历史元数据不会因修改本文自动消失，维护者应单独评估历史清理和凭据轮换。
 - 服务器不跑模型（Relay 无 GPU/数据库需求）；不验 CUA 真实桌面（Linux 不通，组长 Windows 侧的事）
 - L3 的"手机"为本机 Chrome 模拟；L4 已用**实体安卓机 + 真实网络（Wi-Fi/蜂窝）**跑完矩阵主体，结论表述为"安卓 Chrome 跨网络扫码即用已实测通过"
 - **PHONE-PUBLIC 门槛**：安卓 Chrome 已过矩阵主体；iPhone Safari 未测、真机审批流未覆盖，是否放行由组长/团队按发布标准判定，本文档不代作结论
@@ -381,4 +377,4 @@ server {
 | `/root/myweb.nginx.bak-20260926` | myweb 站点原配置（追加 acme location 前） |
 | `/root/harness-relay.bak-pre301test` | 301 对照实验前的站点配置 |
 | `/etc/nginx/ssl/harness-relay-selfsigned.{crt,key}` | 自签证书（回退用） |
-| `/root/computer-harness-relay-host-credential.txt` | Host 凭据交接（0600） |
+| 私有交接清单 | Host 凭据位置由受控渠道提供，不在公共文档记录 |

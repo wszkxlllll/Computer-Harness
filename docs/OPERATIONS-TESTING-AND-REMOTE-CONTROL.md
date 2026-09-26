@@ -99,7 +99,7 @@ Run 的事实来源是 outputDir 中的 `trajectory.jsonl` 与资产目录；还
 
 2核/2GB服务器可作为小规模 staging 起点，不需要GPU。需真实域名/TLS、非root服务账号、仅公开443、正确WSS/SSE代理、受限凭据文件和安全日志。完整可执行步骤、systemd/Nginx及回滚见 [Relay 部署指南](../apps/relay/README.md)。localhost二维码不能供另一台手机连接。
 
-Relay会接触授权明文载荷，当前不是E2EE；重启清空内存配对/session映射，需要重新配对。Host命令去重不承诺跨重启exactly-once。发布前必须真手机测试确认、撤销、锁屏返回、换网、重复命令、断线与重启；本轮尚未完成这些。
+Relay会接触授权明文载荷，当前不是E2EE；重启清空内存配对/session映射，需要重新配对。Host命令去重不承诺跨重启exactly-once。队友后续报告已完成安卓真机的主体网络/控制矩阵，但使用模拟执行后端；真审批、iOS、Windows 实机全链路及 CI 修复仍待完成，见[部署与 CI 复核](./mobile-staging-ci-audit-2026-09-26.md)。
 
 ## 7. 协作、文档与发布
 
