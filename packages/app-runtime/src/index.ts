@@ -5,6 +5,8 @@ export * from "./providers.js";
 export * from "./reporting.js";
 export * from "./run-factory.js";
 export * from "./event-feed.js";
+export * from "./remote-control.js";
+export * from "./remote-run-api.js";
 export * from "./environment-owner.js";
 export * from "./application-session.js";
 export * from "./cua-doctor.js";

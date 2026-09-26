@@ -1,0 +1,492 @@
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import type {
+  Computer,
+  ComputerSession,
+  ContextCompiler,
+  ProviderAdapter,
+  ActionPolicyDecision,
+  RunOutcome,
+  Viewport,
+} from "@computer-harness/runtime";
+import type { AssetId, AssetRef, ComputerSessionId, ModelTurn, RunId, ToolCall, ToolCallId } from "@computer-harness/protocol";
+import type { WindowTargetInfo } from "./application-session.js";
+import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
+import { ApplicationSession } from "./application-session.js";
+import { InProcessEnvironmentOwner } from "./environment-owner.js";
+import { ApplicationRemoteRunApi, RemoteRunApiError } from "./remote-run-api.js";
+
+const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
+
+function config(outputDir: string): ApplicationSessionConfig {
+  return {
+    model: "glm-5.3-flash",
+    computer: { kind: "cua", socketPath: "fixture-cua.sock", screenshotDir: join(outputDir, "driver-screenshots"), grounding: "off" },
+    outputDir,
+    maxSteps: 4,
+    maxModelRequests: 4,
+    planning: false,
+    memory: "off",
+    memoryRetrieval: "off",
+    batching: "off",
+    contextMode: "raw",
+    contextMaxHistoryEvents: 8,
+    riskProfile: "experiment",
+    riskGuard: "off",
+    riskModel: "off",
+    riskMaxModelRequests: 1,
+    riskTimeoutMs: 100,
+    cleanupDeadlineMs: 100,
+  };
+}
+
+function fixtureComputer(screen: Viewport = viewport): Computer {
+  let sequence = 0;
+  const session: ComputerSession = {
+    id: "remote-api-session" as ComputerSessionId,
+    backend: "fixture",
+    viewport: screen,
+    capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+    openedAt: "2026-09-26T00:00:00.000Z",
+  };
+  return {
+    async open() { return session; },
+    async observe() {
+      sequence += 1;
+      return {
+        capturedAt: "2026-09-26T00:00:0" + String(sequence) + ".000Z",
+        viewport: screen,
+        screenshot: { mediaType: "image/png" as const, data: new Uint8Array([3, 1, 4, sequence]) },
+      };
+    },
+    async execute(_session, action) { return { actionId: action.actionId, status: "completed" as const }; },
+    async close() {},
+  } as unknown as Computer;
+}
+
+function providerFor(options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[] }): ProviderAdapter {
+  let turns = 0;
+  return {
+    id: "remote-api-provider",
+    async generate() {
+      turns += 1;
+      const scriptedTurn = options.turns?.[turns - 1];
+      if (scriptedTurn !== undefined) return structuredClone(scriptedTurn);
+      if (options.askFirst === true && turns === 1) return { type: "user_input_required", question: "Which date should I check?" };
+      return { type: "finish", summary: options.summary };
+    },
+  } as unknown as ProviderAdapter;
+}
+
+function createFixture(
+  outputDir: string,
+  options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[]; guardDecisions?: readonly ActionPolicyDecision[]; screen?: Viewport },
+  limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
+) {
+  let windows: readonly WindowTargetInfo[] = [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }];
+  let guardDecisionIndex = 0;
+  const createdComputerConfigs: Array<Extract<ApplicationSessionConfig["computer"], { kind: "cua" }>> = [];
+  const session = new ApplicationSession({
+    config: config(outputDir),
+    owner: new InProcessEnvironmentOwner(),
+    windowDiscovery: { listWindows: async () => windows },
+    dependencies: {
+      createProvider: () => providerFor(options),
+      createComputer: async ({ config: computerConfig }) => {
+        if (computerConfig.kind === "cua") createdComputerConfigs.push(computerConfig);
+        return fixtureComputer(options.screen);
+      },
+      ...(options.guardDecisions === undefined ? {} : {
+        createActionPolicy: () => ({
+          async evaluate() {
+            const decision = options.guardDecisions?.[guardDecisionIndex];
+            if (decision === undefined) throw new Error("fixture action policy has no decision for this action");
+            guardDecisionIndex += 1;
+            return structuredClone(decision);
+          },
+        }),
+      }),
+    },
+  });
+  const api = new ApplicationRemoteRunApi({
+    session,
+    capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
+    assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(resolve(handle.config.outputDir, "assets")),
+    ...limits,
+  });
+  return { api, session, createdComputerConfigs, setWindows: (value: readonly WindowTargetInfo[]) => { windows = value; } };
+}
+
+function fixtureGuardDecision(decision: "allow" | "require_approval", reason: string): ActionPolicyDecision {
+  return {
+    decision,
+    categories: decision === "allow" ? [] : ["external_commitment"],
+    reasonCode: "fixture_guard_decision",
+    reason,
+    path: "local",
+    policyVersion: "fixture-v1",
+    modelRequestCount: 0,
+  };
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  }
+}
+
+describe("ApplicationRemoteRunApi", () => {
+  it("projects the exact pending guarded click, its claimed target, and clears it when that approval resolves", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-approval-preview-"));
+    const earlierCall: ToolCall = {
+      id: "approval-preview-old" as ToolCallId,
+      name: "click",
+      arguments: { x: 10, y: 20 },
+      declaredEffect: { effects: ["navigate"], target: "旧页面", summary: "打开旧页面" },
+    };
+    const pendingCall: ToolCall = {
+      id: "approval-preview-current" as ToolCallId,
+      name: "click",
+      arguments: { x: 408, y: 667 },
+      declaredEffect: { effects: ["navigate"], target: "查询", summary: "点击查询按钮" },
+    };
+    const { api, session } = createFixture(outputDir, {
+      summary: "The pending click was rejected.",
+      screen: { width: 900, height: 900, coordinateSpace: "physical" },
+      turns: [
+        { type: "tool_calls", calls: [earlierCall] },
+        { type: "tool_calls", calls: [pendingCall] },
+      ],
+      guardDecisions: [
+        fixtureGuardDecision("allow", "The earlier click is allowed."),
+        fixtureGuardDecision("require_approval", "This action requires approval."),
+      ],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "approval-preview-click", "Check the current page", choices.candidates[0]!.token);
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_approval", "Run did not request click approval");
+
+      const snapshot = api.getRun("device-one", started.runId)!;
+      const pending = snapshot.pendingRequest;
+      expect(pending?.kind).toBe("approval");
+      if (pending?.kind !== "approval") throw new Error("expected an approval request");
+      expect(pending.reason).toBe("This action requires approval.");
+      expect(pending.preview).toEqual({
+        actions: [{ operation: "click", kind: "click", points: [{ x: 408, y: 667 }] }],
+        modelDeclaredEffect: { target: "查询", summary: "点击查询按钮", verified: false },
+      });
+      expect(JSON.stringify(pending)).not.toContain("旧页面");
+
+      const streamedEvents: unknown[] = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => streamedEvents.push(event));
+      subscription.close();
+      const pendingProjection = streamedEvents.find((event) => {
+        if (typeof event !== "object" || event === null || !("type" in event) || event.type !== "run.event" || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.pending_request" && "request" in data;
+      });
+      expect(JSON.stringify(pendingProjection)).toContain('"x":408');
+      expect(JSON.stringify(pendingProjection)).toContain('"target":"查询"');
+      expect(JSON.stringify(pendingProjection)).not.toContain("旧页面");
+
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "reject-preview-click",
+        expectedSequence: snapshot.sequence,
+        type: "reject",
+        requestId: pending.requestId,
+      });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("shows typed character count and keys, never raw typed text, and rebinds preview after rejection", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-approval-preview-redaction-"));
+    const secret = "do-not-send-this-sensitive-text";
+    const typeCall: ToolCall = {
+      id: "approval-preview-type" as ToolCallId,
+      name: "type",
+      arguments: { text: secret },
+      declaredEffect: { effects: ["sensitive_disclosure"], target: "登录表单", summary: "输入待确认的内容" },
+    };
+    const keyCall: ToolCall = {
+      id: "approval-preview-keys" as ToolCallId,
+      name: "hotkey",
+      arguments: { keys: ["CTRL", "ALT", "DELETE"] },
+      declaredEffect: { effects: ["security_change"], target: "系统快捷键", summary: "执行系统快捷键" },
+    };
+    const { api, session } = createFixture(outputDir, {
+      summary: "The approvals were rejected.",
+      turns: [
+        { type: "tool_calls", calls: [typeCall] },
+        { type: "tool_calls", calls: [keyCall] },
+      ],
+      guardDecisions: [
+        fixtureGuardDecision("require_approval", "Typing needs approval."),
+        fixtureGuardDecision("require_approval", "The shortcut needs approval."),
+      ],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "approval-preview-sensitive", "Enter a sensitive value", choices.candidates[0]!.token);
+      await waitFor(() => session.activeRun?.controller.getSnapshot().status === "waiting_approval", "Run did not request text approval");
+
+      const firstSnapshot = api.getRun("device-one", started.runId)!;
+      const firstPending = firstSnapshot.pendingRequest;
+      if (firstPending?.kind !== "approval") throw new Error("expected a text approval request");
+      expect(firstPending.preview?.actions).toEqual([{ operation: "type", kind: "type", typedCharacterCount: secret.length }]);
+      expect(JSON.stringify(firstPending)).not.toContain(secret);
+
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "reject-preview-text",
+        expectedSequence: firstSnapshot.sequence,
+        type: "reject",
+        requestId: firstPending.requestId,
+      });
+      await waitFor(() => {
+        const next = api.getRun("device-one", started.runId)?.pendingRequest;
+        return next?.kind === "approval" && next.requestId !== firstPending.requestId;
+      }, "the next guarded request did not replace the rejected approval preview");
+
+      const secondSnapshot = api.getRun("device-one", started.runId)!;
+      const secondPending = secondSnapshot.pendingRequest;
+      if (secondPending?.kind !== "approval") throw new Error("expected a second approval request");
+      expect(secondPending.preview?.actions).toEqual([{ operation: "hotkey", kind: "keypress", keys: ["CTRL", "ALT", "DELETE"] }]);
+      expect(JSON.stringify(secondPending)).not.toContain(secret);
+      expect(JSON.stringify(secondPending)).not.toContain("登录表单");
+
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "reject-preview-hotkey",
+        expectedSequence: secondSnapshot.sequence,
+        type: "reject",
+        requestId: secondPending.requestId,
+      });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves completed replies and authorized screenshot assets while isolating Runs by paired device", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-owner-"));
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "The itinerary is saved in Documents." });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      expect(choices.candidates).toHaveLength(1);
+      expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+      const [first, repeated] = await Promise.all([
+        api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token),
+        api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token),
+      ]);
+      expect(repeated.runId).toBe(first.runId);
+      expect(api.listRuns("device-two")).toEqual([]);
+      expect(api.getRun("device-two", first.runId)).toBeUndefined();
+
+      await session.waitForActiveRun();
+      const completed = api.getRun("device-one", first.runId)!;
+      expect(completed.status).toBe("finished");
+      expect(completed.reply).toBe("The itinerary is saved in Documents.");
+      expect(completed.target).toEqual({ appName: "Fixture app", title: "Fixture window" });
+      expect(JSON.stringify(completed)).not.toMatch(/pid|windowId/iu);
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: 42, windowId: 1001 }, windowDeliveryMode: "foreground" });
+      await expect(api.startRun("device-one", "start-reuse-target", "Try the same target again", choices.candidates[0]!.token))
+        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
+      await expect(api.startRun("device-one", "start-once", "Find the saved itinerary", "A".repeat(32)))
+        .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await expect(api.startRun("device-one", "start-once", "Changed goal", choices.candidates[0]!.token))
+        .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      expect(completed.latestAssetId).toBeTruthy();
+      expect(JSON.stringify(completed)).not.toContain("assets/");
+
+      const screenshot = await api.getAsset("device-one", first.runId, completed.latestAssetId!);
+      expect(screenshot?.mediaType).toBe("image/png");
+      expect(screenshot?.data.length).toBeGreaterThan(0);
+      expect(await api.getAsset("device-two", first.runId, completed.latestAssetId!)).toBeUndefined();
+
+      const events: number[] = [];
+      api.subscribe("device-one", first.runId, 0, (event) => {
+        if (event.type === "run.event") events.push(event.sequence);
+      });
+      expect(events.length).toBeGreaterThan(0);
+      expect(events).toEqual(events.map((_value, index) => index + 1));
+      expect(() => api.subscribe("device-two", first.runId, 0, () => undefined)).toThrow(RemoteRunApiError);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds user replies to the pending question event and hides another phone's Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-request-"));
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "Checked the requested date." });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const run = await api.startRun("device-one", "start-question", "Check a calendar date", choices.candidates[0]!.token);
+      await waitFor(() => session.activeRun?.controller.getSnapshot().status === "waiting_user", "Run did not request user input");
+      const pending = api.getRun("device-one", run.runId)?.pendingRequest;
+      expect(pending?.kind).toBe("user_input");
+      if (pending?.kind !== "user_input") throw new Error("expected pending user input");
+      const sequence = api.getRun("device-one", run.runId)!.sequence;
+
+      await expect(api.submitCommand("device-one", run.runId, {
+        commandId: "bad-reply",
+        expectedSequence: sequence,
+        type: "respond",
+        requestId: "stale-question",
+        text: "Tomorrow",
+      })).rejects.toMatchObject({ code: "STALE_REQUEST" });
+      await expect(api.submitCommand("device-two", run.runId, {
+        commandId: "other-device",
+        expectedSequence: sequence,
+        type: "respond",
+        requestId: pending.requestId,
+        text: "Tomorrow",
+      })).rejects.toMatchObject({ code: "RUN_NOT_FOUND" });
+
+      const accepted = await api.submitCommand("device-one", run.runId, {
+        commandId: "good-reply",
+        expectedSequence: sequence,
+        type: "respond",
+        requestId: pending.requestId,
+        text: "Tomorrow",
+      });
+      expect(accepted.status).toBe("accepted");
+      expect(api.getCommandReceipt("device-two", run.runId, "good-reply")).toBeUndefined();
+      await session.waitForActiveRun();
+      await waitFor(
+        () => api.getCommandReceipt("device-one", run.runId, "good-reply")?.status === "applied",
+        "response command did not reach its terminal receipt",
+      );
+      expect(api.getRun("device-one", run.runId)?.reply).toBe("Checked the requested date.");
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never evicts start idempotency keys to make capacity; duplicate requests cannot create a second Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-capacity-"));
+    let now = 10_000;
+    const { api, session } = createFixture(outputDir, { summary: "Completed once." }, { maxStartRequests: 1, now: () => now });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const targetToken = choices.candidates[0]!.token;
+      const first = await api.startRun("device-one", "start-stable", "Perform one task", targetToken);
+      await session.waitForActiveRun();
+      now += 10 * 60_000 + 1;
+      const duplicate = await api.startRun("device-one", "start-stable", "Perform one task", targetToken);
+      expect(duplicate.runId).toBe(first.runId);
+      await expect(api.startRun("device-one", "start-new", "A second task", "A".repeat(32))).rejects.toMatchObject({ code: "CAPACITY_REACHED" });
+      const duplicateAfterCapacity = await api.startRun("device-one", "start-stable", "Perform one task", targetToken);
+      expect(duplicateAfterCapacity.runId).toBe(first.runId);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains command receipts and rejects new IDs rather than evicting actionable dedupe entries", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-command-capacity-"));
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "Answered once." }, { maxCommandsPerRun: 1 });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const run = await api.startRun("device-one", "start-command-capacity", "Ask one question", choices.candidates[0]!.token);
+      await waitFor(() => session.activeRun?.controller.getSnapshot().status === "waiting_user", "Run did not request user input");
+      const pending = api.getRun("device-one", run.runId)?.pendingRequest;
+      if (pending?.kind !== "user_input") throw new Error("expected pending user input");
+      const command = {
+        commandId: "answer-stable",
+        expectedSequence: api.getRun("device-one", run.runId)!.sequence,
+        type: "respond" as const,
+        requestId: pending.requestId,
+        text: "Tomorrow",
+      };
+      await api.submitCommand("device-one", run.runId, command);
+      await session.waitForActiveRun();
+      await waitFor(() => api.getCommandReceipt("device-one", run.runId, command.commandId)?.status === "applied", "command did not finish");
+      expect((await api.submitCommand("device-one", run.runId, command)).status).toBe("applied");
+      await expect(api.submitCommand("device-one", run.runId, {
+        ...command,
+        commandId: "answer-new",
+        expectedSequence: api.getRun("device-one", run.runId)!.sequence,
+      })).rejects.toMatchObject({ code: "CAPACITY_REACHED" });
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds initial-window tokens to one device and invalidates refreshed, expired, or changed choices", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-tokens-"));
+    let now = 10_000;
+    const { api, session, setWindows } = createFixture(outputDir, { summary: "Should not start." }, { now: () => now });
+    try {
+      const firstList = await api.listWindowTargets("device-one");
+      const oldToken = firstList.candidates[0]!.token;
+      expect(Date.parse(firstList.expiresAt) - now).toBe(10 * 60_000);
+      await expect(api.startRun("device-two", "cross-device", "No target authority", oldToken))
+        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
+
+      const refreshed = await api.listWindowTargets("device-one");
+      await expect(api.startRun("device-one", "old-choice", "Stale after refresh", oldToken))
+        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
+
+      const changedTargetToken = refreshed.candidates[0]!.token;
+      setWindows([{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Replaced window" }]);
+      await expect(api.startRun("device-one", "changed-target", "Do not start on a reused window", changedTargetToken))
+        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
+      expect(session.history).toHaveLength(0);
+
+      setWindows([{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }]);
+      const expiring = await api.listWindowTargets("device-one");
+      now += 10 * 60_000 + 1;
+      await expect(api.startRun("device-one", "expired-choice", "Expired", expiring.candidates[0]!.token))
+        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
+      expect(session.history).toHaveLength(0);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects symlinked remote asset path components when the filesystem supports symlinks", async ({ skip }) => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "harness-remote-asset-symlink-"));
+    const assetRoot = join(tempRoot, "assets");
+    const outsideAssetDir = join(tempRoot, "outside-assets");
+    const outsideFile = join(outsideAssetDir, "escape.png");
+    await mkdir(assetRoot, { recursive: true });
+    await mkdir(outsideAssetDir, { recursive: true });
+    await writeFile(outsideFile, new Uint8Array([1, 2, 3]));
+    try {
+      try {
+        await symlink(outsideAssetDir, join(assetRoot, "images"), process.platform === "win32" ? "junction" : "dir");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (process.platform === "win32" && ["EPERM", "EACCES", "ENOTSUP", "UNKNOWN"].includes(code ?? "")) {
+          skip("Windows junction creation is unavailable for this account or filesystem.");
+          return;
+        }
+        throw error;
+      }
+      const ref: AssetRef = {
+        assetId: "asset-symlink" as AssetId,
+        relativePath: "images/escape.png",
+        mediaType: "image/png",
+        byteLength: 3,
+      };
+      await expect(createFileRemoteAssetReader(assetRoot).read(ref, new AbortController().signal)).rejects.toThrow(/symlink|changed|outside/iu);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

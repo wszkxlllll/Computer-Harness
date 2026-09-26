@@ -1,0 +1,16 @@
+{
+  "name": "@computer-harness/host",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@computer-harness/app-runtime": "workspace:*",
+    "@computer-harness/protocol": "workspace:*",
+    "@computer-harness/relay-connector": "workspace:*",
+    "fastify": "5.12.5"
+  }
+}
