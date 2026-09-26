@@ -86,6 +86,9 @@ jobs:
       - name: Prepare synthetic test report directory
         run: node -e "require('node:fs').mkdirSync('.ci-reports',{recursive:true})"
 
+      - name: Build Web production bundle
+        run: pnpm --filter @computer-harness/web build
+
       - name: Unit and contract tests (offline; no live desktop or model API)
         run: pnpm test
 
