@@ -27,6 +27,8 @@ describe("computer-side phone connection manager", () => {
     vi.mocked(getDevices).mockResolvedValue({ devices: [] });
     render(<ConnectPhoneScreen />);
 
+    expect(screen.getByText(/跨网络配对取决于该地址对应的 Relay 是否可达/)).toBeDefined();
+    expect(screen.queryByText(/公网中继尚未部署/)).toBeNull();
     await waitFor(() => expect(screen.getByText("手机浏览器")).toBeDefined());
     expect(screen.getByRole("button", { name: "允许这台手机" })).toBeDefined();
     expect(screen.getByRole("button", { name: "拒绝" })).toBeDefined();

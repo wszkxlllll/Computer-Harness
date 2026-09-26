@@ -47,7 +47,9 @@ export function PairingQrPanel({ challenge, hasActiveChallenge, busy, loading, o
           <p className="qr-expires">有效至 {formatDate(challenge.expiresAt)}</p>
           {isLoopbackUrl(challenge.pairingUrl)
             ? <p className="notice notice-warning qr-warning">这个二维码指向本机地址。手机扫描时，localhost 会指向手机自己；当前仅能验证本地界面，不能完成手机连接。</p>
-            : <p className="notice notice-warning qr-warning">公网中继尚未完成验证。请只在信任的手机上扫描；当前不保证不同网络间可达，也不代表正式扫码即用。</p>}
+            : isHttpsUrl(challenge.pairingUrl)
+              ? <p className="notice notice-warning qr-warning">这个二维码指向非本机地址。请确认对应的 Relay 可从手机访问，且 HTTPS 证书受手机信任；配对仍需在电脑本机确认。</p>
+              : <p className="notice notice-warning qr-warning">这个二维码指向非本机 HTTP 地址，手机与 Relay 之间的数据未受 HTTPS 保护。请改用手机信任的 HTTPS 地址后再配对。</p>}
         </div>
       )}
       {!challenge && hasActiveChallenge && (
@@ -63,5 +65,13 @@ function isLoopbackUrl(rawUrl: string): boolean {
     return host === "localhost" || host === "::1" || host === "[::1]" || host.startsWith("127.");
   } catch {
     return true;
+  }
+}
+
+function isHttpsUrl(rawUrl: string): boolean {
+  try {
+    return new URL(rawUrl).protocol === "https:";
+  } catch {
+    return false;
   }
 }

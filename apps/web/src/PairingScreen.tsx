@@ -1,32 +1,17 @@
-import { useEffect, useRef, useState } from "react";
-import { ApiError, establishPairSession, getPairRequest, setPhoneCsrfToken, submitPairRequest } from "./api";
+import { useEffect, useState } from "react";
+import { ApiError, setPhoneCsrfToken } from "./api";
 import { BrandHeader } from "./components/BrandHeader";
 import { clearInitialPairingToken, getInitialPairingToken } from "./pairing-token";
 import { shouldEstablishSession } from "./pairing-state";
+import { clearPairRequestReference, establishPairSessionOnce, getPairRequestOnce, getPendingPairSession, getPhoneSessionOnce, hasEstablishedPairSession, readStoredRequestId, storeRequestId, submitTokenOnce } from "./pairing-session";
 import type { PairRequestStatus } from "./types";
-
-const requestPromises = new Map<string, ReturnType<typeof submitPairRequest>>();
-
-function submitTokenOnce(token: string) {
-  const existing = requestPromises.get(token);
-  if (existing) return existing;
-  const pending = submitPairRequest(token, "手机浏览器").then((result) => {
-    if (requestPromises.get(token) === pending) requestPromises.delete(token);
-    return result;
-  }).catch((error: unknown) => {
-    if (requestPromises.get(token) === pending) requestPromises.delete(token);
-    throw error;
-  });
-  requestPromises.set(token, pending);
-  return pending;
-}
 
 export function PairingScreen() {
   const [activeToken, setActiveToken] = useState(() => getInitialPairingToken());
   const [requestId, setRequestId] = useState(() => activeToken ? undefined : readStoredRequestId());
-  const [pairState, setPairState] = useState<PairRequestStatus["status"] | "starting" | "connected" | "error">(requestId ? "pending_local_confirmation" : activeToken ? "starting" : "error");
+  const [hasPairingContext] = useState(() => Boolean(activeToken || requestId));
+  const [pairState, setPairState] = useState<PairRequestStatus["status"] | "starting" | "checking" | "connected" | "error">(requestId ? "pending_local_confirmation" : activeToken ? "starting" : "checking");
   const [message, setMessage] = useState<string>();
-  const sessionPending = useRef(false);
 
   useEffect(() => {
     if (!activeToken || requestId) return;
@@ -53,24 +38,72 @@ export function PairingScreen() {
   }, [activeToken, requestId]);
 
   useEffect(() => {
-    if (!requestId || pairState === "connected" || pairState === "rejected" || pairState === "expired" || pairState === "error") return;
+    if (hasPairingContext || activeToken || requestId) return;
+    let cancelled = false;
+    void getPhoneSessionOnce().then((session) => {
+      if (cancelled) return;
+      setPhoneCsrfToken(session.csrfToken);
+      setPairState("connected");
+    }).catch((caught: unknown) => {
+      if (cancelled) return;
+      setPhoneCsrfToken(undefined);
+      setPairState("error");
+      setMessage(caught instanceof ApiError && caught.status === 401
+        ? "请扫描电脑生成的配对二维码，以连接手机。"
+        : caught instanceof Error ? caught.message : "暂时无法确认手机连接状态。请检查网络后重试。");
+    });
+    return () => { cancelled = true; };
+  }, [activeToken, hasPairingContext, requestId]);
+
+  useEffect(() => {
+    if (!requestId) return;
+    const currentRequestId = requestId;
     let stopped = false;
+    let terminal = false;
+    let pollTimer: number | undefined;
+    let polling = false;
+
+    async function completePendingSession(): Promise<boolean> {
+      if (hasEstablishedPairSession(currentRequestId)) {
+        if (stopped) return true;
+        terminal = true;
+        setPairState("connected");
+        return true;
+      }
+      const pendingSession = getPendingPairSession(currentRequestId);
+      if (!pendingSession) return false;
+      try {
+        await pendingSession;
+      } catch {
+        return false;
+      }
+      if (stopped) return true;
+      terminal = true;
+      setPairState("connected");
+      return true;
+    }
 
     async function poll() {
+      if (stopped || terminal || polling) return;
+      polling = true;
       try {
-        const current = await getPairRequest(requestId!);
+        if (await completePendingSession()) return;
+        if (stopped) return;
+        const current = await getPairRequestOnce(currentRequestId);
         if (stopped) return;
         setPairState(current.status);
-        if (shouldEstablishSession(current.status) && !sessionPending.current) {
-          sessionPending.current = true;
+        if (current.status === "rejected" || current.status === "expired") {
+          terminal = true;
+          clearPairRequestReference(currentRequestId);
+          return;
+        }
+        if (shouldEstablishSession(current.status)) {
           try {
-            const session = await establishPairSession(requestId!);
+            await establishPairSessionOnce(currentRequestId);
             if (stopped) return;
-            setPhoneCsrfToken(session.csrfToken);
-            clearStoredRequestId();
+            terminal = true;
             setPairState("connected");
           } catch (caught) {
-            sessionPending.current = false;
             if (!(caught instanceof ApiError && caught.status === 409) && !stopped) {
               setMessage(caught instanceof Error ? caught.message : "配对已确认，但无法建立手机会话。");
             }
@@ -79,24 +112,32 @@ export function PairingScreen() {
       } catch (caught) {
         if (stopped) return;
         if (caught instanceof ApiError && (caught.status === 404 || caught.status === 410 || caught.code === "PAIRING_REQUEST_EXPIRED")) {
+          if (await completePendingSession()) return;
+          if (stopped) return;
+          terminal = true;
+          clearPairRequestReference(currentRequestId);
           setPairState("expired");
           setMessage(caught.message);
           return;
         }
         setMessage(caught instanceof Error ? caught.message : "连接电脑时遇到问题，正在重试。");
+      } finally {
+        polling = false;
+        if (!stopped && !terminal) pollTimer = window.setTimeout(() => void poll(), 1600);
       }
     }
 
     void poll();
-    const timer = window.setInterval(() => void poll(), 1600);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
     };
-  }, [pairState, requestId]);
+  }, [requestId]);
 
   const heading = pairState === "connected"
     ? "手机已连接"
+    : pairState === "checking"
+      ? "正在确认手机连接"
     : pairState === "rejected"
       ? "电脑没有授权这台手机"
       : pairState === "expired"
@@ -112,6 +153,7 @@ export function PairingScreen() {
         <p className="eyebrow">连接 Harness</p>
         <h1 className="page-title">{heading}</h1>
         {pairState === "starting" && <div className="loading-panel" role="status">正在向电脑发送配对请求…</div>}
+        {pairState === "checking" && <div className="loading-panel" role="status">正在确认手机连接状态…</div>}
         {pairState === "pending_local_confirmation" && (
           <div className="pair-state-box" role="status" aria-live="polite">
             <span className="pair-state-mark" aria-hidden="true">…</span>
@@ -137,30 +179,4 @@ export function PairingScreen() {
       </main>
     </>
   );
-}
-
-function readStoredRequestId(): string | undefined {
-  const queryId = new URLSearchParams(window.location.search).get("request");
-  if (queryId) return queryId;
-  try {
-    return window.sessionStorage.getItem("harness-pair-request") ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function storeRequestId(requestId: string) {
-  try {
-    window.sessionStorage.setItem("harness-pair-request", requestId);
-  } catch {
-    // The request ID is also kept in the URL for reload recovery.
-  }
-}
-
-function clearStoredRequestId() {
-  try {
-    window.sessionStorage.removeItem("harness-pair-request");
-  } catch {
-    // Session storage may be disabled; the HttpOnly cookie remains authoritative.
-  }
 }

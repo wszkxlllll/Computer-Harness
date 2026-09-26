@@ -242,7 +242,9 @@ server {
         proxy_buffering off;
     }
 
-    location /api/runs/ {
+    # No trailing slash: cover both the collection /api/runs and child routes.
+    # A slash-only prefix can redirect /api/runs and break POST/list requests.
+    location /api/runs {
         proxy_pass http://127.0.0.1:8787;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -261,5 +263,9 @@ server {
 ```
 
 `$uri` omits query parameters; `/pair` additionally disables access logging. The `crit` error-log threshold avoids routine request-line diagnostics that may contain a pairing query. Keep the proxy's request-body logging disabled. HTTPS and WSS terminate at the proxy; the backend remains loopback-only.
+
+After `nginx -t` and a controlled reload, verify the collection route without following redirects: unauthenticated `GET /api/runs` should return `401`, not `301` or `302`. Verify the authenticated POST and SSE paths with a synthetic Host before release. If an old keep-alive connection still sees the previous configuration, test with a new connection first; do not restart unrelated sites as the default diagnostic step.
+
+Before SSH deployment, verify the server host-key fingerprint through the cloud console or a trusted administrator. A changed key is a deployment blocker: do not use `StrictHostKeyChecking=no` or delete a prior trust record without verification. Keep passwords, host credentials, client IP addresses and private credential-file locations out of public handoff reports. For rollback, preserve shared Nginx and certificate directories; switch back to the previous release and disable only this service's configuration when necessary.
 
 Nginx behavior references: [WebSocket proxying](https://nginx.org/en/docs/http/websocket.html), [request log variables](https://nginx.org/en/docs/http/ngx_http_core_module.html), and [request rate limiting](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html).

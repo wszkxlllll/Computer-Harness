@@ -102,8 +102,8 @@ export function ConnectPhoneScreen() {
         <p className="eyebrow">电脑端 · 连接管理</p>
         <h1 className="page-title">连接手机</h1>
         <div className="prototype-banner" role="note">
-          <strong>本机原型</strong>
-          <span>公网中继尚未部署，当前二维码不代表已支持跨网络扫码。普通用户流程无需 VPN；本机演示也不要求手动输入电脑 IP。</span>
+          <strong>配对说明</strong>
+          <span>手机会访问二维码中显示的地址；跨网络配对取决于该地址对应的 Relay 是否可达，以及 HTTPS 证书是否受手机信任。每次配对仍需在电脑本机确认。</span>
         </div>
 
         {!localOnly && (
