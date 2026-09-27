@@ -32,6 +32,7 @@ import {
 import {
   captureWindowWithRetry,
   discoverWindow,
+  activateWindowTarget,
   listWindowTargets,
   sameWindowGeometry,
   validateWindowTarget,
@@ -84,32 +85,11 @@ async function bringWindowToFrontOnce(
   target: CuaWindowTarget,
   signal: AbortSignal,
 ): Promise<void> {
-  signal.throwIfAborted();
-  const result = await driver.callTool("bring_to_front", JSON.stringify({
-    pid: target.pid,
-    window_id: target.windowId,
-    session,
-  }), { signal });
-  signal.throwIfAborted();
-  if (result.isError) {
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
-  }
-  if (result.degraded) {
-    throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
-  }
-  if (typeof result.structuredJson === "string") {
-    try {
-      const payload: unknown = JSON.parse(result.structuredJson);
-      if (payload !== null && typeof payload === "object" && !Array.isArray(payload) &&
-          "landed_on_target" in payload && payload.landed_on_target === false) {
-        throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
-      }
-    } catch (error) {
-      if (error instanceof WindowContractError) throw error;
-      // An unavailable optional result field is not focus evidence; the
-      // retained per-action foreground guard remains authoritative.
-    }
-  }
+  // Keep the foreground evidence contract in one place.  In particular, a
+  // successful `landed_on_target` flag is not enough when the daemon also
+  // reports a different actual foreground HWND: continuing would let a
+  // keyboard action land in a newly surfaced sheet or dialog.
+  await activateWindowTarget(driver, session, target, signal);
 }
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;

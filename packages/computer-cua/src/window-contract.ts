@@ -100,7 +100,7 @@ export async function listWindowTargets(
   }), { signal });
   if (result.isError) throw new WindowContractError("WINDOW_TARGET_REFUSED", "configured CUA window target was refused");
   if (result.degraded) throw new WindowContractError("WINDOW_TARGET_UNKNOWN", "configured CUA window target is degraded");
-  return parseWindows(result);
+  return parseWindows(result, onScreenOnly);
 }
 
 export async function captureWindow(
@@ -319,18 +319,75 @@ export async function activateWindowTarget(
     session,
   }), { signal });
   signal.throwIfAborted();
-  if (result.isError) throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
-  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
   const structured = parseStructured(result.structuredJson);
+  if (result.isError) {
+    // A macOS sheet can be enumerated as a distinct HWND, yet Cocoa/AX may
+    // keep the parent document focused after bring_to_front. Preserve that
+    // distinction for callers: the candidate was found, but its independent
+    // foreground identity was not confirmed, so no capture/input may follow.
+    const observedFocusedHandle = parseWindowHandle(isRecord(structured?.observed) ? structured.observed.focused_window_id : undefined);
+    const observedFrontmostHandle = parseWindowHandle(isRecord(structured?.observed) ? structured.observed.frontmost_ordinary_window_id : undefined);
+    const exactWindowEffect = isRecord(structured?.exact_window_effect) ? structured.exact_window_effect : undefined;
+    if (observedFocusedHandle !== undefined && observedFocusedHandle !== String(target.windowId) ||
+        observedFrontmostHandle !== undefined && observedFrontmostHandle !== String(target.windowId) ||
+        exactWindowEffect?.verified === false) {
+      throw new WindowContractError(
+        "WINDOW_ACTIVATION_UNCONFIRMED",
+        activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
+      );
+    }
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
+  }
+  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
   const landed = structured?.landed_on_target;
   const targetHandle = parseWindowHandle(structured?.target_hwnd);
   const foregroundHandle = parseWindowHandle(structured?.now_fg_hwnd);
   const expectedHandle = String(target.windowId);
-  if (landed !== true || (targetHandle !== undefined && targetHandle !== expectedHandle) ||
-      (foregroundHandle !== undefined && foregroundHandle !== expectedHandle) ||
-      (targetHandle !== undefined && foregroundHandle !== undefined && targetHandle !== foregroundHandle)) {
+  const observed = isRecord(structured?.observed) ? structured.observed : undefined;
+  const observedFocusedHandle = parseWindowHandle(observed?.focused_window_id);
+  const observedFrontmostHandle = parseWindowHandle(observed?.frontmost_ordinary_window_id);
+  const exactWindowEffect = isRecord(structured?.exact_window_effect) ? structured.exact_window_effect : undefined;
+  const explicitMismatch = landed === false
+    || targetHandle !== undefined && targetHandle !== expectedHandle
+    || foregroundHandle !== undefined && foregroundHandle !== expectedHandle
+    || targetHandle !== undefined && foregroundHandle !== undefined && targetHandle !== foregroundHandle
+    || observedFocusedHandle !== undefined && observedFocusedHandle !== expectedHandle
+    || observedFrontmostHandle !== undefined && observedFrontmostHandle !== expectedHandle
+    || observed?.front_process_matches_target === false
+    || exactWindowEffect?.verified === false;
+  // CUA 0.22.2 reports verified Cocoa/AX activation as `status=activated`
+  // with the exact window id nested in `observed`; older fixtures/daemons use
+  // the compact landed_on_target form. Accept either only when the returned
+  // identity and foreground evidence agree with the requested HWND.
+  const modernEvidence = structured?.status === "activated"
+    && parseWindowHandle(structured?.window_id) === expectedHandle
+    && observedFocusedHandle === expectedHandle
+    && (observedFrontmostHandle === undefined || observedFrontmostHandle === expectedHandle)
+    && observed?.front_process_matches_target === true
+    && exactWindowEffect?.verified === true;
+  const verified = landed === true || modernEvidence;
+  if (explicitMismatch || !verified) {
+    if (observedFocusedHandle !== undefined && observedFocusedHandle !== expectedHandle ||
+        observedFrontmostHandle !== undefined && observedFrontmostHandle !== expectedHandle ||
+        exactWindowEffect?.verified === false) {
+      throw new WindowContractError(
+        "WINDOW_ACTIVATION_UNCONFIRMED",
+        activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
+      );
+    }
     throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
   }
+}
+
+function activationUnconfirmedMessage(
+  target: CuaWindowTarget,
+  observedFocusedHandle: string | undefined,
+  observedFrontmostHandle: string | undefined,
+): string {
+  const observed = observedFocusedHandle ?? observedFrontmostHandle;
+  return `CUA bring_to_front found exact target pid=${target.pid}, window_id=${target.windowId}, but independent foreground focus was not confirmed` +
+    (observed === undefined ? "" : ` (observed foreground window_id=${observed})`) +
+    "; no capture or input was sent";
 }
 
 function parseWindowHandle(value: unknown): string | undefined {
@@ -405,11 +462,11 @@ export function windowActionTarget(binding: CuaWindowBinding): { kind: "window";
   return { kind: "window", pid: binding.target.pid, window_id: binding.target.windowId };
 }
 
-function parseWindows(result: ToolResult): CuaWindowInfo[] {
+function parseWindows(result: ToolResult, onScreenOnly: boolean): CuaWindowInfo[] {
   const value = parseStructured(result.structuredJson);
   const windows = value?.windows;
   if (!Array.isArray(windows)) throw new WindowContractError("WINDOW_TARGET_SCHEMA", "CUA list_windows returned no structured windows");
-  return windows.flatMap((item) => {
+  const parsed = windows.flatMap((item) => {
     if (!isRecord(item)) return [];
     const pid = positiveSafeInteger(item.pid);
     const windowId = positiveSafeInteger(item.window_id);
@@ -424,6 +481,77 @@ function parseWindows(result: ToolResult): CuaWindowInfo[] {
       ...(appName === undefined ? {} : { appName }),
     }];
   });
+  return normalizeWindowInventory(parsed, { dropUntitledSiblings: !onScreenOnly });
+}
+
+/**
+ * CUA's macOS inventory includes system-owned menu-bar and placeholder
+ * windows alongside application windows. Keep this normalization at the
+ * contract boundary so every picker and automatic matcher sees the same
+ * identities. The filters deliberately use geometry/labels, never PID alone:
+ * two real windows from one process remain candidates when their title or
+ * geometry identifies them separately.
+ */
+function normalizeWindowInventory(
+  windows: readonly CuaWindowInfo[],
+  options: { readonly dropUntitledSiblings: boolean },
+): CuaWindowInfo[] {
+  const visibleIdentityCandidates = windows.filter((window) =>
+    !isDegenerateWindow(window) && !isMacMenuBarWindow(window) && !isMacProxyWindow(window));
+  const titledAppNames = options.dropUntitledSiblings
+    ? new Set(
+      visibleIdentityCandidates
+        .filter((window) => window.appName !== undefined && window.title !== undefined)
+        .map((window) => normalizeWindowLabel(window.appName)),
+    )
+    : undefined;
+  const filteredIdentityCandidates = titledAppNames === undefined
+    ? visibleIdentityCandidates
+    : visibleIdentityCandidates.filter((window) =>
+      window.title !== undefined || window.appName === undefined || !titledAppNames.has(normalizeWindowLabel(window.appName)));
+
+  const seen = new Set<string>();
+  return filteredIdentityCandidates.filter((window) => {
+    const identity = [
+      window.target.pid,
+      window.target.windowId,
+      normalizeWindowLabel(window.appName),
+      normalizeWindowLabel(window.title),
+      window.bounds.x,
+      window.bounds.y,
+      window.bounds.width,
+      window.bounds.height,
+    ].join("\u0000");
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+function isDegenerateWindow(window: CuaWindowInfo): boolean {
+  return window.bounds.width <= 1 || window.bounds.height <= 1;
+}
+
+/** macOS menu-bar proxies are full-display, shallow, origin-anchored windows. */
+function isMacMenuBarWindow(window: CuaWindowInfo): boolean {
+  return window.bounds.x === 0 && window.bounds.y === 0 &&
+    window.bounds.width >= 600 && window.bounds.height <= 48;
+}
+
+/**
+ * macOS exposes several Accessibility service proxies as untitled 64x64 (or
+ * smaller) windows. Keep this deliberately narrow: normal untitled sheets and
+ * dialogs are retained for explicit/manual handoff, and no PID-wide merge is
+ * performed here.
+ */
+function isMacProxyWindow(window: CuaWindowInfo): boolean {
+  if (window.title !== undefined || window.bounds.width > 64 || window.bounds.height > 64) return false;
+  const appName = normalizeWindowLabel(window.appName);
+  return /service|autofill|自动填充|通知中心|accessibility|聚焦|通用控制|wi[- ]?fi/iu.test(appName);
+}
+
+function normalizeWindowLabel(value: string | undefined): string {
+  return value?.normalize("NFKC").trim().toLocaleLowerCase() ?? "";
 }
 
 function boundedLabel(value: unknown): string | undefined {

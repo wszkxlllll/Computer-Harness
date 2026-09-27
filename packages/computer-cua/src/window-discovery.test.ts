@@ -36,6 +36,115 @@ describe("CuaWindowDiscovery", () => {
     expect(calls).toEqual(["startSession", "list_windows", "endSession", "shutdown", "destroy"]);
   });
 
+  it("normalizes the macOS inventory without collapsing distinct real windows", async () => {
+    const driver = {
+      async startSession() { return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        expect(name).toBe("list_windows");
+        return result({ structuredJson: JSON.stringify({ windows: [
+          // macOS emits one shallow menu-bar proxy per application/window.
+          { pid: 10, window_id: 100, app_name: "Google Chrome", title: "", bounds: { x: 0, y: 0, width: 1512, height: 33 } },
+          { pid: 10, window_id: 101, app_name: "Google Chrome", title: "", bounds: { x: 0, y: 0, width: 1512, height: 33 } },
+          // Hidden Chromium placeholders are not actionable identities.
+          { pid: 10, window_id: 102, app_name: "Google Chrome", title: "", bounds: { x: 0, y: 0, width: 1, height: 1 } },
+          { pid: 10, window_id: 103, app_name: "Google Chrome", title: "", bounds: { x: 0, y: 0, width: 1, height: 1 } },
+          // Untitled Accessibility service proxies are also not actionable.
+          { pid: 10, window_id: 109, app_name: "CursorUIViewService", title: "", bounds: { x: 400, y: 500, width: 64, height: 64 } },
+          // Untitled normal-size sheets remain available for explicit/manual
+          // handoff, even when the app also has titled windows.
+          { pid: 10, window_id: 104, app_name: "Google Chrome", title: "", bounds: { x: 99, y: 59, width: 1296, height: 139 } },
+          { pid: 11, window_id: 105, app_name: "Google Chrome", title: "", bounds: { x: 99, y: 59, width: 1296, height: 139 } },
+          // Same app and process, but two real titled windows: retain both.
+          { pid: 10, window_id: 106, app_name: "Google Chrome", title: "Orders", bounds: { x: 0, y: 34, width: 1512, height: 948 } },
+          { pid: 10, window_id: 107, app_name: "Google Chrome", title: "Calendar", bounds: { x: 12, y: 48, width: 1200, height: 800 } },
+          // The same exact PID/HWND can be duplicated by the macOS bridge;
+          // retain a different HWND even when all labels/geometries match.
+          { pid: 10, window_id: 108, app_name: "Google Chrome", title: "Orders", bounds: { x: 0, y: 34, width: 1512, height: 948 } },
+          // An app exposing only untitled windows remains available, and two
+          // different geometries stay ambiguous for safety.
+          { pid: 20, window_id: 200, app_name: "Terminal", title: "", bounds: { x: 20, y: 40, width: 900, height: 700 } },
+          { pid: 20, window_id: 201, app_name: "Terminal", title: "", bounds: { x: 40, y: 60, width: 800, height: 600 } },
+        ] }) });
+      },
+      async endSession() { return { active: false, session: "picker" } as never; },
+      async shutdown() {},
+      uniffiDestroy() {},
+    } as unknown as CuaDriverLike;
+    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+
+    await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([
+      {
+        target: { pid: 10, windowId: 104 },
+        bounds: { x: 99, y: 59, width: 1296, height: 139 },
+        appName: "Google Chrome",
+      },
+      {
+        target: { pid: 11, windowId: 105 },
+        bounds: { x: 99, y: 59, width: 1296, height: 139 },
+        appName: "Google Chrome",
+      },
+      {
+        target: { pid: 10, windowId: 106 },
+        bounds: { x: 0, y: 34, width: 1512, height: 948 },
+        appName: "Google Chrome",
+        title: "Orders",
+      },
+      {
+        target: { pid: 10, windowId: 107 },
+        bounds: { x: 12, y: 48, width: 1200, height: 800 },
+        appName: "Google Chrome",
+        title: "Calendar",
+      },
+      {
+        target: { pid: 10, windowId: 108 },
+        bounds: { x: 0, y: 34, width: 1512, height: 948 },
+        appName: "Google Chrome",
+        title: "Orders",
+      },
+      {
+        target: { pid: 20, windowId: 200 },
+        bounds: { x: 20, y: 40, width: 900, height: 700 },
+        appName: "Terminal",
+      },
+      {
+        target: { pid: 20, windowId: 201 },
+        bounds: { x: 40, y: 60, width: 800, height: 600 },
+        appName: "Terminal",
+      },
+    ]);
+
+    await expect(discovery.listWindows(new AbortController().signal, false)).resolves.toEqual([
+      {
+        target: { pid: 10, windowId: 106 },
+        bounds: { x: 0, y: 34, width: 1512, height: 948 },
+        appName: "Google Chrome",
+        title: "Orders",
+      },
+      {
+        target: { pid: 10, windowId: 107 },
+        bounds: { x: 12, y: 48, width: 1200, height: 800 },
+        appName: "Google Chrome",
+        title: "Calendar",
+      },
+      {
+        target: { pid: 10, windowId: 108 },
+        bounds: { x: 0, y: 34, width: 1512, height: 948 },
+        appName: "Google Chrome",
+        title: "Orders",
+      },
+      {
+        target: { pid: 20, windowId: 200 },
+        bounds: { x: 20, y: 40, width: 900, height: 700 },
+        appName: "Terminal",
+      },
+      {
+        target: { pid: 20, windowId: 201 },
+        bounds: { x: 40, y: 60, width: 800, height: 600 },
+        appName: "Terminal",
+      },
+    ]);
+  });
+
   it("can read the full top-level inventory and restore only the exact selected HWND", async () => {
     const calls: Array<{ tool: string; args?: Record<string, unknown> }> = [];
     const driver = {
@@ -66,6 +175,32 @@ describe("CuaWindowDiscovery", () => {
     });
   });
 
+  it("accepts CUA 0.22.2 Cocoa activation evidence with the observed focused HWND", async () => {
+    const driver = {
+      async startSession() { return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        expect(name).toBe("bring_to_front");
+        return result({
+          structuredJson: JSON.stringify({
+            status: "activated",
+            window_id: 10,
+            exact_window_effect: { verified: true },
+            observed: {
+              focused_window_id: 10,
+              frontmost_ordinary_window_id: 10,
+              front_process_matches_target: true,
+            },
+          }),
+        });
+      },
+      async endSession() { return { active: false, session: "picker" } as never; },
+      async shutdown() {},
+      uniffiDestroy() {},
+    } as unknown as CuaDriverLike;
+    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    await expect(discovery.activateWindow({ pid: 123, windowId: 10 }, new AbortController().signal)).resolves.toBeUndefined();
+  });
+
   it("rejects an activation that does not report landing on the exact target", async () => {
     const calls: string[] = [];
     const driver = {
@@ -82,6 +217,38 @@ describe("CuaWindowDiscovery", () => {
     await expect(discovery.activateWindow({ pid: 123, windowId: 10 }, new AbortController().signal))
       .rejects.toMatchObject({ name: "WindowContractError", code: "WINDOW_ACTIVATION_REFUSED" });
     expect(calls).toEqual(["startSession", "bring_to_front", "endSession", "shutdown", "destroy"]);
+  });
+
+  it("classifies a surfaced sheet whose HWND cannot independently become foreground", async () => {
+    const driver = {
+      async startSession() { return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        expect(name).toBe("bring_to_front");
+        return result({
+          isError: true,
+          structuredJson: JSON.stringify({
+            status: "partial",
+            window_id: 11,
+            exact_window_effect: { verified: false },
+            observed: {
+              focused_window_id: 10,
+              frontmost_ordinary_window_id: 10,
+              front_process_matches_target: true,
+            },
+          }),
+        });
+      },
+      async endSession() { return { active: false, session: "picker" } as never; },
+      async shutdown() {},
+      uniffiDestroy() {},
+    } as unknown as CuaDriverLike;
+    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    await expect(discovery.activateWindow({ pid: 123, windowId: 11 }, new AbortController().signal))
+      .rejects.toMatchObject({
+        name: "WindowContractError",
+        code: "WINDOW_ACTIVATION_UNCONFIRMED",
+        message: expect.stringContaining("no capture or input was sent"),
+      });
   });
 
   it("attempts cleanup after an aborted start and exposes cleanup failure", async () => {

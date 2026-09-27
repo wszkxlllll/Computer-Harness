@@ -285,6 +285,26 @@ describe("managed browser host pilot", () => {
     }
   });
 
+  it("preserves an ephemeral profile when browser exit cannot be proven", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-ephemeral-timeout-"));
+    const markerPath = join(root, "active-profile-marker");
+    await writeFile(markerPath, "must-remain-until-process-exits", "utf8");
+    const diagnostics: string[] = [];
+    const child = { exitCode: null } as unknown as ChildProcess;
+    try {
+      await cleanupManagedBrowser(child, 4321, "ws://127.0.0.1:1234/devtools/browser/fixture", root, "ephemeral", undefined, (kind) => diagnostics.push(kind), {
+        closeGracefully: async () => false,
+        waitForProcessTree: async () => false,
+        forceTerminate: async () => undefined,
+      });
+      expect(diagnostics).toEqual(["graceful_close_failed", "process_exit_timeout", "profile_cleanup_failed"]);
+      await expect(access(root)).resolves.toBeUndefined();
+      await expect(readFile(markerPath, "utf8")).resolves.toBe("must-remain-until-process-exits");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("releases the persistent lock after graceful close even when Browser.close reports a transport error", async () => {
     const root = await mkdtemp(join(tmpdir(), "computer-harness-cleanup-graceful-"));
     const lockPath = join(root, ".computer-harness-profile.lock");

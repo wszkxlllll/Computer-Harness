@@ -1380,6 +1380,14 @@ export async function cleanupManagedBrowser(
     }
   }
   if (profileMode === "ephemeral") {
+    // Never remove a profile while its browser process may still be alive.
+    // Deleting an active Chromium profile can corrupt the process state and
+    // makes a later cleanup/recovery impossible. Preserve the directory and
+    // surface the existing diagnostic boundary instead.
+    if (!processExited) {
+      onDiagnostic?.("profile_cleanup_failed");
+      return;
+    }
     try {
       await rm(profileRoot, { recursive: true, force: true });
     } catch {

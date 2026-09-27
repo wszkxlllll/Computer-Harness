@@ -53,6 +53,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let foregroundRefusalCode: string | undefined;
   let activationRefusal = false;
   let activationLanded = true;
+  let activationTargetHwnd: number | undefined;
+  let activationForegroundHwnd: number | undefined;
   const target = { pid: 1234, windowId: 5678 };
   const driver = {
     async startSession() { calls.push({ name: "startSession" }); return { active: true, revived: false } as never; },
@@ -78,7 +80,11 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       if (name === "bring_to_front") {
         return activationRefusal
           ? result({ isError: true, text: "fixture activation refused" })
-          : result({ structuredJson: JSON.stringify({ landed_on_target: activationLanded }) });
+          : result({ structuredJson: JSON.stringify({
+            landed_on_target: activationLanded,
+            ...(activationTargetHwnd === undefined ? {} : { target_hwnd: activationTargetHwnd }),
+            ...(activationForegroundHwnd === undefined ? {} : { now_fg_hwnd: activationForegroundHwnd }),
+          }) });
       }
       if (name === "list_windows") {
         listWindowsCallCount += 1;
@@ -141,6 +147,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     },
     setActivationRefusal(value: boolean) { activationRefusal = value; },
     setActivationLanded(value: boolean) { activationLanded = value; },
+    setActivationHandles(targetHwnd: number | undefined, foregroundHwnd: number | undefined) {
+      activationTargetHwnd = targetHwnd;
+      activationForegroundHwnd = foregroundHwnd;
+    },
   };
 }
 
@@ -250,6 +260,26 @@ describe("CuaDriverComputer", () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-miss-"));
     const fake = windowDriver();
     fake.setActivationLanded(false);
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    try {
+      await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/did not land on the exact window target/u);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
+      expect(fake.calls.some((call) => call.name === "verifyState")).toBe(false);
+      expect(fake.calls.some((call) => call.name === "click" || call.name === "type_text" || call.name === "press_key")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when bring_to_front reports a different actual foreground HWND", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-foreground-mismatch-"));
+    const fake = windowDriver();
+    // The selected target reports success, but the daemon's actual foreground
+    // remains another window (the shape observed with macOS sheets).
+    fake.setActivationHandles(fake.target.windowId, fake.target.windowId + 1);
     const computer = new CuaDriverComputer({
       socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
       windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
