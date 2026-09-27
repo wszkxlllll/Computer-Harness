@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, prepareManagedBrowserProfile, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
@@ -258,6 +258,13 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--recover-managed-browser-profile")) {
+    if (process.argv.length !== 3) throw new Error("--recover-managed-browser-profile is a standalone local recovery command.");
+    const profile = resolveManagedBrowserProfileConfig();
+    const result = await recoverStaleManagedBrowserProfile(profile.profileRoot, profile.profileLabel);
+    process.stdout.write(`Archived stale managed-browser runtime markers: ${result.archivedMarkers.join(", ")}. Login data was not modified. Archive id: ${result.archiveId}.\n`);
+    return;
+  }
   if (process.argv.includes("--recover-environment")) {
     await runEnvironmentLeaseRecovery(process.argv.slice(2));
     return;

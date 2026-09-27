@@ -91,9 +91,10 @@ export async function listWindowTargets(
   session: string,
   signal: AbortSignal,
   pid?: number,
+  onScreenOnly = true,
 ): Promise<readonly CuaWindowInfo[]> {
   const result = await driver.callTool("list_windows", JSON.stringify({
-    on_screen_only: true,
+    on_screen_only: onScreenOnly,
     ...(pid === undefined ? {} : { pid }),
     session,
   }), { signal });
@@ -299,6 +300,52 @@ function captureRefusalMessage(
   const classification = captureFailureClassification(errorCode, errorText);
   return `configured CUA ${tool} capture was refused for exact target pid=${target.pid}, window_id=${target.windowId}` +
     (classification === undefined ? "" : ` [${classification}]`);
+}
+
+/** Bring one exact OS window to the foreground. This may restore a minimized
+ * window, but it never guesses an identity and dispatches no keyboard/mouse
+ * input. */
+export async function activateWindowTarget(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+): Promise<void> {
+  validateWindowTarget(target);
+  signal.throwIfAborted();
+  const result = await driver.callTool("bring_to_front", JSON.stringify({
+    pid: target.pid,
+    window_id: target.windowId,
+    session,
+  }), { signal });
+  signal.throwIfAborted();
+  if (result.isError) throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
+  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
+  const structured = parseStructured(result.structuredJson);
+  const landed = structured?.landed_on_target;
+  const targetHandle = parseWindowHandle(structured?.target_hwnd);
+  const foregroundHandle = parseWindowHandle(structured?.now_fg_hwnd);
+  const expectedHandle = String(target.windowId);
+  if (landed !== true || (targetHandle !== undefined && targetHandle !== expectedHandle) ||
+      (foregroundHandle !== undefined && foregroundHandle !== expectedHandle) ||
+      (targetHandle !== undefined && foregroundHandle !== undefined && targetHandle !== foregroundHandle)) {
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
+  }
+}
+
+function parseWindowHandle(value: unknown): string | undefined {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? String(value) : undefined;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (/^0x[0-9a-f]+$/iu.test(normalized)) {
+    const parsed = Number.parseInt(normalized.slice(2), 16);
+    return Number.isSafeInteger(parsed) ? String(parsed) : undefined;
+  }
+  if (/^\d+$/u.test(normalized)) {
+    const parsed = Number(normalized);
+    return Number.isSafeInteger(parsed) ? String(parsed) : undefined;
+  }
+  return undefined;
 }
 
 function captureFailureClassification(errorCode: string | undefined, errorText: string): string | undefined {

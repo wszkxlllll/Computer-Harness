@@ -75,4 +75,13 @@ export {
   type ManagedBrowserWindowResolution,
   type CuaBootstrapSession,
 } from "./managed-browser-host.js";
+export {
+  inspectManagedBrowserProfile,
+  recoverStaleManagedBrowserProfile,
+  type ManagedBrowserProfileInspection,
+  type ManagedBrowserProfileMarker,
+  type ManagedBrowserProfileRecoveryDependencies,
+  type ManagedBrowserProfileRecoveryResult,
+  type ManagedBrowserProfileState,
+} from "./managed-browser-profile-recovery.js";
 export { ManagedBrowserWindowResolutionError, resolveOwnedManagedBrowserWindow, validateManagedBrowserWindowResolution, type ManagedBrowserWindowResolutionFailure } from "./managed-browser-resolver.js";

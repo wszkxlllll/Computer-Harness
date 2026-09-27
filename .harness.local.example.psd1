@@ -11,7 +11,7 @@
   Preset = 'assisted'
   OutputRoot = 'runs\local'
 
-  # Optional: reuse a Harness-owned browser login without passing profile flags per start.
+  # Optional: phone Host uses this Harness-owned login when a paired device opens Managed browser.
   ManagedBrowserProfileMode = ''
   ManagedBrowserProfileLabel = ''
   # Jev is off by default. Enabling it sends visible window app names/titles to TypeSafe.

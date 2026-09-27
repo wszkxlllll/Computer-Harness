@@ -230,6 +230,8 @@ export async function openCuaBootstrapSession(socketPath: string, label: string,
 export interface ManagedBrowserDevToolsPage {
   readonly id?: unknown;
   readonly type?: unknown;
+  /** Host-private CDP URL used only to bind the explicit startup target. */
+  readonly url?: unknown;
   readonly webSocketDebuggerUrl?: unknown;
 }
 
@@ -277,6 +279,20 @@ export function resolveManagedBrowserActivePage(
     ? activities
     : activities.filter((activity) => activity.browserWindowId === expectedBrowserWindowId);
   const visible = inWindow.filter((activity) => activity.visibilityState === "visible");
+  if (expectedBrowserWindowId !== undefined) {
+    // Once the host has attested a browser window, focus is not a substitute
+    // for the active-tab invariant: two visible pages in that same window are
+    // ambiguous and must force a fresh observation.
+    return visible.length === 1 ? visible[0] : undefined;
+  }
+  if (visible.length === 0) return undefined;
+  // Chromium can report the active document in each open browser window as
+  // `visibilityState=visible`. During startup this is common when a
+  // persistent profile restores more than one window. The focused document
+  // is the only one that can safely receive the initial GUI action, so use it
+  // when it is unique; retain the fail-closed ambiguity rule otherwise.
+  const focused = visible.filter((activity) => activity.hasFocus === true);
+  if (focused.length === 1) return focused[0];
   return visible.length === 1 ? visible[0] : undefined;
 }
 
@@ -287,15 +303,101 @@ export async function resolveManagedBrowserActivePageSet(
   signal: AbortSignal,
   expectedBrowserWindowId?: number,
   requireSingleBrowserWindow = false,
+  onActivities?: (activities: readonly (ManagedBrowserPageActivity | undefined)[]) => void,
 ): Promise<ManagedBrowserPageActivity | undefined> {
   const pageTargets = pages.filter((item) => item.type === "page" && typeof item.id === "string" && typeof item.webSocketDebuggerUrl === "string");
   if (pageTargets.length === 0 || pageTargets.length > MAX_MANAGED_PAGE_TARGETS) return undefined;
   const activities = await Promise.all(pageTargets.map((page) => readActivity(page, signal)));
+  onActivities?.(activities);
   if (activities.some((activity) => activity === undefined)) return undefined;
   const resolvedActivities = activities as ManagedBrowserPageActivity[];
   const selected = resolveManagedBrowserActivePage(resolvedActivities, expectedBrowserWindowId);
   if (selected === undefined || !requireSingleBrowserWindow) return selected;
-  return resolvedActivities.every((activity) => activity.browserWindowId === selected.browserWindowId) ? selected : undefined;
+  const visible = resolvedActivities.filter((activity) => activity.visibilityState === "visible");
+  const selectedWindowVisible = visible.filter((activity) => activity.browserWindowId === selected.browserWindowId);
+  if (selectedWindowVisible.length !== 1) return undefined;
+  // A unique focused page disambiguates visible pages in restored background
+  // windows. Without that evidence, require every visible page to belong to
+  // the selected browser window as before.
+  const focused = visible.filter((activity) => activity.hasFocus === true);
+  if (focused.length === 1 && focused[0] === selected) return selected;
+  return visible.every((activity) => activity.browserWindowId === selected.browserWindowId) ? selected : undefined;
+}
+
+const MANAGED_BROWSER_TARGET_ID_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/u;
+
+export async function createManagedBrowserPage(
+  browserWebSocketDebuggerUrl: string,
+  url: string,
+  signal: AbortSignal,
+  connect: (webSocketUrl: string, signal: AbortSignal) => Promise<ManagedBrowserCloseTransport> = LoopbackWebSocket.connect,
+): Promise<string> {
+  if (url !== "about:blank" && !url.startsWith("https://") && !url.startsWith("http://") && !url.startsWith("data:text/html")) {
+    throw new DomGroundingUnavailableError("managed browser startup URL was invalid");
+  }
+  const socket = await connect(browserWebSocketDebuggerUrl, signal);
+  try {
+    const response = await socket.command("Target.createTarget", { url, newWindow: false }, signal);
+    const result = isRecord(response) && isRecord(response.result) ? response.result : undefined;
+    const targetId = result?.targetId;
+    if (typeof targetId !== "string" || !MANAGED_BROWSER_TARGET_ID_PATTERN.test(targetId)) {
+      throw new DomGroundingUnavailableError("managed browser startup target was not created");
+    }
+    return targetId;
+  } finally {
+    socket.close();
+  }
+}
+
+export async function activateManagedBrowserPage(
+  browserWebSocketDebuggerUrl: string,
+  targetId: string,
+  signal: AbortSignal,
+  connect: (webSocketUrl: string, signal: AbortSignal) => Promise<ManagedBrowserCloseTransport> = LoopbackWebSocket.connect,
+): Promise<void> {
+  if (!MANAGED_BROWSER_TARGET_ID_PATTERN.test(targetId)) throw new DomGroundingUnavailableError("managed browser startup target id was invalid");
+  const socket = await connect(browserWebSocketDebuggerUrl, signal);
+  try {
+    const response = await socket.command("Target.activateTarget", { targetId }, signal);
+    const result = isRecord(response) ? response.result : undefined;
+    if (isRecord(result) && result.success === false) throw new DomGroundingUnavailableError("managed browser startup target could not be activated");
+  } finally {
+    socket.close();
+  }
+}
+
+export async function closeManagedBrowserPage(
+  browserWebSocketDebuggerUrl: string,
+  targetId: string,
+  signal: AbortSignal,
+  connect: (webSocketUrl: string, signal: AbortSignal) => Promise<ManagedBrowserCloseTransport> = LoopbackWebSocket.connect,
+): Promise<void> {
+  if (!MANAGED_BROWSER_TARGET_ID_PATTERN.test(targetId)) throw new DomGroundingUnavailableError("managed browser target id was invalid");
+  const socket = await connect(browserWebSocketDebuggerUrl, signal);
+  try {
+    const response = await socket.command("Target.closeTarget", { targetId }, signal);
+    const result = isRecord(response) && isRecord(response.result) ? response.result : undefined;
+    if (isRecord(result) && result.success === false) throw new DomGroundingUnavailableError("managed browser target could not be closed");
+  } finally {
+    socket.close();
+  }
+}
+
+/**
+ * Startup-only exact-target fallback. The targetId came from Host-issued
+ * Target.createTarget and remains stable across normal navigation/redirects;
+ * unlike a generic hidden-page fallback it cannot bind a prepared tab. The
+ * returned activity still carries the browserWindowId/bounds used by the
+ * existing CUA ownership and geometry checks.
+ */
+export function selectManagedBrowserStartupActivity(
+  activities: readonly (ManagedBrowserPageActivity | undefined)[],
+  targetId: string,
+  activationSucceeded: boolean,
+): ManagedBrowserPageActivity | undefined {
+  if (!activationSucceeded || !MANAGED_BROWSER_TARGET_ID_PATTERN.test(targetId)) return undefined;
+  const activity = activities.find((candidate) => candidate?.page.id === targetId);
+  return activity === undefined || activity.visibilityState === "unloaded" ? undefined : activity;
 }
 
 const MANAGED_PAGE_ACTIVITY_SCRIPT = String.raw`({
@@ -576,8 +678,11 @@ export class ManagedBrowserHost {
     if (typeof options.resolveOwnedWindowTarget !== "function") {
       throw new DomGroundingUnavailableError("managed browser host requires an owned-window resolver");
     }
-    if (!options.url.startsWith("https://") && !options.url.startsWith("http://") && !options.url.startsWith("data:text/html")) {
-      throw new DomGroundingUnavailableError("managed browser host URL must be an explicit http(s) or static data URL");
+    if (options.url !== "about:blank" && !options.url.startsWith("https://") && !options.url.startsWith("http://") && !options.url.startsWith("data:text/html")) {
+      throw new DomGroundingUnavailableError("managed browser host URL must be an explicit http(s), exact about:blank, or static data URL");
+    }
+    if (options.url === "about:blank" && options.registerStartupUrl === true) {
+      throw new DomGroundingUnavailableError("about:blank cannot be registered as a managed browser startup URL");
     }
     if (!Number.isInteger(options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS) || (options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS) <= 0) {
       throw new DomGroundingUnavailableError("managed browser startup timeout must be positive");
@@ -609,9 +714,8 @@ export class ManagedBrowserHost {
       const preparedStartupUrls = profileMode === "persistent"
         ? await readManagedBrowserStartupUrls(profileRoot)
         : [];
-      const launchUrls = profileMode === "persistent"
-        ? buildManagedBrowserLaunchUrls(preparedStartupUrls, this.options.url)
-        : [this.options.url];
+      const bootstrapUrl = createManagedBrowserBootstrapUrl();
+      const launchUrls = buildManagedBrowserLaunchUrls(preparedStartupUrls, this.options.url, bootstrapUrl);
       const args = [
         `--user-data-dir=${profileRoot}`,
         "--remote-debugging-address=127.0.0.1",
@@ -631,9 +735,21 @@ export class ManagedBrowserHost {
       const devTools = await waitForDevToolsPort(profileRoot, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal, freshnessBoundaryMs);
       const browserEndpoint = await waitForDevToolsBrowserEndpoint(devTools.port, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal);
       browserWebSocketDebuggerUrl = browserEndpoint;
+      const bootstrapPages = await listDevToolsPages(devTools.port, signal).catch(() => [] as ManagedBrowserDevToolsPage[]);
+      const startupTargetId = await createManagedBrowserPage(browserEndpoint, this.options.url, signal);
+      if (launchUrls.length === 1 && launchUrls[0] === bootstrapUrl) {
+        const bootstrapCandidates = bootstrapPages.filter((page) => page.type === "page" && typeof page.id === "string" && page.id !== startupTargetId && page.url === bootstrapUrl);
+        // Close a lone Host-created dummy only when its identity is
+        // unambiguous. Multiple blank pages may include restored/user tabs;
+        // those are never closed by this lifecycle.
+        if (bootstrapCandidates.length === 1) {
+          await closeManagedBrowserPage(browserEndpoint, bootstrapCandidates[0]!.id as string, signal).catch(() => undefined);
+        }
+      }
       const startupPageSet = await waitForManagedBrowserStartupPageSet(
         devTools.port,
         browserEndpoint,
+        startupTargetId,
         signal,
         Math.min(this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, 3_000),
       );
@@ -641,7 +757,7 @@ export class ManagedBrowserHost {
       const selected = startupPageSet.selected;
       if (selected === undefined) {
         try { this.options.onStartupPageDiagnostic?.({ pageCount: pages.length, selected: false }); } catch { /* best effort */ }
-        throw new DomGroundingUnavailableError("managed browser host must expose one visible page in one browser window");
+        throw new DomGroundingUnavailableError(`managed browser host must expose one visible page in one browser window (${summarizeManagedBrowserPageActivities(startupPageSet.activities)})`);
       }
       try {
         this.options.onStartupPageDiagnostic?.({
@@ -1019,14 +1135,32 @@ interface ManagedBrowserProfileResources {
 export function buildManagedBrowserLaunchUrls(
   preparedStartupUrls: readonly string[],
   currentUrl: string,
+  bootstrapUrl = "about:blank",
 ): readonly string[] {
-  const currentNormalized = normalizeManagedBrowserStartupUrl(currentUrl);
+  const currentNormalized = isHttpStartupUrl(currentUrl)
+    ? normalizeManagedBrowserStartupUrl(currentUrl)
+    : currentUrl === "about:blank" ? "about:blank" : undefined;
   const prepared = preparedStartupUrls
     .map((url) => normalizeManagedBrowserStartupUrl(url))
-    .filter((url, index, urls) => urls.indexOf(url) === index && url !== currentNormalized);
-  // Chromium treats the first command-line URL as the foreground tab. Keep
-  // the explicitly supplied Run URL first; prepared sites are background tabs.
-  return [currentUrl, ...prepared];
+    .filter((url, index, urls) => urls.indexOf(url) === index && (currentNormalized === undefined || url !== currentNormalized));
+  // The current Run URL is created and activated through CDP after the
+  // browser endpoint is ready. Command-line launching it would create a
+  // duplicate tab and cannot provide a stable targetId across redirects.
+  // Keep prepared sites as startup tabs; the caller supplies a unique
+  // Host-owned bootstrap when there are no prepared tabs.
+  return prepared.length === 0 ? [bootstrapUrl] : prepared;
+}
+
+function isHttpStartupUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:")
+      && parsed.hostname.length > 0
+      && parsed.username.length === 0
+      && parsed.password.length === 0;
+  } catch {
+    return false;
+  }
 }
 
 function isMissingFile(error: unknown): boolean {
@@ -1350,23 +1484,41 @@ async function listDevToolsPages(port: number, signal: AbortSignal): Promise<Man
 async function waitForManagedBrowserStartupPageSet(
   port: number,
   browserWebSocketDebuggerUrl: string,
+  startupTargetId: string,
   signal: AbortSignal,
   timeoutMs: number,
-): Promise<{ readonly pages: ManagedBrowserDevToolsPage[]; readonly selected: ManagedBrowserPageActivity | undefined }> {
+): Promise<{ readonly pages: ManagedBrowserDevToolsPage[]; readonly activities: readonly (ManagedBrowserPageActivity | undefined)[]; readonly selected: ManagedBrowserPageActivity | undefined }> {
   const deadline = Date.now() + timeoutMs;
   let lastPages: ManagedBrowserDevToolsPage[] = [];
+  let lastActivities: readonly (ManagedBrowserPageActivity | undefined)[] = [];
+  let activationSucceeded = false;
   while (Date.now() < deadline) {
     signal.throwIfAborted();
     try {
       lastPages = await listDevToolsPages(port, signal);
-      const selected = await resolveManagedBrowserActivePageSet(lastPages, (page, activitySignal) => inspectManagedPageActivity(page, browserWebSocketDebuggerUrl, activitySignal), signal, undefined, true);
-      if (selected !== undefined) return { pages: lastPages, selected };
+      if (!activationSucceeded) {
+        await activateManagedBrowserPage(browserWebSocketDebuggerUrl, startupTargetId, signal);
+        activationSucceeded = true;
+      }
+      const selected = await resolveManagedBrowserActivePageSet(
+        lastPages,
+        (page, activitySignal) => inspectManagedPageActivity(page, browserWebSocketDebuggerUrl, activitySignal),
+        signal,
+        undefined,
+        true,
+        (activities) => { lastActivities = [...activities]; },
+      );
+      if (selected !== undefined && selected.page.id === startupTargetId) {
+        return { pages: lastPages, activities: lastActivities, selected };
+      }
+      const exactTarget = selectManagedBrowserStartupActivity(lastActivities, startupTargetId, activationSucceeded);
+      if (exactTarget !== undefined) return { pages: lastPages, activities: lastActivities, selected: exactTarget };
     } catch (error) {
       if (signal.aborted) throw error;
     }
     await wait(100, signal);
   }
-  return { pages: lastPages, selected: undefined };
+  return { pages: lastPages, activities: lastActivities, selected: undefined };
 }
 
 async function listDevToolsBrowserWebSocketUrl(port: number, signal: AbortSignal): Promise<string> {
@@ -1451,6 +1603,16 @@ function parseBrowserBounds(value: unknown): ManagedBrowserPageActivity["browser
   const width = positiveIntegerValue(value.width);
   const height = positiveIntegerValue(value.height);
   return x === undefined || y === undefined || width === undefined || height === undefined ? undefined : { x, y, width, height };
+}
+
+function summarizeManagedBrowserPageActivities(activities: readonly (ManagedBrowserPageActivity | undefined)[]): string {
+  if (activities.length === 0) return "pages=0";
+  const summary = activities.map((activity) => {
+    if (activity === undefined) return "activity-unavailable";
+    const focus = activity.hasFocus === true ? "focus" : activity.hasFocus === false ? "no-focus" : "unknown-focus";
+    return `${activity.browserWindowId}:${activity.visibilityState}:${focus}`;
+  });
+  return `activities=${summary.join(",")}`;
 }
 
 function finiteInteger(value: unknown): number | undefined {
@@ -1678,6 +1840,10 @@ function encodeClientFrame(value: string | Buffer, opcode = 0x1): Buffer {
 
 function shortHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
+}
+
+function createManagedBrowserBootstrapUrl(): string {
+  return `data:text/html,computer-harness-bootstrap-${randomBytes(16).toString("hex")}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

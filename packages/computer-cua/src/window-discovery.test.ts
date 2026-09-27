@@ -36,6 +36,54 @@ describe("CuaWindowDiscovery", () => {
     expect(calls).toEqual(["startSession", "list_windows", "endSession", "shutdown", "destroy"]);
   });
 
+  it("can read the full top-level inventory and restore only the exact selected HWND", async () => {
+    const calls: Array<{ tool: string; args?: Record<string, unknown> }> = [];
+    const driver = {
+      async startSession() { calls.push({ tool: "startSession" }); return { active: true, revived: false } as never; },
+      async callTool(name: string, rawArgs: string) {
+        const args = JSON.parse(rawArgs) as Record<string, unknown>;
+        calls.push({ tool: name, args });
+        if (name === "list_windows") {
+          return result({ structuredJson: JSON.stringify({ windows: [{ pid: 102_140, window_id: 33_296_778, app_name: "Weixin", title: "微信", bounds: { x: -2_000, y: -2_000, width: 800, height: 600 } }] }) });
+        }
+        return result({ structuredJson: JSON.stringify({ landed_on_target: true, target_hwnd: "33296778", now_fg_hwnd: "33296778" }) });
+      },
+      async endSession() { calls.push({ tool: "endSession" }); return { active: false, session: "picker" } as never; },
+      async shutdown() { calls.push({ tool: "shutdown" }); },
+      uniffiDestroy() { calls.push({ tool: "destroy" }); },
+    } as unknown as CuaDriverLike;
+    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+
+    await expect(discovery.listWindows(new AbortController().signal, false)).resolves.toMatchObject([
+      { target: { pid: 102_140, windowId: 33_296_778 }, title: "微信" },
+    ]);
+    await discovery.activateWindow({ pid: 102_140, windowId: 33_296_778 }, new AbortController().signal);
+
+    expect(calls.filter((call) => call.tool === "list_windows")[0]?.args).toMatchObject({ on_screen_only: false });
+    expect(calls.filter((call) => call.tool === "bring_to_front")[0]).toEqual({
+      tool: "bring_to_front",
+      args: { pid: 102_140, window_id: 33_296_778, session: expect.any(String) },
+    });
+  });
+
+  it("rejects an activation that does not report landing on the exact target", async () => {
+    const calls: string[] = [];
+    const driver = {
+      async startSession() { calls.push("startSession"); return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        calls.push(name);
+        return result({ structuredJson: JSON.stringify({ landed_on_target: false, target_hwnd: "10", now_fg_hwnd: "11" }) });
+      },
+      async endSession() { calls.push("endSession"); return { active: false, session: "picker" } as never; },
+      async shutdown() { calls.push("shutdown"); },
+      uniffiDestroy() { calls.push("destroy"); },
+    } as unknown as CuaDriverLike;
+    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    await expect(discovery.activateWindow({ pid: 123, windowId: 10 }, new AbortController().signal))
+      .rejects.toMatchObject({ name: "WindowContractError", code: "WINDOW_ACTIVATION_REFUSED" });
+    expect(calls).toEqual(["startSession", "bring_to_front", "endSession", "shutdown", "destroy"]);
+  });
+
   it("attempts cleanup after an aborted start and exposes cleanup failure", async () => {
     const calls: string[] = [];
     const driver = {
