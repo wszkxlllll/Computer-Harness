@@ -24,6 +24,15 @@ export interface RemoteWindowTargetSet {
   readonly expiresAt: string;
 }
 
+export type RemoteBrowserSessionMode = "temporary" | "saved";
+
+export type RemoteRunTarget =
+  | { readonly mode: "auto" }
+  | { readonly mode: "window"; readonly targetToken: string }
+  | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string };
+/** A bare token remains accepted for existing clients. */
+export type RemoteRunTargetInput = string | RemoteRunTarget;
+
 export interface RemoteApprovalActionPreview {
   /** Tool name bounded by Host; the action kind below is from the guarded action. */
   readonly operation: string;
@@ -134,7 +143,7 @@ export interface RemoteRunApi {
   listRuns(deviceId: string): Promise<readonly RemoteRunSnapshot[]> | readonly RemoteRunSnapshot[];
   getRun(deviceId: string, runId: string): Promise<RemoteRunSnapshot | undefined> | RemoteRunSnapshot | undefined;
   listWindowTargets(deviceId: string): Promise<RemoteWindowTargetSet>;
-  startRun(deviceId: string, commandId: string, goal: string, targetToken: string): Promise<RemoteRunSnapshot>;
+  startRun(deviceId: string, commandId: string, goal: string, target: RemoteRunTargetInput): Promise<RemoteRunSnapshot>;
   submitCommand(deviceId: string, runId: string, command: RemoteCommand): Promise<RemoteCommandReceipt>;
   getCommandReceipt(deviceId: string, runId: string, commandId: string): Promise<RemoteCommandReceipt | undefined> | RemoteCommandReceipt | undefined;
   subscribe(deviceId: string, runId: string, afterSequence: number, listener: (event: RemoteStreamEvent) => void): RemoteSubscription;

@@ -42,7 +42,7 @@ function config(outputDir: string): ApplicationSessionConfig {
   };
 }
 
-function fixtureComputer(screen: Viewport = viewport): Computer {
+function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promise<void> = async () => undefined): Computer {
   let sequence = 0;
   const session: ComputerSession = {
     id: "remote-api-session" as ComputerSessionId,
@@ -62,7 +62,7 @@ function fixtureComputer(screen: Viewport = viewport): Computer {
       };
     },
     async execute(_session, action) { return { actionId: action.actionId, status: "completed" as const }; },
-    async close() {},
+    async close() { await closeComputer(); },
   } as unknown as Computer;
 }
 
@@ -82,21 +82,61 @@ function providerFor(options: { askFirst?: boolean; summary: string; turns?: rea
 
 function createFixture(
   outputDir: string,
-  options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[]; guardDecisions?: readonly ActionPolicyDecision[]; screen?: Viewport },
+  options: {
+    askFirst?: boolean;
+    summary: string;
+    turns?: readonly ModelTurn[];
+    guardDecisions?: readonly ActionPolicyDecision[];
+    screen?: Viewport;
+    windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
+    allWindows?: readonly WindowTargetInfo[];
+    onActivateWindow?: (target: { pid: number; windowId: number }, showWindow: (window: WindowTargetInfo) => void) => void;
+    managedBrowserProfile?: { readonly profileLabel: string; readonly profileRoot: string };
+    inspectManagedBrowserProfile?: (profileRoot: string, profileLabel: string) => Promise<{ state: "ready" | "active" | "stale" | "unknown" | "unsafe"; markers: readonly ("profile_lock" | "devtools_port")[] }>;
+    readManagedBrowserStartupUrls?: () => Promise<readonly string[]>;
+    closeComputer?: () => Promise<void>;
+  },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
   let windows: readonly WindowTargetInfo[] = [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }];
+  let windowReadIndex = 0;
   let guardDecisionIndex = 0;
   const createdComputerConfigs: Array<Extract<ApplicationSessionConfig["computer"], { kind: "cua" }>> = [];
+  const windowDiscoveryCalls: Array<{ type: "visible" | "all" | "activate"; pid?: number; windowId?: number }> = [];
+  const baseConfig = config(outputDir);
+  const baseComputer = baseConfig.computer;
+  if (baseComputer.kind !== "cua") throw new Error("fixture requires CUA");
+  const sessionConfig: ApplicationSessionConfig = {
+    ...baseConfig,
+    computer: options.managedBrowserProfile === undefined ? baseComputer : {
+      ...baseComputer,
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: options.managedBrowserProfile.profileLabel,
+      managedBrowserProfileRoot: options.managedBrowserProfile.profileRoot,
+    },
+  };
   const session = new ApplicationSession({
-    config: config(outputDir),
+    config: sessionConfig,
     owner: new InProcessEnvironmentOwner(),
-    windowDiscovery: { listWindows: async () => windows },
+    windowDiscovery: {
+      listWindows: async () => {
+        windowDiscoveryCalls.push({ type: "visible" });
+        return options.windowSnapshots?.[windowReadIndex++] ?? windows;
+      },
+      listAllWindows: async () => {
+        windowDiscoveryCalls.push({ type: "all" });
+        return options.allWindows ?? options.windowSnapshots?.[0] ?? windows;
+      },
+      activateWindow: async (target) => {
+        windowDiscoveryCalls.push({ type: "activate", pid: target.pid, windowId: target.windowId });
+        options.onActivateWindow?.(target, (window) => { windows = [...windows.filter((item) => item.pid !== window.pid || item.windowId !== window.windowId), window]; });
+      },
+    },
     dependencies: {
       createProvider: () => providerFor(options),
       createComputer: async ({ config: computerConfig }) => {
         if (computerConfig.kind === "cua") createdComputerConfigs.push(computerConfig);
-        return fixtureComputer(options.screen);
+        return fixtureComputer(options.screen, options.closeComputer);
       },
       ...(options.guardDecisions === undefined ? {} : {
         createActionPolicy: () => ({
@@ -114,9 +154,12 @@ function createFixture(
     session,
     capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
     assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(resolve(handle.config.outputDir, "assets")),
+    ...(options.managedBrowserProfile === undefined ? {} : { managedBrowserProfile: options.managedBrowserProfile }),
+    ...(options.inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile: options.inspectManagedBrowserProfile }),
+    ...(options.readManagedBrowserStartupUrls === undefined ? {} : { readManagedBrowserStartupUrls: options.readManagedBrowserStartupUrls }),
     ...limits,
   });
-  return { api, session, createdComputerConfigs, setWindows: (value: readonly WindowTargetInfo[]) => { windows = value; } };
+  return { api, session, createdComputerConfigs, windowDiscoveryCalls, setWindows: (value: readonly WindowTargetInfo[]) => { windows = value; } };
 }
 
 function fixtureGuardDecision(decision: "allow" | "require_approval", reason: string): ActionPolicyDecision {
@@ -339,6 +382,479 @@ describe("ApplicationRemoteRunApi", () => {
       expect(events.length).toBeGreaterThan(0);
       expect(events).toEqual(events.map((_value, index) => index + 1));
       expect(() => api.subscribe("device-two", first.runId, 0, () => undefined)).toThrow(RemoteRunApiError);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("automatically binds a unique confident local window match and deduplicates the complete target", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-target-"));
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "Checked the report." });
+    try {
+      const [first, repeated] = await Promise.all([
+        api.startRun("device-one", "auto-unique", "Open Fixture app and check the report", { mode: "auto" }),
+        api.startRun("device-one", "auto-unique", "Open Fixture app and check the report", { mode: "auto" }),
+      ]);
+      expect(repeated.runId).toBe(first.runId);
+      expect(first.target).toEqual({ appName: "Fixture app", title: "Fixture window" });
+      expect(JSON.stringify(first)).not.toMatch(/pid|windowId/iu);
+      await session.waitForActiveRun();
+      expect(createdComputerConfigs[0]).toMatchObject({
+        windowTarget: { pid: 42, windowId: 1001 },
+        windowDeliveryMode: "foreground",
+        grounding: "off",
+      });
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores one uniquely matched minimized window, refreshes visibility, then binds its exact identity", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-minimized-window-"));
+    const wechat = { pid: 102_140, windowId: 33_296_778, appName: "Weixin", title: "微信" };
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "The message task can start.",
+      allWindows: [wechat],
+      windowSnapshots: [[], [wechat]],
+      onActivateWindow(target, showWindow) {
+        expect(target).toEqual({ pid: wechat.pid, windowId: wechat.windowId });
+        showWindow(wechat);
+      },
+    });
+    try {
+      const run = await api.startRun("device-one", "auto-wechat-minimized", "在微信上给测试联系人发消息", { mode: "auto" });
+      expect(run.target).toEqual({ appName: "Weixin", title: "微信" });
+      expect(windowDiscoveryCalls).toEqual([
+        { type: "all" },
+        { type: "visible" },
+        { type: "activate", pid: wechat.pid, windowId: wechat.windowId },
+        { type: "visible" },
+      ]);
+      expect(createdComputerConfigs[0]).toMatchObject({
+        windowTarget: { pid: wechat.pid, windowId: wechat.windowId },
+        windowDeliveryMode: "foreground",
+      });
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not activate an auto match whose visible identity changed after inventory", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-minimized-stale-"));
+    const selected = { pid: 102_140, windowId: 33_296_778, appName: "Weixin", title: "微信" };
+    const replacement = { ...selected, title: "登录窗口" };
+    const { api, session, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "Should not run.",
+      allWindows: [selected],
+      windowSnapshots: [[replacement]],
+    });
+    try {
+      await expect(api.startRun("device-one", "auto-wechat-stale", "在微信上给测试联系人发消息", { mode: "auto" }))
+        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
+      expect(windowDiscoveryCalls.some((call) => call.type === "activate")).toBe(false);
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires the phone to choose manually when automatic matching is ambiguous or absent", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-abstain-"));
+    const { api, session, setWindows } = createFixture(outputDir, { summary: "Should not run." });
+    try {
+      setWindows([
+        { pid: 10, windowId: 100, appName: "Google Chrome", title: "First" },
+        { pid: 20, windowId: 200, appName: "Google Chrome", title: "Second" },
+      ]);
+      await expect(api.startRun("device-one", "auto-ambiguous", "Use Google Chrome to check the report", { mode: "auto" }))
+        .rejects.toMatchObject({ code: "WINDOW_SELECTION_REQUIRED" });
+
+      setWindows([
+        { pid: 30, windowId: 300, appName: "Browser", title: "New Tab" },
+        { pid: 40, windowId: 400, appName: "Browser", title: "Untitled" },
+      ]);
+      await expect(api.startRun("device-one", "auto-none", "Look at the browser window", { mode: "auto" }))
+        .rejects.toMatchObject({ code: "WINDOW_SELECTION_REQUIRED" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an automatic match whose exact window identity changes before Run start", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-moved-"));
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Should not run.",
+      windowSnapshots: [
+        [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }],
+        [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "A replacement window" }],
+      ],
+    });
+    try {
+      await expect(api.startRun("device-one", "auto-moved", "Open Fixture app and check the report", { mode: "auto" }))
+        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+      expect(createdComputerConfigs).toEqual([]);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("opens the explicitly requested browser with the injected Host profile and redacts URL and profile path", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-managed-browser-"));
+    const profileRoot = "C:\\HarnessOwned\\managed-browser-profiles";
+    const managedBrowserProfile = { profileLabel: "saved.login", profileRoot };
+    const url = "https://tickets.example/search?token=private";
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      askFirst: true,
+      summary: "Checked the requested page.",
+      managedBrowserProfile,
+    });
+    try {
+      const [first, repeated] = await Promise.all([
+        api.startRun("device-one", "browser-once", "Check my ticket", { mode: "browser", sessionMode: "saved", url }),
+        api.startRun("device-one", "browser-once", "Check my ticket", { mode: "browser", sessionMode: "saved", url }),
+      ]);
+      expect(repeated.runId).toBe(first.runId);
+      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "tickets.example" });
+      expect(JSON.stringify(first)).not.toContain("token=private");
+      expect(JSON.stringify(first)).not.toContain(profileRoot);
+      expect(createdComputerConfigs[0]).toMatchObject({
+        grounding: "hybrid-catalog-v1",
+        managedBrowserUrl: url,
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "saved.login",
+        managedBrowserProfileRoot: profileRoot,
+        windowDeliveryMode: "foreground",
+      });
+      expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
+      await expect(api.startRun("device-one", "browser-once", "Check my ticket", { mode: "browser", sessionMode: "saved", url: "https://other.example" }))
+        .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await waitFor(() => session.activeRun?.controller.getSnapshot().status === "waiting_user", "managed browser fixture did not pause for its report check");
+      const handle = session.activeRun;
+      if (handle === undefined) throw new Error("expected managed browser fixture Run to remain active");
+      await session.submitUserInput("Continue");
+      await session.waitForActiveRun();
+      const report = await handle.report();
+      expect(JSON.stringify(report)).not.toContain("token=private");
+      expect(JSON.stringify(report)).not.toContain(profileRoot);
+    } finally {
+      if (session.activeRun !== undefined) session.activeRun.controller.cancel("managed browser config test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a stale managed-browser profile before creating a Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-managed-browser-stale-profile-"));
+    const managedBrowserProfile = { profileLabel: "travel", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };
+    const { api, session } = createFixture(outputDir, {
+      summary: "Should not run.",
+      managedBrowserProfile,
+      inspectManagedBrowserProfile: async (profileRoot, profileLabel) => {
+        expect(profileRoot).toBe(managedBrowserProfile.profileRoot);
+        expect(profileLabel).toBe("travel");
+        return { state: "stale", markers: ["profile_lock", "devtools_port"] };
+      },
+    });
+    try {
+      await expect(api.startRun("device-one", "browser-stale-profile", "Open the travel page", { mode: "browser", sessionMode: "saved" }))
+        .rejects.toMatchObject({ code: "MANAGED_BROWSER_PROFILE_UNAVAILABLE" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("maps managed-profile inspection failures to a safe typed pre-Run error", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-managed-browser-profile-check-error-"));
+    const { api, session } = createFixture(outputDir, {
+      summary: "Should not run.",
+      managedBrowserProfile: { profileLabel: "mobile", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" },
+      inspectManagedBrowserProfile: async () => { throw new Error("permission denied at a private path"); },
+    });
+    try {
+      await expect(api.startRun("device-one", "browser-profile-check-error", "Open the website", { mode: "browser", sessionMode: "saved" }))
+        .rejects.toMatchObject({ code: "MANAGED_BROWSER_PROFILE_UNAVAILABLE" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults a temporary browser to an ephemeral exact about:blank target", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-browser-blank-"));
+    const managedBrowserProfile = { profileLabel: "saved.login", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Opened a blank managed page.",
+      managedBrowserProfile,
+    });
+    try {
+      const [first, sameCommandWithEmptyUrl] = await Promise.all([
+        api.startRun("device-one", "browser-blank", "Open a blank managed page", { mode: "browser" }),
+        api.startRun("device-one", "browser-blank", "Open a blank managed page", { mode: "browser", url: " \t " }),
+      ]);
+      expect(sameCommandWithEmptyUrl.runId).toBe(first.runId);
+      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserUrl: "about:blank",
+        managedBrowserProfileMode: "ephemeral",
+        grounding: "hybrid-catalog-v1",
+        windowDeliveryMode: "foreground",
+      });
+      const sameCommandWithExplicitBlank = await api.startRun("device-one", "browser-blank", "Open a blank managed page", { mode: "browser", url: "about:blank" });
+      expect(sameCommandWithExplicitBlank.runId).toBe(first.runId);
+    } finally {
+      session.activeRun?.controller.cancel("about:blank target test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for cleanup after a public finished snapshot before starting the next Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-finished-cleanup-"));
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolveCleanup) => { releaseCleanup = resolveCleanup; });
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The first Run finished before cleanup completed.",
+      closeComputer: () => cleanupGate,
+    });
+    try {
+      const first = await api.startRun("device-one", "finished-before-cleanup", "Open a blank managed page", { mode: "browser" });
+      await waitFor(() => api.getRun("device-one", first.runId)?.status === "finished", "public finished snapshot was not published");
+      expect(session.activeRun).toBeDefined();
+
+      const secondPromise = api.startRun("device-one", "after-finished-cleanup", "Open another blank managed page", { mode: "browser" });
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+      expect(createdComputerConfigs).toHaveLength(1);
+      expect(session.activeRun).toBeDefined();
+
+      releaseCleanup();
+      const second = await secondPromise;
+      expect(second.runId).not.toBe(first.runId);
+      expect(createdComputerConfigs).toHaveLength(2);
+      await session.waitForActiveRun();
+    } finally {
+      releaseCleanup();
+      session.activeRun?.controller.cancel("finished cleanup ordering test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a second start while the current Run is still waiting for user input", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-running-busy-"));
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "The user input was received." });
+    try {
+      const first = await api.startRun("device-one", "running-busy-first", "Open a blank managed page", { mode: "browser" });
+      await waitFor(() => api.getRun("device-one", first.runId)?.status === "waiting_user", "Run did not remain active while waiting for input");
+      await expect(api.startRun("device-one", "running-busy-second", "Open another blank managed page", { mode: "browser" }))
+        .rejects.toMatchObject({ code: "RUN_BUSY" });
+      await session.submitUserInput("Continue");
+      await session.waitForActiveRun();
+    } finally {
+      session.activeRun?.controller.cancel("running busy test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits before inspecting a saved profile after a terminal snapshot", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-saved-cleanup-order-"));
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolveCleanup) => { releaseCleanup = resolveCleanup; });
+    let inspectCalls = 0;
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The browser task finished.",
+      managedBrowserProfile: { profileLabel: "travel", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" },
+      inspectManagedBrowserProfile: async () => {
+        inspectCalls += 1;
+        return { state: "ready", markers: [] };
+      },
+      readManagedBrowserStartupUrls: async () => ["https://travel.example/"],
+      closeComputer: () => cleanupGate,
+    });
+    try {
+      const first = await api.startRun("device-one", "saved-order-first", "Open a blank managed page", { mode: "browser" });
+      await waitFor(() => api.getRun("device-one", first.runId)?.status === "finished", "terminal snapshot was not published");
+      const secondPromise = api.startRun("device-one", "saved-order-second", "Open the saved travel site", { mode: "browser", sessionMode: "saved" });
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+      expect(inspectCalls).toBe(0);
+      expect(createdComputerConfigs).toHaveLength(1);
+      releaseCleanup();
+      await secondPromise;
+      expect(inspectCalls).toBe(1);
+      expect(createdComputerConfigs).toHaveLength(2);
+    } finally {
+      releaseCleanup();
+      session.activeRun?.controller.cancel("saved cleanup ordering test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits before automatic window discovery after a terminal snapshot", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-cleanup-order-"));
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolveCleanup) => { releaseCleanup = resolveCleanup; });
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "The browser task finished.",
+      allWindows: [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }],
+      closeComputer: () => cleanupGate,
+    });
+    try {
+      const first = await api.startRun("device-one", "auto-order-first", "Open a blank managed page", { mode: "browser" });
+      await waitFor(() => api.getRun("device-one", first.runId)?.status === "finished", "terminal snapshot was not published");
+      const callsBeforeSecond = windowDiscoveryCalls.length;
+      const secondPromise = api.startRun("device-one", "auto-order-second", "Open Fixture app and check the report", { mode: "auto" });
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+      expect(windowDiscoveryCalls).toHaveLength(callsBeforeSecond);
+      expect(createdComputerConfigs).toHaveLength(1);
+      releaseCleanup();
+      await secondPromise;
+      expect(windowDiscoveryCalls.some((call) => call.type === "all")).toBe(true);
+      expect(createdComputerConfigs).toHaveLength(2);
+    } finally {
+      releaseCleanup();
+      session.activeRun?.controller.cancel("auto cleanup ordering test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits before manual window verification after a terminal snapshot", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-manual-cleanup-order-"));
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolveCleanup) => { releaseCleanup = resolveCleanup; });
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "The browser task finished.",
+      closeComputer: () => cleanupGate,
+    });
+    try {
+      const candidates = await api.listWindowTargets("device-one");
+      const targetToken = candidates.candidates[0]?.token;
+      if (targetToken === undefined) throw new Error("fixture did not expose a manual window target");
+      const first = await api.startRun("device-one", "manual-order-first", "Open a blank managed page", { mode: "browser" });
+      await waitFor(() => api.getRun("device-one", first.runId)?.status === "finished", "terminal snapshot was not published");
+      const callsBeforeSecond = windowDiscoveryCalls.length;
+      const secondPromise = api.startRun("device-one", "manual-order-second", "Use the selected Fixture app", targetToken);
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+      expect(windowDiscoveryCalls).toHaveLength(callsBeforeSecond);
+      expect(createdComputerConfigs).toHaveLength(1);
+      releaseCleanup();
+      await secondPromise;
+      expect(windowDiscoveryCalls.length).toBeGreaterThan(callsBeforeSecond);
+      expect(createdComputerConfigs).toHaveLength(2);
+    } finally {
+      releaseCleanup();
+      session.activeRun?.controller.cancel("manual cleanup ordering test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the first prepared saved site when the saved browser URL is omitted", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-saved-browser-"));
+    const profileRoot = await mkdtemp(join(tmpdir(), "harness-remote-api-profile-root-"));
+    const profile = { profileLabel: "travel", profileRoot };
+    await mkdir(join(profileRoot, profile.profileLabel), { recursive: true });
+    await writeFile(join(profileRoot, profile.profileLabel, "managed-browser-startup.json"), JSON.stringify({ schemaVersion: 1, urls: ["https://travel.example/search", "https://tickets.example/"] }), "utf8");
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Opened the prepared site.",
+      managedBrowserProfile: profile,
+    });
+    try {
+      const run = await api.startRun("device-one", "saved-browser", "Check the prepared travel site", { mode: "browser", sessionMode: "saved" });
+      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "travel.example" });
+      const sameCommandWithWhitespace = await api.startRun("device-one", "saved-browser", "Check the prepared travel site", { mode: "browser", sessionMode: "saved", url: " \t " });
+      expect(sameCommandWithWhitespace.runId).toBe(run.runId);
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserUrl: "https://travel.example/search",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "travel",
+        managedBrowserProfileRoot: profile.profileRoot,
+      });
+      await session.waitForActiveRun();
+      const explicitBlank = await api.startRun("device-one", "saved-browser-explicit-blank", "Open a saved blank page", { mode: "browser", sessionMode: "saved", url: "about:blank" });
+      expect(explicitBlank.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(createdComputerConfigs.at(-1)).toMatchObject({ managedBrowserUrl: "about:blank", managedBrowserProfileMode: "persistent" });
+    } finally {
+      session.activeRun?.controller.cancel("saved browser restore test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+      await rm(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to temporary-looking about:blank target when saved profile has no prepared sites", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-saved-browser-empty-"));
+    const profile = { profileLabel: "empty", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Opened the empty saved profile.",
+      managedBrowserProfile: profile,
+      readManagedBrowserStartupUrls: async () => [],
+    });
+    try {
+      const run = await api.startRun("device-one", "saved-browser-empty", "Open the saved browser", { mode: "browser", sessionMode: "saved" });
+      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(createdComputerConfigs[0]).toMatchObject({ managedBrowserUrl: "about:blank", managedBrowserProfileMode: "persistent" });
+    } finally {
+      session.activeRun?.controller.cancel("empty saved browser test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects saved browser mode without a persistent profile while allowing temporary mode", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-browser-gate-"));
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "Should not run." });
+    try {
+      await expect(api.startRun("device-one", "browser-unconfigured", "Check a page", { mode: "browser", sessionMode: "saved", url: "https://example.test" }))
+        .rejects.toMatchObject({ code: "MANAGED_BROWSER_UNAVAILABLE" });
+      const extraProfilePath = {
+        mode: "browser",
+        url: "https://example.test",
+        managedBrowserProfileRoot: "C:\\client-controlled",
+      } as never;
+      await expect(api.startRun("device-one", "browser-client-path", "Check a page", extraProfilePath))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "browser-invalid-scheme", "Check a page", { mode: "browser", url: "file:///private/document" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "browser-credentials", "Check a page", { mode: "browser", url: "https://name:secret@example.test" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "browser-about-fragment", "Check a page", { mode: "browser", url: "about:blank#other" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "browser-other-about", "Check a page", { mode: "browser", url: "about:newtab" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "browser-data-url", "Check a page", { mode: "browser", url: "data:text/html,hello" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "browser-javascript-url", "Check a page", { mode: "browser", url: "javascript:alert(1)" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      expect(createdComputerConfigs).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });

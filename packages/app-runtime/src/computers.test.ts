@@ -84,6 +84,22 @@ describe("prepareComputerRunAssembly", () => {
     managedRegistry.registerMany(managed.groundingTools);
     expect(managed.enabledToolNames(managedRegistry)).toEqual(expect.arrayContaining(["click", "wait", "type", "click_element", "select_option"]));
     expect(managed.enabledToolNames(managedRegistry)).not.toContain("unverified_computer_tool");
+
+    const managedBlank = prepareComputerRunAssembly({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      managedBrowserUrl: "about:blank",
+    }, "hybrid-catalog-v1");
+    expect(managedBlank.config).toMatchObject({ managedBrowserUrl: "about:blank", grounding: "hybrid-catalog-v1", windowDeliveryMode: "foreground" });
+    for (const invalidUrl of ["about:blank#other", "about:newtab", "file:///private/document", "data:text/html,hello", "javascript:alert(1)", "https://user:secret@example.test"]) {
+      expect(() => prepareComputerRunAssembly({
+        kind: "cua",
+        socketPath: "fixture.sock",
+        screenshotDir: "screenshots",
+        managedBrowserUrl: invalidUrl,
+      }, "hybrid-catalog-v1")).toThrow(/managedBrowserUrl/iu);
+    }
   });
 
   it("rejects unsupported grounding before Computer or Run resources are created", () => {
