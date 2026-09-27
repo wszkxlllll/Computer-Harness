@@ -45,16 +45,55 @@ describe("relay API route allowlist", () => {
     expect(parseBoundedJson(encode(`{"a":${"[".repeat(18)}0${"]".repeat(18)}}`))).toBeNull();
   });
 
-  it("requires opaque target tokens for run start and rejects OS handles or path fields", () => {
+  it("accepts legacy and tagged run targets while rejecting unsafe or ambiguous selectors", () => {
     const route = resolveAllowedApiRoute("POST", "/api/runs");
     expect(route).not.toBeNull();
-    const baseBody = { commandId: "start_01", goal: "Open the selected application", targetToken: "a".repeat(32) };
-    expect(isValidApiRequestBody(route!, baseBody)).toBe(true);
-    expect(isValidApiRequestBody(route!, { commandId: baseBody.commandId, goal: baseBody.goal })).toBe(false);
-    expect(isValidApiRequestBody(route!, { ...baseBody, pid: 1234 })).toBe(false);
-    expect(isValidApiRequestBody(route!, { ...baseBody, hwnd: 5678 })).toBe(false);
-    expect(isValidApiRequestBody(route!, { ...baseBody, path: "C:/private/document" })).toBe(false);
-    expect(isValidApiRequestBody(route!, { ...baseBody, targetToken: "short" })).toBe(false);
-    expect(isValidApiRequestBody(route!, { ...baseBody, goal: "" })).toBe(false);
+    const base = { commandId: "start_01", goal: "Open the selected application" };
+    const targetToken = "a".repeat(32);
+    for (const body of [
+      { ...base, targetToken },
+      { ...base, target: { mode: "auto" } },
+      { ...base, target: { mode: "window", targetToken } },
+      { ...base, target: { mode: "browser" } },
+      { ...base, target: { mode: "browser", url: "" } },
+      { ...base, target: { mode: "browser", url: "   " } },
+      { ...base, target: { mode: "browser", url: "about:blank" } },
+      { ...base, target: { mode: "browser", url: "https://example.com/trips" } },
+      { ...base, target: { mode: "browser", url: "http://localhost:3000/" } },
+      { ...base, target: { mode: "browser", sessionMode: "temporary" } },
+      { ...base, target: { mode: "browser", sessionMode: "saved" } },
+      { ...base, target: { mode: "browser", sessionMode: "saved", url: "https://example.com/trips" } },
+    ]) {
+      expect(isValidApiRequestBody(route!, body), JSON.stringify(body)).toBe(true);
+    }
+
+    for (const body of [
+      { ...base },
+      { ...base, targetToken, target: { mode: "auto" } },
+      { ...base, pid: 1234, targetToken },
+      { ...base, hwnd: 5678, targetToken },
+      { ...base, path: "C:/private/document", targetToken },
+      { ...base, targetToken: "short" },
+      { ...base, goal: "", targetToken },
+      { ...base, target: null },
+      { ...base, target: [] },
+      { ...base, target: { mode: "unknown" } },
+      { ...base, target: { mode: "auto", targetToken } },
+      { ...base, target: { mode: "window", targetToken: "short" } },
+      { ...base, target: { mode: "window", targetToken, pid: 1234 } },
+      { ...base, target: { mode: "browser", url: "ftp://example.com/" } },
+      { ...base, target: { mode: "browser", url: "example.com/trips" } },
+      { ...base, target: { mode: "browser", url: "https:///trips" } },
+      { ...base, target: { mode: "browser", url: "https://user:secret@example.com/" } },
+      { ...base, target: { mode: "browser", url: " https://example.com/" } },
+      { ...base, target: { mode: "browser", url: "https://example.com/ " } },
+      { ...base, target: { mode: "browser", sessionMode: "unknown" } },
+      { ...base, target: { mode: "browser", url: "about:blank#fragment" } },
+      { ...base, target: { mode: "browser", url: `https://example.com/${"x".repeat(2048)}` } },
+      { ...base, target: { mode: "browser", url: " ".repeat(2049) } },
+      { ...base, target: { mode: "browser", url: "https://example.com/", profilePath: "C:/private" } },
+    ]) {
+      expect(isValidApiRequestBody(route!, body), JSON.stringify(body)).toBe(false);
+    }
   });
 });

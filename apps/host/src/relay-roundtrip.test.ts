@@ -202,7 +202,10 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       expect(JSON.stringify(windowChoices)).not.toMatch(/pid|windowId/iu);
       let accepted: { runId: string; status: string };
       try {
-        accepted = await webApi.createRun("Complete a fixture task", "web-start-roundtrip", windowChoices.candidates[0]!.token);
+        accepted = await webApi.createRun("Complete a fixture task", "web-start-roundtrip", {
+          mode: "window",
+          targetToken: windowChoices.candidates[0]!.token,
+        });
       } catch (error) {
         const apiError = error as { status?: number; code?: string };
         throw new Error("Fixture run start failed with HTTP " + String(apiError.status) + " " + String(apiError.code));

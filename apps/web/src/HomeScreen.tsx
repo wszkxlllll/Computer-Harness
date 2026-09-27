@@ -4,7 +4,8 @@ import { shouldClearAfterFailure } from "./command-id-registry";
 import { GoalComposer } from "./components/GoalComposer";
 import { PhoneLayout } from "./components/PhoneLayout";
 import { StatusLabel } from "./components/StatusLabel";
-import type { RunStatus, RunSummary, WindowTarget } from "./types";
+import type { RunStatus, RunSummary, RunTarget, WindowTarget } from "./types";
+import { isValidBrowserUrl } from "./run-target";
 
 const activeStatuses = new Set<RunStatus>(["created", "running", "waiting_user", "waiting_window", "waiting_approval", "paused"]);
 
@@ -16,20 +17,28 @@ export function HomeScreen() {
   const [listError, setListError] = useState<string>();
   const [windowTargets, setWindowTargets] = useState<WindowTarget[]>([]);
   const [windowExpiresAt, setWindowExpiresAt] = useState<string>();
-  const [windowTargetsLoading, setWindowTargetsLoading] = useState(true);
+  const [windowTargetsLoading, setWindowTargetsLoading] = useState(false);
   const [windowTargetsExpired, setWindowTargetsExpired] = useState(false);
   const [selectedTargetToken, setSelectedTargetToken] = useState<string>();
   const [windowTargetsError, setWindowTargetsError] = useState<string>();
+  const [targetMode, setTargetMode] = useState<RunTarget["mode"]>("auto");
+  const [browserSessionMode, setBrowserSessionMode] = useState<"temporary" | "saved">("temporary");
+  const [browserUrl, setBrowserUrl] = useState("");
   const commandIdByTarget = useRef(new Map<string, string>());
   const activeRun = runs.find((run) => activeStatuses.has(run.status));
   const windowExpiresAtMs = windowExpiresAt ? Date.parse(windowExpiresAt) : Number.NaN;
   const hasCurrentTarget = selectedTargetToken !== undefined && windowTargets.some((candidate) => candidate.token === selectedTargetToken);
-  const canStart = !windowTargetsLoading
-    && !windowTargetsExpired
-    && !windowTargetsError
-    && Number.isFinite(windowExpiresAtMs)
-    && windowExpiresAtMs > Date.now()
-    && hasCurrentTarget;
+  const canStart = !loading && !listError && !activeRun && !sending && (
+    targetMode === "auto"
+    || (targetMode === "browser" && (!browserUrl.trim() || isValidBrowserUrl(browserUrl)))
+    || (targetMode === "window"
+      && !windowTargetsLoading
+      && !windowTargetsExpired
+      && !windowTargetsError
+      && Number.isFinite(windowExpiresAtMs)
+      && windowExpiresAtMs > Date.now()
+      && hasCurrentTarget)
+  );
 
   const refresh = useCallback(async () => {
     setListError(undefined);
@@ -69,10 +78,6 @@ export function HomeScreen() {
   }, [refresh]);
 
   useEffect(() => {
-    void refreshWindowTargets();
-  }, [refreshWindowTargets]);
-
-  useEffect(() => {
     if (!windowExpiresAt) return;
     const expiresAt = Date.parse(windowExpiresAt);
     if (!Number.isFinite(expiresAt)) return;
@@ -90,27 +95,41 @@ export function HomeScreen() {
     return () => window.clearTimeout(timer);
   }, [windowExpiresAt]);
 
-  async function start(goal: string, targetToken: string) {
-    if (activeRun) return;
-    if (!Number.isFinite(windowExpiresAtMs) || windowExpiresAtMs <= Date.now() || !windowTargets.some((candidate) => candidate.token === targetToken)) {
+  function changeTargetMode(mode: RunTarget["mode"]) {
+    setTargetMode(mode);
+    setError(undefined);
+    if (mode === "window") void refreshWindowTargets();
+  }
+
+  async function start(goal: string, target: RunTarget) {
+    if (loading || listError || activeRun || sending) return;
+    if (target.mode === "window" && (!Number.isFinite(windowExpiresAtMs) || windowExpiresAtMs <= Date.now() || !windowTargets.some((candidate) => candidate.token === target.targetToken))) {
       setWindowTargetsExpired(true);
       setSelectedTargetToken(undefined);
       setWindowTargetsError("所选窗口已过期或已变化。请刷新列表并重新选择目标。");
       return;
     }
+    if (target.mode === "browser" && target.url !== undefined && !isValidBrowserUrl(target.url)) return;
 
     setSending(true);
     setError(undefined);
-    const actionKey = `${goal}\u0000${targetToken}`;
+    const actionKey = JSON.stringify([goal, target]);
     const commandId = commandIdByTarget.current.get(actionKey) ?? crypto.randomUUID();
     commandIdByTarget.current.set(actionKey, commandId);
     try {
-      const response = await createRun(goal, commandId, targetToken);
+      const response = await createRun(goal, commandId, target);
       commandIdByTarget.current.delete(actionKey);
       window.location.assign(`/run/${encodeURIComponent(response.runId)}`);
     } catch (caught) {
-      if (shouldClearAfterFailure(caught)) commandIdByTarget.current.delete(actionKey);
-      if (caught instanceof ApiError && caught.code === "WINDOW_TARGET_STALE") {
+      if (shouldClearAfterFailure(caught) || (caught instanceof ApiError && caught.code === "WINDOW_DISCOVERY_FAILED")) {
+        commandIdByTarget.current.delete(actionKey);
+      }
+      if (caught instanceof ApiError && caught.code === "WINDOW_SELECTION_REQUIRED" && target.mode === "auto") {
+        setTargetMode("window");
+        setSelectedTargetToken(undefined);
+        setError(caught.message);
+        await refreshWindowTargets();
+      } else if (caught instanceof ApiError && caught.code === "WINDOW_TARGET_STALE" && target.mode === "window") {
         setSelectedTargetToken(undefined);
         setWindowTargets([]);
         setWindowExpiresAt(undefined);
@@ -118,6 +137,7 @@ export function HomeScreen() {
         setWindowTargetsError(caught.message);
       } else {
         setError(caught instanceof Error ? caught.message : "任务没有发送成功。网络恢复后可以再次尝试。");
+        if (caught instanceof ApiError && caught.code === "RUN_BUSY") await refresh();
       }
       setSending(false);
     }
@@ -143,6 +163,12 @@ export function HomeScreen() {
           disabled={activeRun !== undefined}
           busy={sending}
           canStart={canStart}
+          targetMode={targetMode}
+          browserSessionMode={browserSessionMode}
+          browserUrl={browserUrl}
+          onTargetModeChange={changeTargetMode}
+          onBrowserSessionModeChange={setBrowserSessionMode}
+          onBrowserUrlChange={setBrowserUrl}
           targetPicker={{
             candidates: windowTargets,
             expiresAt: windowExpiresAt,

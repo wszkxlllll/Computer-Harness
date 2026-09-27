@@ -37,6 +37,11 @@ export interface WindowTargetList {
   expiresAt: string;
 }
 
+export type RunTarget =
+  | { mode: "auto" }
+  | { mode: "window"; targetToken: string }
+  | { mode: "browser"; sessionMode?: "temporary" | "saved"; url?: string };
+
 export interface RunCapabilities {
   pause?: boolean;
   resume?: boolean;

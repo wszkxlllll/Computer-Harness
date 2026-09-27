@@ -123,18 +123,73 @@ export function resolveAllowedApiRoute(methodText: string, requestTarget: string
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
+function hasExactKeys(value: Record<string, unknown>, allowedKeys: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === allowedKeys.length && keys.every((key) => allowedKeys.includes(key));
+}
+
+function isValidWindowTargetToken(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{32}$/u.test(value);
+}
+
+function isValidBrowserStartUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return true;
+  if (trimmed !== value) return false;
+  if (value === "about:blank") return true;
+  if (!/^https?:\/\//iu.test(value)) return false;
+  const authority = /^https?:\/\/([^/?#]*)/iu.exec(value)?.[1];
+  if (authority === undefined || authority.length === 0 || authority.includes("@")) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && url.hostname.length > 0
+      && url.username.length === 0
+      && url.password.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function isValidBrowserSessionMode(value: unknown): value is "temporary" | "saved" {
+  return value === "temporary" || value === "saved";
+}
+
+function isValidRunTarget(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.mode !== "string") return false;
+  if (value.mode === "auto") return hasExactKeys(value, ["mode"]);
+  if (value.mode === "window") {
+    return hasExactKeys(value, ["mode", "targetToken"]) && isValidWindowTargetToken(value.targetToken);
+  }
+  if (value.mode === "browser") {
+    if (hasExactKeys(value, ["mode"])) return true;
+    if (hasExactKeys(value, ["mode", "url"])) return isValidBrowserStartUrl(value.url);
+    if (hasExactKeys(value, ["mode", "sessionMode"])) return isValidBrowserSessionMode(value.sessionMode);
+    return hasExactKeys(value, ["mode", "sessionMode", "url"])
+      && isValidBrowserSessionMode(value.sessionMode)
+      && isValidBrowserStartUrl(value.url);
+  }
+  return false;
+}
+
 /** Validate the only route-specific browser start payload without accepting OS handles or paths. */
 export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject | undefined): boolean {
   if (route.method !== "POST" || route.path !== "/api/runs") return true;
   if (body === undefined) return false;
-  const keys = Object.keys(body);
-  if (keys.length !== 3 || keys.some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken")) return false;
-  return isValidIdentifier(body.commandId)
+  const hasLegacyTarget = Object.hasOwn(body, "targetToken");
+  const hasTaggedTarget = Object.hasOwn(body, "target");
+  if (hasLegacyTarget === hasTaggedTarget) return false;
+  const outerKeys = hasLegacyTarget ? ["commandId", "goal", "targetToken"] : ["commandId", "goal", "target"];
+  if (!hasExactKeys(body, outerKeys)) return false;
+  const validBase = isValidIdentifier(body.commandId)
     && typeof body.goal === "string"
     && body.goal.length > 0
-    && body.goal.length <= 20_000
-    && typeof body.targetToken === "string"
-    && /^[A-Za-z0-9_-]{32}$/u.test(body.targetToken);
+    && body.goal.length <= 20_000;
+  if (!validBase) return false;
+  return hasLegacyTarget
+    ? isValidWindowTargetToken(body.targetToken)
+    : isValidRunTarget(body.target);
 }
 
 /** Parse bounded JSON and reject values risky to pass across a process boundary. */
