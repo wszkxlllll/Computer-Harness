@@ -23,6 +23,11 @@ export interface WindowTargetInfo {
 
 export interface WindowTargetDiscovery {
   listWindows(signal: AbortSignal): Promise<readonly WindowTargetInfo[]>;
+  /** Includes minimized/off-screen top-level windows when the backend can
+   * enumerate them. It remains read-only. */
+  listAllWindows?(signal: AbortSignal): Promise<readonly WindowTargetInfo[]>;
+  /** Restore/focus one exact identity selected from a fresh inventory. */
+  activateWindow?(target: ApplicationSessionWindowTarget, signal: AbortSignal): Promise<void>;
 }
 
 export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
@@ -31,7 +36,15 @@ export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
   "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding" | "windowHandoff"
->> & { windowTarget?: ApplicationSessionWindowTarget | null; windowDeliveryMode?: "background" | "foreground" | null; managedBrowserUrl?: string };
+>> & {
+  windowTarget?: ApplicationSessionWindowTarget | null;
+  windowDeliveryMode?: "background" | "foreground" | null;
+  managedBrowserUrl?: string;
+  managedBrowserProfileMode?: "ephemeral" | "persistent";
+  managedBrowserProfileLabel?: string;
+  /** Host-private and never projected to Provider or Run reports. */
+  managedBrowserProfileRoot?: string;
+};
 
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";
 
@@ -116,6 +129,20 @@ export class ApplicationSession {
     return this.windowDiscovery.listWindows(signal);
   }
 
+  public async listAllWindowTargets(signal: AbortSignal): Promise<readonly WindowTargetInfo[]> {
+    if (this.windowDiscovery === undefined) throw new Error("window discovery is unavailable for this ApplicationSession");
+    if (this.closed) throw new Error("ApplicationSession is closed");
+    if (this.active !== undefined) throw new Error("window discovery is unavailable while an active Run owns the environment");
+    return await (this.windowDiscovery.listAllWindows?.(signal) ?? this.windowDiscovery.listWindows(signal));
+  }
+
+  public async activateWindowTarget(target: ApplicationSessionWindowTarget, signal: AbortSignal): Promise<void> {
+    if (this.windowDiscovery?.activateWindow === undefined) throw new Error("window activation is unavailable for this ApplicationSession");
+    if (this.closed) throw new Error("ApplicationSession is closed");
+    if (this.active !== undefined) throw new Error("window activation is unavailable while an active Run owns the environment");
+    await this.windowDiscovery.activateWindow(target, signal);
+  }
+
   public async startRun(
     goal: string,
     featureOverrides: ApplicationSessionRunFeatureOverrides = {},
@@ -123,9 +150,21 @@ export class ApplicationSession {
   ): Promise<RunHandle> {
     if (this.closed) throw new Error("application session is closed");
     if (goal.trim().length === 0) throw new Error("application session requires a non-empty goal");
-    if (this.active !== undefined) throw new Error("application session already has an active Run");
+    await this.waitUntilIdleAfterTerminal();
+    // waitUntilIdleAfterTerminal() is async even when the session was already
+    // idle. The caller may close the session during that yield; do not acquire
+    // a lease or invoke the Run factory after that close.
+    if (this.closed) throw new Error("application session is closed");
     const runId = `run-${Date.now()}-${randomUUID().slice(0, 12)}` as RunId;
-    const { windowTarget, windowDeliveryMode, managedBrowserUrl, ...featureConfig } = featureOverrides;
+    const {
+      windowTarget,
+      windowDeliveryMode,
+      managedBrowserUrl,
+      managedBrowserProfileMode,
+      managedBrowserProfileLabel,
+      managedBrowserProfileRoot,
+      ...featureConfig
+    } = featureOverrides;
     const config: ResolvedRunConfig = {
       ...this.config,
       ...featureConfig,
@@ -149,6 +188,15 @@ export class ApplicationSession {
     if (managedBrowserUrl !== undefined) {
       if (config.computer.kind !== "cua") throw new Error("managed browser URL requires the CUA computer");
       config.computer = { ...config.computer, managedBrowserUrl };
+    }
+    if (managedBrowserProfileMode !== undefined || managedBrowserProfileLabel !== undefined || managedBrowserProfileRoot !== undefined) {
+      if (config.computer.kind !== "cua") throw new Error("managed browser profile requires the CUA computer");
+      config.computer = {
+        ...config.computer,
+        ...(managedBrowserProfileMode === undefined ? {} : { managedBrowserProfileMode }),
+        ...(managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel }),
+        ...(managedBrowserProfileRoot === undefined ? {} : { managedBrowserProfileRoot }),
+      };
     }
     const lease = this.owner.acquire(this.environmentIdentity, runId);
     let handle: RunHandle;
@@ -178,6 +226,33 @@ export class ApplicationSession {
     this.lastCompletion = completion;
     void completion.catch(() => undefined);
     return handle;
+  }
+
+  /**
+   * Establish the start boundary for callers that need to do work before
+   * constructing a new Run (for example target discovery). A Runtime
+   * terminal snapshot may be public before Handle.close/report and lease
+   * release finish, so terminal cleanup is awaited here. A non-terminal Run
+   * and an unresolved owner lease fail closed immediately.
+   */
+  public async waitUntilIdleAfterTerminal(): Promise<void> {
+    if (this.closed) throw new Error("application session is closed");
+    const activeBeforeWait = this.active;
+    if (activeBeforeWait !== undefined) {
+      if (activeBeforeWait.handle.controller.getSnapshot().status !== "finished") {
+        throw new Error("application session already has an active Run");
+      }
+      await activeBeforeWait.completion;
+      // The session may have been closed while cleanup was pending. Do not
+      // allow a caller that was waiting on cleanup to create resources after
+      // close(), and re-check the owner barrier after the terminal promise.
+      if (this.closed) throw new Error("application session is closed");
+      if (this.active !== undefined) throw new Error("application session terminal cleanup is still pending");
+    }
+    const owner = this.owner.inspect(this.environmentIdentity);
+    if (owner !== undefined) {
+      throw new Error(`application session has unresolved desktop cleanup (pending_cleanup; environment is owned by run ${owner.runId})`);
+    }
   }
 
   public async waitForActiveRun(): Promise<RunOutcome | undefined> {

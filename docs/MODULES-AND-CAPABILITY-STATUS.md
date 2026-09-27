@@ -89,6 +89,6 @@ Jev 当前是 CLI/TUI 的显式窗口选择器，默认仍为本地匹配；启�
 | CLI | 按参数与 profile；非交互 experiment 和交互 live-interactive 不同；monitor/grounding 默认 off |
 | TUI | 可选择下一 Run 的模块与窗口；CUA TUI 有 grounding auto 和人工交接入口 |
 | PowerShell research 预设 | entities、lexical、Batch、recent、Monitor guidance；Guard off 来自 wrapper，不是所有入口通用默认 |
-| 手机 Host | Planning on、facts、lexical、Batch、recent/80、Guard layered/same、风险模型预算 1、Monitor shadow、handoff confirm-v1、Grounding off |
+| 手机 Host | Planning on、facts、lexical、Batch、recent/80、Guard layered/same、风险模型预算 1、Monitor shadow、handoff confirm-v1；原生目标 Grounding off，新受管浏览器入口覆盖为 hybrid-catalog-v1，配置/上线状态见[目标模式接入记录](./mobile-target-modes-2026-09-27.md) |
 
 配置应在 Run 开始时冻结并明确呈现。模块开关、策略版本和结果归因是后续实验的组成部分；不要仅凭包名、README 默认值或上次 TUI 选择推断当前 Run 的实际配置。

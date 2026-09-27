@@ -203,6 +203,55 @@ describe("ApplicationSession", () => {
     }
   });
 
+  it("does not create a Run after terminal cleanup if the session was closed while waiting", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-terminal-close-"));
+    const owner = new InProcessEnvironmentOwner();
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolveCleanup) => { releaseCleanup = resolveCleanup; });
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "succeeded");
+      handle.controller = { getSnapshot: () => ({ status: "finished" }) } as RunController;
+      handle.close = vi.fn(async () => { await cleanupGate; });
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("first task");
+      let secondState: "pending" | "rejected" | "resolved" = "pending";
+      const second = session.startRun("second task").then(
+        () => { secondState = "resolved"; },
+        () => { secondState = "rejected"; },
+      );
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+      expect(secondState).toBe("pending");
+      const closing = session.close();
+      releaseCleanup();
+      await closing;
+      await second;
+      expect(secondState).toBe("rejected");
+      expect(createRun).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseCleanup();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rechecks close after an idle start boundary before invoking the Run factory", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-idle-close-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => fakeHandle(config, "succeeded"));
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      const starting = session.startRun("close during idle start boundary");
+      await session.close();
+      await expect(starting).rejects.toThrow(/application session is closed/iu);
+      expect(createRun).not.toHaveBeenCalled();
+      expect(owner.inspect(session.environmentId)).toBeUndefined();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("shares a CUA local-desktop owner across renamed socket routes", () => {
     const owner = new InProcessEnvironmentOwner();
     const first = environmentIdentityForConfig({ kind: "cua", socketPath: "pipe-one", screenshotDir: "screens-one" });

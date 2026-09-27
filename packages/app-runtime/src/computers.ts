@@ -119,7 +119,7 @@ function validateManagedBrowserConfig(
 ): void {
   const label = grounding === undefined ? "DOM/hybrid grounding" : `grounding ${grounding}`;
   if (!isManagedBrowserUrl(config.managedBrowserUrl)) {
-    throw new Error(`${label} requires an explicit managedBrowserUrl (http/https)`);
+    throw new Error(`${label} requires a credential-free http(s) managedBrowserUrl or exact about:blank`);
   }
   if (config.socketPath.trim().length === 0) throw new Error(`${label} requires a non-empty CUA socket`);
   if (config.windowTarget !== undefined) {
@@ -151,15 +151,21 @@ export interface ComputerFactoryDependencies {
 export function createWindowTargetDiscovery(config: ComputerBackendConfig): WindowTargetDiscovery | undefined {
   if (config.kind !== "cua") return undefined;
   const discovery = new CuaWindowDiscovery({ socketPath: config.socketPath });
+  const project = (windows: Awaited<ReturnType<CuaWindowDiscovery["listWindows"]>>) => windows.map((window) => ({
+    pid: window.target.pid,
+    windowId: window.target.windowId,
+    ...(window.appName === undefined ? {} : { appName: window.appName }),
+    ...(window.title === undefined ? {} : { title: window.title }),
+  }));
   return {
     async listWindows(signal) {
-      const windows = await discovery.listWindows(signal);
-      return windows.map((window) => ({
-        pid: window.target.pid,
-        windowId: window.target.windowId,
-        ...(window.appName === undefined ? {} : { appName: window.appName }),
-        ...(window.title === undefined ? {} : { title: window.title }),
-      }));
+      return project(await discovery.listWindows(signal));
+    },
+    async listAllWindows(signal) {
+      return project(await discovery.listWindows(signal, false));
+    },
+    async activateWindow(target, signal) {
+      await discovery.activateWindow(target, signal);
     },
   };
 }
@@ -223,9 +229,10 @@ export async function createComputer(
 
 function isManagedBrowserUrl(value: string | undefined): value is string {
   if (value === undefined || value.trim().length === 0) return false;
+  if (value === "about:blank") return true;
   try {
     const parsed = new URL(value);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0 && parsed.username.length === 0 && parsed.password.length === 0;
   } catch {
     return false;
   }

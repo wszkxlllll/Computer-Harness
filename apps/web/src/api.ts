@@ -9,6 +9,7 @@ import {
   type PairingChallenge,
   type RunSnapshot,
   type RunSummary,
+  type RunTarget,
   type WindowTargetList,
 } from "./types";
 
@@ -121,6 +122,13 @@ function errorMessageForCode(code?: string): string | undefined {
     SSE_LIMIT: "打开的任务页面过多。关闭其他页面后再试。",
     request_too_large: "这次请求内容过长，请缩短后再试。",
     WINDOW_TARGET_STALE: "所选窗口已过期或发生变化。请刷新可用窗口并重新选择后再开始。",
+    WINDOW_SELECTION_REQUIRED: "电脑无法唯一确定要操作的窗口。请从刷新后的列表中手动选择一个窗口。",
+    WINDOW_ACTIVATION_FAILED: "电脑找到了匹配窗口，但无法将它恢复到屏幕上。任务尚未开始，请手动选择一个当前可见的窗口后重试。",
+    WINDOW_DISCOVERY_FAILED: "电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。",
+    RUN_BUSY: "电脑正在处理另一个任务。请等待当前任务结束后再开始。",
+    INVALID_TARGET: "目标信息无效。请检查窗口选择或 http://、https:// 地址后重试。",
+    MANAGED_BROWSER_UNAVAILABLE: "电脑上的受管理浏览器当前不可用。请在电脑端检查 Harness 状态后重试。",
+    MANAGED_BROWSER_PROFILE_UNAVAILABLE: "受管浏览器配置当前被占用，或上次异常退出留下了运行标记。任务尚未启动。请停止使用它的浏览器和 Harness Host，再在电脑运行 scripts/mobile.ps1 recover-browser-profile。该命令只归档运行标记，不会删除登录数据。",
   };
   return messages[code];
 }
@@ -129,10 +137,10 @@ export function listWindowTargets(): Promise<WindowTargetList> {
   return request("/api/windows");
 }
 
-export function createRun(goal: string, commandId: string, targetToken: string): Promise<{ runId: string; status: string }> {
+export function createRun(goal: string, commandId: string, target: RunTarget): Promise<{ runId: string; status: string }> {
   return request("/api/runs", {
     method: "POST",
-    body: JSON.stringify({ commandId, goal, targetToken }),
+    body: JSON.stringify({ commandId, goal, target }),
   }, "phone");
 }
 

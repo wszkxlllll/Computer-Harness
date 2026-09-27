@@ -30,25 +30,84 @@ describe("explicit window-target run contract", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/windows", expect.objectContaining({ credentials: "same-origin", cache: "no-store" }));
   });
 
-  it("starts only with the explicitly chosen opaque target token", async () => {
+  it("starts with the explicitly chosen opaque window token", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-1", status: "created" }), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
     setPhoneCsrfToken("phone-csrf");
 
-    await createRun("Compare these pages", "command-1", "opaque-window-token");
+    await createRun("Compare these pages", "command-1", { mode: "window", targetToken: "opaque-window-token" });
 
     const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(String(request.body))).toEqual({ commandId: "command-1", goal: "Compare these pages", targetToken: "opaque-window-token" });
+    expect(JSON.parse(String(request.body))).toEqual({ commandId: "command-1", goal: "Compare these pages", target: { mode: "window", targetToken: "opaque-window-token" } });
     expect(request.headers).toBeInstanceOf(Headers);
     expect((request.headers as Headers).get("X-CSRF-Token")).toBe("phone-csrf");
+  });
+
+  it("sends an explicit browser URL as a browser target", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-2", status: "created" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRun("Review this site", "command-2", { mode: "browser", url: "https://example.com/reports?q=1" });
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({
+      commandId: "command-2",
+      goal: "Review this site",
+      target: { mode: "browser", url: "https://example.com/reports?q=1" },
+    });
+  });
+
+  it("sends a blank-page browser target without inventing a URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-blank", status: "created" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRun("Find the relevant website", "command-blank", { mode: "browser" });
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({ commandId: "command-blank", goal: "Find the relevant website", target: { mode: "browser" } });
+  });
+
+  it("sends automatic selection as an explicit target mode", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-3", status: "created" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRun("Use the matching window", "command-3", { mode: "auto" });
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({ commandId: "command-3", goal: "Use the matching window", target: { mode: "auto" } });
   });
 
   it("maps a stale window response to explicit refresh-and-reselect guidance", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "WINDOW_TARGET_STALE", message: "stale" } }), { status: 409 })));
 
-    await expect(createRun("Goal", "command-1", "expired-token")).rejects.toMatchObject({
+    await expect(createRun("Goal", "command-1", { mode: "window", targetToken: "expired-token" })).rejects.toMatchObject({
       code: "WINDOW_TARGET_STALE",
       message: "所选窗口已过期或发生变化。请刷新可用窗口并重新选择后再开始。",
+    });
+  });
+
+  it("maps automatic ambiguity and active-run conflicts to localized guidance", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "WINDOW_SELECTION_REQUIRED" } }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "RUN_BUSY" } }), { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createRun("Goal", "command-4", { mode: "auto" })).rejects.toMatchObject({
+      code: "WINDOW_SELECTION_REQUIRED",
+      message: "电脑无法唯一确定要操作的窗口。请从刷新后的列表中手动选择一个窗口。",
+    });
+    await expect(createRun("Goal", "command-5", { mode: "browser", url: "https://example.com" })).rejects.toMatchObject({
+      code: "RUN_BUSY",
+      message: "电脑正在处理另一个任务。请等待当前任务结束后再开始。",
+    });
+  });
+
+  it("maps automatic window-discovery failures to a safe retry or manual-selection hint", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "WINDOW_DISCOVERY_FAILED" } }), { status: 503 })));
+
+    await expect(createRun("Goal", "command-6", { mode: "auto" })).rejects.toMatchObject({
+      code: "WINDOW_DISCOVERY_FAILED",
+      message: "电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。",
     });
   });
 });

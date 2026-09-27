@@ -5,7 +5,7 @@ import {
   type CuaDriverLike,
 } from "@trycua/cua-driver";
 import { randomUUID } from "node:crypto";
-import { listWindowTargets, type CuaWindowInfo } from "./window-contract.js";
+import { activateWindowTarget, listWindowTargets, type CuaWindowInfo, type CuaWindowTarget } from "./window-contract.js";
 
 export interface CuaWindowDiscoveryOptions {
   readonly socketPath: string;
@@ -39,29 +39,41 @@ export class CuaWindowDiscovery {
     this.options = options;
   }
 
-  public async listWindows(signal: AbortSignal): Promise<readonly CuaWindowInfo[]> {
+  public async listWindows(signal: AbortSignal, onScreenOnly = true): Promise<readonly CuaWindowInfo[]> {
     const previousOperation = this.operationTail;
     let release!: () => void;
     this.operationTail = new Promise<void>((resolve) => { release = resolve; });
     await previousOperation;
     try {
       signal.throwIfAborted();
-      return await this.listWindowsExclusive(signal);
+      return await this.withDriver(signal, (driver, session) => listWindowTargets(driver, session, signal, undefined, onScreenOnly));
     } finally {
       release();
     }
   }
 
-  private async listWindowsExclusive(signal: AbortSignal): Promise<readonly CuaWindowInfo[]> {
+  public async activateWindow(target: CuaWindowTarget, signal: AbortSignal): Promise<void> {
+    const previousOperation = this.operationTail;
+    let release!: () => void;
+    this.operationTail = new Promise<void>((resolve) => { release = resolve; });
+    await previousOperation;
+    try {
+      await this.withDriver(signal, (driver, session) => activateWindowTarget(driver, session, target, signal));
+    } finally {
+      release();
+    }
+  }
+
+  private async withDriver<T>(signal: AbortSignal, operation: (driver: CuaDriverLike, session: string) => Promise<T>): Promise<T> {
     signal.throwIfAborted();
     await this.retryPendingCleanup();
     const driver = (this.options.driverFactory ?? ((socketPath) => CuaDriver.connect(socketPath)))(this.options.socketPath);
     const session = this.options.sessionLabel ?? `computer-harness-window-picker-${randomUUID()}`;
-    let windows: readonly CuaWindowInfo[] | undefined;
+    let value: T | undefined;
     let primaryError: unknown;
     try {
       await driver.startSession(StartSessionInput.new({ session }), { signal });
-      windows = await listWindowTargets(driver, session, signal);
+      value = await operation(driver, session);
     } catch (error) {
       primaryError = error;
     }
@@ -73,7 +85,7 @@ export class CuaWindowDiscovery {
       throw new CuaWindowDiscoveryCleanupError(`${primary}; window picker cleanup is not confirmed`, cleanupErrors);
     }
     if (primaryError !== undefined) throw primaryError;
-    return windows ?? [];
+    return value as T;
   }
 
   private async retryPendingCleanup(): Promise<void> {

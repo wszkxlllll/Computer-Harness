@@ -8,7 +8,7 @@
 
 [快速开始](#快速开始) · [手机控制](#手机控制) · [架构与扩展](#架构与扩展) · [任务与评测](#任务与评测) · [开发文档](./docs/DOCS-INDEX.md)
 
-> 当前为 `codex/mobile-control-handoff-20260926` 分支的开发预览，尚未合并 main。手机控制设施已接入；公网扫码和完整跨窗口任务仍待验收，不是即装即用的稳定产品。
+> 当前为开发预览。手机控制目标模式与受管浏览器入口已接入，公网资源和本机只读启动链路已有验证；真实手机完整业务任务、复杂跨窗口任务和其他平台仍需单独验收，不是稳定产品承诺。
 
 ## 能做什么
 
@@ -25,12 +25,12 @@
 
 ## 快速开始
 
-### 1. 获取开发分支并构建
+### 1. 获取代码并构建
 
 需要 Node.js `>=22.13.0`、pnpm `11.19.0`。仅构建和离线测试不需要模型密钥或桌面权限。
 
 ```sh
-git clone --branch codex/mobile-control-handoff-20260926 --single-branch https://github.com/wszkxlllll/Computer-Harness.git
+git clone https://github.com/wszkxlllll/Computer-Harness.git
 cd Computer-Harness
 pnpm install --frozen-lockfile
 pnpm run build
@@ -100,13 +100,34 @@ TYPESAFE_API_KEY=your_typesafe_key
 .\scripts\mobile.ps1 start
 ```
 
-在**电脑**打开 `http://localhost:4317` 预览控制台。真实手机扫码需要先部署 HTTPS Relay，并配置电脑的出站连接；手机无法通过自己的 localhost 连接电脑。
+源码变化后需要重建时使用：
+
+```powershell
+.\scripts\mobile.ps1 start -Build
+```
+
+在**电脑**打开 `http://localhost:4317` 预览控制台。真手机需要通过已部署的 HTTPS Relay 访问；手机中的 `localhost` 指向手机自己，不能直接连接电脑。
+
+手机每次发起任务可以选择三种目标模式：
+
+- **自动选择（默认）**：按 Goal 在本机已打开或最小化的顶层窗口中匹配应用名和标题。只有唯一且可信的匹配才自动绑定；无匹配或有歧义时保留任务并转入手动选择，不静默接管整桌面，也不会自动启动未打开的原生应用。
+- **手动选择窗口**：由用户从当前可见窗口中选择，作为自动匹配的兜底。
+- **打开网站**：使用 Harness 管理的浏览器会话。`临时浏览`是默认选项，使用一次性 profile；`使用已登录网站`是显式选项，使用 Host 管理的持久 profile。临时模式网址留空会打开空白页；已登录模式网址留空会恢复 Host 登记的网站；填写网址时只能使用允许的 HTTP(S) 地址。
+
+浏览器的 profile 根目录、标签、Cookie 和 CDP 地址始终由 Host 管理，手机不能传入任意路径或登录数据；个人日常浏览器的登录状态不会自动复制到 Harness。若受管浏览器异常退出并留下运行标记，先停止 Host，再执行：
+
+```powershell
+.\scripts\mobile.ps1 recover-browser-profile
+```
+
+该命令只在 Host 和 profile 所有者均已停止时运行，并将 Host-owned profile 中的陈旧运行标记归档，不删除登录数据或任意用户文件。
 
 - [手机使用指南](./docs/mobile-control-guide-2026-09-26.md)：配对、操作和配置边界。
+- [手机目标模式与浏览器接入记录](./docs/mobile-target-modes-2026-09-27.md)：自动选窗、临时/已登录浏览器、profile 安全边界和验证证据。
 - [服务器部署](./apps/relay/README.md)：HTTPS/WSS、凭据、服务运维与回滚。
 - [验证与问题清单](./docs/mobile-control-issues-2026-09-26.md)：哪些已验证，哪些尚未放行。
 
-Host 当前使用固定组合预设，并开启 layered Guard；**不会继承 TUI 上次选择的功能**。不要同时用手机与 TUI 控制同一桌面。公网部署和实体手机验收尚未完成。
+Host 当前使用固定组合预设：Planning、Fact Memory、lexical retrieval、recent Context、same-control input Batch、layered Guard、shadow Monitor 和人工确认的窗口交接；原生窗口目标默认不启用 UIA/DOM，受管浏览器目标使用 Hybrid Grounding。Host **不会继承 TUI 上次选择的功能**。不要同时用手机与 TUI 控制同一桌面；手机公网完整业务任务和无障碍验收仍需单独完成。
 
 ## 架构与扩展
 
@@ -155,15 +176,16 @@ TUI / CLI / SDK                         手机 Web
 
 ## 当前验证与限制
 
-2026-09-26 检查点：根构建、Web 构建通过；**725 项 Vitest 在低并发下通过**，TAP 19 通过、1 项权限跳过。默认并发曾有一次 Relay 测试超时，单独及低并发复测通过。这不是本分支远端 CI 或所有实机场景通过声明。
+2026-09-27 检查点：根构建、Web 构建通过；**84 个 Vitest 文件、814 项测试通过**，脚本测试 19 项通过、1 项因 Windows 无法创建符号链接而跳过。公网 Relay/Web 资源健康检查通过；这不是所有远端 CI、手机网络环境或真实业务任务均已通过的声明。
 
 仍需解决或验收：
 
 - 原生整段输入、浏览器弹层捕获，以及 WPS / 完整跨窗口任务的可靠性。
 - 模型定位偏差、重复动作和延迟；UIA、DOM、Monitor 不保证业务成功。
-- 手机公网配对、真实网络切换与实体设备体验。
+- 真手机公网配对、真实网络切换、审批和实体设备无障碍体验；当前浏览器二态与窗口恢复主要是 Windows/CUA 的只读验证。
+- macOS 等平台的 managed-profile 恢复尚未放行：默认进程检查无法可靠保留 `argv` 边界时会返回 `unknown` 并拒绝恢复；需要接入边界保持的进程 API 后再做真实验收。其他平台的真实桌面适配也仍待验证。
 
-窗口模式不是操作系统沙箱，也不保证后台输入或用户并发操作不受影响。截图会发送给所选模型；可选 Jev 选窗需明确允许分享应用名和窗口标题。不要使用无授权账号或敏感生产环境试验。
+窗口模式不是操作系统沙箱，也不保证后台输入或用户并发操作不受影响。截图会发送给所选模型；可选 Jev 选窗需明确允许分享应用名和窗口标题。受管浏览器的启动/观察通过只读真实验证，不等于网页导航、消息发送或复杂任务已完成。不要使用无授权账号或敏感生产环境试验。
 
 详细证据、失败复测及后续顺序见[项目交接](./docs/PROJECT-HANDOFF.md)和[测试报告](./docs/mobile-control-technical-report-2026-09-26.md)。
 

@@ -69,7 +69,7 @@ export interface ResolvedRunConfig {
   contextMaxInputTokens?: number;
   riskProfile: "experiment" | "live-interactive";
   riskGuard: "off" | "layered";
-  /** Defaults to off; DOM/hybrid require an explicit managedBrowserUrl. */
+  /** Defaults to off; DOM/hybrid require an explicit HTTP(S) URL or about:blank. */
   grounding?: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
   /** Interactive native-window handoff; off unless a host explicitly opts in. */
   windowHandoff?: "off" | "confirm-v1";

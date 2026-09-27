@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RemoteRunApi, RemoteRunSnapshot } from "@computer-harness/app-runtime";
+import { RemoteRunApiError, type RemoteRunApi, type RemoteRunSnapshot, type RemoteRunTargetInput } from "@computer-harness/app-runtime";
 import type { AssetId, RunId } from "@computer-harness/protocol";
 import { createHostServer } from "./server.js";
 
@@ -27,7 +27,7 @@ function fakeApi(): RemoteRunApi {
       candidates: [{ token: targetToken, appName: "Fixture app", title: "Fixture window" }],
       expiresAt: "2026-09-26T00:10:00.000Z",
     }),
-    startRun: async (_deviceId, commandId, goal, _targetToken) => ({
+    startRun: async (_deviceId, commandId, goal, _target) => ({
       ...snapshot(),
       goal,
       runId: ("run-" + commandId) as RunId,
@@ -62,8 +62,19 @@ function jsonResponse<T>(response: { json(): T }): T {
 describe("Host HTTP boundary", () => {
   it("requires local confirmation, HttpOnly session cookies, CSRF, and revocable paired devices", async () => {
     const revoked: string[] = [];
+    const api = fakeApi();
+    const targetsReceived: RemoteRunTargetInput[] = [];
     const host = createHostServer({
-      api: fakeApi(),
+      api: {
+        ...api,
+        startRun: (deviceId, commandId, goal, target) => {
+          targetsReceived.push(target);
+          if (typeof target !== "string" && target.mode === "auto" && goal === "Ambiguous goal") {
+            return Promise.reject(new RemoteRunApiError("WINDOW_SELECTION_REQUIRED", "No single visible window confidently matches this goal. Choose a window manually."));
+          }
+          return api.startRun(deviceId, commandId, goal, target);
+        },
+      },
       allowedOrigins: [localOrigin, relayOrigin],
       bridgeOrigin: relayOrigin,
       pairingUrlForToken: (token) => relayOrigin + "/pair?token=" + encodeURIComponent(token),
@@ -183,6 +194,83 @@ describe("Host HTTP boundary", () => {
       });
       expect(created.statusCode).toBe(202);
       expect(jsonResponse<{ runId: string; status: string }>(created)).toMatchObject({ runId: "run-start-1", status: "running" });
+
+      const autoStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-auto", goal: "Open a matching app", target: { mode: "auto" } },
+      });
+      expect(autoStart.statusCode).toBe(202);
+      const browserStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-browser", goal: "Check a page", target: { mode: "browser", url: "https://example.test/path" } },
+      });
+      expect(browserStart.statusCode).toBe(202);
+      const blankBrowserStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-browser-blank", goal: "Open a blank page", target: { mode: "browser" } },
+      });
+      expect(blankBrowserStart.statusCode).toBe(202);
+      const emptyBrowserStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-browser-empty", goal: "Open a blank page", target: { mode: "browser", url: " \t " } },
+      });
+      expect(emptyBrowserStart.statusCode).toBe(202);
+      const savedBrowserStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-browser-saved", goal: "Use a saved site", target: { mode: "browser", sessionMode: "saved" } },
+      });
+      expect(savedBrowserStart.statusCode).toBe(202);
+      expect(targetsReceived).toEqual([
+        targetToken,
+        { mode: "auto" },
+        { mode: "browser", url: "https://example.test/path" },
+        { mode: "browser" },
+        { mode: "browser", url: " \t " },
+        { mode: "browser", sessionMode: "saved" },
+      ]);
+
+      const selectionRequired = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-auto-abstain", goal: "Ambiguous goal", target: { mode: "auto" } },
+      });
+      expect(selectionRequired.statusCode).toBe(409);
+      expect(jsonResponse<{ error: { code: string; message: string } }>(selectionRequired)).toEqual({
+        error: { code: "WINDOW_SELECTION_REQUIRED", message: "No single visible window confidently matches this goal. Choose a window manually." },
+      });
+
+      const bothTargetFields = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-both", goal: "Check a page", targetToken, target: { mode: "auto" } },
+      });
+      expect(bothTargetFields.statusCode).toBe(400);
+      const unknownTargetField = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-extra", goal: "Check a page", target: { mode: "browser", url: "https://example.test", profileRoot: "C:\\client" } },
+      });
+      expect(unknownTargetField.statusCode).toBe(400);
+      const missingTarget = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-missing", goal: "Check a page" },
+      });
+      expect(missingTarget.statusCode).toBe(400);
 
       const list = await host.server.inject({ method: "GET", url: "/api/runs", headers: { origin: relayOrigin, cookie } });
       expect(jsonResponse<{ runs: RemoteRunSnapshot[] }>(list).runs).toHaveLength(1);

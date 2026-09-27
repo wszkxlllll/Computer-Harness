@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet('check', 'start', 'help')]
+  [ValidateSet('check', 'start', 'recover-browser-profile', 'help')]
   [string] $Command = 'start',
   [ValidateRange(1, 65535)]
   [int] $HostPort = 4317,
@@ -16,9 +16,10 @@ $configPath = Join-Path $repoRoot '.harness.local.psd1'
 
 if ($Command -eq 'help') {
   Write-Output 'Local mobile-control launcher.'
-  Write-Output 'Usage: .\scripts\mobile.ps1 [-Command check|start] [-HostPort 4317] [-Build] [-Dev [-WebPort 5173]]'
+  Write-Output 'Usage: .\scripts\mobile.ps1 [-Command check|start|recover-browser-profile] [-HostPort 4317] [-Build] [-Dev [-WebPort 5173]]'
   Write-Output 'The default launch serves the built Web console from the loopback Host. -Dev enables the Vite server.'
   Write-Output 'The configured CUA daemon is reused when ready; otherwise it is started hidden and stopped on exit.'
+  Write-Output 'recover-browser-profile archives only stale managed-browser runtime markers after confirming the Host and profile owner are stopped.'
   exit 0
 }
 
@@ -104,6 +105,7 @@ $typescriptEntry = Join-Path $repoRoot 'node_modules\typescript\lib\tsc.js'
 $webRoot = Join-Path $repoRoot 'apps\web'
 $webIndex = Join-Path $webRoot 'dist\index.html'
 $viteEntry = Join-Path $webRoot 'node_modules\vite\bin\vite.js'
+$cliEntry = Join-Path $repoRoot 'apps\cli\dist\index.js'
 
 if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw "Configured Node executable was not found: $nodePath" }
 if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { throw "Local env file was not found: $envFile" }
@@ -118,6 +120,49 @@ if ($Dev) {
 
 $nodeVersion = (& $nodePath -p 'process.versions.node').Trim()
 if ([version] $nodeVersion -lt [version] '22.13.0') { throw "Computer Harness requires Node >=22.13.0; configured Node is $nodeVersion." }
+
+if ($Command -eq 'recover-browser-profile') {
+  $profileMode = [string] $config.ManagedBrowserProfileMode
+  $profileLabel = [string] $config.ManagedBrowserProfileLabel
+  if ($profileMode -ne '' -and $profileMode -ne 'persistent') {
+    throw 'Recovery applies only to the Host persistent managed-browser profile.'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($profileLabel) -and $profileLabel -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+    throw 'ManagedBrowserProfileLabel must contain 1 to 64 letters, digits, dots, underscores, or hyphens.'
+  }
+  if (Test-TcpListener '127.0.0.1' $HostPort) { throw "Host port $HostPort is active. Stop Harness before checking or recovering its managed browser profile." }
+  try {
+    $hostProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+      $_.CommandLine -and ([string] $_.CommandLine).IndexOf($hostEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+  } catch {
+    throw 'Could not inspect running Host processes. Recovery was refused.'
+  }
+  if ($hostProcesses.Count -gt 0) { throw 'A Harness Host process is still running. Stop it before recovering the managed browser profile.' }
+
+  if ($Build -or -not (Test-Path -LiteralPath $cliEntry -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $typescriptEntry -PathType Leaf)) { throw "TypeScript compiler was not found: $typescriptEntry" }
+    Push-Location $repoRoot
+    try {
+      & $nodePath $typescriptEntry --build $hostTypecheckProject
+      if ($LASTEXITCODE -ne 0) { throw "TypeScript workspace build failed with exit code $LASTEXITCODE." }
+    } finally {
+      Pop-Location
+    }
+  }
+  if (-not (Test-Path -LiteralPath $cliEntry -PathType Leaf)) { throw "CLI build output was not found: $cliEntry" }
+  $previousManagedBrowserProfileLabel = $env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL
+  try {
+    if ([string]::IsNullOrWhiteSpace($profileLabel)) { Remove-Item Env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL -ErrorAction SilentlyContinue }
+    else { $env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL = $profileLabel }
+    & $nodePath $cliEntry --recover-managed-browser-profile
+    if ($LASTEXITCODE -ne 0) { throw "Managed browser profile recovery was refused or failed with exit code $LASTEXITCODE." }
+  } finally {
+    if ($null -eq $previousManagedBrowserProfileLabel) { Remove-Item Env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL -ErrorAction SilentlyContinue }
+    else { $env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL = $previousManagedBrowserProfileLabel }
+  }
+  exit 0
+}
 
 if ($Command -eq 'check') {
   Write-Output "Repository : $repoRoot"
@@ -178,11 +223,25 @@ $webOrigin = if ($Dev) { "http://localhost:$WebPort" } else { "http://localhost:
 $apiOrigin = "http://127.0.0.1:$HostPort"
 $previousViteHostOrigin = $env:VITE_HOST_ORIGIN
 $previousPath = $env:PATH
+$previousManagedBrowserProfileLabel = $env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL
 $webProcess = $null
 $daemonProcess = $null
 $ownedDaemon = $false
 
 try {
+  $configuredProfileMode = [string] $config.ManagedBrowserProfileMode
+  $configuredProfileLabel = [string] $config.ManagedBrowserProfileLabel
+  if ($configuredProfileMode -ne '' -and $configuredProfileMode -notin @('ephemeral', 'persistent')) {
+    throw 'ManagedBrowserProfileMode must be empty, ephemeral, or persistent.'
+  }
+  if ($configuredProfileMode -eq 'persistent' -and -not [string]::IsNullOrWhiteSpace($configuredProfileLabel)) {
+    if ($configuredProfileLabel -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+      throw 'ManagedBrowserProfileLabel must contain 1 to 64 letters, digits, dots, underscores, or hyphens.'
+    }
+    $env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL = $configuredProfileLabel
+  } else {
+    Remove-Item Env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL -ErrorAction SilentlyContinue
+  }
   if (-not (Test-Path -LiteralPath $cuaBinary -PathType Leaf)) { throw "Configured CUA daemon executable was not found: $cuaBinary" }
   if (-not (Test-CuaReady)) {
     Write-Output 'Starting the configured CUA daemon in the background...'
@@ -240,6 +299,7 @@ try {
 } finally {
   $env:PATH = $previousPath
   if ($null -eq $previousViteHostOrigin) { Remove-Item Env:VITE_HOST_ORIGIN -ErrorAction SilentlyContinue } else { $env:VITE_HOST_ORIGIN = $previousViteHostOrigin }
+  if ($null -eq $previousManagedBrowserProfileLabel) { Remove-Item Env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL -ErrorAction SilentlyContinue } else { $env:HARNESS_MANAGED_BROWSER_PROFILE_LABEL = $previousManagedBrowserProfileLabel }
   if ($null -ne $webProcess -and -not $webProcess.HasExited) {
     $previousPreference = $ErrorActionPreference
     try {

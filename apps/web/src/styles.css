@@ -190,6 +190,41 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .composer-footer .button { min-width: 8.5rem; }
 .inline-error { color: var(--danger); font-size: .9rem; font-weight: 650; margin: .45rem 0; }
 
+.target-mode-fieldset { border: 0; margin: .8rem 0 0; min-width: 0; padding: 0; }
+.target-mode-fieldset legend { color: var(--muted); font-size: .8rem; font-weight: 600; margin-bottom: .1rem; padding: 0; }
+.target-mode-options { display: flex; flex-wrap: wrap; gap: 0 .8rem; }
+.target-mode-option {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  display: flex;
+  flex: 1 1 10rem;
+  gap: .55rem;
+  min-height: 3rem;
+  padding: .4rem .1rem;
+}
+.target-mode-option input { accent-color: var(--accent); flex: 0 0 auto; height: 1.05rem; margin: 0; width: 1.05rem; }
+.target-mode-copy { display: grid; gap: .06rem; }
+.target-mode-copy strong { font-size: .88rem; }
+.target-mode-copy > span { color: var(--muted); font-size: .78rem; font-weight: 400; }
+.browser-target-field { margin-top: .85rem; }
+.browser-session-fieldset { border: 0; margin: 0 0 .65rem; min-width: 0; padding: 0; }
+.browser-session-fieldset legend { color: var(--muted); font-size: .8rem; font-weight: 600; margin-bottom: .1rem; padding: 0; }
+.browser-target-field > label { display: block; font-size: .88rem; font-weight: 650; margin-bottom: .2rem; }
+.browser-target-field > input {
+  background: var(--surface);
+  border: 1px solid #aeb7c3;
+  border-radius: .45rem;
+  color: var(--ink);
+  display: block;
+  font: inherit;
+  min-height: 2.75rem;
+  padding: .45rem .6rem;
+  width: 100%;
+}
+.browser-target-field > .field-hint { margin: .35rem 0 0; }
+.browser-target-field > .inline-error { font-size: .82rem; }
+
 .window-target-section { margin-top: 1rem; }
 .window-target-heading-row, .history-heading, .devices-heading-row {
   align-items: center;
@@ -778,6 +813,8 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   .page-shell { padding-inline: 1rem; }
   .home-page { padding-top: .85rem; }
   .goal-composer { padding: .85rem; }
+  .target-mode-options { gap: 0 .45rem; }
+  .target-mode-option { flex-basis: 8rem; }
   .window-target-heading-row { align-items: flex-start; }
   .window-target-heading-row .button { font-size: .78rem; min-height: 2.5rem; padding-inline: .5rem; }
   .composer-footer .button { min-width: 0; min-inline-size: 0; width: 100%; }

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { RemoteRunApiError, type RemoteCommand, type RemoteRunApi } from "@computer-harness/app-runtime";
+import { RemoteRunApiError, type RemoteCommand, type RemoteRunApi, type RemoteRunTarget } from "@computer-harness/app-runtime";
 import type { HostRequestHandler, PairingTokenRegistration, RelayBridgeRequest } from "@computer-harness/relay-connector/protocol";
 import { resolveAllowedApiRoute } from "@computer-harness/relay-connector/routing";
 import type { PairRequestView, PairedDeviceView } from "./contracts.js";
@@ -101,7 +101,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     }
     if (error instanceof RemoteRunApiError) {
       const status = error.code === "RUN_NOT_FOUND" ? 404
-        : error.code === "INVALID_COMMAND" ? 400
+        : error.code === "INVALID_COMMAND" || error.code === "INVALID_TARGET" ? 400
           : error.code === "CAPACITY_REACHED" ? 429
             : error.code === "WINDOW_DISCOVERY_FAILED" ? 503
           : 409;
@@ -241,6 +241,31 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     }
     return value as Record<string, unknown>;
   };
+
+  const parseRemoteRunTarget = (value: unknown): RemoteRunTarget => {
+    const target = bodyObject(value);
+    const keys = Object.keys(target);
+    if (target.mode === "auto" && keys.length === 1 && keys[0] === "mode") return { mode: "auto" };
+    if (target.mode === "window" && keys.length === 2 && keys.includes("mode") && keys.includes("targetToken")) {
+      return { mode: "window", targetToken: requiredString(target, "targetToken", 128) };
+    }
+    if (target.mode === "browser" && keys.length === 1 && keys[0] === "mode") return { mode: "browser" };
+    if (target.mode === "browser" && keys.length === 2 && keys.includes("mode") && keys.includes("url") &&
+        typeof target.url === "string" && target.url.length <= 2_048) {
+      return { mode: "browser", url: target.url };
+    }
+    if (target.mode === "browser" && keys.length === 2 && keys.includes("mode") && keys.includes("sessionMode") &&
+        isBrowserSessionMode(target.sessionMode)) {
+      return { mode: "browser", sessionMode: target.sessionMode };
+    }
+    if (target.mode === "browser" && keys.length === 3 && keys.includes("mode") && keys.includes("sessionMode") && keys.includes("url") &&
+        isBrowserSessionMode(target.sessionMode) && typeof target.url === "string" && target.url.length <= 2_048) {
+      return { mode: "browser", sessionMode: target.sessionMode, url: target.url };
+    }
+    throw new HostHttpError(400, "INVALID_REQUEST", "target must contain only the fields for one supported selection mode.");
+  };
+
+  const isBrowserSessionMode = (value: unknown): value is "temporary" | "saved" => value === "temporary" || value === "saved";
 
   const requiredString = (body: Record<string, unknown>, field: string, maxLength: number): string => {
     const value = body[field];
@@ -417,13 +442,20 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
   server.post("/api/runs", async (request, reply) => {
     const session = browserSession(request, true);
     const body = bodyObject(request.body);
-    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken")) {
-      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, and targetToken are accepted.");
+    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken" && key !== "target")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, and one target selector are accepted.");
     }
     const commandId = requiredString(body, "commandId", 128);
     const goal = requiredString(body, "goal", 20_000);
-    const targetToken = requiredString(body, "targetToken", 128);
-    const run = await options.api.startRun(session.deviceId, commandId, goal, targetToken);
+    const hasLegacyTarget = Object.hasOwn(body, "targetToken");
+    const hasTarget = Object.hasOwn(body, "target");
+    if (hasLegacyTarget === hasTarget) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Provide exactly one of targetToken or target.");
+    }
+    const target = hasLegacyTarget
+      ? requiredString(body, "targetToken", 128)
+      : parseRemoteRunTarget(body.target);
+    const run = await options.api.startRun(session.deviceId, commandId, goal, target);
     return reply.code(202).send({ runId: run.runId, status: run.status });
   });
 

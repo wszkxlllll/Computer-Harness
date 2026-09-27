@@ -6,6 +6,7 @@ import {
   ApplicationSession,
   createFileRemoteAssetReader,
   createWindowTargetDiscovery,
+  resolveManagedBrowserProfileConfig,
   type ApplicationSessionConfig,
   type ProviderCredentials,
   type ResolvedRunConfig,
@@ -31,7 +32,8 @@ async function main(): Promise<void> {
   await loadEnvFile(args.envFile);
   const credentials = readProviderCredentials();
   const outputDir = resolve(args.output);
-  const config = createSessionConfig(args, outputDir);
+  const managedBrowserProfile = resolveManagedBrowserProfileConfig();
+  const config = createSessionConfig(args, outputDir, managedBrowserProfile);
   const windowDiscovery = createWindowTargetDiscovery(config.computer);
   if (windowDiscovery === undefined) throw new Error("Mobile Host requires the CUA backend's read-only window discovery.");
   const dependencies = {
@@ -55,6 +57,7 @@ async function main(): Promise<void> {
   const api = new ApplicationRemoteRunApi({
     session,
     capabilities,
+    managedBrowserProfile,
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
   });
@@ -172,7 +175,11 @@ function parseArguments(argv: readonly string[]): HostArguments {
   return { envFile, socket, model, output, port, origins };
 }
 
-function createSessionConfig(args: HostArguments, outputDir: string): ApplicationSessionConfig {
+function createSessionConfig(
+  args: HostArguments,
+  outputDir: string,
+  managedBrowserProfile: { readonly profileLabel: string; readonly profileRoot: string },
+): ApplicationSessionConfig {
   const model: RunModel = args.model;
   const qwenModel = args.model === "qwen3.8-flash";
   const baseUrl = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
@@ -184,7 +191,9 @@ function createSessionConfig(args: HostArguments, outputDir: string): Applicatio
       socketPath: args.socket,
       screenshotDir: resolve(outputDir, "driver-screenshots"),
       grounding: "off",
-      managedBrowserProfileMode: "ephemeral",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: managedBrowserProfile.profileLabel,
+      managedBrowserProfileRoot: managedBrowserProfile.profileRoot,
     },
     outputDir,
     maxSteps: 100,

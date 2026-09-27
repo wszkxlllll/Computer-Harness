@@ -6,7 +6,7 @@ import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import { acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, cleanupManagedBrowser, closeManagedBrowserGracefully, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, cleanupManagedBrowser, closeManagedBrowserGracefully, createManagedBrowserPage, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
   it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {
@@ -129,6 +129,26 @@ describe("managed browser host pilot", () => {
     })).not.toThrow();
     expect(() => new ManagedBrowserHost({
       browser: "edge",
+      url: "data:text/html,fixture",
+      resolveOwnedWindowTarget: async () => undefined,
+    })).not.toThrow();
+    expect(() => new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      resolveOwnedWindowTarget: async () => undefined,
+    })).not.toThrow();
+    expect(() => new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      registerStartupUrl: true,
+      resolveOwnedWindowTarget: async () => undefined,
+    })).toThrow(/cannot be registered/iu);
+    for (const url of ["about:blank#fragment", "about:newtab", "file:///private.html"]) {
+      expect(() => new ManagedBrowserHost({ browser: "edge", url, resolveOwnedWindowTarget: async () => undefined }))
+        .toThrow(/explicit http|exact about:blank|data URL/iu);
+    }
+    expect(() => new ManagedBrowserHost({
+      browser: "edge",
       url: "https://example.com",
       profileMode: "persistent",
       resolveOwnedWindowTarget: async () => undefined,
@@ -158,6 +178,8 @@ describe("managed browser host pilot", () => {
     try {
       await expect(readManagedBrowserStartupUrls(root)).resolves.toEqual([]);
       expect(normalizeManagedBrowserStartupUrl("https://example.test/path?token=secret#fragment")).toBe("https://example.test/path");
+      expect(() => normalizeManagedBrowserStartupUrl("about:blank")).toThrow(/http\(s\) URL/iu);
+      await expect(registerManagedBrowserStartupUrl(root, "about:blank")).rejects.toThrow(/http\(s\) URL/iu);
       await expect(registerManagedBrowserStartupUrl(root, "https://example.test/path?token=secret#fragment")).resolves.toEqual(["https://example.test/path"]);
       await expect(registerManagedBrowserStartupUrl(root, "https://example.test/path?another=secret")).resolves.toEqual(["https://example.test/path"]);
       for (let index = 1; index < 8; index += 1) {
@@ -172,11 +194,52 @@ describe("managed browser host pilot", () => {
     }
   });
 
-  it("puts the explicit Run URL first and keeps prepared URLs bounded and deduplicated", () => {
-    expect(buildManagedBrowserLaunchUrls(["https://prepared.test/", "https://current.test/path"], "https://current.test/path?query=ignored")).toEqual([
-      "https://current.test/path?query=ignored",
+  it("keeps prepared startup URLs bounded while reserving the current URL for CDP creation", () => {
+    expect(buildManagedBrowserLaunchUrls(["https://prepared.test/", "https://current.test/path"], "https://current.test/path?query=ignored")).toEqual(["https://prepared.test/"]);
+    expect(buildManagedBrowserLaunchUrls(["https://prepared.test/", "https://other.test/"], "about:blank")).toEqual([
       "https://prepared.test/",
+      "https://other.test/",
     ]);
+    expect(buildManagedBrowserLaunchUrls([], "https://current.test/path")).toEqual(["about:blank"]);
+    expect(buildManagedBrowserLaunchUrls(["https://prepared.test/"], "data:text/html,fixture")).toEqual(["https://prepared.test/"]);
+    expect(buildManagedBrowserLaunchUrls([], "data:text/html,fixture")).toEqual(["about:blank"]);
+    expect(buildManagedBrowserLaunchUrls([], "https://current.test/path", "data:text/html,computer-harness-bootstrap-fixture")).toEqual(["data:text/html,computer-harness-bootstrap-fixture"]);
+  });
+
+
+  it("creates an exact startup target for explicit URLs, including about:blank", async () => {
+    const command = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+      expect(params.newWindow).toBe(false);
+      return { result: { targetId: params.url === "about:blank" ? "blank-target" : "current-target" } };
+    });
+    const close = vi.fn();
+    const connect = async () => ({ command, close });
+    await expect(createManagedBrowserPage("ws://127.0.0.1:1234/devtools/browser/test", "https://example.test/start", new AbortController().signal, connect)).resolves.toBe("current-target");
+    await expect(createManagedBrowserPage("ws://127.0.0.1:1234/devtools/browser/test", "about:blank", new AbortController().signal, connect)).resolves.toBe("blank-target");
+    expect(command.mock.calls[0]?.[1]).toMatchObject({ url: "https://example.test/start", newWindow: false });
+    expect(command.mock.calls[1]?.[1]).toMatchObject({ url: "about:blank", newWindow: false });
+    expect(command).toHaveBeenCalledTimes(2);
+  });
+
+  it("activates a startup target through the browser CDP endpoint", async () => {
+    const command = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      expect(method).toBe("Target.activateTarget");
+      expect(params).toEqual({ targetId: "current-tab" });
+      return { result: { success: true } };
+    });
+    const close = vi.fn();
+    await activateManagedBrowserPage("ws://127.0.0.1:1234/devtools/browser/test", "current-tab", new AbortController().signal, async () => ({ command, close }));
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the exact CDP target identity across a redirect even when activity remains hidden", () => {
+    const page = { type: "page", id: "current-target", webSocketDebuggerUrl: "ws://current" };
+    const activity = { page, browserWindowId: 7, visibilityState: "hidden" as const, hasFocus: false };
+    expect(selectManagedBrowserStartupActivity([activity], "current-target", true)).toBe(activity);
+    expect(selectManagedBrowserStartupActivity([activity], "prepared-target", true)).toBeUndefined();
+    expect(selectManagedBrowserStartupActivity([activity], "current-target", false)).toBeUndefined();
+    expect(selectManagedBrowserStartupActivity([{ ...activity, visibilityState: "unloaded" as const }], "current-target", true)).toBeUndefined();
   });
 
   it("requests Browser.close and treats the expected websocket shutdown as graceful", async () => {
@@ -386,6 +449,48 @@ describe("managed browser host pilot", () => {
     expect(resolveManagedBrowserActivePage([hiddenMain, visiblePopup], 7)).toBeUndefined();
     expect(resolveManagedBrowserActivePage([{ ...visibleSwitched, page: { ...visibleSwitched.page, id: "another-visible" } }, visibleSwitched], 7)).toBeUndefined();
     expect(resolveManagedBrowserActivePage([{ ...hiddenMain, visibilityState: "hidden" as const }], 7)).toBeUndefined();
+  });
+
+  it("selects the active about:blank page ahead of hidden restored startup tabs", async () => {
+    const pages = [
+      { type: "page", id: "blank-start-tab", webSocketDebuggerUrl: "ws://blank" },
+      { type: "page", id: "restored-travel-tab", webSocketDebuggerUrl: "ws://restored" },
+    ];
+    const activities = new Map([
+      ["blank-start-tab", { page: pages[0]!, browserWindowId: 7, visibilityState: "visible" as const, hasFocus: true }],
+      ["restored-travel-tab", { page: pages[1]!, browserWindowId: 7, visibilityState: "hidden" as const, hasFocus: false }],
+    ]);
+    const readActivity = vi.fn(async (page: { id?: unknown }) => activities.get(String(page.id)));
+    await expect(resolveManagedBrowserActivePageSet(pages, readActivity, new AbortController().signal, undefined, true))
+      .resolves.toMatchObject({ page: { id: "blank-start-tab" }, browserWindowId: 7 });
+  });
+
+  it("selects the uniquely focused page when a persistent profile restores another visible window", async () => {
+    const pages = [
+      { type: "page", id: "focused-start-tab", webSocketDebuggerUrl: "ws://focused" },
+      { type: "page", id: "restored-window-tab", webSocketDebuggerUrl: "ws://restored" },
+    ];
+    const activities = new Map([
+      ["focused-start-tab", { page: pages[0]!, browserWindowId: 7, visibilityState: "visible" as const, hasFocus: true }],
+      ["restored-window-tab", { page: pages[1]!, browserWindowId: 8, visibilityState: "visible" as const, hasFocus: false }],
+    ]);
+    const readActivity = vi.fn(async (page: { id?: unknown }) => activities.get(String(page.id)));
+    await expect(resolveManagedBrowserActivePageSet(pages, readActivity, new AbortController().signal, undefined, true))
+      .resolves.toMatchObject({ page: { id: "focused-start-tab" }, browserWindowId: 7 });
+  });
+
+  it("rejects two visible pages in the selected startup window even when one has focus", async () => {
+    const pages = [
+      { type: "page", id: "focused-tab", webSocketDebuggerUrl: "ws://focused" },
+      { type: "page", id: "second-visible-tab", webSocketDebuggerUrl: "ws://second" },
+    ];
+    const activities = new Map([
+      ["focused-tab", { page: pages[0]!, browserWindowId: 7, visibilityState: "visible" as const, hasFocus: true }],
+      ["second-visible-tab", { page: pages[1]!, browserWindowId: 7, visibilityState: "visible" as const, hasFocus: false }],
+    ]);
+    const readActivity = vi.fn(async (page: { id?: unknown }) => activities.get(String(page.id)));
+    await expect(resolveManagedBrowserActivePageSet(pages, readActivity, new AbortController().signal, undefined, true)).resolves.toBeUndefined();
+    await expect(resolveManagedBrowserActivePageSet(pages, readActivity, new AbortController().signal, 7)).resolves.toBeUndefined();
   });
 
   it("uses a bounded fake CDP activity reader for a multi-tab active selection", async () => {

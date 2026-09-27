@@ -235,20 +235,64 @@ describe("local outbound relay transport", () => {
     expect(await (await reconnectedRunsPromise).json()).toEqual({ runs: [{ runId: "run_one" }] });
 
     const requestCount = reconnectedHost.received.filter((message) => message.type === "bridge.request").length;
-    const invalidRunStart = await fetch(`${origin}/api/runs`, {
-      method: "POST",
-      headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
-      body: JSON.stringify({ commandId: "cmd_missing_target", goal: "start a run", pid: 1234, path: "C:/private" }),
-    });
-    expect(invalidRunStart.status).toBe(400);
+    const invalidRunStarts = [
+      { commandId: "cmd_missing_target", goal: "start a run", pid: 1234, path: "C:/private" },
+      { commandId: "cmd_auto_extra", goal: "start a run", target: { mode: "auto", targetToken: opaqueTargetToken } },
+      { commandId: "cmd_redundant_target", goal: "start a run", targetToken: opaqueTargetToken, target: { mode: "auto" } },
+      { commandId: "cmd_bad_window", goal: "start a run", target: { mode: "window", targetToken: "short" } },
+      { commandId: "cmd_bad_browser", goal: "start a run", target: { mode: "browser", url: "ftp://example.com/" } },
+    ];
+    for (const body of invalidRunStarts) {
+      const invalidRunStart = await fetch(`${origin}/api/runs`, {
+        method: "POST",
+        headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify(body),
+      });
+      expect(invalidRunStart.status, body.commandId).toBe(400);
+    }
     expect(reconnectedHost.received.filter((message) => message.type === "bridge.request")).toHaveLength(requestCount);
+
+    const acceptedRunStarts = [
+      { commandId: "cmd_auto", goal: "start automatically", target: { mode: "auto" } },
+      { commandId: "cmd_window", goal: "start on the selected window", target: { mode: "window", targetToken: opaqueTargetToken } },
+      { commandId: "cmd_browser_default", goal: "start with a blank managed browser", target: { mode: "browser" } },
+      { commandId: "cmd_browser_blank", goal: "start with a blank managed browser", target: { mode: "browser", url: "   " } },
+      { commandId: "cmd_browser_about_blank", goal: "start with a blank managed browser", target: { mode: "browser", url: "about:blank" } },
+      { commandId: "cmd_browser", goal: "start in the managed browser", target: { mode: "browser", url: "https://example.com/trips" } },
+      { commandId: "cmd_legacy", goal: "start with the selected window", targetToken: opaqueTargetToken },
+    ];
+    for (const body of acceptedRunStarts) {
+      const startPromise = fetch(`${origin}/api/runs`, {
+        method: "POST",
+        headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify(body),
+      });
+      const startRequest = await reconnectedHost.next((message) => {
+        const requestBody = message.body as Record<string, unknown> | undefined;
+        return message.type === "bridge.request"
+          && message.method === "POST"
+          && message.path === "/api/runs"
+          && requestBody?.commandId === body.commandId;
+      });
+      expect(startRequest.body).toEqual(body);
+      reconnectedHost.send(bridgeResponse(startRequest.requestId, { runId: `run_${body.commandId}`, status: "accepted" }, 202));
+      const startResponse = await startPromise;
+      expect(startResponse.status, body.commandId).toBe(202);
+      expect(await startResponse.json()).toEqual({ runId: `run_${body.commandId}`, status: "accepted" });
+    }
 
     const unknownOutcomePromise = fetch(`${origin}/api/runs`, {
       method: "POST",
       headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
       body: JSON.stringify({ commandId: "cmd_one", goal: "start a run", targetToken: opaqueTargetToken }),
     });
-    const inFlightCommand = await reconnectedHost.next((message) => message.type === "bridge.request" && message.method === "POST");
+    const inFlightCommand = await reconnectedHost.next((message) => {
+      const requestBody = message.body as Record<string, unknown> | undefined;
+      return message.type === "bridge.request"
+        && message.method === "POST"
+        && message.path === "/api/runs"
+        && requestBody?.commandId === "cmd_one";
+    });
     expect(inFlightCommand.body).toEqual({ commandId: "cmd_one", goal: "start a run", targetToken: opaqueTargetToken });
     await reconnectedHost.close();
     const unknownOutcome = await unknownOutcomePromise;

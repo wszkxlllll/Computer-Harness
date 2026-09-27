@@ -3,7 +3,8 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { AssetId, AssetRef, ComputerWindowCandidate, JsonValue, RunOutcome, RuntimeEvent } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
-import type { ApplicationSession, WindowTargetInfo } from "./application-session.js";
+import { inspectManagedBrowserProfile, readManagedBrowserStartupUrls } from "@computer-harness/computer-cua";
+import type { ApplicationSession, ApplicationSessionRunFeatureOverrides, WindowTargetInfo } from "./application-session.js";
 import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
 import { approvalRequiresVisualReview, projectApprovalPreview } from "./approval-preview.js";
@@ -18,11 +19,15 @@ import {
   type RemoteRunEvent,
   type RemoteRunSnapshot,
   type RemoteRunStatus,
+  type RemoteRunTarget,
+  type RemoteRunTargetInput,
+  type RemoteBrowserSessionMode,
   type RemoteStreamEvent,
   type RemoteSubscription,
   type RemoteWindowTargetLabel,
   type RemoteWindowTargetSet,
 } from "./remote-control.js";
+import { matchGoalToWindow } from "./window-target-matcher.js";
 
 interface ManagedRemoteRun {
   readonly handle: RunHandle;
@@ -52,7 +57,7 @@ interface ManagedRemoteRun {
 
 interface StartRequest {
   readonly goal: string;
-  readonly targetToken: string;
+  readonly targetFingerprint: string;
   readonly promise: Promise<RemoteRunSnapshot>;
 }
 
@@ -65,6 +70,10 @@ interface DeviceWindowCandidates {
   readonly expiresAt: number;
   readonly candidates: Map<string, WindowTargetSelection>;
 }
+
+type ResolvedStartTarget =
+  | { readonly mode: "window"; readonly selection: WindowTargetSelection }
+  | { readonly mode: "browser"; readonly sessionMode: RemoteBrowserSessionMode; readonly url: string };
 
 const DEFAULT_MAX_RUNS = 50;
 const DEFAULT_EVENT_CAPACITY = 256;
@@ -131,7 +140,7 @@ export function createFileRemoteAssetReader(rootDir: string): AssetReader {
 
 export class RemoteRunApiError extends Error {
   public constructor(
-    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED",
+    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE",
     message: string,
   ) {
     super(message);
@@ -148,6 +157,10 @@ export interface ApplicationRemoteRunApiOptions {
   readonly maxCommandsPerRun?: number;
   readonly eventCapacity?: number;
   readonly now?: () => number;
+  /** Presence means the Host configured a persistent profile wholly outside client input. */
+  readonly managedBrowserProfile?: { readonly profileLabel: string; readonly profileRoot: string };
+  readonly inspectManagedBrowserProfile?: typeof inspectManagedBrowserProfile;
+  readonly readManagedBrowserStartupUrls?: typeof readManagedBrowserStartupUrls;
 }
 
 /** Adapts ApplicationSession and its committed feed into a redacted remote view. */
@@ -163,6 +176,10 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
   private readonly maxCommandsPerRun: number;
   private readonly eventCapacity: number;
   private readonly now: () => number;
+  private readonly managedBrowserProfile: ApplicationRemoteRunApiOptions["managedBrowserProfile"];
+  private readonly inspectManagedBrowserProfile: typeof inspectManagedBrowserProfile;
+  private readonly readManagedBrowserStartupUrls: typeof readManagedBrowserStartupUrls;
+  private startInProgress = false;
 
   public constructor(options: ApplicationRemoteRunApiOptions) {
     this.session = options.session;
@@ -173,6 +190,13 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     this.maxCommandsPerRun = options.maxCommandsPerRun ?? DEFAULT_MAX_COMMANDS_PER_RUN;
     this.eventCapacity = options.eventCapacity ?? DEFAULT_EVENT_CAPACITY;
     this.now = options.now ?? Date.now;
+    this.managedBrowserProfile = options.managedBrowserProfile;
+    this.inspectManagedBrowserProfile = options.inspectManagedBrowserProfile ?? inspectManagedBrowserProfile;
+    this.readManagedBrowserStartupUrls = options.readManagedBrowserStartupUrls ?? readManagedBrowserStartupUrls;
+    if (this.managedBrowserProfile !== undefined &&
+        (!/^[A-Za-z0-9._-]{1,64}$/u.test(this.managedBrowserProfile.profileLabel) || this.managedBrowserProfile.profileRoot.trim().length === 0)) {
+      throw new Error("managed browser readiness requires a bounded profile label and explicit Host-owned profile root");
+    }
     if (!Number.isInteger(this.maxRuns) || this.maxRuns < 1) throw new Error("maxRuns must be a positive integer");
     if (!Number.isInteger(this.maxStartRequests) || this.maxStartRequests < 1) throw new Error("maxStartRequests must be a positive integer");
     if (!Number.isInteger(this.maxCommandsPerRun) || this.maxCommandsPerRun < 1) throw new Error("maxCommandsPerRun must be a positive integer");
@@ -198,11 +222,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     try {
       windows = await this.session.listWindowTargets(AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS));
     } catch (error) {
-      const message = errorMessage(error);
-      if (/active Run|no Run is active/iu.test(message)) {
-        throw new RemoteRunApiError("RUN_BUSY", "Window choices are available only while the Host has no active Run.");
-      }
-      throw new RemoteRunApiError("WINDOW_DISCOVERY_FAILED", "The Host could not safely refresh visible desktop windows. Try again after the desktop is ready.");
+      throw windowDiscoveryError(error, "The Host could not safely refresh visible desktop windows. Try again after the desktop is ready.");
     }
     const choices = new Map<string, WindowTargetSelection>();
     const candidates = windows.slice(0, MAX_WINDOW_TARGETS).map((window) => {
@@ -227,22 +247,34 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     return { candidates, expiresAt: new Date(expiresAt).toISOString() };
   }
 
-  public startRun(deviceId: string, commandId: string, goal: string, targetToken: string): Promise<RemoteRunSnapshot> {
+  public startRun(deviceId: string, commandId: string, goal: string, targetInput: RemoteRunTargetInput): Promise<RemoteRunSnapshot> {
     const cleanGoal = validateText(goal, MAX_GOAL_CHARS, "goal");
     const cleanCommandId = validateIdentifier(commandId, "commandId");
+    let target: RemoteRunTarget;
+    try {
+      target = normalizeRemoteRunTarget(targetInput);
+      if (target.mode === "browser" && target.sessionMode === "saved" && this.managedBrowserProfile === undefined) {
+        throw new RemoteRunApiError("MANAGED_BROWSER_UNAVAILABLE", "This Host has no configured persistent managed-browser profile.");
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const key = deviceId + "\u0000" + cleanCommandId;
+    const targetFingerprint = stableJson(target);
     const existing = this.startRequests.get(key);
     if (existing !== undefined) {
-      if (existing.goal !== cleanGoal || existing.targetToken !== targetToken) return Promise.reject(new RemoteRunApiError("IDEMPOTENCY_CONFLICT", "commandId was already used with different Run details"));
+      if (existing.goal !== cleanGoal || existing.targetFingerprint !== targetFingerprint) return Promise.reject(new RemoteRunApiError("IDEMPOTENCY_CONFLICT", "commandId was already used with different Run details"));
       return existing.promise;
     }
     if (this.startRequests.size >= this.maxStartRequests) {
       return Promise.reject(new RemoteRunApiError("CAPACITY_REACHED", "The Host reached its safe start-request limit. Existing command IDs remain protected from replay; restart the Host to begin a new deduplication epoch."));
     }
-    let choice: WindowTargetSelection;
+    let selectedTarget: WindowTargetSelection | undefined;
     try {
-      validateWindowTargetToken(targetToken);
-      choice = this.takeWindowTarget(deviceId, targetToken);
+      if (target.mode === "window") {
+        validateWindowTargetToken(target.targetToken);
+        selectedTarget = this.takeWindowTarget(deviceId, target.targetToken);
+      }
     } catch (error) {
       return Promise.reject(error);
     }
@@ -253,10 +285,116 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       rejectPromise = rejectPromiseValue;
     });
     // Reserve the idempotency key synchronously before fresh discovery yields.
-    this.startRequests.set(key, { goal: cleanGoal, targetToken, promise });
-    void this.createRun(deviceId, cleanGoal, choice)
+    this.startRequests.set(key, { goal: cleanGoal, targetFingerprint, promise });
+    void this.resolveTargetAndCreateRun(deviceId, cleanGoal, target, selectedTarget)
       .then(resolvePromise, rejectPromise);
     return promise;
+  }
+
+  private async resolveTargetAndCreateRun(
+    deviceId: string,
+    goal: string,
+    target: RemoteRunTarget,
+    selectedTarget: WindowTargetSelection | undefined,
+  ): Promise<RemoteRunSnapshot> {
+    if (this.startInProgress) {
+      throw new RemoteRunApiError("RUN_BUSY", "The Host is already resolving a target for another Run. Wait for it to finish starting.");
+    }
+    this.startInProgress = true;
+    try {
+      // A public Runtime `finished` event can precede ApplicationSession's
+      // close/report/lease-release completion. Establish the shared session
+      // boundary before saved-profile inspection or any window discovery so
+      // every target mode observes the same single-owner lifecycle.
+      try {
+        await this.session.waitUntilIdleAfterTerminal();
+      } catch (error) {
+        const message = errorMessage(error);
+        if (/already has an active Run|terminal cleanup|unresolved desktop cleanup|pending_cleanup|environment .*locked/iu.test(message)) {
+          throw new RemoteRunApiError("RUN_BUSY", "The Host already has a Run or unresolved desktop cleanup.");
+        }
+        throw error;
+      }
+      if (target.mode === "browser") {
+        const profile = this.managedBrowserProfile;
+        if (target.sessionMode === "saved") {
+          if (profile === undefined) throw new RemoteRunApiError("MANAGED_BROWSER_UNAVAILABLE", "This Host has no configured persistent managed-browser profile.");
+          let readiness: Awaited<ReturnType<typeof inspectManagedBrowserProfile>>;
+          try {
+            readiness = await this.inspectManagedBrowserProfile(profile.profileRoot, profile.profileLabel);
+          } catch {
+            throw new RemoteRunApiError(
+              "MANAGED_BROWSER_PROFILE_UNAVAILABLE",
+              "受管浏览器配置无法通过安全检查。任务尚未启动。请在电脑停止使用该配置的浏览器和 Harness Host，再运行 scripts/mobile.ps1 recover-browser-profile。",
+            );
+          }
+          if (readiness.state !== "ready") {
+            throw new RemoteRunApiError(
+              "MANAGED_BROWSER_PROFILE_UNAVAILABLE",
+              "受管浏览器配置当前被占用，或上次异常退出留下了运行标记。任务尚未启动。请先停止使用该配置的浏览器和 Harness Host，再在电脑运行 `scripts/mobile.ps1 recover-browser-profile`；命令会先检查占用状态，只归档运行标记，不会删除登录数据。",
+            );
+          }
+          let url = target.url;
+          if (url === undefined) {
+            try {
+              url = (await this.readManagedBrowserStartupUrls(resolve(profile.profileRoot, profile.profileLabel)))[0] ?? "about:blank";
+            } catch {
+              throw new RemoteRunApiError("MANAGED_BROWSER_PROFILE_UNAVAILABLE", "电脑端已登录网站清单无法安全读取。任务尚未启动，请检查受管浏览器配置后重试。");
+            }
+          }
+          return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "saved", url });
+        }
+        return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "temporary", url: target.url ?? "about:blank" });
+      }
+      if (target.mode === "window") {
+        if (selectedTarget === undefined) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window choice is invalid. Refresh the list and choose again.");
+        return await this.createRun(deviceId, goal, { mode: "window", selection: selectedTarget });
+      }
+
+      let currentWindows: readonly WindowTargetInfo[];
+      try {
+        currentWindows = await this.session.listAllWindowTargets(AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS));
+      } catch (error) {
+        throw windowDiscoveryError(error, "The Host could not safely match the goal to open windows. Refresh the list and try again.");
+      }
+      if (currentWindows.length > MAX_WINDOW_TARGETS) {
+        throw new RemoteRunApiError("WINDOW_SELECTION_REQUIRED", "Too many open windows can be matched safely. Choose a window manually.");
+      }
+      const match = matchGoalToWindow(goal, currentWindows);
+      if (match.kind !== "matched") {
+        const reason = match.kind === "ambiguous" ? "More than one open window matches the goal." : "No open window confidently matches the goal.";
+        throw new RemoteRunApiError("WINDOW_SELECTION_REQUIRED", `${reason} Choose a window manually.`);
+      }
+      const window = match.match.target;
+      const visible = await this.session.listWindowTargets(AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS));
+      const visibleByHandle = visible.find((candidate) => candidate.pid === window.pid && candidate.windowId === window.windowId);
+      if (visibleByHandle !== undefined && !sameWindowIdentity(visibleByHandle, window)) {
+        throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The matched window changed while it was being selected. Refresh and try again.");
+      }
+      if (visibleByHandle === undefined) {
+        try {
+          await this.session.activateWindowTarget(
+            { pid: window.pid, windowId: window.windowId },
+            AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS),
+          );
+        } catch (error) {
+          throw new RemoteRunApiError("WINDOW_ACTIVATION_FAILED", "The matched window could not be restored. Choose a currently visible window manually.");
+        }
+      }
+      const appName = boundedText(window.appName, 256);
+      const title = boundedText(window.title, 512);
+      return await this.createRun(deviceId, goal, {
+        mode: "window",
+        selection: {
+          pid: window.pid,
+          windowId: window.windowId,
+          ...(appName === undefined ? {} : { appName }),
+          ...(title === undefined ? {} : { title }),
+        },
+      });
+    } finally {
+      this.startInProgress = false;
+    }
   }
 
   public async submitCommand(deviceId: string, runId: string, command: RemoteCommand): Promise<RemoteCommandReceipt> {
@@ -371,23 +509,54 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     return choice;
   }
 
-  private async createRun(deviceId: string, goal: string, target: WindowTargetSelection): Promise<RemoteRunSnapshot> {
-    let currentWindows: readonly WindowTargetInfo[];
-    try {
-      currentWindows = await this.session.listWindowTargets(AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS));
-    } catch {
-      throw new RemoteRunApiError("WINDOW_DISCOVERY_FAILED", "The Host could not verify the selected desktop window. Refresh the list and try again.");
+  private async createRun(deviceId: string, goal: string, target: ResolvedStartTarget): Promise<RemoteRunSnapshot> {
+    let targetLabel: RemoteWindowTargetLabel;
+    let featureOverrides: ApplicationSessionRunFeatureOverrides;
+    if (target.mode === "window") {
+      const selection = target.selection;
+      let currentWindows: readonly WindowTargetInfo[];
+      try {
+        currentWindows = await this.session.listWindowTargets(AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS));
+      } catch (error) {
+        throw windowDiscoveryError(error, "The Host could not verify the selected desktop window. Refresh the list and try again.");
+      }
+      const stillPresent = currentWindows.some((window) =>
+        window.pid === selection.pid && window.windowId === selection.windowId &&
+        boundedText(window.appName, 256) === selection.appName && boundedText(window.title, 512) === selection.title);
+      if (!stillPresent) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The selected window changed or closed. Refresh the list and choose again.");
+      targetLabel = {
+        ...(selection.appName === undefined ? {} : { appName: selection.appName }),
+        ...(selection.title === undefined ? {} : { title: selection.title }),
+      };
+      featureOverrides = {
+        windowTarget: { pid: selection.pid, windowId: selection.windowId },
+        windowDeliveryMode: "foreground",
+      };
+    } else {
+      const url = new URL(target.url ?? "about:blank");
+      targetLabel = { appName: "Harness-managed browser", title: url.host || "New tab" };
+      if (target.sessionMode === "saved") {
+        if (this.managedBrowserProfile === undefined) throw new RemoteRunApiError("MANAGED_BROWSER_UNAVAILABLE", "This Host has no configured persistent managed-browser profile.");
+        featureOverrides = {
+          windowTarget: null,
+          grounding: "hybrid-catalog-v1",
+          managedBrowserUrl: target.url,
+          managedBrowserProfileMode: "persistent",
+          managedBrowserProfileLabel: this.managedBrowserProfile.profileLabel,
+          managedBrowserProfileRoot: this.managedBrowserProfile.profileRoot,
+        };
+      } else {
+        featureOverrides = {
+          windowTarget: null,
+          grounding: "hybrid-catalog-v1",
+          managedBrowserUrl: target.url,
+          managedBrowserProfileMode: "ephemeral",
+        };
+      }
     }
-    const stillPresent = currentWindows.some((window) =>
-      window.pid === target.pid && window.windowId === target.windowId &&
-      boundedText(window.appName, 256) === target.appName && boundedText(window.title, 512) === target.title);
-    if (!stillPresent) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The selected window changed or closed. Refresh the list and choose again.");
     let handle: RunHandle;
     try {
-      handle = await this.session.startRun(goal, {
-        windowTarget: { pid: target.pid, windowId: target.windowId },
-        windowDeliveryMode: "foreground",
-      });
+      handle = await this.session.startRun(goal, featureOverrides);
     } catch (error) {
       const message = errorMessage(error);
       if (/owned by run|environment .*locked|pending_cleanup|already has an active Run/iu.test(message)) {
@@ -399,10 +568,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     const record: ManagedRemoteRun = {
       handle,
       ownerDeviceId: deviceId,
-      target: {
-        ...(target.appName === undefined ? {} : { appName: target.appName }),
-        ...(target.title === undefined ? {} : { title: target.title }),
-      },
+      target: targetLabel,
       startedAt: this.now(),
       eventCapacity: this.eventCapacity,
       events: [],
@@ -769,6 +935,81 @@ function safeIssueCategory(category: string): string {
 function safeMediaType(value: string): string {
   if (!/^(?:image\/(?:png|jpeg|webp)|application\/pdf|text\/plain)$/iu.test(value)) return "application/octet-stream";
   return value.toLowerCase();
+}
+
+function normalizeRemoteRunTarget(value: RemoteRunTargetInput): RemoteRunTarget {
+  if (typeof value === "string") return { mode: "window", targetToken: value };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new RemoteRunApiError("INVALID_TARGET", "target must be an auto, window, or browser selection.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.mode === "auto" && hasExactKeys(record, ["mode"])) return { mode: "auto" };
+  if (record.mode === "window" && hasExactKeys(record, ["mode", "targetToken"]) && typeof record.targetToken === "string") {
+    return { mode: "window", targetToken: record.targetToken };
+  }
+  if (record.mode === "browser" && hasExactKeys(record, ["mode"])) {
+    return { mode: "browser", sessionMode: "temporary" };
+  }
+  if (record.mode === "browser" && hasExactKeys(record, ["mode", "url"]) &&
+      (record.url === undefined || typeof record.url === "string")) {
+    return browserTargetWithNormalizedUrl("temporary", record.url);
+  }
+  if (record.mode === "browser" && hasExactKeys(record, ["mode", "sessionMode"]) && isBrowserSessionMode(record.sessionMode)) {
+    return { mode: "browser", sessionMode: record.sessionMode };
+  }
+  if (record.mode === "browser" && hasExactKeys(record, ["mode", "sessionMode", "url"]) && isBrowserSessionMode(record.sessionMode) &&
+      (record.url === undefined || typeof record.url === "string")) {
+    return browserTargetWithNormalizedUrl(record.sessionMode, record.url);
+  }
+  throw new RemoteRunApiError("INVALID_TARGET", "target must contain only the fields for one supported selection mode.");
+}
+
+function isBrowserSessionMode(value: unknown): value is RemoteBrowserSessionMode {
+  return value === "temporary" || value === "saved";
+}
+
+function browserTargetWithNormalizedUrl(sessionMode: RemoteBrowserSessionMode, rawUrl: unknown): RemoteRunTarget {
+  if (typeof rawUrl !== "string" || rawUrl.trim().length === 0) return { mode: "browser", sessionMode };
+  const url = normalizeManagedBrowserUrl(rawUrl);
+  if (sessionMode === "temporary" && url === "about:blank") return { mode: "browser", sessionMode };
+  return { mode: "browser", sessionMode, url };
+}
+
+function normalizeManagedBrowserUrl(value: string): string {
+  if (value.length > 2_048) {
+    throw new RemoteRunApiError("INVALID_TARGET", "Managed browser URL must contain no more than 2048 characters.");
+  }
+  if (value.trim().length === 0) return "about:blank";
+  if (value === "about:blank") return value;
+  if (value !== value.trim()) throw new RemoteRunApiError("INVALID_TARGET", "Managed browser URL must not have surrounding whitespace.");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new RemoteRunApiError("INVALID_TARGET", "Managed browser URL must be a complete http(s) URL or exact about:blank.");
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.hostname.length === 0 || parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new RemoteRunApiError("INVALID_TARGET", "Managed browser URL must be http(s), include a host, and contain no embedded credentials.");
+  }
+  return parsed.toString();
+}
+
+function hasExactKeys(record: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(record);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function windowDiscoveryError(error: unknown, message: string): RemoteRunApiError {
+  if (/active Run|no Run is active/iu.test(errorMessage(error))) {
+    return new RemoteRunApiError("RUN_BUSY", "The Host already has a Run or unresolved desktop cleanup.");
+  }
+  return new RemoteRunApiError("WINDOW_DISCOVERY_FAILED", message);
+}
+
+function sameWindowIdentity(left: WindowTargetInfo, right: WindowTargetInfo): boolean {
+  return left.pid === right.pid && left.windowId === right.windowId &&
+    boundedText(left.appName, 256) === boundedText(right.appName, 256) &&
+    boundedText(left.title, 512) === boundedText(right.title, 512);
 }
 
 function candidateKey(candidate: ComputerWindowCandidate): string {
