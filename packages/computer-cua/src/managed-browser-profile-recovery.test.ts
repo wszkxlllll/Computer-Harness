@@ -1,12 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import { argvReferencesManagedBrowserProfile, commandLineReferencesManagedBrowserProfile, inspectManagedBrowserProfile, matchingPidsFromInventory, recoverStaleManagedBrowserProfile, sameManagedBrowserProfilePath } from "./managed-browser-profile-recovery.js";
+
+// GitHub's Windows runner temp directory may be a reparse point. Production
+// must reject such a profile root, so these tests create their fixtures under
+// a repository-controlled directory whose real path is checked before use.
+const testRootBase = resolve(fileURLToPath(new URL("../../../.test-tmp/managed-browser-profile-recovery/", import.meta.url)));
+
+async function mkdtempFixture(prefix: string): Promise<string> {
+  await mkdir(testRootBase, { recursive: true });
+  const metadata = await lstat(testRootBase);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("managed-browser recovery test root is not a regular directory");
+  const resolvedBase = await realpath(testRootBase);
+  if (!sameManagedBrowserProfilePath(resolvedBase, testRootBase, process.platform)) {
+    throw new Error("managed-browser recovery test root resolves through a reparse point");
+  }
+  return mkdtemp(join(testRootBase, prefix));
+}
 
 describe("managed browser stale profile recovery", () => {
   it("refuses recovery while a process uses the exact profile and leaves markers untouched", async () => {
-    const root = await mkdtemp(join(tmpdir(), "harness-profile-active-"));
+    const root = await mkdtempFixture("harness-profile-active-");
     const profile = join(root, "travel");
     await mkdir(profile);
     await writeFile(join(profile, ".computer-harness-profile.lock"), "", "utf8");
@@ -21,7 +37,7 @@ describe("managed browser stale profile recovery", () => {
   });
 
   it("archives only stale runtime markers and leaves browser login data untouched", async () => {
-    const root = await mkdtemp(join(tmpdir(), "harness-profile-recover-"));
+    const root = await mkdtempFixture("harness-profile-recover-");
     const profile = join(root, "travel");
     await mkdir(profile);
     await writeFile(join(profile, ".computer-harness-profile.lock"), "stale-lock-marker", "utf8");
@@ -45,7 +61,7 @@ describe("managed browser stale profile recovery", () => {
   });
 
   it("leaves the profile lock in place after a partial archive so recovery can retry", async () => {
-    const root = await mkdtemp(join(tmpdir(), "harness-profile-partial-recovery-"));
+    const root = await mkdtempFixture("harness-profile-partial-recovery-");
     const profile = join(root, "travel");
     await mkdir(profile);
     await writeFile(join(profile, ".computer-harness-profile.lock"), "stale-lock", "utf8");
@@ -75,7 +91,7 @@ describe("managed browser stale profile recovery", () => {
   });
 
   it("refuses recovery when process inventory is unavailable", async () => {
-    const root = await mkdtemp(join(tmpdir(), "harness-profile-unknown-"));
+    const root = await mkdtempFixture("harness-profile-unknown-");
     const profile = join(root, "travel");
     await mkdir(profile);
     await writeFile(join(profile, ".computer-harness-profile.lock"), "", "utf8");
@@ -89,7 +105,7 @@ describe("managed browser stale profile recovery", () => {
   });
 
   it("allows a leftover DevToolsActivePort when no profile lock or owner remains", async () => {
-    const root = await mkdtemp(join(tmpdir(), "harness-profile-port-only-"));
+    const root = await mkdtempFixture("harness-profile-port-only-");
     const profile = join(root, "travel");
     await mkdir(profile);
     await writeFile(join(profile, "DevToolsActivePort"), "9222\n", "utf8");
@@ -162,7 +178,7 @@ describe("managed browser stale profile recovery", () => {
     const inventory = `1234\tChromium --user-data-dir="${root}" --no-first-run`;
     expect(matchingPidsFromInventory(inventory, root, "darwin")).toBeUndefined();
 
-    const fixtureRoot = await mkdtemp(join(tmpdir(), "harness-profile-darwin-injected-"));
+    const fixtureRoot = await mkdtempFixture("harness-profile-darwin-injected-");
     const profile = join(fixtureRoot, "travel");
     await mkdir(profile);
     await writeFile(join(profile, ".computer-harness-profile.lock"), "stale-lock", "utf8");
@@ -192,10 +208,10 @@ describe("managed browser stale profile recovery", () => {
 
   it("accepts Windows realpath casing changes but still rejects an outside reparse target", async () => {
     if (process.platform !== "win32") return;
-    const root = await mkdtemp(join(tmpdir(), "Harness-Profile-Case-"));
+    const root = await mkdtempFixture("Harness-Profile-Case-");
     const profile = join(root, "travel");
     await mkdir(profile);
-    const outsideRoot = await mkdtemp(join(tmpdir(), "Harness-Profile-Outside-"));
+    const outsideRoot = await mkdtempFixture("Harness-Profile-Outside-");
     const outsideProfile = join(outsideRoot, "travel");
     await mkdir(outsideProfile);
     try {
@@ -219,7 +235,7 @@ describe("managed browser stale profile recovery", () => {
   });
 
   it("rejects traversal labels and reparse markers", async () => {
-    const root = await mkdtemp(join(tmpdir(), "harness-profile-path-"));
+    const root = await mkdtempFixture("harness-profile-path-");
     const profile = join(root, "travel");
     await mkdir(profile);
     const outside = join(root, "outside-marker");

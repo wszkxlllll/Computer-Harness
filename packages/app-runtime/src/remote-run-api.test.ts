@@ -106,6 +106,15 @@ function createFixture(
   const baseConfig = config(outputDir);
   const baseComputer = baseConfig.computer;
   if (baseComputer.kind !== "cua") throw new Error("fixture requires CUA");
+  // Saved-browser tests use a Host-owned profile path, but the profile
+  // lifecycle itself is covered by computer-cua tests. Keep this fixture
+  // deterministic across CI hosts: do not let the test consult the real
+  // process inventory (or reject a platform-specific fake path).
+  const inspectManagedBrowserProfile = options.inspectManagedBrowserProfile ?? (
+    options.managedBrowserProfile === undefined
+      ? undefined
+      : async () => ({ state: "ready" as const, markers: [] as const })
+  );
   const sessionConfig: ApplicationSessionConfig = {
     ...baseConfig,
     computer: options.managedBrowserProfile === undefined ? baseComputer : {
@@ -155,7 +164,7 @@ function createFixture(
     capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
     assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(resolve(handle.config.outputDir, "assets")),
     ...(options.managedBrowserProfile === undefined ? {} : { managedBrowserProfile: options.managedBrowserProfile }),
-    ...(options.inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile: options.inspectManagedBrowserProfile }),
+    ...(inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile }),
     ...(options.readManagedBrowserStartupUrls === undefined ? {} : { readManagedBrowserStartupUrls: options.readManagedBrowserStartupUrls }),
     ...limits,
   });
