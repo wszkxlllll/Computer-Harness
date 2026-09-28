@@ -1,7 +1,7 @@
 # 手机录音与实时语音识别：阶段 B2 实施记录
 
 日期：2026-09-29
-状态：离线实现、mock 回归与真实 Qwen 约 4 秒短音频探针已通过；手机麦克风/Relay 实测尚未完成，待 Sol medium 审查。
+状态：离线实现、mock 回归与真实 Qwen 约 4 秒短音频探针已通过；手机麦克风与 WAN Relay 实测尚未完成。
 基线：阶段 A `e98502b`、B1 `74eeb86`。
 范围：Web 按键录音、PCM16/16 kHz 音频流、Host 代理识别、partial/final 转写、编辑后交给已有输入接口。
 
@@ -34,7 +34,7 @@
 
 - 每台设备最多一个活动录音；Host session ID 随机生成并绑定配对 `deviceId`。内容上限严格为 60 秒 / 1,920,000 bytes，单 chunk 最多 4,096 bytes、单请求最多 4 块，终态记录最多保留 30 秒。Host 从第一次成功接收音频时开始计时；录音阶段另有固定 10 秒尾批次传输宽限，但字节上限不放宽。录音前权限等待与初始化有 60 秒 idle grace，避免正常麦克风授权超过 20 秒就令会话过期。进入 finalizing 后不再按录音时长/idle sweep 过期；由已有 finish timeout 限制等待 Provider 的时间。活动和保留会话总量均有上限。
 - Chunk sequence 从 0 开始且必须连续，最大 1,200 个；相同 sequence、相同摘要的重试幂等确认但不重发给 Provider。Host 在转发任何新块前先验证整批的顺序、冲突和总预算，因此后续冲突不会造成有效前缀被静默执行。Provider 传输失败若发生在批次中途，会以明确失败终止该识别 session，而不是返回批次成功。Host 只保留块摘要以做去重，不保留原始 PCM。
-- Qwen 启动配置使用 Host 私有环境变量 `DASHSCOPE_API_KEY` 与 `DASHSCOPE_REALTIME_ASR_ENDPOINT`；可选 `DASHSCOPE_WORKSPACE_ID` 作为工作空间请求头。endpoint 必须为 `wss`，由部署者配置 workspace 专属主机和 `/api-ws/v1/realtime` 路径，Provider 加入 `model=qwen3-asr-flash-realtime`。
+- Qwen 启动配置使用 Host 私有环境变量 `DASHSCOPE_API_KEY`，以及 `DASHSCOPE_WORKSPACE_ID` 或显式 `DASHSCOPE_REALTIME_ASR_ENDPOINT`。显式 endpoint 优先；若 workspace 值过期或不安全，会忽略且不发送对应请求头。未设置 endpoint 时，仅对通过安全 label 校验的 workspace ID 派生北京专属 WSS `/api-ws/v1/realtime` endpoint；未提供安全 workspace 时能力保持 unavailable。Provider 加入 `model=qwen3-asr-flash-realtime`。
 - Host 发送 `session.update`：文本输出、`input_audio_format: pcm`、16 kHz、普通话识别、`turn_detection: null`。停止时依序发送 `input_audio_buffer.commit` 和 `session.finish`。
 - `conversation.item.input_audio_transcription.text` 将 `text + stash` 作为该 segment 的 partial 快照；`.completed` 使用 `transcript` 更新同一 segment 为 final。段 final 不代表会话结束；最终提交要等 `session.finished`。
 - Host/Relay 不将音频或转写写入 Run trajectory、截图或应用日志。转写只在当前 Host 进程的有界内存 session 中存在，并经配对认证返回给对应手机；Host 退出后清除。
@@ -84,6 +84,6 @@ raw PCM 可以用 `.pcm` / `.raw` 扩展名自动识别，或显式追加 `--for
 
 ## 下一步
 
-1. Sol medium 审查本阶段实现与测试。
-2. 修复审查意见后，由主 Agent 决定并说明真实 Qwen API 联通测试；之后再进行手机真机录音测试。
-3. 根据真实请求 RTT、partial 到达延迟、漏句与网络积压情况，判断是否把手机到 Relay 的音频传输替换为单条 WebSocket 流；不要以 mock 结果宣称实际延迟改善。
+1. 在本机 Host 与手机真机上做短录音，验证授权、采集、编辑确认和取消链路。
+2. 再测 WAN Relay 下的 RTT、partial/final 到达和漏句/积压情况。
+3. 根据真实数据决定是否把手机到 Relay 的音频传输换成单条 WebSocket 流；mock 或短探针结果不能代替手机/WAN 结论。

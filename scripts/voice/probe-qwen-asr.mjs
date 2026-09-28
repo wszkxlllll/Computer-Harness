@@ -74,18 +74,6 @@ export function parseArgs(argv) {
   return { help, ...(input === undefined ? {} : { input }), ...(format === undefined ? {} : { format }) };
 }
 
-export function defaultEndpoint(workspaceId) {
-  const safeWorkspaceId = validateWorkspaceId(workspaceId);
-  return `wss://${safeWorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime`;
-}
-
-function validateWorkspaceId(workspaceId) {
-  if (typeof workspaceId !== "string" || !/^[A-Za-z0-9-]{1,63}$/u.test(workspaceId)) {
-    throw new ProbeFailure("workspace_id_required");
-  }
-  return workspaceId;
-}
-
 export function resolveInputFormat(inputPath, explicitFormat) {
   if (explicitFormat === "wav" || explicitFormat === "raw") return explicitFormat;
   const extension = extname(inputPath).toLowerCase();
@@ -101,6 +89,16 @@ export function parsePcmInput(bytes, format) {
     throw new ProbeFailure("invalid_audio");
   }
   return pcm;
+}
+
+export function resolveProbeProviderConfig(workspaceId, explicitEndpoint, helpers) {
+  const safeWorkspaceId = helpers.normalizeWorkspaceId(workspaceId);
+  if (!explicitEndpoint?.trim() && workspaceId && !safeWorkspaceId) {
+    throw new ProbeFailure("workspace_id_invalid");
+  }
+  const endpoint = helpers.resolveEndpoint(explicitEndpoint, safeWorkspaceId);
+  if (endpoint === undefined) throw new ProbeFailure("endpoint_or_workspace_missing");
+  return { endpoint, ...(safeWorkspaceId ? { workspaceId: safeWorkspaceId } : {}) };
 }
 
 function extractWavePcm(bytes) {
@@ -175,10 +173,8 @@ async function main() {
   try {
     const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
     const workspaceRaw = process.env.DASHSCOPE_WORKSPACE_ID?.trim();
-    const workspaceId = workspaceRaw === undefined || workspaceRaw.length === 0 ? undefined : validateWorkspaceId(workspaceRaw);
     if (!apiKey) throw new ProbeFailure("api_key_missing");
-    const endpoint = process.env.DASHSCOPE_REALTIME_ASR_ENDPOINT?.trim()
-      || defaultEndpoint(workspaceId);
+    const workspaceId = workspaceRaw === undefined || workspaceRaw.length === 0 ? undefined : workspaceRaw;
 
     const inputPath = resolve(args.input);
     const inputInfo = await stat(inputPath).catch(() => { throw new ProbeFailure("input_unreadable"); });
@@ -189,12 +185,17 @@ async function main() {
 
     // Load only after --help and local argument/audio validation, so the help
     // path works without a built package or any credentials.
-    const { createQwenRealtimeVoiceProvider } = await import("../../packages/voice-provider-qwen/dist/index.js")
+    const { createQwenRealtimeVoiceProvider, normalizeQwenWorkspaceId, resolveQwenRealtimeEndpoint } = await import("../../packages/voice-provider-qwen/dist/index.js")
       .catch(() => { throw new ProbeFailure("provider_not_built"); });
+    const providerConfig = resolveProbeProviderConfig(
+      workspaceId,
+      process.env.DASHSCOPE_REALTIME_ASR_ENDPOINT,
+      { normalizeWorkspaceId: normalizeQwenWorkspaceId, resolveEndpoint: resolveQwenRealtimeEndpoint },
+    );
     const provider = createQwenRealtimeVoiceProvider({
-      endpoint,
+      endpoint: providerConfig.endpoint,
       apiKey,
-      ...(workspaceId ? { workspaceId } : {}),
+      ...(providerConfig.workspaceId ? { workspaceId: providerConfig.workspaceId } : {}),
       handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
       finishTimeoutMs: FINISH_TIMEOUT_MS,
     });

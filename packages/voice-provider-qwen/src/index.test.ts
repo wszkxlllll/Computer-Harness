@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { QwenRealtimeConnection, QwenRealtimeEvent } from "./index.js";
-import { createQwenRealtimeVoiceProvider } from "./index.js";
+import { createQwenRealtimeVoiceProvider, resolveQwenRealtimeEndpoint } from "./index.js";
 
 interface MockConnection extends QwenRealtimeConnection {
   readonly sent: QwenRealtimeEvent[];
@@ -48,6 +48,28 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("Qwen realtime voice provider", () => {
+  it("resolves an explicit endpoint first and derives only a safe Beijing workspace endpoint", () => {
+    expect(resolveQwenRealtimeEndpoint(undefined, "ws-demo123"))
+      .toBe("wss://ws-demo123.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime");
+    expect(resolveQwenRealtimeEndpoint("wss://custom.example/realtime", "ws-demo123"))
+      .toBe("wss://custom.example/realtime");
+    // Endpoint resolution is independent from optional workspace-header validation.
+    // Callers must sanitize workspaceId before passing it to the provider.
+    expect(resolveQwenRealtimeEndpoint("wss://custom.example/realtime", "bad/host"))
+      .toBe("wss://custom.example/realtime");
+    expect(resolveQwenRealtimeEndpoint(undefined, undefined)).toBeUndefined();
+    expect(resolveQwenRealtimeEndpoint(undefined, "ws-demo.example.com")).toBeUndefined();
+    expect(resolveQwenRealtimeEndpoint(undefined, "bad/host")).toBeUndefined();
+  });
+
+  it("rejects an explicitly supplied unsafe workspace header in the provider constructor", () => {
+    expect(() => createQwenRealtimeVoiceProvider({
+      endpoint: "wss://custom.example/realtime",
+      apiKey: "test-key",
+      workspaceId: "bad/host",
+    })).toThrow("workspace ID is invalid");
+  });
+
   it("publishes provider identity and its audio capabilities", () => {
     const provider = createQwenRealtimeVoiceProvider({
       endpoint: "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime",

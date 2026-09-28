@@ -48,6 +48,23 @@ export interface QwenRealtimeProviderOptions {
   readonly createConnection?: QwenRealtimeSocketFactory;
 }
 
+const SAFE_WORKSPACE_LABEL = /^[A-Za-z0-9-]{1,63}$/u;
+
+/** Resolve explicit configuration first, otherwise derive the Beijing workspace WSS endpoint. */
+export function resolveQwenRealtimeEndpoint(endpoint?: string, workspaceId?: string): string | undefined {
+  const configured = endpoint?.trim();
+  if (configured !== undefined && configured.length > 0) return configured;
+  const workspace = normalizeQwenWorkspaceId(workspaceId);
+  if (workspace === undefined) return undefined;
+  return `wss://${workspace}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime`;
+}
+
+/** Return a header-safe workspace label, or undefined when it is absent/unsafe. */
+export function normalizeQwenWorkspaceId(workspaceId?: string): string | undefined {
+  const workspace = workspaceId?.trim();
+  return workspace !== undefined && SAFE_WORKSPACE_LABEL.test(workspace) ? workspace : undefined;
+}
+
 export class QwenVoiceProviderError extends Error {
   public constructor(public readonly code: "provider_unavailable" | "provider_timeout" | "provider_protocol_error") {
     super(code);
@@ -69,8 +86,12 @@ export class QwenRealtimeVoiceProvider implements StreamingVoiceInputProvider {
   public constructor(options: QwenRealtimeProviderOptions) {
     this.endpoint = validateEndpoint(options.endpoint);
     if (options.apiKey.trim().length === 0) throw new Error("Qwen realtime ASR requires an API key.");
+    const workspaceId = normalizeQwenWorkspaceId(options.workspaceId);
+    if (options.workspaceId !== undefined && options.workspaceId.trim().length > 0 && workspaceId === undefined) {
+      throw new Error("Qwen realtime ASR workspace ID is invalid.");
+    }
     this.apiKey = options.apiKey;
-    this.workspaceId = options.workspaceId;
+    this.workspaceId = workspaceId;
     this.language = options.language ?? "zh";
     this.handshakeTimeoutMs = positiveTimeout(options.handshakeTimeoutMs, DEFAULT_HANDSHAKE_TIMEOUT_MS);
     this.finishTimeoutMs = positiveTimeout(options.finishTimeoutMs, DEFAULT_FINISH_TIMEOUT_MS);

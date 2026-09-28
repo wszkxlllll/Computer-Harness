@@ -1,11 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  defaultEndpoint,
-  parseArgs,
-  parsePcmInput,
-  resolveInputFormat,
-} from "./probe-qwen-asr.mjs";
+import { parseArgs, parsePcmInput, resolveInputFormat, resolveProbeProviderConfig } from "./probe-qwen-asr.mjs";
 
 test("help and argument validation are offline", () => {
   assert.equal(parseArgs(["--help"]).help, true);
@@ -16,11 +11,6 @@ test("help and argument validation are offline", () => {
   assert.throws(() => parseArgs([]), { code: "input_required" });
   assert.throws(() => parseArgs(["--input", "a.wav", "--input", "b.wav"]), { code: "invalid_arguments" });
   assert.throws(() => parseArgs(["--input", "a.wav", "--format", "flac"]), { code: "invalid_arguments" });
-});
-
-test("default Beijing realtime endpoint is built only from a safe workspace label", () => {
-  assert.equal(defaultEndpoint("ws-demo123"), "wss://ws-demo123.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime");
-  assert.throws(() => defaultEndpoint("ws-demo.example.com"), { code: "workspace_id_required" });
 });
 
 test("accepts bounded raw PCM16 and infers supported extensions", () => {
@@ -38,6 +28,20 @@ test("accepts only mono 16 kHz PCM16 WAV and rejects unsupported WAV audio", () 
   assert.equal(parsePcmInput(valid, "wav").byteLength, 3_200);
   assert.throws(() => parsePcmInput(makeWav(Buffer.alloc(3_200), { sampleRate: 48_000 }), "wav"), { code: "unsupported_wav_format" });
   assert.throws(() => parsePcmInput(Buffer.from("not a wave"), "wav"), { code: "invalid_wav" });
+});
+
+test("explicit endpoint ignores an unsafe workspace and never forwards it as a header value", () => {
+  const normalizeWorkspaceId = (value) => /^[A-Za-z0-9-]{1,63}$/u.test(value ?? "") ? value : undefined;
+  const resolveEndpoint = (endpoint, workspaceId) => endpoint?.trim()
+    || (workspaceId ? `wss://${workspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime` : undefined);
+  assert.deepEqual(resolveProbeProviderConfig("stale/invalid", "wss://custom.example/realtime", {
+    normalizeWorkspaceId,
+    resolveEndpoint,
+  }), { endpoint: "wss://custom.example/realtime" });
+  assert.throws(() => resolveProbeProviderConfig("stale/invalid", undefined, {
+    normalizeWorkspaceId,
+    resolveEndpoint,
+  }), { code: "workspace_id_invalid" });
 });
 
 function makeWav(pcm, { sampleRate = 16_000, channels = 1, bitsPerSample = 16 } = {}) {

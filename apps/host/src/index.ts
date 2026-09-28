@@ -13,9 +13,9 @@ import {
 } from "@computer-harness/app-runtime";
 import { HostRelayConnector } from "@computer-harness/relay-connector";
 import type { RunModel } from "@computer-harness/app-runtime";
-import { createQwenRealtimeVoiceProvider } from "@computer-harness/voice-provider-qwen";
 import { createHostServer } from "./server.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
+import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 
 interface HostArguments {
   envFile: string;
@@ -241,17 +241,6 @@ function readProviderCredentials(): ProviderCredentials {
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
-}
-
-function createConfiguredVoiceProvider() {
-  const apiKey = process.env.DASHSCOPE_API_KEY;
-  const endpoint = process.env.DASHSCOPE_REALTIME_ASR_ENDPOINT;
-  if (apiKey === undefined || endpoint === undefined || apiKey.trim().length === 0 || endpoint.trim().length === 0) return undefined;
-  return createQwenRealtimeVoiceProvider({
-    apiKey,
-    endpoint,
-    ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { workspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
-  });
 }
 
 async function loadEnvFile(path: string): Promise<void> {

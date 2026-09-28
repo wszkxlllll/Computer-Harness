@@ -125,10 +125,13 @@ written to Run trajectory, screenshots, or logs. Device revocation and Host
 shutdown cancel active provider sessions.
 
 The initial adapter is Qwen3-ASR-Flash-Realtime over the Host-owned secure
-WebSocket. Configure `DASHSCOPE_API_KEY` and the workspace-specific
-`DASHSCOPE_REALTIME_ASR_ENDPOINT` in the Host's private environment file;
-`DASHSCOPE_WORKSPACE_ID` is optional when the endpoint already scopes the
-workspace. The browser never receives these values. This preview uses JSON HTTP
+WebSocket. Configure `DASHSCOPE_API_KEY` and either an explicit
+`DASHSCOPE_REALTIME_ASR_ENDPOINT` or a safe `DASHSCOPE_WORKSPACE_ID` in the
+Host's private environment file. The explicit endpoint takes precedence; a
+stale or unsafe workspace value is ignored and never sent as a header in that
+case. Without an explicit endpoint, Host derives the Beijing workspace WSS
+endpoint only from a validated workspace label; an unsafe workspace makes
+voice unavailable. The browser never receives these values. This preview uses JSON HTTP
 Relay requests for each audio block; moving the upload stream onto one Relay
 WebSocket is a later transport optimization.
 

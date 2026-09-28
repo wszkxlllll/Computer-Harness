@@ -131,7 +131,7 @@ TYPESAFE_API_KEY=your_typesafe_key
 
 手机配对页面的 Goal、任务纠正和待回答问题都可按“按下说话”录入。录音明确由用户开始；录音期间所属表单会锁定，最多录制 60 秒，到时自动完成收尾；完整转写会填入原文本框，检查编辑后仍需手动发送。上传首块立即发、网络在途时会把后续音频按序最多四块一批；原始音频不会写入轨迹、截图或日志。
 
-实时识别需要在 Host 私有环境文件中配置 `DASHSCOPE_API_KEY` 和 workspace 专属的 `DASHSCOPE_REALTIME_ASR_ENDPOINT`（WSS `/api-ws/v1/realtime`）；可选 `DASHSCOPE_WORKSPACE_ID`。浏览器不接触密钥。能力查询只读取 Host 的本地配置，不代表远端 API 已连通。当前实现已通过 mock/离线回归，真实 Qwen API、手机麦克风和实际弱网时延尚未验收；不要把它视为已验证的稳定语音能力。
+实时识别需要在 Host 私有环境文件中配置 `DASHSCOPE_API_KEY`，以及安全的 `DASHSCOPE_WORKSPACE_ID` 或显式 `DASHSCOPE_REALTIME_ASR_ENDPOINT`。显式 endpoint 优先；只提供 workspace ID 时 Host 会派生北京专属 WSS `/api-ws/v1/realtime` endpoint。显式 endpoint 存在时，过期或不安全的 workspace 值会被忽略且不会作为请求头发送；没有显式 endpoint 时，不安全 workspace 会使能力保持 unavailable。浏览器不接触密钥。能力查询只读取 Host 的本地配置，不代表远端 API 已连通。mock/离线回归已通过，真实 Qwen 短探针（约 4 秒合成语音）也已通过；手机麦克风、WAN Relay 和实际弱网时延尚未验收，不要把它视为已验证的稳定语音能力。
 
 Host 当前使用固定组合预设：Planning、Fact Memory、lexical retrieval、recent Context、same-control input Batch、layered Guard、shadow Monitor 和人工确认的窗口交接；原生窗口目标默认不启用 UIA/DOM，受管浏览器目标使用 Hybrid Grounding。Host **不会继承 TUI 上次选择的功能**。不要同时用手机与 TUI 控制同一桌面；手机公网完整业务任务和无障碍验收仍需单独完成。
 
@@ -182,7 +182,7 @@ TUI / CLI / SDK                         手机 Web
 
 ## 当前验证与限制
 
-2026-09-27 检查点：根构建、Web 构建通过；**84 个 Vitest 文件、814 项测试通过**，脚本测试 19 项通过、1 项因 Windows 无法创建符号链接而跳过。公网 Relay/Web 资源健康检查通过；这不是所有远端 CI、手机网络环境或真实业务任务均已通过的声明。
+2026-09-29 检查点：根构建、Web 构建通过；**92 个 Vitest 文件、891 项测试通过**，脚本测试 19 项通过、1 项因 Windows 无法创建符号链接而跳过。公网 Relay/Web 资源健康检查通过；这不是所有远端 CI、手机网络环境或真实业务任务均已通过的声明。
 
 仍需解决或验收：
 
