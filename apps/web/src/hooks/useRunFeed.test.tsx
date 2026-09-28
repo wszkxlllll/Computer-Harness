@@ -61,6 +61,7 @@ function Probe() {
     <div>
       <span data-testid="sequence">{feed.snapshot?.sequence ?? -1}</span>
       <span data-testid="connection">{feed.connection}</span>
+      <span data-testid="error">{feed.error ?? ""}</span>
       <span data-testid="event-count">{feed.events.length}</span>
       <button type="button" onClick={() => void feed.refresh().catch(() => undefined)}>refresh</button>
     </div>
@@ -74,6 +75,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.unstubAllGlobals();
 });
@@ -98,6 +100,61 @@ describe("run feed reconnect", () => {
     expect(screen.getByTestId("connection").textContent).toBe("reconnecting");
     act(() => source.open());
     expect(screen.getByTestId("connection").textContent).toBe("live");
+  });
+
+  it("clears a stale connection warning when the event stream reconnects", async () => {
+    vi.mocked(getRun)
+      .mockResolvedValueOnce(snapshot(4))
+      .mockRejectedValueOnce(new Error("offline"));
+    render(<Probe />);
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+
+    act(() => source.fail());
+    expect(screen.getByTestId("connection").textContent).toBe("reconnecting");
+
+    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+    await waitFor(() => expect(screen.getByTestId("connection").textContent).toBe("offline"));
+    expect(screen.getByTestId("error").textContent).toBe("offline");
+
+    act(() => source.open());
+    expect(screen.getByTestId("connection").textContent).toBe("live");
+    expect(screen.getByTestId("error").textContent).toBe("");
+  });
+
+  it("shows a prominent warning after reconnecting for 12 seconds and clears it on recovery", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getRun).mockResolvedValueOnce(snapshot(4));
+    render(<Probe />);
+    await act(async () => undefined);
+    const source = FakeEventSource.instances[0];
+
+    act(() => source.fail());
+    expect(screen.getByTestId("connection").textContent).toBe("reconnecting");
+    expect(screen.getByTestId("error").textContent).toBe("");
+
+    act(() => vi.advanceTimersByTime(11_999));
+    expect(screen.getByTestId("error").textContent).toBe("");
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByTestId("error").textContent).toContain("连接已中断超过 12 秒");
+
+    act(() => source.open());
+    expect(screen.getByTestId("connection").textContent).toBe("live");
+    expect(screen.getByTestId("error").textContent).toBe("");
+  });
+
+  it("starts the delayed warning from the browser offline event", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getRun).mockResolvedValueOnce(snapshot(4));
+    render(<Probe />);
+    await act(async () => undefined);
+
+    act(() => window.dispatchEvent(new Event("offline")));
+    expect(screen.getByTestId("connection").textContent).toBe("reconnecting");
+    expect(screen.getByTestId("error").textContent).toBe("");
+
+    act(() => vi.advanceTimersByTime(12_000));
+    expect(screen.getByTestId("error").textContent).toContain("连接已中断超过 12 秒");
   });
 
   it("refreshes the snapshot and resumes after its sequence when an event is missing", async () => {

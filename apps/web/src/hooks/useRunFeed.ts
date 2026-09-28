@@ -5,6 +5,9 @@ import type { RemoteEvent, RunSnapshot } from "../types";
 
 export type FeedConnection = "loading" | "live" | "reconnecting" | "offline";
 
+const RECONNECT_WARNING_DELAY_MS = 12_000;
+const RECONNECT_WARNING = "连接已中断超过 12 秒，正在自动重连。请检查手机网络；恢复后提示会自动消失。";
+
 export interface RunFeedState {
   snapshot?: RunSnapshot;
   events: RemoteEvent[];
@@ -71,7 +74,22 @@ export function useRunFeed(runId: string): RunFeedState {
   useEffect(() => {
     let stopped = false;
     let source: EventSource | undefined;
+    let reconnectWarningTimer: number | undefined;
     let openFeed: (sequence: number) => void = () => undefined;
+
+    const clearReconnectWarningTimer = () => {
+      if (reconnectWarningTimer === undefined) return;
+      window.clearTimeout(reconnectWarningTimer);
+      reconnectWarningTimer = undefined;
+    };
+
+    const scheduleReconnectWarning = () => {
+      if (reconnectWarningTimer !== undefined) return;
+      reconnectWarningTimer = window.setTimeout(() => {
+        reconnectWarningTimer = undefined;
+        if (!stopped) setError(RECONNECT_WARNING);
+      }, RECONNECT_WARNING_DELAY_MS);
+    };
 
     const onMessage = (rawEvent: Event) => {
       const message = rawEvent as MessageEvent<string>;
@@ -139,8 +157,15 @@ export function useRunFeed(runId: string): RunFeedState {
       source.addEventListener("resync_required", onMessage);
       source.addEventListener("run.resync_required", onMessage);
       source.onmessage = onMessage;
-      source.onopen = () => setConnection("live");
-      source.onerror = () => setConnection("reconnecting");
+      source.onopen = () => {
+        clearReconnectWarningTimer();
+        setConnection("live");
+        setError(undefined);
+      };
+      source.onerror = () => {
+        setConnection("reconnecting");
+        scheduleReconnectWarning();
+      };
     };
     restartFeedRef.current = openFeed;
 
@@ -157,19 +182,28 @@ export function useRunFeed(runId: string): RunFeedState {
       }
     }
 
+    const onOffline = () => {
+      setConnection("reconnecting");
+      scheduleReconnectWarning();
+    };
     const onOnline = () => { void refresh().catch(() => undefined); };
     const onVisibility = () => {
-      if (document.visibilityState === "visible") onOnline();
+      if (document.visibilityState !== "visible") return;
+      if (navigator.onLine === false) onOffline();
+      else onOnline();
     };
 
     void initialize();
+    window.addEventListener("offline", onOffline);
     window.addEventListener("online", onOnline);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       stopped = true;
+      clearReconnectWarningTimer();
       source?.close();
       sourceRef.current?.close();
       restartFeedRef.current = undefined;
+      window.removeEventListener("offline", onOffline);
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisibility);
     };
