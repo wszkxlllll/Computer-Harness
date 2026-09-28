@@ -2,6 +2,9 @@ import { useState, type FormEvent } from "react";
 import type { RunTarget } from "../types";
 import { isValidBrowserUrl } from "../run-target";
 import { WindowTargetPicker, type WindowTargetPickerProps } from "./WindowTargetPicker";
+import { VoiceInputControl } from "./VoiceInputControl";
+import type { VoiceAudioCaptureAdapter } from "@computer-harness/voice";
+import { appendVoiceInputText } from "../voice-input-text";
 
 interface GoalComposerProps {
   disabled?: boolean;
@@ -14,6 +17,7 @@ interface GoalComposerProps {
   onBrowserSessionModeChange: (mode: "temporary" | "saved") => void;
   onBrowserUrlChange: (url: string) => void;
   targetPicker: WindowTargetPickerProps;
+  voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
   onSubmit: (goal: string, target: RunTarget) => Promise<void>;
   error?: string;
 }
@@ -29,10 +33,13 @@ export function GoalComposer({
   onBrowserSessionModeChange,
   onBrowserUrlChange,
   targetPicker,
+  voiceCaptureAdapterFactory,
   onSubmit,
   error,
 }: GoalComposerProps) {
   const [goal, setGoal] = useState("");
+  const [voiceActive, setVoiceActive] = useState(false);
+  const formDisabled = disabled || busy || voiceActive;
   const parsedBrowserUrl = browserUrl.trim();
   const browserUrlValid = !parsedBrowserUrl || isValidBrowserUrl(parsedBrowserUrl);
   const browserUrlInvalid = Boolean(parsedBrowserUrl) && !isValidBrowserUrl(parsedBrowserUrl);
@@ -40,7 +47,7 @@ export function GoalComposer({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = goal.trim();
-    if (!value || !canStart || disabled || busy) return;
+    if (!value || !canStart || disabled || busy || voiceActive) return;
     if (targetMode === "window") {
       const targetToken = targetPicker.selectedToken;
       if (!targetToken) return;
@@ -69,11 +76,12 @@ export function GoalComposer({
         onChange={(event) => setGoal(event.currentTarget.value)}
         placeholder="写下任务内容…"
         aria-describedby={error ? "goal-help goal-error" : "goal-help"}
-        disabled={disabled || busy}
+        disabled={formDisabled}
         required
       />
+      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} onTranscript={(text) => setGoal((current) => appendVoiceInputText(current, text))} createCaptureAdapter={voiceCaptureAdapterFactory} />
       {error && <p id="goal-error" className="inline-error" role="alert">{error}</p>}
-      <fieldset className="target-mode-fieldset" disabled={disabled || busy}>
+      <fieldset className="target-mode-fieldset" disabled={formDisabled}>
         <legend>操作目标</legend>
         <div className="target-mode-options">
           <label className="target-mode-option">
@@ -91,7 +99,7 @@ export function GoalComposer({
         </div>
       </fieldset>
 
-      {targetMode === "window" && <WindowTargetPicker {...targetPicker} disabled={disabled || busy || targetPicker.disabled} />}
+      {targetMode === "window" && <WindowTargetPicker {...targetPicker} disabled={formDisabled || targetPicker.disabled} />}
 
       {targetMode === "browser" && (
         <div className="browser-target-field">
@@ -121,7 +129,7 @@ export function GoalComposer({
             placeholder="https://example.com"
             aria-describedby={browserUrlInvalid ? "browser-target-help browser-target-error" : "browser-target-help"}
             aria-invalid={browserUrlInvalid}
-            disabled={disabled || busy}
+            disabled={formDisabled}
           />
           <p id="browser-target-help" className="field-hint">{browserSessionMode === "saved" ? "留空时恢复电脑端准备好的网站；没有准备网站时安全打开空白页。填写网址时使用电脑端已准备的登录状态打开该网站。" : "留空会打开临时空白页，由助手根据任务访问网站。"}</p>
           {browserUrlInvalid && <p id="browser-target-error" className="inline-error" role="alert">请输入完整的 http:// 或 https:// 地址。</p>}
@@ -131,7 +139,7 @@ export function GoalComposer({
         <button
           className="button button-primary button-large"
           type="submit"
-          disabled={disabled || busy || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid)}
+          disabled={formDisabled || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid)}
         >
           {busy ? "正在发送…" : "开始任务"}
         </button>

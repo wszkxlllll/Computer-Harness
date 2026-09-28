@@ -1,4 +1,11 @@
-import type { VoiceOutputAdapter } from "@computer-harness/voice";
+import { createContext, useContext } from "react";
+import type { VoiceInputCapabilities, VoiceOutputAdapter } from "@computer-harness/voice";
+
+export const VoiceInputCapabilitiesContext = createContext<VoiceInputCapabilities | undefined>(undefined);
+
+export function useVoiceInputCapabilities(): VoiceInputCapabilities | undefined {
+  return useContext(VoiceInputCapabilitiesContext);
+}
 
 export interface VoiceCapabilities {
   readAloud?: (text: string) => void | Promise<void>;

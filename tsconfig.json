@@ -12,6 +12,7 @@
     { "path": "packages/provider-qwen" },
     { "path": "packages/app-runtime" },
     { "path": "packages/voice" },
+    { "path": "packages/voice-provider-qwen" },
     { "path": "packages/relay-connector" },
     { "path": "apps/cli" },
     { "path": "apps/relay" },

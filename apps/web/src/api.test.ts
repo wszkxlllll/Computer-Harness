@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createRun, listRuns, listWindowTargets, setPhoneCsrfToken } from "./api";
+import {
+  appendVoiceAudio,
+  createRun,
+  finishVoiceInput,
+  getVoiceInputCapabilities,
+  listRuns,
+  listWindowTargets,
+  setPhoneCsrfToken,
+  startVoiceInput,
+} from "./api";
 
 afterEach(() => {
   setPhoneCsrfToken(undefined);
@@ -17,6 +26,52 @@ describe("API error presentation", () => {
       message: "电脑当前离线或无法连接。确认电脑已开机并运行 Harness。",
       code: "host_unavailable",
     });
+  });
+});
+
+describe("voice input Host API contract", () => {
+  it("discovers availability without sending audio and starts with a client idempotency key", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ available: true, sampleRate: 16_000, chunkBytes: 3_200 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sessionId: "voice-session", events: [], eventCursor: 0 }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setPhoneCsrfToken("phone-csrf");
+
+    await expect(getVoiceInputCapabilities()).resolves.toMatchObject({ available: true, sampleRate: 16_000 });
+    await startVoiceInput("voice-start-id");
+    const [capabilityPath, startPath] = fetchMock.mock.calls.map(([path]) => path);
+    expect(capabilityPath).toBe("/api/voice/capabilities");
+    expect(startPath).toBe("/api/voice/sessions");
+    const [, startRequest] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(String(startRequest.body))).toEqual({ requestId: "voice-start-id" });
+    expect((startRequest.headers as Headers).get("X-CSRF-Token")).toBe("phone-csrf");
+  });
+
+  it("encodes an ordered PCM batch in a same-origin JSON request and never submits a transcript", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ sessionId: "voice-session", events: [], eventCursor: 4 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setPhoneCsrfToken("phone-csrf");
+    await appendVoiceAudio("voice-session", [
+      { sequence: 7, data: new Uint8Array([1, 0, 2, 0]) },
+      { sequence: 8, data: new Uint8Array([3, 0]) },
+    ], 3);
+    const [path, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/api/voice/sessions/voice-session/audio");
+    expect(JSON.parse(String(request.body))).toEqual({
+      chunks: [{ sequence: 7, audio: "AQACAA==" }, { sequence: 8, audio: "AwA=" }],
+      afterEventSequence: 3,
+    });
+    expect(JSON.stringify(JSON.parse(String(request.body)))).not.toContain("transcript");
+    expect((request.headers as Headers).get("X-CSRF-Token")).toBe("phone-csrf");
+  });
+
+  it("finishes through the explicit finalization route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ sessionId: "voice-session", events: [], eventCursor: 9 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setPhoneCsrfToken("phone-csrf");
+    await finishVoiceInput("voice-session", 8);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/voice/sessions/voice-session/finish");
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ afterEventSequence: 8 });
   });
 });
 

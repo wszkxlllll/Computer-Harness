@@ -711,6 +711,14 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .voice-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .55rem; }
 .voice-actions .button { font-size: .82rem; }
 .voice-transcript { border-top: 1px solid var(--line); color: var(--muted); padding-top: .45rem; overflow-wrap: anywhere; }
+.voice-input-control { margin: .35rem 0 .6rem; }
+.voice-input-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; }
+.voice-input-actions .voice-record-button, .voice-input-actions .voice-cancel-button { min-height: 2.75rem; }
+.voice-record-duration { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 2.5rem; }
+.voice-input-status, .voice-input-error, .voice-input-transcript { font-size: .84rem; margin: .35rem 0 0; overflow-wrap: anywhere; }
+.voice-input-status { color: var(--muted); }
+.voice-input-error { color: var(--danger); }
+.voice-input-transcript { color: var(--ink); line-height: 1.5; }
 .preferences-footer { border-top: 1px solid var(--line); margin-top: .9rem; padding-top: .75rem; }
 .preference-save-status { color: var(--muted); font-size: .78rem; margin: .3rem 0; }
 

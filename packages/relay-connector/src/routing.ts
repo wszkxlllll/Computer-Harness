@@ -1,3 +1,10 @@
+import {
+  VOICE_INPUT_MAX_BATCH_BYTES,
+  VOICE_INPUT_MAX_BATCH_CHUNKS,
+  VOICE_INPUT_MAX_CHUNK_BYTES,
+  VOICE_INPUT_MAX_CHUNKS,
+} from "@computer-harness/voice";
+
 export type RelayHttpMethod = "GET" | "POST" | "DELETE";
 export type ApiResponseKind = "json" | "sse" | "asset";
 
@@ -45,6 +52,20 @@ function identifyRoute(method: RelayHttpMethod, pathname: string): Omit<AllowedA
   }
 
   if (method === "GET" && pathname === "/api/windows") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "GET" && pathname === "/api/voice/capabilities") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "POST" && pathname === "/api/voice/sessions") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  const voiceAudioMatch = /^\/api\/voice\/sessions\/([A-Za-z0-9_-]{1,128})\/audio$/u.exec(pathname);
+  if (voiceAudioMatch !== null && method === "POST") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  const voiceControlMatch = /^\/api\/voice\/sessions\/([A-Za-z0-9_-]{1,128})\/(finish|cancel)$/u.exec(pathname);
+  if (voiceControlMatch !== null && method === "POST") {
     return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
   }
 
@@ -175,6 +196,38 @@ function isValidRunTarget(value: unknown): boolean {
 
 /** Validate the only route-specific browser start payload without accepting OS handles or paths. */
 export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject | undefined): boolean {
+  if (route.method === "POST" && route.path === "/api/voice/sessions") {
+    return body !== undefined && hasExactKeys(body, ["requestId"]) && isValidIdentifier(body.requestId);
+  }
+  if (route.method === "POST" && /^\/api\/voice\/sessions\/[A-Za-z0-9_-]{1,128}\/audio$/u.test(route.path)) {
+    if (body === undefined || !hasExactKeys(body, ["chunks", "afterEventSequence"])
+      || !Number.isSafeInteger(body.afterEventSequence) || (body.afterEventSequence as number) < 0
+      || !Array.isArray(body.chunks) || body.chunks.length === 0 || body.chunks.length > VOICE_INPUT_MAX_BATCH_CHUNKS) return false;
+    let totalBytes = 0;
+    let previousSequence = -1;
+    for (const value of body.chunks) {
+      if (!isRecord(value) || !hasExactKeys(value, ["sequence", "audio"])
+        || !Number.isSafeInteger(value.sequence) || (value.sequence as number) < 0
+        || (value.sequence as number) >= VOICE_INPUT_MAX_CHUNKS
+        || (value.sequence as number) <= previousSequence
+        || typeof value.audio !== "string" || value.audio.length === 0
+        || value.audio.length > Math.ceil(VOICE_INPUT_MAX_CHUNK_BYTES / 3) * 4
+        || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value.audio)) return false;
+      previousSequence = value.sequence as number;
+      const decoded = Buffer.from(value.audio, "base64");
+      const validChunk = decoded.byteLength > 0 && decoded.byteLength <= VOICE_INPUT_MAX_CHUNK_BYTES
+        && decoded.byteLength % 2 === 0 && decoded.toString("base64") === value.audio;
+      decoded.fill(0);
+      if (!validChunk) return false;
+      totalBytes += decoded.byteLength;
+      if (totalBytes > VOICE_INPUT_MAX_BATCH_BYTES) return false;
+    }
+    return true;
+  }
+  if (route.method === "POST" && /^\/api\/voice\/sessions\/[A-Za-z0-9_-]{1,128}\/(?:finish|cancel)$/u.test(route.path)) {
+    return body !== undefined && hasExactKeys(body, ["afterEventSequence"])
+      && Number.isSafeInteger(body.afterEventSequence) && (body.afterEventSequence as number) >= 0;
+  }
   if (route.method !== "POST" || route.path !== "/api/runs") return true;
   if (body === undefined) return false;
   const hasLegacyTarget = Object.hasOwn(body, "targetToken");

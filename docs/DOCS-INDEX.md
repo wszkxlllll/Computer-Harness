@@ -6,7 +6,7 @@
 
 下一阶段完整待办与分工入口：[产品开发、验证与稳定 Demo 清单](./product-next-stage-task-list-2026-09-27.md)。覆盖桌面执行、手机/语音、个性化、Guard、三平台、现有模块优化、评测发布及后续研究；第11节为可认领任务全集，第12节为认领规则。分工尚待用户确认。
 
-语音阶段 A+B1 实施记录：[语音合同、运行通知与 Host/Web 播报](./voice-streaming-and-notices-implementation-2026-09-28.md)。Host/RemoteRunAPI 可选投影最小安全 `run.notice` SSE 事件，Web 已接入默认关闭、可中断的 Browser `speechSynthesis` 输出和语速偏好；录音/STT、真实 TTS Provider 与 Android/iOS 真机验收仍待完成。
+语音阶段 A+B1 实施记录：[语音合同、运行通知与 Host/Web 播报](./voice-streaming-and-notices-implementation-2026-09-28.md)。Host/RemoteRunAPI 可选投影最小安全 `run.notice` SSE 事件，Web 已接入默认关闭、可中断的 Browser `speechSynthesis` 输出和语速偏好。阶段 B2 已完成 mock 离线录音/STT 链路，真实 Qwen API、手机麦克风与真机验收仍待进行：[阶段 B2 实施记录](./voice-recording-b2-implementation-2026-09-29.md)。
 
 当前交付：[手机 App 式界面与审批修复](./mobile-accessible-ui-implementation-2026-09-26.md)。已按成熟 App 参考重做实际界面；756 项测试通过，最终小屏裁切已修复并重建。2026-09-27 已部署公网 Web、启动新版本机 Host 并验证配对注册；未完成手机读屏及真实任务验收。
 

@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { ApiError, getPhoneSession, setPhoneCsrfToken } from "./api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ApiError, getPhoneSession, getVoiceInputCapabilities, setPhoneCsrfToken } from "./api";
 import { BrandHeader } from "./components/BrandHeader";
 import { ConnectPhoneScreen } from "./ConnectPhoneScreen";
 import { HomeScreen } from "./HomeScreen";
@@ -8,6 +8,8 @@ import { PreferencesScreen } from "./PreferencesScreen";
 import { PreferencesProvider } from "./PreferencesContext";
 import { RunWorkspace } from "./RunWorkspace";
 import type { VoiceCapabilities } from "./voice-capabilities";
+import { VoiceInputCapabilitiesContext } from "./voice-capabilities";
+import type { VoiceInputCapabilities } from "@computer-harness/voice";
 
 const pathname = window.location.pathname;
 
@@ -31,15 +33,26 @@ function AppRoutes({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilitie
 function PhoneSessionGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<"loading" | "ready" | "unpaired" | "offline">("loading");
   const [error, setError] = useState<string>();
+  const [voiceInputCapabilities, setVoiceInputCapabilities] = useState<VoiceInputCapabilities>();
+  const connectGeneration = useRef(0);
 
   async function connect() {
+    const generation = ++connectGeneration.current;
     setState("loading");
     setError(undefined);
+    setVoiceInputCapabilities(undefined);
     try {
       const session = await getPhoneSession();
+      if (connectGeneration.current !== generation) return;
       setPhoneCsrfToken(session.csrfToken);
       setState("ready");
+      void getVoiceInputCapabilities().then((capabilities) => {
+        if (connectGeneration.current === generation) setVoiceInputCapabilities(capabilities);
+      }).catch(() => {
+        if (connectGeneration.current === generation) setVoiceInputCapabilities({ available: false, unavailableReason: "provider_unavailable" });
+      });
     } catch (caught) {
+      if (connectGeneration.current !== generation) return;
       setPhoneCsrfToken(undefined);
       if (caught instanceof ApiError && caught.status === 401) {
         setState("unpaired");
@@ -50,9 +63,14 @@ function PhoneSessionGate({ children }: { children: ReactNode }) {
     }
   }
 
-  useEffect(() => { void connect(); }, []);
+  useEffect(() => {
+    void connect();
+    return () => { connectGeneration.current += 1; };
+  }, []);
 
-  if (state === "ready") return <>{children}</>;
+  if (state === "ready") {
+    return <VoiceInputCapabilitiesContext.Provider value={voiceInputCapabilities}>{children}</VoiceInputCapabilitiesContext.Provider>;
+  }
   if (state === "loading") {
     return <main className="page-shell"><div className="loading-panel" role="status">正在连接你的电脑…</div></main>;
   }

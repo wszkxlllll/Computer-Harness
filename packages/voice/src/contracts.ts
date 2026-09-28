@@ -6,6 +6,17 @@
 
 export type VoiceInputState = "starting" | "recording" | "finalizing" | "finished" | "cancelled" | "failed";
 
+/** Shared upload contract limits. Four maximum-sized chunks stay below the Relay's 32 KiB JSON request bound. */
+export const VOICE_INPUT_SAMPLE_RATE = 16_000;
+export const VOICE_INPUT_RECOMMENDED_CHUNK_BYTES = 3_200;
+export const VOICE_INPUT_MAX_CHUNK_BYTES = 4_096;
+export const VOICE_INPUT_MAX_BATCH_CHUNKS = 4;
+export const VOICE_INPUT_MAX_BATCH_BYTES = VOICE_INPUT_MAX_CHUNK_BYTES * VOICE_INPUT_MAX_BATCH_CHUNKS;
+export const VOICE_INPUT_MAX_DURATION_MS = 60_000;
+export const VOICE_INPUT_MAX_AUDIO_BYTES = VOICE_INPUT_SAMPLE_RATE * 2 * 60;
+/** Transport sequence ceiling; the byte and elapsed-time budgets remain authoritative session limits. */
+export const VOICE_INPUT_MAX_CHUNKS = 1_200;
+
 /**
  * One stable transcript segment. Providers may update it with a higher
  * revision; a `final` segment does not finish the recording session.
@@ -37,6 +48,82 @@ export interface VoiceInputSession {
 
 export interface VoiceInputAdapter {
   start(options?: { readonly signal?: AbortSignal }): Promise<VoiceInputSession>;
+}
+
+/** One ordered mono PCM16 audio block at 16 kHz. Treat `data` as borrowed and do not retain it. */
+export interface Pcm16AudioChunk {
+  readonly sequence: number;
+  readonly data: Uint8Array;
+}
+
+export type VoiceCaptureEvent =
+  | { readonly type: "audio_chunk"; readonly chunk: Pcm16AudioChunk }
+  | { readonly type: "capture_stopped" }
+  | { readonly type: "capture_failed"; readonly errorCode: string };
+
+/** Platform-owned microphone capture. Implementations must not persist raw audio. */
+export interface VoiceAudioCaptureSession {
+  readonly events: AsyncIterable<VoiceCaptureEvent>;
+  stop(): Promise<void>;
+  cancel(): Promise<void>;
+}
+
+export interface VoiceAudioCaptureAdapter {
+  start(options?: { readonly signal?: AbortSignal }): Promise<VoiceAudioCaptureSession>;
+}
+
+/** Streaming recognition adds audio input to the compatible transcript session contract. */
+export interface StreamingVoiceInputSession extends VoiceInputSession {
+  appendAudioChunk(chunk: Pcm16AudioChunk): Promise<void>;
+}
+
+export interface StreamingVoiceInputProvider {
+  /** Stable provider identifier used by Host capability discovery. */
+  readonly providerId: string;
+  capabilities(): VoiceInputCapabilities;
+  start(options?: { readonly signal?: AbortSignal }): Promise<StreamingVoiceInputSession>;
+}
+
+export interface VoiceInputCapabilities {
+  readonly available: boolean;
+  readonly provider?: string;
+  readonly sampleRate?: 16_000;
+  readonly channels?: 1;
+  readonly chunkBytes?: number;
+  readonly maxDurationMs?: number;
+  readonly unavailableReason?: "not_configured" | "provider_unavailable";
+}
+
+export interface VoiceSessionEventEnvelope {
+  readonly sequence: number;
+  readonly event: VoiceInputEvent;
+}
+
+export interface VoiceSessionUpdate {
+  readonly sessionId: string;
+  readonly events: readonly VoiceSessionEventEnvelope[];
+  readonly eventCursor: number;
+  readonly acceptedAudioBytes?: number;
+  /** Highest sequence accepted by the last audio batch. */
+  readonly acceptedSequence?: number;
+  /** True only when every submitted chunk was an already accepted identical retry. */
+  readonly duplicate?: boolean;
+}
+
+/** Host-side owner of paired-device voice sessions; never a Runtime/Computer dependency. */
+export interface VoiceInputSessionService {
+  capabilities(): VoiceInputCapabilities;
+  start(deviceId: string, requestId: string): Promise<VoiceSessionUpdate>;
+  append(
+    deviceId: string,
+    sessionId: string,
+    chunks: readonly Pcm16AudioChunk[],
+    afterEventSequence: number,
+  ): Promise<VoiceSessionUpdate>;
+  finish(deviceId: string, sessionId: string, afterEventSequence: number): Promise<VoiceSessionUpdate>;
+  cancel(deviceId: string, sessionId: string, afterEventSequence: number): Promise<VoiceSessionUpdate>;
+  cancelDevice(deviceId: string): Promise<void>;
+  close(): Promise<void>;
 }
 
 export type VoiceOutputCancelReason = "user" | "interrupted" | "run_changed" | "failed";

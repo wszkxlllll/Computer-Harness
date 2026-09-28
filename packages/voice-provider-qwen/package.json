@@ -1,18 +1,18 @@
 {
-  "name": "@computer-harness/relay-connector",
+  "name": "@computer-harness/voice-provider-qwen",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./dist/index.js",
-    "./protocol": "./dist/protocol.js",
-    "./routing": "./dist/routing.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@computer-harness/app-runtime": "workspace:*",
     "@computer-harness/voice": "workspace:*",
     "ws": "8.21.3"
   },

@@ -12,6 +12,7 @@ import {
   type RunTarget,
   type WindowTargetList,
 } from "./types";
+import type { Pcm16AudioChunk, VoiceInputCapabilities, VoiceSessionUpdate } from "@computer-harness/voice";
 
 export { ApiError } from "./types";
 
@@ -129,6 +130,14 @@ function errorMessageForCode(code?: string): string | undefined {
     INVALID_TARGET: "目标信息无效。请检查窗口选择或 http://、https:// 地址后重试。",
     MANAGED_BROWSER_UNAVAILABLE: "电脑上的受管理浏览器当前不可用。请在电脑端检查 Harness 状态后重试。",
     MANAGED_BROWSER_PROFILE_UNAVAILABLE: "受管浏览器配置当前被占用，或上次异常退出留下了运行标记。任务尚未启动。请停止使用它的浏览器和 Harness Host，再在电脑运行 scripts/mobile.ps1 recover-browser-profile。该命令只归档运行标记，不会删除登录数据。",
+    VOICE_UNAVAILABLE: "电脑端尚未配置语音识别，仍可直接输入文字。",
+    VOICE_PROVIDER_UNAVAILABLE: "语音识别暂时中断。请重试，或改用文字输入。",
+    VOICE_FINISH_TIMEOUT: "语音识别没有及时完成。请重试，或检查转写内容后再提交。",
+    VOICE_SESSION_ACTIVE: "这台手机已有一段录音正在处理。请先结束或取消它。",
+    VOICE_SESSION_EXPIRED: "录音时间过长或连接中断，请重新开始。",
+    VOICE_AUDIO_LIMIT: "录音已达到时长上限。请停止录音后检查转写内容。",
+    VOICE_EVENT_GAP: "录音进度连接中断，请重新录制这段语音。",
+    INVALID_AUDIO_CHUNK: "录音数据格式不受支持，请重试或改用文字输入。",
   };
   return messages[code];
 }
@@ -195,6 +204,48 @@ export function getPhoneSession(): Promise<PairSession> {
   return request("/api/session");
 }
 
+export function getVoiceInputCapabilities(): Promise<VoiceInputCapabilities> {
+  return request("/api/voice/capabilities");
+}
+
+export function startVoiceInput(requestId: string): Promise<VoiceSessionUpdate> {
+  return request("/api/voice/sessions", {
+    method: "POST",
+    body: JSON.stringify({ requestId }),
+  }, "phone");
+}
+
+export function appendVoiceAudio(
+  sessionId: string,
+  chunks: readonly Pcm16AudioChunk[],
+  afterEventSequence: number,
+  signal?: AbortSignal,
+): Promise<VoiceSessionUpdate> {
+  return request(`/api/voice/sessions/${encodeURIComponent(sessionId)}/audio`, {
+    method: "POST",
+    ...(signal === undefined ? {} : { signal }),
+    body: JSON.stringify({
+      chunks: chunks.map((chunk) => ({ sequence: chunk.sequence, audio: bytesToBase64(chunk.data) })),
+      afterEventSequence,
+    }),
+  }, "phone");
+}
+
+export function finishVoiceInput(sessionId: string, afterEventSequence: number): Promise<VoiceSessionUpdate> {
+  return request(`/api/voice/sessions/${encodeURIComponent(sessionId)}/finish`, {
+    method: "POST",
+    body: JSON.stringify({ afterEventSequence }),
+  }, "phone");
+}
+
+export function cancelVoiceInput(sessionId: string, afterEventSequence: number, signal?: AbortSignal): Promise<VoiceSessionUpdate> {
+  return request(`/api/voice/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+    method: "POST",
+    ...(signal === undefined ? {} : { signal }),
+    body: JSON.stringify({ afterEventSequence }),
+  }, "phone");
+}
+
 export function deletePhoneSession(): Promise<void> {
   return request("/api/session", { method: "DELETE", body: JSON.stringify({}) }, "phone");
 }
@@ -226,4 +277,14 @@ export async function getDevices(): Promise<DeviceList> {
 
 export function revokeDevice(deviceId: string): Promise<void> {
   return request(`/api/local/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" }, "local");
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const blockSize = 0x8000;
+  for (let start = 0; start < bytes.length; start += blockSize) {
+    const block = bytes.subarray(start, Math.min(bytes.length, start + blockSize));
+    binary += String.fromCharCode(...block);
+  }
+  return btoa(binary);
 }

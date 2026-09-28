@@ -127,6 +127,12 @@ TYPESAFE_API_KEY=your_typesafe_key
 - [服务器部署](./apps/relay/README.md)：HTTPS/WSS、凭据、服务运维与回滚。
 - [验证与问题清单](./docs/mobile-control-issues-2026-09-26.md)：哪些已验证，哪些尚未放行。
 
+### 语音输入（试验阶段）
+
+手机配对页面的 Goal、任务纠正和待回答问题都可按“按下说话”录入。录音明确由用户开始；录音期间所属表单会锁定，最多录制 60 秒，到时自动完成收尾；完整转写会填入原文本框，检查编辑后仍需手动发送。上传首块立即发、网络在途时会把后续音频按序最多四块一批；原始音频不会写入轨迹、截图或日志。
+
+实时识别需要在 Host 私有环境文件中配置 `DASHSCOPE_API_KEY` 和 workspace 专属的 `DASHSCOPE_REALTIME_ASR_ENDPOINT`（WSS `/api-ws/v1/realtime`）；可选 `DASHSCOPE_WORKSPACE_ID`。浏览器不接触密钥。能力查询只读取 Host 的本地配置，不代表远端 API 已连通。当前实现已通过 mock/离线回归，真实 Qwen API、手机麦克风和实际弱网时延尚未验收；不要把它视为已验证的稳定语音能力。
+
 Host 当前使用固定组合预设：Planning、Fact Memory、lexical retrieval、recent Context、same-control input Batch、layered Guard、shadow Monitor 和人工确认的窗口交接；原生窗口目标默认不启用 UIA/DOM，受管浏览器目标使用 Hybrid Grounding。Host **不会继承 TUI 上次选择的功能**。不要同时用手机与 TUI 控制同一桌面；手机公网完整业务任务和无障碍验收仍需单独完成。
 
 ## 架构与扩展

@@ -47,6 +47,12 @@ importers:
       '@computer-harness/relay-connector':
         specifier: workspace:*
         version: link:../../packages/relay-connector
+      '@computer-harness/voice':
+        specifier: workspace:*
+        version: link:../../packages/voice
+      '@computer-harness/voice-provider-qwen':
+        specifier: workspace:*
+        version: link:../../packages/voice-provider-qwen
       fastify:
         specifier: 5.12.5
         version: 5.12.5
@@ -226,6 +232,9 @@ importers:
       '@computer-harness/app-runtime':
         specifier: workspace:*
         version: link:../app-runtime
+      '@computer-harness/voice':
+        specifier: workspace:*
+        version: link:../voice
       ws:
         specifier: 8.21.3
         version: 8.21.3
@@ -269,6 +278,19 @@ importers:
       '@computer-harness/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/voice-provider-qwen:
+    dependencies:
+      '@computer-harness/voice':
+        specifier: workspace:*
+        version: link:../voice
+      ws:
+        specifier: 8.21.3
+        version: 8.21.3
+    devDependencies:
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
 
   spikes/cua-driver:
     dependencies:
