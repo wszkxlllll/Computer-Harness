@@ -23,6 +23,7 @@
     "@computer-harness/provider-qwen": "workspace:*",
     "@computer-harness/risk-guard": "workspace:*",
     "@computer-harness/runtime": "workspace:*",
-    "@computer-harness/trajectory": "workspace:*"
+    "@computer-harness/trajectory": "workspace:*",
+    "@computer-harness/voice": "workspace:*"
   }
 }

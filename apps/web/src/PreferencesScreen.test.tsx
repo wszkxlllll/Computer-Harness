@@ -50,6 +50,7 @@ describe("personal preferences screen", () => {
     const stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY)!) as UserPreferences;
     expect(stored.presentation).toEqual({ layoutMode: "simple", textSize: "large", highContrast: true, reduceMotion: true });
     expect(stored.assistant).toEqual({ responseDetail: "detailed", stepExplanation: "more", preferredLanguage: "en" });
+    expect(stored.voice).toEqual({ runNoticesEnabled: false, speechRate: "normal" });
   });
 
   it("restores all known preferences to defaults", async () => {
@@ -86,13 +87,38 @@ describe("personal preferences screen", () => {
     expect(transcribeOnce).toHaveBeenCalledTimes(1);
   });
 
+  it("lets an injected replaceable output adapter enable and save run-notice speech preferences", async () => {
+    const capabilities: VoiceCapabilities = {
+      createOutputAdapter: () => ({
+        openSession: async () => ({
+          enqueueText: async () => undefined,
+          finish: async () => undefined,
+          cancel: async () => undefined,
+        }),
+      }),
+    };
+    render(<PreferencesProvider><PreferencesScreen voiceCapabilities={capabilities} /></PreferencesProvider>);
+    const enabled = screen.getByRole("switch", { name: /朗读任务关键通知/ }) as HTMLInputElement;
+    expect(enabled.checked).toBe(false);
+    expect(enabled.disabled).toBe(false);
+    fireEvent.click(enabled);
+    fireEvent.change(screen.getByLabelText("朗读速度"), { target: { value: "fast" } });
+    await waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY)!) as UserPreferences;
+      expect(stored.voice).toEqual({ runNoticesEnabled: true, speechRate: "fast" });
+    });
+  });
+
   it("keeps unavailable voice controls out of the way and does not expose fake actions", () => {
     renderPreferences();
     const voice = screen.getByText("语音功能 · 暂不可用").closest("details") as HTMLDetailsElement;
     expect(voice.open).toBe(false);
     expect(screen.queryByRole("button", { name: /朗读偏好说明/ })).toBeNull();
     voice.open = true;
-    expect(screen.getByText(/不会调用浏览器语音或麦克风接口/)).toBeDefined();
+    expect(screen.getByText(/不会录音，也不会申请麦克风权限/)).toBeDefined();
+    const noticeSwitch = screen.getByRole("switch", { name: /朗读任务关键通知/ }) as HTMLInputElement;
+    expect(noticeSwitch.checked).toBe(false);
+    expect(noticeSwitch.disabled).toBe(true);
     expect(screen.queryByRole("button", { name: /语音输入测试/ })).toBeNull();
   });
 });

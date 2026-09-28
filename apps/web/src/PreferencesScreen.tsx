@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { PhoneLayout } from "./components/PhoneLayout";
 import { usePreferences } from "./PreferencesContext";
-import type { AssistantPreferences, DisplayPreset, PreferredLanguage, ResponseDetail, StepExplanation, TextSize } from "./preferences";
+import type { AssistantPreferences, DisplayPreset, PreferredLanguage, ResponseDetail, SpeechRate, StepExplanation, TextSize } from "./preferences";
 import type { VoiceCapabilities } from "./voice-capabilities";
+import { isBrowserSpeechOutputAvailable } from "./run-notice-speech";
 
 export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
-  const { preferences, saved, setAssistant, setPresentation, setDisplayPreset, reset } = usePreferences();
+  const { preferences, saved, setAssistant, setPresentation, setDisplayPreset, setVoice, reset } = usePreferences();
   const [message, setMessage] = useState("");
   const [voiceInputText, setVoiceInputText] = useState("");
   const [voiceMessage, setVoiceMessage] = useState("");
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const voiceOutputAvailable = voiceCapabilities?.createOutputAdapter !== undefined || isBrowserSpeechOutputAvailable();
   const preset: DisplayPreset | undefined = preferences.presentation.layoutMode === "simple" && preferences.presentation.textSize === "large"
     ? "large_simple"
     : preferences.presentation.layoutMode === "standard" && preferences.presentation.textSize === "standard"
@@ -170,11 +172,35 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
         </section>
 
         <details className="preferences-section voice-capability">
-          <summary>语音功能 · {voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce ? "已接入" : "暂不可用"}</summary>
+          <summary>语音功能 · {voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce ? "已接入" : voiceOutputAvailable ? "任务播报可用" : "暂不可用"}</summary>
           <div className="voice-capability-content">
-            <p>{voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce
-              ? "由宿主按需接入；不会自动朗读或录音。"
-              : "不会自动朗读，也不会调用浏览器语音或麦克风接口。"}</p>
+            <p>任务通知使用当前接入的语音合成；只有明确打开下方开关后才会朗读。此功能不会录音，也不会申请麦克风权限。</p>
+            <fieldset className="preference-choice-group">
+              <legend>任务通知播报</legend>
+              <PreferenceToggle
+                id="run-notices-speech"
+                title="朗读任务关键通知"
+                description="朗读任务进度、等待确认、错误和最终结果；审批或提问变化时会停止过期播报。"
+                checked={preferences.voice.runNoticesEnabled}
+                disabled={!voiceOutputAvailable}
+                onChange={(value) => setMessage(setVoice("runNoticesEnabled", value) ? "语音偏好已保存到此浏览器。" : "语音偏好已更新，但浏览器未能保存。")}
+              />
+              {!voiceOutputAvailable && <p className="field-hint">当前环境不支持语音播报，任务通知仍会显示为文字。</p>}
+            </fieldset>
+            <div className="preference-language-row">
+              <label className="preference-select-label" htmlFor="speech-rate">朗读速度</label>
+              <select
+                className="preference-select"
+                id="speech-rate"
+                value={preferences.voice.speechRate}
+                disabled={!voiceOutputAvailable}
+                onChange={(event) => setMessage(setVoice("speechRate", event.currentTarget.value as SpeechRate) ? "朗读速度已保存到此浏览器。" : "朗读速度已更新，但浏览器未能保存。")}
+              >
+                <option value="slow">慢</option>
+                <option value="normal">标准</option>
+                <option value="fast">稍快</option>
+              </select>
+            </div>
             {(voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce) && (
               <div className="voice-actions">
                 {voiceCapabilities.readAloud && (
@@ -238,12 +264,14 @@ function PreferenceToggle({
   title,
   description,
   checked,
+  disabled = false,
   onChange,
 }: {
   id: string;
   title: string;
   description: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (value: boolean) => void;
 }) {
   return (
@@ -252,7 +280,7 @@ function PreferenceToggle({
         <strong>{title}</strong>
         <span className="sr-only">{description}</span>
       </span>
-      <input id={id} type="checkbox" role="switch" checked={checked} onChange={(event) => onChange(event.currentTarget.checked)} />
+      <input id={id} type="checkbox" role="switch" checked={checked} disabled={disabled} onChange={(event) => onChange(event.currentTarget.checked)} />
     </label>
   );
 }

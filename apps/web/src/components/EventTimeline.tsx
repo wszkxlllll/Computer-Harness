@@ -33,6 +33,7 @@ export function EventTimeline({ events, simplified = false }: EventTimelineProps
 }
 
 function eventLabel(event: RemoteEvent): string | undefined {
+  if (event.type === "run.notice" && typeof event.data?.text === "string") return event.data.text.slice(0, 320);
   const labels: Record<string, string> = {
     "run.started": "电脑开始处理任务",
     "run.status": "电脑更新了任务状态",

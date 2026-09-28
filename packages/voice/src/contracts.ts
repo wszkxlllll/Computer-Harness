@@ -60,6 +60,8 @@ export interface VoiceOutputSession {
   cancel(reason: VoiceOutputCancelReason): Promise<void>;
 }
 
+export type VoiceSpeechRate = 0.85 | 1 | 1.15;
+
 export interface VoiceOutputAdapter {
-  openSession(options?: { readonly signal?: AbortSignal }): Promise<VoiceOutputSession>;
+  openSession(options?: { readonly signal?: AbortSignal; readonly speechRate?: VoiceSpeechRate }): Promise<VoiceOutputSession>;
 }

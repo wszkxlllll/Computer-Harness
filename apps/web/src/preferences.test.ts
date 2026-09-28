@@ -31,6 +31,7 @@ describe("versioned local preferences", () => {
       version: PREFERENCES_VERSION,
       presentation: { layoutMode: "simple" as const, textSize: "large" as const, highContrast: true, reduceMotion: true },
       assistant: { responseDetail: "detailed" as const, stepExplanation: "more" as const, preferredLanguage: "en" as const },
+      voice: { runNoticesEnabled: true, speechRate: "fast" as const },
     };
     expect(writePreferences(preferences, storage)).toBe(true);
     expect(readPreferences(storage)).toEqual(preferences);
@@ -58,5 +59,23 @@ describe("versioned local preferences", () => {
     };
     expect(readPreferences(failing)).toEqual(DEFAULT_PREFERENCES);
     expect(writePreferences(DEFAULT_PREFERENCES, failing)).toBe(false);
+  });
+
+  it("migrates version 1 preferences and keeps notification speech disabled by default", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      presentation: { layoutMode: "simple", textSize: "large", highContrast: true, reduceMotion: false },
+      assistant: { responseDetail: "concise", stepExplanation: "more", preferredLanguage: "zh-CN" },
+    }));
+    const migrated = readPreferences(storage);
+    expect(migrated).toEqual({
+      ...DEFAULT_PREFERENCES,
+      presentation: { layoutMode: "simple", textSize: "large", highContrast: true, reduceMotion: false },
+      assistant: { responseDetail: "concise", stepExplanation: "more", preferredLanguage: "zh-CN" },
+      voice: { runNoticesEnabled: false, speechRate: "normal" },
+    });
+    expect(writePreferences(migrated, storage)).toBe(true);
+    expect(JSON.parse(storage.getItem(PREFERENCES_STORAGE_KEY)!).version).toBe(PREFERENCES_VERSION);
   });
 });

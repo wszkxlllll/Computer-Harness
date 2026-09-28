@@ -1,5 +1,5 @@
 export const PREFERENCES_STORAGE_KEY = "harness.preferences";
-export const PREFERENCES_VERSION = 1 as const;
+export const PREFERENCES_VERSION = 2 as const;
 
 export type LayoutMode = "standard" | "simple";
 export type TextSize = "standard" | "large";
@@ -7,6 +7,7 @@ export type DisplayPreset = "standard" | "large_simple";
 export type ResponseDetail = "concise" | "standard" | "detailed";
 export type StepExplanation = "standard" | "more";
 export type PreferredLanguage = "follow_conversation" | "zh-CN" | "en";
+export type SpeechRate = "slow" | "normal" | "fast";
 
 export interface PresentationPreferences {
   layoutMode: LayoutMode;
@@ -21,10 +22,16 @@ export interface AssistantPreferences {
   preferredLanguage: PreferredLanguage;
 }
 
+export interface VoicePreferences {
+  runNoticesEnabled: boolean;
+  speechRate: SpeechRate;
+}
+
 export interface UserPreferences {
   version: typeof PREFERENCES_VERSION;
   presentation: PresentationPreferences;
   assistant: AssistantPreferences;
+  voice: VoicePreferences;
 }
 
 export interface PreferenceStorage {
@@ -44,6 +51,10 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
     responseDetail: "standard",
     stepExplanation: "standard",
     preferredLanguage: "follow_conversation",
+  },
+  voice: {
+    runNoticesEnabled: false,
+    speechRate: "normal",
   },
 };
 
@@ -65,9 +76,10 @@ export function readPreferences(storage?: PreferenceStorage): UserPreferences {
     const raw = storage.getItem(PREFERENCES_STORAGE_KEY);
     if (!raw) return cloneDefaults();
     const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed) || parsed.version !== PREFERENCES_VERSION) return cloneDefaults();
+    if (!isRecord(parsed) || (parsed.version !== 1 && parsed.version !== PREFERENCES_VERSION)) return cloneDefaults();
     const presentation = isRecord(parsed.presentation) ? parsed.presentation : {};
     const assistant = isRecord(parsed.assistant) ? parsed.assistant : {};
+    const voice = isRecord(parsed.voice) ? parsed.voice : {};
 
     return {
       version: PREFERENCES_VERSION,
@@ -82,6 +94,15 @@ export function readPreferences(storage?: PreferenceStorage): UserPreferences {
         stepExplanation: oneOf(assistant.stepExplanation, ["standard", "more"], DEFAULT_PREFERENCES.assistant.stepExplanation),
         preferredLanguage: oneOf(assistant.preferredLanguage, ["follow_conversation", "zh-CN", "en"], DEFAULT_PREFERENCES.assistant.preferredLanguage),
       },
+      // Version 1 had no voice settings. Migration keeps every existing choice and defaults speech off.
+      voice: {
+        runNoticesEnabled: parsed.version === PREFERENCES_VERSION
+          ? booleanOr(voice.runNoticesEnabled, DEFAULT_PREFERENCES.voice.runNoticesEnabled)
+          : DEFAULT_PREFERENCES.voice.runNoticesEnabled,
+        speechRate: parsed.version === PREFERENCES_VERSION
+          ? oneOf(voice.speechRate, ["slow", "normal", "fast"], DEFAULT_PREFERENCES.voice.speechRate)
+          : DEFAULT_PREFERENCES.voice.speechRate,
+      },
     };
   } catch {
     return cloneDefaults();
@@ -95,6 +116,7 @@ export function writePreferences(preferences: UserPreferences, storage?: Prefere
       version: PREFERENCES_VERSION,
       presentation: { ...preferences.presentation },
       assistant: { ...preferences.assistant },
+      voice: { ...preferences.voice },
     };
     storage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(value));
     return true;
@@ -108,5 +130,6 @@ export function cloneDefaults(): UserPreferences {
     version: PREFERENCES_VERSION,
     presentation: { ...DEFAULT_PREFERENCES.presentation },
     assistant: { ...DEFAULT_PREFERENCES.assistant },
+    voice: { ...DEFAULT_PREFERENCES.voice },
   };
 }

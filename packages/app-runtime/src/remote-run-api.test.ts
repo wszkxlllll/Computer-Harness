@@ -95,6 +95,7 @@ function createFixture(
     inspectManagedBrowserProfile?: (profileRoot: string, profileLabel: string) => Promise<{ state: "ready" | "active" | "stale" | "unknown" | "unsafe"; markers: readonly ("profile_lock" | "devtools_port")[] }>;
     readManagedBrowserStartupUrls?: () => Promise<readonly string[]>;
     closeComputer?: () => Promise<void>;
+    runNotices?: boolean;
   },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
@@ -162,6 +163,7 @@ function createFixture(
   const api = new ApplicationRemoteRunApi({
     session,
     capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
+    ...(options.runNotices === true ? { runNotices: { enabled: true, dynamicContentEnabled: false } } : {}),
     assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(resolve(handle.config.outputDir, "assets")),
     ...(options.managedBrowserProfile === undefined ? {} : { managedBrowserProfile: options.managedBrowserProfile }),
     ...(inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile }),
@@ -192,6 +194,92 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 }
 
 describe("ApplicationRemoteRunApi", () => {
+  it("keeps the public stream unchanged when RunNotice projection is disabled", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-notices-off-"));
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "Done." });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "notices-off", "Check a schedule", choices.candidates[0]!.token);
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_user", "Run did not request user input");
+      const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") events.push(event as unknown as { type: string; data?: Record<string, unknown> });
+      });
+      subscription.close();
+      expect(events.some((event) => event.data?.type === "run.notice")).toBe(false);
+      expect(events.some((event) => event.data?.type === "run.pending_request")).toBe(true);
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "answer-notices-off",
+        expectedSequence: current.sequence,
+        type: "respond",
+        requestId: current.pendingRequest!.requestId,
+        text: "明天",
+      });
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes minimal safe notices, validates pending IDs, and replays them through the ordered stream", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-notices-on-"));
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "A private itinerary summary.", runNotices: true });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "notices-on", "Check a schedule", choices.candidates[0]!.token);
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_user", "Run did not request user input");
+
+      const initialEvents: Array<{ sequence: number; data?: Record<string, unknown> }> = [];
+      const initialSubscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") initialEvents.push(event as unknown as { sequence: number; data?: Record<string, unknown> });
+      });
+      initialSubscription.close();
+      const questionNotice = initialEvents.find((event) => event.data?.type === "run.notice" && event.data.kind === "question");
+      const pendingRequestId = api.getRun("device-one", started.runId)?.pendingRequest?.requestId;
+      expect(questionNotice?.data).toEqual({
+        type: "run.notice",
+        noticeId: expect.any(String),
+        kind: "question",
+        text: "我有一个问题需要你回答，请查看任务页面。",
+        delivery: "interrupt",
+        eventSequence: expect.any(Number),
+        pendingRequestId,
+      });
+      expect(JSON.stringify(questionNotice)).not.toContain("Which date should I check?");
+      expect(JSON.stringify(questionNotice)).not.toMatch(/reason|path|modelDeclaredEffect/iu);
+
+      const questionSequence = questionNotice!.sequence;
+      const replayed: unknown[] = [];
+      const replaySubscription = api.subscribe("device-one", started.runId, questionSequence - 1, (event) => replayed.push(event));
+      replaySubscription.close();
+      expect(replayed).toHaveLength(1);
+      expect(JSON.stringify(replayed[0])).toContain('"noticeId"');
+
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "answer-notices-on",
+        expectedSequence: current.sequence,
+        type: "respond",
+        requestId: current.pendingRequest!.requestId,
+        text: "明天",
+      });
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "finished", "Run did not finish after user input");
+      const terminalEvents: Array<{ sequence: number; data?: Record<string, unknown> }> = [];
+      const terminalSubscription = api.subscribe("device-one", started.runId, questionSequence, (event) => {
+        if (event.type === "run.event") terminalEvents.push(event as unknown as { sequence: number; data?: Record<string, unknown> });
+      });
+      terminalSubscription.close();
+      const resultNotices = terminalEvents.filter((event) => event.data?.type === "run.notice" && event.data.kind === "result");
+      expect(resultNotices).toHaveLength(1);
+      expect(resultNotices[0]?.data?.text).toBe("本次运行结束，请查看结果。");
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("projects the exact pending guarded click, its claimed target, and clears it when that approval resolves", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-approval-preview-"));
     const earlierCall: ToolCall = {
@@ -209,6 +297,7 @@ describe("ApplicationRemoteRunApi", () => {
     const { api, session } = createFixture(outputDir, {
       summary: "The pending click was rejected.",
       screen: { width: 900, height: 900, coordinateSpace: "physical" },
+      runNotices: true,
       turns: [
         { type: "tool_calls", calls: [earlierCall] },
         { type: "tool_calls", calls: [pendingCall] },
@@ -262,6 +351,24 @@ describe("ApplicationRemoteRunApi", () => {
       expect(JSON.stringify(pendingProjection)).toContain('"requiresVisualReview":true');
       expect(JSON.stringify(pendingProjection)).toContain('"evidence"');
       expect(JSON.stringify(pendingProjection)).not.toContain("旧页面");
+
+      const approvalNoticeEvent = streamedEvents.find((event) => {
+        if (typeof event !== "object" || event === null || !("type" in event) || event.type !== "run.event" || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.notice" && "kind" in data && data.kind === "approval";
+      });
+      expect(approvalNoticeEvent).toMatchObject({
+        data: {
+          type: "run.notice",
+          noticeId: expect.any(String),
+          kind: "approval",
+          text: "有一项操作需要你审批，请查看审批详情。",
+          delivery: "interrupt",
+          eventSequence: expect.any(Number),
+          pendingRequestId: pending.requestId,
+        },
+      });
+      expect(JSON.stringify(approvalNoticeEvent)).not.toMatch(/reason|path|policyVersion|modelRequestCount/iu);
 
       await api.submitCommand("device-one", started.runId, {
         commandId: "reject-preview-click",

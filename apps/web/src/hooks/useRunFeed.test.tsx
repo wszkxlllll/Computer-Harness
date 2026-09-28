@@ -62,6 +62,7 @@ function Probe() {
       <span data-testid="sequence">{feed.snapshot?.sequence ?? -1}</span>
       <span data-testid="connection">{feed.connection}</span>
       <span data-testid="event-count">{feed.events.length}</span>
+      <span data-testid="notice-count">{feed.notices.length}</span>
       <button type="button" onClick={() => void feed.refresh().catch(() => undefined)}>refresh</button>
     </div>
   );
@@ -79,6 +80,24 @@ afterEach(() => {
 });
 
 describe("run feed reconnect", () => {
+  it("deduplicates public notices by noticeId even if replay arrives at a new SSE sequence", async () => {
+    vi.mocked(getRun).mockResolvedValue(snapshot(4));
+    render(<Probe />);
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+    const noticeData = {
+      type: "run.notice",
+      noticeId: "run-1:event-9:progress:fixed",
+      kind: "progress",
+      text: "操作已执行，正在核对页面结果。",
+      delivery: "polite",
+      eventSequence: 9,
+    };
+    act(() => source.emit({ runId: "run-1", sequence: 5, type: "run.event", data: noticeData }));
+    act(() => source.emit({ runId: "run-1", sequence: 6, type: "run.event", data: noticeData }));
+    expect(screen.getByTestId("notice-count").textContent).toBe("1");
+  });
+
   it("deduplicates events and reflects native reconnect state", async () => {
     vi.mocked(getRun).mockResolvedValueOnce(snapshot(4)).mockResolvedValue(snapshot(5));
     render(<Probe />);

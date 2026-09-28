@@ -1,16 +1,36 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getRun, runEventsUrl } from "../api";
 import { decideSequence, reconnectCursor } from "../event-sequence";
-import type { RemoteEvent, RunSnapshot } from "../types";
+import type { RemoteEvent, RunNotice, RunSnapshot } from "../types";
 
 export type FeedConnection = "loading" | "live" | "reconnecting" | "offline";
 
 export interface RunFeedState {
   snapshot?: RunSnapshot;
   events: RemoteEvent[];
+  notices: RunNotice[];
   connection: FeedConnection;
   error?: string;
   refresh: () => Promise<RunSnapshot>;
+}
+
+function decodeNotice(event: RemoteEvent): RunNotice | undefined {
+  const data = event.data;
+  if (!data || data.type !== "run.notice" || typeof data.noticeId !== "string" ||
+      typeof data.text !== "string" || !Number.isSafeInteger(data.eventSequence) ||
+      (data.delivery !== "polite" && data.delivery !== "interrupt") ||
+      !["progress", "approval", "question", "error", "result"].includes(String(data.kind))) return undefined;
+  const kind = data.kind as RunNotice["kind"];
+  if ((kind === "approval" || kind === "question") && typeof data.pendingRequestId !== "string") return undefined;
+  return {
+    noticeId: data.noticeId,
+    kind,
+    text: data.text,
+    delivery: data.delivery,
+    eventSequence: data.eventSequence as number,
+    feedSequence: event.sequence,
+    ...(typeof data.pendingRequestId === "string" ? { pendingRequestId: data.pendingRequestId } : {}),
+  };
 }
 
 function decodeEvent(message: MessageEvent<string>, runId: string): RemoteEvent | undefined {
@@ -38,6 +58,7 @@ function decodeEvent(message: MessageEvent<string>, runId: string): RemoteEvent 
 export function useRunFeed(runId: string): RunFeedState {
   const [snapshot, setSnapshot] = useState<RunSnapshot>();
   const [events, setEvents] = useState<RemoteEvent[]>([]);
+  const [noticeState, setNoticeState] = useState<{ runId: string; notices: RunNotice[] }>({ runId, notices: [] });
   const [connection, setConnection] = useState<FeedConnection>("loading");
   const [error, setError] = useState<string>();
   const snapshotRef = useRef<RunSnapshot | undefined>(undefined);
@@ -70,6 +91,7 @@ export function useRunFeed(runId: string): RunFeedState {
 
   useEffect(() => {
     let stopped = false;
+    const seenNoticeIds = new Set<string>();
     let source: EventSource | undefined;
     let openFeed: (sequence: number) => void = () => undefined;
 
@@ -116,6 +138,14 @@ export function useRunFeed(runId: string): RunFeedState {
       lastSequenceRef.current = event.sequence;
       const normalized = { ...event, type: payloadType };
       setEvents((current) => [...current.filter((item) => item.sequence !== event.sequence), normalized].slice(-12));
+      const notice = decodeNotice(normalized);
+      if (notice && !seenNoticeIds.has(notice.noticeId)) {
+        seenNoticeIds.add(notice.noticeId);
+        setNoticeState((current) => ({
+          runId,
+          notices: [...(current.runId === runId ? current.notices : []), notice].slice(-24),
+        }));
+      }
 
       if (!refreshQueuedRef.current) {
         refreshQueuedRef.current = true;
@@ -175,5 +205,5 @@ export function useRunFeed(runId: string): RunFeedState {
     };
   }, [acceptSnapshot, refresh, runId]);
 
-  return { snapshot, events, connection, error, refresh };
+  return { snapshot, events, notices: noticeState.runId === runId ? noticeState.notices : [], connection, error, refresh };
 }

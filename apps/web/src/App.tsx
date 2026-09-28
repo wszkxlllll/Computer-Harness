@@ -24,7 +24,7 @@ function AppRoutes({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilitie
   if (pathname === "/pair") return <PairingScreen />;
   if (pathname === "/preferences") return <PhoneSessionGate><PreferencesScreen voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
   const runMatch = pathname.match(/^\/run\/([^/]+)\/?$/);
-  if (runMatch) return <PhoneSessionGate><RunWorkspace runId={decodeURIComponent(runMatch[1])} /></PhoneSessionGate>;
+  if (runMatch) return <PhoneSessionGate><RunWorkspace runId={decodeURIComponent(runMatch[1])} voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
   return <PhoneSessionGate><HomeScreen /></PhoneSessionGate>;
 }
 

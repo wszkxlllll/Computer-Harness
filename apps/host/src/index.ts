@@ -57,6 +57,7 @@ async function main(): Promise<void> {
   const api = new ApplicationRemoteRunApi({
     session,
     capabilities,
+    runNotices: { enabled: true, dynamicContentEnabled: false },
     managedBrowserProfile,
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),

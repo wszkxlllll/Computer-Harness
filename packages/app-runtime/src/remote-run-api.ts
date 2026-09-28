@@ -7,6 +7,7 @@ import { inspectManagedBrowserProfile, readManagedBrowserStartupUrls } from "@co
 import type { ApplicationSession, ApplicationSessionRunFeatureOverrides, WindowTargetInfo } from "./application-session.js";
 import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
+import { RunNoticeProjector, RunNoticeScheduler, type RunNoticeGeneration } from "@computer-harness/voice";
 import { approvalRequiresVisualReview, projectApprovalPreview } from "./approval-preview.js";
 import {
   type RemoteAsset,
@@ -41,6 +42,9 @@ interface ManagedRemoteRun {
   readonly candidates: Map<string, { requestId: string; candidate: ComputerWindowCandidate }>;
   readonly commandReceipts: Map<string, { fingerprint: string; receipt: RemoteCommandReceipt }>;
   readonly maxCommandReceipts: number;
+  readonly noticeProjector?: RunNoticeProjector;
+  readonly noticeScheduler?: RunNoticeScheduler;
+  readonly noticeGeneration?: RunNoticeGeneration;
   eventFeedSubscription?: EventFeedSubscription;
   nextSubscriptionId: number;
   sequence: number;
@@ -161,6 +165,8 @@ export interface ApplicationRemoteRunApiOptions {
   readonly managedBrowserProfile?: { readonly profileLabel: string; readonly profileRoot: string };
   readonly inspectManagedBrowserProfile?: typeof inspectManagedBrowserProfile;
   readonly readManagedBrowserStartupUrls?: typeof readManagedBrowserStartupUrls;
+  /** When omitted or disabled, the public remote event stream is unchanged. */
+  readonly runNotices?: { readonly enabled: boolean; readonly dynamicContentEnabled?: boolean };
 }
 
 /** Adapts ApplicationSession and its committed feed into a redacted remote view. */
@@ -179,6 +185,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
   private readonly managedBrowserProfile: ApplicationRemoteRunApiOptions["managedBrowserProfile"];
   private readonly inspectManagedBrowserProfile: typeof inspectManagedBrowserProfile;
   private readonly readManagedBrowserStartupUrls: typeof readManagedBrowserStartupUrls;
+  private readonly runNotices: ApplicationRemoteRunApiOptions["runNotices"];
   private startInProgress = false;
 
   public constructor(options: ApplicationRemoteRunApiOptions) {
@@ -193,6 +200,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     this.managedBrowserProfile = options.managedBrowserProfile;
     this.inspectManagedBrowserProfile = options.inspectManagedBrowserProfile ?? inspectManagedBrowserProfile;
     this.readManagedBrowserStartupUrls = options.readManagedBrowserStartupUrls ?? readManagedBrowserStartupUrls;
+    this.runNotices = options.runNotices?.enabled === true ? options.runNotices : undefined;
     if (this.managedBrowserProfile !== undefined &&
         (!/^[A-Za-z0-9._-]{1,64}$/u.test(this.managedBrowserProfile.profileLabel) || this.managedBrowserProfile.profileRoot.trim().length === 0)) {
       throw new Error("managed browser readiness requires a bounded profile label and explicit Host-owned profile root");
@@ -565,6 +573,17 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       throw error;
     }
     const runtime = handle.controller.getSnapshot();
+    const noticeOptions = this.runNotices;
+    const noticeState = noticeOptions === undefined ? undefined : (() => {
+      const scheduler = new RunNoticeScheduler();
+      return {
+        noticeProjector: new RunNoticeProjector(handle.runId, {
+          dynamicContentEnabled: noticeOptions.dynamicContentEnabled ?? false,
+        }),
+        noticeScheduler: scheduler,
+        noticeGeneration: scheduler.activateRun(handle.runId),
+      };
+    })();
     const record: ManagedRemoteRun = {
       handle,
       ownerDeviceId: deviceId,
@@ -577,6 +596,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       candidates: new Map(),
       commandReceipts: new Map(),
       maxCommandReceipts: this.maxCommandsPerRun,
+      ...(noticeState ?? {}),
       nextSubscriptionId: 1,
       sequence: 0,
       rawSequence: -1,
@@ -706,6 +726,41 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
     const projected = projectRuntimeEvent(event, record.reply);
     if (projected !== undefined) this.publish(record, projected);
+    this.projectAndPublishNotice(record, event);
+  }
+
+  private projectAndPublishNotice(record: ManagedRemoteRun, event: RuntimeEvent): void {
+    const projector = record.noticeProjector;
+    const scheduler = record.noticeScheduler;
+    const generation = record.noticeGeneration;
+    if (projector === undefined || scheduler === undefined || generation === undefined) return;
+
+    const notice = projector.project(event);
+    if (notice !== undefined) scheduler.offer(notice, generation);
+
+    const snapshot = record.handle.controller.getSnapshot();
+    const currentPendingRequestIds = new Set<string>();
+    if (snapshot.pendingApproval !== undefined) currentPendingRequestIds.add(snapshot.pendingApproval.requestId);
+    if (snapshot.pendingUserQuestion !== undefined && record.pendingInputRequestId !== undefined) {
+      currentPendingRequestIds.add(record.pendingInputRequestId);
+    }
+    if (snapshot.pendingWindowHandoff !== undefined && record.pendingWindowRequestId === snapshot.pendingWindowHandoff.sourceActionId) {
+      currentPendingRequestIds.add(snapshot.pendingWindowHandoff.sourceActionId);
+    }
+
+    let next = scheduler.takeNext(currentPendingRequestIds);
+    while (next !== undefined) {
+      this.publish(record, {
+        type: "run.notice",
+        noticeId: next.noticeId,
+        kind: next.kind,
+        text: next.text,
+        delivery: next.delivery,
+        eventSequence: next.eventSequence,
+        ...(next.pendingRequestId === undefined ? {} : { pendingRequestId: next.pendingRequestId }),
+      });
+      next = scheduler.takeNext(currentPendingRequestIds);
+    }
   }
 
   private async refreshWindowCandidates(record: ManagedRemoteRun, requestId: string): Promise<void> {

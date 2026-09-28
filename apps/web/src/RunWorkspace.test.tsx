@@ -1,11 +1,14 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RunWorkspace } from "./RunWorkspace";
 import { PreferencesProvider } from "./PreferencesContext";
 import { useRunFeed } from "./hooks/useRunFeed";
 import { useRunCommands } from "./hooks/useRunCommands";
 import type { RunSnapshot } from "./types";
+import { DEFAULT_PREFERENCES, PREFERENCES_STORAGE_KEY } from "./preferences";
+import type { VoiceCapabilities } from "./voice-capabilities";
 
 vi.mock("./hooks/useRunFeed", () => ({ useRunFeed: vi.fn() }));
 vi.mock("./hooks/useRunCommands", () => ({ useRunCommands: vi.fn() }));
@@ -55,7 +58,7 @@ const approval: RunSnapshot = {
 let feedState: ReturnType<typeof useRunFeed>;
 
 beforeEach(() => {
-  feedState = { snapshot: approval, events: [], connection: "live", refresh };
+  feedState = { snapshot: approval, events: [], notices: [], connection: "live", refresh };
   vi.mocked(useRunFeed).mockImplementation(() => feedState);
   vi.mocked(useRunCommands).mockReturnValue(commands);
 });
@@ -66,6 +69,39 @@ afterEach(() => {
 });
 
 describe("request-bound screenshot lifecycle", () => {
+  it("does not duplicate a live notice when React StrictMode replays effects", async () => {
+    localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_PREFERENCES,
+      voice: { runNoticesEnabled: true, speechRate: "normal" },
+    }));
+    const spoken: string[] = [];
+    const openSession = vi.fn(async () => ({
+      enqueueText: async (chunk: { text: string }) => { spoken.push(chunk.text); },
+      finish: async () => undefined,
+      cancel: async () => undefined,
+    }));
+    const voiceCapabilities: VoiceCapabilities = {
+      createOutputAdapter: () => ({ openSession }),
+    };
+    const renderElement = () => <StrictMode><PreferencesProvider><RunWorkspace runId="run-1" voiceCapabilities={voiceCapabilities} /></PreferencesProvider></StrictMode>;
+    const view = render(renderElement());
+    feedState = {
+      ...feedState,
+      snapshot: { ...approval, sequence: 3 },
+      notices: [{
+        noticeId: "notice-strict-mode",
+        kind: "error",
+        text: "任务出现问题，请查看详情。",
+        delivery: "interrupt",
+        eventSequence: 7,
+        feedSequence: 4,
+      }],
+    };
+    view.rerender(renderElement());
+    await waitFor(() => expect(spoken).toEqual(["任务出现问题，请查看详情。"]));
+    expect(openSession).toHaveBeenCalledTimes(1);
+  });
+
   it("closes the old approval viewer and never resurrects that request after a newer request resolves", () => {
     const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
     fireEvent.click(screen.getByRole("button", { name: /放大查看/ }));

@@ -66,6 +66,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@computer-harness/voice':
+        specifier: workspace:*
+        version: link:../../packages/voice
       qrcode:
         specifier: 1.5.4
         version: 1.5.4
@@ -139,6 +142,9 @@ importers:
       '@computer-harness/trajectory':
         specifier: workspace:*
         version: link:../trajectory
+      '@computer-harness/voice':
+        specifier: workspace:*
+        version: link:../voice
 
   packages/computer-cua:
     dependencies:

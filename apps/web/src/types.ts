@@ -116,6 +116,21 @@ export interface RemoteEvent {
   data?: Record<string, unknown>;
 }
 
+export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
+export type RunNoticeDelivery = "polite" | "interrupt";
+
+/** Minimal public notice projection carried inside an ordered `run.event`. */
+export interface RunNotice {
+  noticeId: string;
+  kind: RunNoticeKind;
+  text: string;
+  delivery: RunNoticeDelivery;
+  eventSequence: number;
+  /** Remote SSE cursor used locally to defer interaction notices until their snapshot is current. */
+  feedSequence?: number;
+  pendingRequestId?: string;
+}
+
 export type CommandReceiptStatus = "accepted" | "applied" | "rejected" | "outcome_unknown";
 
 export interface CommandReceipt {

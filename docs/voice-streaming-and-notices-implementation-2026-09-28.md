@@ -1,15 +1,17 @@
-# 语音合同与运行通知阶段 A
+# 语音合同、运行通知与阶段 B1 实施记录
 
 日期：2026-09-29
 文档角色：结果 / 实施记录
-状态：当前实现；Host/Web 接入待实施
+状态：阶段 A 与 B1 已实现；STT/录音、真实语音服务和手机真机验收待实施
 当前入口：[产品开发、验证与稳定 Demo 清单](./product-next-stage-task-list-2026-09-27.md) 第 4 节、第 11.4 节
-基线：`codex/voice-streaming-notices-20260928` 分支
-范围：provider-neutral 语音合同、转写段落合并、RuntimeEvent 到 RunNotice 的纯投影和通知调度；不包含付费服务、录音 UI、Host/Web 传输或手机真机播放。
+基线：阶段 A commit `e98502b`；B1 当前工作树变更尚未提交
+范围：provider-neutral 语音合同、转写段落合并、RuntimeEvent 到 RunNotice 的纯投影和通知调度、Host/SSE 安全通知投影、Web 可选浏览器播报。没有实现录音/STT Provider、真实 TTS 服务或设备级播放保证。
 
 ## 当前结论
 
-新增 `@computer-harness/voice` 包，依赖仅为 `@computer-harness/protocol`。Runtime、Guard、RemoteRunAPI 与现有 RuntimeEvent 没有语音字段，也不依赖该包。后续 Host 可订阅已提交的 Run 事件，把投影后的 RunNotice 传到 Web；Web/Host 再分别装配录音、转写、合成和播放实现。
+新增 `@computer-harness/voice` 包，依赖仅为 `@computer-harness/protocol`。Runtime、Guard 与 RuntimeEvent 没有语音字段，也不依赖该包。`ApplicationRemoteRunApi` 通过可选 `runNotices` 配置为每个 Run 装配 projector/scheduler；默认关闭时，不增加任何公共事件。Host 显式开启投影并固定 `dynamicContentEnabled: false`。公共 SSE 仍沿用有序 `run.event`，其中 `data.type = "run.notice"`，只包含 `noticeId`、`kind`、`text`、`delivery`、Runtime `eventSequence` 和审批/问题通知所需的 `pendingRequestId`，不暴露原始 RuntimeEvent、Guard reason、路径或私有候选字段。
+
+Web `useRunFeed` 从 SSE 读取该投影，并按 `noticeId` 去重；重连后的重复投影不会重复播报。手机端只有用户在偏好中打开“朗读任务关键通知”才调用浏览器 `speechSynthesis`；默认关闭，速度可选慢/标准/稍快。Browser TTS 实现 `VoiceOutputAdapter`，旧 `VoiceCapabilities.readAloud` / `transcribeOnce` facade 仍保留，并新增可选 `createOutputAdapter()` 供替换实现注入。Host 只提供固定安全 notice，不将模型自然语言或 Guard 原因转给语音输出。
 
 旧 `apps/web/src/voice-capabilities.ts` 的 `VoiceCapabilities.readAloud` 与 `transcribeOnce` 保持原样，旧调用方不需迁移。新合同位于 `packages/voice/src/contracts.ts`，不把一次性 facade 假装成流式 Provider。
 
@@ -26,7 +28,9 @@
   └─ RunNoticeProjector
        └─ RunNotice
             └─ RunNoticeScheduler（Run/generation 校验、pending 校验、去重、限频、优先级）
-                 └─ Host 后续把取出的 Notice 交给 Web/TTS
+                 └─ Host 当前 pending ID 校验并发布最小 run.notice SSE 投影
+                      └─ Web 按 noticeId 去重
+                           └─ 显式开启后交给 BrowserSpeechOutput
 ```
 
 ### 录音和转写
@@ -47,7 +51,7 @@
 
 ### TTS 输出
 
-未来 Host/Web 输出适配器实现 `VoiceOutputAdapter.openSession()`，逐步提交 `VoiceTextChunk`，并在用户停止、审批/问题/错误/完成需要抢占、Run 切换或连接失败时调用 `cancel(reason)`。自然完成时调用 `finish()` 排空已接收文本。Provider 可在 `enqueueText()` 后开始流式合成与播放，不需等整段回复生成。
+Web 当前实现 `BrowserSpeechOutput.openSession()`，用浏览器 `speechSynthesis` 播放已准入的 `RunNotice`。其为首个低延迟输出适配器，不访问麦克风、不请求录音权限、不保证后台/锁屏持续播放，也未在真实 Android/iOS 设备测量延迟。后续服务端/系统语音 Provider 可通过 `VoiceCapabilities.createOutputAdapter()` 替换。
 
 | 字段/合同 | 生产者 | 消费者 | 结束、失效与清理 |
 | --- | --- | --- | --- |
@@ -91,22 +95,30 @@ Plan 投影维护按 task ID 索引的当前 Run 任务；一个 pending/complet
 | `runId`、`eventSequence` | Host 绑定活跃 Run、保持先后次序；Run 切换后旧 notice 失效 |
 | `eventId` | 对应权威 RuntimeEvent，供 Host/测试追溯来源；不反写 RuntimeEvent |
 | `kind`、`delivery` | scheduler 决定通知类别、礼貌排队或请求中断当前播报 |
-| `text` | TTS 消费的唯一文案；经长度限制和控制字符清理 |
+| `text` | TTS 消费的唯一文案；由安全 notice 投影产生，经长度限制和控制字符清理；公共 SSE 不含原始模型文本 |
 | `dedupeKey` | 同一阶段/结果语义重复时去重；只保留当前 Run 的有限集合，Run 切换/clear 即释放 |
 | `pendingRequestId` | approval/question notice 取自权威请求事件；scheduler 出队时要求 Host 提供当前仍 pending 的 request ID 集合，否则丢弃该 notice |
 
-`RunNoticeScheduler` 默认进度最少间隔 12 秒，审批/提问/错误/完成绕过该限频并返回 `interruptCurrent: true`，由下一阶段的 TTS consumer 取消当前输出后读取高优先级通知。审批/提问需要出队时的当前 pending request ID 快照；默认空快照会 fail closed 丢弃 stale interaction。错误会淘汰排队中的 polite 进度，但保留尚可能有效的 approval/question；Run result 会清空全队列并成为唯一终态通知。队列有界为 16。只有实际进入队列的 notice 才写入去重集合；rate-limited/queue-full notice 可以重试。Notice ID 与语义去重键各最多保留 512 个；切换 Run 生成新 generation、清空队列和去重集合，旧 generation/Run 或较旧 event sequence 会被拒绝。`clear()` 使当前 generation 失效。
+`RunNoticeScheduler` 默认进度最少间隔 12 秒，审批/提问/错误/完成绕过该限频并返回 `interruptCurrent: true`；Web 播报控制器会先取消当前 utterance，再播放有效的高优先级通知。Host 出队时从该 Run 的当前 Runtime snapshot 重新构造 pending request ID 集合。审批/提问 ID 不再 pending 时 fail closed 丢弃。错误会淘汰排队中的 polite 进度，但保留尚可能有效的 approval/question；Run result 会清空全队列并成为唯一终态通知。队列有界为 16。只有实际进入队列的 notice 才写入去重集合；rate-limited/queue-full notice 可以重试。Notice ID 与语义去重键各最多保留 512 个；切换 Run 生成新 generation、清空队列和去重集合，旧 generation/Run 或较旧 event sequence 会被拒绝。`clear()` 使当前 generation 失效。Web 侧再按公共 `noticeId` 去重，覆盖 SSE 重放/重连。
+
+### Host 与 Web 的 B1 接入
+
+- Host 装配启用 RunNotice 投影，但固定关闭动态文本。RemoteRunAPI 在 committed RuntimeEvent 被接受后投影，Host 出队时核对当前 approval/question request ID，再写入既有事件回放缓冲和 SSE 序列。关闭 `runNotices` 时没有新的公共事件。
+- `useRunFeed` 只接收结构校验通过的最小 notice，按 `noticeId` 留存最近 24 条；SSE 外层 event cursor 去重之外再做 ID 去重。Web 内部保留 SSE cursor，不扩展公共 notice schema：朗读关闭期间持续推进基线，用户打开时只读之后的新通知，不回放此前缓存的历史审批/提问；当前 pending 内容仍由页面 snapshot 展示。
+- Preferences 的 `voice.runNoticesEnabled` 默认 `false`；`voice.speechRate` 为 `slow/normal/fast`，分别映射为 `0.85/1/1.15`。版本 1 的旧偏好保留显示/回答设置并迁移成语音关闭的版本 2。
+- 用户启用后，BrowserSpeechOutput 逐 notice 创建 utterance；`delivery: interrupt` 会先取消当前语音。controller 用 intent epoch 保证同一轮里更新的 interrupt（特别是终态 result）淘汰尚未开始播报的旧通知；result 是该 Run 的最终通知。切换 Run、卸载页面、用户开始文字输入、审批/问题 ID 清除或更换、以及未来录音界面调用 `notifyVoiceInputStarted()` 都会取消当前输出。审批/问题通知会等 snapshot 的 SSE cursor 追上通知，再于真正调用 `enqueueText()` 前核对 `snapshot.pendingRequest`。
+- 设置语速会取消旧速率的活跃输出 session；下一条通知以新速度重新打开 session。pending request ID 在相应 utterance 结束/失败后释放，后续 unrelated 通知不会再受它影响。Browser session 会把播放和 finish 失败传回 Web 可见降级文案。StrictMode 下重复 effect 通过 per-Run cursor/notice 去重；短暂 cleanup probe 不会误取消存活输出，真实卸载后取消。
+- 不支持 `speechSynthesis` 时，设置页明确显示并禁用开关；播放抛错时运行任务不受影响，页面显示错误，通知仍在文字时间线。
 
 动态内容默认关闭。已知词/模式（口令、验证码、电话、证件号、银行卡/长数字、邮箱及敏感 URL 参数）命中时，即使动态内容已启用，projector 也只生成固定安全文案。该启发式不具备语义隐私识别能力，不是保密保证；不能以“未命中”证明任意动态文本安全。下一阶段需提供明确开关，默认只播固定状态，并通过真机/真实任务确认锁屏等场景不会泄露。
 
 ## 本阶段验证
 
-本次只跑本地离线测试和类型检查，不调用真实 STT/TTS、不发模型请求、不录音、不操作桌面。重点测试包括：多段转写与 revision 更新、final 不降级为 partial、starting 阶段快速 finish、assistantText 缺失回退、候选在拒绝/失败/未知动作后不播报而成功 Receipt 后才生成、Planning 多 task 状态、动态内容开关和敏感模式、限频/队列满后重试、终态结果清队列、error 保留有效 pending 交互、approval/question 过期校验与乱序 generation 丢弃。
+本阶段 B1 已执行定向离线验证：app-runtime public notice 投影/关闭基线/pending request/终态/SSE replay；Web notice ID 去重；Browser TTS 关闭默认、可打断、pending 失效取消、语音失败降级；偏好迁移。完整测试数和构建/typecheck/diff-check 结果在本轮交付汇报中记录。本阶段没有真实 STT/TTS Provider、手机真机、锁屏/后台播放或语音延迟实验；浏览器 API 用可控测试替身验证。
 
 ## 下一阶段接点与未实现项
 
-1. Host 从 `RunHandle.eventFeed` 的 committed event subscription 消费 RuntimeEvent，用 projector 生成 RunNotice，再经已有 RemoteRunAPI/SSE 对应路由显式投影；不要把 RunNotice 字段加入 protocol RuntimeEvent，也不要将 assistantText、Planning 或 Monitor 的原始事件泛化暴露给手机。
-2. Web 录音界面实现 `VoiceInputAdapter`，展示 partial transcript、支持结束后等待全部 final 段、可编辑确认后走现有 Goal/Correction/Question 命令；取消、权限拒绝、网络失败必须可见。
-3. Host/Web 选择第一种真实 STT/TTS 适配器；密钥不下发手机。TTS consumer 读取 scheduler 队列，遇 interrupt 取消当前输出，并检查 Run generation 后再播放。
-4. 保留 `VoiceCapabilities` 旧 facade 兼容层。新 Provider/设备能力通过新合同接入，不要求原先的 `readAloud` / `transcribeOnce` 实现流式行为。
-5. 记录录音到 partial、final、首个可听片段、完整播报、cancel 生效的延迟；同时记录转写修订/漏句、误播敏感内容、重复进度和抢占成功率。未完成 Android/iOS 实机验证前不声称语音链路可交付。
+1. 实现 `VoiceInputAdapter` 与 Web 录音控制，显示 partial/final、等待整段 session terminal、允许编辑后通过现有 Goal/Correction/Question 命令提交；取消、权限拒绝和网络失败要可见。
+2. 选择第一个真实 STT/TTS Provider；密钥留在 Host/服务端。浏览器语音只证明输出合同与本地播放入口，不能替代真实服务评估。
+3. Android/iOS 真机验证 TTS 起播延迟、后台/锁屏行为、焦点、取消时延、重复播报和失败降级；未验证前不声称移动语音链路已交付。
+4. 录音到 partial/final、首个可听片段、完整播报与 cancel 生效的延迟；记录转写修订/漏句、误播敏感内容、重复进度和抢占成功率。
