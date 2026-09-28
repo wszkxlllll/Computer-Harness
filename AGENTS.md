@@ -1,3 +1,9 @@
+# 唯一工作目录
+
+- 本项目唯一源码与工作目录是 `/Users/guoyuhang/Desktop/大创/Computer-Harness`。所有后续对话、Agent、命令、文档、测试证据和本地运行产物均以此目录为准。
+- `/Users/guoyuhang/Documents/ChatGPT/Computer-Harness` 只是 Codex 旧项目记录对应的空挂载点，不是仓库；若任务从该路径启动，先切换到桌面项目目录，禁止复制出第二份源码或用软链接替代工作区。
+- 本机私有配置统一放在仓库根目录的 `.env`、`.env.relay` 与 `.harness.local.json`，必须保持 Git 忽略且不得输出值。服务器 SSH 私钥仍保留在标准系统位置 `~/.ssh/computer-harness-zhaiyx`，不得移动进仓库。
+
 # 审计与规划输出约定
 
 用户确认于 2026-08-31，适用于本项目后续代码审查、阶段验收和实施规划。

@@ -5,6 +5,7 @@ coverage/
 .cache/
 .tools/
 .harness.local.psd1
+.harness.local.json
 .env
 .env.*
 !.env.example
