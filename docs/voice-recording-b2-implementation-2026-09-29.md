@@ -1,7 +1,7 @@
 # 手机录音与实时语音识别：阶段 B2 实施记录
 
 日期：2026-09-29
-状态：离线实现与 mock 回归完成，待 Sol medium 审查；尚未调用真实 Qwen API，也未做手机麦克风实测。
+状态：离线实现、mock 回归与真实 Qwen 约 4 秒短音频探针已通过；手机麦克风/Relay 实测尚未完成，待 Sol medium 审查。
 基线：阶段 A `e98502b`、B1 `74eeb86`。
 范围：Web 按键录音、PCM16/16 kHz 音频流、Host 代理识别、partial/final 转写、编辑后交给已有输入接口。
 
@@ -40,7 +40,7 @@
 - Host/Relay 不将音频或转写写入 Run trajectory、截图或应用日志。转写只在当前 Host 进程的有界内存 session 中存在，并经配对认证返回给对应手机；Host 退出后清除。
 - 当前上传使用同源 JSON HTTP。第一个 100 ms 音频块立即请求，以降低首包等待；该请求在途时新块放入有界队列，响应后以最多四块（最大 Base64 体约 22 KiB）成批连续上传。单 in-flight/待发 PCM 队列总量最多 64 KB，超过即停止、取消识别并提示重试。300–400 ms 模拟 RTT 下，队列持续按序排空且未触发背压。单 WebSocket 上传是后续可替换的 transport，不属于本阶段验证结论。
 - B2 未发布，因此 `/audio` 只接受 batch envelope `{ chunks, afterEventSequence }`，不保留旧版单块请求形状；Host、Relay 与 Web 必须同版本。
-- `GET /api/voice/capabilities` 是一次很轻的本地 Host 配置读取，供已配对页面决定是否启用录音按钮；它**不尝试连接 Qwen，也不证明密钥、workspace endpoint 或公网链路可用**。真实 API 联通仍需之后明确执行。
+- `GET /api/voice/capabilities` 是一次很轻的本地 Host 配置读取，供已配对页面决定是否启用录音按钮；它**不尝试连接 Qwen，也不证明密钥、workspace endpoint 或公网链路可用**。真实短音频鉴权与协议验证结果见本节探针记录。
 - WebAudioWorklet 停止时等待同源 Worklet 的 flush 确认，500 ms 未确认会拒绝停止；控件随后取消 Host session，不调用 finish，不把可能截尾内容填入表单。录音期间表单 submit/相关字段被禁用，程序处理也会再次拒绝提交。
 
 ## 验证情况
@@ -56,7 +56,31 @@
 - 工作区 `pnpm run typecheck` 与 Web 生产构建 `pnpm --filter @computer-harness/web build` 均通过；构建产物包含同源 `harness-pcm-capture-worklet.js`。
 - 测试输出仍有 Fastify `disableRequestLogging` 弃用提示；与本次录音链路无关，不影响测试通过。
 
-**未验证：**真实 API 鉴权与 endpoint、真实麦克风权限、iOS/Android AudioWorklet 行为、弱网延迟、Relay 实际部署。当前没有产生 API 费用、没有操作真实桌面，也没有保存真实录音。
+**尚未验证：**手机真实麦克风权限与录音链路、iOS/Android AudioWorklet 行为、WAN Relay、长语音质量、真实弱网延迟，以及完整成本/稳定性。主 Agent 已完成一次真实 Qwen 短探针，证据见下节。没有操作真实桌面，也没有将音频写入仓库。
+
+## 真实 Qwen 短探针（主 Agent 已执行）
+
+已新增可复用的离线校验脚本 `../scripts/voice/probe-qwen-asr.mjs`。它只接受最多 10 秒、16 kHz 单声道 PCM16 little-endian WAV 或 raw PCM；每块按 3,200 bytes/100 ms 顺序发给已构建的 Qwen Provider，整个探针最多 20 秒。默认 WSS endpoint 从 `DASHSCOPE_WORKSPACE_ID` 拼北京 workspace host，也可由 `DASHSCOPE_REALTIME_ASR_ENDPOINT` 覆盖。密钥只从进程环境读取，不打印 endpoint/header/env；输出 Provider ID、耗时、partial/final 段数和最终转写。探针使用真实 API，可能产生费用，必须由主 Agent 在获得用户明确授权后执行。
+
+**隐私注意：**最终转写会打印到终端，因此只使用无敏感内容的合成/测试语音；不要将私人录音作为探针输入。脚本不会把转写写入轨迹或文档，但终端输出可能被本地终端历史或录屏保留。
+
+```powershell
+pnpm run build
+node --env-file=.env scripts/voice/probe-qwen-asr.mjs --input .\path\to\short-16k-mono-pcm16.wav
+```
+
+raw PCM 可以用 `.pcm` / `.raw` 扩展名自动识别，或显式追加 `--format raw`。离线检查：`node scripts/voice/probe-qwen-asr.mjs --help` 和 `node --test scripts/voice/probe-qwen-asr.test.mjs`。
+
+| 结果字段 | 已记录结果 |
+|---|---|
+| 输入 | 本机 SAPI 合成的约 4 秒、16 kHz 单声道 PCM16 WAV；音频未入库 |
+| Provider | `qwen3-asr-flash-realtime` |
+| 耗时 | 4597 ms |
+| Partial / final segments | 1 / 1 |
+| 最终转写 | 上海到杭州，明天下午出发。 |
+| 退出状态 | 正常退出 |
+
+该结果只证明本次短音频的真实鉴权、Provider 协议和短时转写链路可用；**不证明**手机麦克风、WAN Relay、长语音、实际成本或稳定性已经通过。探针密钥、Authorization header、完整环境变量与本机音频路径不记录在此文档。
 
 ## 下一步
 
