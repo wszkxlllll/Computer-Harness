@@ -258,6 +258,12 @@ importers:
         specifier: 3.25.76
         version: 3.25.76
 
+  packages/voice:
+    dependencies:
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   spikes/cua-driver:
     dependencies:
       '@computer-harness/computer-cua':
