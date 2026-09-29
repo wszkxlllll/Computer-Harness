@@ -65,16 +65,18 @@ describe("Host HTTP boundary", () => {
     const api = fakeApi();
     const targetsReceived: RemoteRunTargetInput[] = [];
     const assistantPreferencesReceived: RunAssistantPreferencesSnapshot[] = [];
+    const runNoticeContentOptIns: boolean[] = [];
     const host = createHostServer({
       api: {
         ...api,
-        startRun: (deviceId, commandId, goal, target, assistantPreferences) => {
+        startRun: (deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled) => {
           targetsReceived.push(target);
           if (assistantPreferences !== undefined) assistantPreferencesReceived.push(assistantPreferences);
+          if (runNoticeContentEnabled === true) runNoticeContentOptIns.push(true);
           if (typeof target !== "string" && target.mode === "auto" && goal === "Ambiguous goal") {
             return Promise.reject(new RemoteRunApiError("WINDOW_SELECTION_REQUIRED", "No single visible window confidently matches this goal. Choose a window manually."));
           }
-          return api.startRun(deviceId, commandId, goal, target, assistantPreferences);
+          return api.startRun(deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled);
         },
       },
       allowedOrigins: [localOrigin, relayOrigin],
@@ -204,6 +206,13 @@ describe("Host HTTP boundary", () => {
         payload: { commandId: "start-auto", goal: "Open a matching app", target: { mode: "auto" } },
       });
       expect(autoStart.statusCode).toBe(202);
+      const desktopStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-desktop", goal: "Inspect a desktop popup", target: { mode: "desktop" } },
+      });
+      expect(desktopStart.statusCode).toBe(202);
       const browserStart = await host.server.inject({
         method: "POST",
         url: "/api/runs",
@@ -235,6 +244,7 @@ describe("Host HTTP boundary", () => {
       expect(targetsReceived).toEqual([
         targetToken,
         { mode: "auto" },
+        { mode: "desktop" },
         { mode: "browser", url: "https://example.test/path" },
         { mode: "browser" },
         { mode: "browser", url: " \t " },
@@ -267,6 +277,33 @@ describe("Host HTTP boundary", () => {
         additionalGuidance: "Keep rows safely",
       }]);
       expect(Object.isFrozen(assistantPreferencesReceived[0])).toBe(true);
+
+      const noticeOptInStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: {
+          commandId: "start-notice-content-opt-in",
+          goal: "Check a page",
+          target: { mode: "auto" },
+          runNoticeContentEnabled: true,
+        },
+      });
+      expect(noticeOptInStart.statusCode).toBe(202);
+      expect(runNoticeContentOptIns).toEqual([true]);
+      const invalidNoticeContentOptIn = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: {
+          commandId: "start-invalid-notice-content-opt-in",
+          goal: "Check a page",
+          target: { mode: "auto" },
+          runNoticeContentEnabled: "true",
+        },
+      });
+      expect(invalidNoticeContentOptIn.statusCode).toBe(400);
+      expect(runNoticeContentOptIns).toEqual([true]);
 
       const invalidAssistantPreferences = [
         { version: 1, responseDetail: "detailed", stepExplanation: "more", preferredLanguage: "zh-CN", additionalGuidance: "fine", presentation: { textSize: "large" } },

@@ -190,6 +190,7 @@ function isValidBrowserSessionMode(value: unknown): value is "temporary" | "save
 function isValidRunTarget(value: unknown): boolean {
   if (!isRecord(value) || typeof value.mode !== "string") return false;
   if (value.mode === "auto") return hasExactKeys(value, ["mode"]);
+  if (value.mode === "desktop") return hasExactKeys(value, ["mode"]);
   if (value.mode === "window") {
     return hasExactKeys(value, ["mode", "targetToken"]) && isValidWindowTargetToken(value.targetToken);
   }
@@ -244,8 +245,13 @@ export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject |
   const hasTaggedTarget = Object.hasOwn(body, "target");
   if (hasLegacyTarget === hasTaggedTarget) return false;
   const hasAssistantPreferences = Object.hasOwn(body, "assistantPreferences");
+  const hasRunNoticeContentEnabled = Object.hasOwn(body, "runNoticeContentEnabled");
   const targetKeys = hasLegacyTarget ? ["commandId", "goal", "targetToken"] : ["commandId", "goal", "target"];
-  const outerKeys = hasAssistantPreferences ? [...targetKeys, "assistantPreferences"] : targetKeys;
+  const outerKeys = [
+    ...targetKeys,
+    ...(hasAssistantPreferences ? ["assistantPreferences"] : []),
+    ...(hasRunNoticeContentEnabled ? ["runNoticeContentEnabled"] : []),
+  ];
   if (!hasExactKeys(body, outerKeys)) return false;
   const validBase = isValidIdentifier(body.commandId)
     && typeof body.goal === "string"
@@ -253,6 +259,7 @@ export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject |
     && body.goal.length <= 20_000;
   if (!validBase) return false;
   if (hasAssistantPreferences && !isValidAssistantPreferences(body.assistantPreferences)) return false;
+  if (hasRunNoticeContentEnabled && typeof body.runNoticeContentEnabled !== "boolean") return false;
   return hasLegacyTarget
     ? isValidWindowTargetToken(body.targetToken)
     : isValidRunTarget(body.target);

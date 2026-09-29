@@ -8,6 +8,8 @@ import type { RunStatus, RunSummary, RunTarget, WindowTarget } from "./types";
 import { isValidBrowserUrl } from "./run-target";
 import { usePreferences } from "./PreferencesContext";
 import { toRunAssistantPreferencesSnapshot } from "./preferences";
+import { announceBrowserText } from "./run-notice-speech";
+import { navigateWithinApp } from "./navigation";
 
 const activeStatuses = new Set<RunStatus>(["created", "running", "waiting_user", "waiting_window", "waiting_approval", "paused"]);
 
@@ -33,6 +35,7 @@ export function HomeScreen() {
   const hasCurrentTarget = selectedTargetToken !== undefined && windowTargets.some((candidate) => candidate.token === selectedTargetToken);
   const canStart = !loading && !listError && !activeRun && !sending && (
     targetMode === "auto"
+    || targetMode === "desktop"
     || (targetMode === "browser" && (!browserUrl.trim() || isValidBrowserUrl(browserUrl)))
     || (targetMode === "window"
       && !windowTargetsLoading
@@ -116,14 +119,18 @@ export function HomeScreen() {
 
     setSending(true);
     setError(undefined);
+    if (preferences.voice.runNoticesEnabled) {
+      const rate = preferences.voice.speechRate === "slow" ? 0.85 : preferences.voice.speechRate === "fast" ? 1.15 : 1;
+      announceBrowserText("正在发送任务。", rate);
+    }
     const assistantPreferences = toRunAssistantPreferencesSnapshot(preferences.assistant);
-    const actionKey = JSON.stringify([goal, target, assistantPreferences]);
+    const actionKey = JSON.stringify([goal, target, assistantPreferences, preferences.voice.runNoticesEnabled]);
     const commandId = commandIdByTarget.current.get(actionKey) ?? crypto.randomUUID();
     commandIdByTarget.current.set(actionKey, commandId);
     try {
-      const response = await createRun(goal, commandId, target, assistantPreferences);
+      const response = await createRun(goal, commandId, target, assistantPreferences, preferences.voice.runNoticesEnabled);
       commandIdByTarget.current.delete(actionKey);
-      window.location.assign(`/run/${encodeURIComponent(response.runId)}`);
+      navigateWithinApp(`/run/${encodeURIComponent(response.runId)}`);
     } catch (caught) {
       if (shouldClearAfterFailure(caught) || (caught instanceof ApiError && caught.code === "WINDOW_DISCOVERY_FAILED")) {
         commandIdByTarget.current.delete(actionKey);

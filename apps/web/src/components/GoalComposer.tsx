@@ -61,6 +61,10 @@ export function GoalComposer({
         : { mode: "browser", sessionMode: browserSessionMode });
       return;
     }
+    if (targetMode === "desktop") {
+      await onSubmit(value, { mode: "desktop" });
+      return;
+    }
     await onSubmit(value, { mode: "auto" });
   }
 
@@ -95,6 +99,10 @@ export function GoalComposer({
           <label className="target-mode-option">
             <input type="radio" name="target-mode" value="browser" checked={targetMode === "browser"} onChange={() => onTargetModeChange("browser")} />
             <span className="target-mode-copy"><strong>打开网站</strong><span>让电脑上的浏览器打开一个地址。</span></span>
+          </label>
+          <label className="target-mode-option">
+            <input type="radio" name="target-mode" value="desktop" checked={targetMode === "desktop"} onChange={() => onTargetModeChange("desktop")} />
+            <span className="target-mode-copy"><strong>整个桌面</strong><span>捕获并操作当前完整桌面，可看见独立弹窗；也可能包含其他窗口中的内容。</span></span>
           </label>
         </div>
       </fieldset>

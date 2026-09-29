@@ -11,8 +11,6 @@ import type { VoiceCapabilities } from "./voice-capabilities";
 import { VoiceInputCapabilitiesContext } from "./voice-capabilities";
 import type { VoiceInputCapabilities } from "@computer-harness/voice";
 
-const pathname = window.location.pathname;
-
 export function App({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
   return (
     <PreferencesProvider>
@@ -22,6 +20,13 @@ export function App({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabiliti
 }
 
 function AppRoutes({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
+  const [pathname, setPathname] = useState(() => window.location.pathname);
+  useEffect(() => {
+    const updatePathname = () => setPathname(window.location.pathname);
+    window.addEventListener("popstate", updatePathname);
+    return () => window.removeEventListener("popstate", updatePathname);
+  }, []);
+
   if (pathname === "/connect") return <ConnectPhoneScreen />;
   if (pathname === "/pair") return <PairingScreen />;
   if (pathname === "/preferences") return <PhoneSessionGate><PreferencesScreen voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;

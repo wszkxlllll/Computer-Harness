@@ -26,7 +26,7 @@ interface ViewerReview {
 }
 
 export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
-  const { snapshot, events, notices, connection, error, refresh } = useRunFeed(runId);
+  const { snapshot, pendingRequestState, events, notices, connection, error, refresh } = useRunFeed(runId);
   const commands = useRunCommands({ runId, snapshot, refresh });
   const [viewerReview, setViewerReview] = useState<ViewerReview>();
   const [blockedRequestId, setBlockedRequestId] = useState<string>();
@@ -35,6 +35,11 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   const runHeadingRef = useRef<HTMLHeadingElement>(null);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
+  const pendingRequestStateRef = useRef(pendingRequestState);
+  pendingRequestStateRef.current = pendingRequestState;
+  const currentSpeechPendingRequest = () => pendingRequestStateRef.current === undefined
+    ? snapshotRef.current?.pendingRequest
+    : pendingRequestStateRef.current.request;
   const { preferences } = usePreferences();
   const speechController = useMemo(() => new RunNoticeSpeechController(
     () => voiceCapabilities?.createOutputAdapter?.() ?? new BrowserSpeechOutput(),
@@ -72,17 +77,17 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
       void speechController.deliver(notice, {
         enabled: preferences.voice.runNoticesEnabled,
         speechRate: rate,
-        snapshotSequence: snapshotRef.current?.sequence,
-        currentPendingRequest: () => snapshotRef.current?.pendingRequest,
+        snapshotSequence: pendingRequestStateRef.current?.sequence ?? snapshotRef.current?.sequence,
+        currentPendingRequest: currentSpeechPendingRequest,
       }).then((state) => {
         if (state === "handled") noticeCursor.acknowledge(notice.noticeId);
       });
     }
-  }, [notices, noticeCursor, preferences.voice.runNoticesEnabled, preferences.voice.speechRate, runId, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind, snapshot?.sequence, speechController]);
+  }, [notices, noticeCursor, pendingRequestState?.request?.requestId, pendingRequestState?.request?.kind, pendingRequestState?.sequence, preferences.voice.runNoticesEnabled, preferences.voice.speechRate, runId, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind, snapshot?.sequence, speechController]);
 
   useEffect(() => {
-    speechController.syncPendingRequest(snapshot?.pendingRequest);
-  }, [speechController, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind]);
+    speechController.syncPendingRequest(currentSpeechPendingRequest());
+  }, [speechController, pendingRequestState?.request?.requestId, pendingRequestState?.request?.kind, pendingRequestState?.sequence, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind]);
 
   useEffect(() => {
     const onTextInput = (event: Event) => {

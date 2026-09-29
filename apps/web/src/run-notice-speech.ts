@@ -6,6 +6,8 @@ export const VOICE_INPUT_STARTED_EVENT = "harness:voice-input-started";
 interface SpeechSynthesisPort {
   speak(utterance: SpeechSynthesisUtterance): void;
   cancel(): void;
+  getVoices?(): SpeechSynthesisVoice[];
+  resume?(): void;
 }
 
 export interface BrowserSpeechEnvironment {
@@ -23,6 +25,30 @@ function browserEnvironment(): BrowserSpeechEnvironment | undefined {
 
 export function isBrowserSpeechOutputAvailable(): boolean {
   return browserEnvironment() !== undefined;
+}
+
+const immediateUtterances = new Set<SpeechSynthesisUtterance>();
+
+/** Starts inside a direct user gesture, which unlocks speech in restrictive mobile WebViews. */
+export function announceBrowserText(
+  text: string,
+  speechRate: VoiceSpeechRate,
+  environment: BrowserSpeechEnvironment | undefined = browserEnvironment(),
+): boolean {
+  if (environment === undefined || text.trim().length === 0) return false;
+  try {
+    const utterance = environment.createUtterance(text.trim());
+    configureMandarinUtterance(utterance, environment.speechSynthesis, speechRate);
+    const release = () => immediateUtterances.delete(utterance);
+    utterance.onend = release;
+    utterance.onerror = release;
+    immediateUtterances.add(utterance);
+    environment.speechSynthesis.resume?.();
+    environment.speechSynthesis.speak(utterance);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Low-latency browser TTS adapter. It requires no microphone permission. */
@@ -56,6 +82,9 @@ class BrowserSpeechSession implements VoiceOutputSession {
   private lastSequence = -1;
   private readonly chunks = new Set<string>();
   private readonly pending = new Set<PendingUtterance>();
+  // Some mobile WebViews stop an utterance when the JavaScript wrapper is
+  // collected, even though it is still queued by speechSynthesis.
+  private readonly activeUtterances = new Set<SpeechSynthesisUtterance>();
   private firstFailure?: Error;
 
   public constructor(private readonly environment: BrowserSpeechEnvironment, private readonly speechRate: VoiceSpeechRate) {}
@@ -91,14 +120,20 @@ class BrowserSpeechSession implements VoiceOutputSession {
     };
     try {
       const utterance = this.environment.createUtterance(text);
-      utterance.rate = this.speechRate;
-      utterance.onend = () => pending.resolve();
+      configureMandarinUtterance(utterance, this.environment.speechSynthesis, this.speechRate);
+      utterance.onend = () => {
+        this.activeUtterances.delete(utterance);
+        pending.resolve();
+      };
       utterance.onerror = (event) => {
+        this.activeUtterances.delete(utterance);
         const error = new Error(`浏览器语音播报失败：${event.error || "unknown"}`);
         this.firstFailure ??= error;
         pending.reject(error);
       };
       this.pending.add(pending);
+      this.activeUtterances.add(utterance);
+      this.environment.speechSynthesis.resume?.();
       this.environment.speechSynthesis.speak(utterance);
     } catch (error) {
       const failure = error instanceof Error ? error : new Error("浏览器语音播报失败。");
@@ -119,8 +154,41 @@ class BrowserSpeechSession implements VoiceOutputSession {
   public async cancel(_reason: VoiceOutputCancelReason): Promise<void> {
     this.closed = true;
     this.environment.speechSynthesis.cancel();
+    this.activeUtterances.clear();
     for (const item of [...this.pending]) item.resolve();
   }
+}
+
+/** Prefer Mainland Mandarin and never select Cantonese merely because it is the first zh-* voice. */
+export function selectMandarinVoice(voices: readonly SpeechSynthesisVoice[]): SpeechSynthesisVoice | undefined {
+  const score = (voice: SpeechSynthesisVoice): number => {
+    const language = voice.lang.trim().toLowerCase().replaceAll("_", "-");
+    const name = voice.name.trim().toLowerCase();
+    if (language === "zh-cn") return 500;
+    if (language.startsWith("zh-cn-")) return 480;
+    if (language === "zh-hans" || language.startsWith("zh-hans-")) return 450;
+    if (language === "zh-sg") return 420;
+    if (/(mandarin|putonghua|普通话|国语|xiaoxiao|huihui|ting-ting)/iu.test(name)) return 400;
+    if (language === "zh" || language.startsWith("cmn-")) return 300;
+    if (language.startsWith("zh-hk") || language.startsWith("yue-") || /(cantonese|粤语|廣東話|广东话)/iu.test(name)) return -100;
+    if (language.startsWith("zh-tw")) return 100;
+    return 0;
+  };
+  return voices
+    .map((voice, index) => ({ voice, index, score: score(voice) }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index)[0]?.voice;
+}
+
+function configureMandarinUtterance(
+  utterance: SpeechSynthesisUtterance,
+  synthesis: SpeechSynthesisPort,
+  speechRate: VoiceSpeechRate,
+): void {
+  utterance.rate = speechRate;
+  utterance.lang = "zh-CN";
+  const voice = selectMandarinVoice(synthesis.getVoices?.() ?? []);
+  if (voice !== undefined) utterance.voice = voice;
 }
 
 export interface RunNoticeSpeechOptions {
@@ -154,6 +222,15 @@ export class RunNoticeCursor {
       this.initialized = true;
       this.wasEnabled = enabled;
       this.baselineFeedSequence = latestSequence;
+      // The run-created notice is normally committed before navigation reaches
+      // the Run page. Admit only that bounded start notice on first attach so
+      // enabling speech before starting a Run produces audible confirmation
+      // without replaying historical approvals, errors, or results.
+      if (enabled) {
+        const start = [...notices].reverse().find((notice) =>
+          notice.kind === "progress" && notice.eventSequence === 0 && notice.text === "任务已开始。");
+        return start === undefined || this.seenNoticeIds.has(start.noticeId) ? [] : [start];
+      }
       return [];
     }
     if (!enabled || !this.wasEnabled) {

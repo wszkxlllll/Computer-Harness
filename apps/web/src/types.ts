@@ -39,6 +39,7 @@ export interface WindowTargetList {
 
 export type RunTarget =
   | { mode: "auto" }
+  | { mode: "desktop" }
   | { mode: "window"; targetToken: string }
   | { mode: "browser"; sessionMode?: "temporary" | "saved"; url?: string };
 

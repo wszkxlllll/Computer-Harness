@@ -28,6 +28,7 @@ export type RemoteBrowserSessionMode = "temporary" | "saved";
 
 export type RemoteRunTarget =
   | { readonly mode: "auto" }
+  | { readonly mode: "desktop" }
   | { readonly mode: "window"; readonly targetToken: string }
   | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string };
 /** A bare token remains accepted for existing clients. */
@@ -143,7 +144,14 @@ export interface RemoteRunApi {
   listRuns(deviceId: string): Promise<readonly RemoteRunSnapshot[]> | readonly RemoteRunSnapshot[];
   getRun(deviceId: string, runId: string): Promise<RemoteRunSnapshot | undefined> | RemoteRunSnapshot | undefined;
   listWindowTargets(deviceId: string): Promise<RemoteWindowTargetSet>;
-  startRun(deviceId: string, commandId: string, goal: string, target: RemoteRunTargetInput, assistantPreferences?: RunAssistantPreferencesSnapshot): Promise<RemoteRunSnapshot>;
+  startRun(
+    deviceId: string,
+    commandId: string,
+    goal: string,
+    target: RemoteRunTargetInput,
+    assistantPreferences?: RunAssistantPreferencesSnapshot,
+    runNoticeContentEnabled?: boolean,
+  ): Promise<RemoteRunSnapshot>;
   submitCommand(deviceId: string, runId: string, command: RemoteCommand): Promise<RemoteCommandReceipt>;
   getCommandReceipt(deviceId: string, runId: string, commandId: string): Promise<RemoteCommandReceipt | undefined> | RemoteCommandReceipt | undefined;
   subscribe(deviceId: string, runId: string, afterSequence: number, listener: (event: RemoteStreamEvent) => void): RemoteSubscription;

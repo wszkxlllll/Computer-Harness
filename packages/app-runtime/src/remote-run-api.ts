@@ -9,7 +9,7 @@ import type { ApplicationSession, ApplicationSessionRunFeatureOverrides, WindowT
 import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
 import { RunNoticeProjector, RunNoticeScheduler, type RunNoticeGeneration } from "@computer-harness/voice";
-import { approvalRequiresVisualReview, projectApprovalPreview } from "./approval-preview.js";
+import { approvalRequiresVisualReview, projectApprovalPreview, projectApprovalVoiceContext } from "./approval-preview.js";
 import {
   type RemoteAsset,
   type RemoteCommand,
@@ -64,6 +64,7 @@ interface StartRequest {
   readonly goal: string;
   readonly targetFingerprint: string;
   readonly assistantPreferencesFingerprint: string;
+  readonly runNoticeContentEnabled: boolean;
   readonly promise: Promise<RemoteRunSnapshot>;
 }
 
@@ -78,6 +79,7 @@ interface DeviceWindowCandidates {
 }
 
 type ResolvedStartTarget =
+  | { readonly mode: "desktop" }
   | { readonly mode: "window"; readonly selection: WindowTargetSelection }
   | { readonly mode: "browser"; readonly sessionMode: RemoteBrowserSessionMode; readonly url: string };
 
@@ -263,9 +265,13 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     goal: string,
     targetInput: RemoteRunTargetInput,
     assistantPreferencesInput?: RunAssistantPreferencesSnapshot,
+    runNoticeContentEnabledInput = false,
   ): Promise<RemoteRunSnapshot> {
     const cleanGoal = validateText(goal, MAX_GOAL_CHARS, "goal");
     const cleanCommandId = validateIdentifier(commandId, "commandId");
+    if (typeof runNoticeContentEnabledInput !== "boolean") {
+      return Promise.reject(new RemoteRunApiError("INVALID_COMMAND", "runNoticeContentEnabled must be a boolean."));
+    }
     let assistantPreferences: RunAssistantPreferencesSnapshot | undefined;
     try {
       assistantPreferences = assistantPreferencesInput === undefined
@@ -293,6 +299,9 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       if (existing.goal !== cleanGoal || existing.targetFingerprint !== targetFingerprint || existing.assistantPreferencesFingerprint !== assistantPreferencesFingerprint) {
         return Promise.reject(new RemoteRunApiError("IDEMPOTENCY_CONFLICT", "commandId was already used with different Run details"));
       }
+      if (existing.runNoticeContentEnabled !== runNoticeContentEnabledInput) {
+        return Promise.reject(new RemoteRunApiError("IDEMPOTENCY_CONFLICT", "commandId was already used with different Run details"));
+      }
       return existing.promise;
     }
     if (this.startRequests.size >= this.maxStartRequests) {
@@ -314,8 +323,8 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       rejectPromise = rejectPromiseValue;
     });
     // Reserve the idempotency key synchronously before fresh discovery yields.
-    this.startRequests.set(key, { goal: cleanGoal, targetFingerprint, assistantPreferencesFingerprint, promise });
-    void this.resolveTargetAndCreateRun(deviceId, cleanGoal, target, selectedTarget, assistantPreferences)
+    this.startRequests.set(key, { goal: cleanGoal, targetFingerprint, assistantPreferencesFingerprint, runNoticeContentEnabled: runNoticeContentEnabledInput, promise });
+    void this.resolveTargetAndCreateRun(deviceId, cleanGoal, target, selectedTarget, assistantPreferences, runNoticeContentEnabledInput)
       .then(resolvePromise, rejectPromise);
     return promise;
   }
@@ -326,6 +335,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     target: RemoteRunTarget,
     selectedTarget: WindowTargetSelection | undefined,
     assistantPreferences: RunAssistantPreferencesSnapshot | undefined,
+    runNoticeContentEnabled: boolean,
   ): Promise<RemoteRunSnapshot> {
     if (this.startInProgress) {
       throw new RemoteRunApiError("RUN_BUSY", "The Host is already resolving a target for another Run. Wait for it to finish starting.");
@@ -372,13 +382,16 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
               throw new RemoteRunApiError("MANAGED_BROWSER_PROFILE_UNAVAILABLE", "电脑端已登录网站清单无法安全读取。任务尚未启动，请检查受管浏览器配置后重试。");
             }
           }
-          return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "saved", url }, assistantPreferences);
+          return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "saved", url }, assistantPreferences, runNoticeContentEnabled);
         }
-        return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "temporary", url: target.url ?? "about:blank" }, assistantPreferences);
+        return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "temporary", url: target.url ?? "about:blank" }, assistantPreferences, runNoticeContentEnabled);
       }
       if (target.mode === "window") {
         if (selectedTarget === undefined) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window choice is invalid. Refresh the list and choose again.");
-        return await this.createRun(deviceId, goal, { mode: "window", selection: selectedTarget }, assistantPreferences);
+        return await this.createRun(deviceId, goal, { mode: "window", selection: selectedTarget }, assistantPreferences, runNoticeContentEnabled);
+      }
+      if (target.mode === "desktop") {
+        return await this.createRun(deviceId, goal, { mode: "desktop" }, assistantPreferences, runNoticeContentEnabled);
       }
 
       let currentWindows: readonly WindowTargetInfo[];
@@ -421,7 +434,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
           ...(appName === undefined ? {} : { appName }),
           ...(title === undefined ? {} : { title }),
         },
-      }, assistantPreferences);
+      }, assistantPreferences, runNoticeContentEnabled);
     } finally {
       this.startInProgress = false;
     }
@@ -544,10 +557,14 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     goal: string,
     target: ResolvedStartTarget,
     assistantPreferences?: RunAssistantPreferencesSnapshot,
+    runNoticeContentEnabled = false,
   ): Promise<RemoteRunSnapshot> {
     let targetLabel: RemoteWindowTargetLabel;
     let featureOverrides: ApplicationSessionRunFeatureOverrides;
-    if (target.mode === "window") {
+    if (target.mode === "desktop") {
+      targetLabel = { appName: "Primary desktop", title: "Entire foreground desktop" };
+      featureOverrides = { windowTarget: null, grounding: "off" };
+    } else if (target.mode === "window") {
       const selection = target.selection;
       let currentWindows: readonly WindowTargetInfo[];
       try {
@@ -606,7 +623,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       const scheduler = new RunNoticeScheduler();
       return {
         noticeProjector: new RunNoticeProjector(handle.runId, {
-          dynamicContentEnabled: noticeOptions.dynamicContentEnabled ?? false,
+          dynamicContentEnabled: (noticeOptions.dynamicContentEnabled ?? false) && runNoticeContentEnabled,
         }),
         noticeScheduler: scheduler,
         noticeGeneration: scheduler.activateRun(handle.runId),
@@ -763,10 +780,22 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     const generation = record.noticeGeneration;
     if (projector === undefined || scheduler === undefined || generation === undefined) return;
 
-    const notice = projector.project(event);
+    const runtimeSnapshot = record.handle.controller.getSnapshot();
+    const approvalVoiceContext = event.type === "approval.requested"
+      ? projectApprovalVoiceContext(record.handle.controller.getEvents(), event.requestId, event.callId)
+      : undefined;
+    const currentApproval = event.type === "approval.requested"
+      ? {
+          requestId: event.requestId,
+          ...(approvalVoiceContext === undefined ? {} : { voiceContext: approvalVoiceContext }),
+        }
+      : undefined;
+    const notice = projector.project(event, {
+      ...(currentApproval === undefined ? {} : { currentApproval }),
+    });
     if (notice !== undefined) scheduler.offer(notice, generation);
 
-    const snapshot = record.handle.controller.getSnapshot();
+    const snapshot = runtimeSnapshot;
     const currentPendingRequestIds = new Set<string>();
     if (snapshot.pendingApproval !== undefined) currentPendingRequestIds.add(snapshot.pendingApproval.requestId);
     if (snapshot.pendingUserQuestion !== undefined && record.pendingInputRequestId !== undefined) {
@@ -1023,10 +1052,11 @@ function safeMediaType(value: string): string {
 function normalizeRemoteRunTarget(value: RemoteRunTargetInput): RemoteRunTarget {
   if (typeof value === "string") return { mode: "window", targetToken: value };
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new RemoteRunApiError("INVALID_TARGET", "target must be an auto, window, or browser selection.");
+    throw new RemoteRunApiError("INVALID_TARGET", "target must be an auto, desktop, window, or browser selection.");
   }
   const record = value as Record<string, unknown>;
   if (record.mode === "auto" && hasExactKeys(record, ["mode"])) return { mode: "auto" };
+  if (record.mode === "desktop" && hasExactKeys(record, ["mode"])) return { mode: "desktop" };
   if (record.mode === "window" && hasExactKeys(record, ["mode", "targetToken"]) && typeof record.targetToken === "string") {
     return { mode: "window", targetToken: record.targetToken };
   }

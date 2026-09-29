@@ -61,7 +61,9 @@ async function main(): Promise<void> {
   const api = new ApplicationRemoteRunApi({
     session,
     capabilities,
-    runNotices: { enabled: true, dynamicContentEnabled: false },
+    // The Host permits safe dynamic notice text; each phone must explicitly
+    // opt in when starting the Run. Sensitive text is still redacted by the projector.
+    runNotices: { enabled: true, dynamicContentEnabled: true },
     managedBrowserProfile,
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
@@ -218,7 +220,7 @@ function createSessionConfig(
     cleanupDeadlineMs: 5_000,
     monitor: "shadow",
     windowHandoff: "confirm-v1",
-    glmThinking: process.env.GLM_THINKING === "disabled" ? "disabled" : "enabled",
+    glmThinking: readGlmThinking(process.env.GLM_THINKING),
     ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
@@ -241,6 +243,12 @@ function readProviderCredentials(): ProviderCredentials {
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
+}
+
+function readGlmThinking(value: string | undefined): "disabled" | "enabled" | "low" | "high" | "max" {
+  return value === "disabled" || value === "enabled" || value === "low" || value === "high" || value === "max"
+    ? value
+    : "enabled";
 }
 
 async function loadEnvFile(path: string): Promise<void> {

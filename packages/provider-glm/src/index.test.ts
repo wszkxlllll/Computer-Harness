@@ -203,6 +203,19 @@ describe("GLM provider adapter", () => {
     await expect(adapter.generate(input(), { signal: controller.signal })).rejects.toThrow("cancelled");
   });
 
+  it("sends forced thinking with an explicit GLM-5.3 reasoning effort", async () => {
+    const client = new Client({ choices: [{ message: { content: "finished" } }] });
+    const adapter = new GlmAdapter({
+      apiKey: "key",
+      profile: { name: "glm-5.3-flash", thinking: "low", coordinateMode: "actual_pixels" },
+      assetReader: new Reader(),
+      httpClient: client,
+    });
+    await adapter.generate(input(), { signal: new AbortController().signal });
+    expect(client.body?.thinking).toEqual({ type: "enabled" });
+    expect(client.body?.reasoning_effort).toBe("low");
+  });
+
   it("maps control definitions from the shared tool projection", async () => {
     const observationAssessment = { observationId: "obs-current", actionId: "action-previous", actionOutcome: "expected_change", evidence: "The requested panel is visible." };
     const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Observed control result", observationAssessment }) } }] } }] });

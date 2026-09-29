@@ -258,6 +258,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     const target = bodyObject(value);
     const keys = Object.keys(target);
     if (target.mode === "auto" && keys.length === 1 && keys[0] === "mode") return { mode: "auto" };
+    if (target.mode === "desktop" && keys.length === 1 && keys[0] === "mode") return { mode: "desktop" };
     if (target.mode === "window" && keys.length === 2 && keys.includes("mode") && keys.includes("targetToken")) {
       return { mode: "window", targetToken: requiredString(target, "targetToken", 128) };
     }
@@ -535,8 +536,8 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
   server.post("/api/runs", async (request, reply) => {
     const session = browserSession(request, true);
     const body = bodyObject(request.body);
-    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken" && key !== "target" && key !== "assistantPreferences")) {
-      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, one target selector, and assistantPreferences are accepted.");
+    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken" && key !== "target" && key !== "assistantPreferences" && key !== "runNoticeContentEnabled")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, one target selector, assistantPreferences, and runNoticeContentEnabled are accepted.");
     }
     const commandId = requiredString(body, "commandId", 128);
     const goal = requiredString(body, "goal", 20_000);
@@ -556,9 +557,11 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
         throw new HostHttpError(400, "INVALID_ASSISTANT_PREFERENCES", error instanceof Error ? error.message : "assistantPreferences is invalid.");
       }
     }
-    const run = assistantPreferences === undefined
-      ? await options.api.startRun(session.deviceId, commandId, goal, target)
-      : await options.api.startRun(session.deviceId, commandId, goal, target, assistantPreferences);
+    if (Object.hasOwn(body, "runNoticeContentEnabled") && typeof body.runNoticeContentEnabled !== "boolean") {
+      throw new HostHttpError(400, "INVALID_REQUEST", "runNoticeContentEnabled must be a boolean.");
+    }
+    const runNoticeContentEnabled = body.runNoticeContentEnabled === true;
+    const run = await options.api.startRun(session.deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled);
     return reply.code(202).send({ runId: run.runId, status: run.status });
   });
 

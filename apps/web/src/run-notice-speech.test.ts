@@ -1,16 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VoiceOutputAdapter, VoiceOutputSession } from "@computer-harness/voice";
 import type { PendingRequestBase, RunNotice } from "./types";
-import { BrowserSpeechOutput, RunNoticeCursor, RunNoticeSpeechController, type BrowserSpeechEnvironment } from "./run-notice-speech";
+import { announceBrowserText, BrowserSpeechOutput, RunNoticeCursor, RunNoticeSpeechController, selectMandarinVoice, type BrowserSpeechEnvironment } from "./run-notice-speech";
 
 class FakeUtterance {
   rate = 1;
+  lang = "";
+  voice: SpeechSynthesisVoice | null = null;
   onend: ((event: SpeechSynthesisEvent) => void) | null = null;
   onerror: ((event: SpeechSynthesisErrorEvent) => void) | null = null;
   constructor(readonly text: string) {}
 }
 
-function fakeEnvironment(options: { failSpeak?: boolean } = {}) {
+function fakeVoice(name: string, lang: string): SpeechSynthesisVoice {
+  return { name, lang, default: false, localService: true, voiceURI: `${lang}:${name}` };
+}
+
+function fakeEnvironment(options: { failSpeak?: boolean; voices?: SpeechSynthesisVoice[] } = {}) {
   const utterances: FakeUtterance[] = [];
   const cancel = vi.fn();
   const speak = vi.fn((utterance: SpeechSynthesisUtterance) => {
@@ -18,7 +24,7 @@ function fakeEnvironment(options: { failSpeak?: boolean } = {}) {
     utterances.push(utterance as unknown as FakeUtterance);
   });
   const environment: BrowserSpeechEnvironment = {
-    speechSynthesis: { speak, cancel },
+    speechSynthesis: { speak, cancel, getVoices: () => options.voices ?? [] },
     createUtterance: (text) => new FakeUtterance(text) as unknown as SpeechSynthesisUtterance,
   };
   return { environment, utterances, speak, cancel };
@@ -40,6 +46,24 @@ function options(pending: () => PendingRequestBase | undefined, enabled = true) 
 }
 
 describe("browser RunNotice speech output", () => {
+  it("pins Mandarin Chinese and does not inherit a Cantonese browser default", async () => {
+    const cantonese = fakeVoice("Sin-Ji Cantonese", "zh-HK");
+    const mandarin = fakeVoice("Ting-Ting", "zh-CN");
+    const { environment, utterances } = fakeEnvironment({ voices: [cantonese, mandarin] });
+    const session = await new BrowserSpeechOutput(environment).openSession();
+    void session.enqueueText({ chunkId: "mandarin-1", sequence: 1, text: "任务已开始。" });
+    expect(utterances[0]?.lang).toBe("zh-CN");
+    expect(utterances[0]?.voice).toBe(mandarin);
+    expect(selectMandarinVoice([cantonese])).toBeUndefined();
+  });
+
+  it("can announce task submission synchronously from a mobile user gesture", () => {
+    const mandarin = fakeVoice("Xiaoxiao", "zh-CN");
+    const { environment, utterances } = fakeEnvironment({ voices: [mandarin] });
+    expect(announceBrowserText("正在发送任务。", 0.85, environment)).toBe(true);
+    expect(utterances[0]).toMatchObject({ text: "正在发送任务。", lang: "zh-CN", rate: 0.85, voice: mandarin });
+  });
+
   it("stays silent when disabled and reports unsupported speech synthesis", async () => {
     const { environment, speak } = fakeEnvironment();
     const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());
@@ -232,5 +256,14 @@ describe("browser RunNotice speech output", () => {
     expect(enabledOnMount.select("run-2", [], true)).toEqual([]);
     const firstLiveNotice = notice({ noticeId: "first-live", feedSequence: 1 });
     expect(enabledOnMount.select("run-2", [firstLiveNotice], true)).toEqual([firstLiveNotice]);
+  });
+
+  it("admits only the bounded task-start notice on the first enabled Run-page attach", () => {
+    const cursor = new RunNoticeCursor("run-start");
+    const start = notice({ noticeId: "start", eventSequence: 0, feedSequence: 1, text: "任务已开始。" });
+    const historicalError = notice({ noticeId: "old-error", eventSequence: 1, feedSequence: 2, kind: "error", delivery: "interrupt" });
+    expect(cursor.select("run-start", [start, historicalError], true)).toEqual([start]);
+    cursor.acknowledge(start.noticeId);
+    expect(cursor.select("run-start", [start, historicalError], true)).toEqual([]);
   });
 });

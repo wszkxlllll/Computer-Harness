@@ -124,6 +124,21 @@ describe("explicit window-target run contract", () => {
     });
   });
 
+  it("sends the explicit per-run dynamic notice opt-in", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-notice-content", status: "created" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRun("Summarize this page", "command-notice-content", { mode: "auto" }, undefined, true);
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({
+      commandId: "command-notice-content",
+      goal: "Summarize this page",
+      target: { mode: "auto" },
+      runNoticeContentEnabled: true,
+    });
+  });
+
   it("sends an explicit browser URL as a browser target", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-2", status: "created" }), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -156,6 +171,16 @@ describe("explicit window-target run contract", () => {
 
     const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(String(request.body))).toEqual({ commandId: "command-3", goal: "Use the matching window", target: { mode: "auto" } });
+  });
+
+  it("sends entire-desktop selection as an explicit target mode", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-desktop", status: "created" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRun("Inspect a popup", "command-desktop", { mode: "desktop" });
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({ commandId: "command-desktop", goal: "Inspect a popup", target: { mode: "desktop" } });
   });
 
   it("maps a stale window response to explicit refresh-and-reselect guidance", async () => {

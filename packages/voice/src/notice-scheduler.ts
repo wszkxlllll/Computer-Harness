@@ -75,7 +75,9 @@ export class RunNoticeScheduler {
     if (this.seenNoticeIds.has(notice.noticeId) || this.seenDedupeKeys.has(dedupeKey)) return { status: "duplicate", interruptCurrent: false };
     if (!Number.isSafeInteger(notice.eventSequence) || notice.eventSequence < this.latestEventSequence) return { status: "stale", interruptCurrent: false };
 
-    if (notice.kind === "progress" && notice.delivery === "polite" && this.lastProgressAt !== undefined &&
+    const isPoliteProgress = notice.kind === "progress" && notice.delivery === "polite";
+    const cooldownApplies = isPoliteProgress && notice.progressSemantic === undefined;
+    if (cooldownApplies && this.lastProgressAt !== undefined &&
         this.now() - this.lastProgressAt < this.minimumProgressIntervalMs) {
       // Do not remember a rate-limited notice; it can be retried after cooldown.
       return { status: "rate_limited", interruptCurrent: false };
@@ -110,7 +112,7 @@ export class RunNoticeScheduler {
     this.latestEventSequence = Math.max(this.latestEventSequence, notice.eventSequence);
     this.remember(this.seenNoticeIds, notice.noticeId);
     this.remember(this.seenDedupeKeys, dedupeKey);
-    if (notice.kind === "progress" && notice.delivery === "polite") this.lastProgressAt = this.now();
+    if (cooldownApplies) this.lastProgressAt = this.now();
     if (notice.kind === "result") this.terminal = true;
     return { status: "queued", interruptCurrent };
   }

@@ -145,6 +145,7 @@ describe("relay API route allowlist", () => {
       { ...base, target: { mode: "auto" } },
       { ...base, targetToken, assistantPreferences },
       { ...base, target: { mode: "auto" }, assistantPreferences },
+      { ...base, target: { mode: "auto" }, assistantPreferences, runNoticeContentEnabled: true },
       {
         ...base,
         target: { mode: "auto" },
@@ -182,6 +183,11 @@ describe("relay API route allowlist", () => {
       targetToken,
       target: { mode: "auto" },
       assistantPreferences,
+    })).toBe(false);
+    expect(isValidApiRequestBody(route!, {
+      ...base,
+      target: { mode: "auto" },
+      runNoticeContentEnabled: "true",
     })).toBe(false);
   });
 });

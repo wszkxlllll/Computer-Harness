@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AssetId, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
-import { approvalRequiresVisualReview, projectApprovalPreview } from "./approval-preview.js";
+import { approvalRequiresVisualReview, projectApprovalPreview, projectApprovalVoiceContext } from "./approval-preview.js";
 
 function event(sequence: number, data: Record<string, unknown>): RuntimeEvent {
   return {
@@ -171,5 +171,78 @@ describe("projectApprovalPreview", () => {
     expect(JSON.stringify(preview)).not.toContain("Unrelated claim");
     expect(projectApprovalPreview(events, "another-request", "pending-call" as ToolCallId)).toBeUndefined();
     expect(projectApprovalPreview(events, "approval-current", "older-call" as ToolCallId)).toBeUndefined();
+  });
+});
+
+describe("projectApprovalVoiceContext", () => {
+  it("uses Guard categories and action kind from the exact approval call, not the latest Guard event", () => {
+    const targetCallId = "approval-voice-target" as ToolCallId;
+    const otherCallId = "approval-voice-other" as ToolCallId;
+    const targetGuard = event(1, {
+      type: "action.guard.evaluated",
+      callIds: [targetCallId],
+      actions: [{ actionId: "target-action", basedOn: "obs" as ObservationId, kind: "click", point: { x: 1, y: 1 } }],
+      decision: "require_approval",
+      categories: ["external_commitment"],
+      reasonCode: "declared_high_impact",
+      reason: "Untrusted English text for the target call.",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const unrelatedGuard = event(2, {
+      type: "action.guard.evaluated",
+      callIds: [otherCallId],
+      actions: [{ actionId: "other-action", basedOn: "obs" as ObservationId, kind: "type", textLength: 9 }],
+      decision: "require_approval",
+      categories: ["financial", "privacy_account"],
+      reasonCode: "protected_input",
+      reason: "Unrelated recent Guard record.",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const approval = event(3, {
+      type: "approval.requested",
+      requestId: "approval-voice-request",
+      callId: targetCallId,
+      reason: "Never read this free-form English reason.",
+    });
+
+    const projected = projectApprovalVoiceContext([targetGuard, unrelatedGuard, approval], "approval-voice-request", targetCallId);
+    expect(projected).toEqual({ categories: ["external_commitment"], reasonCode: "declared_high_impact", actionKind: "click" });
+    expect(JSON.stringify(projected)).not.toContain("Untrusted English text");
+  });
+
+  it("maps an approval call to its matching action index in a batch Guard event", () => {
+    const firstCallId = "approval-batch-first" as ToolCallId;
+    const targetCallId = "approval-batch-target" as ToolCallId;
+    const batchGuard = event(1, {
+      type: "action.guard.evaluated",
+      callIds: [firstCallId, targetCallId],
+      actions: [
+        { actionId: "batch-type-action", basedOn: "obs" as ObservationId, kind: "type", textLength: 12 },
+        { actionId: "batch-key-action", basedOn: "obs" as ObservationId, kind: "keypress", keys: ["ENTER"] },
+      ],
+      decision: "require_approval",
+      categories: ["financial", "external_commitment"],
+      reasonCode: "declared_high_impact",
+      reason: "Batch Guard event.",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const approval = event(2, {
+      type: "approval.requested",
+      requestId: "approval-batch-request",
+      callId: targetCallId,
+      reason: "This English reason is not voice content.",
+    });
+
+    expect(projectApprovalVoiceContext([batchGuard, approval], "approval-batch-request", targetCallId)).toEqual({
+      categories: ["financial", "external_commitment"],
+      reasonCode: "declared_high_impact",
+      actionKind: "keypress",
+    });
   });
 });

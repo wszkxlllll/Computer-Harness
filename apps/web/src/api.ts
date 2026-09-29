@@ -152,10 +152,17 @@ export function createRun(
   commandId: string,
   target: RunTarget,
   assistantPreferences?: RunAssistantPreferencesSnapshot,
+  runNoticeContentEnabled?: boolean,
 ): Promise<{ runId: string; status: string }> {
   return request("/api/runs", {
     method: "POST",
-    body: JSON.stringify({ commandId, goal, target, ...(assistantPreferences === undefined ? {} : { assistantPreferences }) }),
+    body: JSON.stringify({
+      commandId,
+      goal,
+      target,
+      ...(assistantPreferences === undefined ? {} : { assistantPreferences }),
+      ...(runNoticeContentEnabled === undefined ? {} : { runNoticeContentEnabled }),
+    }),
   }, "phone");
 }
 

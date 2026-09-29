@@ -77,10 +77,10 @@ describe("personal preferences screen", () => {
     render(<PreferencesProvider><PreferencesScreen voiceCapabilities={capabilities} /></PreferencesProvider>);
     fireEvent.click(screen.getByText("语音功能 · 已接入"));
 
-    const readButton = screen.getByRole("button", { name: "朗读偏好说明" });
+    const readButton = screen.getByRole("button", { name: "测试语音播报" });
     fireEvent.click(readButton);
-    await screen.findByText("已将这段说明交给接入的语音能力。");
-    expect(readAloud).toHaveBeenCalledWith("你正在查看个人偏好。助手回答偏好会在开始新任务时加入该任务的 Context。");
+    await screen.findByText("语音播报测试已完成。");
+    expect(readAloud).toHaveBeenCalledWith("语音播报测试正常。");
     fireEvent.click(screen.getByRole("button", { name: "语音输入测试" }));
     await screen.findByText("把这段文字当作本地预览");
     expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toBeNull();

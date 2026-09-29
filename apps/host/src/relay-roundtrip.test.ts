@@ -133,9 +133,11 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
       });
       const originalStartRun = api.startRun.bind(api);
-      api.startRun = (deviceId, commandId, goal, target, assistantPreferences) => {
+      const hostRunNoticeContentOptIns: boolean[] = [];
+      api.startRun = (deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled) => {
         hostStartPreferences.push(assistantPreferences);
-        return originalStartRun(deviceId, commandId, goal, target, assistantPreferences);
+        if (runNoticeContentEnabled === true) hostRunNoticeContentOptIns.push(true);
+        return originalStartRun(deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled);
       };
       host = createHostServer({
         api,
@@ -227,7 +229,7 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         accepted = await webApi.createRun("Complete a fixture task", "web-start-roundtrip", {
           mode: "window",
           targetToken: windowChoices.candidates[0]!.token,
-        }, assistantPreferences);
+        }, assistantPreferences, true);
       } catch (error) {
         const apiError = error as { status?: number; code?: string };
         throw new Error("Fixture run start failed with HTTP " + String(apiError.status) + " " + String(apiError.code));
@@ -241,8 +243,10 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         goal: "Complete a fixture task",
         target: { mode: "window", targetToken: windowChoices.candidates[0]!.token },
         assistantPreferences,
+        runNoticeContentEnabled: true,
       });
       expect(hostStartPreferences).toEqual([assistantPreferences]);
+      expect(hostRunNoticeContentOptIns).toEqual([true]);
       await session.waitForActiveRun();
 
       const bridgedRunCountBeforeInvalidStarts = bridgeRequests.filter((request) => request.method === "POST" && request.path === "/api/runs").length;

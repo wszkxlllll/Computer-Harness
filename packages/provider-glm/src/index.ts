@@ -30,13 +30,14 @@ import {
 } from "@computer-harness/runtime";
 
 export type GlmCoordinateMode = "normalized_1000" | "actual_pixels";
+export type GlmThinkingMode = "disabled" | "enabled" | "low" | "high" | "max";
 
 export type GlmProfileName = "glm-5.3-flash";
 
 export interface GlmProfile {
   /** Provider model id; custom profiles may use another id explicitly. */
   readonly name: string;
-  readonly thinking: "disabled" | "enabled";
+  readonly thinking: GlmThinkingMode;
   readonly coordinateMode: GlmCoordinateMode;
 }
 
@@ -113,7 +114,10 @@ export class GlmAdapter implements ProviderAdapter {
       messages: await this.presentMessages(`${snapshot.system}\n${profilePrompt(this.profile)}\n${OBSERVATION_ASSESSMENT_GUIDANCE}`, snapshot.messages, snapshot.tools, options.signal),
       tools: snapshot.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(snapshot))),
       stream: false,
-      thinking: { type: this.profile.thinking },
+      thinking: { type: this.profile.thinking === "disabled" ? "disabled" : "enabled" },
+      ...(["low", "high", "max"].includes(this.profile.thinking)
+        ? { reasoning_effort: this.profile.thinking }
+        : {}),
     } satisfies Record<string, unknown>;
     const frozenBody = deepFreeze(body);
     const prepared: PreparedProviderRequest = Object.freeze({

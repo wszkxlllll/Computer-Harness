@@ -489,7 +489,10 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     ...(options.qwenOutputMode === undefined ? {} : { qwenOutputMode: options.qwenOutputMode }),
     ...(qwenEndpoint === undefined ? {} : { qwenEndpoint }),
     ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
-    glmThinking: process.env.GLM_THINKING === "disabled" || process.env.GLM_THINKING === "enabled" ? process.env.GLM_THINKING : "enabled",
+    glmThinking: process.env.GLM_THINKING === "disabled" || process.env.GLM_THINKING === "enabled"
+      || process.env.GLM_THINKING === "low" || process.env.GLM_THINKING === "high" || process.env.GLM_THINKING === "max"
+      ? process.env.GLM_THINKING
+      : "enabled",
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };

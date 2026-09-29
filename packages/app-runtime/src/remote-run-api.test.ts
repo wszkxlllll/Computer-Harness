@@ -2,17 +2,19 @@ import { lstat, mkdir, mkdtemp, open, realpath, rm, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type {
-  Computer,
-  ComputerSession,
-  ContextCompiler,
-  ModelInput,
-  ProviderAdapter,
-  ActionPolicyDecision,
-  RunOutcome,
-  Viewport,
+import {
+  currentObservationAssessmentBinding,
+  type Computer,
+  type ComputerSession,
+  type ContextCompiler,
+  type ModelInput,
+  type ProviderAdapter,
+  type ActionPolicyDecision,
+  type RunOutcome,
+  type Viewport,
+  type MonitorPolicyMode,
 } from "@computer-harness/runtime";
-import type { AssetId, AssetRef, ComputerSessionId, ModelTurn, RunId, ToolCall, ToolCallId } from "@computer-harness/protocol";
+import type { RuntimeEvent, AssetId, AssetRef, ComputerSessionId, ModelTurn, RunId, ToolCall, ToolCallId } from "@computer-harness/protocol";
 import type { WindowTargetInfo } from "./application-session.js";
 import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
 import { ApplicationSession } from "./application-session.js";
@@ -67,13 +69,21 @@ function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promi
   } as unknown as Computer;
 }
 
-function providerFor(options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[]; onModelInput?: (input: ModelInput) => void }): ProviderAdapter {
+function providerFor(options: {
+  askFirst?: boolean;
+  summary: string;
+  turns?: readonly ModelTurn[];
+  onModelInput?: (input: ModelInput) => void;
+  turnFactory?: (turnNumber: number, input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn | undefined;
+}, getEvents: () => readonly RuntimeEvent[]): ProviderAdapter {
   let turns = 0;
   return {
     id: "remote-api-provider",
     async generate(input: ModelInput) {
       options.onModelInput?.(input);
       turns += 1;
+      const generatedTurn = options.turnFactory?.(turns, input, getEvents());
+      if (generatedTurn !== undefined) return structuredClone(generatedTurn);
       const scriptedTurn = options.turns?.[turns - 1];
       if (scriptedTurn !== undefined) return structuredClone(scriptedTurn);
       if (options.askFirst === true && turns === 1) return { type: "user_input_required", question: "Which date should I check?" };
@@ -98,7 +108,10 @@ function createFixture(
     readManagedBrowserStartupUrls?: () => Promise<readonly string[]>;
     closeComputer?: () => Promise<void>;
     runNotices?: boolean;
+    runNoticeDynamicContent?: boolean;
     onModelInput?: (input: ModelInput) => void;
+    turnFactory?: (turnNumber: number, input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn | undefined;
+    monitor?: MonitorPolicyMode;
   },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
@@ -121,6 +134,7 @@ function createFixture(
   );
   const sessionConfig: ApplicationSessionConfig = {
     ...baseConfig,
+    ...(options.monitor === undefined ? {} : { monitor: options.monitor }),
     computer: options.managedBrowserProfile === undefined ? baseComputer : {
       ...baseComputer,
       managedBrowserProfileMode: "persistent",
@@ -128,7 +142,8 @@ function createFixture(
       managedBrowserProfileRoot: options.managedBrowserProfile.profileRoot,
     },
   };
-  const session = new ApplicationSession({
+  let session!: ApplicationSession;
+  session = new ApplicationSession({
     config: sessionConfig,
     owner: new InProcessEnvironmentOwner(),
     windowDiscovery: {
@@ -146,7 +161,7 @@ function createFixture(
       },
     },
     dependencies: {
-      createProvider: () => providerFor(options),
+      createProvider: () => providerFor(options, () => session.activeRun?.controller.getEvents() ?? []),
       createComputer: async ({ config: computerConfig }) => {
         if (computerConfig.kind === "cua") createdComputerConfigs.push(computerConfig);
         return fixtureComputer(options.screen, options.closeComputer);
@@ -166,7 +181,7 @@ function createFixture(
   const api = new ApplicationRemoteRunApi({
     session,
     capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
-    ...(options.runNotices === true ? { runNotices: { enabled: true, dynamicContentEnabled: false } } : {}),
+    ...(options.runNotices === true ? { runNotices: { enabled: true, dynamicContentEnabled: options.runNoticeDynamicContent === true } } : {}),
     assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(resolve(handle.config.outputDir, "assets")),
     ...(options.managedBrowserProfile === undefined ? {} : { managedBrowserProfile: options.managedBrowserProfile }),
     ...(inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile }),
@@ -228,7 +243,7 @@ describe("ApplicationRemoteRunApi", () => {
 
   it("publishes minimal safe notices, validates pending IDs, and replays them through the ordered stream", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-notices-on-"));
-    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "A private itinerary summary.", runNotices: true });
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "A private itinerary summary.", runNotices: true, runNoticeDynamicContent: true });
     try {
       const choices = await api.listWindowTargets("device-one");
       const started = await api.startRun("device-one", "notices-on", "Check a schedule", choices.candidates[0]!.token);
@@ -259,7 +274,7 @@ describe("ApplicationRemoteRunApi", () => {
         type: "run.notice",
         noticeId: expect.any(String),
         kind: "question",
-        text: "我有一个问题需要你回答，请查看任务页面。",
+        text: "我有个问题需要你回答，请查看任务。",
         delivery: "interrupt",
         eventSequence: expect.any(Number),
         pendingRequestId,
@@ -290,9 +305,67 @@ describe("ApplicationRemoteRunApi", () => {
       terminalSubscription.close();
       const resultNotices = terminalEvents.filter((event) => event.data?.type === "run.notice" && event.data.kind === "result");
       expect(resultNotices).toHaveLength(1);
-      expect(resultNotices[0]?.data?.text).toBe("本次运行结束，请查看结果。");
+      expect(resultNotices[0]?.data?.text).toBe("任务已完成，可查看结果。");
       expect(terminalEvents.some((event) => event.data?.type === "run.notice" && event.data.text === "任务已开始。")).toBe(false);
     } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes the first validated milestone soon after run start instead of rate-limiting it", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-first-milestone-notice-"));
+    const click: ToolCall = {
+      id: "first-milestone-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "results", summary: "Open results" },
+    };
+    let bindingAtSecondTurn: ReturnType<typeof currentObservationAssessmentBinding>;
+    const { api, session } = createFixture(outputDir, {
+      summary: "The task is complete.",
+      runNotices: true,
+      runNoticeDynamicContent: true,
+      monitor: "guidance",
+      turnFactory: (turnNumber, _input, events) => {
+        if (turnNumber === 1) return { type: "tool_calls", calls: [click] };
+        bindingAtSecondTurn = currentObservationAssessmentBinding(events);
+        const binding = bindingAtSecondTurn;
+        if (binding === undefined || binding.transition !== "changed") return { type: "finish", summary: "No validated changed transition." };
+        return {
+          type: "finish",
+          summary: "The report is ready.",
+          observationAssessment: {
+            observationId: binding.observationId,
+            actionId: binding.actionId,
+            actionOutcome: "expected_change",
+            evidence: "The results page is visibly open.",
+            progress: { kind: "milestone", summary: "The results page is open." },
+          },
+        };
+      },
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "first-milestone-notice", "Open the results page", choices.candidates[0]!.token, undefined, true);
+      await session.waitForActiveRun();
+      expect(bindingAtSecondTurn?.transition).toBe("changed");
+
+      const events: Array<{ sequence: number; data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") events.push(event as unknown as { sequence: number; data?: Record<string, unknown> });
+      });
+      subscription.close();
+      const notices = events.filter((event) => event.data?.type === "run.notice");
+      const startNotice = notices.find((event) => event.data?.text === "任务已开始。");
+      const milestoneNotice = notices.find((event) => event.data?.text === "The results page is open.");
+      expect(startNotice).toBeDefined();
+      expect(milestoneNotice).toBeDefined();
+      expect(milestoneNotice?.data).not.toHaveProperty("progressSemantic");
+      expect(milestoneNotice!.sequence).toBeGreaterThan(startNotice!.sequence);
+    } finally {
+      session.activeRun?.controller.cancel("first milestone notice test cleanup");
+      await session.waitForActiveRun();
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
     }
@@ -316,6 +389,7 @@ describe("ApplicationRemoteRunApi", () => {
       summary: "The pending click was rejected.",
       screen: { width: 900, height: 900, coordinateSpace: "physical" },
       runNotices: true,
+      runNoticeDynamicContent: true,
       turns: [
         { type: "tool_calls", calls: [earlierCall] },
         { type: "tool_calls", calls: [pendingCall] },
@@ -327,7 +401,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const choices = await api.listWindowTargets("device-one");
-      const started = await api.startRun("device-one", "approval-preview-click", "Check the current page", choices.candidates[0]!.token);
+      const started = await api.startRun("device-one", "approval-preview-click", "Check the current page", choices.candidates[0]!.token, undefined, true);
       await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_approval", "Run did not request click approval");
 
       const snapshot = api.getRun("device-one", started.runId)!;
@@ -380,12 +454,13 @@ describe("ApplicationRemoteRunApi", () => {
           type: "run.notice",
           noticeId: expect.any(String),
           kind: "approval",
-          text: "有一项操作需要你审批，请查看审批详情。",
+          text: "可能涉及对外发送或提交内容的点击操作，请核对后审批。",
           delivery: "interrupt",
           eventSequence: expect.any(Number),
           pendingRequestId: pending.requestId,
         },
       });
+      expect(JSON.stringify(approvalNoticeEvent)).not.toContain(pending.reason);
       expect(JSON.stringify(approvalNoticeEvent)).not.toMatch(/reason|path|policyVersion|modelRequestCount/iu);
 
       await api.submitCommand("device-one", started.runId, {
@@ -398,6 +473,55 @@ describe("ApplicationRemoteRunApi", () => {
       expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
     } finally {
       session.activeRun?.controller.cancel("approval preview test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("speaks only structured approval context and never repeats a sensitive raw reason", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-sensitive-approval-notice-"));
+    const pendingCall: ToolCall = {
+      id: "approval-sensitive-notice" as ToolCallId,
+      name: "click",
+      arguments: { x: 408, y: 667 },
+      declaredEffect: { effects: ["navigate"], target: "查询", summary: "点击查询按钮" },
+    };
+    const { api, session } = createFixture(outputDir, {
+      summary: "The request was rejected.",
+      screen: { width: 900, height: 900, coordinateSpace: "physical" },
+      runNotices: true,
+      runNoticeDynamicContent: true,
+      turns: [{ type: "tool_calls", calls: [pendingCall] }],
+      guardDecisions: [fixtureGuardDecision("require_approval", "Please enter the password hunter2.")],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "approval-sensitive-notice", "Submit the form", choices.candidates[0]!.token, undefined, true);
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_approval", "Run did not request approval");
+      const pending = api.getRun("device-one", started.runId)?.pendingRequest;
+      if (pending?.kind !== "approval") throw new Error("expected an approval request");
+
+      const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") events.push(event as unknown as { type: string; data?: Record<string, unknown> });
+      });
+      subscription.close();
+      const approvalNotice = events.find((event) => event.data?.type === "run.notice" && event.data.kind === "approval");
+      expect(approvalNotice?.data?.text).toBe("可能涉及对外发送或提交内容的点击操作，请核对后审批。");
+      expect(JSON.stringify(approvalNotice)).not.toContain("hunter2");
+      expect(JSON.stringify(approvalNotice)).not.toContain("password");
+
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "reject-sensitive-notice",
+        expectedSequence: api.getRun("device-one", started.runId)!.sequence,
+        type: "reject",
+        requestId: pending.requestId,
+      });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+    } finally {
+      session.activeRun?.controller.cancel("sensitive approval notice test cleanup");
       await session.waitForActiveRun();
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -501,6 +625,8 @@ describe("ApplicationRemoteRunApi", () => {
         .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
       await expect(api.startRun("device-one", "start-once", "Changed goal", choices.candidates[0]!.token))
         .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await expect(api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token, undefined, true))
+        .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
       expect(completed.latestAssetId).toBeTruthy();
       expect(JSON.stringify(completed)).not.toContain("assets/");
 
@@ -516,6 +642,25 @@ describe("ApplicationRemoteRunApi", () => {
       expect(events.length).toBeGreaterThan(0);
       expect(events).toEqual(events.map((_value, index) => index + 1));
       expect(() => api.subscribe("device-two", first.runId, 0, () => undefined)).toThrow(RemoteRunApiError);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts an explicitly requested primary-desktop Run without window discovery or binding", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-target-"));
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, { summary: "Desktop inspected." });
+    try {
+      const run = await api.startRun("device-one", "desktop-run", "Inspect the transient popup", { mode: "desktop" });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", run.runId)?.target).toEqual({
+        appName: "Primary desktop",
+        title: "Entire foreground desktop",
+      });
+      expect(windowDiscoveryCalls).toEqual([]);
+      expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
+      expect(createdComputerConfigs[0]?.grounding).toBe("off");
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });

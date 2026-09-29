@@ -173,7 +173,7 @@ describe("app-runtime provider factory", () => {
     };
     const provider = createProvider({
       model: "glm-5.3-flash",
-      config: config({ glmEndpoint: "https://glm.fixture/v1", glmThinking: "disabled" }),
+      config: config({ glmEndpoint: "https://glm.fixture/v1", glmThinking: "low" }),
       assetReader,
       outputDir: "runs/glm-wire",
       credentials: { glmApiKey: "fixture-glm-key" },
@@ -182,7 +182,7 @@ describe("app-runtime provider factory", () => {
     await expect(provider.generate(clickInput(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 12, y: 34 } }] });
     expect(request?.url).toBe("https://glm.fixture/v1");
     expect(request?.headers.Authorization).toBe("Bearer fixture-glm-key");
-    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false, thinking: { type: "disabled" } });
+    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false, thinking: { type: "enabled" }, reasoning_effort: "low" });
     expect(request?.body.tools).toMatchObject([{ type: "function", function: { name: "click" } }]);
   });
 

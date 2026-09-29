@@ -45,7 +45,7 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
   }
   const profile: GlmProfile = {
     ...glmProfiles["glm-5.3-flash"],
-    thinking: options.config.glmThinking === "disabled" ? "disabled" : "enabled",
+    thinking: options.config.glmThinking ?? "enabled",
   };
   return new GlmAdapter({
     apiKey,

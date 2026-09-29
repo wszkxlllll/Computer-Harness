@@ -1,8 +1,44 @@
-import type { ActionGuardActionSummary, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
+import type { ActionGuardActionSummary, RiskCategory, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
 import type { RemoteApprovalActionPreview, RemoteApprovalEvidence, RemoteApprovalPreview } from "./remote-control.js";
 
 const MAX_PREVIEW_ACTIONS = 16;
 const MAX_PREVIEW_KEYS = 8;
+
+export interface ApprovalVoiceContext {
+  readonly categories: readonly RiskCategory[];
+  readonly reasonCode: string;
+  readonly actionKind?: ActionGuardActionSummary["kind"];
+}
+
+/** Build private speech context from the Guard record for this exact approval call. */
+export function projectApprovalVoiceContext(
+  events: readonly RuntimeEvent[],
+  requestId: string,
+  callId: ToolCallId,
+): ApprovalVoiceContext | undefined {
+  const approvalIndex = events.findIndex((event) =>
+    event.type === "approval.requested" && event.requestId === requestId && event.callId === callId,
+  );
+  const approvalEvent = events[approvalIndex];
+  if (approvalEvent?.type !== "approval.requested") return undefined;
+
+  for (let index = approvalIndex - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "action.guard.evaluated" || event.decision !== "require_approval"
+      || event.sequence >= approvalEvent.sequence) continue;
+    const matchingCallIndices = event.callIds.flatMap((candidate, candidateIndex) => candidate === callId ? [candidateIndex] : []);
+    if (matchingCallIndices.length === 0) continue;
+    if (matchingCallIndices.length !== 1) return undefined;
+    const callIndex = matchingCallIndices[0]!;
+    const action = event.callIds.length === event.actions.length ? event.actions[callIndex] : undefined;
+    return {
+      categories: [...event.categories],
+      reasonCode: event.reasonCode,
+      ...(action === undefined ? {} : { actionKind: action.kind }),
+    };
+  }
+  return undefined;
+}
 
 /** Build a safe, request-bound preview from the already committed Runtime events. */
 export function projectApprovalPreview(

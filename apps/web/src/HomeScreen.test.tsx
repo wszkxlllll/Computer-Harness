@@ -59,7 +59,38 @@ describe("home run-target selection", () => {
     expect(startButton.hasAttribute("disabled")).toBe(false);
     fireEvent.click(startButton);
 
-    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find a window automatically", expect.any(String), { mode: "auto" }, defaultAssistantPreferences));
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find a window automatically", expect.any(String), { mode: "auto" }, defaultAssistantPreferences, false));
+    expect(listWindowTargets).not.toHaveBeenCalled();
+  });
+
+  it("keeps the document loaded when it opens the newly created Run", async () => {
+    vi.mocked(createRun).mockResolvedValue({ runId: "run-created", status: "created" });
+    renderHome();
+
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Check a task" } });
+    await screen.findByText("这里还没有任务");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/run/run-created"));
+  });
+
+  it("submits an explicit entire-desktop target without window discovery", async () => {
+    vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Inspect a transient desktop popup" } });
+    fireEvent.click(screen.getByRole("radio", { name: /整个桌面/ }));
+    await screen.findByText("这里还没有任务");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "Inspect a transient desktop popup",
+      expect.any(String),
+      { mode: "desktop" },
+      defaultAssistantPreferences,
+      false,
+    ));
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
@@ -88,7 +119,7 @@ describe("home run-target selection", () => {
       stepExplanation: "more",
       preferredLanguage: "en",
       additionalGuidance: "Group findings by topic.",
-    }));
+    }, true));
   });
 
   it("rotates IDs after discovery failure and 409, but retains them after generic server errors", async () => {
@@ -198,7 +229,7 @@ describe("home run-target selection", () => {
       mode: "browser",
       sessionMode: "temporary",
       url: "https://example.com/reports?q=1",
-    }, defaultAssistantPreferences));
+    }, defaultAssistantPreferences, false));
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
@@ -215,7 +246,7 @@ describe("home run-target selection", () => {
     expect(startButton.hasAttribute("disabled")).toBe(false);
     fireEvent.click(startButton);
 
-    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find the relevant website from the task", expect.any(String), { mode: "browser", sessionMode: "temporary" }, defaultAssistantPreferences));
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find the relevant website from the task", expect.any(String), { mode: "browser", sessionMode: "temporary" }, defaultAssistantPreferences, false));
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
@@ -234,7 +265,7 @@ describe("home run-target selection", () => {
       mode: "browser",
       sessionMode: "saved",
       url: "https://travel.example/search",
-    }, defaultAssistantPreferences));
+    }, defaultAssistantPreferences, false));
   });
 
   it("preserves the goal and opens a refreshed manual picker after ambiguous automatic matching", async () => {
@@ -259,7 +290,7 @@ describe("home run-target selection", () => {
     expect((screen.getByRole("radio", { name: /手动选择窗口/ }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByRole("alert").textContent).toContain("无法唯一确定");
     expect(screen.getByRole("button", { name: "开始任务" }).hasAttribute("disabled")).toBe(true);
-    expect(createRun).toHaveBeenCalledWith("Keep this goal after choosing a window", expect.any(String), { mode: "auto" }, defaultAssistantPreferences);
+    expect(createRun).toHaveBeenCalledWith("Keep this goal after choosing a window", expect.any(String), { mode: "auto" }, defaultAssistantPreferences, false);
     expect(listWindowTargets).toHaveBeenCalledTimes(1);
   });
 
@@ -273,7 +304,7 @@ describe("home run-target selection", () => {
 
     await screen.findByRole("heading", { name: "正在处理的任务" });
     expect(screen.getByRole("button", { name: "开始任务" }).hasAttribute("disabled")).toBe(true);
-    for (const name of [/自动选择/, /手动选择窗口/, /打开网站/]) {
+    for (const name of [/自动选择/, /手动选择窗口/, /打开网站/, /整个桌面/]) {
       const modeInput = screen.getByRole("radio", { name }) as HTMLInputElement;
       expect((modeInput.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
     }

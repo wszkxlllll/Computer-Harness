@@ -4,7 +4,7 @@ import { usePreferences } from "./PreferencesContext";
 import { RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS } from "./preferences";
 import type { AssistantPreferences, DisplayPreset, PreferredLanguage, ResponseDetail, SpeechRate, StepExplanation, TextSize } from "./preferences";
 import type { VoiceCapabilities } from "./voice-capabilities";
-import { isBrowserSpeechOutputAvailable } from "./run-notice-speech";
+import { BrowserSpeechOutput, isBrowserSpeechOutputAvailable } from "./run-notice-speech";
 
 export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
   const { preferences, saved, setAssistant, setPresentation, setDisplayPreset, setVoice, reset } = usePreferences();
@@ -12,7 +12,9 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
   const [voiceInputText, setVoiceInputText] = useState("");
   const [voiceMessage, setVoiceMessage] = useState("");
   const [voiceBusy, setVoiceBusy] = useState(false);
-  const voiceOutputAvailable = voiceCapabilities?.createOutputAdapter !== undefined || isBrowserSpeechOutputAvailable();
+  const voiceOutputAvailable = voiceCapabilities?.readAloud !== undefined
+    || voiceCapabilities?.createOutputAdapter !== undefined
+    || isBrowserSpeechOutputAvailable();
   const preset: DisplayPreset | undefined = preferences.presentation.layoutMode === "simple" && preferences.presentation.textSize === "large"
     ? "large_simple"
     : preferences.presentation.layoutMode === "standard" && preferences.presentation.textSize === "standard"
@@ -35,18 +37,32 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
     setMessage(reset() ? "已恢复默认偏好，并保存到此浏览器。" : "已恢复默认偏好，但浏览器未能保存。");
   }
 
-  async function readPreferenceHelp() {
-    if (!voiceCapabilities?.readAloud || voiceBusy) return;
+  async function playVoicePreview(text: string) {
+    if (voiceBusy) return;
     setVoiceBusy(true);
     setVoiceMessage("");
     try {
-      await voiceCapabilities.readAloud("你正在查看个人偏好。助手回答偏好会在开始新任务时加入该任务的 Context。");
-      setVoiceMessage("已将这段说明交给接入的语音能力。");
+      if (voiceCapabilities?.readAloud) {
+        await voiceCapabilities.readAloud(text);
+      } else {
+        const rate = preferences.voice.speechRate === "slow" ? 0.85 : preferences.voice.speechRate === "fast" ? 1.15 : 1;
+        const adapter = voiceCapabilities?.createOutputAdapter?.() ?? new BrowserSpeechOutput();
+        const session = await adapter.openSession({ speechRate: rate });
+        await session.enqueueText({ chunkId: crypto.randomUUID(), sequence: 0, text });
+        await session.finish();
+      }
+      setVoiceMessage("语音播报测试已完成。");
     } catch {
       setVoiceMessage("语音读出没有启动。你仍可阅读页面上的说明。");
     } finally {
       setVoiceBusy(false);
     }
+  }
+
+  function changeRunNoticeSpeech(enabled: boolean) {
+    const savedVoice = setVoice("runNoticesEnabled", enabled);
+    setMessage(savedVoice ? "语音偏好已保存到此浏览器。" : "语音偏好已更新，但浏览器未能保存。");
+    if (enabled) void playVoicePreview("语音播报已开启。");
   }
 
   async function capturePreferenceText() {
@@ -207,7 +223,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
         <details className="preferences-section voice-capability">
           <summary>语音功能 · {voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce ? "已接入" : voiceOutputAvailable ? "任务播报可用" : "暂不可用"}</summary>
           <div className="voice-capability-content">
-            <p>任务通知使用当前接入的语音合成；只有明确打开下方开关后才会朗读。此功能不会录音，也不会申请麦克风权限。</p>
+            <p>任务通知使用当前浏览器语音合成。只有明确开启开关并在开启状态下新建任务，电脑才会向配对设备发送可读的审批原因和已确认进度；检测到敏感内容时会退回固定提示。此功能不会录音，也不会申请麦克风权限。</p>
             <fieldset className="preference-choice-group">
               <legend>任务通知播报</legend>
               <PreferenceToggle
@@ -216,7 +232,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
                 description="朗读任务进度、等待确认、错误和最终结果；审批或提问变化时会停止过期播报。"
                 checked={preferences.voice.runNoticesEnabled}
                 disabled={!voiceOutputAvailable}
-                onChange={(value) => setMessage(setVoice("runNoticesEnabled", value) ? "语音偏好已保存到此浏览器。" : "语音偏好已更新，但浏览器未能保存。")}
+                onChange={changeRunNoticeSpeech}
               />
               {!voiceOutputAvailable && <p className="field-hint">当前环境不支持语音播报，任务通知仍会显示为文字。</p>}
             </fieldset>
@@ -234,14 +250,14 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
                 <option value="fast">稍快</option>
               </select>
             </div>
-            {(voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce) && (
+            {(voiceOutputAvailable || voiceCapabilities?.transcribeOnce) && (
               <div className="voice-actions">
-                {voiceCapabilities.readAloud && (
-                  <button className="button button-secondary" type="button" disabled={voiceBusy} onClick={() => void readPreferenceHelp()}>
-                    朗读偏好说明
+                {voiceOutputAvailable && (
+                  <button className="button button-secondary" type="button" disabled={voiceBusy} onClick={() => void playVoicePreview("语音播报测试正常。")}>
+                    测试语音播报
                   </button>
                 )}
-                {voiceCapabilities.transcribeOnce && (
+                {voiceCapabilities?.transcribeOnce && (
                   <button className="button button-secondary" type="button" disabled={voiceBusy} onClick={() => void capturePreferenceText()}>
                     语音输入测试
                   </button>

@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import { GlmAdapter, type GlmAdapterOptions, type GlmHttpClient } from "@computer-harness/provider-glm";
+import { GlmAdapter, type GlmAdapterOptions, type GlmHttpClient, type GlmProfile } from "@computer-harness/provider-glm";
 import { Qwen38FlashAdapter, type Qwen38AdapterOptions, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenHttpClient } from "@computer-harness/provider-qwen";
 import { InMemoryPlanStore, createPlanningTools } from "@computer-harness/planning";
 import type {
@@ -28,6 +28,7 @@ interface CliOptions {
   output: string;
   timeoutMs: number;
   model: ProviderName | "all";
+  glmThinking: GlmProfile["thinking"];
   qwenThinking: Qwen38ThinkingMode;
   qwenOutputMode: Qwen38OutputMode;
   planning: boolean;
@@ -184,12 +185,17 @@ function parseArgs(argv: readonly string[]): CliOptions {
   if (qwenThinking !== "disabled" && qwenThinking !== "low" && qwenThinking !== "medium" && qwenThinking !== "xhigh") throw new Error("--qwen-thinking must be disabled, low, medium, or xhigh");
   const qwenOutputMode = values.get("qwen-output-mode") ?? "strict_json";
   if (qwenOutputMode !== "native_tools" && qwenOutputMode !== "strict_json") throw new Error("--qwen-output-mode must be native_tools or strict_json");
+  const glmThinking = values.get("glm-thinking") ?? "enabled";
+  if (glmThinking !== "disabled" && glmThinking !== "enabled" && glmThinking !== "low" && glmThinking !== "high" && glmThinking !== "max") {
+    throw new Error("--glm-thinking must be disabled, enabled, low, high, or max");
+  }
   return {
     envFile: resolve(values.get("env-file") ?? ".env"),
     image: resolve(values.get("image") ?? "runs/api-conformance/non-sensitive-ui.png"),
     output: resolve(values.get("output") ?? `runs/api-conformance/${new Date().toISOString().replace(/[-:.TZ]/g, "")}`),
     timeoutMs: timeoutValue,
     model: modelValue,
+    glmThinking,
     qwenThinking,
     qwenOutputMode,
     planning: argv.includes("--planning"),
@@ -427,6 +433,7 @@ async function runModel(
   env: Record<string, string>,
   reader: AssetReader,
   timeoutMs: number,
+  glmThinking: GlmProfile["thinking"],
   qwenThinking: Qwen38ThinkingMode,
   qwenOutputMode: Qwen38OutputMode,
   secondInput: (first: ModelTurn, firstCall: ToolCall) => Promise<ModelInput>,
@@ -447,7 +454,12 @@ async function runModel(
     if (endpoint !== undefined) qwen38Options.endpoint = endpoint;
     adapter = new Qwen38FlashAdapter(qwen38Options);
   } else {
-    const glmOptions: GlmAdapterOptions = { apiKey, profile: provider, assetReader: reader, httpClient: client };
+    const glmOptions: GlmAdapterOptions = {
+      apiKey,
+      profile: { name: provider, thinking: glmThinking, coordinateMode: "actual_pixels" },
+      assetReader: reader,
+      httpClient: client,
+    };
     const endpoint = envValue(env, "GLM_ENDPOINT");
     if (endpoint !== undefined) glmOptions.endpoint = endpoint;
     adapter = new GlmAdapter(glmOptions);
@@ -492,7 +504,7 @@ async function main(): Promise<void> {
   const models: ProviderName[] = options.model === "all" ? ["glm-5.3-flash", "qwen3.8-flash"] : [options.model];
   const results: ModelRunResult[] = [];
   for (const provider of models) {
-    const result = await runModel(provider, firstInput, env, reader, options.timeoutMs, options.qwenThinking, options.qwenOutputMode, async (first, firstCall) => {
+    const result = await runModel(provider, firstInput, env, reader, options.timeoutMs, options.glmThinking, options.qwenThinking, options.qwenOutputMode, async (first, firstCall) => {
       const events = [
         ...baseEvents(runId, sessionId, firstObservation),
         makeEvent(runId, 5, "model.response.received", { turn: first }),
@@ -508,7 +520,7 @@ async function main(): Promise<void> {
     kind: "static_api_conformance",
     protocol: "provider-adapter-v1",
     fixture: { kind: "synthetic_non_sensitive_image", fileName: basename(options.image), byteLength: imageBytes.byteLength, viewport },
-    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs, qwenThinking: options.qwenThinking, qwenOutputMode: options.qwenOutputMode, planning: options.planning },
+    constraints: { noComputerExecute: true, noCua: true, maxRoundsPerProvider: 2, timeoutMs: options.timeoutMs, glmThinking: options.glmThinking, qwenThinking: options.qwenThinking, qwenOutputMode: options.qwenOutputMode, planning: options.planning },
     toolNames: registry.modelTools().map((tool) => tool.name),
     results,
   };

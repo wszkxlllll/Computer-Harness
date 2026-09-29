@@ -1,7 +1,8 @@
-import type { ActionId, EventId, ObservationAssessment, ObservationId, PlanningTask, RunId, RuntimeEvent } from "@computer-harness/protocol";
+import type { ActionGuardActionSummary, ActionId, EventId, ObservationAssessment, ObservationId, PlanningTask, RiskCategory, RunId, RuntimeEvent } from "@computer-harness/protocol";
 
 export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
 export type RunNoticeDelivery = "polite" | "interrupt";
+export type RunNoticeProgressSemantic = "run_start" | "verified_milestone";
 
 /** A transient, user-facing projection. It is not persisted as a RuntimeEvent. */
 export interface RunNotice {
@@ -15,32 +16,54 @@ export interface RunNotice {
   readonly dedupeKey: string;
   /** Required for approval/question; consumers compare it with the current pending request before speaking. */
   readonly pendingRequestId?: string;
+  /** Internal scheduler semantics; the Host explicitly omits this from the public RunNotice wire event. */
+  readonly progressSemantic?: RunNoticeProgressSemantic;
 }
 
 export interface RunNoticeProjectorOptions {
-  /** Defaults to fixed, safe status text; enable only with explicit user preference. */
+  /** Defaults to fixed, safe status text; enable only when the current paired device opted in. */
   readonly dynamicContentEnabled?: boolean;
 }
 
+export interface RunNoticeProjectionContext {
+  /** Guard data correlated to the exact callId on the live approval request. */
+  readonly currentApproval?: {
+    readonly requestId: string;
+    readonly voiceContext?: ApprovalNoticeVoiceContext;
+  };
+}
+
+export interface ApprovalNoticeVoiceContext {
+  readonly categories: readonly RiskCategory[];
+  readonly reasonCode: string;
+  readonly actionKind?: ActionGuardActionSummary["kind"];
+}
+
 const MAX_NOTICE_CHARS = 320;
+const MAX_DYNAMIC_TEXT_CHARS = 240;
+const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu;
 
 interface AssessmentTransition {
   readonly actionId: ActionId;
   readonly observationId: ObservationId;
+  readonly sourceActionEventId: EventId;
+  readonly sourceObservationEventId: EventId;
   readonly transition: "changed" | "unchanged" | "unknown";
 }
 
 /**
  * Consume committed RuntimeEvents in order. Ordinary action completion is
- * silent; a progress notice requires a current, action-bound assessment and
- * uses fixed wording so model-provided summaries are never spoken.
+ * silent; a milestone notice requires a current, action-bound assessment and
+ * speaks its bounded summary only after explicit per-Run opt-in and filtering.
  */
 export class RunNoticeProjector {
   private lastSequence = -1;
   private readonly planTasks = new Map<string, PlanningTask>();
   private latestObservationId: ObservationId | undefined;
+  private latestObservationEventId: EventId | undefined;
   private observationActionId: ActionId | undefined;
   private lastActionId: ActionId | undefined;
+  private lastActionReceiptEventId: EventId | undefined;
   private lastActionStatus: "completed" | "refused" | "failed" | "cancelled" | undefined;
   private readonly assessmentTransitions = new Map<ActionId, AssessmentTransition>();
   private readonly announcedAssessments = new Set<string>();
@@ -52,7 +75,7 @@ export class RunNoticeProjector {
     this.dynamicContentEnabled = options.dynamicContentEnabled ?? false;
   }
 
-  public project(event: RuntimeEvent): RunNotice | undefined {
+  public project(event: RuntimeEvent, context: RunNoticeProjectionContext = {}): RunNotice | undefined {
     if (this.finished || event.runId !== this.runId || event.sequence <= this.lastSequence) return undefined;
     this.lastSequence = event.sequence;
 
@@ -60,33 +83,38 @@ export class RunNoticeProjector {
       case "run.created":
         if (this.startNoticeProjected) return undefined;
         this.startNoticeProjected = true;
-        return this.notice(event, "progress", "任务已开始。", "polite", "run-start", "fixed");
+        return this.notice(event, "progress", "任务已开始。", "polite", "run-start", "fixed", undefined, "run_start");
       case "planning.task.updated":
         return this.projectPlanning(event);
       case "observation.created":
         this.latestObservationId = event.observation.id;
+        this.latestObservationEventId = event.eventId;
         this.observationActionId = this.lastActionStatus === undefined ? undefined : this.lastActionId;
         return undefined;
       case "model.response.received":
         return this.projectObservationAssessment(event);
       case "action.proposed": {
         this.latestObservationId = undefined;
+        this.latestObservationEventId = undefined;
         this.observationActionId = undefined;
         this.lastActionId = event.action.actionId;
+        this.lastActionReceiptEventId = undefined;
         this.lastActionStatus = undefined;
         return undefined;
       }
       case "action.execution.completed": {
-        this.recordActionReceipt(event.receipt.actionId, event.receipt.status);
+        this.recordActionReceipt(event.receipt.actionId, event.receipt.status, event.eventId);
         return undefined;
       }
       case "action.execution.failed":
-        this.recordActionReceipt(event.receipt.actionId, event.receipt.status);
+        this.recordActionReceipt(event.receipt.actionId, event.receipt.status, event.eventId);
         return undefined;
       case "monitor.transition":
         this.assessmentTransitions.set(event.actionId, {
           actionId: event.actionId,
           observationId: event.postObservationId,
+          sourceActionEventId: event.sourceActionEventId,
+          sourceObservationEventId: event.sourceObservationEventId,
           transition: event.transition,
         });
         while (this.assessmentTransitions.size > 64) {
@@ -96,7 +124,7 @@ export class RunNoticeProjector {
         }
         return undefined;
       case "approval.requested":
-        return this.notice(event, "approval", "有一项操作需要你审批，请查看审批详情。", "interrupt", `approval:${event.requestId}`, "fixed", event.requestId);
+        return this.projectApproval(event, context);
       case "user.input.requested":
         return this.projectQuestion(event);
       case "user.input.received":
@@ -105,15 +133,15 @@ export class RunNoticeProjector {
         return undefined;
       case "runtime.error":
       case "model.request.failed":
-        return this.notice(event, "error", "任务遇到问题，请查看任务页面中的详情。", "interrupt", `error:${event.eventId}`, "fixed");
+        return this.notice(event, "error", "任务遇到问题，请查看详情。", "interrupt", `error:${event.eventId}`, "fixed");
       case "run.finished": {
         this.finished = true;
         this.planTasks.clear();
         this.assessmentTransitions.clear();
         this.announcedAssessments.clear();
-        const summary = candidateText(event.summary);
-        const dynamic = summary !== undefined && this.dynamicContentEnabled && !isPotentiallySensitive(summary);
-        const text = dynamic ? `本次运行提供的文字摘要：${summary}` : resultFallback(event.outcome);
+        const summary = safeDynamicText(event.summary);
+        const dynamic = event.outcome === "succeeded" && summary !== undefined && this.dynamicContentEnabled;
+        const text = dynamic ? summary : resultFallback(event.outcome);
         return this.notice(event, "result", text, "interrupt", `result:${event.outcome}`, dynamic ? "dynamic" : "fixed");
       }
       default:
@@ -127,9 +155,9 @@ export class RunNoticeProjector {
     this.planTasks.set(task.id, task);
 
     if (task.status !== "in_progress" || (previous?.subject === task.subject && previous.status === task.status)) return undefined;
-    const subject = candidateText(task.subject);
-    const dynamic = subject !== undefined && this.dynamicContentEnabled && !isPotentiallySensitive(subject);
-    const text = dynamic ? `当前阶段：${subject}` : "任务阶段已更新。";
+    const subject = safeDynamicText(task.subject);
+    const dynamic = subject !== undefined && this.dynamicContentEnabled;
+    const text = dynamic ? subject : "任务有新进展。";
     return this.notice(event, "progress", text, "polite", `phase:${task.id}:${event.eventId}`, dynamic ? "dynamic" : "fixed");
   }
 
@@ -142,6 +170,8 @@ export class RunNoticeProjector {
       || this.lastActionStatus !== "completed") return undefined;
     const transition = this.assessmentTransitions.get(rawAssessment.actionId);
     if (transition === undefined || transition.observationId !== rawAssessment.observationId
+      || transition.sourceActionEventId !== this.lastActionReceiptEventId
+      || transition.sourceObservationEventId !== this.latestObservationEventId
       || !assessmentAgreesWithTransition(rawAssessment, transition.transition)) return undefined;
     const dedupeKey = `${rawAssessment.observationId}:${rawAssessment.actionId}:${rawAssessment.progress.kind}`;
     if (this.announcedAssessments.has(dedupeKey)) return undefined;
@@ -151,28 +181,54 @@ export class RunNoticeProjector {
       if (first.done) break;
       this.announcedAssessments.delete(first.value);
     }
+    const summary = safeDynamicText(rawAssessment.progress.summary, MAX_DYNAMIC_TEXT_CHARS);
+    const dynamic = summary !== undefined && this.dynamicContentEnabled;
     return this.notice(
       event,
       "progress",
-      "已确认一个阶段性进展，正在继续核对任务。",
+      dynamic ? summary : "已确认一项进展，任务继续中。",
       "polite",
       `assessment:${dedupeKey}`,
-      "fixed",
+      dynamic ? "dynamic" : "fixed",
+      undefined,
+      "verified_milestone",
     );
   }
 
-  private recordActionReceipt(actionId: ActionId, status: "completed" | "refused" | "failed" | "cancelled"): void {
+  private projectApproval(
+    event: Extract<RuntimeEvent, { type: "approval.requested" }>,
+    context: RunNoticeProjectionContext,
+  ): RunNotice {
+    const pending = context.currentApproval;
+    const voiceText = pending?.requestId === event.requestId && this.dynamicContentEnabled
+      ? approvalVoiceText(pending.voiceContext)
+      : undefined;
+    const dynamic = voiceText !== undefined;
+    return this.notice(
+      event,
+      "approval",
+      dynamic ? voiceText : "有项操作需要审批，请核对后处理。",
+      "interrupt",
+      `approval:${event.requestId}`,
+      dynamic ? "dynamic" : "fixed",
+      event.requestId,
+    );
+  }
+
+  private recordActionReceipt(actionId: ActionId, status: "completed" | "refused" | "failed" | "cancelled", eventId: EventId): void {
     this.latestObservationId = undefined;
+    this.latestObservationEventId = undefined;
     this.observationActionId = undefined;
     this.lastActionId = actionId;
+    this.lastActionReceiptEventId = eventId;
     this.lastActionStatus = status;
   }
 
   private projectQuestion(event: Extract<RuntimeEvent, { type: "user.input.requested" }>): RunNotice {
     const requestId = event.eventId as unknown as string;
-    const question = candidateText(event.question);
-    const dynamic = question !== undefined && this.dynamicContentEnabled && !isPotentiallySensitive(question);
-    const text = dynamic ? question : "我有一个问题需要你回答，请查看任务页面。";
+    const question = safeDynamicText(event.question);
+    const dynamic = question !== undefined && this.dynamicContentEnabled;
+    const text = dynamic ? question : "我有个问题需要你回答，请查看任务。";
     return this.notice(event, "question", text, "interrupt", `question:${event.eventId}`, dynamic ? "dynamic" : "fixed", requestId);
   }
 
@@ -184,6 +240,7 @@ export class RunNoticeProjector {
     dedupeKey: string,
     variant: "dynamic" | "fixed",
     pendingRequestId?: string,
+    progressSemantic?: RunNoticeProgressSemantic,
   ): RunNotice {
     return {
       noticeId: `${event.runId}:${event.eventId}:${kind}:${variant}`,
@@ -195,37 +252,88 @@ export class RunNoticeProjector {
       delivery,
       dedupeKey,
       ...(pendingRequestId === undefined ? {} : { pendingRequestId }),
+      ...(progressSemantic === undefined ? {} : { progressSemantic }),
     };
   }
 }
 
 export function candidateText(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
-  const text = value.replace(/[\u0000-\u001f\u007f]/gu, " ").replace(/\s+/gu, " ").trim();
+  const text = value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/gu, " ").trim();
   if (text.length === 0) return undefined;
   return text.slice(0, MAX_NOTICE_CHARS);
+}
+
+function safeDynamicText(value: string | undefined, maxChars = MAX_NOTICE_CHARS): string | undefined {
+  if (value === undefined) return undefined;
+  // Scan the full normalized value before truncating so a secret at the tail
+  // cannot evade filtering by falling outside the spoken prefix.
+  const text = value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/gu, " ").trim();
+  if (text.length === 0 || isPotentiallySensitive(text)) return undefined;
+  return text.slice(0, Math.min(maxChars, MAX_DYNAMIC_TEXT_CHARS));
 }
 
 /** Known-pattern filter only. It is not a semantic privacy guarantee. */
 export function isPotentiallySensitive(text: string): boolean {
   return [
     /(?:密码|口令|验证码|身份证|手机号|手机号码|电话号码|银行卡|卡号|支付|账户|账号|住址|家庭住址|订单号|隐私|密钥|password|passcode|verification\s+code|api[_ -]?key|secret|token|credit\s+card)/iu,
+    /(?:social\s+security|ssn|phone\s+number|account\s+number|email\s+address|access\s+token|bearer\s+token)/iu,
     /(?:\+?86[\s-]?)?1[3-9]\d{9}/u,
     /\b\d{17}[\dXx]\b/u,
     /\b\d{15,19}\b/u,
     /\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/u,
     /https?:\/\/\S*(?:token|secret|session|auth|key)=/iu,
+    /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|AKIA[0-9A-Z]{16}|Bearer\s+\S+)\b/u,
   ].some((pattern) => pattern.test(text));
 }
 
 function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>['outcome']): string {
   switch (outcome) {
-    case "succeeded": return "本次运行结束，请查看结果。";
-    case "failed": return "本次运行结束时遇到问题，请查看详情。";
-    case "cancelled": return "本次运行已取消。";
-    case "budget_exhausted": return "本次运行达到执行预算，请查看当前进度。";
-    case "outcome_unknown": return "有一项操作的结果尚未确认，请先查看任务页面。";
+    case "succeeded": return "任务已完成，可查看结果。";
+    case "failed": return "任务未能完成，请查看详情。";
+    case "cancelled": return "任务已取消。";
+    case "budget_exhausted": return "任务达到执行上限，可查看进度。";
+    case "outcome_unknown": return "有项操作结果未确认，请查看任务。";
   }
+}
+
+function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): string | undefined {
+  if (context === undefined) return undefined;
+  const categoryLabels: Readonly<Record<RiskCategory, string>> = {
+    external_commitment: "对外发送或提交内容",
+    financial: "付款或财务操作",
+    destructive: "删除或不可逆修改内容",
+    privacy_account: "隐私、账户或凭据",
+    intent_violation: "主机安全限制",
+  };
+  const categories = [...new Set(context.categories)];
+  if (context.reasonCode === "protected_input" && !categories.includes("privacy_account")) categories.push("privacy_account");
+  if (categories.length === 0 || categories.some((category) => !Object.hasOwn(categoryLabels, category))) {
+    if (context.reasonCode === "declared_unknown" || context.reasonCode === "unknown_grounding_evidence_unavailable" || context.reasonCode === "model_unclear") {
+      return "操作影响尚未确认，请核对请求后审批。";
+    }
+    return undefined;
+  }
+
+  const actionLabels: Readonly<Record<ActionGuardActionSummary["kind"], string>> = {
+    click: "点击操作",
+    double_click: "双击操作",
+    right_click: "右键操作",
+    scroll: "滚动操作",
+    drag: "拖动操作",
+    type: "输入操作",
+    keypress: "键盘操作",
+    select_option: "选择操作",
+    wait: "等待操作",
+  };
+  const riskLabels = categories.map((category) => categoryLabels[category]);
+  const riskText = riskLabels.length === 1
+    ? riskLabels[0]!
+    : `${riskLabels.slice(0, -1).join("、")}及${riskLabels.at(-1)}`;
+  const actionText = context.actionKind !== undefined && Object.hasOwn(actionLabels, context.actionKind)
+    ? actionLabels[context.actionKind]
+    : "电脑操作";
+  return `可能涉及${riskText}的${actionText}，请核对后审批。`;
 }
 
 function isObservationAssessment(value: unknown): value is ObservationAssessment {
