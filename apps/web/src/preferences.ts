@@ -1,5 +1,11 @@
 export const PREFERENCES_STORAGE_KEY = "harness.preferences";
-export const PREFERENCES_VERSION = 2 as const;
+export const PREFERENCES_VERSION = 3 as const;
+export { RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS } from "@computer-harness/protocol";
+import {
+  normalizeRunAssistantPreferencesSnapshot,
+  RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS,
+  type RunAssistantPreferencesSnapshot,
+} from "@computer-harness/protocol";
 
 export type LayoutMode = "standard" | "simple";
 export type TextSize = "standard" | "large";
@@ -20,6 +26,7 @@ export interface AssistantPreferences {
   responseDetail: ResponseDetail;
   stepExplanation: StepExplanation;
   preferredLanguage: PreferredLanguage;
+  additionalGuidance: string;
 }
 
 export interface VoicePreferences {
@@ -51,6 +58,7 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
     responseDetail: "standard",
     stepExplanation: "standard",
     preferredLanguage: "follow_conversation",
+    additionalGuidance: "",
   },
   voice: {
     runNoticesEnabled: false,
@@ -76,7 +84,7 @@ export function readPreferences(storage?: PreferenceStorage): UserPreferences {
     const raw = storage.getItem(PREFERENCES_STORAGE_KEY);
     if (!raw) return cloneDefaults();
     const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed) || (parsed.version !== 1 && parsed.version !== PREFERENCES_VERSION)) return cloneDefaults();
+    if (!isRecord(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== PREFERENCES_VERSION)) return cloneDefaults();
     const presentation = isRecord(parsed.presentation) ? parsed.presentation : {};
     const assistant = isRecord(parsed.assistant) ? parsed.assistant : {};
     const voice = isRecord(parsed.voice) ? parsed.voice : {};
@@ -93,13 +101,14 @@ export function readPreferences(storage?: PreferenceStorage): UserPreferences {
         responseDetail: oneOf(assistant.responseDetail, ["concise", "standard", "detailed"], DEFAULT_PREFERENCES.assistant.responseDetail),
         stepExplanation: oneOf(assistant.stepExplanation, ["standard", "more"], DEFAULT_PREFERENCES.assistant.stepExplanation),
         preferredLanguage: oneOf(assistant.preferredLanguage, ["follow_conversation", "zh-CN", "en"], DEFAULT_PREFERENCES.assistant.preferredLanguage),
+        additionalGuidance: readAdditionalGuidance(assistant.additionalGuidance),
       },
-      // Version 1 had no voice settings. Migration keeps every existing choice and defaults speech off.
+      // Versions 1 and 2 had no custom guidance. Preserve their other choices.
       voice: {
-        runNoticesEnabled: parsed.version === PREFERENCES_VERSION
+        runNoticesEnabled: parsed.version === 2 || parsed.version === PREFERENCES_VERSION
           ? booleanOr(voice.runNoticesEnabled, DEFAULT_PREFERENCES.voice.runNoticesEnabled)
           : DEFAULT_PREFERENCES.voice.runNoticesEnabled,
-        speechRate: parsed.version === PREFERENCES_VERSION
+        speechRate: parsed.version === 2 || parsed.version === PREFERENCES_VERSION
           ? oneOf(voice.speechRate, ["slow", "normal", "fast"], DEFAULT_PREFERENCES.voice.speechRate)
           : DEFAULT_PREFERENCES.voice.speechRate,
       },
@@ -115,7 +124,7 @@ export function writePreferences(preferences: UserPreferences, storage?: Prefere
     const value: UserPreferences = {
       version: PREFERENCES_VERSION,
       presentation: { ...preferences.presentation },
-      assistant: { ...preferences.assistant },
+      assistant: { ...preferences.assistant, additionalGuidance: readAdditionalGuidance(preferences.assistant.additionalGuidance) },
       voice: { ...preferences.voice },
     };
     storage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(value));
@@ -132,4 +141,29 @@ export function cloneDefaults(): UserPreferences {
     assistant: { ...DEFAULT_PREFERENCES.assistant },
     voice: { ...DEFAULT_PREFERENCES.voice },
   };
+}
+
+export function toRunAssistantPreferencesSnapshot(assistant: AssistantPreferences): RunAssistantPreferencesSnapshot {
+  return normalizeRunAssistantPreferencesSnapshot({
+    version: 1,
+    responseDetail: assistant.responseDetail,
+    stepExplanation: assistant.stepExplanation,
+    preferredLanguage: assistant.preferredLanguage,
+    additionalGuidance: assistant.additionalGuidance,
+  });
+}
+
+function readAdditionalGuidance(value: unknown): string {
+  if (typeof value !== "string" || [...value].length > RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS) return "";
+  try {
+    return normalizeRunAssistantPreferencesSnapshot({
+      version: 1,
+      responseDetail: DEFAULT_PREFERENCES.assistant.responseDetail,
+      stepExplanation: DEFAULT_PREFERENCES.assistant.stepExplanation,
+      preferredLanguage: DEFAULT_PREFERENCES.assistant.preferredLanguage,
+      additionalGuidance: value,
+    }).additionalGuidance;
+  } catch {
+    return "";
+  }
 }

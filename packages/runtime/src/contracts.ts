@@ -24,6 +24,7 @@ import type {
   Point,
   PreparedRequestEstimate as ProtocolPreparedRequestEstimate,
   PreparedRequestMetadata,
+  RunAssistantPreferencesSnapshot,
   RunId,
   RiskCategory,
   RuntimeEvent,
@@ -178,6 +179,7 @@ export interface ContextCompileInput {
   memory?: MemoryState;
   features?: RunFeatureConfig;
   monitorGuidance?: MonitorGuidance;
+  assistantPreferences?: RunAssistantPreferencesSnapshot;
 }
 
 export interface MonitorGuidance {

@@ -8,6 +8,61 @@ export type ToolCallId = Brand<string, "ToolCallId">;
 export type EventId = Brand<string, "EventId">;
 export type AssetId = Brand<string, "AssetId">;
 
+export type ResponseDetailPreference = "concise" | "standard" | "detailed";
+export type StepExplanationPreference = "standard" | "more";
+export type PreferredLanguagePreference = "follow_conversation" | "zh-CN" | "en";
+
+/** Versioned, provider-neutral answer preferences frozen for one Run. */
+export interface RunAssistantPreferencesSnapshot {
+  readonly version: 1;
+  readonly responseDetail: ResponseDetailPreference;
+  readonly stepExplanation: StepExplanationPreference;
+  readonly preferredLanguage: PreferredLanguagePreference;
+  readonly additionalGuidance: string;
+}
+
+export const RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS = 600;
+
+/** Strictly validates and safely normalizes the only assistant preferences accepted by a Run. */
+export function normalizeRunAssistantPreferencesSnapshot(value: unknown): RunAssistantPreferencesSnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("assistantPreferences must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const expectedKeys = ["version", "responseDetail", "stepExplanation", "preferredLanguage", "additionalGuidance"] as const;
+  const ownKeys = Reflect.ownKeys(record);
+  if ((Object.getPrototypeOf(record) !== Object.prototype && Object.getPrototypeOf(record) !== null) ||
+      ownKeys.length !== expectedKeys.length || ownKeys.some((key) => typeof key !== "string" || !expectedKeys.includes(key as typeof expectedKeys[number]))) {
+    throw new Error("assistantPreferences contains unsupported fields");
+  }
+  if (record.version !== 1) throw new Error("assistantPreferences.version must be 1");
+  if (record.responseDetail !== "concise" && record.responseDetail !== "standard" && record.responseDetail !== "detailed") {
+    throw new Error("assistantPreferences.responseDetail is invalid");
+  }
+  if (record.stepExplanation !== "standard" && record.stepExplanation !== "more") {
+    throw new Error("assistantPreferences.stepExplanation is invalid");
+  }
+  if (record.preferredLanguage !== "follow_conversation" && record.preferredLanguage !== "zh-CN" && record.preferredLanguage !== "en") {
+    throw new Error("assistantPreferences.preferredLanguage is invalid");
+  }
+  if (typeof record.additionalGuidance !== "string") throw new Error("assistantPreferences.additionalGuidance must be text");
+  if ([...record.additionalGuidance].length > RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS) {
+    throw new Error(`assistantPreferences.additionalGuidance exceeds ${RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} characters`);
+  }
+  const additionalGuidance = record.additionalGuidance
+    .normalize("NFC")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return Object.freeze({
+    version: 1,
+    responseDetail: record.responseDetail,
+    stepExplanation: record.stepExplanation,
+    preferredLanguage: record.preferredLanguage,
+    additionalGuidance,
+  });
+}
+
 /** Shared task description used by Planning and future read-only consumers. */
 export interface TaskSpec {
   subject: string;
@@ -668,17 +723,36 @@ export interface ModelContinuation {
   content: string;
 }
 
+export type ObservationActionOutcome = "expected_change" | "no_effect" | "unexpected_change" | "uncertain";
+
+export interface ObservationAssessment {
+  /** Exact current Observation that the assessment describes. */
+  observationId: ObservationId;
+  /** The immediately preceding GUI action associated with that Observation. */
+  actionId: ActionId;
+  actionOutcome: ObservationActionOutcome;
+  /** Concise, untrusted evidence from the visible state. */
+  evidence: string;
+  /** Optional short progress label; consumers must not assume it is safe to speak. */
+  progress?: {
+    kind: "milestone" | "blocked";
+    summary: string;
+  };
+}
+
 export type ModelTurn =
   | {
       type: "tool_calls";
       calls: ToolCall[];
       assistantText?: string;
+      observationAssessment?: ObservationAssessment;
       continuation?: ModelContinuation;
       usage?: ModelUsage;
     }
   | {
       type: "user_input_required";
       question: string;
+      observationAssessment?: ObservationAssessment;
       usage?: ModelUsage;
     }
   | {
@@ -686,6 +760,7 @@ export type ModelTurn =
       summary: string;
       /** Structured termination status supplied by providers that expose it. */
       reportedStatus?: "success" | "failure";
+      observationAssessment?: ObservationAssessment;
       usage?: ModelUsage;
     };
 
@@ -838,6 +913,21 @@ export interface ContextGroundingTrace {
   readonly recovery?: GroundingRecoveryTrace;
 }
 
+/** Redacted accounting for the late, provider-neutral answer-preference message. */
+export interface ContextAssistantPreferencesTrace {
+  readonly projectionVersion: 1;
+  readonly included: boolean;
+  readonly omittedReason?: "budget";
+  /** Candidate projection token estimate, including values omitted by the budget. */
+  readonly estimatedTokens: number;
+  readonly responseDetail: ResponseDetailPreference;
+  readonly stepExplanation: StepExplanationPreference;
+  readonly preferredLanguage: PreferredLanguagePreference;
+  readonly additionalGuidancePresent: boolean;
+  readonly additionalGuidanceCharacters: number;
+  readonly additionalGuidanceSha256?: string;
+}
+
 /** Private diagnostic metadata emitted alongside a prepared Provider request;
  * it contains no body/path, and its hash is not an anonymity guarantee. */
 export interface PreparedRequestEstimate {
@@ -877,6 +967,7 @@ export interface ContextTrace {
   memorySelection?: ContextMemorySelectionTrace;
   memoryRetrieval?: ContextMemoryRetrievalTrace;
   grounding?: ContextGroundingTrace;
+  assistantPreferences?: ContextAssistantPreferencesTrace;
   observationIncluded: boolean;
   monitorGuidanceIncluded?: boolean;
   monitorGuidanceOmittedReason?: "budget";

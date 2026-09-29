@@ -6,10 +6,13 @@ import { PhoneLayout } from "./components/PhoneLayout";
 import { StatusLabel } from "./components/StatusLabel";
 import type { RunStatus, RunSummary, RunTarget, WindowTarget } from "./types";
 import { isValidBrowserUrl } from "./run-target";
+import { usePreferences } from "./PreferencesContext";
+import { toRunAssistantPreferencesSnapshot } from "./preferences";
 
 const activeStatuses = new Set<RunStatus>(["created", "running", "waiting_user", "waiting_window", "waiting_approval", "paused"]);
 
 export function HomeScreen() {
+  const { preferences } = usePreferences();
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -113,11 +116,12 @@ export function HomeScreen() {
 
     setSending(true);
     setError(undefined);
-    const actionKey = JSON.stringify([goal, target]);
+    const assistantPreferences = toRunAssistantPreferencesSnapshot(preferences.assistant);
+    const actionKey = JSON.stringify([goal, target, assistantPreferences]);
     const commandId = commandIdByTarget.current.get(actionKey) ?? crypto.randomUUID();
     commandIdByTarget.current.set(actionKey, commandId);
     try {
-      const response = await createRun(goal, commandId, target);
+      const response = await createRun(goal, commandId, target, assistantPreferences);
       commandIdByTarget.current.delete(actionKey);
       window.location.assign(`/run/${encodeURIComponent(response.runId)}`);
     } catch (caught) {

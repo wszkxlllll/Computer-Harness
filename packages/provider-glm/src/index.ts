@@ -3,6 +3,7 @@ import type {
   JsonValue,
   ModelUsage,
   ModelTurn,
+  ObservationAssessment,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -19,7 +20,14 @@ import type {
   ControlKind,
   CoordinateField,
 } from "@computer-harness/runtime";
-import { encodeToolCallArguments, isActionableFinishSummary, splitActionEffectArguments } from "@computer-harness/runtime";
+import {
+  encodeToolCallArguments,
+  isActionableFinishSummary,
+  OBSERVATION_ASSESSMENT_GUIDANCE,
+  splitActionEffectArguments,
+  splitObservationAssessment,
+  withObservationAssessmentSchema,
+} from "@computer-harness/runtime";
 
 export type GlmCoordinateMode = "normalized_1000" | "actual_pixels";
 
@@ -102,7 +110,7 @@ export class GlmAdapter implements ProviderAdapter {
     const snapshot = structuredClone(input);
     const body = {
       model: this.profile.name,
-      messages: await this.presentMessages(`${snapshot.system}\n${profilePrompt(this.profile)}`, snapshot.messages, snapshot.tools, options.signal),
+      messages: await this.presentMessages(`${snapshot.system}\n${profilePrompt(this.profile)}\n${OBSERVATION_ASSESSMENT_GUIDANCE}`, snapshot.messages, snapshot.tools, options.signal),
       tools: snapshot.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(snapshot))),
       stream: false,
       thinking: { type: this.profile.thinking },
@@ -203,12 +211,21 @@ export class GlmAdapter implements ProviderAdapter {
       }
       const ids = new Set<string>();
       const calls: ToolCall[] = [];
+      let observationAssessment: ObservationAssessment | undefined;
+      let assessmentSupplied = false;
+      let controlTurn: ModelTurn | undefined;
       for (const raw of rawToolCalls) {
         const parsed = readToolCall(raw);
         if (ids.has(parsed.id)) {
           throw new GlmProviderError(`GLM returned duplicate ToolCall id: ${parsed.id}`, "GLM_DUPLICATE_TOOL_CALL");
         }
         ids.add(parsed.id);
+        const assessmentParts = splitObservationAssessment(parsed.arguments);
+        if (assessmentParts.supplied) {
+          if (assessmentSupplied) observationAssessment = undefined;
+          else observationAssessment = assessmentParts.observationAssessment;
+          assessmentSupplied = true;
+        }
         if (!input.tools.some((tool) => tool.name === parsed.name)) {
           throw new GlmProviderError(`GLM selected a tool not offered by this run: ${parsed.name}`, "GLM_UNAVAILABLE_TOOL");
         }
@@ -217,27 +234,32 @@ export class GlmAdapter implements ProviderAdapter {
           if (calls.length > 0 || rawToolCalls.length !== 1) {
             throw new GlmProviderError("GLM control calls cannot be mixed with other tool calls", "GLM_INVALID_TOOL_CALL");
           }
-          const control = mapControlCall(tool.control, parsed.arguments, parsed.name);
-          return control.type === "finish"
-            ? { ...control, ...(usage === undefined ? {} : { usage }) }
-            : { ...control, ...(usage === undefined ? {} : { usage }) };
+          controlTurn = mapControlCall(tool.control, assessmentParts.arguments, parsed.name);
+          continue;
         }
         let separated: ReturnType<typeof splitActionEffectArguments>;
         try {
-          separated = splitActionEffectArguments(tool, parsed.arguments);
+          separated = splitActionEffectArguments(tool, assessmentParts.arguments);
         } catch (error) {
           throw new GlmProviderError(`GLM action effect is invalid: ${error instanceof Error ? error.message : String(error)}`, "GLM_INVALID_TOOL_CALL");
         }
         const mapped = mapCoordinates({ ...parsed, arguments: separated.arguments }, latestViewport(input), this.profile.coordinateMode, tool?.coordinate?.fields);
         calls.push({ ...mapped, ...(separated.declaredEffect === undefined ? {} : { declaredEffect: separated.declaredEffect }) });
       }
+      if (controlTurn !== undefined) {
+        return {
+          ...controlTurn,
+          ...(observationAssessment === undefined ? {} : { observationAssessment }),
+          ...(usage === undefined ? {} : { usage }),
+        };
+      }
       const assistantText = typeof message.content === "string" && message.content.trim().length > 0
         ? message.content
         : undefined;
       const continuation = reasoningContinuation(message.reasoning_content, this.id);
       return assistantText === undefined
-        ? { type: "tool_calls", calls, ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) }
-        : { type: "tool_calls", calls, assistantText, ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) };
+        ? { type: "tool_calls", calls, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) }
+        : { type: "tool_calls", calls, assistantText, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) };
     }
     if (typeof message.content === "string" && message.content.trim().length > 0) {
       if (message.reasoning_content !== undefined && typeof message.reasoning_content !== "string") {
@@ -402,7 +424,7 @@ function toGlmTool(tool: ModelToolSpec, profile: GlmProfile, viewport: Viewport 
     function: {
       name: tool.name,
       description: `${tool.description}${coordinateHint}`,
-      parameters: addCoordinateBounds(tool.inputSchema ?? { type: "object", properties: {} }, tool.coordinate?.fields, profile.coordinateMode, viewport),
+      parameters: addCoordinateBounds(withObservationAssessmentSchema(tool.inputSchema ?? { type: "object", properties: {} }), tool.coordinate?.fields, profile.coordinateMode, viewport),
     },
   };
 }

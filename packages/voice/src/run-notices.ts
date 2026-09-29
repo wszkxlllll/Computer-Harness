@@ -1,4 +1,4 @@
-import type { ActionId, EventId, PlanningTask, RunId, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
+import type { ActionId, EventId, ObservationAssessment, ObservationId, PlanningTask, RunId, RuntimeEvent } from "@computer-harness/protocol";
 
 export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
 export type RunNoticeDelivery = "polite" | "interrupt";
@@ -22,28 +22,29 @@ export interface RunNoticeProjectorOptions {
   readonly dynamicContentEnabled?: boolean;
 }
 
-const COMPUTER_TOOL_NAMES = new Set([
-  "click", "type", "keypress", "hotkey", "scroll", "drag", "wait", "click_element", "select_option",
-]);
 const MAX_NOTICE_CHARS = 320;
 
-interface ProgressCandidate {
-  readonly text: string;
-  readonly source: "assistant_text" | "declared_effect" | "planning";
+interface AssessmentTransition {
+  readonly actionId: ActionId;
+  readonly observationId: ObservationId;
+  readonly transition: "changed" | "unchanged" | "unknown";
 }
 
 /**
- * Consume committed RuntimeEvents in order. Provider responses only create
- * pending candidates; progress is projected after the matching action gets a
- * completed receipt. Dynamic text is opt-in and known-sensitive patterns
- * always fall back to a fixed notice.
+ * Consume committed RuntimeEvents in order. Ordinary action completion is
+ * silent; a progress notice requires a current, action-bound assessment and
+ * uses fixed wording so model-provided summaries are never spoken.
  */
 export class RunNoticeProjector {
   private lastSequence = -1;
   private readonly planTasks = new Map<string, PlanningTask>();
-  private activePlanTaskId: string | undefined;
-  private readonly pendingCalls = new Map<ToolCallId, ProgressCandidate>();
-  private readonly pendingActions = new Map<ActionId, ProgressCandidate>();
+  private latestObservationId: ObservationId | undefined;
+  private observationActionId: ActionId | undefined;
+  private lastActionId: ActionId | undefined;
+  private lastActionStatus: "completed" | "refused" | "failed" | "cancelled" | undefined;
+  private readonly assessmentTransitions = new Map<ActionId, AssessmentTransition>();
+  private readonly announcedAssessments = new Set<string>();
+  private startNoticeProjected = false;
   private finished = false;
   private readonly dynamicContentEnabled: boolean;
 
@@ -56,31 +57,43 @@ export class RunNoticeProjector {
     this.lastSequence = event.sequence;
 
     switch (event.type) {
+      case "run.created":
+        if (this.startNoticeProjected) return undefined;
+        this.startNoticeProjected = true;
+        return this.notice(event, "progress", "任务已开始。", "polite", "run-start", "fixed");
       case "planning.task.updated":
         return this.projectPlanning(event);
-      case "model.response.received":
-        this.projectModelResponse(event);
+      case "observation.created":
+        this.latestObservationId = event.observation.id;
+        this.observationActionId = this.lastActionStatus === undefined ? undefined : this.lastActionId;
         return undefined;
+      case "model.response.received":
+        return this.projectObservationAssessment(event);
       case "action.proposed": {
-        const candidate = this.pendingCalls.get(event.callId);
-        this.pendingCalls.delete(event.callId);
-        if (candidate !== undefined) this.pendingActions.set(event.action.actionId, candidate);
+        this.latestObservationId = undefined;
+        this.observationActionId = undefined;
+        this.lastActionId = event.action.actionId;
+        this.lastActionStatus = undefined;
         return undefined;
       }
       case "action.execution.completed": {
-        const candidate = this.pendingActions.get(event.receipt.actionId);
-        this.pendingActions.delete(event.receipt.actionId);
-        if (candidate === undefined || event.receipt.status !== "completed") return undefined;
-        return this.projectCompletedAction(event, candidate);
+        this.recordActionReceipt(event.receipt.actionId, event.receipt.status);
+        return undefined;
       }
       case "action.execution.failed":
-        this.pendingActions.delete(event.receipt.actionId);
+        this.recordActionReceipt(event.receipt.actionId, event.receipt.status);
         return undefined;
-      case "tool.call.rejected":
-        this.pendingCalls.delete(event.callId);
-        return undefined;
-      case "tool.call.failed":
-        this.pendingCalls.delete(event.result.callId);
+      case "monitor.transition":
+        this.assessmentTransitions.set(event.actionId, {
+          actionId: event.actionId,
+          observationId: event.postObservationId,
+          transition: event.transition,
+        });
+        while (this.assessmentTransitions.size > 64) {
+          const first = this.assessmentTransitions.keys().next();
+          if (first.done) break;
+          this.assessmentTransitions.delete(first.value);
+        }
         return undefined;
       case "approval.requested":
         return this.notice(event, "approval", "有一项操作需要你审批，请查看审批详情。", "interrupt", `approval:${event.requestId}`, "fixed", event.requestId);
@@ -95,10 +108,9 @@ export class RunNoticeProjector {
         return this.notice(event, "error", "任务遇到问题，请查看任务页面中的详情。", "interrupt", `error:${event.eventId}`, "fixed");
       case "run.finished": {
         this.finished = true;
-        this.pendingCalls.clear();
-        this.pendingActions.clear();
         this.planTasks.clear();
-        this.activePlanTaskId = undefined;
+        this.assessmentTransitions.clear();
+        this.announcedAssessments.clear();
         const summary = candidateText(event.summary);
         const dynamic = summary !== undefined && this.dynamicContentEnabled && !isPotentiallySensitive(summary);
         const text = dynamic ? `本次运行提供的文字摘要：${summary}` : resultFallback(event.outcome);
@@ -113,8 +125,6 @@ export class RunNoticeProjector {
     const previous = this.planTasks.get(event.mutation.task.id);
     const task = structuredClone(event.mutation.task);
     this.planTasks.set(task.id, task);
-    if (task.status === "in_progress") this.activePlanTaskId = task.id;
-    else if (this.activePlanTaskId === task.id) this.activePlanTaskId = latestInProgressTaskId(this.planTasks);
 
     if (task.status !== "in_progress" || (previous?.subject === task.subject && previous.status === task.status)) return undefined;
     const subject = candidateText(task.subject);
@@ -123,22 +133,39 @@ export class RunNoticeProjector {
     return this.notice(event, "progress", text, "polite", `phase:${task.id}:${event.eventId}`, dynamic ? "dynamic" : "fixed");
   }
 
-  private projectModelResponse(event: Extract<RuntimeEvent, { type: "model.response.received" }>): void {
-    if (event.turn.type !== "tool_calls") return;
-    const activeTask = this.activePlanTask();
-    const assistantText = candidateText(event.turn.assistantText);
-    for (const call of event.turn.calls) {
-      if (!COMPUTER_TOOL_NAMES.has(call.name)) continue;
-      const declaredSummary = candidateText(call.declaredEffect?.summary);
-      const candidate = assistantText !== undefined
-        ? { text: assistantText, source: "assistant_text" as const }
-        : declaredSummary !== undefined
-          ? { text: declaredSummary, source: "declared_effect" as const }
-          : activeTask === undefined
-            ? undefined
-            : { text: activeTask.subject, source: "planning" as const };
-      if (candidate !== undefined) this.pendingCalls.set(call.id, candidate);
+  private projectObservationAssessment(event: Extract<RuntimeEvent, { type: "model.response.received" }>): RunNotice | undefined {
+    const rawAssessment: unknown = event.turn.observationAssessment;
+    if (!isObservationAssessment(rawAssessment) || rawAssessment.progress === undefined
+      || rawAssessment.observationId !== this.latestObservationId
+      || rawAssessment.actionId !== this.observationActionId
+      || rawAssessment.actionId !== this.lastActionId
+      || this.lastActionStatus !== "completed") return undefined;
+    const transition = this.assessmentTransitions.get(rawAssessment.actionId);
+    if (transition === undefined || transition.observationId !== rawAssessment.observationId
+      || !assessmentAgreesWithTransition(rawAssessment, transition.transition)) return undefined;
+    const dedupeKey = `${rawAssessment.observationId}:${rawAssessment.actionId}:${rawAssessment.progress.kind}`;
+    if (this.announcedAssessments.has(dedupeKey)) return undefined;
+    this.announcedAssessments.add(dedupeKey);
+    while (this.announcedAssessments.size > 128) {
+      const first = this.announcedAssessments.values().next();
+      if (first.done) break;
+      this.announcedAssessments.delete(first.value);
     }
+    return this.notice(
+      event,
+      "progress",
+      "已确认一个阶段性进展，正在继续核对任务。",
+      "polite",
+      `assessment:${dedupeKey}`,
+      "fixed",
+    );
+  }
+
+  private recordActionReceipt(actionId: ActionId, status: "completed" | "refused" | "failed" | "cancelled"): void {
+    this.latestObservationId = undefined;
+    this.observationActionId = undefined;
+    this.lastActionId = actionId;
+    this.lastActionStatus = status;
   }
 
   private projectQuestion(event: Extract<RuntimeEvent, { type: "user.input.requested" }>): RunNotice {
@@ -147,35 +174,6 @@ export class RunNoticeProjector {
     const dynamic = question !== undefined && this.dynamicContentEnabled && !isPotentiallySensitive(question);
     const text = dynamic ? question : "我有一个问题需要你回答，请查看任务页面。";
     return this.notice(event, "question", text, "interrupt", `question:${event.eventId}`, dynamic ? "dynamic" : "fixed", requestId);
-  }
-
-  private projectCompletedAction(
-    event: Extract<RuntimeEvent, { type: "action.execution.completed" }>,
-    candidate: ProgressCandidate,
-  ): RunNotice {
-    const text = this.dynamicProgressText(candidate);
-    const dynamic = text !== undefined;
-    return this.notice(
-      event,
-      "progress",
-      text ?? "操作已执行，正在核对页面结果。",
-      "polite",
-      `action-progress:${normalizeKey(candidate.text)}`,
-      dynamic ? "dynamic" : "fixed",
-    );
-  }
-
-  private dynamicProgressText(candidate: ProgressCandidate): string | undefined {
-    if (!this.dynamicContentEnabled || isPotentiallySensitive(candidate.text)) return undefined;
-    const safeCandidate = candidateText(candidate.text);
-    if (safeCandidate === undefined) return undefined;
-    if (candidate.source === "planning") return `当前阶段“${safeCandidate}”仍在进行；操作已执行，正在核对页面结果。`;
-    if (candidate.source === "declared_effect") return "已执行模型声明的操作步骤，正在核对页面结果。";
-    return "已执行本轮模型提出的操作，正在核对页面结果。";
-  }
-
-  private activePlanTask(): PlanningTask | undefined {
-    return this.activePlanTaskId === undefined ? undefined : this.planTasks.get(this.activePlanTaskId);
   }
 
   private notice(
@@ -220,11 +218,6 @@ export function isPotentiallySensitive(text: string): boolean {
   ].some((pattern) => pattern.test(text));
 }
 
-function latestInProgressTaskId(tasks: ReadonlyMap<string, PlanningTask>): string | undefined {
-  const inProgress = [...tasks.values()].filter((task) => task.status === "in_progress");
-  return inProgress.at(-1)?.id;
-}
-
 function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>['outcome']): string {
   switch (outcome) {
     case "succeeded": return "本次运行结束，请查看结果。";
@@ -235,6 +228,27 @@ function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>
   }
 }
 
-function normalizeKey(text: string): string {
-  return text.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim();
+function isObservationAssessment(value: unknown): value is ObservationAssessment {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const assessment = value as Record<string, unknown>;
+  if (Object.keys(assessment).some((key) => !["observationId", "actionId", "actionOutcome", "evidence", "progress"].includes(key))) return false;
+  if (typeof assessment.observationId !== "string" || assessment.observationId.length === 0 || assessment.observationId.length > 128
+    || typeof assessment.actionId !== "string" || assessment.actionId.length === 0 || assessment.actionId.length > 128
+    || !["expected_change", "no_effect", "unexpected_change", "uncertain"].includes(String(assessment.actionOutcome))
+    || typeof assessment.evidence !== "string" || assessment.evidence.trim().length === 0 || assessment.evidence.length > 240) return false;
+  if (assessment.progress === undefined) return true;
+  if (typeof assessment.progress !== "object" || assessment.progress === null || Array.isArray(assessment.progress)) return false;
+  const progress = assessment.progress as Record<string, unknown>;
+  return Object.keys(progress).every((key) => key === "kind" || key === "summary")
+    && (progress.kind === "milestone" || progress.kind === "blocked")
+    && typeof progress.summary === "string" && progress.summary.trim().length > 0 && progress.summary.length <= 160;
+}
+
+function assessmentAgreesWithTransition(
+  assessment: ObservationAssessment,
+  transition: "changed" | "unchanged" | "unknown",
+): boolean {
+  return assessment.progress?.kind === "milestone"
+    && transition === "changed"
+    && assessment.actionOutcome === "expected_change";
 }

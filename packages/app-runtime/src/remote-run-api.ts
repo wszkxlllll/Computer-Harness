@@ -1,6 +1,7 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 import type { AssetId, AssetRef, ComputerWindowCandidate, JsonValue, RunOutcome, RuntimeEvent } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { inspectManagedBrowserProfile, readManagedBrowserStartupUrls } from "@computer-harness/computer-cua";
@@ -62,6 +63,7 @@ interface ManagedRemoteRun {
 interface StartRequest {
   readonly goal: string;
   readonly targetFingerprint: string;
+  readonly assistantPreferencesFingerprint: string;
   readonly promise: Promise<RemoteRunSnapshot>;
 }
 
@@ -144,7 +146,7 @@ export function createFileRemoteAssetReader(rootDir: string): AssetReader {
 
 export class RemoteRunApiError extends Error {
   public constructor(
-    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE",
+    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "INVALID_ASSISTANT_PREFERENCES" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE",
     message: string,
   ) {
     super(message);
@@ -255,9 +257,23 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     return { candidates, expiresAt: new Date(expiresAt).toISOString() };
   }
 
-  public startRun(deviceId: string, commandId: string, goal: string, targetInput: RemoteRunTargetInput): Promise<RemoteRunSnapshot> {
+  public startRun(
+    deviceId: string,
+    commandId: string,
+    goal: string,
+    targetInput: RemoteRunTargetInput,
+    assistantPreferencesInput?: RunAssistantPreferencesSnapshot,
+  ): Promise<RemoteRunSnapshot> {
     const cleanGoal = validateText(goal, MAX_GOAL_CHARS, "goal");
     const cleanCommandId = validateIdentifier(commandId, "commandId");
+    let assistantPreferences: RunAssistantPreferencesSnapshot | undefined;
+    try {
+      assistantPreferences = assistantPreferencesInput === undefined
+        ? undefined
+        : normalizeRunAssistantPreferencesSnapshot(assistantPreferencesInput);
+    } catch (error) {
+      return Promise.reject(new RemoteRunApiError("INVALID_ASSISTANT_PREFERENCES", errorMessage(error)));
+    }
     let target: RemoteRunTarget;
     try {
       target = normalizeRemoteRunTarget(targetInput);
@@ -269,9 +285,14 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
     const key = deviceId + "\u0000" + cleanCommandId;
     const targetFingerprint = stableJson(target);
+    const assistantPreferencesFingerprint = createHash("sha256")
+      .update(stableJson(assistantPreferences ?? null), "utf8")
+      .digest("hex");
     const existing = this.startRequests.get(key);
     if (existing !== undefined) {
-      if (existing.goal !== cleanGoal || existing.targetFingerprint !== targetFingerprint) return Promise.reject(new RemoteRunApiError("IDEMPOTENCY_CONFLICT", "commandId was already used with different Run details"));
+      if (existing.goal !== cleanGoal || existing.targetFingerprint !== targetFingerprint || existing.assistantPreferencesFingerprint !== assistantPreferencesFingerprint) {
+        return Promise.reject(new RemoteRunApiError("IDEMPOTENCY_CONFLICT", "commandId was already used with different Run details"));
+      }
       return existing.promise;
     }
     if (this.startRequests.size >= this.maxStartRequests) {
@@ -293,8 +314,8 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       rejectPromise = rejectPromiseValue;
     });
     // Reserve the idempotency key synchronously before fresh discovery yields.
-    this.startRequests.set(key, { goal: cleanGoal, targetFingerprint, promise });
-    void this.resolveTargetAndCreateRun(deviceId, cleanGoal, target, selectedTarget)
+    this.startRequests.set(key, { goal: cleanGoal, targetFingerprint, assistantPreferencesFingerprint, promise });
+    void this.resolveTargetAndCreateRun(deviceId, cleanGoal, target, selectedTarget, assistantPreferences)
       .then(resolvePromise, rejectPromise);
     return promise;
   }
@@ -304,6 +325,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     goal: string,
     target: RemoteRunTarget,
     selectedTarget: WindowTargetSelection | undefined,
+    assistantPreferences: RunAssistantPreferencesSnapshot | undefined,
   ): Promise<RemoteRunSnapshot> {
     if (this.startInProgress) {
       throw new RemoteRunApiError("RUN_BUSY", "The Host is already resolving a target for another Run. Wait for it to finish starting.");
@@ -350,13 +372,13 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
               throw new RemoteRunApiError("MANAGED_BROWSER_PROFILE_UNAVAILABLE", "电脑端已登录网站清单无法安全读取。任务尚未启动，请检查受管浏览器配置后重试。");
             }
           }
-          return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "saved", url });
+          return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "saved", url }, assistantPreferences);
         }
-        return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "temporary", url: target.url ?? "about:blank" });
+        return await this.createRun(deviceId, goal, { mode: "browser", sessionMode: "temporary", url: target.url ?? "about:blank" }, assistantPreferences);
       }
       if (target.mode === "window") {
         if (selectedTarget === undefined) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window choice is invalid. Refresh the list and choose again.");
-        return await this.createRun(deviceId, goal, { mode: "window", selection: selectedTarget });
+        return await this.createRun(deviceId, goal, { mode: "window", selection: selectedTarget }, assistantPreferences);
       }
 
       let currentWindows: readonly WindowTargetInfo[];
@@ -399,7 +421,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
           ...(appName === undefined ? {} : { appName }),
           ...(title === undefined ? {} : { title }),
         },
-      });
+      }, assistantPreferences);
     } finally {
       this.startInProgress = false;
     }
@@ -517,7 +539,12 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     return choice;
   }
 
-  private async createRun(deviceId: string, goal: string, target: ResolvedStartTarget): Promise<RemoteRunSnapshot> {
+  private async createRun(
+    deviceId: string,
+    goal: string,
+    target: ResolvedStartTarget,
+    assistantPreferences?: RunAssistantPreferencesSnapshot,
+  ): Promise<RemoteRunSnapshot> {
     let targetLabel: RemoteWindowTargetLabel;
     let featureOverrides: ApplicationSessionRunFeatureOverrides;
     if (target.mode === "window") {
@@ -564,7 +591,8 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
     let handle: RunHandle;
     try {
-      handle = await this.session.startRun(goal, featureOverrides);
+      handle = await this.session.startRun(goal, featureOverrides, undefined,
+        assistantPreferences === undefined ? {} : { assistantPreferences });
     } catch (error) {
       const message = errorMessage(error);
       if (/owned by run|environment .*locked|pending_cleanup|already has an active Run/iu.test(message)) {

@@ -11,6 +11,7 @@ import type {
   EventId,
   GroundingCatalog,
   ModelTurn,
+  ObservationAssessment,
   ObservationFrame,
   ObservationId,
   RunId,
@@ -47,6 +48,7 @@ import {
   validateActionIntent,
   groundingComputerTools,
 } from "./index.js";
+import { currentObservationAssessmentBinding } from "./observation-assessment.js";
 
 const runId = "runtime-test" as RunId;
 const sessionId = "fake-computer" as ComputerSessionId;
@@ -276,6 +278,24 @@ class ScriptedProvider implements ProviderAdapter {
       throw new Error("fake provider script exhausted");
     }
     return turn;
+  }
+}
+
+class EventAwareProvider implements ProviderAdapter {
+  public readonly id = "event-aware-provider";
+  public readonly inputs: ModelInput[] = [];
+
+  public constructor(
+    private readonly turns: Array<(input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn>,
+    private readonly getEvents: () => readonly RuntimeEvent[],
+  ) {}
+
+  public async generate(input: ModelInput, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    options.signal.throwIfAborted();
+    this.inputs.push(input);
+    const turn = this.turns.shift();
+    if (turn === undefined) throw new Error("event-aware provider script exhausted");
+    return turn(input, this.getEvents());
   }
 }
 
@@ -2791,6 +2811,109 @@ describe("RunController Monitor online consumer", () => {
     expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("no observable change"))))).toBe(true);
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
     await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("persists a fresh assessment on a normal control turn and keeps Monitor guidance in the next Context", async () => {
+    let controller: RunController | undefined;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("assessment-first-action")] }),
+      (input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        expect(input.messages.some((message) => message.content.some((block) =>
+          block.type === "text" && block.text.includes("no observable change")))).toBe(true);
+        return {
+          type: "finish",
+          summary: "done",
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "no_effect",
+            evidence: "The current screen matches the previous screen.",
+          },
+        };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    controller = created.controller;
+    await expect(created.controller.start("assess current state")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    const response = events.filter((event) => event.type === "model.response.received").at(-1);
+    expect(response?.type).toBe("model.response.received");
+    if (response?.type === "model.response.received") {
+      expect(response.turn).toMatchObject({ observationAssessment: { actionOutcome: "no_effect", evidence: "The current screen matches the previous screen." } });
+    }
+    expect(provider.inputs).toHaveLength(2);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("turns an assessment conflict into actionable Monitor guidance in the following Context", async () => {
+    let controller: RunController | undefined;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("assessment-conflict-first")] }),
+      (_input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        return {
+          type: "tool_calls",
+          calls: [{ ...clickCall("assessment-conflict-second"), arguments: { x: 60, y: 70 } }],
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "no_effect",
+            evidence: "The screenshot visibly changed after the action.",
+          },
+        };
+      },
+      (input) => {
+        expect(input.messages.some((message) => message.content.some((block) =>
+          block.type === "text" && block.text.includes("result is uncertain")))).toBe(true);
+        return { type: "finish", summary: "checked current state" };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider, new SequencedScreenshotComputer([1, 2, 3, 4]), clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    controller = created.controller;
+    await expect(created.controller.start("reconcile assessment conflict")).resolves.toBe("succeeded");
+    expect(created.controller.getEvents().some((event) => event.type === "monitor.proposal"
+      && event.proposal === "guidance" && event.guidanceText?.includes("result is uncertain"))).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("drops missing or stale assessment observation/action bindings without failing a valid turn", async () => {
+    const invalidAssessments: Array<(assessment: ObservationAssessment) => ObservationAssessment> = [
+      (assessment) => ({ ...assessment, observationId: "stale-observation" as ObservationId }),
+      (assessment) => ({ ...assessment, actionId: "stale-action" as ActionId }),
+      (assessment) => Object.fromEntries(Object.entries(assessment).filter(([key]) => key !== "observationId")) as unknown as ObservationAssessment,
+      (assessment) => Object.fromEntries(Object.entries(assessment).filter(([key]) => key !== "actionId")) as unknown as ObservationAssessment,
+    ];
+    for (const [index, invalid] of invalidAssessments.entries()) {
+      let controller: RunController | undefined;
+      const provider = new EventAwareProvider([
+        () => ({ type: "tool_calls", calls: [clickCall(`invalid-assessment-${index}`)] }),
+        (_input, events) => {
+          const binding = currentObservationAssessmentBinding(events);
+          expect(binding).toBeDefined();
+          const valid: ObservationAssessment = {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "expected_change",
+            evidence: "Some visible evidence.",
+          };
+          return { type: "finish", summary: "still finished", observationAssessment: invalid(valid) };
+        },
+      ], () => controller?.getEvents() ?? []);
+      const created = await makeController(provider);
+      controller = created.controller;
+      await expect(created.controller.start("drop invalid optional assessment")).resolves.toBe("succeeded");
+      const response = created.controller.getEvents().filter((event) => event.type === "model.response.received").at(-1);
+      expect(response?.type).toBe("model.response.received");
+      if (response?.type === "model.response.received") expect(response.turn).not.toHaveProperty("observationAssessment");
+      await rm(created.directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects an exact same-frame repeat before Computer.execute and exposes the rejection to the next Provider turn", async () => {

@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRun, listRuns, listWindowTargets } from "./api";
 import { HomeScreen } from "./HomeScreen";
 import { ApiError, type WindowTargetList } from "./types";
+import { PreferencesProvider } from "./PreferencesContext";
+import { PREFERENCES_STORAGE_KEY } from "./preferences";
 
 vi.mock("./api", async (importOriginal) => {
   const api = await importOriginal<typeof import("./api")>();
@@ -13,8 +15,21 @@ vi.mock("./api", async (importOriginal) => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  localStorage.clear();
   window.history.replaceState(null, "", "/");
 });
+
+function renderHome() {
+  return render(<PreferencesProvider><HomeScreen /></PreferencesProvider>);
+}
+
+const defaultAssistantPreferences = {
+  version: 1 as const,
+  responseDetail: "standard" as const,
+  stepExplanation: "standard" as const,
+  preferredLanguage: "follow_conversation" as const,
+  additionalGuidance: "",
+};
 
 describe("home run-target selection", () => {
   beforeEach(() => {
@@ -31,7 +46,7 @@ describe("home run-target selection", () => {
   it("submits the default automatic target without loading or selecting a window", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
     vi.mocked(listWindowTargets).mockReturnValue(new Promise<WindowTargetList>(() => undefined));
-    render(<HomeScreen />);
+    renderHome();
 
     expect(screen.getByRole("heading", { name: "新任务" })).toBeDefined();
     expect(screen.queryByText(/电脑来完成/)).toBeNull();
@@ -44,8 +59,36 @@ describe("home run-target selection", () => {
     expect(startButton.hasAttribute("disabled")).toBe(false);
     fireEvent.click(startButton);
 
-    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find a window automatically", expect.any(String), { mode: "auto" }));
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find a window automatically", expect.any(String), { mode: "auto" }, defaultAssistantPreferences));
     expect(listWindowTargets).not.toHaveBeenCalled();
+  });
+
+  it("freezes only assistant preferences into the new Run request", async () => {
+    localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      version: 3,
+      presentation: { layoutMode: "simple", textSize: "large", highContrast: true, reduceMotion: true },
+      assistant: {
+        responseDetail: "detailed",
+        stepExplanation: "more",
+        preferredLanguage: "en",
+        additionalGuidance: "Group findings by topic.",
+      },
+      voice: { runNoticesEnabled: true, speechRate: "fast" },
+    }));
+    vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
+    renderHome();
+
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Summarize this page" } });
+    await screen.findByText("这里还没有任务");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Summarize this page", expect.any(String), { mode: "auto" }, {
+      version: 1,
+      responseDetail: "detailed",
+      stepExplanation: "more",
+      preferredLanguage: "en",
+      additionalGuidance: "Group findings by topic.",
+    }));
   });
 
   it("rotates IDs after discovery failure and 409, but retains them after generic server errors", async () => {
@@ -55,7 +98,7 @@ describe("home run-target selection", () => {
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"))
       .mockRejectedValueOnce(new ApiError("电脑正在处理另一个任务。请等待当前任务结束后再开始。", 409, "RUN_BUSY"))
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"));
-    render(<HomeScreen />);
+    renderHome();
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Retry automatic discovery" } });
@@ -85,7 +128,7 @@ describe("home run-target selection", () => {
   });
 
   it("tracks the selected task tab when navigating to the recent-tasks anchor", () => {
-    render(<HomeScreen />);
+    renderHome();
     const navigation = within(screen.getByRole("navigation", { name: "手机主导航" }));
     const newTask = navigation.getByRole("link", { name: "新任务" });
     const tasks = navigation.getByRole("link", { name: "任务" });
@@ -115,7 +158,7 @@ describe("home run-target selection", () => {
       409,
       "WINDOW_TARGET_STALE",
     ));
-    render(<HomeScreen />);
+    renderHome();
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Keep this draft while refreshing" } });
@@ -137,7 +180,7 @@ describe("home run-target selection", () => {
 
   it("submits an explicit browser URL without requesting window inventory", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
-    render(<HomeScreen />);
+    renderHome();
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Open this website" } });
@@ -155,13 +198,13 @@ describe("home run-target selection", () => {
       mode: "browser",
       sessionMode: "temporary",
       url: "https://example.com/reports?q=1",
-    }));
+    }, defaultAssistantPreferences));
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
   it("starts browser mode with no URL property when the optional field is blank", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
-    render(<HomeScreen />);
+    renderHome();
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Find the relevant website from the task" } });
@@ -172,13 +215,13 @@ describe("home run-target selection", () => {
     expect(startButton.hasAttribute("disabled")).toBe(false);
     fireEvent.click(startButton);
 
-    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find the relevant website from the task", expect.any(String), { mode: "browser", sessionMode: "temporary" }));
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Find the relevant website from the task", expect.any(String), { mode: "browser", sessionMode: "temporary" }, defaultAssistantPreferences));
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
   it("submits the explicit saved browser session mode without exposing profile details", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
-    render(<HomeScreen />);
+    renderHome();
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Use the saved travel site" } });
@@ -191,7 +234,7 @@ describe("home run-target selection", () => {
       mode: "browser",
       sessionMode: "saved",
       url: "https://travel.example/search",
-    }));
+    }, defaultAssistantPreferences));
   });
 
   it("preserves the goal and opens a refreshed manual picker after ambiguous automatic matching", async () => {
@@ -204,7 +247,7 @@ describe("home run-target selection", () => {
       409,
       "WINDOW_SELECTION_REQUIRED",
     ));
-    render(<HomeScreen />);
+    renderHome();
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Keep this goal after choosing a window" } });
@@ -216,7 +259,7 @@ describe("home run-target selection", () => {
     expect((screen.getByRole("radio", { name: /手动选择窗口/ }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByRole("alert").textContent).toContain("无法唯一确定");
     expect(screen.getByRole("button", { name: "开始任务" }).hasAttribute("disabled")).toBe(true);
-    expect(createRun).toHaveBeenCalledWith("Keep this goal after choosing a window", expect.any(String), { mode: "auto" });
+    expect(createRun).toHaveBeenCalledWith("Keep this goal after choosing a window", expect.any(String), { mode: "auto" }, defaultAssistantPreferences);
     expect(listWindowTargets).toHaveBeenCalledTimes(1);
   });
 
@@ -226,7 +269,7 @@ describe("home run-target selection", () => {
       goal: "Existing work",
       status: "running",
     }]);
-    render(<HomeScreen />);
+    renderHome();
 
     await screen.findByRole("heading", { name: "正在处理的任务" });
     expect(screen.getByRole("button", { name: "开始任务" }).hasAttribute("disabled")).toBe(true);

@@ -45,6 +45,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     ...baseConfig,
     computer: computerAssembly.config,
   };
+  // The preference snapshot has one consumer: Context. Keep its private text
+  // out of Provider, Memory, and policy factory configuration objects.
+  const factoryConfig = withoutAssistantPreferences(config);
   validateRunModuleFactories(config, dependencies);
   if (!Number.isInteger(config.cleanupDeadlineMs) || config.cleanupDeadlineMs <= 0) {
     throw new Error("cleanupDeadlineMs must be a positive integer");
@@ -82,15 +85,15 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
     const usesCompleteMemoryModule = config.memory !== "off" && dependencies.createMemoryModule !== undefined;
     const configuredEmbeddingProvider = !usesCompleteMemoryModule && memoryRetrievalMode === "hybrid"
-      ? dependencies.createMemoryEmbeddingProvider?.({ config, credentials })
+      ? dependencies.createMemoryEmbeddingProvider?.({ config: factoryConfig, credentials })
       : undefined;
     const memoryRetrievalService = config.memory === "off" || usesCompleteMemoryModule || memoryRetrievalMode === "off"
       ? undefined
       : (dependencies.createMemoryRecallService?.({
-          config,
+          config: factoryConfig,
           credentials,
           ...(configuredEmbeddingProvider === undefined ? {} : { provider: configuredEmbeddingProvider }),
-        }) ?? createMemoryRecallService(config, credentials, configuredEmbeddingProvider));
+        }) ?? createMemoryRecallService(factoryConfig, credentials, configuredEmbeddingProvider));
     if (config.planning) {
       const planRoot = resolve(config.outputDir, "plan-store");
       planningModule = dependencies.createPlanningModule?.({ runId, rootDir: planRoot })
@@ -104,7 +107,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     if (config.memory !== "off") {
       const memoryRoot = resolve(config.outputDir, "memory-store");
       if (dependencies.createMemoryModule !== undefined) {
-        memoryModule = dependencies.createMemoryModule({ runId, rootDir: memoryRoot, mode: config.memory, config, credentials });
+        memoryModule = dependencies.createMemoryModule({ runId, rootDir: memoryRoot, mode: config.memory, config: factoryConfig, credentials });
       } else {
         const memoryStore = (dependencies.createMemoryStore ?? ((rootDir) => new FileMemoryStore(rootDir)))(memoryRoot);
         memoryModule = createMemoryRunModule(runId, memoryStore, {
@@ -124,7 +127,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     const providerFactory = dependencies.createProvider ?? createProvider;
     const provider = await providerFactory({
       model: config.model,
-      config,
+      config: factoryConfig,
       assetReader,
       outputDir: config.outputDir,
       credentials,
@@ -142,18 +145,18 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         ? provider
         : await providerFactory({
             model: config.riskModel,
-            config,
+            config: factoryConfig,
             assetReader,
             outputDir: resolve(config.outputDir, "risk-review"),
             credentials,
           });
     if (riskProvider !== undefined && riskProvider !== provider) ownedProviders.push(riskProvider);
     const actionPolicy = dependencies.createActionPolicy === undefined
-      ? createActionPolicy(config, riskProvider)
-      : dependencies.createActionPolicy(config, riskProvider);
+      ? createActionPolicy(factoryConfig, riskProvider)
+      : dependencies.createActionPolicy(factoryConfig, riskProvider);
     const features = featureConfig(config);
     const contextMemoryRecall = memoryModule?.recall === undefined ? undefined : scopeMemoryRecall(memoryModule, runId);
-    const baseContextCompiler = dependencies.createContextCompiler?.(tools, features, config, contextMemoryRecall) ?? new DefaultContextCompiler(tools, {
+    const baseContextCompiler = dependencies.createContextCompiler?.(tools, features, factoryConfig, contextMemoryRecall) ?? new DefaultContextCompiler(tools, {
       mode: config.contextMode,
       maxHistoryEvents: config.contextMaxHistoryEvents,
       features,
@@ -178,7 +181,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       computer: createdComputer,
       contextCompiler,
       toolRegistry: tools,
-      policy: dependencies.createPolicy?.(config) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
+      policy: dependencies.createPolicy?.(factoryConfig) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,
       assetStore,
@@ -186,6 +189,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       onEventCommitted: eventFeed.publish,
       batching: config.batching,
       windowHandoff: config.windowHandoff ?? "off",
+      ...(config.assistantPreferences === undefined ? {} : { assistantPreferences: config.assistantPreferences }),
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
       ...(memoryMutationApplier === undefined ? {} : { memoryMutationApplier }),
@@ -530,6 +534,11 @@ function featureConfig(config: ResolvedRunConfig): RunFeatureConfig {
     riskGuard: config.riskGuard,
     monitor: config.monitor ?? "off",
   };
+}
+
+function withoutAssistantPreferences(config: ResolvedRunConfig): ResolvedRunConfig {
+  const { assistantPreferences: _privateContextInput, ...factoryConfig } = config;
+  return factoryConfig;
 }
 
 function generatedRunId(): RunId {

@@ -163,7 +163,7 @@ describe("GLM provider adapter", () => {
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
     const turn = await adapter.generate(input(), { signal: new AbortController().signal });
     expect(turn).toEqual({ type: "tool_calls", calls: [{ id: "glm-call", name: "click", arguments: { x: 400, y: 150 } }] });
-    expect(client.body?.tools).toEqual([{ type: "function", function: { name: "click", description: "click Coordinates x,y are normalized numbers from 0 to 1000.", parameters: { type: "object" } } }]);
+    expect(client.body?.tools).toMatchObject([{ type: "function", function: { name: "click", description: "click Coordinates x,y are normalized numbers from 0 to 1000.", parameters: { type: "object", properties: { observationAssessment: { type: "object" } } } } }]);
     expect(client.body?.thinking).toEqual({ type: "disabled" });
     const messages = client.body?.messages as Array<Record<string, unknown>>;
     const userContent = messages[1]?.content as Array<Record<string, unknown>>;
@@ -204,10 +204,65 @@ describe("GLM provider adapter", () => {
   });
 
   it("maps control definitions from the shared tool projection", async () => {
-    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Observed control result" }) } }] } }] });
+    const observationAssessment = { observationId: "obs-current", actionId: "action-previous", actionOutcome: "expected_change", evidence: "The requested panel is visible." };
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Observed control result", observationAssessment }) } }] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
-    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success", summary: "Observed control result" });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success", summary: "Observed control result", observationAssessment });
     expect((client.body?.tools as Array<Record<string, unknown>>).map((item) => (item.function as Record<string, unknown>).name)).toContain("terminate");
+  });
+
+  it("extracts a valid assessment from an action call, drops invalid optional data, and keeps its schema stable", async () => {
+    const assessment = {
+      observationId: "observation-current",
+      actionId: "action-previous",
+      actionOutcome: "unexpected_change",
+      evidence: "The page changed to an error panel.",
+      progress: { kind: "blocked", summary: "A private code 123456 is shown" },
+    };
+    const client = new Client({ choices: [{ message: { content: "I checked the page.", tool_calls: [{
+      id: "assessed-click", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, observationAssessment: assessment }) },
+    }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({
+      type: "tool_calls",
+      calls: [{ name: "click", arguments: { x: 400, y: 150 } }],
+      observationAssessment: assessment,
+    });
+    expect(JSON.stringify(client.body?.tools)).toContain("observationAssessment");
+    const systemText = String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content);
+    expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).not.toContain("observation-current");
+    expect(JSON.stringify(client.body?.tools)).not.toContain("123456");
+
+    const invalid = new Client({ choices: [{ message: { content: "", tool_calls: [{
+      id: "invalid-optional-assessment", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, observationAssessment: { ...assessment, actionOutcome: "confident" } }) },
+    }] } }] });
+    const invalidTurn = await new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: invalid }).generate(input(), { signal: new AbortController().signal });
+    expect(invalidTurn).toMatchObject({ type: "tool_calls", calls: [{ arguments: { x: 400, y: 150 } }] });
+    expect(invalidTurn).not.toHaveProperty("observationAssessment");
+  });
+
+  it("keeps the stable system and tool schema prefix unchanged when historical assessment content changes", async () => {
+    const capture = async (evidence: string) => {
+      const client = new Client({ choices: [{ message: { content: "done" } }] });
+      const modelInput = {
+        ...input(),
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: "continue" }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: `Prior model-reported ObservationAssessment: ${evidence}` }] },
+        ],
+      };
+      const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+      const prepared = await adapter.prepare(modelInput, { signal: new AbortController().signal });
+      await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+      return { body: client.body, prepared };
+    };
+    const first = await capture("no_effect on the current form");
+    const second = await capture("unexpected_change to an error screen");
+    expect((first.body?.messages as unknown[])[0]).toEqual((second.body?.messages as unknown[])[0]);
+    expect(first.body?.tools).toEqual(second.body?.tools);
+    expect(first.body?.messages).not.toEqual(second.body?.messages);
+    expect(first.prepared.payloadHash).not.toBe(second.prepared.payloadHash);
   });
 
   it("projects Planning and Memory activation guidance into Function tool schemas", async () => {

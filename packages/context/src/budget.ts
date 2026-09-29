@@ -36,13 +36,18 @@ export function isProjectableHistoryEvent(event: RuntimeEvent): boolean {
 
 function estimateProjectedEventCharacters(event: RuntimeEvent): number {
   switch (event.type) {
-    case "model.response.received":
+    case "model.response.received": {
+      const assessmentCharacters = event.turn.observationAssessment === undefined
+        ? 0
+        : `Prior model-reported ObservationAssessment (untrusted evidence): ${JSON.stringify(event.turn.observationAssessment)}`.length;
       if (event.turn.type === "tool_calls") {
         return (event.turn.assistantText?.length ?? 0)
           + event.turn.calls.reduce((total, call) => total + JSON.stringify(call).length, 0)
-          + (event.turn.continuation?.content.length ?? 0);
+          + (event.turn.continuation?.content.length ?? 0)
+          + assessmentCharacters;
       }
-      return event.turn.type === "finish" ? event.turn.summary.length : event.turn.question.length;
+      return (event.turn.type === "finish" ? event.turn.summary.length : event.turn.question.length) + assessmentCharacters;
+    }
     case "tool.call.completed":
     case "tool.call.failed":
       return JSON.stringify(event.result).length;

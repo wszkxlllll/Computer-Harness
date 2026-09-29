@@ -18,6 +18,7 @@ import type {
   ObservationFrame,
   ObservationId,
   RunId,
+  RunAssistantPreferencesSnapshot,
   RunOutcome,
   RuntimeEvent,
   RuntimeEventData,
@@ -66,6 +67,7 @@ import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeated
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 import { DeterministicGroundingSelector, type GroundingSelector, type GroundingSelectionQuery, type GroundingStructuredToolHint } from "./grounding-selector.js";
 import { finishSummaryRejectionReason } from "./finish-summary.js";
+import { currentObservationAssessmentBinding, parseObservationAssessment } from "./observation-assessment.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -101,6 +103,8 @@ export interface RunControllerDependencies {
   memoryMutationApplier?: (runId: RunId, mutation: MemoryMutation) => Promise<void>;
   /** One immutable source for prompt, Runtime and Registry feature semantics. */
   features?: RunFeatureConfig;
+  /** User-level response preferences frozen for this Run; never affects action policy. */
+  assistantPreferences?: RunAssistantPreferencesSnapshot;
   /** Disabled by default so the existing one-computer-call baseline is stable. */
   batching?: "off" | "same-control-input-v1";
   /** Runtime-owned, deterministic hot-element projection; Computer stays context-agnostic. */
@@ -327,6 +331,7 @@ export class RunController {
   private readonly batching: "off" | "same-control-input-v1";
   private readonly groundingSelector: GroundingSelector;
   private readonly features: RunFeatureConfig;
+  private readonly assistantPreferences: RunAssistantPreferencesSnapshot | undefined;
   private readonly monitorMode: MonitorPolicyMode;
   private readonly cleanupDeadlineMs: number;
   private readonly abortController = new AbortController();
@@ -390,6 +395,9 @@ export class RunController {
       memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
       batching: this.batching,
     };
+    this.assistantPreferences = dependencies.assistantPreferences === undefined
+      ? undefined
+      : Object.freeze({ ...dependencies.assistantPreferences });
     this.monitorMode = this.features.monitor ?? "off";
     if (this.monitorMode !== "off") {
       this.monitorState = createProgressMonitorState(this.runId);
@@ -629,6 +637,7 @@ export class RunController {
               ...(this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
               ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
               features: this.features,
+              ...(this.assistantPreferences === undefined ? {} : { assistantPreferences: this.assistantPreferences }),
               ...(this.monitorPendingGuidance === undefined ? {} : { monitorGuidance: this.monitorPendingGuidance }),
                ...(this.latestObservation === undefined ? {} : { latestObservation: this.observationForContext(this.latestObservation) }),
             },
@@ -765,6 +774,7 @@ export class RunController {
           }
 
           this.throwIfAborted();
+          turn = this.validateTurnObservationAssessment(turn);
           await this.commitEvent({
             type: "model.response.received",
             turn,
@@ -2543,6 +2553,20 @@ export class RunController {
       // committed, leave the already-completed action outcome untouched.
       await this.recordMonitorDiagnosticFailure(error);
     }
+  }
+
+  private validateTurnObservationAssessment(turn: ModelTurn): ModelTurn {
+    if (turn.observationAssessment === undefined) return turn;
+    const assessment = parseObservationAssessment(turn.observationAssessment);
+    const binding = currentObservationAssessmentBinding(this.events);
+    if (assessment !== undefined && binding !== undefined
+      && assessment.observationId === binding.observationId
+      && assessment.actionId === binding.actionId
+      && this.latestObservation?.id === binding.observationId) {
+      return { ...turn, observationAssessment: assessment };
+    }
+    const { observationAssessment: _discarded, ...validTurn } = turn;
+    return validTurn as ModelTurn;
   }
 
   private clearMonitorPendingRecommendations(): void {

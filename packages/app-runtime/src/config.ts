@@ -1,6 +1,6 @@
 import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryRunModule, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
 import type { PlanStore, PlanningRunModule } from "@computer-harness/planning";
-import type { RunId, RunOutcome } from "@computer-harness/protocol";
+import type { RunAssistantPreferencesSnapshot, RunId, RunOutcome } from "@computer-harness/protocol";
 import type {
   ActionPolicy,
   AssetReader,
@@ -67,6 +67,8 @@ export interface ResolvedRunConfig {
   contextMode: "raw" | "recent";
   contextMaxHistoryEvents: number;
   contextMaxInputTokens?: number;
+  /** Frozen, provider-neutral answer preferences for this Run only. */
+  assistantPreferences?: RunAssistantPreferencesSnapshot;
   riskProfile: "experiment" | "live-interactive";
   riskGuard: "off" | "layered";
   /** Defaults to off; DOM/hybrid require an explicit HTTP(S) URL or about:blank. */

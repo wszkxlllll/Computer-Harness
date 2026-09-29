@@ -18,6 +18,7 @@
 | **选择目标窗口** | TUI 按应用名和标题选择；唯一可信的本地匹配可自动绑定，不确定时交给用户。支持受控的激活与窗口交接。 |
 | **结合视觉与控件信息** | 可选 UIA / Accessibility；托管浏览器可增加 DOM。元素点击与普通坐标操作共存。 |
 | **控制执行过程** | 暂停、恢复、纠正、审批和 Abort 进入同一个 Runtime，不另建执行循环。 |
+| **个性化回答** | 手机可设置详略、步骤说明、语言和最多 600 字的补充说明；每个新 Run 单独冻结偏好并投影到 Context。 |
 | **组合实验策略** | Context、Planning、Run Memory、受限 Action Batch、Monitor 和 Risk Guard 按配置参与执行。 |
 | **保留运行证据** | 记录事件、截图、动作回执与结果，区分工具完成、模型报告和真实任务验收。 |
 
@@ -122,7 +123,10 @@ TYPESAFE_API_KEY=your_typesafe_key
 
 该命令只在 Host 和 profile 所有者均已停止时运行，并将 Host-owned profile 中的陈旧运行标记归档，不删除登录数据或任意用户文件。
 
+设置中的助手详略、步骤说明、语言和补充回答说明存于当前浏览器的 localStorage，不会跨浏览器或设备同步。开始新 Run 时，Web 只提交助手偏好白名单；Host 校验后冻结为该 Run 的版本化快照。修改只影响之后开始的 Run。实际偏好作为 Goal 后的动态用户消息发送给已配置模型，随后仍会提供历史纠正与当前观察；若预算不足，Host 优先保留纠正并省略偏好。当前明确要求与纠正、系统/安全指令、审批和工具策略始终优先。600 字上限按 Unicode 字符计；Context trace 只保存枚举、字符数和补充说明 SHA-256，不保存原文。当前完成代码和离线合同测试，尚未做真实模型行为对照或手机真机无障碍验收。
+
 - [手机使用指南](./docs/mobile-control-guide-2026-09-26.md)：配对、操作和配置边界。
+- [助手回答偏好实施记录](./docs/assistant-preferences-p1-implementation-2026-09-29.md)：Run 快照生命周期、Context 投影、trace 脱敏与离线验证范围。
 - [手机目标模式与浏览器接入记录](./docs/mobile-target-modes-2026-09-27.md)：自动选窗、临时/已登录浏览器、profile 安全边界和验证证据。
 - [服务器部署](./apps/relay/README.md)：HTTPS/WSS、凭据、服务运维与回滚。
 - [验证与问题清单](./docs/mobile-control-issues-2026-09-26.md)：哪些已验证，哪些尚未放行。
@@ -132,6 +136,8 @@ TYPESAFE_API_KEY=your_typesafe_key
 手机配对页面的 Goal、任务纠正和待回答问题都可按“按下说话”录入。录音明确由用户开始；录音期间所属表单会锁定，最多录制 60 秒，到时自动完成收尾；完整转写会填入原文本框，检查编辑后仍需手动发送。上传首块立即发、网络在途时会把后续音频按序最多四块一批；原始音频不会写入轨迹、截图或日志。
 
 实时识别需要在 Host 私有环境文件中配置 `DASHSCOPE_API_KEY`，以及安全的 `DASHSCOPE_WORKSPACE_ID` 或显式 `DASHSCOPE_REALTIME_ASR_ENDPOINT`。显式 endpoint 优先；只提供 workspace ID 时 Host 会派生北京专属 WSS `/api-ws/v1/realtime` endpoint。显式 endpoint 存在时，过期或不安全的 workspace 值会被忽略且不会作为请求头发送；没有显式 endpoint 时，不安全 workspace 会使能力保持 unavailable。浏览器不接触密钥。能力查询只读取 Host 的本地配置，不代表远端 API 已连通。mock/离线回归已通过，真实 Qwen 短探针（约 4 秒合成语音）也已通过；手机麦克风、WAN Relay 和实际弱网时延尚未验收，不要把它视为已验证的稳定语音能力。
+
+运行通知可在任务页面偏好中显式开启。普通 GUI action 完成不会播报进度；只有当前 Observation/action 匹配、Monitor transition 为 `changed` 且 assessment 为 `expected_change` 的 milestone 才会播报固定里程碑提示。受阻、无效果或不确定结论只作为后续模型 Context guidance，不语音播报。assessment 随正常模型回合传输，不额外发起模型请求，也不能覆盖 Runtime 回执或确定性 Monitor 证据。
 
 Host 当前使用固定组合预设：Planning、Fact Memory、lexical retrieval、recent Context、same-control input Batch、layered Guard、shadow Monitor 和人工确认的窗口交接；原生窗口目标默认不启用 UIA/DOM，受管浏览器目标使用 Hybrid Grounding。Host **不会继承 TUI 上次选择的功能**。不要同时用手机与 TUI 控制同一桌面；手机公网完整业务任务和无障碍验收仍需单独完成。
 

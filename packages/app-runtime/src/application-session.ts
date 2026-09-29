@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import type { RunId, RunOutcome } from "@computer-harness/protocol";
+import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot, type RunId, type RunOutcome } from "@computer-harness/protocol";
 import type { RunReport } from "./reporting.js";
 import { createRun } from "./run-factory.js";
 import {
@@ -12,7 +12,7 @@ import {
 } from "./environment-owner.js";
 import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
 
-export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId">;
+export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId" | "assistantPreferences">;
 
 export interface WindowTargetInfo {
   readonly pid: number;
@@ -45,6 +45,11 @@ export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   /** Host-private and never projected to Provider or Run reports. */
   managedBrowserProfileRoot?: string;
 };
+
+/** Per-Run non-feature input kept separate from computer and Guard overrides. */
+export interface ApplicationSessionRunOptions {
+  readonly assistantPreferences?: RunAssistantPreferencesSnapshot;
+}
 
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";
 
@@ -147,9 +152,13 @@ export class ApplicationSession {
     goal: string,
     featureOverrides: ApplicationSessionRunFeatureOverrides = {},
     starter?: Parameters<RunHandle["start"]>[0],
+    runOptions: ApplicationSessionRunOptions = {},
   ): Promise<RunHandle> {
     if (this.closed) throw new Error("application session is closed");
     if (goal.trim().length === 0) throw new Error("application session requires a non-empty goal");
+    const assistantPreferences = runOptions.assistantPreferences === undefined
+      ? undefined
+      : normalizeRunAssistantPreferencesSnapshot(runOptions.assistantPreferences);
     await this.waitUntilIdleAfterTerminal();
     // waitUntilIdleAfterTerminal() is async even when the session was already
     // idle. The caller may close the session during that yield; do not acquire
@@ -171,6 +180,9 @@ export class ApplicationSession {
       goal,
       runId,
       outputDir: resolve(this.config.outputDir, runId),
+      ...(assistantPreferences === undefined
+        ? {}
+        : { assistantPreferences }),
     };
     if (config.computer.kind === "cua" && (windowTarget !== undefined || windowDeliveryMode !== undefined)) {
       if (windowTarget === null || windowDeliveryMode === null) {

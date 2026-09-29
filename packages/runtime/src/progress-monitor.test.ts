@@ -93,6 +93,27 @@ function transition(
   });
 }
 
+function assessmentResponse(
+  runId: RunId,
+  observationId: string,
+  actionId: string,
+  actionOutcome: "expected_change" | "no_effect" | "unexpected_change" | "uncertain",
+): RuntimeEvent {
+  return eventForRun(runId, {
+    type: "model.response.received",
+    turn: {
+      type: "finish",
+      summary: "done",
+      observationAssessment: {
+        observationId: observationId as ObservationId,
+        actionId: actionId as ActionId,
+        actionOutcome,
+        evidence: "Visible state compared with the prior observation.",
+      },
+    },
+  });
+}
+
 describe("progress monitor foundation", () => {
   const runId = "monitor-run" as RunId;
 
@@ -253,6 +274,41 @@ describe("progress monitor foundation", () => {
     expect(forged.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
     expect(forged.output.evidence.map((item) => item.kind)).toContain("action_binding_unavailable");
     expect(shouldRejectRepeatedNoChange(forged.state, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
+  });
+
+  it("reconciles assessments with the exact action, latest observation, receipt, and visual transition", () => {
+    const stateFor = (transitionKind: "changed" | "unchanged" | "unknown", receiptStatus: "completed" | "failed" = "completed") => {
+      let state = createProgressMonitorState(runId);
+      state = reduceProgressMonitor(state, observation(runId, "assessment-before")).state;
+      state = reduceProgressMonitor(state, click(runId, "assessment-action", "assessment-before")).state;
+      state = reduceProgressMonitor(state, receipt(runId, "assessment-action", receiptStatus)).state;
+      state = reduceProgressMonitor(state, observation(runId, "assessment-current")).state;
+      state = reduceProgressMonitor(state, transition(runId, "assessment-action", "assessment-current", transitionKind, "assessment-before")).state;
+      return state;
+    };
+
+    const noEffect = reduceProgressMonitor(stateFor("unchanged"), assessmentResponse(runId, "assessment-current", "assessment-action", "no_effect"));
+    expect(noEffect.output.assessmentOutcome).toBe("no_effect");
+    expect(noEffect.output.reasons.map((reason) => reason.code)).toContain("no_observed_change");
+    expect(noEffect.output.evidence.map((item) => item.kind)).toContain("semantic_assessment");
+    expect(noEffect.output.evidence.map((item) => item.kind)).toContain("visual_transition_unchanged");
+
+    const unexpected = reduceProgressMonitor(stateFor("changed"), assessmentResponse(runId, "assessment-current", "assessment-action", "unexpected_change"));
+    expect(unexpected.output.assessmentOutcome).toBe("unexpected_change");
+    expect(unexpected.output.reasons.map((reason) => reason.code)).toContain("unexpected_change");
+
+    const conflict = reduceProgressMonitor(stateFor("unchanged"), assessmentResponse(runId, "assessment-current", "assessment-action", "expected_change"));
+    expect(conflict.output.assessmentOutcome).toBe("uncertain");
+    expect(conflict.output.reasons.map((reason) => reason.code)).toContain("assessment_uncertain");
+
+    const receiptError = reduceProgressMonitor(stateFor("unknown", "failed"), assessmentResponse(runId, "assessment-current", "assessment-action", "expected_change"));
+    expect(receiptError.output.assessmentOutcome).toBe("uncertain");
+    expect(receiptError.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
+
+    const staleObservation = reduceProgressMonitor(stateFor("changed"), assessmentResponse(runId, "assessment-before", "assessment-action", "expected_change"));
+    expect(staleObservation.output.assessmentOutcome).toBe("uncertain");
+    const staleAction = reduceProgressMonitor(stateFor("changed"), assessmentResponse(runId, "assessment-current", "older-action", "expected_change"));
+    expect(staleAction.output.assessmentOutcome).toBe("uncertain");
   });
 
   it("bounds observation/action history and resets it when the run changes", () => {

@@ -6,6 +6,7 @@ import type {
   Computer,
   ComputerSession,
   ContextCompiler,
+  ModelInput,
   ProviderAdapter,
   ActionPolicyDecision,
   RunOutcome,
@@ -66,11 +67,12 @@ function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promi
   } as unknown as Computer;
 }
 
-function providerFor(options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[] }): ProviderAdapter {
+function providerFor(options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[]; onModelInput?: (input: ModelInput) => void }): ProviderAdapter {
   let turns = 0;
   return {
     id: "remote-api-provider",
-    async generate() {
+    async generate(input: ModelInput) {
+      options.onModelInput?.(input);
       turns += 1;
       const scriptedTurn = options.turns?.[turns - 1];
       if (scriptedTurn !== undefined) return structuredClone(scriptedTurn);
@@ -96,6 +98,7 @@ function createFixture(
     readManagedBrowserStartupUrls?: () => Promise<readonly string[]>;
     closeComputer?: () => Promise<void>;
     runNotices?: boolean;
+    onModelInput?: (input: ModelInput) => void;
   },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
@@ -236,6 +239,20 @@ describe("ApplicationRemoteRunApi", () => {
         if (event.type === "run.event") initialEvents.push(event as unknown as { sequence: number; data?: Record<string, unknown> });
       });
       initialSubscription.close();
+      const startNotices = initialEvents.filter((event) => event.data?.type === "run.notice" && event.data.text === "任务已开始。");
+      expect(startNotices).toHaveLength(1);
+      expect(startNotices[0]?.data).toMatchObject({
+        kind: "progress",
+        text: "任务已开始。",
+        delivery: "polite",
+        eventSequence: 0,
+      });
+      expect(JSON.stringify(startNotices[0])).not.toContain("Check a schedule");
+      const startReplay: unknown[] = [];
+      const startReplaySubscription = api.subscribe("device-one", started.runId, startNotices[0]!.sequence - 1, (event) => startReplay.push(event));
+      startReplaySubscription.close();
+      expect(startReplay.filter((event) => JSON.stringify(event).includes(String(startNotices[0]?.data?.noticeId)))).toHaveLength(1);
+
       const questionNotice = initialEvents.find((event) => event.data?.type === "run.notice" && event.data.kind === "question");
       const pendingRequestId = api.getRun("device-one", started.runId)?.pendingRequest?.requestId;
       expect(questionNotice?.data).toEqual({
@@ -274,6 +291,7 @@ describe("ApplicationRemoteRunApi", () => {
       const resultNotices = terminalEvents.filter((event) => event.data?.type === "run.notice" && event.data.kind === "result");
       expect(resultNotices).toHaveLength(1);
       expect(resultNotices[0]?.data?.text).toBe("本次运行结束，请查看结果。");
+      expect(terminalEvents.some((event) => event.data?.type === "run.notice" && event.data.text === "任务已开始。")).toBe(false);
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -498,6 +516,85 @@ describe("ApplicationRemoteRunApi", () => {
       expect(events.length).toBeGreaterThan(0);
       expect(events).toEqual(events.map((_value, index) => index + 1));
       expect(() => api.subscribe("device-two", first.runId, 0, () => undefined)).toThrow(RemoteRunApiError);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes assistant preferences per Run, fingerprints them for idempotency, and leaves no residue", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-assistant-preferences-"));
+    const modelInputs: ModelInput[] = [];
+    const { api, session } = createFixture(outputDir, {
+      summary: "Preferences remain private to the Run context.",
+      onModelInput: (input) => modelInputs.push(input),
+    });
+    const firstPreferences = {
+      version: 1 as const,
+      responseDetail: "detailed" as const,
+      stepExplanation: "more" as const,
+      preferredLanguage: "zh-CN" as const,
+      additionalGuidance: "Group findings by topic.",
+    };
+    try {
+      const firstPromise = api.startRun("device-one", "prefs-idempotency", "Summarize this page", { mode: "browser" }, firstPreferences);
+      firstPreferences.additionalGuidance = "Changed after the request started.";
+      const repeatedPromise = api.startRun("device-one", "prefs-idempotency", "Summarize this page", { mode: "browser" }, {
+        ...firstPreferences,
+        additionalGuidance: "Group findings by topic.",
+      });
+      await expect(api.startRun("device-one", "prefs-idempotency", "Summarize this page", { mode: "browser" }, {
+        version: 1,
+        responseDetail: "concise",
+        stepExplanation: "standard",
+        preferredLanguage: "en",
+        additionalGuidance: "A different preference set.",
+      })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+
+      const first = await firstPromise;
+      const repeated = await repeatedPromise;
+      expect(repeated.runId).toBe(first.runId);
+      await session.waitForActiveRun();
+      const firstInput = modelInputs[0]!;
+      const firstTrace = firstInput.contextBudget?.trace;
+      expect(firstTrace?.assistantPreferences).toMatchObject({
+        projectionVersion: 1,
+        included: true,
+        responseDetail: "detailed",
+        stepExplanation: "more",
+        preferredLanguage: "zh-CN",
+        additionalGuidancePresent: true,
+        additionalGuidanceCharacters: "Group findings by topic.".length,
+      });
+      expect(JSON.stringify(firstTrace)).not.toContain("Group findings by topic.");
+      expect(firstInput.messages.some((message) => message.role === "user" && message.content.some((block) =>
+        block.type === "text" && block.text.includes("Group findings by topic."),
+      ))).toBe(true);
+      expect(JSON.stringify(firstInput.messages)).not.toContain("Changed after the request started.");
+
+      const second = await api.startRun("device-one", "prefs-next-run", "Summarize this page", { mode: "browser" }, {
+        version: 1,
+        responseDetail: "concise",
+        stepExplanation: "standard",
+        preferredLanguage: "en",
+        additionalGuidance: "Use a short numbered list.",
+      });
+      await session.waitForActiveRun();
+      const secondInput = modelInputs[1]!;
+      expect(secondInput.contextBudget?.trace?.stablePrefixHash).toBe(firstTrace?.stablePrefixHash);
+      expect(secondInput.messages.some((message) => message.content.some((block) =>
+        block.type === "text" && block.text.includes("Use a short numbered list."),
+      ))).toBe(true);
+
+      const third = await api.startRun("device-one", "prefs-omitted", "Summarize this page", { mode: "browser" });
+      await session.waitForActiveRun();
+      const thirdInput = modelInputs[2]!;
+      expect(second.runId).not.toBe(first.runId);
+      expect(third.runId).not.toBe(second.runId);
+      expect(thirdInput.contextBudget?.trace?.assistantPreferences).toBeUndefined();
+      expect(thirdInput.contextBudget?.trace?.stablePrefixHash).toBe(firstTrace?.stablePrefixHash);
+      expect(JSON.stringify(thirdInput.messages)).not.toContain("Group findings by topic.");
+      expect(JSON.stringify(api.getRun("device-one", first.runId))).not.toContain("Group findings by topic.");
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });

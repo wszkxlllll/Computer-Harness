@@ -13,6 +13,7 @@ import {
   type WindowTargetList,
 } from "./types";
 import type { Pcm16AudioChunk, VoiceInputCapabilities, VoiceSessionUpdate } from "@computer-harness/voice";
+import type { RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 
 export { ApiError } from "./types";
 
@@ -146,10 +147,15 @@ export function listWindowTargets(): Promise<WindowTargetList> {
   return request("/api/windows");
 }
 
-export function createRun(goal: string, commandId: string, target: RunTarget): Promise<{ runId: string; status: string }> {
+export function createRun(
+  goal: string,
+  commandId: string,
+  target: RunTarget,
+  assistantPreferences?: RunAssistantPreferencesSnapshot,
+): Promise<{ runId: string; status: string }> {
   return request("/api/runs", {
     method: "POST",
-    body: JSON.stringify({ commandId, goal, target }),
+    body: JSON.stringify({ commandId, goal, target, ...(assistantPreferences === undefined ? {} : { assistantPreferences }) }),
   }, "phone");
 }
 

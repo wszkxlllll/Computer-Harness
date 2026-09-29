@@ -797,6 +797,16 @@ const modelContinuationSchema = z.object({
   kind: z.literal("reasoning_content"),
   content: z.string(),
 });
+const observationAssessmentSchema = z.object({
+  observationId: nonEmptyString.max(128),
+  actionId: nonEmptyString.max(128),
+  actionOutcome: z.enum(["expected_change", "no_effect", "unexpected_change", "uncertain"]),
+  evidence: nonEmptyString.max(240),
+  progress: z.object({
+    kind: z.enum(["milestone", "blocked"]),
+    summary: nonEmptyString.max(160),
+  }).optional(),
+});
 const toolCallSchema = z.object({
   id: nonEmptyString,
   name: nonEmptyString,
@@ -812,14 +822,16 @@ const modelTurnSchema = z.union([
     type: z.literal("tool_calls"),
     calls: z.array(toolCallSchema),
     assistantText: z.string().optional(),
+    observationAssessment: observationAssessmentSchema.optional(),
     usage: modelUsageSchema.optional(),
     continuation: modelContinuationSchema.optional(),
   }),
-  z.object({ type: z.literal("user_input_required"), question: nonEmptyString, usage: modelUsageSchema.optional() }),
+  z.object({ type: z.literal("user_input_required"), question: nonEmptyString, observationAssessment: observationAssessmentSchema.optional(), usage: modelUsageSchema.optional() }),
   z.object({
     type: z.literal("finish"),
     summary: nonEmptyString,
     reportedStatus: z.enum(["success", "failure"]).optional(),
+    observationAssessment: observationAssessmentSchema.optional(),
     usage: modelUsageSchema.optional(),
   }),
 ]);
@@ -1008,6 +1020,18 @@ const contextTraceSchema = z.object({
       localIntentSource: z.enum(["user_correction", "active_plan", "goal_background", "declared_effect", "provider_hint"]).optional(),
       actionId: nonEmptyString.optional(),
     }).optional(),
+  }).optional(),
+  assistantPreferences: z.object({
+    projectionVersion: z.literal(1),
+    included: z.boolean(),
+    omittedReason: z.literal("budget").optional(),
+    estimatedTokens: z.number().int().nonnegative(),
+    responseDetail: z.enum(["concise", "standard", "detailed"]),
+    stepExplanation: z.enum(["standard", "more"]),
+    preferredLanguage: z.enum(["follow_conversation", "zh-CN", "en"]),
+    additionalGuidancePresent: z.boolean(),
+    additionalGuidanceCharacters: z.number().int().nonnegative(),
+    additionalGuidanceSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   }).optional(),
   observationIncluded: z.boolean(),
   monitorGuidanceIncluded: z.boolean().optional(),

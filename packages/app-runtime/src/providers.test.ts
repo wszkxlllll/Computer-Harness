@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ModelInput } from "@computer-harness/runtime";
-import type { AssetRef } from "@computer-harness/protocol";
+import { DefaultContextCompiler } from "@computer-harness/context";
+import type { AssetRef, RunAssistantPreferencesSnapshot, RunId } from "@computer-harness/protocol";
+import { createDefaultToolRegistry, type ModelInput } from "@computer-harness/runtime";
 import { createProvider, type ProviderHttpClient, type ResolvedRunConfig } from "./index.js";
 
 function config(overrides: Partial<ResolvedRunConfig> = {}): ResolvedRunConfig {
@@ -93,6 +94,68 @@ describe("app-runtime provider factory", () => {
     const qwen = createProvider({ model: "qwen3.8-flash", config: config({ model: "qwen3.8-flash", qwenCoordinateMode: "normalized_1000", qwenThinking: "low", qwenOutputMode: "strict_json" }), assetReader, outputDir: "runs/qwen", credentials: { qwenApiKey: "fixture-qwen-key" } });
     expect(glm.id).toBe("glm-5.3-flash");
     expect(qwen.id).toBe("qwen3.8-flash");
+  });
+
+  it("sends one identical shared Context preference projection to GLM and Qwen", async () => {
+    const guidance = "Group findings by topic.";
+    const preferences: RunAssistantPreferencesSnapshot = {
+      version: 1,
+      responseDetail: "detailed",
+      stepExplanation: "more",
+      preferredLanguage: "zh-CN",
+      additionalGuidance: guidance,
+    };
+    const compiled = await new DefaultContextCompiler(createDefaultToolRegistry()).compile({
+      runId: "provider-preferences" as RunId,
+      goal: "Summarize this page.",
+      recentEvents: [],
+      assistantPreferences: preferences,
+    }, new AbortController().signal);
+    const glmFinish: Record<string, unknown> = { choices: [{ message: { content: "Summary ready." } }] };
+    const qwenClick: Record<string, unknown> = {
+      choices: [{
+        finish_reason: "tool_calls",
+        message: { content: null, tool_calls: [{ id: "qwen-pref-click", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 20, y: 30 }) } }] },
+      }],
+    };
+    let glmBody: Record<string, unknown> | undefined;
+    let qwenBody: Record<string, unknown> | undefined;
+    const httpClients: NonNullable<Parameters<typeof createProvider>[0]["httpClients"]> = {
+      glm: { async post(_url, body) { glmBody = body; return glmFinish; } },
+      qwen: { async post(_url, body) { qwenBody = body; return qwenClick; } },
+    };
+    const signal = new AbortController().signal;
+    const glm = createProvider({
+      model: "glm-5.3-flash",
+      config: config({ model: "glm-5.3-flash" }),
+      assetReader,
+      outputDir: "runs/glm-preferences",
+      credentials: { glmApiKey: "fixture-glm-key" },
+      httpClients,
+    });
+    const qwen = createProvider({
+      model: "qwen3.8-flash",
+      config: config({ model: "qwen3.8-flash", qwenCoordinateMode: "actual_pixels", qwenThinking: "disabled", qwenOutputMode: "native_tools" }),
+      assetReader,
+      outputDir: "runs/qwen-preferences",
+      credentials: { qwenApiKey: "fixture-qwen-key" },
+      httpClients,
+    });
+
+    await expect(glm.generate(compiled, { signal })).resolves.toMatchObject({ type: "finish", summary: "Summary ready." });
+    await expect(qwen.generate(compiled, { signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click" }] });
+
+    const compiledPreferenceMessages = compiled.messages.filter((message) => message.content.some((block) => block.type === "text" && block.text.includes(guidance)));
+    expect(compiledPreferenceMessages).toHaveLength(1);
+    expect(compiledPreferenceMessages[0]?.content.filter((block) => block.type === "text" && block.text.includes(guidance))).toHaveLength(1);
+    const glmRequest = JSON.stringify(glmBody ?? {});
+    const qwenRequest = JSON.stringify(qwenBody ?? {});
+    expect(glmRequest).toContain(guidance);
+    expect(qwenRequest).toContain(guidance);
+    expect(glmRequest.split(guidance)).toHaveLength(2);
+    expect(qwenRequest.split(guidance)).toHaveLength(2);
+    expect(glmRequest).not.toContain("assistantPreferences");
+    expect(qwenRequest).not.toContain("assistantPreferences");
   });
 
   it("preserves GLM request endpoint, thinking mode, and canonical tool projection", async () => {

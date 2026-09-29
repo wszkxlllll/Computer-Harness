@@ -30,7 +30,7 @@ describe("versioned local preferences", () => {
     const preferences = {
       version: PREFERENCES_VERSION,
       presentation: { layoutMode: "simple" as const, textSize: "large" as const, highContrast: true, reduceMotion: true },
-      assistant: { responseDetail: "detailed" as const, stepExplanation: "more" as const, preferredLanguage: "en" as const },
+      assistant: { responseDetail: "detailed" as const, stepExplanation: "more" as const, preferredLanguage: "en" as const, additionalGuidance: "" },
       voice: { runNoticesEnabled: true, speechRate: "fast" as const },
     };
     expect(writePreferences(preferences, storage)).toBe(true);
@@ -72,10 +72,41 @@ describe("versioned local preferences", () => {
     expect(migrated).toEqual({
       ...DEFAULT_PREFERENCES,
       presentation: { layoutMode: "simple", textSize: "large", highContrast: true, reduceMotion: false },
-      assistant: { responseDetail: "concise", stepExplanation: "more", preferredLanguage: "zh-CN" },
+      assistant: { responseDetail: "concise", stepExplanation: "more", preferredLanguage: "zh-CN", additionalGuidance: "" },
       voice: { runNoticesEnabled: false, speechRate: "normal" },
     });
     expect(writePreferences(migrated, storage)).toBe(true);
     expect(JSON.parse(storage.getItem(PREFERENCES_STORAGE_KEY)!).version).toBe(PREFERENCES_VERSION);
+  });
+
+  it("migrates version 2 preferences without changing saved display, assistant, or voice choices", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      version: 2,
+      presentation: { layoutMode: "simple", textSize: "large", highContrast: true, reduceMotion: true },
+      assistant: { responseDetail: "detailed", stepExplanation: "more", preferredLanguage: "en" },
+      voice: { runNoticesEnabled: true, speechRate: "fast" },
+    }));
+
+    expect(readPreferences(storage)).toEqual({
+      version: 3,
+      presentation: { layoutMode: "simple", textSize: "large", highContrast: true, reduceMotion: true },
+      assistant: { responseDetail: "detailed", stepExplanation: "more", preferredLanguage: "en", additionalGuidance: "" },
+      voice: { runNoticesEnabled: true, speechRate: "fast" },
+    });
+  });
+
+  it("bounds stored additional guidance and removes unsafe formatting controls", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      version: 3,
+      assistant: { additionalGuidance: "  Use short lines\n\u202E and bullets.  " },
+    }));
+    expect(readPreferences(storage).assistant.additionalGuidance).toBe("Use short lines and bullets.");
+    storage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      version: 3,
+      assistant: { additionalGuidance: "x".repeat(601) },
+    }));
+    expect(readPreferences(storage).assistant.additionalGuidance).toBe("");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ActionId, EventId, PlanningTask, RunId, RuntimeEvent, RuntimeEventData } from "@computer-harness/protocol";
+import type { ActionId, EventId, ObservationAssessment, ObservationId, PlanningTask, RunId, RuntimeEvent, RuntimeEventData } from "@computer-harness/protocol";
 import { createVoiceTranscriptState, reduceVoiceInputEvent, RunNoticeProjector, RunNoticeScheduler, transcriptText, type RunNotice } from "./index.js";
 
 const runId = "voice-run" as RunId;
@@ -47,6 +47,51 @@ function actionCompleted(sequence: number, actionId: string, status: "completed"
   return event(sequence, {
     type: eventType,
     receipt: { actionId: actionId as ActionId, status },
+  });
+}
+
+function observation(sequence: number, id: string): RuntimeEvent {
+  return event(sequence, {
+    type: "observation.created",
+    observation: {
+      id: id as ObservationId,
+      runId,
+      computerSessionId: "voice-session" as never,
+      capturedAt: "2026-09-29T00:00:00.000Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" },
+      screenshot: { assetId: `asset-${id}` as never, relativePath: `screenshots/${id}.png`, mediaType: "image/png", byteLength: 1 },
+    },
+  });
+}
+
+function observationAssessmentEvent(sequence: number, assessment: ObservationAssessment, turnType: "tool_calls" | "finish" | "user_input_required" = "tool_calls"): RuntimeEvent {
+  const observationAssessment = assessment;
+  const turn = turnType === "tool_calls"
+    ? { type: "tool_calls" as const, calls: [{ id: `next-${sequence}` as never, name: "click", arguments: { x: 12, y: 24 } }], observationAssessment }
+    : turnType === "finish"
+      ? { type: "finish" as const, summary: "finished", observationAssessment }
+      : { type: "user_input_required" as const, question: "Continue?", observationAssessment };
+  return event(sequence, { type: "model.response.received", turn });
+}
+
+function assessment(overrides: Partial<ObservationAssessment> = {}): ObservationAssessment {
+  return {
+    observationId: "observation-2" as ObservationId,
+    actionId: "action-1" as ActionId,
+    actionOutcome: "expected_change",
+    evidence: "The visible result list is open.",
+    ...overrides,
+  };
+}
+
+function monitorTransition(sequence: number, transition: "changed" | "unchanged" | "unknown"): RuntimeEvent {
+  return event(sequence, {
+    type: "monitor.transition",
+    actionId: "action-1" as ActionId,
+    postObservationId: "observation-2" as ObservationId,
+    sourceActionEventId: "action-event" as EventId,
+    sourceObservationEventId: "observation-event" as EventId,
+    transition,
   });
 }
 
@@ -157,20 +202,121 @@ describe("voice input and transcript contracts", () => {
 });
 
 describe("RuntimeEvent to RunNotice projection", () => {
-  it("holds model intent until the matching action completes and then phrases it as an attempt", () => {
+  it("projects one fixed polite task-start notice per Run and none after terminal", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    const created = event(1, { type: "run.created", goal: "private user goal" });
+    const start = projector.project(created);
+    expect(start).toMatchObject({ kind: "progress", delivery: "polite", text: "任务已开始。" });
+    expect(start?.text).not.toContain("private user goal");
+    expect(projector.project(created)).toBeUndefined();
+    expect(projector.project(event(2, { type: "run.created", goal: "duplicate synthetic event" }))).toBeUndefined();
+    expect(projector.project(event(3, { type: "run.finished", outcome: "succeeded", summary: "done" }))).toMatchObject({ kind: "result" });
+    expect(projector.project(event(4, { type: "run.created", goal: "late event" }))).toBeUndefined();
+  });
+
+  it("does not announce ordinary successful GUI action completion", () => {
     const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     expect(projector.project(computerTurn(1, { assistantText: "打开搜索结果", summary: "查看搜索结果" }))).toBeUndefined();
     expect(projector.project(proposed(2, 1, "action-1"))).toBeUndefined();
-    const completed = projector.project(actionCompleted(3, "action-1"));
-    expect(completed).toMatchObject({ kind: "progress", delivery: "polite", text: "已执行本轮模型提出的操作，正在核对页面结果。" });
-    expect(completed?.text).not.toContain("已完成");
-    expect(completed?.text).not.toContain("打开搜索结果");
+    expect(projector.project(actionCompleted(3, "action-1"))).toBeUndefined();
 
     expect(projector.project(computerTurn(4, { summary: "查看搜索结果" }))).toBeUndefined();
     expect(projector.project(proposed(5, 4, "action-2"))).toBeUndefined();
-    const summaryFallback = projector.project(actionCompleted(6, "action-2"));
-    expect(summaryFallback?.text).toBe("已执行模型声明的操作步骤，正在核对页面结果。");
-    expect(summaryFallback?.text).not.toContain("查看搜索结果");
+    expect(projector.project(actionCompleted(6, "action-2"))).toBeUndefined();
+  });
+
+  it("announces only a valid current assessment and never speaks its summary", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    projector.project(observation(1, "observation-1"));
+    projector.project(computerTurn(2));
+    projector.project(proposed(3, 2, "action-1"));
+    expect(projector.project(actionCompleted(4, "action-1"))).toBeUndefined();
+    projector.project(observation(5, "observation-2"));
+
+    const milestone = assessment({
+      evidence: "A private verification code 123456 is visible in the model summary.",
+      progress: { kind: "milestone", summary: "Private verification code 123456" },
+    });
+    // Monitor-off runs have no deterministic transition, so the model annotation stays silent.
+    expect(projector.project(observationAssessmentEvent(6, milestone))).toBeUndefined();
+    projector.project(monitorTransition(7, "changed"));
+    const progress = projector.project(observationAssessmentEvent(8, milestone));
+    expect(progress).toMatchObject({ kind: "progress", delivery: "polite", text: "已确认一个阶段性进展，正在继续核对任务。" });
+    expect(progress?.text).not.toContain("123456");
+  });
+
+  it("rejects stale observation/action bindings and semantic conflicts", () => {
+    const makeProjector = (): RunNoticeProjector => {
+      const projector = new RunNoticeProjector(runId);
+      projector.project(observation(1, "observation-1"));
+      projector.project(computerTurn(2));
+      projector.project(proposed(3, 2, "action-1"));
+      projector.project(actionCompleted(4, "action-1"));
+      projector.project(observation(5, "observation-2"));
+      return projector;
+    };
+
+    expect(makeProjector().project(observationAssessmentEvent(6, assessment({ observationId: "observation-old" as ObservationId, progress: { kind: "milestone", summary: "stale" } })))).toBeUndefined();
+    expect(makeProjector().project(observationAssessmentEvent(6, assessment({ actionId: "action-old" as ActionId, progress: { kind: "milestone", summary: "stale" } })))).toBeUndefined();
+
+    const conflicting = makeProjector();
+    conflicting.project(monitorTransition(6, "unchanged"));
+    expect(conflicting.project(observationAssessmentEvent(7, assessment({ progress: { kind: "milestone", summary: "unchanged screen" } })))).toBeUndefined();
+
+    const unknown = makeProjector();
+    unknown.project(monitorTransition(6, "unknown"));
+    expect(unknown.project(observationAssessmentEvent(7, assessment({ progress: { kind: "milestone", summary: "unconfirmed change" } })))).toBeUndefined();
+  });
+
+  it("never speaks Monitor conclusions and only voices an expected-change milestone", () => {
+    const projector = new RunNoticeProjector(runId);
+    projector.project(observation(1, "observation-1"));
+    projector.project(computerTurn(2));
+    projector.project(proposed(3, 2, "action-1"));
+    projector.project(actionCompleted(4, "action-1"));
+    projector.project(observation(5, "observation-2"));
+    projector.project(monitorTransition(6, "unchanged"));
+    const unchangedBlocked = projector.project(observationAssessmentEvent(7, assessment({
+      actionOutcome: "no_effect",
+      progress: { kind: "blocked", summary: "The page did not change" },
+    }), "user_input_required"));
+    expect(unchangedBlocked).toBeUndefined();
+
+    const unknownProjector = new RunNoticeProjector(runId);
+    unknownProjector.project(observation(1, "observation-1"));
+    unknownProjector.project(computerTurn(2));
+    unknownProjector.project(proposed(3, 2, "action-1"));
+    unknownProjector.project(actionCompleted(4, "action-1"));
+    unknownProjector.project(observation(5, "observation-2"));
+    unknownProjector.project(monitorTransition(6, "unknown"));
+    expect(unknownProjector.project(observationAssessmentEvent(7, assessment({
+      actionOutcome: "uncertain",
+      progress: { kind: "blocked", summary: "The comparison is uncertain" },
+    })))).toBeUndefined();
+
+    const changedProjector = new RunNoticeProjector(runId);
+    changedProjector.project(observation(1, "observation-1"));
+    changedProjector.project(computerTurn(2));
+    changedProjector.project(proposed(3, 2, "action-1"));
+    changedProjector.project(actionCompleted(4, "action-1"));
+    changedProjector.project(observation(5, "observation-2"));
+    changedProjector.project(monitorTransition(6, "changed"));
+    expect(changedProjector.project(observationAssessmentEvent(7, assessment({
+      actionOutcome: "unexpected_change",
+      progress: { kind: "blocked", summary: "The unexpected page is not the target" },
+    })))).toBeUndefined();
+
+    const unexpectedMilestoneProjector = new RunNoticeProjector(runId);
+    unexpectedMilestoneProjector.project(observation(1, "observation-1"));
+    unexpectedMilestoneProjector.project(computerTurn(2));
+    unexpectedMilestoneProjector.project(proposed(3, 2, "action-1"));
+    unexpectedMilestoneProjector.project(actionCompleted(4, "action-1"));
+    unexpectedMilestoneProjector.project(observation(5, "observation-2"));
+    unexpectedMilestoneProjector.project(monitorTransition(6, "changed"));
+    expect(unexpectedMilestoneProjector.project(observationAssessmentEvent(7, assessment({
+      actionOutcome: "unexpected_change",
+      progress: { kind: "milestone", summary: "The screen changed unexpectedly" },
+    })))).toBeUndefined();
   });
 
   it("uses the current task map when another task becomes pending or completes", () => {
@@ -189,9 +335,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
     }))).toBeUndefined();
     expect(projector.project(computerTurn(4))).toBeUndefined();
     expect(projector.project(proposed(5, 4, "action-plan"))).toBeUndefined();
-    const fallback = projector.project(actionCompleted(6, "action-plan"));
-    expect(fallback?.text).toContain("查询出发日期可用车次");
-    expect(fallback?.text).not.toContain("比较到达后的公交路线");
+    expect(projector.project(actionCompleted(6, "action-plan"))).toBeUndefined();
   });
 
   it("does not announce unexecuted, rejected, refused, failed, or cancelled actions", () => {
@@ -209,7 +353,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
 
     expect(projector.project(computerTurn(9, { summary: "选择日期" }))).toBeUndefined();
     expect(projector.project(proposed(10, 9, "success-action"))).toBeUndefined();
-    expect(projector.project(actionCompleted(11, "success-action"))).toBeDefined();
+    expect(projector.project(actionCompleted(11, "success-action"))).toBeUndefined();
   });
 
   it("emits exactly one fixed or dynamic notice per event, with dynamic content opt-in", () => {
@@ -269,9 +413,15 @@ describe("RunNoticeScheduler", () => {
   it("lets urgent notices bypass progress cooldown and validates pending interaction IDs at dequeue", () => {
     const scheduler = new RunNoticeScheduler({ now: () => 1_000, minimumProgressIntervalMs: 60_000 });
     const generation = scheduler.activateRun(runId);
-    scheduler.offer(notice(1), generation);
+    const taskStart = notice(1, { text: "任务已开始。", dedupeKey: "run-start" });
+    scheduler.offer(taskStart, generation);
     const approval = notice(2, { kind: "approval", delivery: "interrupt", pendingRequestId: "approval-1", text: "请审批", dedupeKey: "approval-1" });
     expect(scheduler.offer(approval, generation)).toEqual({ status: "queued", interruptCurrent: true });
+    const priorityScheduler = new RunNoticeScheduler();
+    const priorityGeneration = priorityScheduler.activateRun(runId);
+    priorityScheduler.offer(taskStart, priorityGeneration);
+    priorityScheduler.offer(approval, priorityGeneration);
+    expect(priorityScheduler.takeNext(new Set([pendingId(approval)]))?.noticeId).toBe(approval.noticeId);
     // A resolved/replaced request is omitted from the live snapshot and is never read aloud.
     expect(scheduler.takeNext(new Set())).toBeUndefined();
 
@@ -287,13 +437,13 @@ describe("RunNoticeScheduler", () => {
     const generation = scheduler.activateRun(runId);
     const approval = notice(1, { kind: "approval", delivery: "interrupt", pendingRequestId: "approval-1", dedupeKey: "approval-1" });
     scheduler.offer(approval, generation);
-    scheduler.offer(notice(2), generation);
+    scheduler.offer(notice(2, { text: "任务已开始。", dedupeKey: "run-start" }), generation);
     const error = notice(3, { kind: "error", delivery: "interrupt", dedupeKey: "error-3" });
     scheduler.offer(error, generation);
     expect(scheduler.takeNext(new Set([pendingId(approval)]))?.noticeId).toBe(approval.noticeId);
     expect(scheduler.takeNext()?.noticeId).toBe(error.noticeId);
 
-    scheduler.offer(notice(4), generation);
+    scheduler.offer(notice(4, { text: "任务已开始。", dedupeKey: "run-start" }), generation);
     const final = notice(5, { kind: "result", delivery: "interrupt", text: "Run ended", dedupeKey: "result-5" });
     expect(scheduler.offer(final, generation)).toMatchObject({ status: "queued", interruptCurrent: true });
     expect(scheduler.takeNext()?.noticeId).toBe(final.noticeId);

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RemoteRunApiError, type RemoteRunApi, type RemoteRunSnapshot, type RemoteRunTargetInput } from "@computer-harness/app-runtime";
-import type { AssetId, RunId } from "@computer-harness/protocol";
+import type { AssetId, RunAssistantPreferencesSnapshot, RunId } from "@computer-harness/protocol";
 import { createHostServer } from "./server.js";
 
 const localOrigin = "http://localhost:4317";
@@ -64,15 +64,17 @@ describe("Host HTTP boundary", () => {
     const revoked: string[] = [];
     const api = fakeApi();
     const targetsReceived: RemoteRunTargetInput[] = [];
+    const assistantPreferencesReceived: RunAssistantPreferencesSnapshot[] = [];
     const host = createHostServer({
       api: {
         ...api,
-        startRun: (deviceId, commandId, goal, target) => {
+        startRun: (deviceId, commandId, goal, target, assistantPreferences) => {
           targetsReceived.push(target);
+          if (assistantPreferences !== undefined) assistantPreferencesReceived.push(assistantPreferences);
           if (typeof target !== "string" && target.mode === "auto" && goal === "Ambiguous goal") {
             return Promise.reject(new RemoteRunApiError("WINDOW_SELECTION_REQUIRED", "No single visible window confidently matches this goal. Choose a window manually."));
           }
-          return api.startRun(deviceId, commandId, goal, target);
+          return api.startRun(deviceId, commandId, goal, target, assistantPreferences);
         },
       },
       allowedOrigins: [localOrigin, relayOrigin],
@@ -238,6 +240,57 @@ describe("Host HTTP boundary", () => {
         { mode: "browser", url: " \t " },
         { mode: "browser", sessionMode: "saved" },
       ]);
+
+      const assistantStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: {
+          commandId: "start-assistant-preferences",
+          goal: "Summarize this page",
+          target: { mode: "auto" },
+          assistantPreferences: {
+            version: 1,
+            responseDetail: "detailed",
+            stepExplanation: "more",
+            preferredLanguage: "zh-CN",
+            additionalGuidance: "  Keep\nrows\u0000 safely\u202E  ",
+          },
+        },
+      });
+      expect(assistantStart.statusCode).toBe(202);
+      expect(assistantPreferencesReceived).toEqual([{
+        version: 1,
+        responseDetail: "detailed",
+        stepExplanation: "more",
+        preferredLanguage: "zh-CN",
+        additionalGuidance: "Keep rows safely",
+      }]);
+      expect(Object.isFrozen(assistantPreferencesReceived[0])).toBe(true);
+
+      const invalidAssistantPreferences = [
+        { version: 1, responseDetail: "detailed", stepExplanation: "more", preferredLanguage: "zh-CN", additionalGuidance: "fine", presentation: { textSize: "large" } },
+        { version: 1, responseDetail: "detailed", stepExplanation: "more", preferredLanguage: "zh-CN", additionalGuidance: "x".repeat(601) },
+        { version: 1, responseDetail: "verbose", stepExplanation: "more", preferredLanguage: "zh-CN", additionalGuidance: "fine" },
+        { version: 1, responseDetail: "detailed", stepExplanation: "more", preferredLanguage: "zh-CN", additionalGuidance: 12 },
+      ];
+      for (const [index, assistantPreferences] of invalidAssistantPreferences.entries()) {
+        const rejected = await host.server.inject({
+          method: "POST",
+          url: "/api/runs",
+          headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+          payload: { commandId: `start-invalid-prefs-${index}`, goal: "Check a page", target: { mode: "auto" }, assistantPreferences },
+        });
+        expect(rejected.statusCode).toBe(400);
+      }
+      const forbiddenPresentation = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-presentation-prefs", goal: "Check a page", target: { mode: "auto" }, presentation: { textSize: "large" } },
+      });
+      expect(forbiddenPresentation.statusCode).toBe(400);
+      expect(assistantPreferencesReceived).toHaveLength(1);
 
       const selectionRequired = await host.server.inject({
         method: "POST",

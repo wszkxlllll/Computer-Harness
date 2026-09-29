@@ -66,6 +66,49 @@ function fakeComputer(calls: { open: number; observe: number; close: number }): 
 }
 
 describe("app-runtime RunHandle", () => {
+  it("passes the frozen Run preference snapshot to Context but not provider factories", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-assistant-preferences-"));
+    const preferences = {
+      version: 1 as const,
+      responseDetail: "detailed" as const,
+      stepExplanation: "more" as const,
+      preferredLanguage: "zh-CN" as const,
+      additionalGuidance: "Group findings by topic.",
+    };
+    const inputs: ModelInput[] = [];
+    let providerConfig: ResolvedRunConfig | undefined;
+    try {
+      const handle = await createRun({ ...config(outputDir), assistantPreferences: preferences }, {
+        createProvider: (options) => {
+          providerConfig = options.config;
+          return {
+            id: "assistant-preferences-provider",
+            async generate(input) {
+              inputs.push(input);
+              return { type: "finish", summary: "The page was summarized." };
+            },
+          };
+        },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      expect(handle.config.assistantPreferences).toEqual(preferences);
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const trace = inputs[0]?.contextBudget?.trace;
+      expect(providerConfig).not.toHaveProperty("assistantPreferences");
+      expect(inputs[0]?.messages.some((message) => message.content.some((block) =>
+        block.type === "text" && block.text.includes("Group findings by topic."),
+      ))).toBe(true);
+      expect(JSON.stringify(trace)).not.toContain("Group findings by topic.");
+      expect(trace?.assistantPreferences).toMatchObject({ included: true, responseDetail: "detailed", additionalGuidancePresent: true });
+      const report = await handle.report();
+      const modelRequest = report.events.find((event) => event.type === "model.request.started");
+      expect(modelRequest?.type === "model.request.started" ? JSON.stringify(modelRequest.contextBudget?.trace) : "").not.toContain("Group findings by topic.");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the default Planning and Memory module tools and Context path working", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-default-modules-"));
     let request = 0;

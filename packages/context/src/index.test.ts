@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { estimateEventTokens } from "./budget.js";
 import type {
   AssetId,
   ActionId,
@@ -7,6 +9,7 @@ import type {
   MemoryState,
   ObservationId,
   RunId,
+  RunAssistantPreferencesSnapshot,
   RuntimeEvent,
   ToolCallId,
 } from "@computer-harness/protocol";
@@ -72,6 +75,101 @@ describe("DefaultContextCompiler", () => {
     expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === first.screenshot.assetId))).toBe(false);
     expect(input.contextBudget?.trace?.projectedEventIds).toContain("event-7");
     expect(input.contextBudget?.trace?.projectedEventIds).not.toContain("event-1");
+  });
+
+  it("keeps current Observation/action assessment IDs in the dynamic observation message", async () => {
+    const before = observation("assessment-before");
+    const latest = observation("assessment-current");
+    const actionId = "assessment-action" as ActionId;
+    const events: RuntimeEvent[] = [
+      event(0, { type: "observation.created", observation: before }),
+      event(1, {
+        type: "action.proposed",
+        callId: "assessment-call" as ToolCallId,
+        action: { actionId, basedOn: before.id, kind: "click", point: { x: 20, y: 30 } },
+      }),
+      event(2, { type: "action.execution.completed", receipt: { actionId, status: "completed" } }),
+      event(3, { type: "observation.created", observation: latest }),
+    ];
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "continue from the current screen",
+      recentEvents: events,
+      latestObservation: latest,
+      features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" },
+      monitorGuidance: { text: "Recheck the visible state before acting.", fingerprint: "monitor-guidance" },
+    }, new AbortController().signal);
+    const currentObservationMessage = input.messages.find((message) => message.content.some((block) =>
+      block.type === "image" && block.asset.assetId === latest.screenshot.assetId));
+    const dynamicText = currentObservationMessage?.content.filter((block) => block.type === "text").map((block) => block.text).join(" ") ?? "";
+    expect(dynamicText).toContain("Observation ID assessment-current");
+    expect(dynamicText).toContain("GUI action ID assessment-action");
+    expect(JSON.stringify(input.messages)).toContain("Recheck the visible state before acting.");
+    expect(input.system).not.toContain("assessment-current");
+    expect(JSON.stringify(input.tools)).not.toContain("assessment-action");
+
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const mismatchedTransitions: RuntimeEvent[] = [
+      event(4, {
+        type: "monitor.transition", actionId: "other-action" as ActionId, postObservationId: latest.id,
+        sourceActionEventId: "event-2" as EventId, sourceObservationEventId: "event-3" as EventId, transition: "changed",
+      }),
+      event(5, {
+        type: "monitor.transition", actionId, postObservationId: "other-observation" as ObservationId,
+        sourceActionEventId: "event-2" as EventId, sourceObservationEventId: "event-3" as EventId, transition: "unchanged",
+      }),
+      event(6, {
+        type: "monitor.transition", actionId, postObservationId: latest.id,
+        sourceActionEventId: "wrong-receipt" as EventId, sourceObservationEventId: "event-3" as EventId, transition: "unknown",
+      }),
+    ];
+    const compileEvents = async (additionalEvents: readonly RuntimeEvent[]) => compiler.compile({
+      runId,
+      goal: "continue from the current screen",
+      recentEvents: [...events, ...additionalEvents],
+      latestObservation: latest,
+      features: { planning: "off", memory: "off", batching: "off", monitor: "guidance" },
+      monitorGuidance: { text: "Recheck the visible state before acting.", fingerprint: "monitor-guidance" },
+    }, new AbortController().signal);
+    const mismatched = await compileEvents(mismatchedTransitions);
+    const mismatchedText = JSON.stringify(mismatched.messages);
+    expect(mismatchedText).not.toContain("Runtime Monitor transition for this exact action/Observation");
+
+    const exact = await compileEvents([
+      ...mismatchedTransitions,
+      event(7, {
+        type: "monitor.transition", actionId, postObservationId: latest.id,
+        sourceActionEventId: "event-2" as EventId, sourceObservationEventId: "event-3" as EventId, transition: "changed",
+      }),
+    ]);
+    expect(JSON.stringify(exact.messages)).toContain("Runtime Monitor transition for this exact action/Observation: changed");
+    expect(exact.contextBudget?.trace?.stablePrefixHash).toBe(input.contextBudget?.trace?.stablePrefixHash);
+    expect(mismatched.contextBudget?.trace?.stablePrefixHash).toBe(input.contextBudget?.trace?.stablePrefixHash);
+  });
+
+  it("serializes prior ModelTurn assessments into assistant history", async () => {
+    const latest = observation("assessment-history");
+    const assessment = {
+      observationId: latest.id,
+      actionId: "historical-action" as ActionId,
+      actionOutcome: "uncertain" as const,
+      evidence: "The prior screen could not be compared confidently.",
+      progress: { kind: "blocked" as const, summary: "Check the current page." },
+    };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "continue",
+      recentEvents: [
+        event(0, { type: "model.response.received", turn: { type: "finish", summary: "Not finished yet", observationAssessment: assessment } }),
+        event(1, { type: "observation.created", observation: latest }),
+      ],
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const assistantText = input.messages.filter((message) => message.role === "assistant")
+      .flatMap((message) => message.content.filter((block) => block.type === "text").map((block) => block.text)).join(" ");
+    expect(assistantText).toContain("Prior model-reported ObservationAssessment (untrusted evidence)");
+    expect(assistantText).toContain("historical-action");
+    expect(assistantText).toContain("Check the current page.");
   });
 
   it("projects a bounded observation grounding catalog near the current image and records its budget trace", async () => {
@@ -565,6 +663,168 @@ describe("DefaultContextCompiler", () => {
     expect(trace?.discardedEvents).toEqual(expect.arrayContaining([{ eventId: "event-0", reason: "history_limit" }]));
     expect(trace?.stablePrefixHash).toBe(second.contextBudget?.trace?.stablePrefixHash);
     expect(trace?.stablePrefixHash).not.toContain("goal one");
+  });
+
+  it("projects user preferences late, keeps them below explicit requests, redacts trace, and accounts for budget", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const latest = observation("assistant-preferences-observation");
+    const preferences: RunAssistantPreferencesSnapshot = Object.freeze({
+      version: 1,
+      responseDetail: "detailed",
+      stepExplanation: "more",
+      preferredLanguage: "zh-CN",
+      additionalGuidance: "Group the findings by topic.",
+    });
+    const input = await compiler.compile({
+      runId,
+      goal: "Give me a one sentence answer in English.",
+      recentEvents: [
+        event(0, { type: "user.input.received", text: "Correction: keep the answer in English and use one sentence." }),
+        event(1, { type: "observation.created", observation: latest }),
+      ],
+      latestObservation: latest,
+      assistantPreferences: preferences,
+    }, new AbortController().signal);
+    const preferenceMessage = input.messages[1]!;
+    const preferenceTextBlock = preferenceMessage.content.find((block) => block.type === "text");
+    const preferenceText = preferenceTextBlock?.type === "text" ? preferenceTextBlock.text : "";
+    expect(preferenceMessage.role).toBe("user");
+    expect(preferenceText).toContain("Give a thorough, organized final reply");
+    expect(preferenceText).toContain("clear ordered steps");
+    expect(preferenceText).toContain("Use Simplified Chinese");
+    expect(preferenceText).toContain('"Group the findings by topic."');
+    expect(preferenceText).toContain("explicit current user requests, later corrections");
+    const correctionMessageIndex = input.messages.findIndex((message) => message.content.some((block) => block.type === "text" && block.text.includes("Correction: keep the answer")));
+    expect(correctionMessageIndex).toBeGreaterThan(input.messages.indexOf(preferenceMessage));
+    expect(input.messages.at(-1)?.content.some((block) => block.type === "image")).toBe(true);
+    expect(input.system).toContain("Optional user response preferences");
+    expect(input.system).not.toContain("Group the findings by topic.");
+    const trace = input.contextBudget?.trace;
+    expect(trace?.assistantPreferences).toMatchObject({
+      projectionVersion: 1,
+      included: true,
+      estimatedTokens: Math.ceil(preferenceText.length / 4),
+      responseDetail: "detailed",
+      stepExplanation: "more",
+      preferredLanguage: "zh-CN",
+      additionalGuidancePresent: true,
+      additionalGuidanceCharacters: "Group the findings by topic.".length,
+      additionalGuidanceSha256: createHash("sha256").update("Group the findings by topic.", "utf8").digest("hex"),
+    });
+    expect(JSON.stringify(trace)).not.toContain("Group the findings by topic.");
+
+    const changedPreferences = Object.freeze({ ...preferences, responseDetail: "concise" as const, additionalGuidance: "Keep the answer short." });
+    const changed = await compiler.compile({
+      runId,
+      goal: "Give me a one sentence answer in English.",
+      recentEvents: [
+        event(0, { type: "user.input.received", text: "Correction: keep the answer in English and use one sentence." }),
+        event(1, { type: "observation.created", observation: latest }),
+      ],
+      latestObservation: latest,
+      assistantPreferences: changedPreferences,
+    }, new AbortController().signal);
+    expect(changed.contextBudget?.trace?.stablePrefixHash).toBe(trace?.stablePrefixHash);
+
+    const base = await compiler.compile({ runId, goal: "budget", recentEvents: [] }, new AbortController().signal);
+    const withPreferences = await compiler.compile({
+      runId,
+      goal: "budget",
+      recentEvents: [],
+      assistantPreferences: { ...preferences, additionalGuidance: "Long guidance. ".repeat(30) },
+    }, new AbortController().signal);
+    const candidateTokens = withPreferences.contextBudget?.trace?.assistantPreferences?.estimatedTokens ?? 0;
+    expect(withPreferences.contextBudget?.estimatedInputTokens).toBe(base.contextBudget?.estimatedInputTokens! + candidateTokens);
+    const omitted = await compiler.compile({
+      runId,
+      goal: "budget",
+      recentEvents: [],
+      assistantPreferences: { ...preferences, additionalGuidance: "Long guidance. ".repeat(30) },
+      context: { maxInputTokens: base.contextBudget!.estimatedFixedTextTokens! + candidateTokens - 1 },
+    }, new AbortController().signal);
+    expect(omitted.contextBudget?.trace?.assistantPreferences).toMatchObject({ included: false, omittedReason: "budget", estimatedTokens: candidateTokens });
+    expect(omitted.contextBudget?.estimatedInputTokens).toBe(base.contextBudget?.estimatedInputTokens);
+    expect(JSON.stringify(omitted.messages)).not.toContain("Long guidance.");
+    expect(omitted.contextBudget?.trace?.stablePrefixHash).toBe(trace?.stablePrefixHash);
+  });
+
+  it("omits preferences before reducing authoritative corrections or the current observation", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const goal = "Continue with the user's correction.";
+    const latest = observation("preference-budget-current-observation");
+    const preferences = {
+      version: 1 as const,
+      responseDetail: "detailed" as const,
+      stepExplanation: "more" as const,
+      preferredLanguage: "zh-CN" as const,
+      additionalGuidance: "Preserve the user's exact wording.",
+    };
+    const base = await compiler.compile({ runId, goal, recentEvents: [] }, new AbortController().signal);
+    const preferenceOnly = await compiler.compile({ runId, goal, recentEvents: [], assistantPreferences: preferences }, new AbortController().signal);
+    const preferenceTokens = preferenceOnly.contextBudget?.trace?.assistantPreferences?.estimatedTokens ?? 0;
+    const correction = "Correction: " + "Keep the answer in English and exactly one sentence. ".repeat(8);
+    const correctionEvent = event(0, { type: "user.input.received", text: correction });
+    const correctionTokens = estimateEventTokens([correctionEvent]);
+    const maxInputTokens = base.contextBudget!.estimatedFixedTextTokens! + correctionTokens + preferenceTokens - 1;
+    expect(preferenceTokens).toBeLessThan(maxInputTokens - base.contextBudget!.estimatedFixedTextTokens!);
+    expect(correctionTokens).toBeLessThan(maxInputTokens - base.contextBudget!.estimatedFixedTextTokens!);
+
+    const compiled = await compiler.compile({
+      runId,
+      goal,
+      recentEvents: [correctionEvent, event(1, { type: "observation.created", observation: latest })],
+      latestObservation: latest,
+      assistantPreferences: preferences,
+      context: { maxInputTokens },
+    }, new AbortController().signal);
+    expect(compiled.contextBudget?.trace?.assistantPreferences).toMatchObject({
+      included: false,
+      omittedReason: "budget",
+      estimatedTokens: preferenceTokens,
+      additionalGuidancePresent: true,
+    });
+    expect(compiled.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(maxInputTokens);
+    expect(compiled.messages.some((message) => message.content.some((block) => block.type === "text" && block.text === correction))).toBe(true);
+    expect(compiled.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId))).toBe(true);
+    expect(JSON.stringify(compiled.contextBudget?.trace)).not.toContain("Preserve the user's exact wording.");
+    expect(JSON.stringify(compiled.messages)).not.toContain("Preserve the user's exact wording.");
+  });
+
+  it("charges projected ObservationAssessment text against event and input budgets", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const assessmentEvent = event(0, {
+      type: "model.response.received",
+      turn: {
+        type: "finish",
+        summary: "A bounded summary.",
+        observationAssessment: {
+          observationId: "assessment-observation",
+          actionId: "assessment-action",
+          actionOutcome: "uncertain",
+          evidence: "e".repeat(240),
+          progress: { kind: "blocked", summary: "p".repeat(160) },
+        },
+      },
+    });
+    const base = await compiler.compile({ runId, goal: "assessment budget", recentEvents: [] }, new AbortController().signal);
+    const projected = await compiler.compile({ runId, goal: "assessment budget", recentEvents: [assessmentEvent] }, new AbortController().signal);
+    const assistantMessage = projected.messages.find((message) => message.role === "assistant")!;
+    const projectedTextCharacters = assistantMessage.content
+      .filter((block) => block.type === "text")
+      .reduce((total, block) => total + (block.type === "text" ? block.text.length : 0), 0);
+    const estimatedEventTokens = estimateEventTokens([assessmentEvent]);
+    expect(estimatedEventTokens).toBe(Math.ceil(projectedTextCharacters / 4));
+    expect(projected.contextBudget?.estimatedHistoryTextTokens).toBe(estimatedEventTokens);
+
+    const omitted = await compiler.compile({
+      runId,
+      goal: "assessment budget",
+      recentEvents: [assessmentEvent],
+      context: { maxInputTokens: base.contextBudget!.estimatedFixedTextTokens! + estimatedEventTokens - 1 },
+    }, new AbortController().signal);
+    expect(omitted.contextBudget?.trace?.discardedEvents).toContainEqual({ eventId: assessmentEvent.eventId, reason: "input_budget" });
+    expect(JSON.stringify(omitted.messages)).not.toContain("e".repeat(80));
+    expect(omitted.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(omitted.contextBudget?.maxInputTokens!);
   });
 
   it("keeps Memory under its soft quota while retaining authoritative input", async () => {

@@ -653,6 +653,24 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .preference-radio-compact { flex: 0 1 auto; }
 .preference-radio-compact .preference-radio-copy strong { font-weight: 600; }
 .preference-choice-group .field-hint { font-size: .78rem; }
+.assistant-guidance { margin: .75rem 0 .35rem; }
+.assistant-guidance > label { display: block; font-size: .88rem; font-weight: 650; margin-bottom: .15rem; }
+.preference-textarea {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  color: var(--ink);
+  display: block;
+  line-height: 1.5;
+  min-height: 5.25rem;
+  padding: .55rem .65rem;
+  resize: vertical;
+  width: 100%;
+}
+.assistant-guidance-footer { align-items: flex-start; display: flex; gap: .75rem; justify-content: space-between; }
+.assistant-guidance-footer .field-hint { font-size: .78rem; }
+.guidance-counter { color: var(--muted); flex: 0 0 auto; font-size: .78rem; padding-top: .3rem; }
+.guidance-clear { margin-top: .1rem; }
 .preference-toggle {
   align-items: center;
   border-bottom: 1px solid var(--line);

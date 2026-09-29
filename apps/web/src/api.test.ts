@@ -98,6 +98,32 @@ describe("explicit window-target run contract", () => {
     expect((request.headers as Headers).get("X-CSRF-Token")).toBe("phone-csrf");
   });
 
+  it("sends only the versioned assistant preference whitelist when supplied", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-prefs", status: "created" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await createRun("Summarize this page", "command-prefs", { mode: "auto" }, {
+      version: 1,
+      responseDetail: "detailed",
+      stepExplanation: "more",
+      preferredLanguage: "zh-CN",
+      additionalGuidance: "Group findings by topic.",
+    });
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({
+      commandId: "command-prefs",
+      goal: "Summarize this page",
+      target: { mode: "auto" },
+      assistantPreferences: {
+        version: 1,
+        responseDetail: "detailed",
+        stepExplanation: "more",
+        preferredLanguage: "zh-CN",
+        additionalGuidance: "Group findings by topic.",
+      },
+    });
+  });
+
   it("sends an explicit browser URL as a browser target", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-2", status: "created" }), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);

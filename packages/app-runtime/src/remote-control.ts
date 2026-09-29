@@ -1,4 +1,4 @@
-import type { AssetId, AssetRef, JsonValue, ObservationId, RunId, RunOutcome, Viewport } from "@computer-harness/protocol";
+import type { AssetId, AssetRef, JsonValue, ObservationId, RunAssistantPreferencesSnapshot, RunId, RunOutcome, Viewport } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import type { ApplicationSession } from "./application-session.js";
 import type { RunHandle } from "./config.js";
@@ -143,7 +143,7 @@ export interface RemoteRunApi {
   listRuns(deviceId: string): Promise<readonly RemoteRunSnapshot[]> | readonly RemoteRunSnapshot[];
   getRun(deviceId: string, runId: string): Promise<RemoteRunSnapshot | undefined> | RemoteRunSnapshot | undefined;
   listWindowTargets(deviceId: string): Promise<RemoteWindowTargetSet>;
-  startRun(deviceId: string, commandId: string, goal: string, target: RemoteRunTargetInput): Promise<RemoteRunSnapshot>;
+  startRun(deviceId: string, commandId: string, goal: string, target: RemoteRunTargetInput, assistantPreferences?: RunAssistantPreferencesSnapshot): Promise<RemoteRunSnapshot>;
   submitCommand(deviceId: string, runId: string, command: RemoteCommand): Promise<RemoteCommandReceipt>;
   getCommandReceipt(deviceId: string, runId: string, commandId: string): Promise<RemoteCommandReceipt | undefined> | RemoteCommandReceipt | undefined;
   subscribe(deviceId: string, runId: string, afterSequence: number, listener: (event: RemoteStreamEvent) => void): RemoteSubscription;

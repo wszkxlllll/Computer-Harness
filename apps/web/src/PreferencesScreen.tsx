@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { PhoneLayout } from "./components/PhoneLayout";
 import { usePreferences } from "./PreferencesContext";
+import { RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS } from "./preferences";
 import type { AssistantPreferences, DisplayPreset, PreferredLanguage, ResponseDetail, SpeechRate, StepExplanation, TextSize } from "./preferences";
 import type { VoiceCapabilities } from "./voice-capabilities";
 import { isBrowserSpeechOutputAvailable } from "./run-notice-speech";
@@ -39,7 +40,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
     setVoiceBusy(true);
     setVoiceMessage("");
     try {
-      await voiceCapabilities.readAloud("你正在查看个人偏好。这里的回答选项尚未连接到助手 Context。");
+      await voiceCapabilities.readAloud("你正在查看个人偏好。助手回答偏好会在开始新任务时加入该任务的 Context。");
       setVoiceMessage("已将这段说明交给接入的语音能力。");
     } catch {
       setVoiceMessage("语音读出没有启动。你仍可阅读页面上的说明。");
@@ -134,10 +135,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
 
         <section className="preferences-section assistant-preferences" aria-labelledby="assistant-preferences-title">
           <h2 id="assistant-preferences-title">助手回答偏好</h2>
-          <details className="preferences-not-connected">
-            <summary>仅保存在此浏览器；尚未连接助手 Context</summary>
-            <p>这些选项不会改变当前任务、电脑操作或审批规则。</p>
-          </details>
+          <p className="field-hint">这些回答偏好只保存在此浏览器。开始新任务时会随白名单发送给电脑端，并作为该 Run 的 Context 提交给已配置的模型；修改不会影响已开始的任务，也不会在设备间同步。它们不会改变电脑操作或审批规则。</p>
 
           <fieldset className="preference-choice-group">
             <legend>回答详略</legend>
@@ -168,6 +166,41 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
               <option value="zh-CN">简体中文</option>
               <option value="en">English</option>
             </select>
+          </div>
+
+          <div className="assistant-guidance">
+            <label htmlFor="assistant-additional-guidance">补充回答说明</label>
+            <textarea
+              id="assistant-additional-guidance"
+              className="preference-textarea"
+              value={preferences.assistant.additionalGuidance}
+              maxLength={RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS * 2}
+              aria-describedby="assistant-guidance-help assistant-guidance-count"
+              onChange={(event) => {
+                const guidance = Array.from(event.currentTarget.value)
+                  .slice(0, RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS)
+                  .join("");
+                setMessage(setAssistant("additionalGuidance", guidance)
+                  ? "补充说明已保存在此浏览器，并会用于下一次新任务。"
+                  : "补充说明已更新，但浏览器未能保存。");
+              }}
+            />
+            <div className="assistant-guidance-footer">
+              <p id="assistant-guidance-help" className="field-hint">写下你希望回答采用的格式或解释方式。每次最多 {RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} 个字符；内容只保存在此浏览器，并仅用于之后开始的新任务。</p>
+              <span id="assistant-guidance-count" className="guidance-counter" aria-label={`${[...preferences.assistant.additionalGuidance].length} / ${RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} 个字符`}>
+                {[...preferences.assistant.additionalGuidance].length} / {RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS}
+              </span>
+            </div>
+            <button
+              className="text-button guidance-clear"
+              type="button"
+              disabled={preferences.assistant.additionalGuidance.length === 0}
+              onClick={() => setMessage(setAssistant("additionalGuidance", "")
+                ? "补充说明已清除，并保存在此浏览器。"
+                : "补充说明已清除，但浏览器未能保存。")}
+            >
+              清空补充说明
+            </button>
           </div>
         </section>
 

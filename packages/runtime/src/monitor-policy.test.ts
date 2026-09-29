@@ -82,6 +82,39 @@ describe("MonitorPolicy", () => {
     }
   });
 
+  it("gives actionable next-turn guidance for reconciled assessment outcomes", () => {
+    const scenarios: Array<{
+      outcome: "no_effect" | "unexpected_change" | "uncertain";
+      reason: "no_observed_change" | "unexpected_change" | "assessment_uncertain";
+      evidence: "visual_transition_unchanged" | "visual_transition_changed" | "visual_transition_unknown";
+      phrase: string;
+    }> = [
+      { outcome: "no_effect", reason: "no_observed_change", evidence: "visual_transition_unchanged", phrase: "appears to have had no effect" },
+      { outcome: "unexpected_change", reason: "unexpected_change", evidence: "visual_transition_changed", phrase: "changed in an unexpected way" },
+      { outcome: "uncertain", reason: "assessment_uncertain", evidence: "visual_transition_unknown", phrase: "result is uncertain" },
+    ];
+    for (const [index, scenario] of scenarios.entries()) {
+      const eventId = `assessment-${index}` as EventId;
+      const output: MonitorPolicyInput["monitor"] = {
+        candidate: true,
+        assessmentOutcome: scenario.outcome,
+        reasons: [{ code: scenario.reason, eventIds: [eventId] }],
+        evidence: [
+          { kind: "semantic_assessment", eventIds: [eventId] },
+          { kind: scenario.evidence, eventIds: [eventId] },
+        ],
+        eventIds: [eventId],
+      };
+      const first = reduceMonitorPolicy(
+        createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 1 }),
+        input(100 + index * 2, { modelDecisionCount: 1, guiActionCount: 1 }, output),
+      );
+      const guidance = reduceMonitorPolicy(first.state, input(101 + index * 2, { modelDecisionCount: 2, guiActionCount: 1 }, output));
+      expect(guidance.proposal.kind).toBe("guidance");
+      if (guidance.proposal.kind === "guidance") expect(guidance.proposal.text).toContain(scenario.phrase);
+    }
+  });
+
   it("requests help only after guidance budget, never because an old candidate aged out", () => {
     let state = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 2, maxGuidanceCount: 1, cooldownWorkUnits: 1 });
     state = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate())).state;

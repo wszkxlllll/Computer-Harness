@@ -3,6 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { RemoteRunApiError, type RemoteCommand, type RemoteRunApi, type RemoteRunTarget } from "@computer-harness/app-runtime";
+import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 import type { HostRequestHandler, PairingTokenRegistration, RelayBridgeRequest } from "@computer-harness/relay-connector/protocol";
 import { resolveAllowedApiRoute } from "@computer-harness/relay-connector/routing";
 import { VOICE_INPUT_MAX_BATCH_CHUNKS, VOICE_INPUT_MAX_CHUNK_BYTES } from "@computer-harness/voice";
@@ -112,7 +113,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     }
     if (error instanceof RemoteRunApiError) {
       const status = error.code === "RUN_NOT_FOUND" ? 404
-        : error.code === "INVALID_COMMAND" || error.code === "INVALID_TARGET" ? 400
+        : error.code === "INVALID_COMMAND" || error.code === "INVALID_TARGET" || error.code === "INVALID_ASSISTANT_PREFERENCES" ? 400
           : error.code === "CAPACITY_REACHED" ? 429
             : error.code === "WINDOW_DISCOVERY_FAILED" ? 503
           : 409;
@@ -534,8 +535,8 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
   server.post("/api/runs", async (request, reply) => {
     const session = browserSession(request, true);
     const body = bodyObject(request.body);
-    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken" && key !== "target")) {
-      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, and one target selector are accepted.");
+    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken" && key !== "target" && key !== "assistantPreferences")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, one target selector, and assistantPreferences are accepted.");
     }
     const commandId = requiredString(body, "commandId", 128);
     const goal = requiredString(body, "goal", 20_000);
@@ -547,7 +548,17 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     const target = hasLegacyTarget
       ? requiredString(body, "targetToken", 128)
       : parseRemoteRunTarget(body.target);
-    const run = await options.api.startRun(session.deviceId, commandId, goal, target);
+    let assistantPreferences: RunAssistantPreferencesSnapshot | undefined;
+    if (Object.hasOwn(body, "assistantPreferences")) {
+      try {
+        assistantPreferences = normalizeRunAssistantPreferencesSnapshot(body.assistantPreferences);
+      } catch (error) {
+        throw new HostHttpError(400, "INVALID_ASSISTANT_PREFERENCES", error instanceof Error ? error.message : "assistantPreferences is invalid.");
+      }
+    }
+    const run = assistantPreferences === undefined
+      ? await options.api.startRun(session.deviceId, commandId, goal, target)
+      : await options.api.startRun(session.deviceId, commandId, goal, target, assistantPreferences);
     return reply.code(202).send({ runId: run.runId, status: run.status });
   });
 
