@@ -4,6 +4,7 @@ import {
   VOICE_INPUT_MAX_CHUNK_BYTES,
   VOICE_INPUT_MAX_CHUNKS,
 } from "@computer-harness/voice";
+import { normalizeRunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 
 export type RelayHttpMethod = "GET" | "POST" | "DELETE";
 export type ApiResponseKind = "json" | "sse" | "asset";
@@ -149,6 +150,15 @@ function hasExactKeys(value: Record<string, unknown>, allowedKeys: readonly stri
   return keys.length === allowedKeys.length && keys.every((key) => allowedKeys.includes(key));
 }
 
+function isValidAssistantPreferences(value: unknown): boolean {
+  try {
+    normalizeRunAssistantPreferencesSnapshot(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isValidWindowTargetToken(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]{32}$/u.test(value);
 }
@@ -233,13 +243,16 @@ export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject |
   const hasLegacyTarget = Object.hasOwn(body, "targetToken");
   const hasTaggedTarget = Object.hasOwn(body, "target");
   if (hasLegacyTarget === hasTaggedTarget) return false;
-  const outerKeys = hasLegacyTarget ? ["commandId", "goal", "targetToken"] : ["commandId", "goal", "target"];
+  const hasAssistantPreferences = Object.hasOwn(body, "assistantPreferences");
+  const targetKeys = hasLegacyTarget ? ["commandId", "goal", "targetToken"] : ["commandId", "goal", "target"];
+  const outerKeys = hasAssistantPreferences ? [...targetKeys, "assistantPreferences"] : targetKeys;
   if (!hasExactKeys(body, outerKeys)) return false;
   const validBase = isValidIdentifier(body.commandId)
     && typeof body.goal === "string"
     && body.goal.length > 0
     && body.goal.length <= 20_000;
   if (!validBase) return false;
+  if (hasAssistantPreferences && !isValidAssistantPreferences(body.assistantPreferences)) return false;
   return hasLegacyTarget
     ? isValidWindowTargetToken(body.targetToken)
     : isValidRunTarget(body.target);

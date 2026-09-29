@@ -126,4 +126,62 @@ describe("relay API route allowlist", () => {
       expect(isValidApiRequestBody(route!, body), JSON.stringify(body)).toBe(false);
     }
   });
+
+  it("accepts only the shared versioned assistant-preferences snapshot on legacy and tagged starts", () => {
+    const route = resolveAllowedApiRoute("POST", "/api/runs");
+    expect(route).not.toBeNull();
+    const base = { commandId: "start_preferences", goal: "Open the selected application" };
+    const targetToken = "a".repeat(32);
+    const assistantPreferences = {
+      version: 1,
+      responseDetail: "detailed",
+      stepExplanation: "more",
+      preferredLanguage: "zh-CN",
+      additionalGuidance: "Group findings by topic.",
+    } as const;
+
+    for (const body of [
+      { ...base, targetToken },
+      { ...base, target: { mode: "auto" } },
+      { ...base, targetToken, assistantPreferences },
+      { ...base, target: { mode: "auto" }, assistantPreferences },
+      {
+        ...base,
+        target: { mode: "auto" },
+        assistantPreferences: { ...assistantPreferences, additionalGuidance: "  Keep\nrows\u0000 safely\u202E  " },
+      },
+    ]) {
+      expect(isValidApiRequestBody(route!, body), JSON.stringify(body)).toBe(true);
+    }
+
+    const invalidPreferences = [
+      { ...assistantPreferences, version: 2 },
+      { ...assistantPreferences, responseDetail: "verbose" },
+      { ...assistantPreferences, stepExplanation: "all" },
+      { ...assistantPreferences, preferredLanguage: "fr" },
+      { ...assistantPreferences, additionalGuidance: "x".repeat(601) },
+      { ...assistantPreferences, additionalGuidance: 12 },
+      { ...assistantPreferences, presentation: { textSize: "large" } },
+      { ...assistantPreferences, voice: { preferredVoice: "calm" } },
+      { ...assistantPreferences, guard: "off" },
+      { ...assistantPreferences, unknownField: true },
+    ];
+    for (const [index, preferences] of invalidPreferences.entries()) {
+      const body = { ...base, target: { mode: "auto" }, assistantPreferences: preferences };
+      expect(isValidApiRequestBody(route!, body), `invalid preferences ${index}`).toBe(false);
+    }
+
+    expect(isValidApiRequestBody(route!, {
+      ...base,
+      targetToken,
+      assistantPreferences,
+      riskGuard: "off",
+    })).toBe(false);
+    expect(isValidApiRequestBody(route!, {
+      ...base,
+      targetToken,
+      target: { mode: "auto" },
+      assistantPreferences,
+    })).toBe(false);
+  });
 });

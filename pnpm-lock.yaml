@@ -235,6 +235,9 @@ importers:
       '@computer-harness/app-runtime':
         specifier: workspace:*
         version: link:../app-runtime
+      '@computer-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@computer-harness/voice':
         specifier: workspace:*
         version: link:../voice

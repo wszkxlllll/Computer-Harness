@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@computer-harness/app-runtime": "workspace:*",
+    "@computer-harness/protocol": "workspace:*",
     "@computer-harness/voice": "workspace:*",
     "ws": "8.21.3"
   },
