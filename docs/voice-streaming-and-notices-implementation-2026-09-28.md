@@ -2,7 +2,7 @@
 
 日期：2026-09-29
 文档角色：结果 / 实施记录
-状态：阶段 A 与 B1 已实现；STT/录音、真实语音服务和手机真机验收待实施
+状态：阶段 A、B1 与 ObservationAssessment 语义进度扩展已实现；真实 TTS 服务和手机真机验收待实施
 当前入口：[产品开发、验证与稳定 Demo 清单](./product-next-stage-task-list-2026-09-27.md) 第 4 节、第 11.4 节
 基线：阶段 A commit `e98502b`；B1 当前工作树变更尚未提交
 范围：provider-neutral 语音合同、转写段落合并、RuntimeEvent 到 RunNotice 的纯投影和通知调度、Host/SSE 安全通知投影、Web 可选浏览器播报。没有实现录音/STT Provider、真实 TTS 服务或设备级播放保证。
@@ -65,23 +65,21 @@ Web 当前实现 `BrowserSpeechOutput.openSession()`，用浏览器 `speechSynth
 
 ### RunNotice 投影和调度
 
-`RunNoticeProjector` 只消费单 Run、按序提交的 RuntimeEvent，每个事件最多产生一个 notice。默认 `dynamicContentEnabled: false`，只生成固定状态文案；用户显式开启动态内容后，才会把筛查通过的动态文本放入 notice。
+`RunNoticeProjector` 只消费单 Run、按序提交的 RuntimeEvent，每个事件最多产生一个 notice。它对 `run.created` 生成一次固定的 polite “任务已开始。”提示，不读取 Goal。RemoteRun 在重放已提交 RuntimeEvent 前创建 projector，因此即使客户端在 Run 启动后订阅，也能从有序 SSE 缓冲中重放该提示且不会重复投影。默认 `dynamicContentEnabled: false`，只生成固定状态文案；用户显式开启动态内容后，才会把筛查通过的动态文本放入 notice。
 
-进度候选顺序为：
+普通成功 GUI action 的旧进度候选路径已关闭：`assistantText`、`declaredEffect.summary` 与 Planning subject 不再绑定到动作 Receipt 上播报。没有明确语义进度时，动作完成、截图和 Guard 事件都不产生动作进度通知；不按动作数量发模板提示。
 
-1. `model.response.received.turn.assistantText`；
-2. 本轮 Computer ToolCall 的 `declaredEffect.summary`；
-3. 当前 `in_progress` Planning task 的 subject；
+`ModelTurn.observationAssessment` 是可选的结构化回合注释，包含当前 `observationId`、前一 GUI `actionId`、`actionOutcome`（`expected_change`、`no_effect`、`unexpected_change` 或 `uncertain`）、简短可见证据，以及可选的 `progress: { kind: milestone | blocked, summary }`。GLM 与 Qwen 适配器把它作为正常 action/control ToolCall arguments 中的可选字段读取，再还原为 ModelTurn 顶层字段；不会因此发起额外模型请求。协议说明和 schema 留在稳定 Provider 前缀，具体观察/动作 ID 与 Monitor guidance 通过现有动态 Context 消息传递。此处描述的是 Harness 适配器合同，不表示远端 API 提供了独立的 ObservationAssessment 能力。
 
-候选只在模型响应中暂存，不立即播报：`model.response.received` 先按 `ToolCallId` 保存候选；`action.proposed` 将候选绑定到 `ActionId`；只有对应 `action.execution.completed` 且 Receipt 为 `completed` 时，才生成关键进度 notice。`tool.call.rejected`、`tool.call.failed`、action refused/failed/cancelled 都会丢弃候选。没有候选时不产生动作进度，不按动作数量发模板提示。
+Runtime 在提交 `model.response.received` 前，要求 assessment 的 Observation 是当前最新帧、action ID 对应前一 GUI action 的回执，并且该帧在回执之后产生。字段无效、缺失、过期或动作不匹配时只丢弃可选 assessment，不让有效的模型回合失败。Monitor 将保留下来的语义分类与已提交回执及视觉 transition 一起归并；缺少确定性证据、回执失败或两者不一致时结论为 `uncertain`。`no_effect`、`unexpected_change` 与 `uncertain` 的指导继续走现有 `monitorGuidance` Context 路径，要求模型检查当前状态并据此选择动作，不替模型执行动作或覆盖回执。
 
-Plan 投影维护按 task ID 索引的当前 Run 任务；一个 pending/completed/blocked Task 不会清除其他 Task 的 in-progress 状态。Planning 阶段变化是已提交状态，可以产生一条阶段 notice。普通 GUI action 必须有对应的语义候选、成功 Receipt 并通过 Scheduler 限频/去重才会产生 notice；裸 `action.execution.completed`、截图事件和 `action.guard.evaluated.reason` 不产生普通进度。Guard 开关不影响通知投影。
+RunNotice 只在通过当前 Observation/action 绑定、Receipt 为 `completed`，且存在相同 action/post-Observation 的 `monitor.transition` 时产生动作里程碑通知。仅接受 `changed + expected_change + progress.kind=milestone`，并使用固定文案；`unexpected_change`、`no_effect`、`uncertain` 和 `blocked` assessment 均不语音播报。Monitor 结论只通过现有 Context guidance 提供给模型。缺少 transition（包括 Monitor 关闭）、transition 不匹配或其他组合都保持静默；绝不朗读 `evidence` 或 `progress.summary`。Planning 阶段变化仍可作为已提交 Planning 状态单独产生阶段 notice。Guard 开关不影响通知投影。
 
 通知类型：
 
 | `kind` | 来源 | `delivery` | 当前文字策略 |
 | --- | --- | --- | --- |
-| `progress` | 已确认的 Computer 动作，或 Planning 阶段变化 | `polite` | 默认固定文案；用户显式开启动态内容后，使用筛查通过的阶段/模型说明，并标明是模型说明且正在核对结果 |
+| `progress` | Run 开始提示、有效 assessment 的 expected-change milestone，或 Planning 阶段变化 | `polite` | 开始/动作进度使用固定文案，不朗读 assessment 的证据或摘要；Monitor 结论只进入 Context guidance |
 | `approval` | `approval.requested` | `interrupt` | 固定提示查看审批详情，不朗读模型 Guard 原因 |
 | `question` | `user.input.requested` | `interrupt` | 默认固定提示；用户显式开启动态内容且问题通过已知模式筛查后才朗读原问题 |
 | `error` | Runtime 错误或 Provider 请求失败 | `interrupt` | 通用提示查看详情，不朗读错误原文、密钥或路径 |
@@ -110,11 +108,11 @@ Plan 投影维护按 task ID 索引的当前 Run 任务；一个 pending/complet
 - 设置语速会取消旧速率的活跃输出 session；下一条通知以新速度重新打开 session。pending request ID 在相应 utterance 结束/失败后释放，后续 unrelated 通知不会再受它影响。Browser session 会把播放和 finish 失败传回 Web 可见降级文案。StrictMode 下重复 effect 通过 per-Run cursor/notice 去重；短暂 cleanup probe 不会误取消存活输出，真实卸载后取消。
 - 不支持 `speechSynthesis` 时，设置页明确显示并禁用开关；播放抛错时运行任务不受影响，页面显示错误，通知仍在文字时间线。
 
-动态内容默认关闭。已知词/模式（口令、验证码、电话、证件号、银行卡/长数字、邮箱及敏感 URL 参数）命中时，即使动态内容已启用，projector 也只生成固定安全文案。该启发式不具备语义隐私识别能力，不是保密保证；不能以“未命中”证明任意动态文本安全。下一阶段需提供明确开关，默认只播固定状态，并通过真机/真实任务确认锁屏等场景不会泄露。
+审批、提问与终态摘要的既有动态内容偏好和敏感模式过滤保持不变。动作进度不使用模型摘要，因此 assessment 的私有证据和 progress summary 不进入语音 notice；这不构成对轨迹中模型输出的隐私保证。
 
 ## 本阶段验证
 
-本阶段 B1 已执行定向离线验证：app-runtime public notice 投影/关闭基线/pending request/终态/SSE replay；Web notice ID 去重；Browser TTS 关闭默认、可打断、pending 失效取消、语音失败降级；偏好迁移。完整测试数和构建/typecheck/diff-check 结果在本轮交付汇报中记录。本阶段没有真实 STT/TTS Provider、手机真机、锁屏/后台播放或语音延迟实验；浏览器 API 用可控测试替身验证。
+ObservationAssessment 接入阶段执行了定向离线验证：GLM/Qwen schema 与解析、current Observation/action 绑定及拒绝、Monitor 与确定性证据冲突、下一 Context guidance、RunNotice 对 stale/missing assessment 的静默处理和 expected-change milestone 文案。随后另有受控真实 API 验证，记录见[独立报告](./semantic-assessment-and-preferences-real-api-validation-2026-09-29.md)，总计四次请求。既有 B1 SSE/TTS 验证仍适用；尚未验证真实手机 TTS、锁屏/后台播放或语音延迟。
 
 ## 下一阶段接点与未实现项
 

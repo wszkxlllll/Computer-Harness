@@ -65,13 +65,13 @@ R1/R2 不以工具返回 completed 判断业务完成。错误输入、错窗口
 
 ### P1：落实现有回答偏好
 
-当前入口：`apps/web/src/preferences.ts`、`PreferencesScreen.tsx`；消费入口应经 Host → app-runtime 组合根 → `packages/context`。
+当前入口：`apps/web/src/preferences.ts`、`PreferencesScreen.tsx`；消费入口经 Host → app-runtime 组合根 → `packages/context`。P1 的代码闭环已实现，真实模型输出效果与手机真机无障碍尚未验收。
 
-流程：用户保存 → 本地界面立即应用显示偏好 → 创建 Run 时提交助手偏好白名单 → Host 校验 → 冻结带版本的本 Run 偏好 → Context 投影 → GLM/Qwen 使用 → trace 记录实际投影。
+流程：用户保存 → 本地界面立即应用显示偏好 → Home 创建 Run 时提交带版本的助手偏好白名单 → Host 严格校验并规范化 → RemoteRunAPI 按偏好计算幂等指纹 → 克隆并冻结本 Run 快照 → app-runtime Run config → Runtime ContextCompileInput → `packages/context` 投影 → GLM/Qwen 共用同一 ModelInput → trace 记录实际投影。没有设置对象的旧调用保持默认且不投影；运行中改默认只影响下一 Run。浏览器 localStorage 不提供跨设备同步。
 
-先接 responseDetail、stepExplanation、preferredLanguage。字体/对比度只影响界面，不塞进模型；当前用户要求优先于默认偏好，偏好不能覆盖系统权限/审批要求。稳定投影放在稳定说明区域，减少无谓前缀变化。运行中修改默认只影响下一 Run；若用户明确纠正当前 Run，复用 inbox 并留事件。
+快照 v1 包含 `responseDetail`、`stepExplanation`、`preferredLanguage` 和可空 `additionalGuidance`（最多 600 个 Unicode 字符）。字体/对比度/语音设置只影响界面或通知，不进入模型。稳定系统前缀只说明偏好的低优先级；本 Run 实际枚举值和自定义文字在 Goal 后作为动态用户消息，并先于后续历史纠正与观察，以保持偏好变化不改 stablePrefixHash，同时让更新的用户纠正更近。预算先为所有权威用户输入保留空间，再考虑偏好；不足时省略偏好并记录 `omittedReason=budget`。当前明确请求与纠正优先，偏好不能覆盖系统指令、安全规则、审批或工具策略。trace 记录投影版本、是否纳入/预算省略、估算 token、枚举、说明字符数和 SHA-256，不保存自定义文字；文本只在模型输入所需位置出现。
 
-完成标准：两 Provider 下对同一任务分别产生简洁/详细或指定语言结果；trace 能定位生效偏好；关闭后无残留；多个 Run/配对设备按既定存储范围隔离；重置生效。浏览器本地偏好不会被宣称为跨设备同步。
+代码完成标准：v2→v3 迁移、创建 Run 白名单、Host 严格校验、幂等冲突、快照隔离、Context 预算/trace 脱敏、stablePrefixHash 缓存不变量与 GLM/Qwen 共用编译投影均有离线测试；重置和清空已覆盖。离线代码实现阶段未调用付费 API；随后受控验证实际发起四次真实 API 请求，详见[验证记录](./semantic-assessment-and-preferences-real-api-validation-2026-09-29.md)。真实模型回答质量的稳定性、两个手机系统的读屏/软键盘体验仍待验收。详见[实施记录](./assistant-preferences-p1-implementation-2026-09-29.md)。
 
 ### P2：可管理的个人需求资料
 
@@ -226,7 +226,7 @@ E1：先固定全功能体验基线，再从暴露的问题选择单变量对照
 | V02 | 近期 / RunNotice与Browser TTS已接，真机未验收 | 两手机平台结果/提问/关键进度播报；补足停止/重播等体验后评估是否需要 | Android/iOS真机；后台/锁屏、低延迟、pending失效取消；播报失败保留文本 |
 | V03 | 随后 / 核心合同已建，Provider/设备未接 | 流式STT/TTS、分块、端点检测与延迟优化 | V01/V02基线；量化首段延迟、完整准确率、费用及取消效果 |
 | V04 | 随后 / 可替换目标 | 本地小模型/第二语音厂商适配、配置及隐私说明 | 模型硬件与许可先核验；保持同一语音合同，不能只mock |
-| P01 | 近期 / 偏好仅本地 | P1回答语言、详略、步骤解释进入Context | 两Provider实测、trace可查、默认/纠正优先级明确 |
+| P01 | 近期 / 代码闭环已实现，真实体验待验收 | P1回答语言、详略、步骤解释和最多600字补充说明进入Context | 离线验证双Provider共用投影、trace与隔离；后续验真实输出、手机无障碍，默认/纠正优先级明确 |
 | P02 | 随后 / 未实现 | P2显式个人资料、编辑/删除/导出与按需投影 | P01；用户确认、字段来源、持久化范围及清除测试 |
 | P03 | 随后 / 未实现 | 跨设备偏好同步及冲突，界面偏好与行为偏好分层 | 身份/设备范围明确；不同用户不得串用；提供本地不上传模式 |
 | P04 | 研究 / 未实现 | 自动发现候选偏好→用户确认→更新/遗忘 | P02；错误候选可纠正；不把瞬时GUI状态当长期个人事实 |

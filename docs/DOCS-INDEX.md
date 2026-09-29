@@ -6,7 +6,13 @@
 
 下一阶段完整待办与分工入口：[产品开发、验证与稳定 Demo 清单](./product-next-stage-task-list-2026-09-27.md)。覆盖桌面执行、手机/语音、个性化、Guard、三平台、现有模块优化、评测发布及后续研究；第11节为可认领任务全集，第12节为认领规则。分工尚待用户确认。
 
-语音阶段 A+B1 实施记录：[语音合同、运行通知与 Host/Web 播报](./voice-streaming-and-notices-implementation-2026-09-28.md)。Host/RemoteRunAPI 可选投影最小安全 `run.notice` SSE 事件，Web 已接入默认关闭、可中断的 Browser `speechSynthesis` 输出和语速偏好。阶段 B2 已完成 mock 离线录音/STT 链路，真实 Qwen API、手机麦克风与真机验收仍待进行：[阶段 B2 实施记录](./voice-recording-b2-implementation-2026-09-29.md)。
+语音阶段 A+B1 实施记录：[语音合同、运行通知与 Host/Web 播报](./voice-streaming-and-notices-implementation-2026-09-28.md)。Host/RemoteRunAPI 可选投影最小安全 `run.notice` SSE 事件，Web 已接入默认关闭、可中断的 Browser `speechSynthesis` 输出和语速偏好；普通 GUI action 不再触发进度播报，动作 milestone/blocked 通知要求当前有效 ObservationAssessment。阶段 B2 已完成 mock 离线录音/STT 链路及真实 Qwen 约 4 秒短探针；手机麦克风与真机/WAN 验收仍待进行：[阶段 B2 实施记录](./voice-recording-b2-implementation-2026-09-29.md)。
+
+语音 Preview 部署与手机测试入口：[隔离部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)。新 Preview 在 `https://47.108.197.221:8443`；旧公网服务保持原状。公网基础检查已完成，手机完整语音链路待实测。
+
+P1 助手回答偏好实施记录：[版本化 Run 快照与 Context 投影](./assistant-preferences-p1-implementation-2026-09-29.md)。代码闭环和离线合同测试已完成；真实模型行为与手机真机无障碍尚未验收。
+
+受控真实 API 验证：[ObservationAssessment 与助手偏好](./semantic-assessment-and-preferences-real-api-validation-2026-09-29.md)。GLM/Qwen 共发起四次合成请求；Qwen assessment 经 Monitor/Context 消费，GLM 简中偏好有单次正向样本，Qwen 个性化选择 `wait` 且 assessment 与 unchanged transition 冲突。终端汇总截断了部分逐项指标，报告明确保留该证据限制。
 
 当前交付：[手机 App 式界面与审批修复](./mobile-accessible-ui-implementation-2026-09-26.md)。已按成熟 App 参考重做实际界面；756 项测试通过，最终小屏裁切已修复并重建。2026-09-27 已部署公网 Web、启动新版本机 Host 并验证配对注册；未完成手机读屏及真实任务验收。
 
