@@ -6,7 +6,7 @@
 
 ## 部署状态
 
-- Preview 使用独立 release：`/opt/computer-harness-preview/releases/2026-09-29-9f7fcb6027b4`；Preview 的 `current` 符号链接指向该 release。
+- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-09-29-082dbf8`；Preview 的 `current` 符号链接指向该 release。首轮 `2026-09-29-9f7fcb6027b4` 保留为 Preview 回滚点。
 - `computer-harness-relay-preview` 服务处于 active，只监听 loopback `8788`。Nginx 在 `8443` 提供 TLS：`https://47.108.197.221:8443`，使用现有有效 IP 证书。用户已开放 `8443`。
 - 旧入口 `https://47.108.197.221` 及旧服务、旧 `current` 均未修改，仍健康。
 - 公网检查结果：health endpoint `200`；匿名 API `401`（认证门正常拒绝匿名请求）；JavaScript 与 CSS 资源 `200`。
@@ -14,7 +14,7 @@
 
 ## 来源与摘要
 
-部署内容来自工作树快照，不是 Git tag 或已提交的 Git release。下列值来自部署计划：
+首轮部署内容来自工作树快照；发现 Relay 未接受新增 `assistantPreferences` 后，修复已提交为 `082dbf8a5e1b7e1c37d91860d7fff77ffcce73b4`，服务器从该提交的 `git archive` 构建并原子切换到当前 Preview release。它仍不是 Git tag 或正式 GitHub Release。
 
 | 项目 | 标识 |
 | --- | --- |
@@ -23,12 +23,14 @@
 | 部署 overlay SHA-256 | `9f7fcb6027b424bf518fb33e4f8dea5308ea05b9632928c77fa28590cbb0a3a3` |
 | 构建 artifact SHA-256 | `29a93e8af3da2defadf69d55bec1f93e26ae191b12777cb96e4a9099d4930ae9` |
 
+当前修复 release 的源码 ZIP SHA-256 为 `91122c31e79572ca3296e656fa51e9b593ffa1cfa11a8e692162191791e8715b`。首轮手机已成功配对，语音 session/audio/finish 均返回成功；开始任务时 `POST /api/runs` 连续返回 `400`，且 Host 未创建 Run。根因是 Relay 的精确请求白名单尚未接受 Web 新增的 `assistantPreferences`，请求在到达 Host 前被拒绝。修复后 Relay 复用 Host 同一份 protocol normalizer，并补充 Relay 合同及真实 Web→Relay→Host WSS roundtrip 测试。Preview Relay 重启会清空内存 session，用户必须重新扫码配对后复测。
+
 本机私有配置 `.env.voice-preview` 存在；本文不记录其中的 hostId、凭据、密钥或配对 token，也不附私有截图。
 
 ## 手机测试入口
 
 1. 在运行本机 Host 的电脑上打开 `http://localhost:4318/connect`。
-2. 用手机扫描该页面提供的配对码，并在本机页面确认配对请求。
+2. 用手机扫描该页面提供的配对码，并在本机页面确认配对请求。Preview Relay 更新或重启后必须重新配对，不能继续使用重启前的手机 session。
 3. 手机使用 Preview 地址 `https://47.108.197.221:8443` 继续测试。不要把旧地址 `https://47.108.197.221` 与 Preview 混用。
 4. 记录手机浏览器、配对是否成功、麦克风权限、录音/转写、取消和弱网表现；这些手机端结果目前尚未提供，本记录不宣称它们已通过。
 
