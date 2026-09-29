@@ -109,11 +109,12 @@ TYPESAFE_API_KEY=your_typesafe_key
 
 在**电脑**打开 `http://localhost:4317` 预览控制台。真手机需要通过已部署的 HTTPS Relay 访问；手机中的 `localhost` 指向手机自己，不能直接连接电脑。
 
-手机每次发起任务可以选择三种目标模式：
+手机每次发起任务可以选择四种目标模式：
 
 - **自动选择（默认）**：按 Goal 在本机已打开或最小化的顶层窗口中匹配应用名和标题。只有唯一且可信的匹配才自动绑定；无匹配或有歧义时保留任务并转入手动选择，不静默接管整桌面，也不会自动启动未打开的原生应用。
 - **手动选择窗口**：由用户从当前可见窗口中选择，作为自动匹配的兜底。
 - **打开网站**：使用 Harness 管理的浏览器会话。`临时浏览`是默认选项，使用一次性 profile；`使用已登录网站`是显式选项，使用 Host 管理的持久 profile。临时模式网址留空会打开空白页；已登录模式网址留空会恢复 Host 登记的网站；填写网址时只能使用允许的 HTTP(S) 地址。
+- **整个桌面**：显式捕获并操作当前主桌面，用于窗口截图遗漏独立弹窗、菜单或系统界面的临时兼容场景。该模式可能把其他可见窗口一并发送给 Provider，不会由自动选窗静默启用。
 
 浏览器的 profile 根目录、标签、Cookie 和 CDP 地址始终由 Host 管理，手机不能传入任意路径或登录数据；个人日常浏览器的登录状态不会自动复制到 Harness。若受管浏览器异常退出并留下运行标记，先停止 Host，再执行：
 
@@ -137,7 +138,7 @@ TYPESAFE_API_KEY=your_typesafe_key
 
 实时识别需要在 Host 私有环境文件中配置 `DASHSCOPE_API_KEY`，以及安全的 `DASHSCOPE_WORKSPACE_ID` 或显式 `DASHSCOPE_REALTIME_ASR_ENDPOINT`。显式 endpoint 优先；只提供 workspace ID 时 Host 会派生北京专属 WSS `/api-ws/v1/realtime` endpoint。显式 endpoint 存在时，过期或不安全的 workspace 值会被忽略且不会作为请求头发送；没有显式 endpoint 时，不安全 workspace 会使能力保持 unavailable。浏览器不接触密钥。能力查询只读取 Host 的本地配置，不代表远端 API 已连通。mock/离线回归已通过，真实 Qwen 短探针（约 4 秒合成语音）也已通过；手机麦克风、WAN Relay 和实际弱网时延尚未验收，不要把它视为已验证的稳定语音能力。
 
-运行通知可在任务页面偏好中显式开启。普通 GUI action 完成不会播报进度；只有当前 Observation/action 匹配、Monitor transition 为 `changed` 且 assessment 为 `expected_change` 的 milestone 才会播报固定里程碑提示。受阻、无效果或不确定结论只作为后续模型 Context guidance，不语音播报。assessment 随正常模型回合传输，不额外发起模型请求，也不能覆盖 Runtime 回执或确定性 Monitor 证据。
+运行通知可在手机设置中显式开启；开关状态会作为逐 Run opt-in 随新任务提交，旧客户端和关闭状态仍使用固定安全通知。普通 GUI action 不播报；只有当前 Observation/action、completed receipt、Monitor 来源事件及 `changed + expected_change` 全部匹配的 milestone 才直接朗读通过敏感筛查的 `progress.summary`。审批通知不朗读 Guard 的英文内部 reason，也不朗读坐标、输入内容或模型未验证的 target/summary，而是按同一 `callId` 关联结构化风险类别与动作类型，生成简短中文“可能涉及”提示。审批、提问、错误与终态会打断当前播报；已解决的 request、SSE 重放和旧快照不会造成重复或过期播报。失败、取消、预算耗尽和结果未知绝不会朗读残留的成功摘要。浏览器 TTS 固定请求普通话，但最终声音仍由设备系统语音提供；真实云端 TTS Provider 尚未接入。
 
 Host 当前使用固定组合预设：Planning、Fact Memory、lexical retrieval、recent Context、same-control input Batch、layered Guard、shadow Monitor 和人工确认的窗口交接；原生窗口目标默认不启用 UIA/DOM，受管浏览器目标使用 Hybrid Grounding。Host **不会继承 TUI 上次选择的功能**。不要同时用手机与 TUI 控制同一桌面；手机公网完整业务任务和无障碍验收仍需单独完成。
 

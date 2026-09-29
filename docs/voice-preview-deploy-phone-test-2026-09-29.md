@@ -6,11 +6,23 @@
 
 ## 部署状态
 
-- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-09-29-082dbf8`；Preview 的 `current` 符号链接指向该 release。首轮 `2026-09-29-9f7fcb6027b4` 保留为 Preview 回滚点。
+- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-09-29-voice-natural-v6`；Preview 的 `current` 符号链接指向该 release。此前 release 保留为 Preview 回滚点。
 - `computer-harness-relay-preview` 服务处于 active，只监听 loopback `8788`。Nginx 在 `8443` 提供 TLS：`https://47.108.197.221:8443`，使用现有有效 IP 证书。用户已开放 `8443`。
 - 旧入口 `https://47.108.197.221` 及旧服务、旧 `current` 均未修改，仍健康。
 - 公网检查结果：health endpoint `200`；匿名 API `401`（认证门正常拒绝匿名请求）；JavaScript 与 CSS 资源 `200`。
 - 本机 Host 在后台运行于 `4318`；WSS 已建立，配对挑战的 origin 已验证。以上结果不代表手机麦克风或完整语音任务已经验收。
+
+2026-09-29 第二次更新加入：语音开关在用户手势内立即试播、首次进入 Run 时只补发固定“任务已开始”通知、手机显式整个桌面目标，以及 GLM-5.3-Flash `reasoning_effort=low`。整个桌面不会由自动选窗静默启用；它可能把其他可见窗口送入 Provider，仅作为独立弹窗未被窗口捕获时的显式兼容路径。部署前本地全量为 93 个测试文件、930 项通过；脚本 19 项通过、1 项因 Windows 无符号链接能力跳过，强制 Web 构建和服务器构建均通过。
+
+2026-09-29 第三次更新修复手机播报的可观察性和语言选择：开始提交任务的直接手势会先播报“正在发送任务”，用于解锁限制后台自动播音的移动 WebView；所有浏览器 TTS utterance 固定为 `zh-CN`，优先选择普通话 voice 并排除粤语 voice；播放中的 utterance 保持强引用，避免移动 WebView 提前回收。动作后判断的 milestone 标准放宽为“新截图已确认完成一个独立用户子目标或稳定阶段结果”，但聚焦、选中、打开菜单和动作 receipt 不算进展。更新后全量为 93 个测试文件、932 项通过；脚本 19 项通过、1 项跳过。真实 GLM low 两轮协议探针成功，但手机是否真实出声仍必须由真机验收。
+
+2026-09-29 第四次更新修复审批通知的客户端竞态：Web 现在直接按 SSE 序列维护当前 pending request，旧 GET snapshot 不得覆盖更新的审批状态；审批 resolved 后会立即取消或抑制旧通知。创建 Run 后使用同文档 History API 导航，不再整页刷新并丢失移动浏览器的语音激活上下文。新增测试覆盖审批通知早于 GET、快速 resolved、SSE replay 去重和同文档导航；全量为 93 个测试文件、937 项通过，脚本 19 项通过、1 项跳过。该修复不改变 Guard、RuntimeEvent 或 TTS Provider。
+
+2026-09-29 第五次更新增加逐 Run 的动态通知正文 opt-in：只有手机开启“朗读任务关键通知”后新建的 Run 才会朗读当前审批原因和已验证的 milestone summary；旧客户端和关闭设置的 Run 继续使用固定安全文案。动态正文在截断前执行控制字符规整和敏感内容扫描，审批继续绑定当前 requestId，普通 assistantText 与 Monitor 原始结论不朗读。`run-start` 不再占用 12 秒进度冷却，首个真实 milestone 可立即发布；后续进度仍限流。Monitor transition 的 receipt/observation 来源事件 ID 也加入绑定校验。Luna 实施、Sol 复审均通过；全量为 93 个测试文件、945 项通过，脚本 19 项通过、1 项跳过，完整 typecheck 通过。
+
+2026-09-29 第六次更新不再朗读 Guard 的英文内部 reason。审批通过 `callId` 精确关联已提交的 `action.guard.evaluated`，只用有限结构化风险类别与动作类型生成简短中文“可能涉及”提示；不播坐标、输入值或模型未验证的 target/summary。已验证 milestone 直接朗读安全的 `progress.summary`，不再添加机械前缀；内部 `progressSemantic` 使已验证 milestone 不被普通阶段提示的冷却永久丢弃，字段不进入公共 wire。只有 succeeded 可朗读动态终态摘要，失败、取消、预算耗尽和结果未知始终播报各自状态。Luna 实施、Sol 多轮复审后无 P0/P1/P2；全量为 93 个测试文件、947 项通过，脚本 19 项通过、1 项跳过，完整 typecheck 与构建通过。
+
+真实 GLM 探针先验证 `thinking.type=disabled` 被服务端以 HTTP 400/1210 拒绝，随后使用 `thinking.type=enabled` 与 `reasoning_effort=low` 成功：单请求约 24.1 秒，输入 219、输出 644、合计 863 tokens。该探针使用无截图、无桌面动作的合成文本，不证明真实 GUI 任务质量；它证明 GLM-5.3-Flash 不能关闭思考，Preview 只能降到 low。
 
 ## 来源与摘要
 
@@ -23,7 +35,9 @@
 | 部署 overlay SHA-256 | `9f7fcb6027b424bf518fb33e4f8dea5308ea05b9632928c77fa28590cbb0a3a3` |
 | 构建 artifact SHA-256 | `29a93e8af3da2defadf69d55bec1f93e26ae191b12777cb96e4a9099d4930ae9` |
 
-当前修复 release 的源码 ZIP SHA-256 为 `91122c31e79572ca3296e656fa51e9b593ffa1cfa11a8e692162191791e8715b`。首轮手机已成功配对，语音 session/audio/finish 均返回成功；开始任务时 `POST /api/runs` 连续返回 `400`，且 Host 未创建 Run。根因是 Relay 的精确请求白名单尚未接受 Web 新增的 `assistantPreferences`，请求在到达 Host 前被拒绝。修复后 Relay 复用 Host 同一份 protocol normalizer，并补充 Relay 合同及真实 Web→Relay→Host WSS roundtrip 测试。Preview Relay 重启会清空内存 session，用户必须重新扫码配对后复测。
+此前 `082dbf8` 修复 release 的源码 ZIP SHA-256 为 `91122c31e79572ca3296e656fa51e9b593ffa1cfa11a8e692162191791e8715b`。首轮手机已成功配对，语音 session/audio/finish 均返回成功；开始任务时 `POST /api/runs` 连续返回 `400`，且 Host 未创建 Run。根因是 Relay 的精确请求白名单尚未接受 Web 新增的 `assistantPreferences`，请求在到达 Host 前被拒绝。修复后 Relay 复用 Host 同一份 protocol normalizer，并补充 Relay 合同及真实 Web→Relay→Host WSS roundtrip 测试。Preview Relay 重启会清空内存 session，用户必须重新扫码配对后复测。
+
+第二次更新的未提交 tracked diff 摘要哈希为 `3ff57e58d70cad30e24b7d777909e3880b38354c`；服务器仅从 Git tracked 基线与这组 tracked overlay 构建，不包含 `.env.voice-preview`、本机运行轨迹、截图或 API 密钥。它仍需后续形成正式 commit 后才能作为可复现源码基线。
 
 本机私有配置 `.env.voice-preview` 存在；本文不记录其中的 hostId、凭据、密钥或配对 token，也不附私有截图。
 

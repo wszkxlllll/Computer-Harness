@@ -6,7 +6,7 @@
 
 下一阶段完整待办与分工入口：[产品开发、验证与稳定 Demo 清单](./product-next-stage-task-list-2026-09-27.md)。覆盖桌面执行、手机/语音、个性化、Guard、三平台、现有模块优化、评测发布及后续研究；第11节为可认领任务全集，第12节为认领规则。分工尚待用户确认。
 
-语音阶段 A+B1 实施记录：[语音合同、运行通知与 Host/Web 播报](./voice-streaming-and-notices-implementation-2026-09-28.md)。Host/RemoteRunAPI 可选投影最小安全 `run.notice` SSE 事件，Web 已接入默认关闭、可中断的 Browser `speechSynthesis` 输出和语速偏好；普通 GUI action 不再触发进度播报，动作 milestone/blocked 通知要求当前有效 ObservationAssessment。阶段 B2 已完成 mock 离线录音/STT 链路及真实 Qwen 约 4 秒短探针；手机麦克风与真机/WAN 验收仍待进行：[阶段 B2 实施记录](./voice-recording-b2-implementation-2026-09-29.md)。
+语音阶段 A+B1 实施记录：[语音合同、运行通知与 Host/Web 播报](./voice-streaming-and-notices-implementation-2026-09-28.md)。Host/RemoteRunAPI 可选投影最小 `run.notice` SSE 事件，手机显式开启后，新 Run 可朗读结构化中文审批提示、已验证 milestone 摘要、问题和结果；过期审批、SSE 重放、旧快照与敏感正文均有降级边界。Web 使用可替换的 Browser `speechSynthesis` 输出并固定请求普通话，真实云端 TTS 尚未接入。阶段 B2 已实现手机录音、Host 流式 ASR 会话与 Qwen Provider，mock、真实短探针和手机链路仍需按实施记录继续验收：[阶段 B2 实施记录](./voice-recording-b2-implementation-2026-09-29.md)。
 
 语音 Preview 部署与手机测试入口：[隔离部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)。新 Preview 在 `https://47.108.197.221:8443`；旧公网服务保持原状。公网基础检查已完成，手机完整语音链路待实测。
 

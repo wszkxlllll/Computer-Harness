@@ -99,7 +99,7 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 | --- | --- | --- |
 | GLM key | `ZHIPUAI_API_KEY` | 兼容别名：`ZHIPU_API_KEY`、`GLM_API_KEY` |
 | GLM endpoint | `GLM_BASE_URL` | 可选，自定义 OpenAI-compatible endpoint |
-| GLM thinking | `GLM_THINKING` | `enabled` 或 `disabled`，默认 `enabled` |
+| GLM thinking | `GLM_THINKING` | GLM-5.3-Flash 强制思考；使用 `low`、`high` 或 `max` 控制强度。`low` 延迟较低，`max` 为最深档。旧 `enabled` 仍表示由 Provider 使用默认强度；`disabled` 会被当前 GLM-5.3-Flash API 拒绝。 |
 | Qwen key | `DASHSCOPE_API_KEY` | Qwen3.8-Flash |
 | Qwen endpoint | `DASHSCOPE_BASE_URL` | 别名：`DASHSCOPE_ENDPOINT` |
 | Qwen workspace | `DASHSCOPE_WORKSPACE_ID` | 可选；用于生成 workspace endpoint |
