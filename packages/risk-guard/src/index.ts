@@ -183,7 +183,7 @@ function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<str
   }
   const contradiction = findContradiction(context, declarations as ActionEffectDeclaration[]);
   if (contradiction !== undefined) return { route: "semantic_review", categories: contradiction.categories, reasonCode: contradiction.code, reason: contradiction.reason };
-  const textSignal = scanDeclarationText(declarations as ActionEffectDeclaration[]);
+  const textSignal = scanDeclarationText(context, declarations as ActionEffectDeclaration[]);
   if (textSignal !== undefined) return { route: "semantic_review", categories: textSignal.categories, reasonCode: textSignal.code, reason: textSignal.reason };
   return { route: "allow", categories: [], reasonCode: "declared_low_impact", reason: "The current action declares only low-impact effects and has no escalation signal." };
 }
@@ -199,22 +199,29 @@ function findContradiction(context: ActionPolicyContext, declarations: ActionEff
   return undefined;
 }
 
-function scanDeclarationText(declarations: ActionEffectDeclaration[]): { code: string; reason: string; categories: RiskCategory[] } | undefined {
+function scanDeclarationText(context: ActionPolicyContext, declarations: ActionEffectDeclaration[]): { code: string; reason: string; categories: RiskCategory[] } | undefined {
   const matches: Array<{ pattern: RegExp; category: RiskCategory }> = [
     { pattern: /(pay|purchase|transfer|checkout|付款|支付|购买|转账|结算)/iu, category: "financial" },
     { pattern: /(send|publish|post|submit|发送|发布|提交)/iu, category: "external_commitment" },
-    { pattern: /(permanent(?:ly)? delete|erase|wipe|永久删除|彻底删除|清空)/iu, category: "destructive" },
+    { pattern: /(permanent(?:ly)? delete|delete(?:[-_ ]account)?|erase|wipe|永久删除|彻底删除|清空)/iu, category: "destructive" },
     { pattern: /(password|permission|privacy|credential|密码|权限|隐私|凭据)/iu, category: "privacy_account" },
   ];
   const categories: RiskCategory[] = [];
-  for (const declaration of declarations) {
+  for (let index = 0; index < declarations.length; index += 1) {
+    const declaration = declarations[index];
+    if (declaration === undefined) continue;
+    const action = context.candidate.actions[index];
     for (const field of [declaration.target, declaration.summary]) {
       const text = normalizeRiskText(field);
       const readOnlyPaymentHistory = declaration.effects.length === 1 && declaration.effects[0] === "navigate" && isReadOnlyPaymentHistoryField(text);
+      const readOnlyPurchasePage = action?.kind === "wait"
+        && declaration.effects.every((effect) => effect === "navigate" || effect === "observe")
+        && isReadOnlyPurchasePageField(text);
       for (const match of matches) {
         const pattern = new RegExp(match.pattern.source, `${match.pattern.flags}g`);
         for (const result of text.matchAll(pattern)) {
           if (readOnlyPaymentHistory && match.category === "financial") continue;
+          if (readOnlyPurchasePage && match.category === "financial") continue;
           categories.push(match.category);
         }
       }
@@ -225,7 +232,22 @@ function scanDeclarationText(declarations: ActionEffectDeclaration[]): { code: s
 }
 
 function normalizeRiskText(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
+  // URLs are opaque Computer arguments, not semantic evidence. Redacting the
+  // complete URL prevents query/path tokens such as "checkout" or "pay" from
+  // being mistaken for an intended financial action while preserving ordinary
+  // declaration text for the high-impact scan.
+  return value.replace(/https?:\/\/\S+/giu, (raw) => {
+    try {
+      const parsed = new URL(raw);
+      const retainedQuery = [...parsed.searchParams.entries()]
+        .filter(([key]) => !/^(?:next|return|redirect|return_url|redirect_uri)$/iu.test(key))
+        .map(([key, item]) => `${key}=${item}`).join(" ");
+      const path = `${parsed.pathname} ${retainedQuery} ${parsed.hash}`;
+      return /(?:pay|purchase|checkout|transfer|delete|erase|wipe|submit|send|付款|支付|购买|结算|转账|删除|清空)/iu.test(path) ? path : "[url]";
+    } catch {
+      return "[url]";
+    }
+  }).replace(/\s+/gu, " ").trim();
 }
 
 /** Payment history is an explicit complete read-only field, not a generic
@@ -234,6 +256,14 @@ function isReadOnlyPaymentHistoryField(text: string): boolean {
   const subject = /^(?:(?:the|a)\s+)?(?:(?:payment|transaction|billing|purchase|pay(?:ment)?)[ _-]*(?:history|record(?:s)?|log(?:s)?)|(?:付款|支付|账单)[ _-]*(?:历史|记录|日志))[.!?。！？]?$/iu;
   const viewStatement = /^(?:view|show|inspect|browse|open|查看|浏览|查阅)\s*(?:(?:the|a)\s+)?(?:(?:payment|transaction|billing|purchase|pay(?:ment)?)[ _-]*(?:history|record(?:s)?|log(?:s)?)|(?:付款|支付|账单)[ _-]*(?:历史|记录|日志))[.!?。！？]?$/iu;
   return subject.test(text) || viewStatement.test(text);
+}
+
+/** A narrow exception for passive waits on a product page. It must not turn
+ * arbitrary purchase wording into navigation: explicit purchase/cart/checkout
+ * verbs always remain high-impact signals. */
+function isReadOnlyPurchasePageField(text: string): boolean {
+  if (/(?:点击\s*购买|购买(?:商品|这件|该商品)|加入购物(?:车|袋)|结算|付款|支付|提交|确认购买|\bbuy\b|\badd\s+to\s+cart\b|\bcheckout\b|\bpay\b|\bsubmit\b)/iu.test(text)) return false;
+  return /(?:查看|浏览|打开|进入|导航至|等待|inspect|browse|open|view|product|商品|产品|购买)\s*(?:.{0,24})(?:页面|页|page|价格|price)/iu.test(text);
 }
 
 function hasProtectedInput(context: ActionPolicyContext): boolean {

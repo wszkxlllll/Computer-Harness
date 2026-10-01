@@ -119,7 +119,7 @@ describe("app-runtime provider factory", () => {
     await expect(provider.generate(clickInput(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 12, y: 34 } }] });
     expect(request?.url).toBe("https://glm.fixture/v1");
     expect(request?.headers.Authorization).toBe("Bearer fixture-glm-key");
-    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false, thinking: { type: "disabled" } });
+    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false, thinking: { type: "enabled" }, max_tokens: 4096 });
     expect(request?.body.tools).toMatchObject([{ type: "function", function: { name: "click" } }]);
   });
 

@@ -11,6 +11,7 @@ export interface CuaWindowDiscoveryOptions {
   readonly socketPath: string;
   readonly sessionLabel?: string;
   readonly driverFactory?: (socketPath: string) => CuaDriverLike;
+  readonly osPlatform?: NodeJS.Platform;
 }
 
 export class CuaWindowDiscoveryCleanupError extends Error {
@@ -46,7 +47,14 @@ export class CuaWindowDiscovery {
     await previousOperation;
     try {
       signal.throwIfAborted();
-      return await this.withDriver(signal, (driver, session) => listWindowTargets(driver, session, signal, undefined, onScreenOnly));
+      return await this.withDriver(signal, (driver, session) => listWindowTargets(
+        driver,
+        session,
+        signal,
+        undefined,
+        onScreenOnly,
+        this.options.osPlatform ?? process.platform,
+      ));
     } finally {
       release();
     }

@@ -10,7 +10,17 @@
 
 下一阶段 A 线入口：[通过真实任务完善产品](./a-line-runtime-delivery-plan-2026-09-27.md)。先在实际设备体验查询、文件保存和跨应用纠正三类任务，再修阻塞并补必要功能；完整配置、偏好和 Guard 策略不再列为必做，旧 B 实验保留为参考。
 
+A 线最新性能结论：[性能与结构审计](./a-line-performance-architecture-audit-2026-09-29.md)。真实简单网页任务的主要耗时在模型往返而非 Relay 或本机动作，优化顺序为 GLM 请求合同与观测、减少回合、任务级工具裁剪、受管浏览器快速路径、Context/图片和流式反馈。
+
+A 线最近一次失败复核：[运行失败审查](./a-line-run-failure-audit-2026-10-01.md)。本次运行已成功打开 CUA 并执行多次动作，最终因 GLM 响应达到 `max_tokens` 而失败；同时运行目标被误记录为错误提示文本，不能作为有效 A 线任务验收。
+
+A 线最近一次成功链路核查：[搜索任务全链路核查](./a-line-search-run-chain-check-2026-10-01.md)。手机、Relay、Host、CUA、GLM 和网页搜索均成功，但仍有 3 次 DOM 引用失效及 4 次风险审批，后续应优先优化这两处体验。
+
 A 线开工前 Mac 验收：[macOS 本机预检](./macos-a-line-preflight-2026-09-27.md)。代码、窗口级截图、Mac 辅助窗口过滤、临时受管浏览器、本机合成配对和普通 TextEdit 输入已通过；保存弹窗已加严格焦点拒绝与显式交接边界，实体手机控制待验收。
+
+Windows 兼容复核：[Windows 兼容工作完整复核](./windows-compatibility-audit-2026-10-01.md)。当前审查在 macOS 完成；Windows 默认 Edge、profile/进程树、精确 HWND、PowerShell 清理和离线回归已覆盖，但 Windows 真机 CUA/Edge/UIA/DPI/多窗口验收仍未完成，不能把 Mac 成功当作 Windows 放行证据。
+
+A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-10-01.md)。汇总本次运行时、受管浏览器、风险控制、手机反馈、测试结果和 Windows 实机验收清单。
 
 本机目录与私有配置：[项目本机文件整理记录](./project-local-files-organization-2026-09-28.md)。桌面仓库是唯一项目目录；Relay 配置、运行证据和旧空壳工作区元数据已归档到仓库内，SSH 私钥与应用缓存按安全边界保留在系统目录。
 

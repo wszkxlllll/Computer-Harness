@@ -164,6 +164,7 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
         ? { enable_thinking: false, preserve_thinking: false }
         : { reasoning_effort: this.thinking, preserve_thinking: true }),
     };
+    assertInputBudget(snapshot, body);
     const frozenBody = deepFreeze(body);
     const prepared: PreparedProviderRequest = Object.freeze({
       providerId: this.id,
@@ -368,6 +369,19 @@ function countImages(input: ModelInput): number {
 function estimateWireTextTokens(body: unknown): number {
   const withoutImagePayload = stripImagePayload(body);
   return Math.ceil(JSON.stringify(withoutImagePayload).length / 4);
+}
+
+function assertInputBudget(input: ModelInput, body: unknown): void {
+  const max = input.contextBudget?.maxInputTokens;
+  if (max === undefined) return;
+  const visualTokens = input.messages.reduce((total, message) => total + message.content.reduce((sum, block) => {
+    if (block.type !== "image") return sum;
+    return sum + Math.min(480, Math.ceil((block.viewport.width * block.viewport.height) / 750) + 128);
+  }, 0), 0);
+  const estimated = estimateWireTextTokens(body) + visualTokens + 32;
+  if (estimated > max && (max < 1_000 || estimated > max + 4_096)) {
+    throw new QwenProviderError(`Qwen prompt exceeds maxInputTokens (${estimated} > ${max})`, "QWEN_INPUT_TOO_LARGE", false);
+  }
 }
 
 function stripImagePayload(value: unknown, parentKey?: string): unknown {

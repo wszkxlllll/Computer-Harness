@@ -208,6 +208,37 @@ describe("LayeredRiskGuard", () => {
     });
   });
 
+  it("does not treat financial-looking URL tokens as a financial Computer action", async () => {
+    await expect(new LayeredRiskGuard().evaluate(
+      context("navigate", "https://example.test/products?next=checkout", "Open the page", "click"),
+      new AbortController().signal,
+    )).resolves.toMatchObject({ decision: "allow", path: "local", reasonCode: "declared_low_impact" });
+  });
+
+  it("keeps high-impact URL paths visible to the risk scan", async () => {
+    await expect(new LayeredRiskGuard().evaluate(
+      context("navigate", "https://example.test/delete-account", "Open the page", "click"),
+      new AbortController().signal,
+    )).resolves.toMatchObject({ decision: "require_approval", reasonCode: "semantic_review_unavailable" });
+  });
+
+  it("keeps high-impact URL query actions visible", async () => {
+    await expect(new LayeredRiskGuard().evaluate(
+      context("navigate", "https://example.test/settings?action=delete-account&next=/home", "Open the page", "click"),
+      new AbortController().signal,
+    )).resolves.toMatchObject({ decision: "require_approval", reasonCode: "semantic_review_unavailable" });
+  });
+
+  it("allows only passive waits on an explicitly described product page", async () => {
+    const passive = context("navigate", "MacBook Air 购买页", "等待页面加载", "click");
+    passive.candidate.actions[0] = { actionId: "wait-action" as ActionId, kind: "wait", durationMs: 100 };
+    await expect(new LayeredRiskGuard().evaluate(passive, new AbortController().signal)).resolves.toMatchObject({ decision: "allow", reasonCode: "declared_low_impact" });
+
+    const commitment = context("navigate", "MacBook Air 购买页", "点击购买并付款", "click");
+    commitment.candidate.actions[0] = { actionId: "wait-action-2" as ActionId, kind: "wait", durationMs: 100 };
+    await expect(new LayeredRiskGuard().evaluate(commitment, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", reasonCode: "semantic_review_unavailable" });
+  });
+
   it.each([
     ["view payment history followed by purchase", context("navigate", "Payment history", "View payment history, then purchase item")],
     ["do not send draft followed by submit", context("local_edit", "Draft", "Do not send the draft; submit the order")],

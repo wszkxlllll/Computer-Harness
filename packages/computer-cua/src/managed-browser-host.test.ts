@@ -6,9 +6,20 @@ import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, cleanupManagedBrowser, closeManagedBrowserGracefully, createManagedBrowserPage, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
+  it("selects a platform browser and bounded executable candidates", () => {
+    expect(defaultManagedBrowserKind("win32")).toBe("edge");
+    expect(defaultManagedBrowserKind("darwin")).toBe("chromium");
+    expect(defaultManagedBrowserKind("linux")).toBe("chromium");
+    expect(managedBrowserExecutableCandidates("chromium", "darwin", "/Users/fixture"))
+      .toContain("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    expect(managedBrowserExecutableCandidates("edge", "win32"))
+      .toContain("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe");
+    expect(managedBrowserExecutableCandidates("chromium", "linux"))
+      .toContain("/usr/bin/chromium");
+  });
   it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("shadowRoot");
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("deviceScaleFactor");
@@ -100,6 +111,50 @@ describe("managed browser host pilot", () => {
     expect(JSON.stringify(evaluation)).not.toContain("aria-departure-label");
     expect(JSON.stringify(evaluation)).not.toContain("option-399");
     expect(evaluation.candidates.length).toBeLessThanOrEqual(256);
+  });
+
+  it("reuses label and aria-labelledby names when revalidating a DOM click", () => {
+    const label = syntheticElement("label", { attrs: { for: "arrival" }, textContent: "Arrival time" });
+    const labelledInput = syntheticElement("input", {
+      attrs: { id: "arrival", type: "text" },
+      labels: [label],
+      rect: { x: 10, y: 10, width: 120, height: 24 },
+    });
+    const ariaLabel = syntheticElement("span", { attrs: { id: "departure-label" }, textContent: "Departure time" });
+    const ariaInput = syntheticElement("input", {
+      attrs: { id: "departure", type: "text", "aria-labelledby": "departure-label" },
+      rect: { x: 10, y: 50, width: 120, height: 24 },
+    });
+    const emailButton = syntheticElement("button", {
+      attrs: { "aria-label": "user@example.com" },
+      rect: { x: 10, y: 90, width: 120, height: 24 },
+    });
+    const page = new SyntheticDocument([label, labelledInput, ariaLabel, ariaInput, emailButton]);
+    const context = {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }),
+    };
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
+      ...context,
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1 },
+    }) as SyntheticEvaluation;
+    for (const expected of [
+      { role: "textbox", name: "Arrival time", element: labelledInput },
+      { role: "textbox", name: "Departure time", element: ariaInput },
+      { role: "button", name: "user@example.com", element: emailButton },
+    ]) {
+      const candidate = evaluation.candidates.find((item) => item.name === expected.name);
+      expect(candidate).toBeDefined();
+      const result = runInNewContext(buildManagedDomClickExpression({
+        role: expected.role,
+        name: expected.name,
+        frame: candidate?.frame as { x: number; y: number; width: number; height: number },
+        fingerprint: syntheticDomFingerprint(expected.element, expected.role, expected.name),
+      }), context) as { status: string };
+      expect(result).toMatchObject({ status: "completed" });
+      expect(expected.element.clicked).toBe(true);
+    }
   });
 
   it("keeps the local fixture coverage explicit for controls, canvas, shadow DOM and iframe boundaries", async () => {
@@ -240,6 +295,44 @@ describe("managed browser host pilot", () => {
     expect(selectManagedBrowserStartupActivity([activity], "prepared-target", true)).toBeUndefined();
     expect(selectManagedBrowserStartupActivity([activity], "current-target", false)).toBeUndefined();
     expect(selectManagedBrowserStartupActivity([{ ...activity, visibilityState: "unloaded" as const }], "current-target", true)).toBeUndefined();
+  });
+
+  it("waits for the explicit startup target to leave blank and expose a ready redirected document", async () => {
+    const target = { id: "startup-target", type: "page" };
+    const readiness = vi.fn()
+      .mockResolvedValueOnce({ url: "about:blank", readyState: "complete", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "interactive", hasDocumentElement: true, hasBody: true });
+
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 1_000))
+      .resolves.toMatchObject({ url: "https://redirected.example/path", readyState: "interactive" });
+    expect(readiness).toHaveBeenCalledTimes(3);
+    expect(readiness.mock.calls.every(([page]) => page.id === "startup-target")).toBe(true);
+  });
+
+  it("does not treat a blank, non-http, loading, or bodyless page as navigation ready", async () => {
+    const target = { id: "startup-target", type: "page" };
+    const readiness = vi.fn().mockResolvedValue({
+      url: "about:blank",
+      readyState: "complete",
+      hasDocumentElement: true,
+      hasBody: true,
+    });
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 20)).resolves.toBeUndefined();
+    expect(readiness).toHaveBeenCalled();
+  });
+
+  it("bounds a navigation readiness reader that never resolves and aborts its signal", async () => {
+    const target = { id: "startup-target", type: "page" };
+    let readerSignal: AbortSignal | undefined;
+    const readiness = vi.fn((_page, signal: AbortSignal) => {
+      readerSignal = signal;
+      return new Promise<undefined>(() => undefined);
+    });
+    const startedAt = Date.now();
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 30)).resolves.toBeUndefined();
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(readerSignal?.aborted).toBe(true);
   });
 
   it("requests Browser.close and treats the expected websocket shutdown as graceful", async () => {
@@ -601,6 +694,7 @@ class SyntheticElement {
   public readonly disabled: boolean;
   public readonly isContentEditable: boolean;
   public readonly shadowRoot: undefined;
+  public clicked = false;
   private readonly attrs: Readonly<Record<string, string>>;
   private readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 
@@ -624,6 +718,10 @@ class SyntheticElement {
 
   public getBoundingClientRect(): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } {
     return this.rect;
+  }
+
+  public click(): void {
+    this.clicked = true;
   }
 
   public querySelectorAll(selector: string): readonly SyntheticElement[] {
@@ -682,6 +780,16 @@ class SyntheticDocument {
 
 function syntheticElement(localName: string, options: SyntheticElementOptions = {}): SyntheticElement {
   return new SyntheticElement(localName, options);
+}
+
+function syntheticDomFingerprint(element: SyntheticElement, role: string, name: string): string {
+  const canonical = [role, element.localName, role, element.getAttribute("type") ?? "", name].join("\u001f");
+  let hash = 2166136261;
+  for (let index = 0; index < canonical.length; index += 1) {
+    hash ^= canonical.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `domf-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 function serverTextFrame(payload: Buffer, opcode: number, final: boolean): Buffer {

@@ -84,6 +84,8 @@ export interface ResolvedRunConfig {
   qwenWorkspaceId?: string;
   glmThinking?: "disabled" | "enabled";
   glmEndpoint?: string;
+  /** Bounded live-interactive deadline for one GLM request. */
+  glmRequestTimeoutMs?: number;
   fixtureResult?: string;
   monitor?: MonitorPolicyMode;
 }

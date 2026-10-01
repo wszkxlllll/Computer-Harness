@@ -87,6 +87,17 @@ describe("GLM provider adapter", () => {
     await expect(adapter.generatePrepared(forged, { signal })).rejects.toMatchObject({ code: "GLM_INVALID_PREPARED_REQUEST" });
   });
 
+  it("rejects a provider projection whose visual prompt exceeds the context budget", async () => {
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: new Client({ choices: [] }) });
+    await expect(adapter.prepare({ ...input(), contextBudget: {
+      mode: "raw",
+      estimatedInputTokens: 1,
+      maxInputTokens: 100,
+      selectedHistoryEvents: 0,
+      omittedHistoryEvents: 0,
+    } }, { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_INPUT_TOO_LARGE" });
+  });
+
   it("uses an immutable input snapshot when parsing a prepared response", async () => {
     const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "snapshot-call", function: { name: "click", arguments: JSON.stringify({ x: 400, y: 300 }) } }] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
@@ -131,7 +142,7 @@ describe("GLM provider adapter", () => {
         { role: "assistant" as const, content: [{ type: "provider_continuation" as const, continuation: { providerId: "test-normalized", kind: "reasoning_content" as const, content: "retain this reasoning" } }] },
       ],
     };
-    const continuation = await capture(continuationInput);
+    const continuation = await capture(continuationInput, new Uint8Array([1, 2, 3]), { name: "test-reasoning", thinking: "enabled", coordinateMode: "normalized_1000" });
     expect(continuation.prepared.estimate!.estimatedTextTokens).toBeGreaterThan(first.prepared.estimate!.estimatedTextTokens);
   });
 
@@ -171,6 +182,13 @@ describe("GLM provider adapter", () => {
     expect((imageBlock?.image_url as { url?: string } | undefined)?.url).toMatch(/^data:image\/png;base64,/);
     expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).toContain("normalized to 0..1000");
     expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).not.toContain("Coordinates are pixels in the current image viewport");
+  });
+
+  it("bounds the default live completion output", async () => {
+    const client = new Client({ choices: [{ message: { content: "done" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
+    await adapter.generate(input(), { signal: new AbortController().signal });
+    expect(client.body?.max_tokens).toBe(4096);
   });
 
   it("rejects malformed, duplicate, and out-of-range provider output", async () => {
@@ -397,8 +415,8 @@ describe("GLM provider adapter", () => {
       });
       await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({
         code: "GLM_REQUEST_TIMEOUT",
-        retryable: true,
-        retryMode: "same_input",
+        retryable: false,
+        retryMode: "feedback",
       });
       expect(observedSignal?.aborted).toBe(true);
     } finally {

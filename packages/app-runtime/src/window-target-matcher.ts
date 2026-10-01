@@ -45,10 +45,11 @@ export function matchGoalToWindow(goal: string, targets: readonly WindowTargetIn
       .filter((target) => target.appName !== undefined && target.title !== undefined)
       .map((target) => normalizeWindowLabel(target.appName)),
   );
-  // Keep untitled windows in the manual picker (for example a macOS Save
-  // sheet), but do not let service/child windows steal automatic app matches
-  // when the same app exposes a titled top-level identity. Distinct titled
-  // windows still remain separate candidates and therefore remain ambiguous.
+  // Automatic matching owns the policy of ignoring untitled siblings when a
+  // titled identity exists for the same app. The CUA adapter deliberately
+  // keeps real untitled sheets/dialogs in its inventory, so they remain
+  // available to manual selection and explicit handoff. Distinct titled
+  // windows remain separate candidates and therefore remain ambiguous.
   const matchableTargets = targets.filter((target) =>
     target.title !== undefined || target.appName === undefined || !titledAppNames.has(normalizeWindowLabel(target.appName)));
 

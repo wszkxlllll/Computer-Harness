@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDefaultToolRegistry, type Computer } from "@computer-harness/runtime";
 import type { ComputerSessionDescriptor } from "@computer-harness/protocol";
-import type { DomGroundingTransport, ManagedBrowserHost, ManagedBrowserHostOptions, ManagedBrowserTarget, CuaBootstrapSession } from "@computer-harness/computer-cua";
+import { defaultManagedBrowserKind, type DomGroundingTransport, type ManagedBrowserHost, type ManagedBrowserHostOptions, type ManagedBrowserTarget, type CuaBootstrapSession } from "@computer-harness/computer-cua";
 import { createComputer, prepareComputerRunAssembly } from "./computers.js";
 
 const managedTarget: ManagedBrowserTarget = {
@@ -82,7 +82,8 @@ describe("prepareComputerRunAssembly", () => {
     if (managedClick === undefined) throw new Error("default registry is missing click");
     managedRegistry.register({ ...managedClick, name: "unverified_computer_tool" });
     managedRegistry.registerMany(managed.groundingTools);
-    expect(managed.enabledToolNames(managedRegistry)).toEqual(expect.arrayContaining(["click", "wait", "type", "click_element", "select_option"]));
+    expect(managed.enabledToolNames(managedRegistry)).toEqual(expect.arrayContaining(["wait", "type", "click_element", "select_option"]));
+    expect(managed.enabledToolNames(managedRegistry)).not.toContain("click");
     expect(managed.enabledToolNames(managedRegistry)).not.toContain("unverified_computer_tool");
 
     const managedBlank = prepareComputerRunAssembly({
@@ -249,6 +250,7 @@ describe("createComputer", () => {
     );
     const session = await computer.open({}, fixture.signal);
     expect(fixture.calls).toMatchObject({ bootstrapOpen: 1, hostConstruct: 1, hostStart: 1, delegateConstruct: 1, delegateOpen: 1, delegateWindowDeliveryMode: "foreground" });
+    expect(fixture.createHost.mock.calls[0]?.[0].browser).toBe(defaultManagedBrowserKind());
     expect(fixture.createHost.mock.calls[0]?.[0]).not.toHaveProperty("registerStartupUrl");
     await computer.close(session);
     expect(fixture.calls).toMatchObject({ delegateClose: 1, hostClose: 1, bootstrapClose: 1 });

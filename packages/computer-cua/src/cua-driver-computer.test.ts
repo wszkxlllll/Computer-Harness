@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
-import { createMockDomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
+import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { captureWindowWithRetry, listWindowTargets } from "./window-contract.js";
 
 const ONE_BY_ONE_PNG = Buffer.from(
@@ -37,6 +37,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let image = { ...initialImage };
   let missing = false;
   let groundingState: Record<string, unknown> | undefined;
+  let groundingStateSequence: readonly Record<string, unknown>[] | undefined;
+  let groundingStateIndex = 0;
   let abortGrounding = false;
   let captureImages: ToolResult["images"][] | undefined;
   let captureImageIndex = 0;
@@ -105,9 +107,12 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
             ...(fallbackRefusal.errorCode === undefined ? {} : { errorCode: fallbackRefusal.errorCode }),
           });
         }
+        const state = groundingStateSequence === undefined
+          ? groundingState
+          : groundingStateSequence[Math.min(groundingStateIndex++, groundingStateSequence.length - 1)];
         return result({
           images: input.include_screenshot === true ? fallbackImages ?? [] : [],
-          structuredJson: JSON.stringify(groundingState ?? {}),
+          structuredJson: JSON.stringify(state ?? {}),
         });
       }
       if (name === "click" && extraWindowAfterClick !== undefined) {
@@ -129,7 +134,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     calls,
     setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
     setMissing(value: boolean) { missing = value; },
-    setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; },
+    setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; groundingStateSequence = undefined; groundingStateIndex = 0; },
+    setGroundingStateSequence(values: readonly Record<string, unknown>[]) { groundingStateSequence = values; groundingStateIndex = 0; },
     setGroundingAbort(value: boolean) { abortGrounding = value; },
     setCaptureImages(value: ToolResult["images"][] | undefined) { captureImages = value; captureImageIndex = 0; },
     setFallbackImages(value: ToolResult["images"] | undefined) { fallbackImages = value; },
@@ -1618,6 +1624,127 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("resamples the same hybrid observation until its trusted content rect makes DOM grounding available", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-first-frame-ready-"));
+    const fake = windowDriver();
+    fake.setGroundingStateSequence([
+      { elements_complete: true, elements: [{ role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true }] },
+      { elements_complete: true, elements: [
+        { role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+        { role: "AXWebArea", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      ] },
+    ]);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    let collectCount = 0;
+    const transport = createMockDomGroundingTransport(() => {
+      collectCount += 1;
+      return {
+        complete: true,
+        tabId: "tab-fixture",
+        generation: "generation-1",
+        coordinateSpace: "physical",
+        candidates: [{ tagName: "select", name: "Departure", frame: { x: 200, y: 220, width: 120, height: 28 }, visible: true, interactive: true, options: [{ text: "08:00", enabled: true }], state: { enabled: true } }],
+      };
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      grounding: "hybrid-catalog-v1",
+      browserTarget,
+      domGroundingTransport: transport,
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const capture = await computer.observe(session, "hybrid-first-frame-ready" as ObservationId, new AbortController().signal);
+      expect(capture.grounding).toMatchObject({ source: "hybrid", degraded: false });
+      expect(capture.grounding?.elements.some((element) => element.source === "dom" && element.role === "combobox" && element.options?.some((option) => option.text === "08:00"))).toBe(true);
+      expect(collectCount).toBe(1);
+      expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(2);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels hybrid content-rect resampling when the observation signal aborts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-resample-abort-"));
+    const fake = windowDriver();
+    fake.setGroundingState({ elements_complete: true, elements: [{ role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true }] });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: createMockDomGroundingTransport({ tabId: "tab-fixture", generation: "generation-1", candidates: [] }), driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const controller = new AbortController();
+      const pending = computer.observe(session, "hybrid-resample-abort" as ObservationId, controller.signal);
+      setTimeout(() => controller.abort(new Error("hybrid grounding observation aborted")), 10);
+      await expect(pending).rejects.toThrow(/hybrid grounding observation aborted/iu);
+      expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps managed-browser window containers visible as context but refuses their clicks", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-container-click-"));
+    const fake = windowDriver();
+    fake.setGroundingStateSequence([
+      { elements_complete: true, elements: [
+        { role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      ] },
+      { elements_complete: true, elements: [
+        { role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+        { role: "AXWebArea", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      ] },
+    ]);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: createMockDomGroundingTransport({ tabId: "tab-fixture", generation: "generation-1", candidates: [] }), driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const capture = await computer.observe(session, "container-click" as ObservationId, new AbortController().signal);
+      const container = capture.grounding?.elements.find((element) => element.source === "uia" && element.name === "Browser");
+      expect(container).toMatchObject({ state: { enabled: false } });
+      const receipt = await computer.execute(session, {
+        actionId: "container-click" as ActionId,
+        basedOn: "container-click" as ObservationId,
+        kind: "click",
+        point: { x: container!.bbox!.x + container!.bbox!.width / 2, y: container!.bbox!.y + container!.bbox!.height / 2 },
+        groundingRef: container!.elementRef,
+      }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("labels UIA browser regions only in managed hybrid mode using the trusted Document rect", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-region-"));
     const fake = windowDriver(
@@ -1753,6 +1880,118 @@ describe("CuaDriverComputer", () => {
       }, new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
       const click = fake.calls.find((call) => call.name === "click");
       expect(click?.input).toMatchObject({ x: expect.any(Number), y: expect.any(Number) });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("calibrates DOM grounding from the macOS AXWebArea content rect", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-web-area-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1568, height: 1181 }, { width: 1568, height: 1181 });
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        { role: "AXWebArea", name: "Apple", frame: { x: 0, y: 114, width: 1568, height: 1067 }, enabled: true },
+      ],
+    });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    try {
+      const computer = new CuaDriverComputer({
+        socketPath: "test-socket",
+        screenshotDir: directory,
+        windowTarget: fake.target,
+        grounding: "hybrid-catalog-v1",
+        browserTarget,
+        domGroundingTransport: createMockDomGroundingTransport({
+          complete: true,
+          tabId: "tab-fixture",
+          generation: "generation-1",
+          coordinateSpace: "css",
+          viewportMetrics: { cssWidth: 1568, cssHeight: 1067, deviceScaleFactor: 1 },
+          candidates: [{ tagName: "a", name: "Mac 机型比较", frame: { x: 1045, y: 369, width: 111, height: 121 }, visible: true, interactive: true, state: { enabled: true } }],
+        }),
+        driverFactory: () => fake.driver,
+      });
+      const session = await computer.open({}, new AbortController().signal);
+      const capture = await computer.observe(session, "macos-web-area-observation" as ObservationId, new AbortController().signal);
+      expect(capture.grounding?.source).toBe("hybrid");
+      expect(capture.grounding?.degraded).toBe(false);
+      expect(capture.grounding?.elements.some((element) => element.source === "dom" && element.name === "Mac 机型比较")).toBe(true);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("delivers a DOM-grounded click through managed CDP instead of native coordinates", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-dom-click-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        { role: "Document", frame: { x: 0, y: 0, width: 1000, height: 800 }, enabled: true },
+        // Deliberately duplicate the managed DOM candidate. The selected
+        // action below uses this UIA ref to reproduce the failed real run.
+        { role: "AXLink", name: "Contact user@example.com", frame: { x: 100, y: 100, width: 120, height: 40 }, enabled: true },
+      ],
+    });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const clickRequests: unknown[] = [];
+    const transport = createMockDomGroundingTransport({
+      complete: true,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      coordinateSpace: "physical",
+      candidates: [{ tagName: "a", name: "Contact user@example.com", frame: { x: 100, y: 100, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true } }],
+    }) as DomGroundingTransport & { click: NonNullable<DomGroundingTransport["click"]> };
+    transport.click = async (request, signal) => {
+      signal.throwIfAborted();
+      clickRequests.push(request);
+      return { status: "completed", tabId: "tab-fixture", generation: "generation-1", message: "dom click fixture" };
+    };
+    try {
+      const computer = new CuaDriverComputer({
+        socketPath: "test-socket",
+        screenshotDir: directory,
+        windowTarget: fake.target,
+        grounding: "hybrid-catalog-v1",
+        browserTarget,
+        domGroundingTransport: transport,
+        driverFactory: () => fake.driver,
+      });
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "dom-click-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, new AbortController().signal);
+      const element = capture.grounding?.elements.find((candidate) => candidate.source === "uia" && candidate.name === "Contact [redacted-email]");
+      expect(element?.bbox).toBeDefined();
+      const receipt = await computer.execute(session, {
+        kind: "click",
+        actionId: "dom-click-action" as ActionId,
+        basedOn: observationId,
+        groundingRef: element!.elementRef,
+        point: { x: element!.bbox!.x + element!.bbox!.width / 2, y: element!.bbox!.y + element!.bbox!.height / 2 },
+      }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "completed", message: "dom click fixture" });
+      expect(clickRequests).toHaveLength(1);
+      expect(clickRequests[0]).toMatchObject({ candidate: { name: "Contact user@example.com" } });
+      expect(fake.calls.some((call) => call.name === "click")).toBe(false);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

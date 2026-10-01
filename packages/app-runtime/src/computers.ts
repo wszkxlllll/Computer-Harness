@@ -1,4 +1,4 @@
-import { CuaWindowDiscovery, ManagedBrowserHost, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
 import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ObservationCapture, ObservationId } from "@computer-harness/protocol";
@@ -63,7 +63,11 @@ export function prepareComputerRunAssembly(
     groundingTools,
     enabledToolNames(registry) {
       if (!windowScoped || effectiveConfig.kind !== "cua") return undefined;
-      const allowedComputerTools = new Set(["click", "wait"]);
+      // A managed browser must not expose the raw coordinate click tool. Its
+      // click path is observation-bound through click_element/CDP; keeping
+      // native click available would let the model silently fall back to an
+      // unverified CGEvent and recreate the stuck-run failure mode.
+      const allowedComputerTools = new Set(managedGrounding ? ["wait"] : ["click", "wait"]);
       if (effectiveConfig.windowDeliveryMode === "foreground") {
         allowedComputerTools.add("type");
         allowedComputerTools.add("keypress");
@@ -263,7 +267,7 @@ class ManagedBrowserComputer implements Computer {
       bootstrap = await this.options.openBootstrap(this.options.config.socketPath, label, signal);
       const createHost = this.options.createHost;
       host = createHost({
-        browser: "edge",
+        browser: defaultManagedBrowserKind(),
         url: this.options.config.managedBrowserUrl!,
         profileMode: this.options.config.managedBrowserProfileMode ?? "ephemeral",
         ...(this.options.config.managedBrowserProfileLabel === undefined ? {} : { profileLabel: this.options.config.managedBrowserProfileLabel }),

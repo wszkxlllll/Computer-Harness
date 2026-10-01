@@ -70,7 +70,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() {},
       uniffiDestroy() {},
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver, osPlatform: "darwin" });
 
     await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([
       {
@@ -115,6 +115,16 @@ describe("CuaWindowDiscovery", () => {
 
     await expect(discovery.listWindows(new AbortController().signal, false)).resolves.toEqual([
       {
+        target: { pid: 10, windowId: 104 },
+        bounds: { x: 99, y: 59, width: 1296, height: 139 },
+        appName: "Google Chrome",
+      },
+      {
+        target: { pid: 11, windowId: 105 },
+        bounds: { x: 99, y: 59, width: 1296, height: 139 },
+        appName: "Google Chrome",
+      },
+      {
         target: { pid: 10, windowId: 106 },
         bounds: { x: 0, y: 34, width: 1512, height: 948 },
         appName: "Google Chrome",
@@ -144,6 +154,38 @@ describe("CuaWindowDiscovery", () => {
       },
     ]);
   });
+
+  it.each(["win32", "linux"] satisfies NodeJS.Platform[])(
+    "does not apply macOS proxy heuristics on %s",
+    async (osPlatform) => {
+      const driver = {
+        async startSession() { return { active: true, revived: false } as never; },
+        async callTool() {
+          return result({ structuredJson: JSON.stringify({ windows: [
+            { pid: 30, window_id: 300, app_name: "Dashboard", title: "", bounds: { x: 0, y: 0, width: 1920, height: 32 } },
+            { pid: 31, window_id: 301, app_name: "AccessibilityService", title: "", bounds: { x: 200, y: 300, width: 64, height: 64 } },
+          ] }) });
+        },
+        async endSession() { return { active: false, session: "picker" } as never; },
+        async shutdown() {},
+        uniffiDestroy() {},
+      } as unknown as CuaDriverLike;
+      const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver, osPlatform });
+
+      await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([
+        {
+          target: { pid: 30, windowId: 300 },
+          bounds: { x: 0, y: 0, width: 1920, height: 32 },
+          appName: "Dashboard",
+        },
+        {
+          target: { pid: 31, windowId: 301 },
+          bounds: { x: 200, y: 300, width: 64, height: 64 },
+          appName: "AccessibilityService",
+        },
+      ]);
+    },
+  );
 
   it("can read the full top-level inventory and restore only the exact selected HWND", async () => {
     const calls: Array<{ tool: string; args?: Record<string, unknown> }> = [];

@@ -70,14 +70,14 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
     },
     {
       name: "hotkey",
-      description: "Press a keyboard shortcut such as CTRL+L or ALT+TAB.",
+      description: "Press a simultaneous keyboard shortcut. Use CMD for macOS shortcuts (for example CMD+L) and CTRL for Windows/Linux shortcuts (for example CTRL+L); use ALT+TAB only where the operating system supports it.",
       category: "computer",
       inputSchema: {
         type: "object",
         properties: {
           keys: {
             type: "array",
-            description: "Key names pressed together, such as [\"CTRL\", \"L\"] for a browser address-bar shortcut.",
+            description: "Key names pressed together. For a browser address bar use [\"CMD\", \"L\"] on macOS or [\"CTRL\", \"L\"] on Windows/Linux.",
             items: { type: "string", minLength: 1 },
             minItems: 1,
           },
@@ -182,6 +182,9 @@ export function groundingComputerTools(options: GroundingComputerToolsOptions = 
       }
       const element = catalog.elements.find((candidate) => candidate.elementRef === elementRef);
       if (element === undefined) throw new Error(`GROUNDING_REF_NOT_FOUND: ${elementRef}`);
+      if (catalog.source === "hybrid" && element.source === "uia" && isManagedBrowserContainerRole(element.role)) {
+        throw new Error("MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE: window/document containers cannot be clicked as controls");
+      }
       if (element.state?.enabled === false) throw new Error(`GROUNDING_ELEMENT_DISABLED: ${elementRef}`);
       if (element.bbox === undefined || element.bbox.width <= 0 || element.bbox.height <= 0) {
         throw new Error(`GROUNDING_BBOX_UNAVAILABLE: ${elementRef}`);
@@ -255,7 +258,6 @@ function selectOptionTool(): ComputerToolDefinition {
       }
       const options = element.options;
       if (options === undefined) throw new Error("SELECT_OPTION_OPTIONS_UNAVAILABLE: current native select did not publish its bounded options list");
-      if (element.optionsTruncated === true) throw new Error("SELECT_OPTION_OPTIONS_TRUNCATED: current native select options list is incomplete");
       const normalizedOptionText = normalizeOptionText(optionText);
       const matchingOptions = options.filter((option) => normalizeOptionText(option.text) === normalizedOptionText);
       if (matchingOptions.length === 0) throw new Error("SELECT_OPTION_OPTION_MISSING: optionText is not listed in the current observation");
@@ -319,6 +321,11 @@ function parseSelectOption(value: JsonValue): { elementRef: string; optionText: 
 
 function normalizeGroundingRole(role: string): string {
   return role.normalize("NFKC").toLocaleLowerCase().replace(/[\s_-]+/gu, "").trim();
+}
+
+function isManagedBrowserContainerRole(role: string): boolean {
+  const normalized = normalizeGroundingRole(role).replace(/^ax/u, "");
+  return normalized === "window" || normalized === "webarea" || normalized === "document";
 }
 
 function normalizeOptionText(value: string): string {

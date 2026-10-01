@@ -28,7 +28,7 @@ describe("home run-target selection", () => {
     });
   });
 
-  it("submits the default automatic target without loading or selecting a window", async () => {
+  it("submits an explicitly selected automatic target without loading or selecting a window", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
     vi.mocked(listWindowTargets).mockReturnValue(new Promise<WindowTargetList>(() => undefined));
     render(<HomeScreen />);
@@ -38,6 +38,7 @@ describe("home run-target selection", () => {
     const goal = await screen.findByLabelText("想让电脑做什么？");
     const startButton = screen.getByRole("button", { name: "开始任务" });
     fireEvent.change(goal, { target: { value: "Find a window automatically" } });
+    fireEvent.click(screen.getByRole("radio", { name: /自动选择/ }));
     await screen.findByText("这里还没有任务");
     expect((screen.getByRole("radio", { name: /自动选择/ }) as HTMLInputElement).checked).toBe(true);
     expect(screen.queryByRole("radio", { name: /Browser.*Contacts/ })).toBeNull();
@@ -141,7 +142,7 @@ describe("home run-target selection", () => {
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Open this website" } });
-    fireEvent.click(screen.getByRole("radio", { name: /打开网站/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /打开网站（推荐）/ }));
     const url = screen.getByLabelText("起始网址（可选）");
     const startButton = screen.getByRole("button", { name: "开始任务" });
     fireEvent.change(url, { target: { value: "ftp://example.com" } });
@@ -165,7 +166,7 @@ describe("home run-target selection", () => {
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Find the relevant website from the task" } });
-    fireEvent.click(screen.getByRole("radio", { name: /打开网站/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /打开网站（推荐）/ }));
     expect(screen.getByLabelText("起始网址（可选）").getAttribute("required")).toBeNull();
     await screen.findByText("这里还没有任务");
     const startButton = screen.getByRole("button", { name: "开始任务" });
@@ -182,7 +183,7 @@ describe("home run-target selection", () => {
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Use the saved travel site" } });
-    fireEvent.click(screen.getByRole("radio", { name: /打开网站/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /打开网站（推荐）/ }));
     fireEvent.click(screen.getByRole("radio", { name: /使用已登录网站/ }));
     fireEvent.change(screen.getByLabelText("起始网址（可选）"), { target: { value: "https://travel.example/search" } });
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
@@ -208,6 +209,7 @@ describe("home run-target selection", () => {
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Keep this goal after choosing a window" } });
+    fireEvent.click(screen.getByRole("radio", { name: /自动选择/ }));
     await screen.findByText("这里还没有任务");
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 
@@ -230,7 +232,7 @@ describe("home run-target selection", () => {
 
     await screen.findByRole("heading", { name: "正在处理的任务" });
     expect(screen.getByRole("button", { name: "开始任务" }).hasAttribute("disabled")).toBe(true);
-    for (const name of [/自动选择/, /手动选择窗口/, /打开网站/]) {
+    for (const name of [/自动选择/, /手动选择窗口/, /打开网站（推荐）/]) {
       const modeInput = screen.getByRole("radio", { name }) as HTMLInputElement;
       expect((modeInput.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
     }

@@ -403,7 +403,7 @@ function normalizedAction(action: ActionIntent): unknown {
     case "click":
     case "double_click":
     case "right_click":
-      return { kind: action.kind, x: action.point.x, y: action.point.y };
+      return { kind: action.kind, x: Math.floor(action.point.x), y: Math.floor(action.point.y) };
     case "scroll":
       return { kind: action.kind, x: action.point.x, y: action.point.y, direction: action.direction, ticks: action.ticks };
     case "drag":
@@ -483,9 +483,12 @@ function makeOutput(
 
 /**
  * Guidance-mode-only deterministic guard. While the latest bound transition
- * remains an unchanged observation, it rejects every exact repeat on that
- * same post-action frame until the model chooses a different action or a new
- * transition replaces the evidence. It never inspects or returns the action
+ * remains an unchanged observation, it rejects every repeat on that
+ * same session/viewport partition until the model chooses a different action
+ * or a changed/unknown transition replaces the evidence. It deliberately
+ * does not require the next action to reuse the newest observation id: a
+ * model can otherwise evade the guard by taking the same coordinate from a
+ * fresh screenshot whose pixels have not changed. It never inspects or returns the action
  * payload, and unknown/changed evidence never blocks.
  */
 export function shouldRejectRepeatedNoChange(state: ProgressMonitorState, action: ActionIntent): boolean {
@@ -502,8 +505,7 @@ export function shouldRejectRepeatedNoChange(state: ProgressMonitorState, action
   if (partitionKey === undefined) return false;
   const signature = actionSignature(action, partitionKey);
   return state.lastTransition.signature === signature
-    && state.lastTransition.partitionKey === partitionKey
-    && state.lastTransition.postObservationId === String(action.basedOn);
+    && state.lastTransition.partitionKey === partitionKey;
 }
 
 function limitEventIds(eventIds: readonly EventId[], limit: number): readonly EventId[] {

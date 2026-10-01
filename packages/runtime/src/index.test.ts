@@ -1518,6 +1518,24 @@ describe("RunController command inbox and control semantics", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("treats an explicit stop in the human-review field as cancellation", async () => {
+    let requestedResolve!: () => void;
+    const requested = new Promise<void>((resolve) => { requestedResolve = resolve; });
+    const provider = new ScriptedProvider(
+      [{ type: "user_input_required", question: "检查当前页面后再继续。" }, { type: "finish", summary: "should not be reached" }],
+      (count) => { if (count === 1) requestedResolve(); },
+    );
+    const created = await makeController(provider);
+    const running = created.controller.start("inspect the page");
+    await requested;
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_user");
+    await created.controller.submitUserInput("停止当前任务。保留最后截图，不要再操作。", created.controller.getEvents().find((event) => event.type === "user.input.requested")?.eventId);
+    await expect(running).resolves.toBe("cancelled");
+    expect(provider.inputs).toHaveLength(1);
+    expect(created.controller.getEvents().some((event) => event.type === "user.input.received")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("supersedes a GUI ToolCall when correction arrives before action started", async () => {
     let controller!: RunController;
     let correction: Promise<void> | undefined;
@@ -1851,6 +1869,13 @@ describe("RunController command inbox and control semantics", () => {
     await expect(running).resolves.toBe("succeeded");
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
     expect(created.controller.getEvents().some((event) => event.type === "approval.resolved")).toBe(true);
+    const events = created.controller.getEvents();
+    const completedActionIndex = events.findIndex((event) => event.type === "action.execution.completed");
+    const postActionObservationIndex = events.findIndex((event, index) => index > completedActionIndex && event.type === "observation.created");
+    const followupModelRequestIndex = events.findIndex((event, index) => index > completedActionIndex && event.type === "model.request.started");
+    expect(completedActionIndex).toBeGreaterThanOrEqual(0);
+    expect(postActionObservationIndex).toBeGreaterThan(completedActionIndex);
+    expect(followupModelRequestIndex).toBeGreaterThan(postActionObservationIndex);
     expect(reduceRuntimeEvents(await readRuntimeEvents(join(created.directory, "trajectory.jsonl")), runId)).toEqual(created.controller.getSnapshot());
     await rm(created.directory, { recursive: true, force: true });
   });
@@ -2857,6 +2882,10 @@ describe("RunController Monitor online consumer", () => {
     const beforeInput = created.controller.getEvents();
     const requestIndex = beforeInput.findIndex((event) => event.type === "user.input.requested");
     expect(requestIndex).toBeGreaterThan(-1);
+    expect(beforeInput[requestIndex]).toMatchObject({
+      type: "user.input.requested",
+      question: expect.stringContaining("不要重复输入网址或重复点击同一入口"),
+    });
     expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "tool.call.completed" || event.type === "tool.call.failed")).toBe(true);
     expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "observation.created" && event.sequence > (beforeInput.find((candidate) => candidate.type === "action.execution.completed")?.sequence ?? -1))).toBe(true);
     expect(beforeInput.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(false);

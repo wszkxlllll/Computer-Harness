@@ -92,6 +92,7 @@ export async function listWindowTargets(
   signal: AbortSignal,
   pid?: number,
   onScreenOnly = true,
+  osPlatform: NodeJS.Platform = process.platform,
 ): Promise<readonly CuaWindowInfo[]> {
   const result = await driver.callTool("list_windows", JSON.stringify({
     on_screen_only: onScreenOnly,
@@ -100,7 +101,7 @@ export async function listWindowTargets(
   }), { signal });
   if (result.isError) throw new WindowContractError("WINDOW_TARGET_REFUSED", "configured CUA window target was refused");
   if (result.degraded) throw new WindowContractError("WINDOW_TARGET_UNKNOWN", "configured CUA window target is degraded");
-  return parseWindows(result, onScreenOnly);
+  return parseWindows(result, osPlatform);
 }
 
 export async function captureWindow(
@@ -462,7 +463,7 @@ export function windowActionTarget(binding: CuaWindowBinding): { kind: "window";
   return { kind: "window", pid: binding.target.pid, window_id: binding.target.windowId };
 }
 
-function parseWindows(result: ToolResult, onScreenOnly: boolean): CuaWindowInfo[] {
+function parseWindows(result: ToolResult, osPlatform: NodeJS.Platform): CuaWindowInfo[] {
   const value = parseStructured(result.structuredJson);
   const windows = value?.windows;
   if (!Array.isArray(windows)) throw new WindowContractError("WINDOW_TARGET_SCHEMA", "CUA list_windows returned no structured windows");
@@ -481,37 +482,27 @@ function parseWindows(result: ToolResult, onScreenOnly: boolean): CuaWindowInfo[
       ...(appName === undefined ? {} : { appName }),
     }];
   });
-  return normalizeWindowInventory(parsed, { dropUntitledSiblings: !onScreenOnly });
+  return normalizeWindowInventory(parsed, osPlatform);
 }
 
 /**
- * CUA's macOS inventory includes system-owned menu-bar and placeholder
- * windows alongside application windows. Keep this normalization at the
- * contract boundary so every picker and automatic matcher sees the same
- * identities. The filters deliberately use geometry/labels, never PID alone:
- * two real windows from one process remain candidates when their title or
- * geometry identifies them separately.
+ * Remove only entries that the CUA adapter can classify as invalid inventory.
+ * Generic degenerate entries and exact duplicates are platform-independent.
+ * macOS menu-bar and Accessibility proxy heuristics are enabled only when the
+ * adapter is explicitly running on Darwin. Automatic matching policy, such as
+ * preferring titled windows over untitled siblings, belongs to app-runtime;
+ * this inventory keeps real sheets/dialogs available for manual selection.
  */
 function normalizeWindowInventory(
   windows: readonly CuaWindowInfo[],
-  options: { readonly dropUntitledSiblings: boolean },
+  osPlatform: NodeJS.Platform,
 ): CuaWindowInfo[] {
-  const visibleIdentityCandidates = windows.filter((window) =>
-    !isDegenerateWindow(window) && !isMacMenuBarWindow(window) && !isMacProxyWindow(window));
-  const titledAppNames = options.dropUntitledSiblings
-    ? new Set(
-      visibleIdentityCandidates
-        .filter((window) => window.appName !== undefined && window.title !== undefined)
-        .map((window) => normalizeWindowLabel(window.appName)),
-    )
-    : undefined;
-  const filteredIdentityCandidates = titledAppNames === undefined
-    ? visibleIdentityCandidates
-    : visibleIdentityCandidates.filter((window) =>
-      window.title !== undefined || window.appName === undefined || !titledAppNames.has(normalizeWindowLabel(window.appName)));
+  const inventoryCandidates = windows.filter((window) =>
+    !isDegenerateWindow(window) &&
+    (osPlatform !== "darwin" || (!isMacMenuBarWindow(window) && !isMacProxyWindow(window))));
 
   const seen = new Set<string>();
-  return filteredIdentityCandidates.filter((window) => {
+  return inventoryCandidates.filter((window) => {
     const identity = [
       window.target.pid,
       window.target.windowId,

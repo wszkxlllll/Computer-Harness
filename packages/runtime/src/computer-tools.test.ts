@@ -128,6 +128,31 @@ describe("default Computer tools", () => {
     expect(() => definition.toAction({ elementRef: "uia-1" }, disabledContext)).toThrow(/GROUNDING_ELEMENT_DISABLED/iu);
   });
 
+  it("refuses managed-browser window containers during tool preflight", () => {
+    const definition = groundingComputerTools()[0];
+    if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
+    const observation = {
+      id: "browser-window-observation" as never,
+      runId: "run" as never,
+      computerSessionId: "session" as never,
+      capturedAt: "2026-09-29T00:00:00Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+      screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png" as const, byteLength: 1 },
+      grounding: {
+        version: "grounding-catalog-v2" as const,
+        source: "hybrid" as const,
+        observationId: "browser-window-observation" as never,
+        computerSessionId: "session" as never,
+        completeness: "partial" as const,
+        degraded: true,
+        maxElements: 16,
+        elements: [{ elementRef: "uia-window", role: "AXWindow", source: "uia" as const, bbox: { x: 0, y: 0, width: 800, height: 600, coordinateSpace: "physical" as const }, state: { enabled: false } }],
+      },
+    };
+    const context = { runId: "run" as never, session: {} as never, signal: new AbortController().signal, observation };
+    expect(() => definition.toAction({ elementRef: "uia-window" }, context)).toThrow(/MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE/iu);
+  });
+
   it("exposes select_option only for managed DOM grounding and binds exact option text", () => {
     expect(groundingComputerTools().map((tool) => tool.name)).toEqual(["click_element"]);
     const definition = groundingComputerTools({ includeSelectOption: true }).find((tool) => tool.name === "select_option");
@@ -165,7 +190,7 @@ describe("default Computer tools", () => {
     expect(() => definition.toAction({ elementRef: "dom-1", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding!, source: "uia", version: "uia-catalog-v1", elements: [{ ...observation.grounding!.elements[0]!, source: "uia" }] } } })).toThrow(/DOM_REQUIRED/iu);
   });
 
-  it("fails closed when the listed native-select options are missing, duplicate, disabled, or truncated", () => {
+  it("uses exact observed option evidence even when the native-select list is truncated", () => {
     const definition = groundingComputerTools({ includeSelectOption: true }).find((tool) => tool.name === "select_option");
     if (definition === undefined || definition.category !== "computer") throw new Error("select_option tool missing");
     const observation = {
@@ -190,7 +215,10 @@ describe("default Computer tools", () => {
     expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "09:00" }, context)).toThrow(/OPTION_MISSING/iu);
     expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, options: [{ text: "08:00", enabled: false }] }] } } })).toThrow(/OPTION_DISABLED/iu);
     expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, options: [{ text: "08:00", enabled: true }, { text: "08:00", enabled: true }] }] } } })).toThrow(/OPTION_AMBIGUOUS/iu);
-    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true }] } } })).toThrow(/OPTIONS_TRUNCATED/iu);
+    expect(definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true }] } } })).toEqual({ kind: "select_option", groundingRef: "dom-options-ref", optionText: "08:00" });
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "09:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true }] } } })).toThrow(/OPTION_MISSING/iu);
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true, options: [{ text: "08:00", enabled: true }, { text: "08:00", enabled: true }] }] } } })).toThrow(/OPTION_AMBIGUOUS/iu);
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true, options: [{ text: "08:00", enabled: false }] }] } } })).toThrow(/OPTION_DISABLED/iu);
   });
 
 });

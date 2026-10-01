@@ -26,6 +26,7 @@ import {
   validateManagedBrowserTarget,
   type DomGroundingContentRect,
   type DomGroundingTransport,
+  type DomClickRequest,
   type DomSelectOptionRequest,
   type ManagedBrowserTarget,
 } from "./dom-grounding.js";
@@ -142,6 +143,8 @@ interface PrivateSession {
   windowBinding?: CuaWindowBinding;
   windowIdentityInvalidated: boolean;
   handoffGeneration: number;
+  /** Allow one bounded managed-browser content-rect stabilization at startup. */
+  initialObservationPending: boolean;
   /** Full visible-window baseline from the last successful target observation. */
   visibleWindowBaseline: ReadonlySet<string> | undefined;
   /** Fresh inventory immediately before an opted-in foreground GUI action. */
@@ -182,6 +185,8 @@ interface PrivateGrounding {
   readonly contentRect?: DomGroundingContentRect;
   readonly elements: ReadonlyMap<string, {
     readonly element: GroundingElement;
+    /** Raw adapter-private DOM name; the public element name may be redacted. */
+    readonly candidateName?: string;
     readonly point: { readonly x: number; readonly y: number };
     readonly candidateFingerprint?: string;
     readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
@@ -316,6 +321,7 @@ export class CuaDriverComputer implements Computer {
         active: true,
         windowIdentityInvalidated: false,
         handoffGeneration: 0,
+        initialObservationPending: true,
         visibleWindowBaseline: undefined,
         preActionWindowBaseline: undefined,
         newlySurfacedWindowKeys: new Set(),
@@ -382,6 +388,7 @@ export class CuaDriverComputer implements Computer {
           current.browserTarget ?? this.options.browserTarget,
           this.options.domGroundingTransport,
           signal,
+          current.initialObservationPending,
         );
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
@@ -393,6 +400,7 @@ export class CuaDriverComputer implements Computer {
           this.groundings.set(String(observationId), grounding);
         }
         this.latestObservationId = observationId;
+        current.initialObservationPending = false;
         return {
           capturedAt: new Date().toISOString(),
           viewport: capture.viewport,
@@ -633,9 +641,6 @@ export class CuaDriverComputer implements Computer {
       if (resolved.element.options === undefined) {
         return refused(action.actionId, "SELECT_OPTION_OPTIONS_UNAVAILABLE", "current native select did not publish its bounded options list");
       }
-      if (resolved.element.optionsTruncated === true) {
-        return refused(action.actionId, "SELECT_OPTION_OPTIONS_TRUNCATED", "current native select options list is incomplete");
-      }
       const matchingOptions = resolved.element.options.filter((option) => normalizeSelectOptionText(option.text) === normalizeSelectOptionText(action.optionText));
       if (matchingOptions.length === 0) {
         return refused(action.actionId, "SELECT_OPTION_OPTION_MISSING", "optionText is not listed in the current observation");
@@ -693,6 +698,90 @@ export class CuaDriverComputer implements Computer {
         const details = driverErrorDetails(error);
         if (details.tag === "Transport") current.active = false;
         if (details.tag === "Tool") return refused(action.actionId, details.errorCode ?? "SELECT_OPTION_REFUSED", details.message);
+        throw normalizeDriverError(error, "execute");
+      }
+    }
+    const privateGrounding = action.groundingRef === undefined ? undefined : this.groundings.get(String(action.basedOn));
+    const resolvedGrounding = action.groundingRef === undefined ? undefined : privateGrounding?.elements.get(action.groundingRef);
+    const browserTarget = privateGrounding?.browserTarget ?? current.browserTarget ?? this.options.browserTarget;
+    const domTransport = this.options.domGroundingTransport;
+    if (action.kind === "click" && privateGrounding?.catalog.source === "hybrid"
+      && resolvedGrounding?.element.source === "uia"
+      && isManagedBrowserContainerRole(resolvedGrounding.element.role)) {
+      return refused(action.actionId, "MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE", "managed-browser window/document containers are not interactive controls");
+    }
+    // Hybrid observations intentionally expose both producers.  A model may
+    // still select the UIA copy of a browser control even when an equivalent
+    // DOM candidate is available.  Normalize that selection here, at the
+    // adapter boundary, so browser clicks remain observation-bound CDP
+    // actions.  The native coordinate path below is retained for non-browser
+    // UIA and visual controls only.
+    const domEquivalent = action.kind === "click"
+      && resolvedGrounding?.element.source === "uia"
+      && browserTarget !== undefined
+      ? findEquivalentDomGrounding(privateGrounding, resolvedGrounding)
+      : undefined;
+    const browserGrounding = domEquivalent ?? (
+      resolvedGrounding?.element.source === "dom" ? resolvedGrounding : undefined
+    );
+    if (action.kind === "click"
+      && action.groundingRef !== undefined
+      && browserGrounding !== undefined
+      && browserTarget !== undefined
+      && domTransport?.click !== undefined
+      && browserGrounding.candidateFingerprint !== undefined
+      && browserGrounding.element.bbox !== undefined) {
+      if (browserGrounding.element.state?.enabled === false) {
+        return refused(action.actionId, "GROUNDING_ELEMENT_DISABLED", "DOM element is explicitly disabled and cannot receive a click");
+      }
+      if (browserGrounding.geometry !== undefined && decisionObservation?.geometry !== undefined && !sameWindowGeometry(browserGrounding.geometry, decisionObservation.geometry)) {
+        return refused(action.actionId, "GROUNDING_GEOMETRY_CHANGED", "DOM element reference was created for an older window geometry");
+      }
+      // For a UIA alias, first validate against the selected UIA point (the
+      // model's action binding), then require the point to land inside the
+      // equivalent DOM box. This prevents a name-only alias from redirecting
+      // an unrelated coordinate.
+      const selectedPoint = resolvedGrounding?.point ?? browserGrounding.point;
+      if (Math.abs(action.point.x - selectedPoint.x) > 0.01 || Math.abs(action.point.y - selectedPoint.y) > 0.01) {
+        return refused(action.actionId, "GROUNDING_POINT_MISMATCH", "grounding click point does not match the current DOM element bounds");
+      }
+      if (domEquivalent !== undefined && !pointInBox(action.point, browserGrounding.element.bbox)) {
+        return refused(action.actionId, "GROUNDING_DOM_ALIAS_MISMATCH", "UIA browser target does not overlap its equivalent DOM element; observe again before clicking");
+      }
+      const request: DomClickRequest = {
+        observationId: action.basedOn,
+        computerSessionId: session.id,
+        viewport: decisionObservation?.viewport ?? session.viewport,
+        browserTarget,
+        candidate: {
+          role: browserGrounding.element.role,
+          ...(browserGrounding.candidateName === undefined ? {} : { name: browserGrounding.candidateName }),
+          bbox: {
+            x: browserGrounding.element.bbox.x,
+            y: browserGrounding.element.bbox.y,
+            width: browserGrounding.element.bbox.width,
+            height: browserGrounding.element.bbox.height,
+          },
+          ...(browserGrounding.candidateFrame === undefined ? {} : { frame: browserGrounding.candidateFrame }),
+          fingerprint: browserGrounding.candidateFingerprint,
+        },
+      };
+      try {
+        const result = await domTransport.click(request, signal);
+        if (result.status === "completed" && (result.tabId !== browserTarget.tabId || result.generation !== browserTarget.generation)) {
+          return refused(action.actionId, "DOM_CLICK_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before clicking");
+        }
+        if (result.status === "completed") {
+          return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
+        }
+        if (result.status === "refused") {
+          return refused(action.actionId, result.driverCode ?? "DOM_CLICK_REFUSED", result.message ?? "managed-browser DOM click was refused");
+        }
+        return { actionId: action.actionId, status: "failed", driverCode: result.driverCode ?? "DOM_CLICK_FAILED", ...(result.message === undefined ? {} : { message: result.message }) };
+      } catch (error) {
+        const details = driverErrorDetails(error);
+        if (details.tag === "Transport") current.active = false;
+        if (details.tag === "Tool") return refused(action.actionId, details.errorCode ?? "DOM_CLICK_REFUSED", details.message);
         throw normalizeDriverError(error, "execute");
       }
     }
@@ -910,6 +999,7 @@ async function readWindowGrounding(
   browserTarget: ManagedBrowserTarget | undefined,
   domTransport: DomGroundingTransport | undefined,
   signal: AbortSignal,
+  allowInitialHybridResampling = false,
 ): Promise<PrivateGrounding | undefined> {
   if (mode === undefined || mode === "off") return undefined;
   if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, false);
@@ -918,9 +1008,59 @@ async function readWindowGrounding(
     // observable degraded DOM sidecar if an untyped host boundary mutates it.
     return emptyDomGrounding(observationId, computerSessionId);
   }
-  const uia = mode === "hybrid-catalog-v1"
+  let uia = mode === "hybrid-catalog-v1"
     ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, browserTarget !== undefined)
     : undefined;
+  // Browser accessibility trees can expose toolbar nodes before the Document
+  // / AXWebArea record is ready. Retry only the trusted UIA producer within a
+  // 3.35-second total budget; DOM collection remains fail-closed until content
+  // origin evidence exists.
+  if (allowInitialHybridResampling && mode === "hybrid-catalog-v1" && browserTarget !== undefined && uia?.contentRect === undefined) {
+    const retryDelaysMs = [100, 250, 500, 1_000, 1_500] as const;
+    const retryDeadline = Date.now() + retryDelaysMs.reduce((total, delay) => total + delay, 0);
+    for (const delayMs of retryDelaysMs) {
+      const beforeDelayMs = retryDeadline - Date.now();
+      if (beforeDelayMs <= 0) break;
+      await waitWithAbort(Math.min(delayMs, beforeDelayMs), signal);
+      const remainingMs = retryDeadline - Date.now();
+      if (remainingMs <= 0) break;
+
+      const retryController = new AbortController();
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      let timeoutExpired = false;
+      let onAbort: (() => void) | undefined;
+      try {
+        const retrySignal = AbortSignal.any([signal, retryController.signal]);
+        const timeoutPromise = new Promise<{ readonly timedOut: true }>((resolve) => {
+          timeoutId = setTimeout(() => {
+            timeoutExpired = true;
+            retryController.abort(new Error("hybrid grounding retry budget exhausted"));
+            resolve({ timedOut: true });
+          }, remainingMs);
+        });
+        const retryPromise = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, retrySignal, true)
+          .then((value) => ({ value }), (error: unknown) => ({ error }));
+        const abortPromise = new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(signal.reason ?? new Error("hybrid grounding retry aborted"));
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+        const result = await Promise.race([retryPromise, timeoutPromise, abortPromise]);
+        if ("timedOut" in result) break;
+        if ("error" in result) {
+          if (signal.aborted) signal.throwIfAborted();
+          if (timeoutExpired || retryController.signal.aborted) break;
+          throw result.error;
+        }
+        uia = result.value;
+        if (uia.contentRect !== undefined) break;
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+        if (!retryController.signal.aborted) retryController.abort(new Error("hybrid grounding retry completed"));
+      }
+    }
+  }
   // DOM-only has no trusted producer for the browser content origin. Keep the
   // capability explicitly fail-closed until a future browser-native content
   // rect producer is added; never guess from window bounds/DPI.
@@ -954,6 +1094,7 @@ async function readDomGroundingCatalog(
     const materialized = materializeDomGrounding({ observationId, computerSessionId, viewport, browserTarget: activeBrowserTarget }, result, GROUNDING_MAX_ELEMENTS, trustedContentRect);
     const elements = new Map<string, {
       readonly element: GroundingElement;
+      readonly candidateName?: string;
       readonly point: { readonly x: number; readonly y: number };
       readonly candidateFingerprint: string;
       readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
@@ -963,6 +1104,7 @@ async function readDomGroundingCatalog(
     for (const [elementRef, privateElement] of materialized.privateElements) {
       elements.set(elementRef, {
         element: privateElement.element,
+        ...(privateElement.candidateName === undefined ? {} : { candidateName: privateElement.candidateName }),
         point: privateElement.point,
         candidateFingerprint: privateElement.candidateFingerprint,
         ...(privateElement.candidateFrame === undefined ? {} : { candidateFrame: privateElement.candidateFrame }),
@@ -1063,6 +1205,72 @@ function mergeGroundings(
   };
 }
 
+type PrivateGroundingElement = PrivateGrounding["elements"] extends ReadonlyMap<string, infer Value> ? Value : never;
+
+function findEquivalentDomGrounding(
+  grounding: PrivateGrounding | undefined,
+  selected: PrivateGroundingElement | undefined,
+): PrivateGroundingElement | undefined {
+  if (grounding === undefined || selected === undefined || selected.element.bbox === undefined) return undefined;
+  const matches = [...grounding.elements.values()]
+    .filter((candidate) => candidate.element.source === "dom" && candidate.element.bbox !== undefined)
+    .filter((candidate) => equivalentBrowserCandidate(selected.element, candidate.element));
+  if (matches.length === 0) return undefined;
+  matches.sort((left, right) => boxIntersectionOverUnion(selected.element.bbox!, right.element.bbox!) - boxIntersectionOverUnion(selected.element.bbox!, left.element.bbox!));
+  return matches[0];
+}
+
+function equivalentBrowserCandidate(left: GroundingElement, right: GroundingElement): boolean {
+  if (normalizeGroundingRole(left.role) !== normalizeGroundingRole(right.role)) return false;
+  const overlap = boxIntersectionOverUnion(left.bbox!, right.bbox!);
+  if (overlap < 0.5) return false;
+  const leftName = normalizeGroundingName(left.name);
+  const rightName = normalizeGroundingName(right.name);
+  return leftName === undefined || rightName === undefined || leftName === rightName || overlap >= 0.8;
+}
+
+function normalizeGroundingRole(value: string): string {
+  const normalized = value.normalize("NFKC").toLocaleLowerCase().replace(/[\s_-]+/gu, "");
+  const axRole = normalized.startsWith("ax") ? normalized.slice(2) : normalized;
+  switch (axRole) {
+    case "link": return "link";
+    case "button": return "button";
+    case "textfield":
+    case "searchfield": return "textbox";
+    case "webarea": return "document";
+    case "checkbox": return "checkbox";
+    case "radiobutton": return "radio";
+    case "combobox": return "combobox";
+    case "menuitem": return "menuitem";
+    default: return axRole;
+  }
+}
+
+function isManagedBrowserContainerRole(role: string): boolean {
+  const normalized = normalizeGroundingRole(role);
+  return normalized === "window" || normalized === "document";
+}
+
+function normalizeGroundingName(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.normalize("NFKC").replace(/[\s\u3000]+/gu, " ").trim().toLocaleLowerCase();
+  return normalized.length === 0 ? undefined : normalized;
+}
+
+function pointInBox(point: { readonly x: number; readonly y: number }, box: NonNullable<GroundingElement["bbox"]>): boolean {
+  return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+}
+
+function boxIntersectionOverUnion(left: NonNullable<GroundingElement["bbox"]>, right: NonNullable<GroundingElement["bbox"]>): number {
+  const x1 = Math.max(left.x, right.x);
+  const y1 = Math.max(left.y, right.y);
+  const x2 = Math.min(left.x + left.width, right.x + right.width);
+  const y2 = Math.min(left.y + left.height, right.y + right.height);
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const union = left.width * left.height + right.width * right.height - intersection;
+  return union <= 0 ? 0 : intersection / union;
+}
+
 async function readGroundingCatalog(
   driver: CuaDriverLike,
   session: string,
@@ -1125,7 +1333,13 @@ async function readGroundingCatalog(
   const elements = new Map<string, { readonly element: GroundingElement; readonly point: { readonly x: number; readonly y: number }; readonly geometry: CuaWindowGeometry }>();
   const publicElements = annotatedRecords.map((candidate, index) => {
     const elementRef = `uia-${groundingObservationDiscriminator(observationId)}-${index + 1}`;
-    const element: GroundingElement = { ...candidate.element, elementRef };
+    const element: GroundingElement = managedBrowserHybrid && isManagedBrowserContainerRole(candidate.element.role)
+      ? {
+          ...candidate.element,
+          elementRef,
+          state: { ...candidate.element.state, enabled: false },
+        }
+      : { ...candidate.element, elementRef };
     elements.set(elementRef, { element, point: candidate.point, geometry: binding.bounds });
     return element;
   });
@@ -1239,7 +1453,14 @@ function trustedContentRectFromUia(
   viewport: Viewport,
 ): DomGroundingContentRect | undefined {
   const candidates = elements
-    .filter((element) => element.role.toLocaleLowerCase() === "document" && element.bbox?.coordinateSpace === "physical")
+    // Windows UIA exposes browser content as `Document`, while macOS
+    // Accessibility exposes the same trusted top-level surface as
+    // `AXWebArea`. Both records come from the exact bound browser window.
+    .filter((element) => {
+      const role = element.role.normalize("NFKC").toLocaleLowerCase().replace(/[\\s_-]+/gu, "");
+      return (role === "document" || role === "axwebarea" || role === "webarea" || role === "axdocument" || role === "documentcontrol")
+        && element.bbox?.coordinateSpace === "physical";
+    })
     .map((element) => element.bbox!)
     .filter((bbox) => bbox.width >= viewport.width * 0.5 && bbox.height >= viewport.height * 0.5)
     .filter((bbox) => bbox.x >= 0 && bbox.y >= 0 && bbox.x + bbox.width <= viewport.width + 1 && bbox.y + bbox.height <= viewport.height + 1)

@@ -2,13 +2,15 @@ import { createHash, randomBytes } from "node:crypto";
 import { access, mkdir, mkdtemp, open, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
 import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
 import { validateWindowTarget, type CuaWindowTarget } from "./window-contract.js";
 import {
   DomGroundingUnavailableError,
+  type DomClickRequest,
+  type DomClickResult,
   type DomGroundingCollectRequest,
   type DomGroundingRawCandidate,
   type DomSelectOptionRequest,
@@ -27,6 +29,39 @@ const MANAGED_BROWSER_STARTUP_METADATA_FILE = "managed-browser-startup.json";
 export const MAX_MANAGED_BROWSER_STARTUP_URLS = 8;
 
 export type ManagedBrowserProfileMode = "ephemeral" | "persistent";
+export type ManagedBrowserKind = "edge" | "chromium";
+
+export function defaultManagedBrowserKind(platform: NodeJS.Platform = process.platform): ManagedBrowserKind {
+  return platform === "win32" ? "edge" : "chromium";
+}
+
+export function managedBrowserExecutableCandidates(
+  browser: ManagedBrowserKind,
+  platform: NodeJS.Platform = process.platform,
+  userHome: string = homedir(),
+): readonly string[] {
+  if (platform === "win32") {
+    return browser === "edge"
+      ? ["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"]
+      : ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"];
+  }
+  if (platform === "darwin") {
+    return browser === "edge"
+      ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", join(userHome, "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")]
+      : [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          join(userHome, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+          join(userHome, "Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ];
+  }
+  if (platform === "linux") {
+    return browser === "edge"
+      ? ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"]
+      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+  }
+  return [];
+}
 
 export interface ManagedBrowserStartupMetadata {
   readonly schemaVersion: 1;
@@ -128,7 +163,7 @@ export async function acquireManagedBrowserProfileLease(options: {
  * title/process name and never reuses a user profile.
  */
 export interface ManagedBrowserHostOptions {
-  readonly browser: "edge" | "chromium";
+  readonly browser: ManagedBrowserKind;
   readonly url: string;
   /** Ephemeral is the default; persistent is Harness-owned and explicitly labeled. */
   readonly profileMode?: ManagedBrowserProfileMode;
@@ -243,6 +278,74 @@ export interface ManagedBrowserPageActivity {
   /** Opaque per-document marker used only to invalidate stale actions. */
   readonly navigationKey?: string;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+}
+
+export interface ManagedBrowserNavigationReadiness {
+  readonly url: string;
+  readonly readyState: "loading" | "interactive" | "complete";
+  readonly hasDocumentElement: boolean;
+  readonly hasBody: boolean;
+}
+
+export type ManagedBrowserNavigationReadinessReader = (
+  page: ManagedBrowserDevToolsPage,
+  signal: AbortSignal,
+) => Promise<ManagedBrowserNavigationReadiness | undefined>;
+
+/** Wait for the explicit startup target to become a usable document. */
+export async function waitForManagedBrowserNavigationReady(
+  page: ManagedBrowserDevToolsPage,
+  readReadiness: ManagedBrowserNavigationReadinessReader,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<ManagedBrowserNavigationReadiness | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    signal.throwIfAborted();
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const timeoutController = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const timedOut = Symbol("navigation-readiness-timeout");
+    let readiness: ManagedBrowserNavigationReadiness | undefined;
+    try {
+      const readSignal = AbortSignal.any([signal, timeoutController.signal]);
+      const readPromise = readReadiness(page, readSignal).catch((error) => {
+        if (signal.aborted) throw error;
+        return undefined;
+      });
+      const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+        timeoutId = setTimeout(() => {
+          timeoutController.abort(new Error("managed browser navigation readiness timed out"));
+          resolve(timedOut);
+        }, remainingMs);
+      });
+      const abortPromise = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(signal.reason ?? new Error("aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+      const result = await Promise.race([readPromise, timeoutPromise, abortPromise]);
+      if (result === timedOut) return undefined;
+      readiness = result;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+      if (!timeoutController.signal.aborted) timeoutController.abort(new Error("navigation readiness check completed"));
+    }
+    let isHttpUrl = false;
+    if (readiness !== undefined) {
+      try {
+        const url = new URL(readiness.url);
+        isHttpUrl = url.protocol === "http:" || url.protocol === "https:";
+      } catch { /* transient or invalid document URL */ }
+    }
+    if (readiness !== undefined && isHttpUrl
+      && (readiness.readyState === "interactive" || readiness.readyState === "complete")
+      && readiness.hasDocumentElement && readiness.hasBody) return readiness;
+    await wait(Math.min(50, Math.max(0, deadline - Date.now())), signal);
+  }
+  return undefined;
 }
 
 export type ManagedBrowserPageActivityReader = (
@@ -620,6 +723,11 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       void role;
     }
   };
+  // Reserve the bounded catalog's first slots for page navigation. A large
+  // app can contain hundreds of controls before its links in DOM order;
+  // links are the primary safe navigation targets and must remain observable.
+  const priorityLinks = document.querySelectorAll('a, [role="link"]');
+  for (const element of priorityLinks) emit(element);
   walk(document);
   return {
     candidates,
@@ -737,6 +845,21 @@ export class ManagedBrowserHost {
       browserWebSocketDebuggerUrl = browserEndpoint;
       const bootstrapPages = await listDevToolsPages(devTools.port, signal).catch(() => [] as ManagedBrowserDevToolsPage[]);
       const startupTargetId = await createManagedBrowserPage(browserEndpoint, this.options.url, signal);
+      const needsNavigationReadiness = this.options.url.startsWith("http://") || this.options.url.startsWith("https://");
+      // HTTP(S) needs a bounded redirect/DOM readiness window. Blank and data
+      // startup pages retain the original 3-second active-page selection cap.
+      const startupReadyDeadline = Date.now() + Math.min(this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, needsNavigationReadiness ? 8_000 : 3_000);
+      if (needsNavigationReadiness) {
+        const startupPage = await waitForManagedBrowserNavigationReady(
+          { id: startupTargetId, type: "page" },
+          (_page, readinessSignal) => readManagedBrowserNavigationReadiness(devTools.port, startupTargetId, readinessSignal),
+          signal,
+          Math.max(1, startupReadyDeadline - Date.now()),
+        );
+        if (startupPage === undefined) {
+          throw new DomGroundingUnavailableError("managed browser startup page did not finish navigation and expose a DOM document");
+        }
+      }
       if (launchUrls.length === 1 && launchUrls[0] === bootstrapUrl) {
         const bootstrapCandidates = bootstrapPages.filter((page) => page.type === "page" && typeof page.id === "string" && page.id !== startupTargetId && page.url === bootstrapUrl);
         // Close a lone Host-created dummy only when its identity is
@@ -751,7 +874,7 @@ export class ManagedBrowserHost {
         browserEndpoint,
         startupTargetId,
         signal,
-        Math.min(this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, 3_000),
+        Math.max(1, startupReadyDeadline - Date.now()),
       );
       const pages = startupPageSet.pages;
       const selected = startupPageSet.selected;
@@ -923,6 +1046,53 @@ export class ManagedBrowserHost {
     }
   }
 
+  /**
+   * Revalidate and activate an observation-bound DOM control in the managed
+   * tab. This avoids relying on native macOS coordinate injection for browser
+   * content while retaining the same tab/generation and bounded-candidate
+   * checks used by select_option.
+   */
+  public async click(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    const state = this.state;
+    if (state === undefined) throw new DomGroundingUnavailableError("managed browser host is not running");
+    if (!sameManagedBrowserTarget(request.browserTarget, state.target)) {
+      return { status: "refused", driverCode: "DOM_CLICK_TARGET_STALE", message: "managed-browser target is stale" };
+    }
+    if (request.browserTarget.tabId !== state.tabId || request.browserTarget.generation !== state.generation) {
+      return { status: "refused", driverCode: "DOM_CLICK_GENERATION_MISMATCH", message: "managed-browser tab or page generation changed" };
+    }
+    if (!isBoundedDomClickBinding(request)) {
+      return { status: "refused", driverCode: "DOM_CLICK_BINDING_INVALID", message: "managed-browser DOM click binding is invalid" };
+    }
+    const page = await this.activePageForSelection(state, signal);
+    if (page === undefined) {
+      return { status: "refused", driverCode: "DOM_CLICK_GENERATION_MISMATCH", message: "managed-browser page was stale or ambiguous" };
+    }
+    const socket = await LoopbackWebSocket.connect(page.webSocketDebuggerUrl as string, signal);
+    try {
+      const expression = buildManagedDomClickExpression({
+        role: request.candidate.role,
+        ...(request.candidate.name === undefined ? {} : { name: request.candidate.name }),
+        ...(request.candidate.frame === undefined ? {} : { frame: request.candidate.frame }),
+        fingerprint: request.candidate.fingerprint,
+      });
+      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false }, signal);
+      const value = response?.result?.result?.value;
+      if (!isRecord(value) || (value.status !== "completed" && value.status !== "refused" && value.status !== "failed")) {
+        return { status: "failed", driverCode: "DOM_CLICK_EVALUATION_INVALID", message: "managed-browser DOM click evaluation returned an invalid result" };
+      }
+      return {
+        status: value.status,
+        ...(typeof value.driverCode === "string" ? { driverCode: value.driverCode } : {}),
+        ...(typeof value.message === "string" ? { message: value.message } : {}),
+        tabId: state.tabId,
+        generation: state.generation,
+      };
+    } finally {
+      socket.close();
+    }
+  }
+
   private async activePageForSelection(state: HostState, signal: AbortSignal): Promise<ManagedBrowserDevToolsPage | undefined> {
     const pages = await listDevToolsPages(state.debuggerPort, signal);
     const selected = await resolveManagedBrowserActivePageSet(
@@ -948,6 +1118,10 @@ class ManagedCdpDomGroundingTransport implements DomGroundingTransport {
   public async selectOption(request: DomSelectOptionRequest, signal: AbortSignal): Promise<DomSelectOptionResult> {
     return this.host.selectOption(request, signal);
   }
+
+  public async click(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.host.click(request, signal);
+  }
 }
 
 function sameManagedBrowserTarget(left: ManagedBrowserTarget, right: ManagedBrowserTarget): boolean {
@@ -960,6 +1134,20 @@ function sameManagedBrowserTarget(left: ManagedBrowserTarget, right: ManagedBrow
 }
 
 function isBoundedSelectCandidateBinding(request: DomSelectOptionRequest): boolean {
+  const candidate = request.candidate;
+  return /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.tabId)
+    && /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.generation)
+    && /^[A-Za-z0-9._-]{1,96}$/u.test(candidate.fingerprint)
+    && candidate.role.trim().length > 0
+    && candidate.role.length <= 64
+    && (candidate.name === undefined || candidate.name.length <= 160)
+    && candidate.bbox.width > 0
+    && candidate.bbox.height > 0
+    && [candidate.bbox.x, candidate.bbox.y, candidate.bbox.width, candidate.bbox.height].every(Number.isFinite)
+    && (candidate.frame === undefined || [candidate.frame.x, candidate.frame.y, candidate.frame.width, candidate.frame.height].every(Number.isFinite) && candidate.frame.width > 0 && candidate.frame.height > 0);
+}
+
+function isBoundedDomClickBinding(request: DomClickRequest): boolean {
   const candidate = request.candidate;
   return /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.tabId)
     && /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.generation)
@@ -1123,6 +1311,163 @@ export function buildManagedDomSelectOptionExpression(input: {
     } catch (_) {
       return { status: "failed", driverCode: "SELECT_OPTION_DISPATCH_FAILED", message: "DOM option selection could not be dispatched" };
     }
+})(${encoded})`;
+}
+
+export function buildManagedDomClickExpression(input: {
+  readonly role: string;
+  readonly name?: string;
+  readonly frame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly fingerprint: string;
+}): string {
+  const encoded = JSON.stringify(input);
+  return String.raw`(function(target) {
+    const MAX_ELEMENTS = 512;
+    const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
+    const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
+    const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
+    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+    const boundedText = (value, max) => {
+      if (typeof value !== "string") return undefined;
+      const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+      return text.length === 0 ? undefined : text.slice(0, max);
+    };
+    const labelNodeText = (node, excluded, maxText) => {
+      const pieces = [];
+      let visited = 0;
+      const visit = (current, depth) => {
+        if (current === undefined || current === null || current === excluded || depth > 16 || visited >= 64 || pieces.length >= 8) return;
+        visited += 1;
+        if (current.nodeType === 3) {
+          const text = boundedText(current.nodeValue, maxText);
+          if (text !== undefined) pieces.push(text);
+          return;
+        }
+        const children = current.childNodes;
+        if (children !== undefined && children !== null && typeof children.length === "number") {
+          const limit = Math.min(Math.max(0, children.length), 64);
+          for (let index = 0; index < limit; index += 1) visit(children[index], depth + 1);
+          return;
+        }
+        const fallback = boundedText(current.textContent, maxText);
+        if (fallback !== undefined) pieces.push(fallback);
+      };
+      visit(node, 0);
+      return boundedText(pieces.join(" "), maxText);
+    };
+    const textFromElements = (elements, maxItems, maxText, excluded) => {
+      if (elements === undefined || elements === null || typeof elements.length !== "number") return undefined;
+      const pieces = [];
+      const limit = Math.min(Math.max(0, elements.length), maxItems);
+      for (let index = 0; index < limit; index += 1) {
+        const text = excluded === undefined
+          ? boundedText(elements[index] && elements[index].textContent, maxText)
+          : labelNodeText(elements[index], excluded, maxText);
+        if (text !== undefined) pieces.push(text);
+      }
+      return boundedText(pieces.join(" "), maxText);
+    };
+    const findById = (element, id) => {
+      const root = typeof element.getRootNode === "function" ? element.getRootNode() : undefined;
+      const owner = root !== undefined && root !== null && typeof root.getElementById === "function" ? root : document;
+      return owner.getElementById(id);
+    };
+    const ariaLabelledByText = (element) => {
+      const rawIds = boundedText(element.getAttribute("aria-labelledby"), 512);
+      if (rawIds === undefined) return undefined;
+      const references = [];
+      for (const id of rawIds.split(/\s+/g).slice(0, 8)) {
+        if (id.length > 128) continue;
+        const referenced = findById(element, id);
+        if (referenced !== null && referenced !== element) references.push(referenced);
+      }
+      return textFromElements(references, 8, 160, element);
+    };
+    const labelText = (element) => {
+      const associated = textFromElements(element.labels, 8, 160, element);
+      if (associated !== undefined) return associated;
+      const id = boundedText(element.getAttribute("id"), 128);
+      if (id === undefined) return undefined;
+      const explicit = [];
+      const labels = document.querySelectorAll("label[for]");
+      const limit = Math.min(Math.max(0, labels.length), 32);
+      for (let index = 0; index < limit; index += 1) {
+        const label = labels[index];
+        if (label && label.getAttribute("for") === id) explicit.push(label);
+      }
+      return textFromElements(explicit, 8, 160, element);
+    };
+    const nameOf = (element, role) => {
+      const candidates = [
+        element.getAttribute("aria-label"),
+        ariaLabelledByText(element),
+        labelText(element),
+        element.getAttribute("title"),
+        element.getAttribute("placeholder"),
+      ];
+      for (const candidate of candidates) {
+        const name = boundedText(candidate, 160);
+        if (name !== undefined) return name;
+      }
+      const roleName = typeof role === "string" ? role.toLowerCase() : "";
+      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+      return allowsTextName ? boundedText(element.textContent, 160) : undefined;
+    };
+    const frameOf = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none" || rect.width <= 0 || rect.height <= 0) return undefined;
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    const sameFrame = (left, right) => left !== undefined && right !== undefined
+      && Math.abs(left.x - right.x) <= 4 && Math.abs(left.y - right.y) <= 4
+      && Math.abs(left.width - right.width) <= 4 && Math.abs(left.height - right.height) <= 4;
+    const fingerprintOf = (element, role, name) => {
+      const canonical = [normalize(role, 64), normalize(element.localName, 32), normalize(role, 64), normalize(element.getAttribute("type"), 32), normalize(name, 160)].join("\u001f");
+      let hash = 2166136261;
+      for (let index = 0; index < canonical.length; index += 1) {
+        hash ^= canonical.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return "domf-" + (hash >>> 0).toString(16).padStart(8, "0");
+    };
+    const candidates = [];
+    const seen = new Set();
+    const walk = (root) => {
+      if (!root || candidates.length >= MAX_ELEMENTS) return;
+      const elements = root instanceof Element ? [root, ...root.querySelectorAll("*")] : [...root.querySelectorAll("*")];
+      for (const element of elements) {
+        if (seen.has(element)) continue;
+        seen.add(element);
+        const role = roleOf(element);
+        const frame = frameOf(element);
+        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || role !== "";
+        if (frame !== undefined && interactive && !["canvas", "img"].includes(element.localName)) {
+          const name = nameOf(element, role);
+          candidates.push({ element, role, name, frame, fingerprint: fingerprintOf(element, role, name) });
+        }
+        if (element.shadowRoot) walk(element.shadowRoot);
+        if (candidates.length >= MAX_ELEMENTS) break;
+      }
+    };
+    walk(document);
+    const role = normalize(target.role, 64);
+    const name = normalize(target.name, 160);
+    const roleMatches = candidates.filter((candidate) => candidate.role === role && candidate.name === name);
+    const matches = roleMatches.filter((candidate) => candidate.fingerprint === target.fingerprint && sameFrame(candidate.frame, target.frame));
+    if (matches.length === 0) {
+      if (roleMatches.some((candidate) => sameFrame(candidate.frame, target.frame))) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE", message: "DOM candidate fingerprint changed" };
+      return { status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH", message: "DOM candidate bounds changed" };
+    }
+    if (matches.length > 1) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_AMBIGUOUS", message: "DOM candidate is ambiguous" };
+    const element = matches[0].element;
+    if (element.disabled === true || element.getAttribute("aria-disabled") === "true") return { status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED", message: "managed-browser DOM control is disabled" };
+    try {
+      element.click();
+      return { status: "completed", message: "managed-browser DOM click dispatched" };
+    } catch (_) {
+      return { status: "failed", driverCode: "DOM_CLICK_DISPATCH_FAILED", message: "managed-browser DOM click could not be dispatched" };
+    }
   })(${encoded})`;
 }
 
@@ -1246,9 +1591,7 @@ export async function inspectManagedBrowserProcessTree(hostProcessId: number, pr
 
 async function resolveManagedBrowserExecutable(browser: ManagedBrowserHostOptions["browser"], explicitPath: string | undefined): Promise<string> {
   const candidates = explicitPath === undefined
-    ? browser === "edge"
-      ? ["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"]
-      : ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"]
+    ? managedBrowserExecutableCandidates(browser)
     : [explicitPath];
   for (const candidate of candidates) {
     try {
@@ -1486,6 +1829,39 @@ async function listDevToolsPages(port: number, signal: AbortSignal): Promise<Man
     return Array.isArray(value) ? value.filter(isRecord) as ManagedBrowserDevToolsPage[] : [];
   } catch {
     throw new DomGroundingUnavailableError("managed browser DevTools page list was unavailable");
+  }
+}
+
+async function readManagedBrowserNavigationReadiness(
+  port: number,
+  targetId: string,
+  signal: AbortSignal,
+): Promise<ManagedBrowserNavigationReadiness | undefined> {
+  const page = (await listDevToolsPages(port, signal)).find((candidate) => candidate.id === targetId && candidate.type === "page");
+  if (page === undefined || typeof page.webSocketDebuggerUrl !== "string") return undefined;
+  let socket: LoopbackWebSocket | undefined;
+  try {
+    socket = await LoopbackWebSocket.connect(page.webSocketDebuggerUrl, signal);
+    const response = await socket.command("Runtime.evaluate", {
+      expression: "({url: location.href, readyState: document.readyState, hasDocumentElement: !!document.documentElement, hasBody: !!document.body})",
+      returnByValue: true,
+      awaitPromise: false,
+    }, signal);
+    const value = response?.result?.result?.value;
+    if (!isRecord(value) || typeof value.url !== "string"
+      || (value.readyState !== "loading" && value.readyState !== "interactive" && value.readyState !== "complete")
+      || typeof value.hasDocumentElement !== "boolean" || typeof value.hasBody !== "boolean") return undefined;
+    return {
+      url: value.url,
+      readyState: value.readyState,
+      hasDocumentElement: value.hasDocumentElement,
+      hasBody: value.hasBody,
+    };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return undefined;
+  } finally {
+    socket?.close();
   }
 }
 

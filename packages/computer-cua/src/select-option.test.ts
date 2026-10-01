@@ -44,8 +44,16 @@ function fixture(target: { readonly pid: number; readonly windowId: number }) {
   return { driver, calls };
 }
 
-function makeTransport(target: ManagedBrowserTarget, mode: "success" | "missing" | "ambiguous" | "disabled" | "generation" | "custom" | "abort" = "success") {
+type SelectOptionFixtureMode = "success" | "missing" | "ambiguous" | "disabled" | "generation" | "custom" | "abort" | "truncated" | "truncated-missing" | "truncated-ambiguous" | "truncated-disabled";
+
+function makeTransport(target: ManagedBrowserTarget, mode: SelectOptionFixtureMode = "success") {
   const requests: DomSelectOptionRequest[] = [];
+  const options = mode === "truncated-missing"
+    ? [{ text: "09:00", enabled: true }]
+    : mode === "truncated-ambiguous"
+      ? [{ text: "08:00", enabled: true }, { text: "08:00", enabled: true }]
+      : [{ text: "08:00", enabled: mode !== "truncated-disabled" && mode !== "disabled" }];
+  const optionsTruncated = mode.startsWith("truncated");
   const transport: DomGroundingTransport = {
     kind: "managed-loopback-cdp-v1",
     async collect() {
@@ -54,7 +62,7 @@ function makeTransport(target: ManagedBrowserTarget, mode: "success" | "missing"
         coordinateSpace: "physical" as const,
         tabId: target.tabId,
         generation: target.generation,
-        candidates: [{ ...(mode === "custom" ? { tagName: "div", ariaRole: "combobox" } : { tagName: "select" }), name: "Departure", frame: { x: 100, y: 100, width: 160, height: 28 }, visible: true, interactive: true, options: [{ text: "08:00", enabled: mode !== "disabled" }], optionsTruncated: false, state: { enabled: mode !== "disabled" } }],
+        candidates: [{ ...(mode === "custom" ? { tagName: "div", ariaRole: "combobox" } : { tagName: "select" }), name: "Departure", frame: { x: 100, y: 100, width: 160, height: 28 }, visible: true, interactive: true, options, optionsTruncated, state: { enabled: mode !== "disabled" } }],
       };
     },
     async selectOption(request, signal) {
@@ -73,7 +81,7 @@ function makeTransport(target: ManagedBrowserTarget, mode: "success" | "missing"
   return { transport, requests };
 }
 
-async function openFixture(mode: Parameters<typeof makeTransport>[1] = "success") {
+async function openFixture(mode: SelectOptionFixtureMode = "success") {
   const directory = await mkdtemp(join(tmpdir(), "computer-harness-select-option-"));
   const windowTarget = { pid: 1234, windowId: 5678 };
   const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "edge", profileId: "fixture", windowTarget, tabId: "tab-1", generation: "generation-1", delivery: "loopback-cdp" };
@@ -116,6 +124,33 @@ describe("managed-browser select_option adapter", () => {
     expect(resizedResult).toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_BBOX_MISMATCH" });
   });
 
+  it("revalidates a truncated observation target against the full live option list", () => {
+    const frame = { x: 10, y: 20, width: 120, height: 28 };
+    const fingerprint = domCandidateFingerprint({ tagName: "select", ariaRole: "combobox", name: "Departure", frame });
+    const run = (options: readonly MiniElementOptions[], optionText: string) => {
+      const select = new MiniElement("select", {
+        attrs: { "aria-label": "Departure" },
+        frame,
+        children: options.map((option) => new MiniElement("option", option)),
+      });
+      const expression = buildManagedDomSelectOptionExpression({ role: "combobox", name: "Departure", frame, fingerprint, optionText });
+      const result = runInNewContext(expression, { document: new MiniDocument([select]), Element: MiniElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), Event: class { public constructor(public readonly type: string) {} } }) as { status: string; driverCode?: string };
+      return { result, select };
+    };
+    const fullOptions = Array.from({ length: 40 }, (_, index) => ({ textContent: index === 2 ? "08:00" : `option-${index}` }));
+    const selected = run(fullOptions, "08:00");
+    expect(selected.result).toEqual({ status: "completed" });
+    expect(selected.select.children[2]?.selected).toBe(true);
+
+    expect(run(Array.from({ length: 40 }, (_, index) => ({ textContent: `option-${index}` })), "08:00").result)
+      .toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_OPTION_MISSING" });
+    expect(run([...fullOptions.slice(0, 3), { textContent: "08:00" }, ...fullOptions.slice(4)], "08:00").result)
+      .toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_OPTION_AMBIGUOUS" });
+    const otherOptions = fullOptions.filter((_option, index) => index !== 2);
+    expect(run([{ textContent: "08:00", attrs: { disabled: "" } }, ...otherOptions], "08:00").result)
+      .toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_OPTION_MISSING" });
+  });
+
   it("selects by exact option text through DOM delivery without a native popup click", async () => {
     const opened = await openFixture();
     try {
@@ -128,6 +163,39 @@ describe("managed-browser select_option adapter", () => {
       expect(receipt).toMatchObject({ status: "completed" });
       expect(opened.selected.requests[0]).toMatchObject({ optionText: "08:00", candidate: { role: "combobox", name: "Departure", fingerprint: expect.stringMatching(/^domf-/u), frame: { x: 100, y: 100 } } });
       expect(opened.fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+    } finally {
+      await opened.computer.close(opened.session);
+      await rm(opened.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a unique enabled option in the observed prefix of a truncated list", async () => {
+    const opened = await openFixture("truncated");
+    try {
+      const capture = await opened.computer.observe(opened.session, "truncated-current" as ObservationId, new AbortController().signal);
+      const select = capture.grounding?.elements.find((candidate) => candidate.source === "dom" && candidate.role === "combobox");
+      expect(select).toMatchObject({ options: [{ text: "08:00", enabled: true }], optionsTruncated: true });
+      const receipt = await opened.computer.execute(opened.session, { actionId: "truncated-action" as ActionId, basedOn: "truncated-current" as ObservationId, kind: "select_option", groundingRef: select!.elementRef, optionText: "08:00" }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "completed" });
+      expect(opened.selected.requests).toHaveLength(1);
+    } finally {
+      await opened.computer.close(opened.session);
+      await rm(opened.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["truncated-missing", "SELECT_OPTION_OPTION_MISSING"],
+    ["truncated-ambiguous", "SELECT_OPTION_OPTION_AMBIGUOUS"],
+    ["truncated-disabled", "SELECT_OPTION_OPTION_DISABLED"],
+  ] as const)("refuses %s from the observed truncated option prefix", async (mode, driverCode) => {
+    const opened = await openFixture(mode);
+    try {
+      const capture = await opened.computer.observe(opened.session, `${mode}-current` as ObservationId, new AbortController().signal);
+      const select = capture.grounding?.elements.find((candidate) => candidate.source === "dom");
+      const receipt = await opened.computer.execute(opened.session, { actionId: `${mode}-action` as ActionId, basedOn: `${mode}-current` as ObservationId, kind: "select_option", groundingRef: select!.elementRef, optionText: "08:00" }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode });
+      expect(opened.selected.requests).toHaveLength(0);
     } finally {
       await opened.computer.close(opened.session);
       await rm(opened.directory, { recursive: true, force: true });
@@ -204,7 +272,7 @@ class MiniElement {
   public readonly parentElement: MiniElement | null;
   public readonly textContent: string;
   public readonly hidden = false;
-  public readonly disabled = false;
+  public readonly disabled: boolean;
   public readonly multiple = false;
   public readonly shadowRoot: undefined;
   public selected = false;
@@ -216,6 +284,7 @@ class MiniElement {
   public constructor(localName: string, options: MiniElementOptions = {}, parentElement: MiniElement | null = null) {
     this.localName = localName;
     this.attrs = options.attrs ?? {};
+    this.disabled = Object.hasOwn(this.attrs, "disabled");
     this.textContent = options.textContent ?? "";
     this.frame = options.frame ?? { x: 0, y: 0, width: 100, height: 20 };
     this.parentElement = parentElement;

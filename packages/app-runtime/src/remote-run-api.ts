@@ -849,6 +849,71 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
 
 function projectRuntimeEvent(event: RuntimeEvent, reply: string | undefined): Readonly<Record<string, JsonValue>> | undefined {
   switch (event.type) {
+    case "model.request.started": {
+      const providerId = safeProgressToken(event.providerId);
+      return {
+        type: "run.progress",
+        phase: "model",
+        status: "started",
+        ...(providerId === undefined ? {} : { providerId }),
+        ...(event.attempt === undefined ? {} : { attempt: event.attempt }),
+        ...(event.contextBudget === undefined ? {} : {
+          context: {
+            estimatedInputTokens: event.contextBudget.estimatedInputTokens,
+            selectedHistoryEvents: event.contextBudget.selectedHistoryEvents,
+            omittedHistoryEvents: event.contextBudget.omittedHistoryEvents,
+            ...(event.contextBudget.maxInputTokens === undefined ? {} : { maxInputTokens: event.contextBudget.maxInputTokens }),
+          },
+        }),
+      };
+    }
+    case "model.response.received":
+      return {
+        type: "run.progress",
+        phase: "model",
+        status: "completed",
+        ...(event.attempt === undefined ? {} : { attempt: event.attempt }),
+        ...(event.turn.usage === undefined ? {} : { usage: modelUsageJson(event.turn.usage) }),
+      };
+    case "model.request.failed": {
+      const code = safeProgressToken(event.code);
+      return {
+        type: "run.progress",
+        phase: "model",
+        status: "failed",
+        category: safeIssueCategory(event.category),
+        ...(code === undefined ? {} : { code }),
+        ...(event.retryable === undefined ? {} : { retryable: event.retryable }),
+      };
+    }
+    case "action.proposed":
+      return {
+        type: "run.progress",
+        phase: "action",
+        status: "proposed",
+        kind: event.action.kind,
+      };
+    case "action.execution.started":
+      return { type: "run.progress", phase: "action", status: "started", kind: event.action.kind };
+    case "action.execution.completed":
+      return { type: "run.progress", phase: "action", status: "completed", actionStatus: event.receipt.status };
+    case "action.execution.failed":
+      return { type: "run.progress", phase: "action", status: "failed", actionStatus: event.receipt.status };
+    case "monitor.proposal":
+      return {
+        type: "run.progress",
+        phase: "monitor",
+        status: event.proposal,
+        mode: event.mode,
+        reasonCodes: event.reasonCodes.slice(0, 8).map((reason) => safeProgressToken(reason)).filter((reason): reason is string => reason !== undefined),
+      };
+    case "monitor.transition":
+      return {
+        type: "run.progress",
+        phase: "monitor",
+        status: "transition",
+        transition: event.transition,
+      };
     case "observation.created":
       return {
         type: "run.observation",
@@ -862,7 +927,6 @@ function projectRuntimeEvent(event: RuntimeEvent, reply: string | undefined): Re
     case "run.finished":
       return { type: "run.reply", outcome: event.outcome, ...(reply === undefined ? {} : { reply }) };
     case "runtime.error":
-    case "model.request.failed":
       return { type: "run.issue", category: safeIssueCategory(event.category) };
     default:
       return undefined;
@@ -930,6 +994,21 @@ function mapStatus(status: string): RemoteRunStatus {
 function safeIssueCategory(category: string): string {
   const allowed = new Set(["provider", "transport", "validation", "safety", "budget", "computer", "cleanup", "control"]);
   return allowed.has(category) ? category : "run";
+}
+
+function safeProgressToken(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.replace(/[\u0000-\u001f\u007f]/gu, " ").trim();
+  return /^[A-Za-z0-9._:-]{1,64}$/u.test(normalized) ? normalized : undefined;
+}
+
+function modelUsageJson(usage: NonNullable<Extract<RuntimeEvent, { type: "model.response.received" }>["turn"]["usage"]>): JsonValue {
+  return {
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage.totalTokens === undefined ? {} : { totalTokens: usage.totalTokens }),
+    ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+  };
 }
 
 function safeMediaType(value: string): string {

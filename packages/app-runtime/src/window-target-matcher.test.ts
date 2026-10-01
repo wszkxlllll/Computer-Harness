@@ -33,7 +33,7 @@ describe("matchGoalToWindow", () => {
     });
   });
 
-  it("ignores untitled auxiliary windows for automatic matching but keeps titled windows ambiguous", () => {
+  it("owns the automatic titled-sibling policy while keeping titled windows ambiguous", () => {
     const main = { pid: 10, windowId: 100, appName: "TextEdit", title: "Notes" };
     const saveSheet = { pid: 10, windowId: 101, appName: "TextEdit", title: undefined };
     expect(matchGoalToWindow("打开 TextEdit", [main, saveSheet])).toEqual({

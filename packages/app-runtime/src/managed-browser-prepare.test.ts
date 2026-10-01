@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CuaBootstrapSession } from "@computer-harness/computer-cua";
+import { defaultManagedBrowserKind, type CuaBootstrapSession } from "@computer-harness/computer-cua";
 import { prepareManagedBrowserProfile, type ManagedBrowserPreparationCuaModule, type ManagedBrowserPreparationHost, type ManagedBrowserPreparationHostOptions } from "./managed-browser-prepare.js";
 
 describe("managed browser preparation seam", () => {
@@ -15,6 +15,7 @@ describe("managed browser preparation seam", () => {
       async close() { calls.hostClose += 1; },
     } as ManagedBrowserPreparationHost;
     const createHost = vi.fn((options: ManagedBrowserPreparationHostOptions) => {
+      expect(options.browser).toBe(defaultManagedBrowserKind());
       expect(options.registerStartupUrl).toBe(true);
       return host;
     });

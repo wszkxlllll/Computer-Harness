@@ -565,6 +565,28 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
+  it("projects model progress through the remote event stream without provider internals", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-progress-"));
+    const { api, session } = createFixture(outputDir, { summary: "Progress was captured." });
+    try {
+      const started = await api.startRun("device-one", "progress-once", "Check the managed page", { mode: "browser", url: "https://example.test" });
+      const streamed: unknown[] = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event));
+      await session.waitForActiveRun();
+      subscription.close();
+      const progress = streamed.filter((event) => typeof event === "object" && event !== null && "type" in event && event.type === "run.event"
+        && "data" in event && typeof event.data === "object" && event.data !== null && "type" in event.data && event.data.type === "run.progress");
+      expect(progress).toEqual(expect.arrayContaining([
+        expect.objectContaining({ data: expect.objectContaining({ phase: "model", status: "started" }) }),
+        expect.objectContaining({ data: expect.objectContaining({ phase: "model", status: "completed" }) }),
+      ]));
+      expect(JSON.stringify(progress)).not.toContain("reasoning_content");
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports a stale managed-browser profile before creating a Run", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-managed-browser-stale-profile-"));
     const managedBrowserProfile = { profileLabel: "travel", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };

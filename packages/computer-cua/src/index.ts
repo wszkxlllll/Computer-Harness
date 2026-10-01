@@ -44,8 +44,11 @@ export {
   type MaterializedDomGrounding,
 } from "./dom-grounding.js";
 export {
+  buildManagedDomClickExpression,
   MANAGED_DOM_EVALUATION_SCRIPT,
   ManagedBrowserHost,
+  defaultManagedBrowserKind,
+  managedBrowserExecutableCandidates,
   acquireManagedBrowserProfileLease,
   buildManagedBrowserLaunchUrls,
   clearManagedBrowserDevToolsPort,
@@ -71,6 +74,7 @@ export {
   type ManagedBrowserPageActivity,
   type ManagedBrowserPageActivityReader,
   type ManagedBrowserProfileMode,
+  type ManagedBrowserKind,
   type ManagedBrowserProfileLease,
   type ManagedBrowserWindowResolution,
   type CuaBootstrapSession,

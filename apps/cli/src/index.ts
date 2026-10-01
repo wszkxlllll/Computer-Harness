@@ -489,7 +489,9 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     ...(options.qwenOutputMode === undefined ? {} : { qwenOutputMode: options.qwenOutputMode }),
     ...(qwenEndpoint === undefined ? {} : { qwenEndpoint }),
     ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
-    glmThinking: process.env.GLM_THINKING === "disabled" || process.env.GLM_THINKING === "enabled" ? process.env.GLM_THINKING : "enabled",
+    // glm-5.3-flash is reasoning-only on the configured API account;
+    // thinking=disabled returns HTTP 400/1210, so keep CLI requests valid.
+    glmThinking: "enabled",
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };

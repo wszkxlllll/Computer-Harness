@@ -197,22 +197,32 @@ function createSessionConfig(
     },
     outputDir,
     maxSteps: 100,
-    maxModelRequests: 100,
+    maxModelRequests: 24,
     planning: true,
     memory: "facts",
     memoryRetrieval: "lexical",
     batching: "same-control-input-v1",
     contextMode: "recent",
-    contextMaxHistoryEvents: 80,
+    contextMaxHistoryEvents: 32,
+    contextMaxInputTokens: 8_000,
     riskProfile: "live-interactive",
     riskGuard: "layered",
     riskModel: "same",
     riskMaxModelRequests: 1,
     riskTimeoutMs: 15_000,
     cleanupDeadlineMs: 5_000,
+    // Keep no-progress evidence in the model context without automatically
+    // blocking a phone-driven action while the interaction path is under test.
     monitor: "shadow",
     windowHandoff: "confirm-v1",
-    glmThinking: process.env.GLM_THINKING === "disabled" ? "disabled" : "enabled",
+    // glm-5.3-flash is a reasoning-only model on the configured API account;
+    // sending thinking=disabled returns HTTP 400/1210. Keep the wire mode
+    // compatible and bound its output below instead of using an unsupported
+    // disable switch.
+    glmThinking: "enabled",
+    // GLM can take longer on image-heavy turns; allow one bounded 90-second
+    // response window while keeping the runtime's single retry finite.
+    glmRequestTimeoutMs: 90_000,
     ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),

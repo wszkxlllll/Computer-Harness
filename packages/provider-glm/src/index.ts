@@ -30,6 +30,8 @@ export interface GlmProfile {
   readonly name: string;
   readonly thinking: "disabled" | "enabled";
   readonly coordinateMode: GlmCoordinateMode;
+  /** Bound the model's completion/reasoning output so one GUI turn cannot monopolize the live-run deadline. */
+  readonly maxOutputTokens?: number;
 }
 
 export const glmProfiles: Readonly<Record<GlmProfileName, GlmProfile>> = {
@@ -37,6 +39,7 @@ export const glmProfiles: Readonly<Record<GlmProfileName, GlmProfile>> = {
     name: "glm-5.3-flash",
     thinking: "enabled",
     coordinateMode: "actual_pixels",
+    maxOutputTokens: 4096,
   },
 };
 
@@ -106,7 +109,9 @@ export class GlmAdapter implements ProviderAdapter {
       tools: snapshot.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(snapshot))),
       stream: false,
       thinking: { type: this.profile.thinking },
+      ...(this.profile.maxOutputTokens === undefined ? {} : { max_tokens: this.profile.maxOutputTokens }),
     } satisfies Record<string, unknown>;
+    assertInputBudget(snapshot, body, "GLM");
     const frozenBody = deepFreeze(body);
     const prepared: PreparedProviderRequest = Object.freeze({
       providerId: this.id,
@@ -161,6 +166,11 @@ export class GlmAdapter implements ProviderAdapter {
           const bytes = await this.assetReader.read(block.asset, signal);
           content.push({ type: "image_url", image_url: { url: toDataUrl(block.asset.mediaType, bytes) } });
         } else if (block.type === "provider_continuation") {
+          // A disabled-thinking live profile must not replay prior hidden
+          // reasoning into every subsequent request.  Some GLM deployments
+          // still return reasoning_content despite the disabled flag; keeping
+          // it would silently grow the next prompt and worsen latency.
+          if (this.profile.thinking !== "enabled") continue;
           if (block.continuation.providerId !== this.id || block.continuation.kind !== "reasoning_content") continue;
           if (reasoningContent !== undefined && reasoningContent !== block.continuation.content) {
             throw new GlmProviderError("GLM history contains conflicting reasoning continuations", "GLM_INVALID_HISTORY");
@@ -292,8 +302,12 @@ export class FetchGlmHttpClient implements GlmHttpClient {
           throw new GlmProviderError(
             `GLM request timed out after ${this.requestTimeoutMs}ms`,
             "GLM_REQUEST_TIMEOUT",
-            true,
-            "same_input",
+            // A timeout leaves the outcome of the remote request unknown. Do
+            // not replay a potentially large image/tool prompt automatically:
+            // callers must observe/restart explicitly instead of issuing a
+            // second identical request that may duplicate provider work.
+            false,
+            "feedback",
           );
         }
         throw new GlmProviderError(
@@ -309,8 +323,8 @@ export class FetchGlmHttpClient implements GlmHttpClient {
           throw new GlmProviderError(
             `GLM response body timed out after ${this.requestTimeoutMs}ms`,
             "GLM_REQUEST_TIMEOUT",
-            true,
-            "same_input",
+            false,
+            "feedback",
           );
         }
         throw new GlmProviderError(
@@ -346,6 +360,27 @@ function countImages(input: ModelInput): number {
 function estimateWireTextTokens(body: unknown): number {
   const withoutImagePayload = stripImagePayload(body);
   return Math.ceil(JSON.stringify(withoutImagePayload).length / 4);
+}
+
+function assertInputBudget(input: ModelInput, body: unknown, provider: string): void {
+  const max = input.contextBudget?.maxInputTokens;
+  if (max === undefined) return;
+  // Context compilation cannot see provider-specific envelopes or the visual
+  // token cost. Keep a conservative provider-side gate immediately before the
+  // network call so an oversized image/schema prompt is never sent.
+  const visualTokens = input.messages.reduce((total, message) => total + message.content.reduce((sum, block) => {
+    if (block.type !== "image") return sum;
+    return sum + Math.min(480, Math.ceil((block.viewport.width * block.viewport.height) / 750) + 128);
+  }, 0), 0);
+  const estimated = estimateWireTextTokens(body) + visualTokens + 32;
+  // The compiler's budget is the authoritative text budget; provider JSON and
+  // vision accounting are intentionally conservative and may overshoot it.
+  // Keep a bounded calibration margin for normal-sized contexts, while small
+  // budgets remain strict so tests and callers cannot accidentally send an
+  // obviously oversized prompt.
+  if (estimated > max && (max < 1_000 || estimated > max + 4_096)) {
+    throw new GlmProviderError(`${provider} prompt exceeds maxInputTokens (${estimated} > ${max})`, "GLM_INPUT_TOO_LARGE", false);
+  }
 }
 
 function stripImagePayload(value: unknown, parentKey?: string): unknown {

@@ -70,9 +70,11 @@ import { finishSummaryRejectionReason } from "./finish-summary.js";
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
 const PROVIDER_RETRY_DELAY_CAP_MS = 5_000;
-const PROVIDER_ATTEMPT_DEADLINE_MS = 240_000;
+// Keep retry admission aligned with the live model turn budget. A late
+// network/5xx failure must not start another full-length request.
+const PROVIDER_ATTEMPT_DEADLINE_MS = 90_000;
 /** Covers the initial request, one retry and their bounded delay for the default HTTP clients. */
-const MAX_PROVIDER_RETRY_WINDOW_MS = 480_000;
+const MAX_PROVIDER_RETRY_WINDOW_MS = 120_000;
 /** Once GUI actions are exhausted, allow only a small number of model decisions for finish/plan closure. */
 const MAX_ACTION_BUDGET_CLOSE_TURNS = 2;
 const DEFAULT_CLEANUP_DEADLINE_MS = 5_000;
@@ -1094,6 +1096,14 @@ export class RunController {
           // Apply the same rule to the remaining calls of a paused ToolTurn;
           // already-started actions are never rolled back here.
           this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+        }
+        if (isExplicitStopInput(command.text)) {
+          // A stop/cancel instruction entered into the human-review field is
+          // a control decision, not a new task correction. Abort immediately
+          // so the provider cannot turn it into another GUI action or a
+          // follow-up planning retry.
+          this.abortController.abort(new Error("cancelled by explicit user stop input"));
+          return { correction: true };
         }
         return { correction: true };
       case "approval_resolution":
@@ -2537,7 +2547,10 @@ export class RunController {
     if (pending === undefined || this.snapshot.status !== "running" || this.monitorExecutionBarrier() !== undefined) return;
     this.monitorPendingHelp = undefined;
     try {
-      await this.commitEvent({ type: "user.input.requested", question: `Monitor requests human review (${pending.reason}); confirm the current state before continuing.` });
+      await this.commitEvent({
+        type: "user.input.requested",
+        question: "页面连续多次操作后没有出现可确认的变化，任务已暂停。请检查电脑当前画面后再补充下一步；不要重复输入网址或重复点击同一入口。若页面仍无变化，请说明“停止任务”。",
+      });
     } catch (error) {
       // A diagnostic request is best effort.  If its own event cannot be
       // committed, leave the already-completed action outcome untouched.
@@ -2947,6 +2960,12 @@ function summarizeGuardAction(action: ActionIntent): import("@computer-harness/p
     : action;
 }
 
+function isExplicitStopInput(text: string): boolean {
+  const normalized = text.normalize("NFKC").trim().replace(/[\s\u3000]+/gu, "");
+  return /^(?:停止|取消)(?:当前)?任务(?:[。.!！?？]|$)/u.test(normalized)
+    || /^(?:stop|cancel|abort)(?:task)?(?:[.!?]|$)/iu.test(normalized);
+}
+
 function isSameControlInputBatch(calls: readonly ToolCall[], entries: readonly PreflightEntry[]): boolean {
   if (entries.length !== calls.length) return false;
   const firstComputer = entries.findIndex((entry) => entry.definition?.category === "computer");
@@ -3048,4 +3067,3 @@ function addProviderRetryFeedback(
   };
   return { ...context, messages: [...context.messages, feedback] };
 }
-

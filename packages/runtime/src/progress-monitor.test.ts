@@ -218,11 +218,22 @@ describe("progress monitor foundation", () => {
 
     const current = reduceProgressMonitor(first.state, observation(runId, "observation-2")).state;
     expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(true);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "rounded" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10.866, y: 20.122 } })).toBe(true);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 11, y: 20 } })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-3" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "relocated" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, groundingRef: "uia-current", point: { x: 11, y: 20 } })).toBe(false);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-scroll" as ActionId, kind: "scroll", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 }, direction: "down", ticks: 1 })).toBe(false);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-type" as ActionId, kind: "type", basedOn: "observation-2" as ObservationId, text: "same input" })).toBe(false);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-key" as ActionId, kind: "keypress", basedOn: "observation-2" as ObservationId, keys: ["ARROWDOWN"] })).toBe(false);
+  });
+
+  it("blocks an ungrounded same-coordinate click after a fresh unchanged-page observation", () => {
+    let state = createProgressMonitorState(runId);
+    state = reduceProgressMonitor(state, observation(runId, "same-page-1")).state;
+    state = reduceProgressMonitor(state, click(runId, "same-page-click", "same-page-1", 100, 200)).state;
+    state = reduceProgressMonitor(state, receipt(runId, "same-page-click", "completed")).state;
+    state = reduceProgressMonitor(state, transition(runId, "same-page-click", "same-page-2", "unchanged", "same-page-1")).state;
+    state = reduceProgressMonitor(state, observation(runId, "same-page-2")).state;
+    expect(shouldRejectRepeatedNoChange(state, { actionId: "same-page-repeat" as ActionId, kind: "click", basedOn: "same-page-2" as ObservationId, point: { x: 100, y: 200 } })).toBe(true);
   });
 
   it("does not treat changed or unknown transition evidence as a no-change candidate", () => {
