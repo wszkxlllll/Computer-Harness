@@ -185,6 +185,14 @@ TUI / CLI / SDK                         手机 Web
 
 队友可参考任务手册第 5 节，为自己的领域建立 `docs/<domain>-task-cards.md` 与 `eval/<domain>/<domain>-manifest.json`。每题说明目标、初态、允许/禁止操作、可观察结果和人工评分，并区分开发与留出任务。
 
+**队友扩展领域（设计草稿）**：
+
+- **政务与公共服务**（域已转其他成员，草稿供交接）：[任务卡](./docs/government-task-cards.md)、[manifest](./eval/government/government-candidate-manifest.v0.json)。覆盖查询办理入口、材料清单、定位流程、填写草稿、上传附件、查询回执、跨应用材料整理、条件变更修订、材料退回恢复。10 族×2 实例（6 族开发/4 族留出）。
+- **生活缴费与社区服务**（成员 C）：[任务卡](./docs/community-payment-task-cards.md)、[manifest](./eval/community-payment/community-payment-candidate-manifest.v0.json)。覆盖查询账单、核对户号地址、账单比较、缴费确认前核对、报修填表、服务预约草稿、地址混淆防错缴、重复账单防重复支付、报修→联系→日程跨应用。10 族×2 实例（6 族开发/4 族留出）。D01 精选：[D01 任务卡](./docs/community-payment-d01-task-cards.md)、[D01 manifest](./eval/community-payment/community-payment-d01-manifest.v0.json)，3 族×2 实例（v1 开发/v2 留出），含微信"生活缴费"小程序与物业 App 入口。
+- **就医与健康服务**（成员 C，D01）：[D01 任务卡](./docs/medical-care-d01-task-cards.md)、[D01 manifest](./eval/medical/medical-d01-manifest.v0.json)。3 族×2 实例（v1 开发/v2 留出），覆盖查询科室/院区、按时间筛选号源、核对预约草稿与整理就诊准备，入口为医院公众号/小程序。
+
+以上各域均为设计草稿/设计定稿候选，待环境验证与 evaluator 实现。使用前必须确认真实入口可达性、建立受控测试环境（测试账户/合成数据）、实现独立 evaluator、完成隐私与合规审查，详见各任务卡"后续工作清单"章节。
+
 当前出行样例只做查询与整理，不购票、占座、下单或付款。原始截图、轨迹和账号信息保留在本地 `runs/`，不提交仓库。
 
 ## 当前验证与限制
