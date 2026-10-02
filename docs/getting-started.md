@@ -49,14 +49,17 @@ pnpm.cmd test
 
 如果执行策略阻止 `.ps1`，持续使用 `pnpm.cmd` 即可；这与路径转换问题是独立问题。
 
-## 3. CUA 0.22.2
+## 3. CUA daemon（Windows/macOS 0.22.2；Linux 0.32.0）
 
-TypeScript workspace 会安装 `@trycua/cua-driver@0.22.2` 的客户端和平台 binding，但不会自动安装或启动官方 daemon。请使用固定 release，而不是 `latest`：
+TypeScript workspace 当前安装 `@trycua/cua-driver@0.22.2` 的客户端和平台 binding，但不会自动安装或启动官方 daemon。请使用固定 release，而不是 `latest`；daemon 与 npm client 必须同 release 配对（2026-10-02 决定：Linux 平台升级 0.32.0 配对，Windows/macOS 维持 0.22.2 不变）：
 
-- [官方 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)
+- Windows / macOS：[官方 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)
+- Linux：[官方 0.32.0 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.32.0)（x86_64 daemon tarball SHA256 `bb006010…f39a6`，对照 release `SHA256SUMS` 校验）。配对原则：0.22.2 npm client 连 0.32.0 daemon 同样报 Transport 错误——2026-09-25 的 Linux 阻塞根因即"同版本号、不同构建管道"（GitHub release 二进制、npm 发布物与 AUR 源码构建互不匹配）；0.30.x 起上游把 npm tarball 与 daemon 放进同一 release 同 CI 发布，配对以"同 release"为准，不要用 AUR 等第三方源码构建的 daemon。
 - [官方 daemon 生命周期文档（main 分支可变参考；固定版本以 release 为准）](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/keep-running.mdx)
 
-Release 中提供 Windows x64/arm64、macOS universal/arm64/x86_64 和 Linux x86_64/arm64 资产。选择当前平台后，用同一 release 的 `checksums.txt` 校验下载物；不要把新 daemon 与 0.22.2 npm client 混用。
+Release 中提供 Windows x64/arm64、macOS universal/arm64/x86_64 和 Linux x86_64/arm64 资产。选择当前平台后，用同一 release 的 `checksums.txt` 校验下载物；不要把不同来源的 daemon 与 npm client 混用。
+
+Linux 0.32.0 配对已于 2026-10-02 在 Plasma X11 验证：`CuaDriver.connect()`/`metadata()` 正常（contractVersion 0.8.0）、`doctor` 全绿、`get_desktop_state` 真实截图通过。注意两点：仓库 `packages/computer-cua` 依赖仍为 0.22.2（Windows/macOS 配对），Linux 走 0.32.0 需要"按平台选择 SDK 版本"的仓库侧路由，该路由落地前 Linux 经仓库 CLI 使用 CUA 仍不可用，可先用独立安装（npm registry `@trycua/cua-driver@0.32.0` + 同 release daemon）复测；0.32.0 daemon 默认开启 content-free telemetry，需要时用 `cua-driver telemetry disable` 关闭。
 
 平台准备要点：
 
