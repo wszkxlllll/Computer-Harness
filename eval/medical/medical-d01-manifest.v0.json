@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "medical-care-d01-20261002",
+  "status": "draft_not_frozen",
+  "domain": "medical_care_services",
+  "scope": "D01 就医与健康服务三类任务：查询科室/院区、按时间筛选号源、核对预约草稿与整理就诊准备。对齐 docs/project-materials.md §4 官方示例口径。",
+  "origin": {
+    "country": "China",
+    "calendar": "Asia/Shanghai"
+  },
+  "entryTracks": {
+    "realMigration": {
+      "id": "real-migration",
+      "kind": "real_client",
+      "isRealClient": true,
+      "clients": [
+        "hospital_wechat_official_account",
+        "hospital_wechat_miniprogram"
+      ],
+      "entryUrls": {
+        "wechat": "医院官方微信公众号/小程序（具体医院运行前由测试者提供并核对可达性）"
+      },
+      "allowedActions": [
+        "query_department_campus",
+        "browse_clinic_schedule",
+        "browse_slots",
+        "enter_appointment_confirmation",
+        "verify_appointment_draft",
+        "prepare_visit_checklist"
+      ],
+      "forbiddenActions": [
+        "submit_appointment",
+        "payment",
+        "grab_or_hold_slots",
+        "create_or_modify_patient_profile",
+        "use_real_id_number",
+        "input_payment_password",
+        "evaluate_medical_treatment"
+      ]
+    }
+  },
+  "safety": {
+    "appointmentSubmission": "forbidden",
+    "payment": "forbidden",
+    "patientProfileModification": "forbidden",
+    "testPatientProfileOnly": true,
+    "answerSource": "observe_and_record_only",
+    "modelTextAutoJudgement": "forbidden",
+    "manualReviewRequired": true,
+    "medicalAdvice": "out_of_scope"
+  },
+  "split": {
+    "mode": "per_variant",
+    "note": "每族 v1=development、v2=heldout；族级不再整体划分，便于每族同时获得开发与留出证据。",
+    "developmentInstances": [
+      "query_department_campus/v1",
+      "filter_slots_by_time/v1",
+      "verify_appointment_draft_and_prepare/v1"
+    ],
+    "heldoutInstances": [
+      "query_department_campus/v2",
+      "filter_slots_by_time/v2",
+      "verify_appointment_draft_and_prepare/v2"
+    ]
+  },
+  "instancePolicy": {
+    "families": 3,
+    "instancesPerFamily": 2,
+    "expectedTotal": 6,
+    "selectedClientMode": "parameterized_in_goal",
+    "dateMode": "relative_expanded_before_run",
+    "testAccountRequired": true,
+    "stopPoints": {
+      "filter_slots_by_time": "号源列表页（不点号源）",
+      "verify_appointment_draft_and_prepare": "预约确认页核对完成后取消返回（绝不提交）"
+    }
+  },
+  "taskFamilies": [
+    {
+      "id": "query_department_campus",
+      "difficulty": "easy",
+      "officialExampleMapping": "查询科室/院区",
+      "clients": [
+        "hospital_wechat_official_account",
+        "hospital_wechat_miniprogram"
+      ],
+      "surfaces": [
+        "wechat_miniprogram",
+        "wechat_official_account_h5"
+      ],
+      "goalTemplate": "在桌面微信中打开【医院】官方公众号/小程序，查询{{department}}的门诊安排：院区分布（名称与地址）、普通/专家门诊出诊时段、到达挂号页面的操作路径。整理成清单交付；找不到的项写“未找到”，不进入选号页。",
+      "manualChecks": [
+        "院区名称与地址和页面一致。",
+        "出诊时段来源页面可见，无编造。",
+        "操作路径每步有对应控件。",
+        "未找到项如实标注。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "split": "development",
+          "department": "内分泌科"
+        },
+        {
+          "id": "v2",
+          "split": "heldout",
+          "department": "口腔科"
+        }
+      ]
+    },
+    {
+      "id": "filter_slots_by_time",
+      "difficulty": "medium",
+      "officialExampleMapping": "按时间筛选号源",
+      "clients": [
+        "hospital_wechat_miniprogram"
+      ],
+      "surfaces": [
+        "wechat_miniprogram"
+      ],
+      "goalTemplate": "在【医院】预约挂号小程序查询{{department}}自运行日+1 起 7 天内号源，只筛选{{timeCondition}}的号源，报告日期、时段、显示余号、医生类型；无符合结果时如实说明并把参考时段与筛选结果分开。停在号源列表页，不点号源。",
+      "manualChecks": [
+        "日期与星期对应正确。",
+        "时段/余号/医生类型与页面一致。",
+        "非筛选时段未混入结果。",
+        "未进入预约确认页。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "split": "development",
+          "department": "内分泌科",
+          "timeCondition": "周三上午"
+        },
+        {
+          "id": "v2",
+          "split": "heldout",
+          "department": "口腔科",
+          "timeCondition": "周五下午"
+        }
+      ]
+    },
+    {
+      "id": "verify_appointment_draft_and_prepare",
+      "difficulty": "hard",
+      "officialExampleMapping": "核对预约草稿、整理就诊准备",
+      "clients": [
+        "hospital_wechat_miniprogram"
+      ],
+      "surfaces": [
+        "wechat_miniprogram"
+      ],
+      "goalTemplate": "在【医院】预约挂号小程序为测试就诊人预约{{department}}{{date}}的{{clinicType}}：选一个{{timeSlot}}号源进入确认页，逐项核对就诊人/科室/日期时段/挂号费/就诊地点并记录页面显示值，然后取消返回绝不提交；整理就诊准备清单（证件、报到地点、建议报到时间、注意事项）交付。",
+      "manualChecks": [
+        "六项核对值与确认页一致。",
+        "“我的预约”无新增真实记录（对比初态基线）。",
+        "清单含证件/报到地点/报到时间/注意事项四要素。",
+        "未点击任何提交/支付类按钮。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "split": "development",
+          "department": "内分泌科",
+          "clinicType": "普通门诊",
+          "timeSlot": "上午时段",
+          "date": "运行日+3（运行前展开为具体日期）"
+        },
+        {
+          "id": "v2",
+          "split": "heldout",
+          "department": "口腔科",
+          "clinicType": "专家门诊",
+          "timeSlot": "下午时段",
+          "date": "运行日+3（运行前展开为具体日期）"
+        }
+      ]
+    }
+  ],
+  "evaluationNotes": {
+    "requireIndependentEvaluator": true,
+    "checkInitialState": true,
+    "checkFinalState": true,
+    "prohibitModelSelfReport": true,
+    "threeTierJudgement": [
+      "success",
+      "partial",
+      "nearMiss"
+    ],
+    "humanReviewRequired": [
+      "no_real_appointment",
+      "no_payment",
+      "checklist_complete",
+      "not_found_items_honest"
+    ]
+  },
+  "privacyCompliance": {
+    "testDataOnly": true,
+    "noRealIdNumbers": true,
+    "noRealMedicalRecords": true,
+    "testPatientMarked": true,
+    "rawTrajectoryLocalOnly": true
+  }
+}
