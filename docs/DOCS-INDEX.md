@@ -43,7 +43,7 @@ P1 助手回答偏好实施记录：[版本化 Run 快照与 Context 投影](./a
 - 出行评测：[试点准备](./travel-pilot-preparation-2026-09-20.md)、[任务卡与反馈表](./travel-task-cards-and-feedback.md)。
 - 队友扩展领域（设计草稿）：[政务与公共服务任务卡](./government-task-cards.md)（[manifest](../eval/government/government-candidate-manifest.v0.json)；域已转其他成员，草稿供交接）、[生活缴费与社区服务任务卡](./community-payment-task-cards.md)（[manifest](../eval/community-payment/community-payment-candidate-manifest.v0.json)；成员 C）。各 10 族×2 实例（6 族开发/4 族留出）；待环境验证与 evaluator 实现，使用前须确认真实入口可达性、建立受控测试环境、实现独立 evaluator、完成隐私与合规审查。
 - 成员 C D01 精选任务卡（设计定稿候选）：[就医与健康服务](./medical-care-d01-task-cards.md)（[manifest](../eval/medical/medical-d01-manifest.v0.json)）、[生活缴费与社区服务](./community-payment-d01-task-cards.md)（[manifest](../eval/community-payment/community-payment-d01-manifest.v0.json)）。各 3 族×2 实例（v1 开发/v2 留出），含医院公众号/小程序、微信"生活缴费"小程序、物业 App 等非网页入口；对齐[项目材料](./project-materials.md) §4 官方示例口径；待真实入口验证与 evaluator 实现。
-- OSWorld 与候选集：[环境说明](./osworld-environment-implementation.md)、[复现说明](./stage-5-osworld-reproducibility.md)、[G0 预检进度](./g0-preflight-progress-2026-09-10.md)、[候选任务清单](./harness-development-validation-candidates-2026-09-10.json)、[Linux 平台验证记录](./linux-platform-adaptation-2026-09-17.md)。
+- OSWorld 与候选集：[环境说明](./osworld-environment-implementation.md)、[复现说明](./stage-5-osworld-reproducibility.md)、[G0 预检进度](./g0-preflight-progress-2026-09-10.md)、[候选任务清单](./harness-development-validation-candidates-2026-09-10.json)、[Linux 平台验证记录](./linux-platform-adaptation-2026-09-17.md)、[CUA Linux 0.32.0 配对验证](./cua-linux-0320-upgrade-verification-2026-10-02.md)。
 - [开发文档规范](./development-documentation-standard.md)约束入口、证据和历史材料的维护方式。
 - [本地缺陷复现探针](./verification/audit-39ff27f9-local-probes.mjs)作为独立验证工具保留。
 

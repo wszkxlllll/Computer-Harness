@@ -48,7 +48,7 @@ bridge.py 原生支持 `--provider docker`，无需改代码；但 DesktopEnv �
   3. 解包进 `.pnpm/<pkg>@<ver>/node_modules/`（tar 内顶层 `package/` 用 `--strip-components=1` 上移一层），原悬空 dep 链接自动生效；
   4. import 冒烟验证无 warning 无报错。
 - 仓库侧候选修复：PR #3 把 CLI 与 batch fixture 改为懒加载 computer-cua，使绑定缺失只影响 cua 路径。其自动回归与最终合并状态以 PR 本身为准。
-- 版本边界：cua-driver 保持 0.22.2 不升不降；0.27.0 起主包新增 `./fleet` 导出；是否升级 0.28.2 由组长决定。
+- 版本边界（2026-10-02 更新）：**Linux 平台升级 cua-driver 0.32.0 配对（daemon 与 npm SDK 同 release）；Windows/macOS 维持 0.22.2 不变**。依据：09-25 Transport 错误根因为"同版本号、不同构建管道"（GitHub release 二进制、npm 发布物与 AUR 源码构建互不匹配），0.30.x 起上游将 daemon 二进制与 npm tarball 放入同一 GitHub release、同 CI 分钟级发布；0.32.0 配对已在 Plasma X11 验证全通（connect/metadata contractVersion 0.8.0、doctor 全绿、`get_desktop_state` 真实截图）。仓库 `packages/computer-cua` 依赖仍为 0.22.2（Windows/macOS 配对），Linux 落地 0.32.0 需要"按平台选择 SDK 版本"的仓库侧路由（别名或包装包），为待批准变更；落地前 Linux 复测用独立安装（npm registry `@trycua/cua-driver@0.32.0` + 同 release daemon，禁 AUR 源码构建混搭）。另：0.27.0 起主包新增 `./fleet` 导出；0.32.0 daemon 默认开启 content-free telemetry（`cua-driver telemetry disable` 可关）。
 
 ## 5. 网络受限环境参考策略（本机实例，非项目要求）
 
@@ -91,7 +91,7 @@ bridge.py 原生支持 `--provider docker`，无需改代码；但 DesktopEnv �
 
 ## 7. 边界与遗留
 
-- 未实例化 CuaDriver 驱动本机真实桌面（AGENTS.md 与 Risk Guard 双重门控，保持 VM 隔离路线）。
+- 未实例化 CuaDriver 驱动本机真实桌面（AGENTS.md 与 Risk Guard 双重门控，保持 VM 隔离路线）。注：2026-10-02 已用独立验证安装（daemon 0.32.0 + npm SDK 0.32.0 配对）完成 connect/doctor/只读截图验证，未执行任何输入类动作；仓库 Runtime 路径的门控维持不变。
 - ip_tables / iptable_nat 重启失效，持久化方案待确认。
 - Qwen 真实 API 本机未实测。
 - D19 需要补充不含截图、密钥和正文的运行 manifest（源码/环境 commit、模型与预算、evaluator 摘要、artifact SHA-256），才能升级为仓库可独立核对的证据。
