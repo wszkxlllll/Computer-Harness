@@ -1,6 +1,6 @@
 # 项目材料与待补内容
 
-更新：2026-10-01。用途：集中保存可复用的项目说明、技术与开放边界、证据入口和待补材料；不是正式报告，也不另设开发路线或人员分工。
+更新：2026-10-03。用途：集中保存可复用的项目说明、技术与开放边界、证据入口和待补材料；不是正式报告，也不另设开发路线或人员分工。
 
 ## 1. 项目说明
 
@@ -45,16 +45,16 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 
 ## 3. 开源、第三方资源与过程材料
 
-下表整理关键来源和使用边界。版本最终从锁文件和实际环境补写；已读的许可信息仅覆盖对应范围，完整依赖与发行物仍需核对。
+下表整理关键来源和使用边界。直接运行/开发依赖与 CUA Driver 0.22.2 的当前核验范围和来源见[第三方依赖声明](../THIRD_PARTY_NOTICES.md)；完整传递依赖 JSON、未安装平台包的 notice 与实际发布物仍需逐项补核。
 
 | 资源 | 来源/已知许可 | 项目使用与自主边界 | 还需补什么 |
 | --- | --- | --- | --- |
-| 本项目源码 | [公开仓库](https://github.com/wszkxlllll/Computer-Harness)；当前未找到根LICENSE | 自主代码、文档、任务与测试 | 团队确认权属及许可，补根LICENSE；公开可访问不等于已有再分发授权 |
-| CUA Driver | [trycua/cua](https://github.com/trycua/cua)、[根许可](https://github.com/trycua/cua/blob/main/LICENSE.md)为MIT；安装SDK 0.22.2 metadata亦声明MIT | 底层驱动；团队实现适配、会话/帧/窗口接线 | 精确发行物、原生组件及传递依赖许可；保留适用版权与许可文本 |
+| 本项目源码 | [公开仓库](https://github.com/wszkxlllll/Computer-Harness)；根目录提供Apache-2.0 LICENSE和package metadata | 本项目原创代码、文档、任务与测试；不自动覆盖第三方代码、素材或服务 | 核心贡献成员已于2026-10-03确认本项目原创代码采用Apache-2.0；第三方代码、素材与服务仍按各自许可和条款处理 |
+| CUA Driver | [CUA 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)：SDK package metadata与精确tag LICENSE为MIT；六个可选平台binding metadata为`MIT AND MPL-2.0` | 上游桌面驱动SDK及平台原生binding；本项目维护Computer Adapter、Surface Registry和Runtime接线 | 已核Windows x64包附带的`node-runtime-NOTICE.md`；其他平台包的tarball notice需在对应平台发行前分别检查并保留适用文本 |
 | GLM / Qwen | [智谱](https://open.bigmodel.cn/)、[阿里云Model Studio](https://help.aliyun.com/zh/model-studio/)；云API服务条款 | 模型调用与实时ASR；团队实现协议、工具、坐标和语音适配 | 实际模型/参数、服务条款、数据处理边界；不写成开放模型权重 |
 | Jev（可选） | TypeSafe服务，官方入口与条款需按实际账户核对 | 当前可选窗口候选选择 | 是否实际启用、分享哪些标题信息；不宣称已证明全任务降延迟 |
-| 前后端运行库 | React/React DOM、Fastify、ws、Zod、qrcode、string-width；已读主要包metadata声明MIT | 通用框架/通信/校验；界面、协议和业务逻辑由团队实现 | 按锁文件分别列版本/准确来源，核对文本及实际分发范围 |
-| 构建、测试及传递组件 | TypeScript metadata为Apache-2.0；Vitest/Vite/tsx为MIT；其他组件逐项确认 | 工程工具；团队维护测试用例和CI | 完整依赖清单，不把所有传递组件统一写MIT；按义务准备第三方声明 |
+| 前后端运行库 | React/React DOM、Fastify、ws、Zod、qrcode、string-width等直接metadata声明MIT | 通用框架/通信/校验；界面、协议和业务逻辑由团队实现 | 直接依赖版本、用途与核验来源见[第三方依赖声明](../THIRD_PARTY_NOTICES.md)；完整传递依赖JSON仍待pnpm store恢复后生成 |
+| 构建、测试及传递组件 | TypeScript 5.7.2为Apache-2.0开发依赖，npm包带`ThirdPartyNoticeText.txt`；Vitest/Vite/tsx为MIT；其余依赖按具体包metadata和许可文本核验 | 工程工具；团队维护测试用例和CI | 不把所有传递组件统一写成MIT；发行前生成完整机器可读清单，并按实际许可保留notice |
 | 系统和运行环境 | Node、pnpm、Python、浏览器、系统语音、部署组件及各自许可/条款 | 运行与设备语音；Browser TTS不是云TTS服务 | 环境版本、分发边界与必要声明；不捆绑个人profile/系统语音模型 |
 | 历史评测组件 | OSWorld代码采用Apache-2.0；VM/应用/素材另有边界 | 已有辅助验证资源 | 仅作资源披露和必要历史说明，不安排新增评测 |
 | 业务入口与素材 | 实际网站、应用、小程序和测试文件的来源/条款 | 查询操作、截图演示和测试 | 分别说明展示授权、脱敏和获取方式；不公开Cookie、私人聊天或无权分发素材 |
@@ -64,7 +64,7 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 
 ### 已有社区贡献
 
-2026-10-01核对：[CUA PR #3450](https://github.com/trycua/cua/pull/3450)已提交、尚未合并；[OpenClaw PR #126399](https://github.com/openclaw/openclaw/pull/126399)和[#127177](https://github.com/openclaw/openclaw/pull/127177)已合并。分别涉及Windows截图像素、完成Run后的computer复用、Windows设备重复审批。
+2026-10-03核对：[CUA Issue #4477](https://github.com/trycua/cua/issues/4477)记录0.22.2 foreground多行输入损坏。[PR #4500](https://github.com/trycua/cua/pull/4500)当前为 Ready/Open/MERGEABLE；维护者已接手 foreground input drain 根因修复，保留我方 fixtures、app-owned oracle 和 tests，并在 CI 与 native Windows 维护流程结束后继续处理；它尚未合并。[PR #3450](https://github.com/trycua/cua/pull/3450)当前为 Open/MERGEABLE/BLOCKED/CHANGES_REQUESTED；其上游验证报告仍保留 Windows native lane 42/43 和一项失败，尚未合并。此前[OpenClaw PR #126399](https://github.com/openclaw/openclaw/pull/126399)和[#127177](https://github.com/openclaw/openclaw/pull/127177)已合并，分别涉及Run完成后的computer复用和Windows设备重复审批。这些上游修改不自动代表当前Harness或CUA release中的功能。
 
 这些可作为问题发现、修复与开放协作记录。它们与当前Harness源码分开说明，贡献人与成果范围由团队核对；不能把历史上游修复当成本项目当前功能。后续只更新真实链接和状态，保留原作者和第三方署名。
 
@@ -104,7 +104,7 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 
 | 待补内容 | 具体做法 |
 | --- | --- |
-| 项目许可和完整第三方表 | 团队确定许可/权属；按实际依赖和外部服务补完整条目，保留必要声明 |
+| 项目许可和完整第三方表 | 根项目采用Apache-2.0；核心贡献成员已于2026-10-03确认本项目原创代码授权。直接运行/开发依赖与CUA 0.22.2见[第三方依赖声明](../THIRD_PARTY_NOTICES.md)；完整传递依赖JSON和未安装平台包的notice待补 |
 | 一个可复现版本 | 对齐源码、部署和文档，记录commit、锁文件、模型/驱动参数与功能开关；队友冷安装复现 |
 | 各生活场景的真实案例 | 选择实际可用入口，补任务初态、结果、人工帮助和失败；已经测过的先整理，不必全部重跑 |
 | 稳定展示素材 | 保留完整成功流程、用户纠正/审批、截图结果及实际播报；剪辑等待时说明真实耗时 |

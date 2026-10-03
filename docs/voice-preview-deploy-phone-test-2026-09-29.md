@@ -1,16 +1,28 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29
-状态：隔离 Preview 已部署并完成公网基础检查；手机端完整实测待用户执行
+状态：隔离 Preview 已于 2026-10-02 切换到跨窗口版本并完成公网基础检查；手机重新配对及端到端实测仍待用户执行
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
 
 ## 部署状态
 
-- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-09-29-voice-natural-v6`；Preview 的 `current` 符号链接指向该 release。此前 release 保留为 Preview 回滚点。
+- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-02-cross-window-v1`；Preview 的 `current` 符号链接已切换到该 release。此前 Preview release `/opt/computer-harness-preview/releases/2026-09-29-voice-natural-v6` 保留，可作为应用版本回滚点。
 - `computer-harness-relay-preview` 服务处于 active，只监听 loopback `8788`。Nginx 在 `8443` 提供 TLS：`https://47.108.197.221:8443`，使用现有有效 IP 证书。用户已开放 `8443`。
 - 旧入口 `https://47.108.197.221` 及旧服务、旧 `current` 均未修改，仍健康。
-- 公网检查结果：health endpoint `200`；匿名 API `401`（认证门正常拒绝匿名请求）；JavaScript 与 CSS 资源 `200`。
-- 本机 Host 在后台运行于 `4318`；WSS 已建立，配对挑战的 origin 已验证。以上结果不代表手机麦克风或完整语音任务已经验收。
+- stable release 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`；本次未切换或重启 stable。
+- 公网检查结果及边界见下方 2026-10-02 更新记录。它们不代表手机麦克风或完整语音任务已经验收。
+
+## 2026-10-02 Preview 更新记录
+
+本次部署包 SHA-256：`1411ED3B62BACD8123C913F1D95820396281AFAD9FB0BD5786F05CF273F46126`。隔离 Preview 的 `current` 已指向 `/opt/computer-harness-preview/releases/2026-10-02-cross-window-v1`，旧 Preview release 留存；stable 仍指向 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`。
+
+- Preview Relay active，服务只监听 loopback `8788`。使用正确 Host `47.108.197.221:8443` 检查 health 返回 `200`。一次错误 Host 的 health 请求返回 `403`，属于 Host 校验 fail-closed；使用正确 Host 后检查通过。
+- 公网根页面引用 `/assets/index-C5cxMpjt.js`，该 asset 返回 `200`。匿名 `GET /api/runs` 与 managed-browser profile 查询返回 `401`。恶意 Origin 的 profile `prepare` 请求返回 `403`；正确 Origin 但没有配对 session/CSRF 的请求返回 `401`。这些结果表明边界拒绝符合预期，不是已完成登录或 profile 准备。
+- 本机 Host 固定监听 `4318`，`/connect` 返回 `200`。Node PID 会动态变化，故不记入文档。服务器侧观察到 Nginx 与 Preview Relay `8788` 之间已有 established WSS；本次复用既有 CUA daemon。
+- 首次远端尝试发现系统缺少 `unzip`，在切换 symlink 前即停止，未改变当前 release。随后通过 Python 对 ZIP entries 做安全校验和解压，再原子切换 `current`。本次没有记录密钥、口令或私有日志正文。
+- 本次只进行部署及连接边界检查；没有启动 Run、profile prepare、浏览器、模型请求或桌面操作。Relay 更新后手机必须重新配对，不能沿用重启前的 session。
+
+如需仅回退 Preview 应用版本，可将 Preview `current` 原子恢复到保留的 `/opt/computer-harness-preview/releases/2026-09-29-voice-natural-v6`，然后重启 `computer-harness-relay-preview.service` 并重做正确 Host 的 health 与静态 asset 检查。此版本回退尚未执行，且不得改动 stable 的 `current`。本文件后面的“服务器回滚”命令表示完全停用 Preview 服务和入口，不是应用版本回退。
 
 2026-09-29 第二次更新加入：语音开关在用户手势内立即试播、首次进入 Run 时只补发固定“任务已开始”通知、手机显式整个桌面目标，以及 GLM-5.3-Flash `reasoning_effort=low`。整个桌面不会由自动选窗静默启用；它可能把其他可见窗口送入 Provider，仅作为独立弹窗未被窗口捕获时的显式兼容路径。部署前本地全量为 93 个测试文件、930 项通过；脚本 19 项通过、1 项因 Windows 无符号链接能力跳过，强制 Web 构建和服务器构建均通过。
 
@@ -24,9 +36,9 @@
 
 真实 GLM 探针先验证 `thinking.type=disabled` 被服务端以 HTTP 400/1210 拒绝，随后使用 `thinking.type=enabled` 与 `reasoning_effort=low` 成功：单请求约 24.1 秒，输入 219、输出 644、合计 863 tokens。该探针使用无截图、无桌面动作的合成文本，不证明真实 GUI 任务质量；它证明 GLM-5.3-Flash 不能关闭思考，Preview 只能降到 low。
 
-## 来源与摘要
+## 2026-09-29 历史来源与摘要
 
-首轮部署内容来自工作树快照；发现 Relay 未接受新增 `assistantPreferences` 后，修复已提交为 `082dbf8a5e1b7e1c37d91860d7fff77ffcce73b4`，服务器从该提交的 `git archive` 构建并原子切换到当前 Preview release。它仍不是 Git tag 或正式 GitHub Release。
+首轮部署内容来自工作树快照；发现 Relay 未接受新增 `assistantPreferences` 后，修复已提交为 `082dbf8a5e1b7e1c37d91860d7fff77ffcce73b4`，服务器从该提交的 `git archive` 构建并原子切换到当时 Preview release。它仍不是 Git tag 或正式 GitHub Release。
 
 | 项目 | 标识 |
 | --- | --- |

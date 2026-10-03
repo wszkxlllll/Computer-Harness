@@ -2,7 +2,7 @@
 
 ## 1. 先看结论
 
-这是手机网页控制本机 Harness 的首版设施，不是另一套 Agent，也不是远程桌面视频软件。本机实现、自动化回归和部分真实任务链路已有证据；公网部署、真手机扫码、原生应用可靠输入及完整跨窗口任务尚未全部验收。
+这是手机网页控制本机 Harness 的首版设施，不是另一套 Agent，也不是远程桌面视频软件。本机实现、自动化回归及受控 SDK 窗口往返已有证据；新的跨窗口 Web/Host/Relay 版本尚未部署到公开页面，真实模型驱动的完整生活任务、真手机无障碍和全部原生应用输入仍未验收。
 
 - 实际测试、指标与失败复测：[技术报告](./mobile-control-technical-report-2026-09-26.md)。
 - 服务器安装、TLS、服务运维：[部署指南](../apps/relay/README.md)。
@@ -17,6 +17,7 @@
 | --- | --- | --- |
 | 连接手机 | 电脑生成短时配对二维码，电脑确认手机，后续可以撤销 | 本地 HTTP/WebSocket 联合测试；真实手机待部署后验收 |
 | 发任务 | 默认按 Goal 自动匹配已打开窗口；也可手动选窗、使用受管浏览器或显式选择整个桌面 | 新目标模式的实施/上线状态见[接入记录](./mobile-target-modes-2026-09-27.md)；不用输入 PID |
+| 跨应用完成任务 | 一个逐 Run 开关，四种起点均可使用；默认关闭 | 需要新版 Web、Host、Relay 同步部署；启用后授权本 Run 列窗/切窗，应用名和标题会发给模型 |
 | 看进度与结果 | 状态、截图、完整回复、长回复展开 | 浏览器窄屏测试、真实 Run 资产读取；不是实时视频流 |
 | 补充要求 | 对当前 Run 发送纠正 | 携程任务已验证一次纠正撤销旧调用并重新观察 |
 | 暂停、恢复、停止 | 使用现有 Runtime 控制合同，展示接收和生效状态 | 自动化覆盖；没有逐项实体手机实测证据 |
@@ -47,18 +48,27 @@
 
 ### 真手机使用
 
-目标模式：默认“自动选择”使用本地应用名/窗口标题匹配，唯一明确匹配才开始；没有明确结果时保留任务并展开手动选择。它不会自动打开未启动的原生应用，也不会静默切成全桌面控制。
+手机保留四种起点：自动选择（默认）、手动选择窗口、打开网站、整个桌面（高级）。自动选择仅在本机已打开的顶层窗口中有唯一可信匹配时自动开始；歧义时保留任务并提供选择。起点只决定首次 binding，不限制开启跨应用任务后的模型选窗范围；自动模式不会私自启动原生应用，也不会静默切入整个桌面。
 
-“受管浏览器”（页面显示“打开网站”）现在有两个会话选项：
+“打开网站”与跨应用 companion 共用同一 Host-managed browser。浏览器默认偏好在手机“设置 → 浏览器与登录状态”选择“本机已准备的登录状态（saved）”或“临时空白浏览器（temporary）”；当前 Web 任务页不再提供逐任务选择。为旧客户端兼容，RemoteRun 的 browser target 仍接受 `sessionMode: "saved" | "temporary"` 覆盖默认值；这个会话模式字段不接受 profile path/label/Cookie。temporary 使用一次性空白 profile；saved 只复用这台受控电脑上的 Harness profile。起始 URL 可以留空，模型可从空白页开始；具体导航仍受任务指令与安全策略约束。
 
-- “临时浏览”（默认）：使用一次性 profile，不读取电脑端保存的登录状态；网址留空时从临时空白页开始。
-- “使用已登录网站”：使用电脑端 Harness 专用 persistent profile。网址留空时恢复电脑端登记的网站；填写 HTTP(S) 网址时沿用该 profile 的登录状态。没有登记网站时安全回退到空白页。
+首次准备 saved profile：手机点击“准备登录状态”，电脑上会打开可见的 Harness-managed Edge。用户在电脑完成站点登录后回到手机点“我已在电脑完成登录”。重新认证使用“重新登录”，不会清除已有数据。状态 `ready` 表示用户确认且 Host 正常关闭准备窗口，不证明站点登录以后永远有效。网站可能要求重新登录。选 saved 但尚未准备好时，Host 会给出设置入口并拒绝 Run，不会静默改用 temporary；Host 正在使用或清理状态未知时也会 fail closed。没有“从手机输入完整登录密码”、多 profile、跨设备同步或清除 profile 功能。
 
-手机只发送会话模式和可选网址，不能传 profile 标签、路径、Cookie 或 CDP 地址。profile 标签只在 Host 本机配置，不代表共享账号；个人日常浏览器的登录不会自动复制进来，网站仍可能要求重新认证。
+手机与 Relay 不接收 profile 路径、标签、Cookie、CDP 地址、密码或 PID/HWND。Host 设置 API 只返回状态、saved/temporary 偏好、有限命令名，以及准备中的不透明 operationId；运行时也不把这些本机信息发送给 Provider。个人日常浏览器的登录不会自动复制进 Harness。
+
+应用可通过 Web `App` 的 `commonSiteChoices` 注入常用网站选项；默认目录为空且不内置站点。选择一项只会填入“起始网址”，用户仍可编辑并明确提交；不会改写 Goal 或浏览器默认 profile 偏好，也不会附加站点用途或当前页面信息。
 
 “整个桌面”是显式兼容模式：它能观察独立弹窗和跨窗口可见状态，但截图也可能包含其他可见应用内容。自动选择失败时不会静默切入整个桌面。
 
-四种目标模式需要新版 Web、Host 和 Relay 同步部署；单独刷新页面不能升级电脑服务。开始真实任务前以[实施记录](./mobile-target-modes-2026-09-27.md)的实际验证范围为准。
+四种起点和跨应用开关需要新版 Web、Host 和 Relay 同步部署；单独刷新页面不能升级电脑服务。新版目前仅在源码/本机预览中，尚未部署公开手机页面。开始真实任务前以[跨窗口实施记录](./cross-window-implementation-and-validation-2026-10-02.md)的实际验证范围为准。
+
+### 单次 Run 跨应用完成任务（默认关闭）
+
+“跨应用完成任务”是四种起点共用的唯一开关，默认关闭。开启后 Host 将请求映射为 `windowSwitch: "opened-windows-v1"`，模型可以调用 `list_windows` 查看本次授权目录，再从实际 ToolResult 中选 opaque ref 调用 `switch_window`。Host 不代模型预选终点，也不会自动按 Goal 给窗口授权。关闭开关或旧客户端省略 `switchWindows` 时，两个工具不进入该 Run 的 Registry/Context，原单窗口行为保持不变。
+
+窗口清单含受支持的已打开顶层窗口，可能包括非前台/最小化窗口；因此应用名和标题可能含文件名、客户名或其他个人信息，会发送给本 Run 的主 Provider。使用前可关闭不希望披露标题的窗口。Host 集成还可传 Host-only 精确 `windowSwitchAllowedTargets`：省略表示显式 opt-in 后全量枚举；非空列表仅含精确授权候选；空列表表示 deny-all。browser 起点或启用 `managedBrowserCompanion` 时，如果空列表与“必须列出自有 browser target”矛盾，Host 会在创建资源前拒绝；不会静默扩大范围。Host 只会在明确 managed-browser 路径追加本 Run 自有的确切 browser target，不会扩大其他窗口权限。切换过程中也不把 allowlist、PID/HWND、profile 路径或登录资料发给手机/模型。
+
+列出不等于可操作：切换前后 Runtime 重新核对身份、激活、几何和新观察。最小化/后台窗口须经切换时 fresh activation/capture 验证；成功切换立即丢弃旧截图、Grounding 和坐标，重新观察后模型才能继续。切窗本身由用户对该 Run 的 opt-in 覆盖，不逐窗口再弹审批；Guard 对真正高风险操作（例如删除、外发、付款、账户/隐私动作）的原策略仍生效。失败、拒绝或结果未知时，UI/报告不会继续把旧目标标成当前，也不会自动重放。离开 Harness 自有浏览器不会提前关闭 Host/profile；Run 结束才清理。个人浏览器不会因品牌/标题得到 DOM，只有精确 binding 到 Run-owned browser 才启用 DOM。
 
 先按部署指南配置服务器域名、HTTPS 和 Host 出站连接，再生成二维码。电脑确认手机后，手机输入 Goal、选择窗口并运行。手机中的 localhost 指向手机自己，不能直接连接电脑；本机预览二维码不是跨网可用的证明。
 
@@ -66,7 +76,7 @@
 
 ### 当前配置差异必须知道
 
-手机 Host 尚未复用 TUI 的完整功能选择页。目前 Host 的装配预设为 Planning 开启、Fact Memory、recent Context、same-control input Batch、Guard `layered`、Monitor `shadow`，并启用人工确认的窗口交接。原生窗口目标 Grounding 为 `off`；新增受管浏览器入口覆盖为 `hybrid-catalog-v1`，实际上线状态见接入记录。模型来自启动配置；这不是用户在 TUI 上次选择的配置。
+手机 Host 尚未复用 TUI 的完整功能选择页。目前 Host 的装配预设为 Planning 开启、Fact Memory、recent Context、same-control input Batch、Guard `layered`、Monitor `shadow`，并保留 legacy popup/foreground handoff 流程。切窗工具由显式逐 Run 开关控制。模型来自启动配置；这不是用户在 TUI 上次选择的配置。Web 通过 Host 的 sanitized profile status/preference API；CLI/TUI 使用本地配置，不调用手机 Host profile API。
 
 特别是 **Host 当前固定开启 Guard**，因此模型工具合同包含 `_harnessEffect`。它描述当前动作的预期效果，由 Guard 消费，不是发送给 CUA 的输入参数。离线 on/off/on 对照已证明当前活动 Schema 和 GLM 历史回填随开关变化且不污染 Registry；自定义提示词或历史诊断文字中的字符串仍可能保留，不能仅凭字段文字出现判断。
 

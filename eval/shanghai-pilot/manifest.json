@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "pilotId": "shanghai-pilot-20261001",
+  "localDate": "2026-10-01",
+  "timezone": "Asia/Shanghai",
+  "taskDocument": "docs/shanghai-government-travel-pilot-2026-10-01.md",
+  "budgetByDifficulty": {
+    "easy": { "maxSteps": 100, "maxModelRequests": 100 },
+    "medium": { "maxSteps": 100, "maxModelRequests": 100 },
+    "hard": { "maxSteps": 100, "maxModelRequests": 100 }
+  },
+  "tasks": {
+    "SG01": { "domain": "government", "startupUrl": "https://zwfw.sh.gov.cn/" },
+    "SG02": { "domain": "government", "startupUrl": "https://www.shanghai.gov.cn/affairs_affairs/c463d8aee2bb4d2abec1f1e29cb3111a.html" },
+    "SG03": { "domain": "government", "startupUrl": "https://www.shanghai.gov.cn/affairs_affairs/c463d8aee2bb4d2abec1f1e29cb3111a.html" },
+    "SG04": { "domain": "government", "startupUrl": "https://zwdt.sh.gov.cn/govPortals/bsfw/item/3895742f-5a6b-4d75-85ed-f8465f83b7cb" },
+    "SG05": { "domain": "government", "startupUrl": "https://www.shanghai.gov.cn" },
+    "ST01": { "domain": "travel", "startupUrl": "https://www.12306.cn/index/" },
+    "ST02": { "domain": "travel", "startupUrl": "https://ditu.amap.com/" },
+    "ST03": { "domain": "travel", "startupUrl": "https://trains.ctrip.com/" },
+    "ST04": { "domain": "travel", "startupUrl": "https://trains.ctrip.com/" },
+    "ST05": { "domain": "travel", "startupUrl": "https://trains.ctrip.com/" }
+  },
+  "runtimeProfile": {
+    "preset": "research",
+    "monitor": "shadow",
+    "riskGuard": "off",
+    "grounding": "hybrid-catalog-v1",
+    "managedBrowserMode": "persistent"
+  }
+}
