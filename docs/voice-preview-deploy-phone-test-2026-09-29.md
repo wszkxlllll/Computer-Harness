@@ -1,18 +1,29 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29
-状态：隔离 Preview 已于 2026-10-03 切换到 Runtime / Surface Registry 冻结版本并完成公网基础检查；手机重新配对及端到端实测仍待用户执行
+状态：隔离 Preview 与本机 Host 已于 2026-10-04 更新到窗口/中途播报修复版本，基础检查通过，可开始下一轮手机实机测试。
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
 
 ## 部署状态
 
-- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-03-runtime-surface-v2`；Preview 的 `current` 符号链接已切换到该 release。此前 `2026-10-02-cross-window-v1` 仍保留，可作为应用版本回滚点。
+- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-04-window-progress-v1`；Preview 的 `current` 符号链接已切换到该 release。此前 `2026-10-03-runtime-surface-v2` 和 `2026-10-02-cross-window-v1` 均保留，可作为回滚点。
 - `computer-harness-relay-preview` 服务处于 active，只监听 loopback `8788`。Nginx 在 `8443` 提供 TLS：`https://47.108.197.221:8443`，使用现有有效 IP 证书。用户已开放 `8443`。
 - 旧入口 `https://47.108.197.221` 及旧服务、旧 `current` 均未修改，仍健康。
 - stable release 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`；本次未切换或重启 stable。
 - 公网检查结果及边界见下方 2026-10-03 更新记录。它们不代表手机麦克风或完整语音任务已经验收。
 
-## 2026-10-03 Runtime / Surface Preview 更新记录
+## 2026-10-04 窗口与播报修复部署
+
+部署 commit：`5f0efe00b6d1ca3e66320283a745f15755858f07`，分支 `codex/runtime-surface-preview-20261003`；源码 tar.gz SHA-256：`0C7BD877FF33135B4239D6486AC6C33BF91492EA5B478B956EDFC81A26D73533`。服务器保存 `.release-source`，不含本机密钥、轨迹或截图。
+
+- Windows 根构建通过；全量 107 文件、1312 项通过，脚本 31 通过、1 项跳过。记事本菜单返回与 WPS 列窗/切换/Ctrl+A/Esc 实机成功，见[修复验收](./window-and-progress-repair-results-2026-10-04.md)。
+- 服务器 frozen lockfile 安装、Web/Relay 依赖构建和入口语法检查通过，Preview current 已原子切换。重启后第一次 health 发生启动竞态而连接失败；稍后公网复查 health `200`、新 asset `/assets/index-Br-MqOQ2.js` `200`、匿名 `/api/runs` `401`；stable health `200`。旧服务未切换。
+- 本机旧 Host 已停止，新 Host 使用本轮构建与原 `.env.voice-preview`、原 CUA socket，监听 4318；`/connect` 返回 `200`，至服务器 8443 的连接 established。没有重启 CUA 或清除浏览器登录 profile。
+- 新日志与任务目录：`runs/voice-preview-window-progress-20261004/`，任务在其 `sessions/` 下。手机必须重新配对，新页面应来自上述新 asset。任务中途语音仍可能被模型漏报，不能用基础 health 证明语音端到端通过。
+
+现在打开 `http://localhost:4318/connect`，手机重新扫码配对，使用 `https://47.108.197.221:8443`。首先复测 WPS 菜单/弹窗与携程→记事本任务，开启朗读关键通知；无需重新登录已保存的网站。
+
+## 2026-10-03 Runtime / Surface Preview 更新记录（历史）
 
 部署源码来自分支 `codex/runtime-surface-preview-20261003` 的 commit `600ccecc713737049267b350cfc983cb3942d80c`；源码归档 SHA-256 为 `09931D26140D9FB4CB80BBD361E07567CBF3225E94ECD7DE2E3A2B97D4884562`。服务器 release 内保存 `.release-source`，记录分支、commit 与归档哈希。
 
@@ -79,7 +90,7 @@
 | 本次 Preview 手机端 | `https://47.108.197.221:8443` | 新隔离部署 |
 | 旧公网服务 | `https://47.108.197.221` | 保持原状、健康 |
 
-本机 Host 日志：`runs/voice-preview-launch/host.stdout.log`、`runs/voice-preview-launch/host.stderr.log`。
+本机当前 Host 日志：`runs/voice-preview-window-progress-20261004/host.stdout.log`、`runs/voice-preview-window-progress-20261004/host.stderr.log`。
 
 ## TLS 尝试记录
 
