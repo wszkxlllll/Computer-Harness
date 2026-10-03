@@ -30,7 +30,7 @@ README 只有一个手机 Quick Start，公共 Relay 明确 `planned / 尚未开
 
 五个指定图示/Demo/评测占位各出现一次。六类生活场景与项目材料一致；Demo 与结果图明确待补，没有虚构成功率或把单次探针当成端到端成绩。
 
-2026-10-03 独立查看 GitHub：CUA [Issue #4477](https://github.com/trycua/cua/issues/4477) 为 Open。[PR #4500](https://github.com/trycua/cua/pull/4500) 为 Ready/Open/MERGEABLE；维护者已接手 foreground input drain 根因修复，保留我方 fixtures、app-owned oracle 和 tests，并明确等待 CI 与 native Windows 维护流程，尚未合并。[PR #3450](https://github.com/trycua/cua/pull/3450) 为 Open/MERGEABLE/BLOCKED/CHANGES_REQUESTED，验证说明仍保留 Windows native lane 42/43 和一项失败，尚未合并。项目材料所述 OpenClaw [PR #126399](https://github.com/openclaw/openclaw/pull/126399) 与 [PR #127177](https://github.com/openclaw/openclaw/pull/127177) 已合并，范围与其标题/描述一致。没有把未发布上游修复写成本项目已具有的能力。
+2026-10-03 独立查看 GitHub：CUA [Issue #4477](https://github.com/trycua/cua/issues/4477) 为 Open。[PR #4500](https://github.com/trycua/cua/pull/4500) 已合并；最终方案修复 foreground input drain，并保留我方 fixtures、app-owned oracle 和 tests。该合并进入上游代码库，不等同于已经发布到本项目当前锁定的 CUA 版本。[PR #3450](https://github.com/trycua/cua/pull/3450) 为 Open / Changes Requested；验证说明仍保留 Windows native lane 42/43 和一项失败。项目材料所述 OpenClaw [PR #126399](https://github.com/openclaw/openclaw/pull/126399) 与 [PR #127177](https://github.com/openclaw/openclaw/pull/127177) 已合并，范围与其标题/描述一致。
 
 原创代码授权记录限定于用户确认的核心贡献者与 Apache-2.0 选择；没有据此宣称第三方授权已清算、法律风险为零或 AI 生成物为团队独占。README 对新贡献的许可及当前不要求单独 CLA 的描述与 Apache 第 5 条不冲突。
 

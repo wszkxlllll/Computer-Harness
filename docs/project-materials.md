@@ -64,7 +64,7 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 
 ### 已有社区贡献
 
-2026-10-03核对：[CUA Issue #4477](https://github.com/trycua/cua/issues/4477)记录0.22.2 foreground多行输入损坏。[PR #4500](https://github.com/trycua/cua/pull/4500)当前为 Ready/Open/MERGEABLE；维护者已接手 foreground input drain 根因修复，保留我方 fixtures、app-owned oracle 和 tests，并在 CI 与 native Windows 维护流程结束后继续处理；它尚未合并。[PR #3450](https://github.com/trycua/cua/pull/3450)当前为 Open/MERGEABLE/BLOCKED/CHANGES_REQUESTED；其上游验证报告仍保留 Windows native lane 42/43 和一项失败，尚未合并。此前[OpenClaw PR #126399](https://github.com/openclaw/openclaw/pull/126399)和[#127177](https://github.com/openclaw/openclaw/pull/127177)已合并，分别涉及Run完成后的computer复用和Windows设备重复审批。这些上游修改不自动代表当前Harness或CUA release中的功能。
+2026-10-03核对：[CUA Issue #4477](https://github.com/trycua/cua/issues/4477)记录0.22.2 foreground多行输入损坏。[PR #4500](https://github.com/trycua/cua/pull/4500)已合并；最终方案修复 foreground input drain，并保留我方 fixtures、app-owned oracle 和 tests。该合并不自动表示修复已进入本项目锁定的 CUA release。[PR #3450](https://github.com/trycua/cua/pull/3450)当前为 Open / Changes Requested；其上游验证报告仍保留 Windows native lane 42/43 和一项失败。此前[OpenClaw PR #126399](https://github.com/openclaw/openclaw/pull/126399)和[#127177](https://github.com/openclaw/openclaw/pull/127177)已合并，分别涉及Run完成后的computer复用和Windows设备重复审批。这些上游修改不自动代表当前Harness或CUA release中的功能。
 
 这些可作为问题发现、修复与开放协作记录。它们与当前Harness源码分开说明，贡献人与成果范围由团队核对；不能把历史上游修复当成本项目当前功能。后续只更新真实链接和状态，保留原作者和第三方署名。
 
