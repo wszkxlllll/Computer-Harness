@@ -1,4 +1,4 @@
-import type { ActionGuardActionSummary, RiskCategory, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
+import type { ActionGuardActionSummary, RiskCategory, RuntimeEvent, SurfaceRef, ToolCallId } from "@computer-harness/protocol";
 import type { RemoteApprovalActionPreview, RemoteApprovalEvidence, RemoteApprovalPreview } from "./remote-control.js";
 
 const MAX_PREVIEW_ACTIONS = 16;
@@ -161,6 +161,8 @@ function projectApprovalEvidence(
     || evidenceEvent.sequence >= approvalSequence
     || decisionEvent.sequence >= evidenceEvent.sequence
     || evidenceObservation.computerSessionId !== decisionObservation.computerSessionId
+    || !sameSurfaceRef(evidence.surfaceRef, decisionObservation.surfaceRef)
+    || !sameSurfaceRef(evidenceObservation.surfaceRef, decisionObservation.surfaceRef)
     || evidenceObservation.screenshot.assetId !== evidence.assetId
     || evidenceObservation.capturedAt !== evidence.capturedAt
     || !sameViewport(evidenceObservation.viewport, evidence.viewport)) {
@@ -181,7 +183,13 @@ function projectApprovalEvidence(
     decisionObservationId: decisionObservationId as RemoteApprovalEvidence["decisionObservationId"],
     capturedAt,
     viewport: { ...evidenceObservation.viewport },
+    surfaceRef: evidence.surfaceRef,
   };
+}
+
+function sameSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
+  return left.surfaceId === right.surfaceId && left.generation === right.generation && left.kind === right.kind &&
+    left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
 }
 
 function sameViewport(

@@ -138,7 +138,7 @@ export interface DomGroundingTransport {
 }
 
 export interface MaterializedDomGrounding {
-  readonly catalog: GroundingCatalog;
+  readonly catalog: Omit<GroundingCatalog, "surfaceRef">;
   /** Adapter-private map used to validate delivery; refs are observation-bound. */
   readonly privateElements: ReadonlyMap<string, {
     readonly element: GroundingElement;

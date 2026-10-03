@@ -196,6 +196,61 @@ describe("local outbound relay transport", () => {
     host.send(bridgeResponse(snapshotRequest.requestId, { authenticated: true, csrfToken }));
     expect(await (await sessionSnapshotPromise).json()).toEqual({ authenticated: true, csrfToken });
 
+    const preferenceUrl = `${origin}/api/managed-browser-profile/preference`;
+    const preferenceBody = JSON.stringify({ defaultSession: "temporary" });
+    const beforePreferenceRequests = host.received.filter((message) => message.type === "bridge.request").length;
+    const missingCsrf = await fetch(preferenceUrl, {
+      method: "PUT",
+      headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json" },
+      body: preferenceBody,
+    });
+    expect(missingCsrf.status).toBe(403);
+    expect(await missingCsrf.json()).toEqual({ error: "csrf_check_failed" });
+
+    const wrongCsrf = await fetch(preferenceUrl, {
+      method: "PUT",
+      headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": "wrong-csrf-token-value" },
+      body: preferenceBody,
+    });
+    expect(wrongCsrf.status).toBe(403);
+    expect(await wrongCsrf.json()).toEqual({ error: "csrf_check_failed" });
+
+    const hostilePreferenceOrigin = await fetch(preferenceUrl, {
+      method: "PUT",
+      headers: { Origin: "https://attacker.example", Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
+      body: preferenceBody,
+    });
+    expect(hostilePreferenceOrigin.status).toBe(403);
+    expect(await hostilePreferenceOrigin.json()).toEqual({ error: "origin_check_failed" });
+    expect(host.received.filter((message) => message.type === "bridge.request")).toHaveLength(beforePreferenceRequests);
+
+    const preferencePromise = fetch(preferenceUrl, {
+      method: "PUT",
+      headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
+      body: preferenceBody,
+    });
+    const preferenceRequest = await host.next((message) => message.type === "bridge.request" && message.path === "/api/managed-browser-profile/preference");
+    expect(preferenceRequest).toMatchObject({
+      method: "PUT",
+      deviceId: "phone_one",
+      sessionToken: hostSessionToken,
+      csrfToken,
+      body: { defaultSession: "temporary" },
+    });
+    const safePreferenceView = {
+      status: "unprepared",
+      defaultSession: "temporary",
+      commands: {
+        prepare: "/api/managed-browser-profile/prepare",
+        complete: "/api/managed-browser-profile/complete",
+        relogin: "/api/managed-browser-profile/relogin",
+      },
+    };
+    host.send(bridgeResponse(preferenceRequest.requestId, safePreferenceView));
+    const preferenceResponse = await preferencePromise;
+    expect(preferenceResponse.status).toBe(200);
+    expect(await preferenceResponse.json()).toEqual(safePreferenceView);
+
     const runsPromise = fetch(`${origin}/api/runs?limit=10`, { headers: { Cookie: relayCookie } });
     const runsRequest = await host.next((message) => message.type === "bridge.request" && message.path === "/api/runs?limit=10");
     host.send(bridgeResponse(runsRequest.requestId, { runs: [] }));

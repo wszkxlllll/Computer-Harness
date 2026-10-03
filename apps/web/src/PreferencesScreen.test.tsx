@@ -5,6 +5,53 @@ import { PreferencesScreen } from "./PreferencesScreen";
 import { PreferencesProvider } from "./PreferencesContext";
 import { PREFERENCES_STORAGE_KEY, DEFAULT_PREFERENCES, type UserPreferences } from "./preferences";
 import type { VoiceCapabilities } from "./voice-capabilities";
+import {
+  completeManagedBrowserLogin,
+  getManagedBrowserProfileSettings,
+  prepareManagedBrowserLogin,
+  reloginManagedBrowser,
+  setManagedBrowserDefaultSession,
+} from "./api";
+import { ApiError, type ManagedBrowserProfileSettings } from "./types";
+
+vi.mock("./api", async (importOriginal) => {
+  const api = await importOriginal<typeof import("./api")>();
+  return {
+    ...api,
+    completeManagedBrowserLogin: vi.fn(),
+    getManagedBrowserProfileSettings: vi.fn(),
+    prepareManagedBrowserLogin: vi.fn(),
+    reloginManagedBrowser: vi.fn(),
+    setManagedBrowserDefaultSession: vi.fn(),
+  };
+});
+
+const readyBrowserProfile: ManagedBrowserProfileSettings = {
+  status: "ready",
+  defaultSession: "saved",
+  commands: { prepare: "prepare", complete: "complete", relogin: "relogin" },
+};
+
+const preparingBrowserProfile: ManagedBrowserProfileSettings = {
+  ...readyBrowserProfile,
+  status: "preparing",
+  operationId: "11111111-1111-4111-8111-111111111111",
+};
+
+const cleanupFailedBrowserProfile: ManagedBrowserProfileSettings = {
+  ...readyBrowserProfile,
+  status: "cleanup_failed",
+};
+
+const reloginRequiredBrowserProfile: ManagedBrowserProfileSettings = {
+  ...readyBrowserProfile,
+  status: "relogin_required",
+};
+
+const unpreparedBrowserProfile: ManagedBrowserProfileSettings = {
+  ...readyBrowserProfile,
+  status: "unprepared",
+};
 
 function renderPreferences() {
   return render(<PreferencesProvider><PreferencesScreen /></PreferencesProvider>);
@@ -20,7 +67,15 @@ afterEach(() => {
 });
 
 describe("personal preferences screen", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    vi.mocked(getManagedBrowserProfileSettings).mockResolvedValue(readyBrowserProfile);
+    vi.mocked(setManagedBrowserDefaultSession).mockImplementation(async (defaultSession) => ({ ...readyBrowserProfile, defaultSession }));
+    vi.mocked(prepareManagedBrowserLogin).mockResolvedValue(preparingBrowserProfile);
+    vi.mocked(completeManagedBrowserLogin).mockResolvedValue(readyBrowserProfile);
+    vi.mocked(reloginManagedBrowser).mockResolvedValue(preparingBrowserProfile);
+  });
 
   it("keeps assistant preferences separate from display preferences and stores them locally", async () => {
     renderPreferences();
@@ -120,6 +175,91 @@ describe("personal preferences screen", () => {
     expect(noticeSwitch.checked).toBe(false);
     expect(noticeSwitch.disabled).toBe(true);
     expect(screen.queryByRole("button", { name: /语音输入测试/ })).toBeNull();
+  });
+
+  it("loads managed-browser state and labels the local status and default-session choices", async () => {
+    renderPreferences();
+
+    expect(await screen.findByText("已准备（本机）")).toBeDefined();
+    expect(screen.getByRole("group", { name: "新任务默认浏览器" })).toBeDefined();
+    expect(screen.getByRole("radio", { name: /本机已准备的登录状态/ })).toBeDefined();
+    expect(screen.getByRole("radio", { name: /临时空白浏览器/ })).toBeDefined();
+    expect((screen.getByRole("radio", { name: /本机已准备的登录状态/ }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/登录状态仅保存在这台电脑/)).toBeDefined();
+    const browserSection = screen.getByRole("region", { name: "浏览器与登录状态" });
+    expect(within(browserSection).queryByRole("button", { name: /清除登录状态/ })).toBeNull();
+    expect(getManagedBrowserProfileSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves the default and runs prepare, complete, and relogin through the profile API", async () => {
+    renderPreferences();
+
+    fireEvent.click(await screen.findByRole("radio", { name: /临时空白浏览器/ }));
+    await waitFor(() => expect(setManagedBrowserDefaultSession).toHaveBeenCalledWith("temporary"));
+    expect(await screen.findByText("之后的新任务将使用空白临时浏览器。")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "准备登录状态" }));
+    expect(await screen.findByRole("button", { name: "我已在电脑完成登录" })).toBeDefined();
+    expect(prepareManagedBrowserLogin).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("电脑端浏览器仍在准备。请完成登录后回到这里确认。")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "我已在电脑完成登录" }));
+    await waitFor(() => expect(completeManagedBrowserLogin).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111"));
+    expect(await screen.findByText("浏览器登录状态已保存在本机。网站可能会在以后要求重新登录。")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新登录" }));
+    await waitFor(() => expect(reloginManagedBrowser).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("电脑端浏览器仍在准备。请完成登录后回到这里确认。")).toBeDefined();
+  });
+
+  it("reports a failed cleanup returned by completion without success copy", async () => {
+    vi.mocked(getManagedBrowserProfileSettings).mockResolvedValue(preparingBrowserProfile);
+    vi.mocked(completeManagedBrowserLogin).mockResolvedValue(cleanupFailedBrowserProfile);
+    renderPreferences();
+
+    fireEvent.click(await screen.findByRole("button", { name: "我已在电脑完成登录" }));
+    expect(await screen.findByText(/电脑未能确认受管浏览器已关闭/)).toBeDefined();
+    expect(screen.queryByText(/已完成|已保存在本机/)).toBeNull();
+    expect(screen.getByText("清理状态未确认")).toBeDefined();
+  });
+
+  it("uses returned status messages for prepare and relogin instead of unconditional success", async () => {
+    vi.mocked(prepareManagedBrowserLogin).mockResolvedValueOnce(cleanupFailedBrowserProfile);
+    renderPreferences();
+
+    fireEvent.click(await screen.findByRole("button", { name: "准备登录状态" }));
+    expect(await screen.findByText(/电脑未能确认受管浏览器已关闭/)).toBeDefined();
+    expect(screen.queryByText(/正在准备|登录状态已准备好|已保存在本机/)).toBeNull();
+
+    cleanup();
+    vi.clearAllMocks();
+    vi.mocked(getManagedBrowserProfileSettings).mockResolvedValue(reloginRequiredBrowserProfile);
+    vi.mocked(reloginManagedBrowser).mockResolvedValueOnce(unpreparedBrowserProfile);
+    renderPreferences();
+
+    fireEvent.click(await screen.findByRole("button", { name: "重新登录" }));
+    expect(await screen.findByText("本机登录状态尚未准备。请在电脑端准备并登录受管浏览器。")).toBeDefined();
+    expect(screen.queryByText(/登录状态已准备好|已保存在本机/)).toBeNull();
+  });
+
+  it("shows profile-operation errors without hiding them", async () => {
+    vi.mocked(prepareManagedBrowserLogin).mockRejectedValueOnce(new ApiError("电脑控制服务暂时无法连接。", 0, "HOST_UNREACHABLE"));
+    renderPreferences();
+
+    fireEvent.click(await screen.findByRole("button", { name: "准备登录状态" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("电脑控制服务暂时无法连接。");
+  });
+
+  it("refreshes the displayed state after a stale profile operation", async () => {
+    vi.mocked(prepareManagedBrowserLogin).mockRejectedValueOnce(new ApiError("状态已变化，请先刷新后再操作。", 409, "PROFILE_OPERATION_STALE"));
+    vi.mocked(getManagedBrowserProfileSettings)
+      .mockResolvedValueOnce(readyBrowserProfile)
+      .mockResolvedValueOnce({ ...readyBrowserProfile, status: "relogin_required" });
+    renderPreferences();
+
+    fireEvent.click(await screen.findByRole("button", { name: "准备登录状态" }));
+    await waitFor(() => expect(getManagedBrowserProfileSettings).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("需要重新登录")).toBeDefined();
   });
 
   it("labels, counts, stores, and lets the user clear additional guidance", async () => {

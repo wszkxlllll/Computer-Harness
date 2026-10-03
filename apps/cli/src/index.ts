@@ -1,7 +1,8 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { pathToFileURL } from "node:url";
+import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
@@ -21,7 +22,7 @@ type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
 type Qwen38ThinkingMode = "disabled" | "low" | "medium" | "xhigh";
 type Qwen38OutputMode = "native_tools" | "strict_json";
 
-interface CliOptions {
+export interface CliOptions {
   doctor: boolean;
   prepareManagedBrowserProfile: boolean;
   goal?: string;
@@ -56,6 +57,7 @@ interface CliOptions {
   cleanupDeadlineMs: number;
   doctorTimeoutMs: number;
   monitor: MonitorPolicyMode;
+  windowSwitch: boolean;
   grounding: TuiFeatureSelection["grounding"];
   windowSelection: "local" | "jev";
   /** Explicit URL for the host-owned temporary browser; never a profile/debug endpoint. */
@@ -65,7 +67,7 @@ interface CliOptions {
   managedBrowserProfileRoot?: string;
 }
 
-function parseArgs(rawArgv: readonly string[]): CliOptions {
+export function parseArgs(rawArgv: readonly string[]): CliOptions {
   // pnpm's `start -- ...` forwards the separator as a literal argv entry;
   // treat it as transport syntax, not as a CLI option.
   const argv = validateCliArguments(rawArgv);
@@ -77,6 +79,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   const prepareManagedBrowserProfileValue = argv.includes("--prepare-managed-browser-profile");
   const goal = value("--goal");
   const tui = argv.includes("--tui");
+  const windowSwitch = argv.includes("--window-switch");
   const modelValue = value("--model");
   const model = resolveCliModel(modelValue, doctor || prepareManagedBrowserProfileValue) as ModelName;
   const monitorValue = value("--monitor") ?? "off";
@@ -87,6 +90,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     throw new Error("--grounding must be off, auto, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
   }
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
+  if (windowSwitch && (doctor || prepareManagedBrowserProfileValue)) throw new Error("--window-switch is available only for a Run or TUI session");
   const windowSelectionValue = value("--window-selection") ?? "local";
   if (windowSelectionValue !== "local" && windowSelectionValue !== "jev") throw new Error("--window-selection must be local or jev");
   if (windowSelectionValue === "jev" && (!tui || computer !== "cua" || !argv.includes("--allow-window-title-sharing"))) {
@@ -123,6 +127,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
   if (managedGrounding && cuaWindowTarget !== undefined) {
     throw new Error(`--grounding ${groundingValue} owns its temporary managed-browser window; omit --cua-window-pid/--cua-window-id`);
   }
+  if (windowSwitch && computer !== "cua") throw new Error("--window-switch requires --computer cua");
   const managedBrowserProfileModeValue = value("--managed-browser-profile-mode") ?? "ephemeral";
   if (managedBrowserProfileModeValue !== "ephemeral" && managedBrowserProfileModeValue !== "persistent") {
     throw new Error("--managed-browser-profile-mode must be ephemeral or persistent");
@@ -242,6 +247,7 @@ function parseArgs(rawArgv: readonly string[]): CliOptions {
     cleanupDeadlineMs,
     doctorTimeoutMs,
     monitor: monitorValue,
+    windowSwitch,
     grounding: groundingValue as CliOptions["grounding"],
     windowSelection: windowSelectionValue,
     ...(managedBrowserUrl === undefined ? {} : { managedBrowserUrl }),
@@ -273,7 +279,8 @@ async function main(): Promise<void> {
     validateCliArguments(process.argv.slice(2));
     process.stdout.write("TUI-only: --grounding auto selects UIA for native windows, DOM + UIA for a selected Harness-managed browser, and off for desktop.\n");
     process.stdout.write("TUI-only: --window-selection jev requires --allow-window-title-sharing and TYPESAFE_API_KEY; default is local.\n");
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
+    process.stdout.write("Run option: --window-switch opts into switching among listed opened windows in a CUA session, including the primary desktop. In TUI, choose features with F; app names and titles go to the main Provider.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
     return;
   }
@@ -297,6 +304,7 @@ async function main(): Promise<void> {
         signal: abort.signal,
       }, {
         onReady: (ready) => process.stdout.write(`Managed browser ready: profile-label=${ready.profileLabel} url-host=${ready.urlHost}. Complete manual login in the visible managed window; press Enter to close it and retain the profile.\n`),
+        onStartupDiagnostic: (diagnostic) => process.stderr.write(`${formatManagedBrowserStartupDiagnostic(diagnostic)}\n`),
       });
       const outcome = result.outcome === "enter" ? "finished" : "interrupted";
       const retention = result.profileRetention === "confirmed"
@@ -347,6 +355,7 @@ async function main(): Promise<void> {
         riskGuard: options.risk.riskGuard,
         monitor: options.monitor,
         grounding: options.grounding,
+        windowSwitch: options.windowSwitch,
       } satisfies TuiFeatureSelection,
       embeddingReady: options.memoryEmbeddingEndpoint !== undefined && (process.env.MEMORY_EMBEDDING_API_KEY?.trim().length ?? 0) > 0,
     }, {
@@ -444,8 +453,13 @@ async function runEnvironmentLeaseRecovery(rawArgs: readonly string[]): Promise<
   process.stdout.write(`Lease quarantine created for Run ${result.runId}; prior lease preserved at ${result.quarantinePath}. Audit record: ${result.auditPath}. The prior Run outcome is unchanged and is not reported as successful.\n`);
 }
 
-function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConfig {
+export function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConfig {
   const qwenEndpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
+  const managedBrowserInitialTarget = options.grounding === "dom-catalog-v1" || options.grounding === "hybrid-catalog-v1";
+  const managedBrowserCompanion = options.windowSwitch
+    && !options.tui
+    && !managedBrowserInitialTarget
+    && options.managedBrowserUrl !== undefined;
   return {
     goal,
     model: options.model,
@@ -460,6 +474,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
           managedBrowserProfileMode: options.managedBrowserProfileMode,
           ...(options.managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel: options.managedBrowserProfileLabel }),
           ...(options.managedBrowserProfileRoot === undefined ? {} : { managedBrowserProfileRoot: options.managedBrowserProfileRoot }),
+          ...(managedBrowserCompanion ? { managedBrowserCompanion: true } : {}),
         }
       : {
           kind: "osworld",
@@ -483,6 +498,7 @@ function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConf
     riskTimeoutMs: options.riskTimeoutMs,
     cleanupDeadlineMs: options.cleanupDeadlineMs,
     monitor: options.monitor,
+    windowSwitch: options.windowSwitch ? "opened-windows-v1" : "off",
     grounding: options.grounding === "auto" ? "off" : options.grounding,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
@@ -596,7 +612,9 @@ async function runWithCliControls(controller: RunController, goal: string, inter
   }
 }
 
-main().catch((error: unknown) => {
-  process.stderr.write(`${sanitizeTerminalText(error instanceof Error ? error.stack ?? error.message : String(error))}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error: unknown) => {
+    process.stderr.write(`${sanitizeTerminalText(error instanceof Error ? error.stack ?? error.message : String(error))}\n`);
+    process.exitCode = 1;
+  });
+}

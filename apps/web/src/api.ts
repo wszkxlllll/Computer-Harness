@@ -3,6 +3,8 @@ import {
   type CommandReceipt,
   type DeviceList,
   type LocalPairingState,
+  type ManagedBrowserDefaultSession,
+  type ManagedBrowserProfileSettings,
   type PairRequestReceipt,
   type PairRequestStatus,
   type PairSession,
@@ -131,6 +133,9 @@ function errorMessageForCode(code?: string): string | undefined {
     INVALID_TARGET: "目标信息无效。请检查窗口选择或 http://、https:// 地址后重试。",
     MANAGED_BROWSER_UNAVAILABLE: "电脑上的受管理浏览器当前不可用。请在电脑端检查 Harness 状态后重试。",
     MANAGED_BROWSER_PROFILE_UNAVAILABLE: "受管浏览器配置当前被占用，或上次异常退出留下了运行标记。任务尚未启动。请停止使用它的浏览器和 Harness Host，再在电脑运行 scripts/mobile.ps1 recover-browser-profile。该命令只归档运行标记，不会删除登录数据。",
+    MANAGED_BROWSER_SETUP_REQUIRED: "受管浏览器的本机登录状态尚未准备好。请先在设置中准备浏览器，再开始此任务。",
+    PROFILE_OPERATION_STALE: "浏览器准备状态已变化。请刷新设置页面后重试。",
+    PROFILE_STATE_UNAVAILABLE: "电脑无法确认受管浏览器的状态。请查看电脑端 Harness 状态后重试。",
     VOICE_UNAVAILABLE: "电脑端尚未配置语音识别，仍可直接输入文字。",
     VOICE_PROVIDER_UNAVAILABLE: "语音识别暂时中断。请重试，或改用文字输入。",
     VOICE_FINISH_TIMEOUT: "语音识别没有及时完成。请重试，或检查转写内容后再提交。",
@@ -145,6 +150,65 @@ function errorMessageForCode(code?: string): string | undefined {
 
 export function listWindowTargets(): Promise<WindowTargetList> {
   return request("/api/windows");
+}
+
+export async function getManagedBrowserProfileSettings(): Promise<ManagedBrowserProfileSettings> {
+  return validateManagedBrowserProfileSettings(await request<unknown>("/api/managed-browser-profile"));
+}
+
+export async function setManagedBrowserDefaultSession(defaultSession: ManagedBrowserDefaultSession): Promise<ManagedBrowserProfileSettings> {
+  return validateManagedBrowserProfileSettings(await request<unknown>("/api/managed-browser-profile/preference", {
+    method: "PUT",
+    body: JSON.stringify({ defaultSession }),
+  }, "phone"));
+}
+
+export async function prepareManagedBrowserLogin(): Promise<ManagedBrowserProfileSettings> {
+  return validateManagedBrowserProfileSettings(await request<unknown>("/api/managed-browser-profile/prepare", {
+    method: "POST",
+    body: JSON.stringify({}),
+  }, "phone"));
+}
+
+export async function completeManagedBrowserLogin(operationId: string): Promise<ManagedBrowserProfileSettings> {
+  return validateManagedBrowserProfileSettings(await request<unknown>("/api/managed-browser-profile/complete", {
+    method: "POST",
+    body: JSON.stringify({ operationId }),
+  }, "phone"));
+}
+
+export async function reloginManagedBrowser(): Promise<ManagedBrowserProfileSettings> {
+  return validateManagedBrowserProfileSettings(await request<unknown>("/api/managed-browser-profile/relogin", {
+    method: "POST",
+    body: JSON.stringify({}),
+  }, "phone"));
+}
+
+function validateManagedBrowserProfileSettings(value: unknown): ManagedBrowserProfileSettings {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("电脑返回的浏览器状态格式无效。");
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  const defaultSession = record.defaultSession;
+  const commands = record.commands;
+  if (status !== "unprepared" && status !== "preparing" && status !== "ready" && status !== "in_use" && status !== "relogin_required" && status !== "cleanup_failed") {
+    throw new Error("电脑返回的浏览器状态格式无效。");
+  }
+  if (defaultSession !== "saved" && defaultSession !== "temporary") throw new Error("电脑返回的浏览器默认状态无效。");
+  if (typeof commands !== "object" || commands === null || Array.isArray(commands)) throw new Error("电脑返回的浏览器操作格式无效。");
+  const commandRecord = commands as Record<string, unknown>;
+  if (typeof commandRecord.prepare !== "string" || typeof commandRecord.complete !== "string" || typeof commandRecord.relogin !== "string") {
+    throw new Error("电脑返回的浏览器操作格式无效。");
+  }
+  if (record.operationId !== undefined && (typeof record.operationId !== "string" || !/^[0-9a-f-]{36}$/iu.test(record.operationId))) {
+    throw new Error("电脑返回的浏览器操作标识无效。");
+  }
+  if (status === "preparing" && typeof record.operationId !== "string") throw new Error("电脑返回的浏览器准备状态缺少操作标识。");
+  return {
+    status,
+    defaultSession,
+    commands: { prepare: commandRecord.prepare, complete: commandRecord.complete, relogin: commandRecord.relogin },
+    ...(typeof record.operationId === "string" ? { operationId: record.operationId } : {}),
+  };
 }
 
 export function createRun(

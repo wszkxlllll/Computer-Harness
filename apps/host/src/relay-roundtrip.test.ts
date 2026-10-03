@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { Computer, ComputerSession, ProviderAdapter } from "@computer-harness/runtime";
-import type { ComputerSessionId, RunAssistantPreferencesSnapshot, Viewport } from "@computer-harness/protocol";
+import type { ComputerSessionId, RunAssistantPreferencesSnapshot, SurfaceId, Viewport } from "@computer-harness/protocol";
 import {
   ApplicationRemoteRunApi,
   ApplicationSession,
@@ -21,6 +21,7 @@ import * as webApi from "../../web/src/api.js";
 import { createHostServer } from "./server.js";
 
 const viewport: Viewport = { width: 16, height: 12, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "relay-roundtrip-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
 
 function sessionConfig(outputDir: string): ApplicationSessionConfig {
@@ -61,6 +62,7 @@ function fixtureComputer(): Computer {
       return {
         capturedAt: new Date().toISOString(),
         viewport,
+        surfaceRef,
         screenshot: { mediaType: "image/png" as const, data: new Uint8Array([0x52, 0x54, observations]) },
       };
     },

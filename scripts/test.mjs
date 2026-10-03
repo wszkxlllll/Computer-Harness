@@ -22,6 +22,7 @@ function run(command, args) {
 run(pnpm, vitestArgs);
 run(process.execPath, [
   "--test",
+  "scripts/cua-window-handoff-probe.test.mjs",
   "scripts/execution-segment-api-conformance-metrics.test.mjs",
   "scripts/travel/metrics.test.mjs",
   "scripts/travel/travel.test.mjs",

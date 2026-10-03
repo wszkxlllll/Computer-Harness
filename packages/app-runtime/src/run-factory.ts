@@ -10,6 +10,7 @@ import {
   DefaultRuntimePolicy,
   RunController,
   createDefaultToolRegistry,
+  windowSwitchTools,
   type ActionPolicy,
   type CleanupDiagnostic,
   type CleanupOperation,
@@ -32,15 +33,33 @@ import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunDe
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
   const runId = input.runId ?? generatedRunId();
-  const grounding = input.grounding ?? "off";
+  const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
+  const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
+  if (companionRequested && input.windowSwitch !== "opened-windows-v1") {
+    throw new Error("managed browser companion requires the opened-windows-v1 Run opt-in");
+  }
+  if (companionRequested && browserInitialGrounding) {
+    throw new Error("managed browser companion cannot also be the initial browser target");
+  }
+  const prepareManagedBrowserCompanion = companionRequested && input.windowSwitch === "opened-windows-v1";
+  const grounding = prepareManagedBrowserCompanion ? "hybrid-catalog-v1" : input.grounding ?? "off";
+  const inputComputer = prepareManagedBrowserCompanion && input.computer.kind === "cua"
+    ? {
+      ...input.computer,
+      managedBrowserCompanion: true,
+      managedBrowserUrl: input.computer.managedBrowserUrl ?? "about:blank",
+    }
+    : input.computer;
   const baseConfig: ResolvedRunConfig = {
     ...input,
     runId,
     grounding,
+    windowSwitch: input.windowSwitch ?? "off",
+    windowHandoff: input.windowHandoff ?? (input.windowSwitch === "opened-windows-v1" ? "confirm-v1" : "off"),
     outputDir: resolve(input.outputDir),
   };
   validateExternalSelections(baseConfig, dependencies);
-  const computerAssembly = prepareComputerRunAssembly(input.computer, grounding);
+  const computerAssembly = prepareComputerRunAssembly(inputComputer, grounding, baseConfig.windowSwitch);
   const config: ResolvedRunConfig = {
     ...baseConfig,
     computer: computerAssembly.config,
@@ -79,6 +98,19 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       readCommitted: (afterSequence, upToSequence) => (controller?.getEventsAfter(afterSequence) ?? [])
         .filter((event) => event.sequence <= upToSequence),
     });
+    const providerFactory = dependencies.createProvider ?? createProvider;
+    const provider = await providerFactory({
+      model: config.model,
+      config: factoryConfig,
+      assetReader,
+      outputDir: config.outputDir,
+      credentials,
+    });
+    ownedProviders.push(provider);
+    if (typeof config.model !== "string" && provider.id !== config.model.id) {
+      throw new Error(`injected Provider id '${provider.id}' does not match configured external Provider '${config.model.id}'`);
+    }
+
     const tools = dependencies.createToolRegistry?.() ?? createDefaultToolRegistry();
     tools.registerMany(computerAssembly.groundingTools);
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
@@ -124,18 +156,21 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       };
     }
 
-    const providerFactory = dependencies.createProvider ?? createProvider;
-    const provider = await providerFactory({
-      model: config.model,
-      config: factoryConfig,
-      assetReader,
-      outputDir: config.outputDir,
-      credentials,
-    });
-    ownedProviders.push(provider);
-    if (typeof config.model !== "string" && provider.id !== config.model.id) {
-      throw new Error(`injected Provider id '${provider.id}' does not match configured external Provider '${config.model.id}'`);
+    const createdComputer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {
+      ...dependencies.computerFactoryDependencies,
+      ...(credentials.osworldBridgeToken === undefined ? {} : { osworldBridgeToken: credentials.osworldBridgeToken }),
+    })))(
+      {
+        config: computerAssembly.config,
+        credentials,
+      },
+    );
+    computer = createdComputer;
+    if (config.windowSwitch === "opened-windows-v1" && createdComputer.listWindows === undefined) {
+      throw new Error("windowSwitch opened-windows-v1 requires a Computer with listWindows support");
     }
+    if (config.windowSwitch === "opened-windows-v1") tools.registerMany(windowSwitchTools());
+
     if (config.riskGuard === "layered" && config.riskModel !== "off" && config.riskModel !== "same") {
       await mkdir(resolve(config.outputDir, "risk-review"), { recursive: true });
     }
@@ -164,16 +199,6 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
     });
     const contextCompiler = projectModuleContext(baseContextCompiler, runId, planningModule, memoryModule);
-    const createdComputer = await (dependencies.createComputer ?? ((options) => createComputer(options.config, {
-      ...dependencies.computerFactoryDependencies,
-      ...(credentials.osworldBridgeToken === undefined ? {} : { osworldBridgeToken: credentials.osworldBridgeToken }),
-    })))(
-      {
-        config: computerAssembly.config,
-        credentials,
-      },
-    );
-    computer = createdComputer;
     const enabledToolNames = computerAssembly.enabledToolNames(tools);
     controller = new RunController({
       runId,
@@ -189,6 +214,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       onEventCommitted: eventFeed.publish,
       batching: config.batching,
       windowHandoff: config.windowHandoff ?? "off",
+      windowSwitch: config.windowSwitch ?? "off",
       ...(config.assistantPreferences === undefined ? {} : { assistantPreferences: config.assistantPreferences }),
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
@@ -538,7 +564,17 @@ function featureConfig(config: ResolvedRunConfig): RunFeatureConfig {
 
 function withoutAssistantPreferences(config: ResolvedRunConfig): ResolvedRunConfig {
   const { assistantPreferences: _privateContextInput, ...factoryConfig } = config;
-  return factoryConfig;
+  if (factoryConfig.computer.kind !== "cua") return factoryConfig;
+  const {
+    windowSwitchAllowedTargets: _hostOnlyTargetScope,
+    managedBrowserCompanion: _runOnlyBrowserCompanion,
+    managedBrowserProfileRoot: _hostOnlyProfileRoot,
+    managedBrowserProfileLabel: _hostOnlyProfileLabel,
+    ...computer
+  } = factoryConfig.computer;
+  if (_hostOnlyTargetScope === undefined && _runOnlyBrowserCompanion === undefined && _hostOnlyProfileRoot === undefined &&
+      _hostOnlyProfileLabel === undefined) return factoryConfig;
+  return { ...factoryConfig, computer };
 }
 
 function generatedRunId(): RunId {

@@ -136,7 +136,7 @@ describe("managed DOM grounding transport gate", () => {
   });
 
   it("does not silently attach a personal browser when DOM mode is enabled", () => {
-    expect(() => new CuaDriverComputer({ socketPath: "fixture.sock", screenshotDir: "runs/dom-gate", grounding: "dom-catalog-v1" })).toThrow(/explicit CUA window target/iu);
+    expect(() => new CuaDriverComputer({ socketPath: "fixture.sock", screenshotDir: "runs/dom-gate", grounding: "dom-catalog-v1" })).toThrow(/explicit managed Chromium\/Edge target/iu);
     expect(() => new CuaDriverComputer({
       socketPath: "fixture.sock",
       screenshotDir: "runs/dom-gate",

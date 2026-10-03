@@ -198,10 +198,13 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
             <button className="text-button refresh-run" type="button" onClick={() => void refreshManually()}>刷新任务状态</button>
           </div>
           <h1 ref={runHeadingRef} id="run-goal" tabIndex={-1}>{snapshot.goal}</h1>
-          {(snapshot.target?.appName || snapshot.target?.title) && (
+          {(snapshot.target?.appName || snapshot.target?.title || snapshot.target?.provenance === "unknown_after_switch" || snapshot.target?.provenance === "selected_target") && (
             <p className="run-target-label">
-              <span>运行窗口</span>
-              <strong>{[snapshot.target?.appName, snapshot.target?.title].filter((value) => value?.trim()).join(" · ")}</strong>
+              <span>{snapshot.target?.provenance === "starting_target" ? "起始目标" : snapshot.target?.provenance === "selected_target" ? "最近确认目标" : snapshot.target?.provenance === "unknown_after_switch" ? "当前目标" : "运行目标"}</span>
+              <strong>{snapshot.target?.provenance === "unknown_after_switch"
+                ? "目标无法确认；请查看运行结果。"
+                : [snapshot.target?.appName, snapshot.target?.title].filter((value) => value?.trim()).join(" · ") || "已确认窗口，名称不可用。"}</strong>
+              {snapshot.target?.provenance === "selected_target" && <small>窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。</small>}
             </p>
           )}
           {snapshot.error && <p className="notice notice-error" role="alert">{snapshot.error}</p>}

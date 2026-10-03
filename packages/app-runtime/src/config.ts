@@ -75,6 +75,8 @@ export interface ResolvedRunConfig {
   grounding?: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
   /** Interactive native-window handoff; off unless a host explicitly opts in. */
   windowHandoff?: "off" | "confirm-v1";
+  /** Model-selected switching among already-open windows; off by default. */
+  windowSwitch?: "off" | "opened-windows-v1";
   riskModel: AppRuntimeRiskModel;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;

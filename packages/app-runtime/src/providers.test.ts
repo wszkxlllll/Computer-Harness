@@ -152,6 +152,11 @@ describe("app-runtime provider factory", () => {
     const qwenRequest = JSON.stringify(qwenBody ?? {});
     expect(glmRequest).toContain(guidance);
     expect(qwenRequest).toContain(guidance);
+    const sharedInstruction = "Preserve the Goal's scope and every stated condition";
+    const glmSystem = (glmBody?.messages as Array<Record<string, unknown>> | undefined)?.find((message) => message.role === "system");
+    const qwenSystem = (qwenBody?.messages as Array<Record<string, unknown>> | undefined)?.find((message) => message.role === "system");
+    expect(glmSystem?.content).toContain(sharedInstruction);
+    expect(qwenSystem?.content).toContain(sharedInstruction);
     expect(glmRequest.split(guidance)).toHaveLength(2);
     expect(qwenRequest.split(guidance)).toHaveLength(2);
     expect(glmRequest).not.toContain("assistantPreferences");

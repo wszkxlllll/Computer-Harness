@@ -29,6 +29,13 @@ test("manifest expands to stable T01..T20 without answer constants", async () =>
   assert.ok(loaded.contentSha256.length === 64);
 });
 
+test("Shanghai pilot defaults provide 100 Runtime requests and GUI actions at every difficulty", async () => {
+  const pilotManifest = JSON.parse(await readFile(new URL("../../eval/shanghai-pilot/manifest.json", import.meta.url), "utf8"));
+  for (const difficulty of ["easy", "medium", "hard"]) {
+    assert.deepEqual(pilotManifest.budgetByDifficulty[difficulty], { maxSteps: 100, maxModelRequests: 100 });
+  }
+});
+
 test("anchor date is strict and uses UTC calendar arithmetic", () => {
   assert.equal(parseAnchorDate("2026-09-20"), "2026-09-20");
   assert.throws(() => parseAnchorDate("2026-02-29"), /valid Shanghai calendar date/u);

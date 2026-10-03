@@ -1,8 +1,9 @@
-import { CuaWindowDiscovery, ManagedBrowserHost, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
-import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ObservationCapture, ObservationId } from "@computer-harness/protocol";
+import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowOption, ObservationCapture, ObservationId } from "@computer-harness/protocol";
 import type { WindowTargetDiscovery } from "./application-session.js";
+import { createWindowsWindowRelationshipProbe } from "./windows-window-relationship-probe.js";
 
 export type ComputerBackendConfig =
   | {
@@ -18,6 +19,12 @@ export type ComputerBackendConfig =
       windowTarget?: { pid: number; windowId: number };
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
+      /** Explicit per-Run permission to discover and switch among opened windows. */
+      windowSwitch?: "off" | "opened-windows-v1";
+      /** Host-only exact target allowlist; omitted permits the enumerated opened-window inventory. */
+      windowSwitchAllowedTargets?: readonly CuaWindowTarget[];
+      /** Resolved per-Run mode: include the Run-owned managed browser alongside the chosen initial binding. */
+      managedBrowserCompanion?: boolean;
       /** Optional UIA/managed-browser grounding sidecar. */
       grounding?: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
       /** Explicit managed-browser URL; required for DOM/hybrid grounding. */
@@ -48,9 +55,11 @@ export interface ComputerRunAssemblyPolicy {
 export function prepareComputerRunAssembly(
   config: ComputerBackendConfig,
   grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
+  windowSwitch: NonNullable<import("./config.js").ResolvedRunConfig["windowSwitch"]> = "off",
 ): ComputerRunAssemblyPolicy {
-  const effectiveConfig = effectiveComputerConfig(config, grounding);
+  const effectiveConfig = effectiveComputerConfig(config, grounding, windowSwitch);
   validateComputerGrounding(effectiveConfig, grounding);
+  validateWindowSwitch(effectiveConfig, windowSwitch, grounding);
 
   const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
   const windowScoped = effectiveConfig.kind === "cua" && (effectiveConfig.windowTarget !== undefined || managedGrounding);
@@ -73,6 +82,7 @@ export function prepareComputerRunAssembly(
       }
       if (grounding !== "off") allowedComputerTools.add("click_element");
       if (managedGrounding) allowedComputerTools.add("select_option");
+      if (windowSwitch === "opened-windows-v1") allowedComputerTools.add("switch_window");
       return registry.list()
         .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
         .map((definition) => definition.name);
@@ -83,14 +93,33 @@ export function prepareComputerRunAssembly(
 function effectiveComputerConfig(
   computer: ComputerBackendConfig,
   grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
+  windowSwitch: NonNullable<import("./config.js").ResolvedRunConfig["windowSwitch"]>,
 ): ComputerBackendConfig {
   if (computer.kind !== "cua") return computer;
   const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
   return {
     ...computer,
     grounding,
-    ...(managedGrounding ? { windowDeliveryMode: "foreground" as const } : {}),
+    windowSwitch,
+    ...(managedGrounding || windowSwitch === "opened-windows-v1" ? { windowDeliveryMode: "foreground" as const } : {}),
   };
+}
+
+function validateWindowSwitch(
+  config: ComputerBackendConfig,
+  windowSwitch: NonNullable<import("./config.js").ResolvedRunConfig["windowSwitch"]>,
+  grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
+): void {
+  if (windowSwitch === "off") return;
+  if (windowSwitch !== "opened-windows-v1") throw new Error("windowSwitch must be off or opened-windows-v1");
+  if (config.kind !== "cua") throw new Error("windowSwitch opened-windows-v1 requires the CUA Computer");
+  // An unbound CUA screen session is a supported starting mode too. Its
+  // inventory is still host-scoped, and model switching binds to an exact
+  // opened window before any targeted action is delivered.
+  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
+  if (config.managedBrowserCompanion === true && !managedGrounding) {
+    throw new Error("managed browser companion requires hybrid DOM grounding");
+  }
 }
 
 function validateComputerGrounding(
@@ -122,8 +151,21 @@ function validateManagedBrowserConfig(
     throw new Error(`${label} requires a credential-free http(s) managedBrowserUrl or exact about:blank`);
   }
   if (config.socketPath.trim().length === 0) throw new Error(`${label} requires a non-empty CUA socket`);
-  if (config.windowTarget !== undefined) {
-    throw new Error(`${label} owns its temporary browser window; omit the preselected CUA window target`);
+  const companionEnabled = config.managedBrowserCompanion === true && config.windowSwitch === "opened-windows-v1";
+  if (config.managedBrowserCompanion === true && !companionEnabled) {
+    throw new Error("managed browser companion requires the opened-windows-v1 opt-in");
+  }
+  if (config.windowSwitch === "opened-windows-v1" && config.windowSwitchAllowedTargets?.length === 0) {
+    throw new Error("managed browser Run cannot use an empty Host target scope");
+  }
+  if (config.windowTarget !== undefined && !companionEnabled) {
+    throw new Error(`${label} owns its initial browser window; omit the preselected CUA window target unless using the managed-browser companion mode`);
+  }
+  if (companionEnabled) {
+    const allowed = config.windowSwitchAllowedTargets;
+    if (allowed !== undefined && config.windowTarget !== undefined && !allowed.some((target) => target.pid === config.windowTarget!.pid && target.windowId === config.windowTarget!.windowId)) {
+      throw new Error("managed browser companion requires the exact initial window in the Host target scope");
+    }
   }
   const profileMode = config.managedBrowserProfileMode ?? "ephemeral";
   if (profileMode !== "ephemeral" && profileMode !== "persistent") {
@@ -146,6 +188,8 @@ export interface ComputerFactoryDependencies {
   createManagedBrowserHost?: (options: ManagedBrowserHostOptions) => ManagedBrowserHost;
   /** Test seam for the short CUA bootstrap session. */
   openCuaBootstrapSession?: typeof openCuaBootstrapSession;
+  /** Cross-platform probe injection; null explicitly disables the Windows fallback. */
+  windowRelationshipProbe?: WindowRelationshipProbe | null;
 }
 
 export function createWindowTargetDiscovery(config: ComputerBackendConfig): WindowTargetDiscovery | undefined {
@@ -195,6 +239,12 @@ export async function createComputer(
   const managedBrowser = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
   if (managedBrowser) validateManagedBrowserConfig(config);
 
+  const relationshipProbe = dependencies.windowRelationshipProbe !== undefined
+    ? dependencies.windowRelationshipProbe ?? undefined
+    : process.platform === "win32" && config.windowDeliveryMode === "foreground" && config.managedBrowserCompanion !== true
+      ? createWindowsWindowRelationshipProbe()
+      : undefined;
+
   const importCuaComputer = dependencies.importCuaComputer ?? defaultCuaImporter;
   let cuaModule: CuaComputerModule;
   try {
@@ -213,6 +263,9 @@ export async function createComputer(
       ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
       ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
       ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
+      ...(config.windowSwitch === undefined ? {} : { windowSwitch: config.windowSwitch }),
+      ...(config.windowSwitchAllowedTargets === undefined ? {} : { windowSwitchAllowedTargets: config.windowSwitchAllowedTargets }),
+      ...(relationshipProbe === undefined ? {} : { windowRelationshipProbe: relationshipProbe }),
     });
   }
   const createHost = dependencies.createManagedBrowserHost ?? ((options: ManagedBrowserHostOptions) => new ManagedBrowserHost(options));
@@ -224,6 +277,7 @@ export async function createComputer(
     createHost,
     openBootstrap,
     createDelegate,
+    ...(relationshipProbe === undefined ? {} : { windowRelationshipProbe: relationshipProbe }),
   });
 }
 
@@ -243,6 +297,7 @@ interface ManagedBrowserComputerOptions {
   readonly createHost: (options: ManagedBrowserHostOptions) => ManagedBrowserHost;
   readonly openBootstrap: typeof openCuaBootstrapSession;
   readonly createDelegate: CuaComputerModule["CuaDriverComputer"];
+  readonly windowRelationshipProbe?: WindowRelationshipProbe;
 }
 
 class ManagedBrowserComputer implements Computer {
@@ -251,18 +306,20 @@ class ManagedBrowserComputer implements Computer {
   private delegate: Computer | undefined;
   private opened: ComputerSessionDescriptor | undefined;
   private closing: Promise<void> | undefined;
+  private openAttempted = false;
+  private readonly hostCleanupDiagnostics: string[] = [];
 
   public constructor(private readonly options: ManagedBrowserComputerOptions) {}
 
   public async open(openOptions: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
-    if (this.opened !== undefined) throw new Error("managed browser Computer is already open");
+    if (this.openAttempted || this.closing !== undefined) throw new Error("managed browser Computer lifecycle has already been used");
+    this.openAttempted = true;
     const label = `computer-harness-managed-bootstrap-${Date.now()}`;
-    let bootstrap: CuaBootstrapSession | undefined;
-    let host: ManagedBrowserHost | undefined;
     try {
-      bootstrap = await this.options.openBootstrap(this.options.config.socketPath, label, signal);
+      const bootstrap = await this.options.openBootstrap(this.options.config.socketPath, label, signal);
+      this.bootstrap = bootstrap;
       const createHost = this.options.createHost;
-      host = createHost({
+      const host = createHost({
         browser: "edge",
         url: this.options.config.managedBrowserUrl!,
         profileMode: this.options.config.managedBrowserProfileMode ?? "ephemeral",
@@ -271,27 +328,50 @@ class ManagedBrowserComputer implements Computer {
           ? { persistentProfileRoot: this.options.config.managedBrowserProfileRoot! }
           : {}),
         resolveOwnedWindowTarget: (browserProcessId, resolverSignal, hint?: ManagedBrowserWindowBindingHint) => resolveOwnedManagedBrowserWindow(bootstrap!.driver, bootstrap!.label, browserProcessId, resolverSignal, hint),
+        onCleanupDiagnostic: (diagnostic) => this.hostCleanupDiagnostics.push(diagnostic),
+        onStartupDiagnostic: (diagnostic) => process.stderr.write(`${formatManagedBrowserStartupDiagnostic(diagnostic)}\n`),
       });
+      this.host = host;
       const record = await host.start(signal);
+      this.throwIfHostCleanupUnconfirmed();
+      const companionMode = this.options.config.managedBrowserCompanion === true &&
+        this.options.config.windowSwitch === "opened-windows-v1";
+      const initialTarget = companionMode ? this.options.config.windowTarget : record.target.windowTarget;
+      const allowedTargets = this.options.config.windowSwitchAllowedTargets;
+      const scopedTargets = allowedTargets === undefined
+        ? undefined
+        : allowedTargets.length === 0
+          ? []
+          : this.options.config.windowSwitch === "opened-windows-v1"
+            ? uniqueTargets([...allowedTargets, record.target.windowTarget])
+            : allowedTargets;
       const delegateOptions: CuaDriverComputerOptions = {
         socketPath: this.options.config.socketPath,
         screenshotDir: this.options.config.screenshotDir,
-        windowTarget: record.target.windowTarget,
         browserTarget: record.target,
         domGroundingTransport: host.createTransport(),
+        ...(initialTarget === undefined ? {} : { windowTarget: initialTarget }),
         ...(this.options.config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: this.options.config.windowDeliveryMode }),
         ...(this.options.config.grounding === undefined ? {} : { grounding: this.options.config.grounding }),
+        ...(this.options.config.windowSwitch === undefined ? {} : { windowSwitch: this.options.config.windowSwitch }),
+        ...(scopedTargets === undefined ? {} : { windowSwitchAllowedTargets: scopedTargets }),
+        ...(this.options.windowRelationshipProbe === undefined ? {} : { windowRelationshipProbe: this.options.windowRelationshipProbe }),
       };
       const delegate = new this.options.createDelegate(delegateOptions);
-      const session = await delegate.open(openOptions, signal);
-      this.bootstrap = bootstrap;
-      this.host = host;
       this.delegate = delegate;
+      if (this.options.config.windowSwitch === "opened-windows-v1" && delegate.listWindows === undefined) {
+        throw new Error("windowSwitch opened-windows-v1 requires a Computer with listWindows support");
+      }
+      const session = await delegate.open(openOptions, signal);
       this.opened = session;
       return session;
     } catch (error) {
-      await host?.close().catch(() => undefined);
-      await bootstrap?.close().catch(() => undefined);
+      try {
+        await this.closeOwnedResources();
+      } catch (cleanupError) {
+        const failures = cleanupError instanceof AggregateError ? [...cleanupError.errors] : [cleanupError];
+        throw new AggregateError([error, ...failures], "managed browser Computer startup failed and cleanup was not confirmed", { cause: error });
+      }
       throw error;
     }
   }
@@ -303,23 +383,106 @@ class ManagedBrowserComputer implements Computer {
 
   public async execute(session: ComputerSessionDescriptor, action: ActionIntent, signal: AbortSignal, options?: ComputerExecuteOptions): Promise<ActionReceipt> {
     if (this.delegate === undefined) throw new Error("managed browser Computer is not open");
+    // Preserve the adapter's opaque windowRef and sessionAfter without
+    // resolving or rewriting a target in this lifecycle wrapper.
     return this.delegate.execute(session, action, signal, options);
   }
 
+  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowOption[]> {
+    if (this.delegate?.listWindows === undefined) throw new Error("managed browser Computer has no opened-window inventory");
+    return this.delegate.listWindows(session, signal);
+  }
+
+  public async listWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
+    if (this.delegate?.listWindowHandoffCandidates === undefined) throw new Error("managed browser Computer has no window handoff picker");
+    return this.delegate.listWindowHandoffCandidates(session, signal);
+  }
+
+  public async listNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
+    if (this.delegate?.listNewWindowHandoffCandidates === undefined) throw new Error("managed browser Computer has no new-window handoff picker");
+    return this.delegate.listNewWindowHandoffCandidates(session, signal);
+  }
+
+  public async detectNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
+    if (this.delegate?.detectNewWindowHandoffCandidates === undefined) throw new Error("managed browser Computer cannot detect new-window handoff candidates");
+    return this.delegate.detectNewWindowHandoffCandidates(session, signal);
+  }
+
+  public async handoffWindow(session: ComputerSessionDescriptor, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
+    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
+    if (this.delegate?.handoffWindow === undefined) throw new Error("managed browser Computer cannot hand off to a window");
+    // The CUA delegate validates candidates against the current native binding;
+    // this wrapper keeps the Harness-owned browser Host alive until Run cleanup.
+    return this.delegate.handoffWindow(session, candidate, signal);
+  }
+
   public async close(session: ComputerSessionDescriptor): Promise<void> {
+    return this.closeOwnedResources(session);
+  }
+
+  public async dispose(): Promise<void> {
+    return this.closeOwnedResources();
+  }
+
+  private async closeOwnedResources(session?: ComputerSessionDescriptor): Promise<void> {
     if (this.closing !== undefined) return this.closing;
+    const delegate = this.delegate;
+    const opened = this.opened;
+    const host = this.host;
+    const bootstrap = this.bootstrap;
     this.closing = (async () => {
-      try {
-        if (this.delegate !== undefined && this.opened !== undefined) await this.delegate.close(session);
-      } finally {
-        await this.host?.close().catch(() => undefined);
-        await this.bootstrap?.close().catch(() => undefined);
-        this.opened = undefined;
-        this.delegate = undefined;
-        this.host = undefined;
-        this.bootstrap = undefined;
+      const failures: unknown[] = [];
+      if (delegate !== undefined) {
+        const activeSession = session ?? opened;
+        if (activeSession !== undefined) {
+          try { await delegate.close(activeSession); } catch (error) { failures.push(error); }
+        } else if (delegate.dispose !== undefined) {
+          try { await delegate.dispose(); } catch (error) { failures.push(error); }
+        }
+      }
+      if (host !== undefined) {
+        try { await host.close(); } catch (error) { failures.push(error); }
+      }
+      if (bootstrap !== undefined) {
+        try { await bootstrap.close(); } catch (error) { failures.push(error); }
+      }
+      const criticalDiagnostics = criticalManagedBrowserCleanupDiagnostics(this.hostCleanupDiagnostics);
+      if (criticalDiagnostics.length > 0) {
+        failures.push(new Error(`managed browser cleanup was not confirmed (${criticalDiagnostics.join(", ")})`));
+      }
+      this.opened = undefined;
+      this.delegate = undefined;
+      this.host = undefined;
+      this.bootstrap = undefined;
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "managed browser Computer cleanup was not confirmed", { cause: failures[0] });
       }
     })();
     return this.closing;
   }
+
+  private throwIfHostCleanupUnconfirmed(): void {
+    const criticalDiagnostics = criticalManagedBrowserCleanupDiagnostics(this.hostCleanupDiagnostics);
+    if (criticalDiagnostics.length > 0) {
+      throw new Error(`managed browser startup cleanup was not confirmed (${criticalDiagnostics.join(", ")})`);
+    }
+  }
+}
+
+function criticalManagedBrowserCleanupDiagnostics(diagnostics: readonly string[]): string[] {
+  const critical = new Set(["process_exit_timeout", "profile_cleanup_failed", "profile_lock_release_failed"]);
+  return [...new Set(diagnostics.filter((diagnostic) => critical.has(diagnostic)))];
+}
+
+function uniqueTargets(targets: readonly CuaWindowTarget[]): readonly CuaWindowTarget[] {
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    const key = `${target.pid}:${target.windowId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

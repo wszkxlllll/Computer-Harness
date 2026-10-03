@@ -5,6 +5,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout, stderr } from "node:process";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ApplicationSession, createWindowTargetDiscovery } from "../packages/app-runtime/dist/index.js";
 
 const PROVIDER_ID = "local-scripted-cua-window-handoff-probe";
@@ -96,7 +97,7 @@ function abortOnSignal(app, signal) {
   return () => signal.removeEventListener("abort", abort);
 }
 
-async function cleanupSession(app, manifest, reason) {
+export async function cleanupSession(app, manifest, reason) {
   const deadlineAt = Date.now() + CLEANUP_TIMEOUT_MS;
   const pending = () => {
     try { app.markEnvironmentPending(reason); } catch { /* keep the diagnostic fail-closed */ }
@@ -111,7 +112,25 @@ async function cleanupSession(app, manifest, reason) {
   }
   try { await withDeadline(() => app.close(), undefined, deadlineAt, "CLEANUP_TIMEOUT", "Session close exceeded its deadline."); }
   catch { return pending(); }
-  const confirmed = app.status === "closed" && app.activeRun === undefined && app.inspectEnvironment() === undefined;
+  if (manifest.runStartAttempted === false && manifest.preflightDiscoveryConfirmed !== true) return pending();
+  const environment = app.inspectEnvironment();
+  if (app.status === "closed" && app.activeRun === undefined && app.history.length === 0 &&
+      manifest.runStartAttempted === false && manifest.preflightDiscoveryConfirmed === true) {
+    // This session never acquired a Run lease. Closing it cannot release or
+    // prove cleanup of another Run's existing owner barrier.
+    manifest.cleanupScope = "no_run_started";
+    manifest.cleanupConfirmed = true;
+    manifest.environmentPending = environment?.state === "pending_cleanup";
+    manifest.environmentBlocked = environment !== undefined;
+    manifest.preexistingEnvironmentPending = manifest.environmentPending;
+    manifest.preexistingEnvironmentBlocked = manifest.environmentBlocked;
+    if (environment !== undefined) {
+      manifest.preexistingEnvironmentRunId = environment.runId;
+      manifest.preexistingEnvironmentReason = environment.reason ?? "Another Run still owns this environment.";
+    }
+    return true;
+  }
+  const confirmed = app.status === "closed" && app.activeRun === undefined && environment === undefined;
   if (!confirmed) return pending();
   manifest.cleanupConfirmed = true;
   manifest.environmentPending = false;
@@ -190,6 +209,17 @@ function isNotepad(window) {
   return /notepad/iu.test(window?.appName ?? "");
 }
 
+export async function preflightNotepadParent(app, parent, signal, deadlineAt, manifest) {
+  const windows = await withDeadline(() => app.listAllWindowTargets(signal), signal, deadlineAt, "PHASE_TIMEOUT", "Diagnostic phase exceeded its deadline.");
+  // A completed discovery has already closed its temporary driver session.
+  manifest.preflightDiscoveryConfirmed = true;
+  const selected = exactWindow(windows, parent);
+  if (selected === undefined || !isNotepad(selected)) {
+    throw new ProbeFailure("PARENT_NOT_EXACT_NOTEPAD", "The selected PID/HWND is not an exact Notepad window in the full inventory; no Run started.");
+  }
+  return selected;
+}
+
 function safeObservation(event, runOutputDir) {
   if (event?.type !== "observation.created") return undefined;
   const ref = event.observation.screenshot;
@@ -226,9 +256,11 @@ function assertCompletedSingleOpenRun(events, providerCalls, handoffTarget, runO
   if (handoff.target.pid !== handoffTarget.pid || handoff.target.windowId !== handoffTarget.windowId) {
     throw new ProbeFailure("HANDOFF_TARGET_MISMATCH", "Completed handoff target differed from the operator-confirmed HWND.");
   }
-  if (computerOpen.session.id === handoff.session.id) throw new ProbeFailure("HANDOFF_SESSION_NOT_REBOUND", "Handoff did not create a new computer-session identity.");
-  const initialObservation = observations.find((event) => event.observation.computerSessionId === computerOpen.session.id);
-  const dialogObservation = observations.find((event) => event.observation.computerSessionId === handoff.session.id);
+  if (computerOpen.session.id !== handoff.session.id || computerOpen.session.backend !== handoff.session.backend) {
+    throw new ProbeFailure("HANDOFF_SESSION_ID_CHANGED", "Window handoff replaced the run-scoped ComputerSession identity or backend.");
+  }
+  const initialObservation = observations.find((event) => event.sequence < handoff.sequence && event.observation.computerSessionId === computerOpen.session.id);
+  const dialogObservation = observations.find((event) => event.sequence > handoff.sequence && event.observation.computerSessionId === handoff.session.id);
   if (initialObservation === undefined || dialogObservation === undefined || initialObservation.observation.id === dialogObservation.observation.id) {
     throw new ProbeFailure("HANDOFF_CAPTURE_MISSING", "Expected distinct parent and post-handoff exact-window observations.");
   }
@@ -303,6 +335,8 @@ async function runHandoff(options, terminal, signal) {
     externalModelCalls: 0,
     actionReplayAllowed: false,
     screenshotsStoredPrivatelyByRuntime: true,
+    runStartAttempted: false,
+    preflightDiscoveryConfirmed: false,
   };
   await saveManifest(manifestPath, manifest);
 
@@ -322,13 +356,15 @@ async function runHandoff(options, terminal, signal) {
   let actionReleased = false;
   let cleanupConfirmed = false;
   try {
-    const windows = await withDeadline(() => app.listWindowTargets(signal), signal, deadlineAt, "PHASE_TIMEOUT", "Diagnostic phase exceeded its deadline.");
-    const selected = exactWindow(windows, parent);
-    if (selected === undefined || !isNotepad(selected)) throw new ProbeFailure("PARENT_NOT_EXACT_NOTEPAD", "The selected PID/HWND is not a listed Notepad window; no Run started.");
+    await preflightNotepadParent(app, parent, signal, deadlineAt, manifest);
     manifest.parentListed = true;
+    manifest.parentInventoryView = "all_top_level";
     manifest.parentAppVerifiedNotepad = true;
     await saveManifest(manifestPath, manifest);
 
+    // Runtime's foreground open performs the one exact activation attempt
+    // and fresh identity/capture checks; preflight does not activate twice.
+    manifest.runStartAttempted = true;
     handle = await withDeadline(() => app.startRun(
       "Open the Notepad file picker once, hand off to the exact dialog, then finish without opening or saving a file.",
       { windowTarget: parent, windowDeliveryMode: "foreground", windowHandoff: "confirm-v1" },
@@ -421,6 +457,8 @@ async function runHandoff(options, terminal, signal) {
       stdout.write("The exact dialog remains open. This Run is finished and its CUA lease is released. The sole live owner should now press Escape once manually, then run --phase parent-observe with this manifest. Do not select/open/save a file.\n");
     } else if (!cleanupConfirmed) {
       stderr.write("Runtime cleanup was not confirmed; process-local environment ownership was retained. Do not cancel the dialog or start another probe.\n");
+    } else if (manifest.preexistingEnvironmentBlocked) {
+      stderr.write("This probe started no Run and closed its session; a pre-existing environment owner barrier remains. No lease was cleared.\n");
     }
   }
 }
@@ -463,6 +501,8 @@ async function runParentObserve(options, terminal, signal) {
     dialogTarget: dialog,
     externalModelCalls: 0,
     scriptedActions: 0,
+    runStartAttempted: false,
+    preflightDiscoveryConfirmed: false,
   };
   await saveManifest(manifestPath, manifest);
 
@@ -477,7 +517,8 @@ async function runParentObserve(options, terminal, signal) {
   });
   const removeAbortListener = abortOnSignal(app, signal);
   try {
-    const before = await withDeadline(() => app.listWindowTargets(signal), signal, deadlineAt, "PHASE_TIMEOUT", "Diagnostic phase exceeded its deadline.");
+    const before = await withDeadline(() => app.listAllWindowTargets(signal), signal, deadlineAt, "PHASE_TIMEOUT", "Diagnostic phase exceeded its deadline.");
+    manifest.preflightDiscoveryConfirmed = true;
     const parentWindow = exactWindow(before, parent);
     const dialogStillListed = exactWindow(before, dialog) !== undefined;
     if (parentWindow === undefined || !isNotepad(parentWindow) || dialogStillListed) {
@@ -491,6 +532,7 @@ async function runParentObserve(options, terminal, signal) {
       deadlineAt,
     );
 
+    manifest.runStartAttempted = true;
     const handle = await withDeadline(() => app.startRun(
       "Observe only the exact Notepad parent window after the file dialog was manually cancelled; take no action.",
       { windowTarget: parent, windowDeliveryMode: "foreground", windowHandoff: "off" },
@@ -501,7 +543,7 @@ async function runParentObserve(options, terminal, signal) {
 
     const events = handle.controller.getEvents();
     const parentCapture = assertNoHiddenAction(events, handle.config.outputDir);
-    const after = await withDeadline(() => app.listWindowTargets(signal), signal, deadlineAt, "PHASE_TIMEOUT", "Diagnostic phase exceeded its deadline.");
+    const after = await withDeadline(() => app.listAllWindowTargets(signal), signal, deadlineAt, "PHASE_TIMEOUT", "Diagnostic phase exceeded its deadline.");
     if (exactWindow(after, parent) === undefined || exactWindow(after, dialog) !== undefined) {
       throw new ProbeFailure("PARENT_RESELECT_POSTCHECK_FAILED", "Post-run inventory did not confirm parent present and dialog absent.");
     }
@@ -538,6 +580,8 @@ async function runParentObserve(options, terminal, signal) {
       stdout.write(`${JSON.stringify({ stage: "parent_reselected", outcome: manifest.outcome, parentTarget: parent, dialogAbsent: true, manifest: manifestPath })}\n`);
     } else if (!cleanupConfirmed) {
       stderr.write("Runtime cleanup was not confirmed; process-local environment ownership was retained. Do not start another probe.\n");
+    } else if (manifest.preexistingEnvironmentBlocked) {
+      stderr.write("This probe started no Run and closed its session; a pre-existing environment owner barrier remains. No lease was cleared.\n");
     }
   }
 }
@@ -586,8 +630,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const code = error instanceof ProbeFailure ? error.code : "UNEXPECTED_ERROR";
-  stderr.write(`CUA window handoff diagnostic stopped safely (${code}). No action will be retried.\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    const code = error instanceof ProbeFailure ? error.code : "UNEXPECTED_ERROR";
+    stderr.write(`CUA window handoff diagnostic stopped safely (${code}). No action will be retried.\n`);
+    process.exitCode = 1;
+  });
+}

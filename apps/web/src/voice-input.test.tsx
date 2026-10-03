@@ -239,10 +239,8 @@ describe("voice input control", () => {
         <GoalComposer
           canStart
           targetMode="auto"
-          browserSessionMode="temporary"
           browserUrl=""
           onTargetModeChange={vi.fn()}
-          onBrowserSessionModeChange={vi.fn()}
           onBrowserUrlChange={vi.fn()}
           targetPicker={targetPicker}
           onSubmit={vi.fn(async () => undefined)}
@@ -283,10 +281,8 @@ describe("voice input control", () => {
         <GoalComposer
           canStart
           targetMode="auto"
-          browserSessionMode="temporary"
           browserUrl=""
           onTargetModeChange={vi.fn()}
-          onBrowserSessionModeChange={vi.fn()}
           onBrowserUrlChange={vi.fn()}
           targetPicker={targetPicker}
           voiceCaptureAdapterFactory={() => ({ start: async () => goalCapture })}

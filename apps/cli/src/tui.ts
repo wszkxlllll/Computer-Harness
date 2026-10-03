@@ -1,5 +1,5 @@
 import { emitKeypressEvents } from "node:readline";
-import type { RuntimeEvent, RunId, RunOutcome } from "@computer-harness/protocol";
+import type { JsonValue, RuntimeEvent, RunId, RunOutcome } from "@computer-harness/protocol";
 import { writeRunReport, type ApplicationSession, type ApplicationSessionRunFeatureOverrides, type ApplicationSessionWindowTarget, type EventFeedNotification, type RunHandle, type WindowTargetInfo } from "@computer-harness/app-runtime";
 import type { RunController } from "@computer-harness/runtime";
 import type { RunSnapshot } from "@computer-harness/trajectory";
@@ -55,6 +55,7 @@ export interface TuiFeatureSelection {
   riskGuard: RiskGuardMode;
   monitor: "off" | "shadow" | "guidance";
   grounding: TuiGroundingChoice;
+  windowSwitch?: boolean;
 }
 
 interface TuiInput extends NodeJS.ReadableStream {
@@ -435,6 +436,11 @@ export async function runApplicationTui(
   };
 
   const startRunForGoal = (goal: string, startNotice: string, successNotice: string): void => {
+    if (featureSelection.windowSwitch === true && !canUseWindowSwitch(activeMetadata)) {
+      notice = "Cross-window switching requires the CUA computer; choose CUA or turn it off in F.";
+      render();
+      return;
+    }
     const effectiveGrounding = resolveTuiGrounding(featureSelection.grounding, managedBrowserSelected ? "managed-browser" : selectedWindowTarget == null ? "desktop" : "host-window");
     if (effectiveGrounding === "uia-catalog-v1" && (selectedWindowTarget === undefined || selectedWindowTarget === null)) {
       notice = "UIA grounding requires an explicitly selected CUA window. Press Esc, then W to choose one before starting.";
@@ -446,7 +452,15 @@ export async function runApplicationTui(
     render();
     invoke(async () => {
       try {
-        const handle = await session.startRun(goal, featureOverrides(featureSelection, selectedWindowTarget, selectedWindowDeliveryMode, managedBrowserSelected, activeMetadata.managedBrowserUrl));
+        const handle = await session.startRun(goal, featureOverrides(
+          featureSelection,
+          selectedWindowTarget,
+          selectedWindowDeliveryMode,
+          managedBrowserSelected,
+          activeMetadata.managedBrowserUrl,
+          activeMetadata.managedBrowserProfileMode,
+          activeMetadata.managedBrowserProfileLabel,
+        ));
         goalSubmissionPending = false;
         attachRun(handle, goal);
       } catch (error) {
@@ -1276,6 +1290,11 @@ export async function runApplicationTui(
       }
       if (keyName === "space" || printable === " " || keyName === "left" || keyName === "right") {
         const direction = keyName === "left" ? -1 : 1;
+        if (featureCursor === 8 && draftFeatureSelection.windowSwitch !== true && !canUseWindowSwitch(activeMetadata)) {
+          notice = "Cross-window switching requires the CUA computer; choose CUA before enabling it.";
+          render();
+          return;
+        }
         draftFeatureSelection = changeTuiFeature(draftFeatureSelection, featureCursor, keyName === "space" || printable === " " ? 1 : direction);
         if (draftFeatureSelection.memory === "off") draftFeatureSelection = { ...draftFeatureSelection, memoryRetrieval: "off" };
         if (draftFeatureSelection.memoryRetrieval === "hybrid" && draftFeatureSelection.memory === "off") draftFeatureSelection = { ...draftFeatureSelection, memoryRetrieval: "off" };
@@ -1537,9 +1556,9 @@ function detailForSnapshot(snapshot: RunSnapshot, events: readonly RuntimeEvent[
 
 /**
  * Build an approval explanation from already committed event fields. Tool
- * arguments are deliberately not rendered: a `type` call may contain
- * credentials or other private text. Target/summary/effects are model-
- * declared metadata, so they are terminal-sanitized before display.
+ * arguments are not rendered except that a switch_window's opaque reference
+ * may be matched to a host-listed app/title label. Private text stays hidden.
+ * Target/summary/effects are model-declared metadata, so they are sanitized.
  */
 function approvalDetail(snapshot: RunSnapshot, events: readonly RuntimeEvent[]): string {
   const pending = snapshot.pendingApproval;
@@ -1553,7 +1572,7 @@ function approvalDetail(snapshot: RunSnapshot, events: readonly RuntimeEvent[]):
   const lines = [
     "Approval is pending: the Run is waiting and no GUI action is executing.",
     `Action: ${call?.name === undefined ? "unknown" : sanitizeTerminalText(call.name)}`,
-    `Target: ${declaration === undefined ? "not provided" : sanitizeTerminalText(declaration.target)}`,
+    `Model-declared target (unverified): ${declaration === undefined ? "not provided" : sanitizeTerminalText(declaration.target)}`,
     `Why: ${sanitizeTerminalText(pending.reason)}`,
     `Intent: ${declaration === undefined ? "not provided" : sanitizeTerminalText(declaration.summary)}`,
     `Effects: ${declaration === undefined || declaration.effects.length === 0 ? "not provided" : declaration.effects.map((effect) => sanitizeTerminalText(effect)).join(", ")}`,
@@ -1561,7 +1580,45 @@ function approvalDetail(snapshot: RunSnapshot, events: readonly RuntimeEvent[]):
     "Review the target and immediate effect before responding.",
     "Y approve · N reject · I correct (revokes this request) · A abort",
   ];
+  if (call?.name === "switch_window") {
+    const listedTarget = windowLabelForPendingSwitch(events, callEvent!.sequence, call.arguments);
+    lines.splice(3, 0, `Host-listed target: ${listedTarget ?? "unavailable; not matched to the latest completed list_windows result"}`);
+    lines.splice(4, 0, "This app/title is the selection-time host inventory record, may be stale or untrusted; the request-bound screenshot may still show the old window, not the new target. Reject if you cannot verify it.");
+  }
   return lines.join("\n");
+}
+
+function windowLabelForPendingSwitch(events: readonly RuntimeEvent[], switchSequence: number, args: unknown): string | undefined {
+  if (typeof args !== "object" || args === null || Array.isArray(args) || !("windowRef" in args) || typeof args.windowRef !== "string") return undefined;
+  const windowRef = args.windowRef;
+  const ordered = [...events].filter((event) => event.sequence < switchSequence).sort((left, right) => left.sequence - right.sequence);
+  const receivedNames = new Map<string, string>();
+  let pendingListCallId: string | undefined;
+  let latestInventory: readonly JsonValue[] | undefined;
+  for (const event of ordered) {
+    if (event.type === "tool.call.received") {
+      receivedNames.set(event.call.id, event.call.name);
+      if (event.call.name === "list_windows") {
+        pendingListCallId = event.call.id;
+        latestInventory = undefined;
+      }
+    } else if (event.type === "tool.call.completed" && event.result.callId === pendingListCallId && receivedNames.get(event.result.callId) === "list_windows") {
+      latestInventory = Array.isArray(event.result.output) ? event.result.output : undefined;
+      pendingListCallId = undefined;
+    } else if (event.type === "tool.call.failed" && event.result.callId === pendingListCallId) {
+      latestInventory = undefined;
+      pendingListCallId = undefined;
+    } else if (event.type === "tool.call.rejected" && event.callId === pendingListCallId) {
+      latestInventory = undefined;
+      pendingListCallId = undefined;
+    }
+  }
+  const option = latestInventory?.find((item) => typeof item === "object" && item !== null && !Array.isArray(item) && item.windowRef === windowRef);
+  if (typeof option !== "object" || option === null || Array.isArray(option)) return undefined;
+  const appName = typeof option.appName === "string" ? sanitizeTerminalText(option.appName).slice(0, 128) : "";
+  const title = typeof option.title === "string" ? sanitizeTerminalText(option.title).slice(0, 160) : "";
+  const label = [appName, title].filter(Boolean).join(" — ");
+  return label.length === 0 ? undefined : label;
 }
 
 function detailLineLimit(rows: number, width: number, ui: Pick<TuiFrameUi, "editMode" | "notice" | "inputLimitReached">): number {
@@ -1614,7 +1671,7 @@ export function buildTuiFrame(
   const lines = [
     `Computer Harness TUI  |  ${snapshot.status.toUpperCase()}${snapshot.outcome === undefined ? "" : ` / ${snapshot.outcome}`}`,
     "─".repeat(width),
-    `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}   Target: ${formatCuaTarget(metadata)}`,
+    `Provider: ${clip(metadata.provider, width - 30)}   Computer: ${clip(metadata.computer, width - 30)}   Starting target: ${formatCuaTarget(metadata)}`,
     `Profile: ${metadata.profile}   Risk Guard: ${metadata.riskGuard === "layered" ? "ENABLED" : "DISABLED"} (${metadata.riskGuard})`,
     `Focus evidence: ${metadata.computer === "cua" ? "UNKNOWN (generic foreground input is not fixture-verified)" : "UNKNOWN (backend metadata is not focus proof)"}`,
     `Session: ${ui.sessionStatus ?? "single-run"}   Event feed: ${ui.feedState ?? "legacy"}`,
@@ -1898,9 +1955,9 @@ function describeTuiFeatureSet(features: TuiFeatureSelection | undefined): strin
     selected.contextMode === expected.contextMode &&
     selected.monitor === expected.monitor &&
     selected.grounding === "off";
-  if (matches({ planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", monitor: "off" })) return "Baseline";
-  if (matches({ planning: true, memory: "facts", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "shadow" })) return "Assisted";
-  if (matches({ planning: true, memory: "entities", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "guidance" })) return "Research";
+  if (selected.windowSwitch !== true && matches({ planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", monitor: "off" })) return "Baseline";
+  if (selected.windowSwitch !== true && matches({ planning: true, memory: "facts", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "shadow" })) return "Assisted";
+  if (selected.windowSwitch !== true && matches({ planning: true, memory: "entities", memoryRetrieval: "lexical", batching: "same-control-input-v1", contextMode: "recent", monitor: "guidance" })) return "Research";
   return "Custom";
 }
 
@@ -1933,6 +1990,7 @@ const tuiFeatureRows = [
   { label: "Risk Guard", values: ["off", "layered"] as const },
   { label: "Progress Monitor", values: ["off", "shadow", "guidance"] as const },
   { label: "Grounding", values: ["off", "auto", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"] as const },
+  { label: "Window switching", values: ["off", "on"] as const },
 ] as const;
 
 function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined, defaultRiskGuard: RiskGuardMode = "layered"): TuiFeatureSelection {
@@ -1945,6 +2003,7 @@ function normalizeTuiFeatureSelection(features: TuiFeatureSelection | undefined,
     riskGuard: features?.riskGuard ?? defaultRiskGuard,
     monitor: features?.monitor ?? "off",
     grounding: features?.grounding ?? "off",
+    windowSwitch: features?.windowSwitch ?? false,
   };
 }
 
@@ -1954,9 +2013,17 @@ function featureOverrides(
   windowDeliveryMode: "background" | "foreground" | null | undefined,
   managedBrowserSelected = false,
   managedBrowserUrl?: string,
+  managedBrowserProfileMode?: "ephemeral" | "persistent",
+  managedBrowserProfileLabel?: string,
 ): ApplicationSessionRunFeatureOverrides {
   const grounding = resolveTuiGrounding(features.grounding, managedBrowserSelected ? "managed-browser" : windowTarget == null ? "desktop" : "host-window");
   const managedGrounding = isManagedGrounding(grounding);
+  const managedBrowserCompanion = features.windowSwitch === true
+    && !managedBrowserSelected
+    && !managedGrounding
+    && isHttpUrl(managedBrowserUrl)
+    && managedBrowserProfileMode !== undefined
+    && (managedBrowserProfileMode !== "persistent" || /^[A-Za-z0-9._-]{1,64}$/u.test(managedBrowserProfileLabel ?? ""));
   return {
     planning: features.planning,
     memory: features.memory,
@@ -1966,7 +2033,9 @@ function featureOverrides(
     riskGuard: features.riskGuard,
     monitor: features.monitor,
     grounding,
-    windowHandoff: !managedGrounding && windowTarget != null ? "confirm-v1" : "off",
+    windowSwitch: features.windowSwitch === true ? "opened-windows-v1" : "off",
+    windowHandoff: features.windowSwitch === true || (!managedGrounding && windowTarget != null) ? "confirm-v1" : "off",
+    ...(managedBrowserCompanion ? { managedBrowserCompanion: true } : {}),
     ...(managedBrowserSelected && managedBrowserUrl !== undefined ? { managedBrowserUrl } : {}),
     ...(managedGrounding
       ? { windowTarget: null, windowDeliveryMode: null }
@@ -1994,7 +2063,9 @@ function changeTuiFeature(features: TuiFeatureSelection, rowIndex: number, delta
             ? "riskGuard"
             : rowIndex === 6
               ? "monitor"
-              : "grounding";
+              : rowIndex === 7
+                ? "grounding"
+                : "windowSwitch";
   const current = features[key] as string | boolean;
   if (typeof current === "boolean") return { ...features, [key]: !current } as TuiFeatureSelection;
   const currentIndex = row.values.indexOf(current as never);
@@ -2011,12 +2082,12 @@ function featureValue(features: TuiFeatureSelection, rowIndex: number): string {
   if (rowIndex === 5) return features.riskGuard;
   if (rowIndex === 6) return features.monitor;
   if (rowIndex === 7) return features.grounding;
-  return features.grounding;
+  return features.windowSwitch === true ? "on" : "off";
 }
 
 function formatTuiFeatures(features: TuiFeatureSelection | undefined, defaultRiskGuard?: RiskGuardMode): string {
   const normalized = normalizeTuiFeatureSelection(features, defaultRiskGuard);
-  return `plan=${normalized.planning ? "on" : "off"}, memory=${normalized.memory}/${normalized.memoryRetrieval}, batch=${normalized.batching}, context=${normalized.contextMode}, guard=${normalized.riskGuard}, monitor=${normalized.monitor}, grounding=${normalized.grounding}`;
+  return `plan=${normalized.planning ? "on" : "off"}, memory=${normalized.memory}/${normalized.memoryRetrieval}, batch=${normalized.batching}, context=${normalized.contextMode}, guard=${normalized.riskGuard}, monitor=${normalized.monitor}, grounding=${normalized.grounding}, windowSwitch=${normalized.windowSwitch ? "on" : "off"}`;
 }
 
 function formatCuaTarget(metadata: TuiMetadata): string {
@@ -2032,6 +2103,10 @@ function formatCuaTarget(metadata: TuiMetadata): string {
 
 function canSelectWindow(metadata: TuiMetadata): boolean {
   return metadata.computer === "cua" && metadata.windowSelectionAvailable !== false;
+}
+
+function canUseWindowSwitch(metadata: TuiMetadata): boolean {
+  return metadata.computer === "cua";
 }
 
 function buildTuiFeaturesFrame(
@@ -2184,6 +2259,10 @@ function windowDisplayLabel(target: WindowTargetInfo): string {
 }
 
 function uiFeatureHint(features: TuiFeatureSelection, metadata?: TuiMetadata): string {
+  if (features.windowSwitch === true) return metadata !== undefined && canUseWindowSwitch(metadata)
+    ? "Window switching is on. The CUA session can switch among listed opened windows; app names and titles go to the main Provider as untrusted text."
+    : "Window switching requires the CUA computer; listed app names and titles go to the main Provider.";
+  if (metadata !== undefined && canUseWindowSwitch(metadata)) return "Window switching is off. Enabling it sends listed opened-window app names and titles to the main Provider.";
   if (features.memory === "off" && features.memoryRetrieval !== "off") return "Memory retrieval requires Memory facts or entities; it will be forced off.";
   if (features.memoryRetrieval === "hybrid") return "Hybrid retrieval needs an explicit embedding endpoint and MEMORY_EMBEDDING_API_KEY; TUI checks this before start.";
   if (features.grounding === "auto") return "Auto: native window -> UIA; explicitly selected Harness-managed browser -> DOM + UIA; desktop -> off. Ordinary Edge does not grant DOM.";
@@ -2260,7 +2339,14 @@ function latestFailure(events: readonly RuntimeEvent[]): { label: string; messag
     if (event.type === "tool.call.rejected") return { label: "Computer action rejected", message: event.reason };
     if (event.type === "tool.call.failed") return { label: "Computer tool failed", message: event.result.error.message };
     if (event.type === "action.execution.failed") {
-      return { label: event.receipt.status === "refused" ? "Computer action refused" : "Computer action failed", message: event.receipt.message ?? event.receipt.status };
+      return {
+        label: event.receipt.status === "refused"
+          ? "Computer action refused"
+          : event.receipt.status === "partial"
+            ? "Computer action partially completed"
+            : "Computer action failed",
+        message: event.receipt.message ?? event.receipt.status,
+      };
     }
   }
   return undefined;

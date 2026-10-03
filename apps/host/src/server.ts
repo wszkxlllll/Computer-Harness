@@ -8,6 +8,7 @@ import type { HostRequestHandler, PairingTokenRegistration, RelayBridgeRequest }
 import { resolveAllowedApiRoute } from "@computer-harness/relay-connector/routing";
 import { VOICE_INPUT_MAX_BATCH_CHUNKS, VOICE_INPUT_MAX_CHUNK_BYTES } from "@computer-harness/voice";
 import type { PairRequestView, PairedDeviceView } from "./contracts.js";
+import { ManagedBrowserProfileServiceError, type ManagedBrowserProfileController } from "./managed-browser-profile-service.js";
 import { PairingError, PairingStore, hashPairingToken } from "./pairing-store.js";
 import {
   VoiceSessionServiceError,
@@ -45,6 +46,7 @@ export interface HostServerOptions {
   readonly revokeDeviceSession?: (deviceId: string) => void;
   readonly pairing?: PairingStore;
   readonly voiceInput?: VoiceInputSessionService;
+  readonly managedBrowserProfile?: ManagedBrowserProfileController;
   readonly staticRoot?: string;
   readonly port?: number;
 }
@@ -108,6 +110,10 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       return;
     }
     if (error instanceof VoiceSessionServiceError) {
+      void reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      return;
+    }
+    if (error instanceof ManagedBrowserProfileServiceError) {
       void reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
       return;
     }
@@ -256,24 +262,33 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
 
   const parseRemoteRunTarget = (value: unknown): RemoteRunTarget => {
     const target = bodyObject(value);
-    const keys = Object.keys(target);
-    if (target.mode === "auto" && keys.length === 1 && keys[0] === "mode") return { mode: "auto" };
-    if (target.mode === "desktop" && keys.length === 1 && keys[0] === "mode") return { mode: "desktop" };
-    if (target.mode === "window" && keys.length === 2 && keys.includes("mode") && keys.includes("targetToken")) {
-      return { mode: "window", targetToken: requiredString(target, "targetToken", 128) };
+    if (Object.hasOwn(target, "switchWindows") && typeof target.switchWindows !== "boolean") {
+      throw new HostHttpError(400, "INVALID_REQUEST", "switchWindows must be a boolean.");
     }
-    if (target.mode === "browser" && keys.length === 1 && keys[0] === "mode") return { mode: "browser" };
-    if (target.mode === "browser" && keys.length === 2 && keys.includes("mode") && keys.includes("url") &&
+    const switchWindows = target.switchWindows === true;
+    const switchField = switchWindows ? { switchWindows: true as const } : {};
+    const hasTargetKeys = (expected: readonly string[]): boolean => {
+      const keys = Object.keys(target).filter((key) => key !== "switchWindows");
+      return keys.length === expected.length && keys.every((key) => expected.includes(key)) &&
+        Object.keys(target).every((key) => key === "switchWindows" || expected.includes(key));
+    };
+    if (target.mode === "auto" && hasTargetKeys(["mode"])) return { mode: "auto", ...switchField };
+    if (target.mode === "desktop" && hasTargetKeys(["mode"])) return { mode: "desktop", ...switchField };
+    if (target.mode === "window" && hasTargetKeys(["mode", "targetToken"])) {
+      return { mode: "window", targetToken: requiredString(target, "targetToken", 128), ...switchField };
+    }
+    if (target.mode === "browser" && hasTargetKeys(["mode"])) return { mode: "browser", ...switchField };
+    if (target.mode === "browser" && hasTargetKeys(["mode", "url"]) &&
         typeof target.url === "string" && target.url.length <= 2_048) {
-      return { mode: "browser", url: target.url };
+      return { mode: "browser", url: target.url, ...switchField };
     }
-    if (target.mode === "browser" && keys.length === 2 && keys.includes("mode") && keys.includes("sessionMode") &&
+    if (target.mode === "browser" && hasTargetKeys(["mode", "sessionMode"]) &&
         isBrowserSessionMode(target.sessionMode)) {
-      return { mode: "browser", sessionMode: target.sessionMode };
+      return { mode: "browser", sessionMode: target.sessionMode, ...switchField };
     }
-    if (target.mode === "browser" && keys.length === 3 && keys.includes("mode") && keys.includes("sessionMode") && keys.includes("url") &&
+    if (target.mode === "browser" && hasTargetKeys(["mode", "sessionMode", "url"]) &&
         isBrowserSessionMode(target.sessionMode) && typeof target.url === "string" && target.url.length <= 2_048) {
-      return { mode: "browser", sessionMode: target.sessionMode, url: target.url };
+      return { mode: "browser", sessionMode: target.sessionMode, url: target.url, ...switchField };
     }
     throw new HostHttpError(400, "INVALID_REQUEST", "target must contain only the fields for one supported selection mode.");
   };
@@ -452,6 +467,55 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     const choices = await options.api.listWindowTargets(session.deviceId);
     revalidateBrowserSession(request, session);
     return choices;
+  });
+
+  server.get("/api/managed-browser-profile", async (request) => {
+    const session = browserSession(request, false);
+    const state = await requireManagedBrowserProfile().getState();
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.put("/api/managed-browser-profile/preference", async (request) => {
+    const session = browserSession(request, true);
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "defaultSession")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only defaultSession is accepted.");
+    }
+    const state = await requireManagedBrowserProfile().setDefaultSession(body.defaultSession);
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.post("/api/managed-browser-profile/prepare", async (request) => {
+    const session = browserSession(request, true);
+    if (Object.keys(bodyObject(request.body)).length !== 0) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Prepare does not accept request fields.");
+    }
+    const state = await requireManagedBrowserProfile().prepare();
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.post("/api/managed-browser-profile/complete", async (request) => {
+    const session = browserSession(request, true);
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "operationId")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only operationId is accepted.");
+    }
+    const state = await requireManagedBrowserProfile().complete(body.operationId);
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.post("/api/managed-browser-profile/relogin", async (request) => {
+    const session = browserSession(request, true);
+    if (Object.keys(bodyObject(request.body)).length !== 0) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Relogin does not accept request fields.");
+    }
+    const state = await requireManagedBrowserProfile().relogin();
+    revalidateBrowserSession(request, session);
+    return state;
   });
 
   server.get("/api/voice/capabilities", async (request) => {
@@ -715,6 +779,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       for (const bySession of activeStreams.values()) {
         for (const subscriptions of bySession.values()) for (const close of [...subscriptions]) close();
       }
+      await options.managedBrowserProfile?.close?.();
       await server.close();
       await options.voiceInput?.close();
     },
@@ -725,6 +790,13 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       throw new VoiceSessionServiceError(503, "VOICE_UNAVAILABLE", "Voice input is not configured on this computer.");
     }
     return options.voiceInput;
+  }
+
+  function requireManagedBrowserProfile(): ManagedBrowserProfileController {
+    if (options.managedBrowserProfile === undefined) {
+      throw new HostHttpError(503, "MANAGED_BROWSER_UNAVAILABLE", "The Host has no managed browser profile service.");
+    }
+    return options.managedBrowserProfile;
   }
 }
 

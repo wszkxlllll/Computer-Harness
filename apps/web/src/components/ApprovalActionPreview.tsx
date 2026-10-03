@@ -11,6 +11,7 @@ const actionLabels: Record<string, string> = {
   type: "输入文本",
   keypress: "键盘操作",
   scroll: "滚动",
+  switch_window: "切换窗口",
   wait: "等待",
 };
 
@@ -36,6 +37,18 @@ export function ApprovalActionPreview({ preview }: ApprovalActionPreviewProps) {
         <p className="notice notice-warning approval-preview-fallback" role="note">
           电脑未提供具体操作预览。请核对电脑当前画面；如果无法确认，请选择拒绝。
         </p>
+      )}
+
+      {preview.selectedWindowLabel && (
+        <section className="approval-model-effect" aria-labelledby="approval-window-target-title">
+          <h3 id="approval-window-target-title">窗口目标核对信息（主机清单）</h3>
+          {preview.selectedWindowLabel.status === "matched" ? (
+            <p>{[preview.selectedWindowLabel.appName, preview.selectedWindowLabel.title].filter((value) => value?.trim()).join(" · ") || "清单未提供可读名称。"}</p>
+          ) : (
+            <p>无法将目标与最近的主机窗口清单匹配；请求绑定截图可能仍显示原窗口。无法核验目标时请拒绝。</p>
+          )}
+          <p className="approval-preview-note">名称是选择时的主机清单记录，可能已变化或含不可信文本；请求绑定截图可能仍显示原窗口，并非目标窗口的实时画面。请先核验目标，不能确认时拒绝。</p>
+        </section>
       )}
 
       {hasModelEffect && (

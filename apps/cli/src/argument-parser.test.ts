@@ -14,6 +14,7 @@ describe("CLI argument validation", () => {
       "--socket",
       "private.sock",
       "--planning",
+      "--window-switch",
       "--tui",
       "--help",
     ])).toEqual([
@@ -26,6 +27,7 @@ describe("CLI argument validation", () => {
       "--socket",
       "private.sock",
       "--planning",
+      "--window-switch",
       "--tui",
       "--help",
     ]);

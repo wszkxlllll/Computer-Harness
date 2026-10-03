@@ -14,14 +14,15 @@ import {
   type Viewport,
   type MonitorPolicyMode,
 } from "@computer-harness/runtime";
-import type { RuntimeEvent, AssetId, AssetRef, ComputerSessionId, ModelTurn, RunId, ToolCall, ToolCallId } from "@computer-harness/protocol";
+import type { RuntimeEvent, AssetId, AssetRef, ComputerSessionId, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId } from "@computer-harness/protocol";
 import type { WindowTargetInfo } from "./application-session.js";
 import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
 import { ApplicationSession } from "./application-session.js";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
-import { ApplicationRemoteRunApi, RemoteRunApiError } from "./remote-run-api.js";
+import { ApplicationRemoteRunApi, RemoteRunApiError, type ManagedBrowserProfileRunCoordinator } from "./remote-run-api.js";
 
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 function config(outputDir: string): ApplicationSessionConfig {
   return {
@@ -45,7 +46,12 @@ function config(outputDir: string): ApplicationSessionConfig {
   };
 }
 
-function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promise<void> = async () => undefined): Computer {
+function fixtureComputer(
+  screen: Viewport = viewport,
+  closeComputer: () => Promise<void> = async () => undefined,
+  windowInventory: readonly ComputerWindowOption[] = [],
+  switchWindowReceiptStatus: "completed" | "failed" | "refused" | "cancelled" | undefined = undefined,
+): Computer {
   let sequence = 0;
   const session: ComputerSession = {
     id: "remote-api-session" as ComputerSessionId,
@@ -61,10 +67,26 @@ function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promi
       return {
         capturedAt: "2026-09-26T00:00:0" + String(sequence) + ".000Z",
         viewport: screen,
+        surfaceRef,
         screenshot: { mediaType: "image/png" as const, data: new Uint8Array([3, 1, 4, sequence]) },
       };
     },
-    async execute(_session, action) { return { actionId: action.actionId, status: "completed" as const }; },
+    async execute(_session, action) {
+      if (action.kind === "switch_window" && switchWindowReceiptStatus !== undefined) {
+        if (switchWindowReceiptStatus === "completed") {
+          return {
+            actionId: action.actionId,
+            status: "completed" as const,
+            sessionAfter: {
+              ...session,
+            },
+          };
+        }
+        return { actionId: action.actionId, status: switchWindowReceiptStatus };
+      }
+      return { actionId: action.actionId, status: "completed" as const };
+    },
+    async listWindows() { return windowInventory; },
     async close() { await closeComputer(); },
   } as unknown as Computer;
 }
@@ -102,8 +124,10 @@ function createFixture(
     screen?: Viewport;
     windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
     allWindows?: readonly WindowTargetInfo[];
+    windowDiscoveryAvailable?: boolean;
     onActivateWindow?: (target: { pid: number; windowId: number }, showWindow: (window: WindowTargetInfo) => void) => void;
     managedBrowserProfile?: { readonly profileLabel: string; readonly profileRoot: string };
+    managedBrowserProfileCoordinator?: ManagedBrowserProfileRunCoordinator;
     inspectManagedBrowserProfile?: (profileRoot: string, profileLabel: string) => Promise<{ state: "ready" | "active" | "stale" | "unknown" | "unsafe"; markers: readonly ("profile_lock" | "devtools_port")[] }>;
     readManagedBrowserStartupUrls?: () => Promise<readonly string[]>;
     closeComputer?: () => Promise<void>;
@@ -112,6 +136,8 @@ function createFixture(
     onModelInput?: (input: ModelInput) => void;
     turnFactory?: (turnNumber: number, input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn | undefined;
     monitor?: MonitorPolicyMode;
+    windowInventory?: readonly ComputerWindowOption[];
+    switchWindowReceiptStatus?: "completed" | "failed" | "refused" | "cancelled";
   },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
@@ -146,7 +172,7 @@ function createFixture(
   session = new ApplicationSession({
     config: sessionConfig,
     owner: new InProcessEnvironmentOwner(),
-    windowDiscovery: {
+    ...(options.windowDiscoveryAvailable === false ? {} : { windowDiscovery: {
       listWindows: async () => {
         windowDiscoveryCalls.push({ type: "visible" });
         return options.windowSnapshots?.[windowReadIndex++] ?? windows;
@@ -159,12 +185,12 @@ function createFixture(
         windowDiscoveryCalls.push({ type: "activate", pid: target.pid, windowId: target.windowId });
         options.onActivateWindow?.(target, (window) => { windows = [...windows.filter((item) => item.pid !== window.pid || item.windowId !== window.windowId), window]; });
       },
-    },
+    } }),
     dependencies: {
       createProvider: () => providerFor(options, () => session.activeRun?.controller.getEvents() ?? []),
       createComputer: async ({ config: computerConfig }) => {
         if (computerConfig.kind === "cua") createdComputerConfigs.push(computerConfig);
-        return fixtureComputer(options.screen, options.closeComputer);
+        return fixtureComputer(options.screen, options.closeComputer, options.windowInventory, options.switchWindowReceiptStatus);
       },
       ...(options.guardDecisions === undefined ? {} : {
         createActionPolicy: () => ({
@@ -184,6 +210,7 @@ function createFixture(
     ...(options.runNotices === true ? { runNotices: { enabled: true, dynamicContentEnabled: options.runNoticeDynamicContent === true } } : {}),
     assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(resolve(handle.config.outputDir, "assets")),
     ...(options.managedBrowserProfile === undefined ? {} : { managedBrowserProfile: options.managedBrowserProfile }),
+    ...(options.managedBrowserProfileCoordinator === undefined ? {} : { managedBrowserProfileCoordinator: options.managedBrowserProfileCoordinator }),
     ...(inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile }),
     ...(options.readManagedBrowserStartupUrls === undefined ? {} : { readManagedBrowserStartupUrls: options.readManagedBrowserStartupUrls }),
     ...limits,
@@ -226,6 +253,9 @@ describe("ApplicationRemoteRunApi", () => {
       subscription.close();
       expect(events.some((event) => event.data?.type === "run.notice")).toBe(false);
       expect(events.some((event) => event.data?.type === "run.pending_request")).toBe(true);
+      const surfaceTransition = events.find((event) => event.data?.type === "run.surface_transition");
+      expect(surfaceTransition?.data).toMatchObject({ reason: "initial_observation", fromKind: null, toKind: "desktop", generation: 1 });
+      expect(JSON.stringify(surfaceTransition)).not.toContain(surfaceRef.surfaceId);
       const current = api.getRun("device-one", started.runId)!;
       await api.submitCommand("device-one", started.runId, {
         commandId: "answer-notices-off",
@@ -419,6 +449,7 @@ describe("ApplicationRemoteRunApi", () => {
           decisionObservationId: expect.any(String),
           capturedAt: expect.any(String),
           viewport: { width: 900, height: 900, coordinateSpace: "physical" },
+          surfaceRef: { surfaceId: surfaceRef.surfaceId, generation: surfaceRef.generation, kind: surfaceRef.kind },
         },
       });
       const evidence = pending.preview?.evidence;
@@ -473,6 +504,111 @@ describe("ApplicationRemoteRunApi", () => {
       expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
     } finally {
       session.activeRun?.controller.cancel("approval preview test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("completes the Host-listed switch under explicit opt-in without a separate approval", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-switch-opt-in-"));
+    const modelInputs: ModelInput[] = [];
+    const listCall: ToolCall = { id: "window-list-call" as ToolCallId, name: "list_windows", arguments: {} };
+    const switchCall: ToolCall = {
+      id: "window-switch-call" as ToolCallId,
+      name: "switch_window",
+      arguments: { windowRef: "wps-window-ref" },
+      declaredEffect: { effects: ["navigate"], target: "MODEL CLAIM ONLY", summary: "Switch to the requested app" },
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The switch completed.",
+      turns: [
+        { type: "tool_calls", calls: [listCall] },
+        { type: "tool_calls", calls: [switchCall] },
+      ],
+      onModelInput: (input) => modelInputs.push(input),
+      switchWindowReceiptStatus: "completed",
+      windowInventory: [
+        { windowRef: "fixture-current-ref", appName: "Fixture app", title: "Fixture window", isCurrent: true },
+        { windowRef: "wps-window-ref", appName: "WPS", title: "Review draft - unsaved", isCurrent: false },
+      ],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "window-switch-opt-in", "Open the listed document window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        switchWindows: true,
+      }, undefined, true);
+      await session.waitForActiveRun();
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.status).toBe("finished");
+      expect(snapshot.pendingRequest).toBeUndefined();
+      expect(snapshot.target).toMatchObject({ appName: "WPS", title: "Review draft - unsaved", provenance: "selected_target" });
+      expect(createdComputerConfigs.at(-1)).toMatchObject({ windowSwitch: "opened-windows-v1" });
+      expect(session.history.at(-1)?.outcome).toBe("succeeded");
+      expect(modelInputs.length).toBeGreaterThanOrEqual(2);
+      expect(modelInputs.every((input) => input.tools.some((tool) => tool.name === "list_windows"))).toBe(true);
+      expect(modelInputs.every((input) => input.tools.some((tool) => tool.name === "switch_window"))).toBe(true);
+      expect(modelInputs[0]?.tools).toEqual(modelInputs[1]?.tools);
+      expect(modelInputs[0]?.system).toBe(modelInputs[1]?.system);
+      expect(JSON.stringify(modelInputs[1]?.messages)).toContain("Review draft - unsaved");
+      expect(started).toBeDefined();
+
+      const events: unknown[] = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => events.push(event));
+      subscription.close();
+      expect(JSON.stringify(events)).toContain("WPS");
+      expect(JSON.stringify(events)).not.toMatch(/"pid"|"windowId"/iu);
+    } finally {
+      session.activeRun?.controller.cancel("window-switch explicit opt-in cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retain the starting target after a refused switch action has begun", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-switch-unknown-"));
+    const listCall: ToolCall = { id: "unknown-window-list-call" as ToolCallId, name: "list_windows", arguments: {} };
+    const switchCall: ToolCall = {
+      id: "unknown-window-switch-call" as ToolCallId,
+      name: "switch_window",
+      arguments: { windowRef: "wps-window-ref" },
+    };
+    const { api, session } = createFixture(outputDir, {
+      summary: "The switch could not be completed.",
+      turns: [
+        { type: "tool_calls", calls: [listCall] },
+        { type: "tool_calls", calls: [switchCall] },
+      ],
+      windowInventory: [
+        { windowRef: "fixture-current-ref", appName: "Fixture app", title: "Fixture window", isCurrent: true },
+        { windowRef: "wps-window-ref", appName: "WPS", title: "Review draft", isCurrent: false },
+      ],
+      switchWindowReceiptStatus: "refused",
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "window-switch-unknown", "Switch to the listed window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        switchWindows: true,
+      });
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "finished", "failed window switch did not terminate the Run");
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.outcome).toBe("failed");
+      expect(snapshot.target).toEqual({ provenance: "unknown_after_switch" });
+
+      const projectedEvents: Array<{ data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") projectedEvents.push(event as unknown as { data?: Record<string, unknown> });
+      });
+      subscription.close();
+      const targetEvents = projectedEvents.filter((event) => event.data?.type === "run.target");
+      expect(targetEvents.at(-1)?.data?.target).toEqual({ provenance: "unknown_after_switch" });
+      expect(JSON.stringify(targetEvents.slice(-2))).not.toContain("Fixture window");
+    } finally {
       await session.waitForActiveRun();
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -599,7 +735,11 @@ describe("ApplicationRemoteRunApi", () => {
 
   it("preserves completed replies and authorized screenshot assets while isolating Runs by paired device", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-owner-"));
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "The itinerary is saved in Documents." });
+    const modelInputs: ModelInput[] = [];
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The itinerary is saved in Documents.",
+      onModelInput: (input) => modelInputs.push(input),
+    });
     try {
       const choices = await api.listWindowTargets("device-one");
       expect(choices.candidates).toHaveLength(1);
@@ -616,7 +756,9 @@ describe("ApplicationRemoteRunApi", () => {
       const completed = api.getRun("device-one", first.runId)!;
       expect(completed.status).toBe("finished");
       expect(completed.reply).toBe("The itinerary is saved in Documents.");
-      expect(completed.target).toEqual({ appName: "Fixture app", title: "Fixture window" });
+      expect(completed.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
+      expect(modelInputs[0]?.tools.map((tool) => tool.name)).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
+      expect(JSON.stringify(modelInputs[0])).not.toMatch(/list_windows|switch_window/iu);
       expect(JSON.stringify(completed)).not.toMatch(/pid|windowId/iu);
       expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: 42, windowId: 1001 }, windowDeliveryMode: "foreground" });
       await expect(api.startRun("device-one", "start-reuse-target", "Try the same target again", choices.candidates[0]!.token))
@@ -627,6 +769,11 @@ describe("ApplicationRemoteRunApi", () => {
         .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
       await expect(api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token, undefined, true))
         .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await expect(api.startRun("device-one", "start-once", "Find the saved itinerary", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        switchWindows: true,
+      })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
       expect(completed.latestAssetId).toBeTruthy();
       expect(JSON.stringify(completed)).not.toContain("assets/");
 
@@ -657,10 +804,81 @@ describe("ApplicationRemoteRunApi", () => {
       expect(api.getRun("device-one", run.runId)?.target).toEqual({
         appName: "Primary desktop",
         title: "Entire foreground desktop",
+        provenance: "starting_target",
       });
       expect(windowDiscoveryCalls).toEqual([]);
       expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
       expect(createdComputerConfigs[0]?.grounding).toBe("off");
+      expect(createdComputerConfigs[0]).not.toHaveProperty("managedBrowserCompanion");
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts a desktop Run with a saved browser companion only when cross-window switching is opted in", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-switch-companion-"));
+    const profileRoot = "C:\\HarnessOwned\\managed-browser-profiles";
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot };
+    let active = false;
+    let released = 0;
+    const coordinator: ManagedBrowserProfileRunCoordinator = {
+      getDefaultSession: () => "saved",
+      async acquireForRun() {
+        if (active) throw Object.assign(new Error("profile busy"), { code: "PROFILE_BUSY" });
+        active = true;
+        return async () => { active = false; released += 1; };
+      },
+    };
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      askFirst: true,
+      summary: "The user confirmed the request.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      const run = await api.startRun("device-one", "desktop-switch-companion", "Inspect the desktop popup", {
+        mode: "desktop", switchWindows: true,
+      });
+      await waitFor(() => api.getRun("device-one", run.runId)?.status === "waiting_user", "desktop companion Run did not pause for confirmation");
+      expect(windowDiscoveryCalls).toEqual([]);
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserCompanion: true,
+        managedBrowserUrl: "about:blank",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "mobile",
+        managedBrowserProfileRoot: profileRoot,
+        windowSwitch: "opened-windows-v1",
+        grounding: "hybrid-catalog-v1",
+      });
+      expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
+      expect(session.activeRun?.config).toMatchObject({ windowSwitch: "opened-windows-v1", windowHandoff: "confirm-v1" });
+      expect(JSON.stringify(run)).not.toContain(profileRoot);
+      expect(active).toBe(true);
+      await session.submitUserInput("Continue");
+      await session.waitForActiveRun();
+      await waitFor(() => released === 1, "desktop saved-profile reservation was not released after Run cleanup");
+    } finally {
+      session.activeRun?.controller.cancel("desktop companion projection test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a desktop switch before Run allocation when the Host cannot list windows", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-switch-unsupported-"));
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Should not run.",
+      windowDiscoveryAvailable: false,
+    });
+    try {
+      await expect(api.startRun("device-one", "desktop-switch-unsupported", "Inspect the desktop popup", {
+        mode: "desktop", switchWindows: true,
+      })).rejects.toMatchObject({ code: "INVALID_TARGET" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+      expect(createdComputerConfigs).toEqual([]);
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -755,7 +973,7 @@ describe("ApplicationRemoteRunApi", () => {
         api.startRun("device-one", "auto-unique", "Open Fixture app and check the report", { mode: "auto" }),
       ]);
       expect(repeated.runId).toBe(first.runId);
-      expect(first.target).toEqual({ appName: "Fixture app", title: "Fixture window" });
+      expect(first.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
       expect(JSON.stringify(first)).not.toMatch(/pid|windowId/iu);
       await session.waitForActiveRun();
       expect(createdComputerConfigs[0]).toMatchObject({
@@ -783,7 +1001,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const run = await api.startRun("device-one", "auto-wechat-minimized", "在微信上给测试联系人发消息", { mode: "auto" });
-      expect(run.target).toEqual({ appName: "Weixin", title: "微信" });
+      expect(run.target).toEqual({ appName: "Weixin", title: "微信", provenance: "starting_target" });
       expect(windowDiscoveryCalls).toEqual([
         { type: "all" },
         { type: "visible" },
@@ -868,6 +1086,147 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
+  it("requires confirmed setup before saved browser targets or saved browser companions start", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-profile-setup-required-"));
+    const coordinator: ManagedBrowserProfileRunCoordinator = {
+      getDefaultSession: () => "saved",
+      async acquireForRun() { throw Object.assign(new Error("profile needs setup"), { code: "PROFILE_NOT_READY" }); },
+    };
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "Should not run.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      await expect(api.startRun("device-one", "saved-browser-before-setup", "Open the travel site", {
+        mode: "browser", url: "https://travel.example",
+      })).rejects.toMatchObject({ code: "MANAGED_BROWSER_SETUP_REQUIRED" });
+      await expect(api.startRun("device-one", "saved-companion-before-setup", "Open Fixture app", {
+        mode: "auto", switchWindows: true,
+      })).rejects.toMatchObject({ code: "MANAGED_BROWSER_SETUP_REQUIRED" });
+      await expect(api.startRun("device-one", "saved-desktop-before-setup", "Inspect the desktop window", {
+        mode: "desktop", switchWindows: true,
+      })).rejects.toMatchObject({ code: "MANAGED_BROWSER_SETUP_REQUIRED" });
+      expect(windowDiscoveryCalls).toEqual([]);
+      expect(createdComputerConfigs).toEqual([]);
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("projects the Host default onto saved browser and native cross-window companion Runs", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-profile-default-saved-"));
+    const profileRoot = "C:\\HarnessOwned\\managed-browser-profiles";
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot };
+    let active = false;
+    let acquired = 0;
+    let released = 0;
+    const coordinator: ManagedBrowserProfileRunCoordinator = {
+      getDefaultSession: () => "saved",
+      async acquireForRun() {
+        if (active) throw Object.assign(new Error("profile busy"), { code: "PROFILE_BUSY" });
+        active = true;
+        acquired += 1;
+        return async () => { active = false; released += 1; };
+      },
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      askFirst: true,
+      summary: "The user confirmed the request.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const companion = await api.startRun("device-one", "saved-window-companion", "Open Fixture app", {
+        mode: "window", targetToken: choices.candidates[0]!.token, switchWindows: true,
+      });
+      await waitFor(() => api.getRun("device-one", companion.runId)?.status === "waiting_user", "saved companion Run did not pause for confirmation");
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserCompanion: true,
+        managedBrowserUrl: "about:blank",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "mobile",
+        managedBrowserProfileRoot: profileRoot,
+        windowSwitch: "opened-windows-v1",
+      });
+      expect(JSON.stringify(companion)).not.toContain(profileRoot);
+      expect(active).toBe(true);
+
+      await session.submitUserInput("Continue");
+      await session.waitForActiveRun();
+      await waitFor(() => released === 1, "saved profile reservation was not released after Run cleanup");
+
+      const browser = await api.startRun("device-one", "saved-browser-default", "Open the saved travel page", {
+        mode: "browser", url: "https://travel.example",
+      });
+      expect(createdComputerConfigs[1]).toMatchObject({
+        managedBrowserUrl: "https://travel.example/",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "mobile",
+        managedBrowserProfileRoot: profileRoot,
+      });
+      expect(createdComputerConfigs[1]).not.toHaveProperty("managedBrowserCompanion");
+      expect(acquired).toBe(2);
+      session.activeRun?.controller.cancel("saved profile projection test cleanup");
+      await session.waitForActiveRun();
+      await waitFor(() => released === 2, "saved browser reservation was not released after Run cleanup");
+      expect(JSON.stringify(browser)).not.toContain(profileRoot);
+
+      const nativeChoices = await api.listWindowTargets("device-one");
+      const nativeWithoutSwitch = await api.startRun("device-one", "saved-native-no-switch", "Open Fixture app", {
+        mode: "window", targetToken: nativeChoices.candidates[0]!.token, switchWindows: false,
+      });
+      await waitFor(() => api.getRun("device-one", nativeWithoutSwitch.runId)?.status === "waiting_user", "native Run did not pause for confirmation");
+      expect(createdComputerConfigs[2]).toMatchObject({ windowSwitch: "off" });
+      expect(createdComputerConfigs[2]).not.toHaveProperty("managedBrowserCompanion");
+      expect(acquired).toBe(2);
+      expect(active).toBe(false);
+      session.activeRun?.controller.cancel("saved profile projection test cleanup");
+      await session.waitForActiveRun();
+    } finally {
+      session.activeRun?.controller.cancel("saved profile projection test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a temporary Host default without preparing or reserving the saved profile", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-profile-default-temporary-"));
+    const acquireForRun = vi.fn(async () => { throw new Error("temporary mode must not reserve the saved profile"); });
+    const coordinator: ManagedBrowserProfileRunCoordinator = { getDefaultSession: () => "temporary", acquireForRun };
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Temporary browser opened.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      const browser = await api.startRun("device-one", "temporary-browser-default", "Open a temporary page", {
+        mode: "browser", url: "https://example.test",
+      });
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserUrl: "https://example.test/",
+        managedBrowserProfileMode: "ephemeral",
+        grounding: "hybrid-catalog-v1",
+      });
+      expect(createdComputerConfigs[0]).not.toHaveProperty("managedBrowserCompanion");
+      expect(acquireForRun).not.toHaveBeenCalled();
+      expect(JSON.stringify(browser)).not.toContain("C:\\\\HarnessOwned");
+      await session.waitForActiveRun();
+    } finally {
+      session.activeRun?.controller.cancel("temporary profile projection test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("opens the explicitly requested browser with the injected Host profile and redacts URL and profile path", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-managed-browser-"));
     const profileRoot = "C:\\HarnessOwned\\managed-browser-profiles";
@@ -884,7 +1243,7 @@ describe("ApplicationRemoteRunApi", () => {
         api.startRun("device-one", "browser-once", "Check my ticket", { mode: "browser", sessionMode: "saved", url }),
       ]);
       expect(repeated.runId).toBe(first.runId);
-      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "tickets.example" });
+      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "tickets.example", provenance: "starting_target" });
       expect(JSON.stringify(first)).not.toContain("token=private");
       expect(JSON.stringify(first)).not.toContain(profileRoot);
       expect(createdComputerConfigs[0]).toMatchObject({
@@ -968,7 +1327,7 @@ describe("ApplicationRemoteRunApi", () => {
         api.startRun("device-one", "browser-blank", "Open a blank managed page", { mode: "browser", url: " \t " }),
       ]);
       expect(sameCommandWithEmptyUrl.runId).toBe(first.runId);
-      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "New tab", provenance: "starting_target" });
       expect(createdComputerConfigs[0]).toMatchObject({
         managedBrowserUrl: "about:blank",
         managedBrowserProfileMode: "ephemeral",
@@ -1144,7 +1503,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const run = await api.startRun("device-one", "saved-browser", "Check the prepared travel site", { mode: "browser", sessionMode: "saved" });
-      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "travel.example" });
+      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "travel.example", provenance: "starting_target" });
       const sameCommandWithWhitespace = await api.startRun("device-one", "saved-browser", "Check the prepared travel site", { mode: "browser", sessionMode: "saved", url: " \t " });
       expect(sameCommandWithWhitespace.runId).toBe(run.runId);
       expect(createdComputerConfigs[0]).toMatchObject({
@@ -1155,7 +1514,7 @@ describe("ApplicationRemoteRunApi", () => {
       });
       await session.waitForActiveRun();
       const explicitBlank = await api.startRun("device-one", "saved-browser-explicit-blank", "Open a saved blank page", { mode: "browser", sessionMode: "saved", url: "about:blank" });
-      expect(explicitBlank.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(explicitBlank.target).toEqual({ appName: "Harness-managed browser", title: "New tab", provenance: "starting_target" });
       expect(createdComputerConfigs.at(-1)).toMatchObject({ managedBrowserUrl: "about:blank", managedBrowserProfileMode: "persistent" });
     } finally {
       session.activeRun?.controller.cancel("saved browser restore test cleanup");
@@ -1176,7 +1535,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const run = await api.startRun("device-one", "saved-browser-empty", "Open the saved browser", { mode: "browser", sessionMode: "saved" });
-      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "New tab", provenance: "starting_target" });
       expect(createdComputerConfigs[0]).toMatchObject({ managedBrowserUrl: "about:blank", managedBrowserProfileMode: "persistent" });
     } finally {
       session.activeRun?.controller.cancel("empty saved browser test cleanup");
@@ -1210,6 +1569,10 @@ describe("ApplicationRemoteRunApi", () => {
       await expect(api.startRun("device-one", "browser-data-url", "Check a page", { mode: "browser", url: "data:text/html,hello" }))
         .rejects.toMatchObject({ code: "INVALID_TARGET" });
       await expect(api.startRun("device-one", "browser-javascript-url", "Check a page", { mode: "browser", url: "javascript:alert(1)" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "desktop-malformed-switch", "Inspect a popup", { mode: "desktop", switchWindows: "yes" } as never))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "malformed-switch-flag", "Open a listed app", { mode: "auto", switchWindows: "yes" } as never))
         .rejects.toMatchObject({ code: "INVALID_TARGET" });
       expect(createdComputerConfigs).toEqual([]);
       expect(session.activeRun).toBeUndefined();

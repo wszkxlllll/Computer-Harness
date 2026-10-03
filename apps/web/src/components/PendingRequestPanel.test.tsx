@@ -55,6 +55,12 @@ describe("pending request panel", () => {
               { operation: "type", kind: "type", typedCharacterCount: 12 },
               { operation: "hotkey", kind: "keypress", keys: ["CTRL", "L"] },
             ],
+            selectedWindowLabel: {
+              status: "matched",
+              source: "latest_list_windows_inventory",
+              appName: "WPS",
+              title: "Review draft - unsaved",
+            },
             modelDeclaredEffect: {
               target: "The save button",
               summary: "Save the updated preferences",
@@ -79,6 +85,9 @@ describe("pending request panel", () => {
     expect(screen.getByText("模型说明（未经验证）")).toBeDefined();
     expect(screen.getByText("The save button")).toBeDefined();
     expect(screen.getByText("Save the updated preferences")).toBeDefined();
+    expect(screen.getByText("窗口目标核对信息（主机清单）")).toBeDefined();
+    expect(screen.getByText("WPS · Review draft - unsaved")).toBeDefined();
+    expect(screen.getByText(/选择时/)).toBeDefined();
     const moreDetails = screen.getByText("更多信息").closest("details") as HTMLDetailsElement;
     expect(moreDetails.open).toBe(false);
     moreDetails.open = true;
@@ -87,6 +96,30 @@ describe("pending request panel", () => {
     expect(document.querySelectorAll(".approval-action-list > li")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "允许这项操作" })).toBeDefined();
     expect(screen.getByRole("button", { name: "拒绝" })).toBeDefined();
+  });
+
+  it("fails closed when a switch approval has no host-listed label", () => {
+    render(
+      <PendingRequestPanel
+        request={{
+          requestId: "approval-switch-unlisted",
+          kind: "approval",
+          reason: "Confirm the target.",
+          preview: {
+            actions: [{ operation: "switch_window", kind: "switch_window" }],
+            selectedWindowLabel: { status: "unavailable", source: "unavailable" },
+          },
+        }}
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={vi.fn()}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/无法将目标与最近的主机窗口清单匹配/)).toBeDefined();
+    expect(screen.getAllByText(/请求绑定截图可能仍显示原窗口/).length).toBeGreaterThan(0);
+    expect(document.querySelector(".approval-preview-content")?.textContent).not.toContain("WPS");
   });
 
   it("gives a truthful fallback and keeps the approval decision available without a preview", () => {

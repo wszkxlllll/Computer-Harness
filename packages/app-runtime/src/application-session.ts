@@ -35,7 +35,7 @@ export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
 /** Feature-only overrides selected by an interactive UI for the next Run. */
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
-  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding" | "windowHandoff"
+  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding" | "windowHandoff" | "windowSwitch"
 >> & {
   windowTarget?: ApplicationSessionWindowTarget | null;
   windowDeliveryMode?: "background" | "foreground" | null;
@@ -44,6 +44,8 @@ export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   managedBrowserProfileLabel?: string;
   /** Host-private and never projected to Provider or Run reports. */
   managedBrowserProfileRoot?: string;
+  /** Run-only opt-in projected onto the CUA Computer at the Host boundary. */
+  managedBrowserCompanion?: boolean;
 };
 
 /** Per-Run non-feature input kept separate from computer and Guard overrides. */
@@ -123,6 +125,10 @@ export class ApplicationSession {
     return this.environmentIdentity;
   }
 
+  public get supportsWindowSwitching(): boolean {
+    return this.config.computer.kind === "cua" && this.windowDiscovery !== undefined;
+  }
+
   public inspectEnvironment(): EnvironmentLeaseInfo | undefined {
     return this.owner.inspect(this.environmentIdentity);
   }
@@ -172,6 +178,7 @@ export class ApplicationSession {
       managedBrowserProfileMode,
       managedBrowserProfileLabel,
       managedBrowserProfileRoot,
+      managedBrowserCompanion,
       ...featureConfig
     } = featureOverrides;
     const config: ResolvedRunConfig = {
@@ -208,6 +215,14 @@ export class ApplicationSession {
         ...(managedBrowserProfileMode === undefined ? {} : { managedBrowserProfileMode }),
         ...(managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel }),
         ...(managedBrowserProfileRoot === undefined ? {} : { managedBrowserProfileRoot }),
+      };
+    }
+    if (managedBrowserCompanion !== undefined) {
+      if (config.computer.kind !== "cua") throw new Error("managed browser companion requires the CUA computer");
+      const { managedBrowserCompanion: _existingCompanion, ...computer } = config.computer;
+      config.computer = {
+        ...computer,
+        ...(managedBrowserCompanion ? { managedBrowserCompanion: true } : {}),
       };
     }
     const lease = this.owner.acquire(this.environmentIdentity, runId);

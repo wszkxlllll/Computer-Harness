@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { RemoteRunApiError, type RemoteRunApi, type RemoteRunSnapshot, type RemoteRunTargetInput } from "@computer-harness/app-runtime";
 import type { AssetId, RunAssistantPreferencesSnapshot, RunId } from "@computer-harness/protocol";
 import { createHostServer } from "./server.js";
+import { ManagedBrowserProfileServiceError, type ManagedBrowserProfileStateView } from "./managed-browser-profile-service.js";
 
 const localOrigin = "http://localhost:4317";
 const relayOrigin = "https://relay.example";
@@ -60,6 +61,149 @@ function jsonResponse<T>(response: { json(): T }): T {
 }
 
 describe("Host HTTP boundary", () => {
+  it("exposes only the authenticated managed-profile contract and keeps commands idempotent", async () => {
+    const operationId = "11111111-1111-4111-8111-111111111111";
+    let state: ManagedBrowserProfileStateView = {
+      status: "unprepared",
+      defaultSession: "saved",
+      commands: {
+        prepare: "/api/managed-browser-profile/prepare",
+        complete: "/api/managed-browser-profile/complete",
+        relogin: "/api/managed-browser-profile/relogin",
+      },
+    };
+    const profile = {
+      getState: vi.fn(async () => state),
+      setDefaultSession: vi.fn(async (value: unknown) => {
+        state = { ...state, defaultSession: value as "saved" | "temporary" };
+        return state;
+      }),
+      prepare: vi.fn(async () => {
+        state = { ...state, status: "preparing", operationId };
+        return state;
+      }),
+      complete: vi.fn(async (value: unknown) => {
+        if (value !== operationId) throw new ManagedBrowserProfileServiceError(409, "PROFILE_OPERATION_STALE", "stale operation");
+        const { operationId: _operationId, ...ready } = { ...state, status: "ready" as const };
+        state = ready;
+        return state;
+      }),
+      relogin: vi.fn(async () => {
+        state = { ...state, status: "preparing", operationId };
+        return state;
+      }),
+    };
+    const host = createHostServer({
+      api: fakeApi(),
+      allowedOrigins: [localOrigin, relayOrigin],
+      bridgeOrigin: relayOrigin,
+      managedBrowserProfile: profile,
+    });
+    try {
+      const unauthorized = await host.server.inject({ method: "GET", url: "/api/managed-browser-profile", headers: { origin: relayOrigin } });
+      expect(unauthorized.statusCode).toBe(401);
+
+      const localSession = await host.server.inject({ method: "GET", url: "/api/local/session", headers: { origin: localOrigin } });
+      const localCsrf = jsonResponse<{ csrfToken: string }>(localSession).csrfToken;
+      const challenge = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+        method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+      }));
+      const token = new URL(challenge.pairingUrl).searchParams.get("token");
+      const pair = jsonResponse<{ requestId: string }>(await host.server.inject({
+        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Profile phone" },
+      }));
+      await host.server.inject({
+        method: "POST", url: "/api/local/pairing/requests/" + pair.requestId + "/confirm",
+        headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+      });
+      const paired = await host.server.inject({ method: "POST", url: "/api/pair/requests/" + pair.requestId + "/session", headers: { origin: relayOrigin }, payload: {} });
+      const cookie = String(paired.headers["set-cookie"]).split(";")[0];
+      const pairedBody = jsonResponse<{ csrfToken: string; deviceId: string }>(paired);
+      const csrf = pairedBody.csrfToken;
+      const sessionToken = cookie.split("=")[1] ?? "";
+      const headers = { origin: relayOrigin, cookie, "x-csrf-token": csrf };
+
+      const status = await host.server.inject({ method: "GET", url: "/api/managed-browser-profile", headers });
+      expect(status.statusCode).toBe(200);
+      expect(jsonResponse(status)).toMatchObject({ status: "unprepared", defaultSession: "saved" });
+      expect(JSON.stringify(status.json())).not.toMatch(/profileRoot|profileLabel|cookie|credential|pid|windowId/iu);
+
+      const missingCsrf = await host.server.inject({
+        method: "PUT", url: "/api/managed-browser-profile/preference", headers: { origin: relayOrigin, cookie }, payload: { defaultSession: "temporary" },
+      });
+      expect(missingCsrf.statusCode).toBe(403);
+      expect(profile.setDefaultSession).not.toHaveBeenCalled();
+
+      const extraPreferenceField = await host.server.inject({
+        method: "PUT", url: "/api/managed-browser-profile/preference", headers, payload: { defaultSession: "temporary", profileRoot: "C:\\client" },
+      });
+      expect(extraPreferenceField.statusCode).toBe(400);
+      const firstPreference = await host.server.inject({ method: "PUT", url: "/api/managed-browser-profile/preference", headers, payload: { defaultSession: "temporary" } });
+      const repeatedPreference = await host.server.inject({ method: "PUT", url: "/api/managed-browser-profile/preference", headers, payload: { defaultSession: "temporary" } });
+      expect(jsonResponse(firstPreference)).toMatchObject({ defaultSession: "temporary" });
+      expect(jsonResponse(repeatedPreference)).toEqual(jsonResponse(firstPreference));
+      expect(profile.setDefaultSession).toHaveBeenCalledTimes(2);
+
+      const missingCommandCsrf = await host.server.inject({
+        method: "POST", url: "/api/managed-browser-profile/prepare", headers: { origin: relayOrigin, cookie }, payload: {},
+      });
+      expect(missingCommandCsrf.statusCode).toBe(403);
+      const prepareWithExtraField = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/prepare", headers, payload: { profileRoot: "C:\\client" } });
+      expect(prepareWithExtraField.statusCode).toBe(400);
+
+      const preparation = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/prepare", headers, payload: {} });
+      const repeatedPreparation = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/prepare", headers, payload: {} });
+      expect(preparation.statusCode).toBe(200);
+      expect(jsonResponse<{ operationId: string }>(repeatedPreparation).operationId).toBe(operationId);
+
+      const staleComplete = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/complete", headers, payload: { operationId: "22222222-2222-4222-8222-222222222222" } });
+      expect(staleComplete.statusCode).toBe(409);
+      const malformedComplete = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/complete", headers, payload: { operationId, profileRoot: "C:\\client" } });
+      expect(malformedComplete.statusCode).toBe(400);
+      const completed = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/complete", headers, payload: { operationId } });
+      const repeatedComplete = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/complete", headers, payload: { operationId } });
+      expect(jsonResponse(completed)).toMatchObject({ status: "ready", defaultSession: "temporary" });
+      expect(jsonResponse(repeatedComplete)).toEqual(jsonResponse(completed));
+
+      const relogin = await host.server.inject({ method: "POST", url: "/api/managed-browser-profile/relogin", headers, payload: {} });
+      expect(jsonResponse(relogin)).toMatchObject({ status: "preparing", operationId });
+
+      const bridgeStatus = await host.relayHandler.request({
+        type: "bridge.request", requestId: "profile-bridge-status", method: "GET", path: "/api/managed-browser-profile",
+        deviceId: pairedBody.deviceId, sessionToken,
+      });
+      expect(bridgeStatus.statusCode).toBe(200);
+      expect(bridgeStatus.body).toMatchObject({ status: "preparing", defaultSession: "temporary" });
+      const bridgeMissingCsrf = await host.relayHandler.request({
+        type: "bridge.request", requestId: "profile-bridge-missing-csrf", method: "PUT", path: "/api/managed-browser-profile/preference",
+        deviceId: pairedBody.deviceId, sessionToken, body: { defaultSession: "saved" },
+      });
+      expect(bridgeMissingCsrf.statusCode).toBe(403);
+      const bridgePreference = await host.relayHandler.request({
+        type: "bridge.request", requestId: "profile-bridge-preference", method: "PUT", path: "/api/managed-browser-profile/preference",
+        deviceId: pairedBody.deviceId, sessionToken, csrfToken: csrf, body: { defaultSession: "saved" },
+      });
+      expect(bridgePreference.statusCode).toBe(200);
+      const bridgePrepare = await host.relayHandler.request({
+        type: "bridge.request", requestId: "profile-bridge-prepare", method: "POST", path: "/api/managed-browser-profile/prepare",
+        deviceId: pairedBody.deviceId, sessionToken, csrfToken: csrf, body: {},
+      });
+      expect(bridgePrepare.statusCode).toBe(200);
+      const bridgeComplete = await host.relayHandler.request({
+        type: "bridge.request", requestId: "profile-bridge-complete", method: "POST", path: "/api/managed-browser-profile/complete",
+        deviceId: pairedBody.deviceId, sessionToken, csrfToken: csrf, body: { operationId },
+      });
+      expect(bridgeComplete.statusCode).toBe(200);
+      const bridgeRelogin = await host.relayHandler.request({
+        type: "bridge.request", requestId: "profile-bridge-relogin", method: "POST", path: "/api/managed-browser-profile/relogin",
+        deviceId: pairedBody.deviceId, sessionToken, csrfToken: csrf, body: {},
+      });
+      expect(bridgeRelogin.statusCode).toBe(200);
+    } finally {
+      await host.close();
+    }
+  });
+
   it("requires local confirmation, HttpOnly session cookies, CSRF, and revocable paired devices", async () => {
     const revoked: string[] = [];
     const api = fakeApi();
@@ -206,6 +350,13 @@ describe("Host HTTP boundary", () => {
         payload: { commandId: "start-auto", goal: "Open a matching app", target: { mode: "auto" } },
       });
       expect(autoStart.statusCode).toBe(202);
+      const autoSwitchStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-auto-switch", goal: "Open a listed app", target: { mode: "auto", switchWindows: true } },
+      });
+      expect(autoSwitchStart.statusCode).toBe(202);
       const desktopStart = await host.server.inject({
         method: "POST",
         url: "/api/runs",
@@ -213,6 +364,34 @@ describe("Host HTTP boundary", () => {
         payload: { commandId: "start-desktop", goal: "Inspect a desktop popup", target: { mode: "desktop" } },
       });
       expect(desktopStart.statusCode).toBe(202);
+      const desktopSwitchStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-desktop-switch", goal: "Inspect a popup", target: { mode: "desktop", switchWindows: true } },
+      });
+      expect(desktopSwitchStart.statusCode).toBe(202);
+      const desktopNoSwitchStart = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-desktop-no-switch", goal: "Inspect a popup", target: { mode: "desktop", switchWindows: false } },
+      });
+      expect(desktopNoSwitchStart.statusCode).toBe(202);
+      const malformedDesktopSwitchFlag = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-desktop-malformed-switch", goal: "Inspect a popup", target: { mode: "desktop", switchWindows: "yes" } },
+      });
+      expect(malformedDesktopSwitchFlag.statusCode).toBe(400);
+      const malformedSwitchFlag = await host.server.inject({
+        method: "POST",
+        url: "/api/runs",
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { commandId: "start-malformed-switch", goal: "Open a listed app", target: { mode: "auto", switchWindows: "yes" } },
+      });
+      expect(malformedSwitchFlag.statusCode).toBe(400);
       const browserStart = await host.server.inject({
         method: "POST",
         url: "/api/runs",
@@ -244,6 +423,9 @@ describe("Host HTTP boundary", () => {
       expect(targetsReceived).toEqual([
         targetToken,
         { mode: "auto" },
+        { mode: "auto", switchWindows: true },
+        { mode: "desktop" },
+        { mode: "desktop", switchWindows: true },
         { mode: "desktop" },
         { mode: "browser", url: "https://example.test/path" },
         { mode: "browser" },

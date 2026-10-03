@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendVoiceAudio,
+  completeManagedBrowserLogin,
   createRun,
   finishVoiceInput,
+  getManagedBrowserProfileSettings,
   getVoiceInputCapabilities,
   listRuns,
   listWindowTargets,
+  prepareManagedBrowserLogin,
+  reloginManagedBrowser,
+  setManagedBrowserDefaultSession,
   setPhoneCsrfToken,
   startVoiceInput,
 } from "./api";
@@ -26,6 +31,69 @@ describe("API error presentation", () => {
       message: "电脑当前离线或无法连接。确认电脑已开机并运行 Harness。",
       code: "host_unavailable",
     });
+  });
+});
+
+describe("managed-browser profile Settings API contract", () => {
+  it("uses the frozen read, preference, prepare, complete, and relogin routes", async () => {
+    const ready = {
+      status: "ready",
+      defaultSession: "saved",
+      commands: { prepare: "prepare", complete: "complete", relogin: "relogin" },
+      profileLabel: "must-not-reach-the-phone",
+    };
+    const preparing = {
+      ...ready,
+      status: "preparing",
+      operationId: "11111111-1111-4111-8111-111111111111",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(ready), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...ready, defaultSession: "temporary" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(preparing), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(ready), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(preparing), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setPhoneCsrfToken("phone-csrf");
+
+    await expect(getManagedBrowserProfileSettings()).resolves.toEqual({
+      status: "ready",
+      defaultSession: "saved",
+      commands: { prepare: "prepare", complete: "complete", relogin: "relogin" },
+    });
+    await setManagedBrowserDefaultSession("temporary");
+    await prepareManagedBrowserLogin();
+    await completeManagedBrowserLogin("11111111-1111-4111-8111-111111111111");
+    await reloginManagedBrowser();
+
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      "/api/managed-browser-profile",
+      "/api/managed-browser-profile/preference",
+      "/api/managed-browser-profile/prepare",
+      "/api/managed-browser-profile/complete",
+      "/api/managed-browser-profile/relogin",
+    ]);
+    const requests = fetchMock.mock.calls.map(([, init]) => init as RequestInit);
+    expect(requests.map((request) => request.method ?? "GET")).toEqual(["GET", "PUT", "POST", "POST", "POST"]);
+    expect(requests.slice(1).map((request) => JSON.parse(String(request.body)))).toEqual([
+      { defaultSession: "temporary" },
+      {},
+      { operationId: "11111111-1111-4111-8111-111111111111" },
+      {},
+    ]);
+    for (const request of requests.slice(1)) {
+      expect((request.headers as Headers).get("X-CSRF-Token")).toBe("phone-csrf");
+    }
+  });
+
+  it("rejects malformed sanitized profile state", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      status: "preparing",
+      defaultSession: "saved",
+      commands: { prepare: "prepare", complete: "complete", relogin: "relogin" },
+    }), { status: 200 })));
+
+    await expect(getManagedBrowserProfileSettings()).rejects.toThrow("电脑返回的浏览器准备状态缺少操作标识。");
   });
 });
 

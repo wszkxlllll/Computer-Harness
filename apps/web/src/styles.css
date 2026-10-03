@@ -189,9 +189,13 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .composer-footer { display: flex; justify-content: flex-end; margin-top: .8rem; }
 .composer-footer .button { min-width: 8.5rem; }
 .inline-error { color: var(--danger); font-size: .9rem; font-weight: 650; margin: .45rem 0; }
+.setup-required-link { display: inline-block; font-size: .84rem; font-weight: 650; margin: .1rem 0 .4rem; }
 
 .target-mode-fieldset { border: 0; margin: .8rem 0 0; min-width: 0; padding: 0; }
 .target-mode-fieldset legend { color: var(--muted); font-size: .8rem; font-weight: 600; margin-bottom: .1rem; padding: 0; }
+.target-mode-disclosure { border-bottom: 1px solid var(--line); margin: .25rem 0 .35rem; }
+.target-mode-disclosure > summary { cursor: pointer; font-size: .86rem; font-weight: 650; min-height: 2.75rem; padding: .55rem .1rem; }
+.target-mode-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .target-mode-options { display: flex; flex-wrap: wrap; gap: 0 .8rem; }
 .target-mode-option {
   align-items: center;
@@ -210,8 +214,8 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .browser-target-field { margin-top: .85rem; }
 .browser-session-fieldset { border: 0; margin: 0 0 .65rem; min-width: 0; padding: 0; }
 .browser-session-fieldset legend { color: var(--muted); font-size: .8rem; font-weight: 600; margin-bottom: .1rem; padding: 0; }
-.browser-target-field > label { display: block; font-size: .88rem; font-weight: 650; margin-bottom: .2rem; }
-.browser-target-field > input {
+.browser-target-field > label, .browser-site-choice label { display: block; font-size: .88rem; font-weight: 650; margin-bottom: .2rem; }
+.browser-target-field > input, .browser-site-choice select {
   background: var(--surface);
   border: 1px solid #aeb7c3;
   border-radius: .45rem;
@@ -222,6 +226,9 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   padding: .45rem .6rem;
   width: 100%;
 }
+.browser-site-choice { margin-bottom: .65rem; }
+.browser-site-choice select { cursor: pointer; }
+.browser-site-choice > .field-hint { margin: .25rem 0 0; }
 .browser-target-field > .field-hint { margin: .35rem 0 0; }
 .browser-target-field > .inline-error { font-size: .82rem; }
 

@@ -6,6 +6,8 @@ import {
   ApplicationSession,
   createFileRemoteAssetReader,
   createWindowTargetDiscovery,
+  defaultEnvironmentOwner,
+  environmentIdentityForConfig,
   resolveManagedBrowserProfileConfig,
   type ApplicationSessionConfig,
   type ProviderCredentials,
@@ -14,6 +16,7 @@ import {
 import { HostRelayConnector } from "@computer-harness/relay-connector";
 import type { RunModel } from "@computer-harness/app-runtime";
 import { createHostServer } from "./server.js";
+import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 
@@ -36,6 +39,16 @@ async function main(): Promise<void> {
   const outputDir = resolve(args.output);
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
+  const environmentOwner = defaultEnvironmentOwner;
+  const environmentIdentity = environmentIdentityForConfig(config.computer);
+  const managedBrowserProfileService = new ManagedBrowserProfileService({
+    socketPath: args.socket,
+    profileLabel: managedBrowserProfile.profileLabel,
+    profileRoot: managedBrowserProfile.profileRoot,
+    environmentOwner,
+    environmentIdentity,
+  });
+  await managedBrowserProfileService.getState();
   const windowDiscovery = createWindowTargetDiscovery(config.computer);
   if (windowDiscovery === undefined) throw new Error("Mobile Host requires the CUA backend's read-only window discovery.");
   const dependencies = {
@@ -47,6 +60,7 @@ async function main(): Promise<void> {
     config,
     dependencies,
     windowDiscovery,
+    owner: environmentOwner,
   });
   const capabilities = {
     pause: true,
@@ -65,6 +79,7 @@ async function main(): Promise<void> {
     // opt in when starting the Run. Sensitive text is still redacted by the projector.
     runNotices: { enabled: true, dynamicContentEnabled: true },
     managedBrowserProfile,
+    managedBrowserProfileCoordinator: managedBrowserProfileService,
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
   });
@@ -100,6 +115,7 @@ async function main(): Promise<void> {
       revokeDeviceSession: (deviceId: string) => relay?.revokeDeviceSession(deviceId),
     }),
     voiceInput,
+    managedBrowserProfile: managedBrowserProfileService,
     staticRoot: webRoot,
     port: args.port,
   });

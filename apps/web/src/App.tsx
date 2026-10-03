@@ -7,19 +7,25 @@ import { PairingScreen } from "./PairingScreen";
 import { PreferencesScreen } from "./PreferencesScreen";
 import { PreferencesProvider } from "./PreferencesContext";
 import { RunWorkspace } from "./RunWorkspace";
+import type { BrowserSiteChoice } from "./types";
 import type { VoiceCapabilities } from "./voice-capabilities";
 import { VoiceInputCapabilitiesContext } from "./voice-capabilities";
 import type { VoiceInputCapabilities } from "@computer-harness/voice";
 
-export function App({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
+export interface AppProps {
+  voiceCapabilities?: VoiceCapabilities;
+  commonSiteChoices?: readonly BrowserSiteChoice[];
+}
+
+export function App({ voiceCapabilities, commonSiteChoices }: AppProps) {
   return (
     <PreferencesProvider>
-      <AppRoutes voiceCapabilities={voiceCapabilities} />
+      <AppRoutes voiceCapabilities={voiceCapabilities} commonSiteChoices={commonSiteChoices} />
     </PreferencesProvider>
   );
 }
 
-function AppRoutes({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
+function AppRoutes({ voiceCapabilities, commonSiteChoices }: AppProps) {
   const [pathname, setPathname] = useState(() => window.location.pathname);
   useEffect(() => {
     const updatePathname = () => setPathname(window.location.pathname);
@@ -32,7 +38,7 @@ function AppRoutes({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilitie
   if (pathname === "/preferences") return <PhoneSessionGate><PreferencesScreen voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
   const runMatch = pathname.match(/^\/run\/([^/]+)\/?$/);
   if (runMatch) return <PhoneSessionGate><RunWorkspace runId={decodeURIComponent(runMatch[1])} voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
-  return <PhoneSessionGate><HomeScreen /></PhoneSessionGate>;
+  return <PhoneSessionGate><HomeScreen commonSiteChoices={commonSiteChoices} /></PhoneSessionGate>;
 }
 
 function PhoneSessionGate({ children }: { children: ReactNode }) {
