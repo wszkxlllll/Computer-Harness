@@ -75,6 +75,29 @@ export type VerifyStateOutput = {
   [key: string]: unknown;
 };
 
+export type StatePredicate = {
+  window?: {
+    exists?: boolean;
+    bounds?: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      tolerancePx?: number;
+    };
+  };
+  element?: {
+    selector: {
+      role?: string;
+      labelContains?: string;
+    };
+    exists?: boolean;
+    valueEquals?: string;
+    enabled?: boolean;
+    selected?: boolean;
+  };
+};
+
 export interface StartSessionInput {
   session?: string;
   captureScope?: number;
@@ -96,7 +119,7 @@ export interface GetSessionStateInput {
 export interface VerifyStateInput {
   pid: bigint;
   windowId: bigint;
-  expect: Array<unknown>;
+  expect: Array<StatePredicate>;
   session?: string;
   timeoutMs?: bigint;
   stableSamples?: bigint;
@@ -112,7 +135,7 @@ export type CuaDriverLike = {
   endSession(input: EndSessionInput, asyncOpts?: { signal?: AbortSignal }): Promise<EndSessionOutput>;
   getSession(input: GetSessionInput, asyncOpts?: { signal?: AbortSignal }): Promise<SessionOutput>;
   getSessionState(input: GetSessionStateInput, asyncOpts?: { signal?: AbortSignal }): Promise<SessionStateOutput>;
-  verifyState(input: VerifyStateInput, asyncOpts?: { signal?: AbortSignal }): Promise<ToolResult>;
+  verifyState(input: VerifyStateInput, asyncOpts?: { signal: AbortSignal }): Promise<ToolResult>;
   shutdown(asyncOpts?: { signal?: AbortSignal }): Promise<void>;
   free?(): void;
 };
