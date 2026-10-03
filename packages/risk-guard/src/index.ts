@@ -38,7 +38,7 @@ export interface LayeredRiskGuardOptions {
   forbiddenShortcuts?: readonly string[];
 }
 
-const POLICY_VERSION = "layered-effects-v1";
+const POLICY_VERSION = "layered-effects-v2";
 const highRiskEffects = new Set<DeclaredActionEffect>([
   "destructive",
   "financial",
@@ -211,17 +211,37 @@ function scanDeclarationText(context: ActionPolicyContext, declarations: ActionE
     const declaration = declarations[index];
     if (declaration === undefined) continue;
     const action = context.candidate.actions[index];
-    for (const field of [declaration.target, declaration.summary]) {
-      const text = normalizeRiskText(field);
+    for (const [fieldIndex, field] of [declaration.target, declaration.summary].entries()) {
+      const normalized = normalizeRiskText(field);
+      // This is not a general negation parser or a declaration-based safety
+      // override. Only remove this exact terminal disclaimer from a single,
+      // observation-bound local typing action; scan the target and every
+      // remaining signal normally. Execution still revalidates native focus.
+      const text = fieldIndex === 1 && isObservedLocalTyping(context, declaration, action)
+        ? normalized.replace(/[,，]\s*不涉及提交或导航[。.]?$/u, "")
+        : normalized;
       const readOnlyPaymentHistory = declaration.effects.length === 1 && declaration.effects[0] === "navigate" && isReadOnlyPaymentHistoryField(text);
       const readOnlyPurchasePage = action?.kind === "wait"
         && declaration.effects.every((effect) => effect === "navigate" || effect === "observe")
         && isReadOnlyPurchasePageField(text);
+      // Search submission is a navigation-only interaction.  It contains the
+      // ordinary word "submit" in the control label, but it does not commit
+      // an order, message, payment, or other external side effect.  Keep this
+      // exception narrow and require the task/declaration to explicitly be a
+      // search so generic submit actions still enter semantic review.
+      const readOnlySearchSubmission = isReadOnlySearchSubmission(context, declaration, action);
+      // Browser address-bar navigation uses the ordinary word "submit" for
+      // the Enter key, but it does not commit a form, order, message, or
+      // payment. Keep this exception narrower than search: it must be an
+      // Enter keypress explicitly scoped to a URL/address bar navigation.
+      const readOnlyAddressBarNavigation = isReadOnlyAddressBarNavigation(declaration, action);
       for (const match of matches) {
         const pattern = new RegExp(match.pattern.source, `${match.pattern.flags}g`);
         for (const result of text.matchAll(pattern)) {
           if (readOnlyPaymentHistory && match.category === "financial") continue;
           if (readOnlyPurchasePage && match.category === "financial") continue;
+          if (readOnlySearchSubmission && match.category === "external_commitment") continue;
+          if (readOnlyAddressBarNavigation && match.category === "external_commitment") continue;
           categories.push(match.category);
         }
       }
@@ -229,6 +249,81 @@ function scanDeclarationText(context: ActionPolicyContext, declarations: ActionE
   }
   if (categories.length === 0) return undefined;
   return { code: "undeclared_high_impact_text", reason: "The declared target or summary contains an undeclared high-impact signal.", categories: [...new Set(categories)] };
+}
+
+function isObservedLocalTyping(
+  context: ActionPolicyContext,
+  declaration: ActionEffectDeclaration,
+  action: ActionPolicyContext["candidate"]["actions"][number] | undefined,
+): boolean {
+  if (context.candidate.calls.length !== 1 || context.candidate.actions.length !== 1) return false;
+  if (action?.kind !== "type" || /[\u0000-\u001f\u007f\u2028\u2029]/u.test(action.text)) return false;
+  if (declaration.effects.length !== 1 || declaration.effects[0] !== "local_edit") return false;
+  if (/["'`“”‘’「」『』]/u.test(declaration.summary)) return false;
+  // Do not remove the old escalation signal when common commitment words
+  // fall outside the legacy scanner's vocabulary. This limits only the new
+  // exception, without changing unrelated declarations' global routing.
+  if (/(?:\bbuy\b|下单|买入)/iu.test(`${declaration.target} ${declaration.summary}`)) return false;
+  const observation = context.candidate.decisionObservation;
+  const catalog = observation.grounding;
+  if (action.basedOn !== observation.id || observation.runId !== context.runId
+    || observation.computerSessionId !== context.candidate.session.id
+    || catalog?.observationId !== observation.id || catalog.computerSessionId !== observation.computerSessionId
+    || catalog.version !== "grounding-catalog-v2" || (catalog.source !== "dom" && catalog.source !== "hybrid")
+    || catalog.completeness === "unknown" || catalog.degraded) return false;
+  // Runtime's hot subset is not proof of globally unique focus or of no
+  // business side effects. It is enough only for this lexical disclaimer
+  // exception; the adapter still checks full live DOM identity/page focus.
+  if (catalog.selection?.truncated === true) {
+    const selection = catalog.selection;
+    const refs = catalog.elements.map((element) => element.elementRef);
+    const counts = selection.sourceCounts;
+    const domCount = catalog.elements.filter((element) => element.source === "dom").length;
+    if (selection.strategy !== "bounded-fusion-v1"
+      || !Number.isSafeInteger(selection.candidateElementCount) || selection.candidateElementCount <= refs.length
+      || counts?.dom !== domCount || !Number.isSafeInteger(counts.uia) || (counts.uia ?? -1) < 0
+      || (counts.dom + (counts.uia ?? -1)) !== selection.candidateElementCount
+      || selection.selectedElementRefs.length !== refs.length
+      || new Set(refs).size !== refs.length || new Set(selection.selectedElementRefs).size !== refs.length
+      || selection.selectedElementRefs.some((ref) => !refs.includes(ref))) return false;
+  }
+  const focused = catalog.elements.filter((element) => element.state?.focused === true);
+  const element = focused[0];
+  return focused.length === 1 && element?.source === "dom" && element.browserRegion === "content"
+    && (element.role === "textbox" || element.role === "searchbox")
+    && element.state?.enabled === true && element.state.editable === true;
+}
+
+function isReadOnlySearchSubmission(
+  context: ActionPolicyContext,
+  declaration: ActionEffectDeclaration,
+  action: ActionPolicyContext["candidate"]["actions"][number] | undefined,
+): boolean {
+  if (declaration.effects.length !== 1 || declaration.effects[0] !== "navigate") return false;
+  if (action?.kind !== "click" && action?.kind !== "keypress") return false;
+  const declarationText = normalizeRiskText(`${declaration.target} ${declaration.summary}`);
+  const goalText = normalizeRiskText(context.goal);
+  if (!/(?:search|query|搜索|查询|检索)/iu.test(declarationText) || !/(?:search|query|搜索|查询|检索)/iu.test(goalText)) return false;
+  if (!/(?:submit|enter|提交|回车)/iu.test(declarationText)) return false;
+  // Keep wording that names an external commitment fail-closed even when a
+  // nearby search term is present (for example “submit the order search”).
+  if (/(?:pay|purchase|checkout|transfer|delete|erase|wipe|send|publish|post|order|application|comment|review|付款|支付|购买|结算|转账|删除|清空|发送|发布|订单|申请|评论|评价)/iu.test(declarationText)) return false;
+  return true;
+}
+
+function isReadOnlyAddressBarNavigation(
+  declaration: ActionEffectDeclaration,
+  action: ActionPolicyContext["candidate"]["actions"][number] | undefined,
+): boolean {
+  if (declaration.effects.length !== 1 || declaration.effects[0] !== "navigate") return false;
+  if (action?.kind !== "keypress" || !action.keys.some((key) => key.toUpperCase() === "ENTER")) return false;
+  const text = normalizeRiskText(`${declaration.target} ${declaration.summary}`);
+  if (!/(?:address\s*(?:and\s*search\s*)?bar|地址栏|网址|\burl\b)/iu.test(text)) return false;
+  if (!/(?:navigate|navigation|load|open|导航|加载|打开)/iu.test(text)) return false;
+  // If the declaration itself names a commitment or destructive URL/path,
+  // keep the normal fail-closed route even when it also mentions the URL bar.
+  if (/(?:pay|purchase|checkout|transfer|delete|erase|wipe|send|publish|post|order|application|comment|review|付款|支付|购买|结算|转账|删除|清空|发送|发布|订单|申请|评论|评价)/iu.test(text)) return false;
+  return true;
 }
 
 function normalizeRiskText(value: string): string {

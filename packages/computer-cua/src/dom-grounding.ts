@@ -171,6 +171,10 @@ export interface DomGroundingTransport {
   readonly selectOption?: (request: DomSelectOptionRequest, signal: AbortSignal) => Promise<DomSelectOptionResult>;
   /** Re-locates and activates one observation-bound DOM control. */
   readonly click?: (request: DomClickRequest, signal: AbortSignal) => Promise<DomClickResult>;
+  /** Read-only identity and page/control focus check before native keyboard delivery. */
+  readonly verifyFocus?: (request: DomClickRequest, signal: AbortSignal) => Promise<DomClickResult>;
+  /** Read-only unique candidate validation before a single native editable click. */
+  readonly validateClick?: (request: DomClickRequest, signal: AbortSignal) => Promise<DomClickResult>;
 }
 
 export interface MaterializedDomGrounding {

@@ -6,6 +6,7 @@ import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
+import { domCandidateFingerprint, type DomGroundingRawCandidate } from "./dom-grounding.js";
 import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
@@ -150,14 +151,69 @@ describe("managed browser host pilot", () => {
         role: expected.role,
         name: expected.name,
         frame: candidate?.frame as { x: number; y: number; width: number; height: number },
-        fingerprint: syntheticDomFingerprint(expected.element, expected.role, expected.name),
+        fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate),
       }), context) as { status: string };
       expect(result).toMatchObject({ status: "completed" });
       expect(expected.element.clicked).toBe(true);
     }
   });
 
+  it.each([undefined, "SEARCH", "text"])("round-trips production collector fingerprints for input type %s", (type) => {
+    const input = syntheticElement("input", { attrs: { "aria-label": "Query", ...(type === undefined ? {} : { type }) } });
+    const page = new SyntheticDocument([input]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const binding = { role: "textbox", name: "Query", frame: candidate.frame as { x: number; y: number; width: number; height: number }, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate) };
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(page.activeElement).toBe(input);
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "completed" });
+    page.focused = false; // Chrome address bar owns focus, activeElement is retained.
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]?.state).toMatchObject({ focused: false });
+    input.clicked = false;
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+    expect(input.clicked).toBe(false);
+    page.focused = true;
+    page.activeElement = null;
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, fingerprint: "domf-00000000" }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE" });
+    const replacement = syntheticElement("input", { attrs: { "aria-label": "Query", type: type === "SEARCH" ? "text" : "search" } });
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: new SyntheticDocument([replacement]) })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE" });
+    expect(replacement.clicked).toBe(false);
+  });
+
+  it("ignores non-input type and refuses occluded native click probes without dispatch", () => {
+    const button = syntheticElement("button", { attrs: { type: "submit", "aria-label": "Go" } });
+    const page = new SyntheticDocument([button]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const binding = { role: "button", name: "Go", frame: candidate.frame as { x: number; y: number; width: number; height: number }, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate) };
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, validateOnly: true }), context)).toMatchObject({ status: "completed" });
+    expect(button.clicked).toBe(false);
+    page.hitTarget = syntheticElement("div");
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, validateOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
+    expect(button.clicked).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+  });
+
+  it.each([
+    { x: -10, y: 10, width: 120, height: 24 },
+    { x: 10, y: -10, width: 120, height: 24 },
+    { x: 950, y: 10, width: 120, height: 24 },
+    { x: 10, y: 790, width: 120, height: 24 },
+  ])("refuses a clipped editable native-click probe at %j without input", (rect) => {
+    const input = syntheticElement("input", { attrs: { "aria-label": "Query" }, rect });
+    const page = new SyntheticDocument([input]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const result = runInNewContext(buildManagedDomClickExpression({ role: "textbox", name: "Query", frame: rect, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate), validateOnly: true }), context);
+    expect(result).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CLIPPED" });
+    expect(input.clicked).toBe(false);
+    expect(page.activeElement).toBeNull();
+  });
+
   it("keeps the local fixture coverage explicit for controls, canvas, shadow DOM and iframe boundaries", async () => {
+    // Fixture strings are supplementary; executable round-trip tests above
+    // and below exercise the production collector and fingerprint function.
     const fixture = await readFile(new URL("./fixtures/managed-dom-fixture.html", import.meta.url), "utf8");
     expect(fixture).toContain('role="button"');
     expect(fixture).toContain("<input");
@@ -208,6 +264,21 @@ describe("managed browser host pilot", () => {
       profileMode: "persistent",
       resolveOwnedWindowTarget: async () => undefined,
     })).toThrow(/persistent.*profile label.*root/iu);
+  });
+
+  it("exposes both read-only gates through the production managed transport", async () => {
+    const host = new ManagedBrowserHost({ browser: "chromium", url: "about:blank", resolveOwnedWindowTarget: async () => undefined });
+    // Attest a fixture state only; no browser process is launched in this test.
+    (host as unknown as { state: object }).state = {};
+    const validate = vi.spyOn(host, "validateClick").mockResolvedValue({ status: "completed" });
+    const verify = vi.spyOn(host, "verifyFocus").mockResolvedValue({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+    const transport = host.createTransport();
+    const request = {} as Parameters<ManagedBrowserHost["validateClick"]>[0];
+    const signal = new AbortController().signal;
+    expect(await transport.validateClick!(request, signal)).toMatchObject({ status: "completed" });
+    expect(await transport.verifyFocus!(request, signal)).toMatchObject({ status: "refused" });
+    expect(validate).toHaveBeenCalledWith(request, signal);
+    expect(verify).toHaveBeenCalledWith(request, signal);
   });
 
   it("locks persistent Harness-owned profiles and leaves state for later Runs", async () => {
@@ -685,6 +756,7 @@ interface SyntheticEvaluation {
 }
 
 class SyntheticElement {
+  public onFocus: (() => void) | undefined;
   public readonly localName: string;
   public readonly children: readonly SyntheticElement[];
   public readonly labels: readonly SyntheticElement[] | undefined;
@@ -724,6 +796,8 @@ class SyntheticElement {
     this.clicked = true;
   }
 
+  public focus(): void { this.onFocus?.(); }
+
   public querySelectorAll(selector: string): readonly SyntheticElement[] {
     const descendants = this.descendants();
     if (selector === "*") return descendants;
@@ -747,10 +821,15 @@ class SyntheticElement {
 
 class SyntheticDocument {
   public activeElement: SyntheticElement | null = null;
+  public focused = true;
+  public hitTarget: SyntheticElement | undefined;
+  public elementFromPoint(): SyntheticElement | null { return this.hitTarget ?? this.allElements()[0] ?? null; }
+  public hasFocus(): boolean { return this.focused; }
   private readonly roots: readonly SyntheticElement[];
 
   public constructor(roots: readonly SyntheticElement[]) {
     this.roots = roots;
+    for (const element of this.allElements()) element.onFocus = () => { this.activeElement = element; };
   }
 
   public querySelectorAll(selector: string): readonly SyntheticElement[] {
@@ -780,16 +859,6 @@ class SyntheticDocument {
 
 function syntheticElement(localName: string, options: SyntheticElementOptions = {}): SyntheticElement {
   return new SyntheticElement(localName, options);
-}
-
-function syntheticDomFingerprint(element: SyntheticElement, role: string, name: string): string {
-  const canonical = [role, element.localName, role, element.getAttribute("type") ?? "", name].join("\u001f");
-  let hash = 2166136261;
-  for (let index = 0; index < canonical.length; index += 1) {
-    hash ^= canonical.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `domf-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 function serverTextFrame(payload: Buffer, opcode: number, final: boolean): Buffer {

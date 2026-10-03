@@ -704,7 +704,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       inputType: element.localName === "input" ? inputType : undefined,
       canvasLike: false,
       ...(optionProjection === undefined ? {} : optionProjection),
-      state: { enabled, focused: document.activeElement === element, editable, expanded: element.getAttribute("aria-expanded") === "true", selected: element.getAttribute("aria-selected") === "true" },
+      state: { enabled, focused: document.hasFocus() && (element.getRootNode?.() ?? document).activeElement === element, editable, expanded: element.getAttribute("aria-expanded") === "true", selected: element.getAttribute("aria-selected") === "true" },
     });
   };
   const walk = (root) => {
@@ -1053,6 +1053,19 @@ export class ManagedBrowserHost {
    * checks used by select_option.
    */
   public async click(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.evaluateClickBinding(request, signal, false);
+  }
+
+  /** Read-only gate before native keyboard input; never focuses or replays a click. */
+  public async verifyFocus(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.evaluateClickBinding(request, signal, true);
+  }
+
+  public async validateClick(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.evaluateClickBinding(request, signal, false, true);
+  }
+
+  private async evaluateClickBinding(request: DomClickRequest, signal: AbortSignal, verifyFocusOnly: boolean, validateOnly = false): Promise<DomClickResult> {
     const state = this.state;
     if (state === undefined) throw new DomGroundingUnavailableError("managed browser host is not running");
     if (!sameManagedBrowserTarget(request.browserTarget, state.target)) {
@@ -1071,6 +1084,8 @@ export class ManagedBrowserHost {
     const socket = await LoopbackWebSocket.connect(page.webSocketDebuggerUrl as string, signal);
     try {
       const expression = buildManagedDomClickExpression({
+        verifyFocusOnly,
+        validateOnly,
         role: request.candidate.role,
         ...(request.candidate.name === undefined ? {} : { name: request.candidate.name }),
         ...(request.candidate.frame === undefined ? {} : { frame: request.candidate.frame }),
@@ -1121,6 +1136,14 @@ class ManagedCdpDomGroundingTransport implements DomGroundingTransport {
 
   public async click(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
     return this.host.click(request, signal);
+  }
+
+  public async validateClick(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.host.validateClick(request, signal);
+  }
+
+  public async verifyFocus(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.host.verifyFocus(request, signal);
   }
 }
 
@@ -1233,7 +1256,7 @@ export function buildManagedDomSelectOptionExpression(input: {
         // The page collector emits the computed public role as ariaRole,
         // including the implicit native-select combobox role.
         part(role, 64),
-        part(element.getAttribute("type"), 32),
+        part(element.localName === "input" ? (element.getAttribute("type") || "text").toLowerCase() : undefined, 32),
         part(name, 160),
       ].join("\u001f");
       let hash = 2166136261;
@@ -1315,6 +1338,8 @@ export function buildManagedDomSelectOptionExpression(input: {
 }
 
 export function buildManagedDomClickExpression(input: {
+  readonly verifyFocusOnly?: boolean;
+  readonly validateOnly?: boolean;
   readonly role: string;
   readonly name?: string;
   readonly frame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
@@ -1423,7 +1448,8 @@ export function buildManagedDomClickExpression(input: {
       && Math.abs(left.x - right.x) <= 4 && Math.abs(left.y - right.y) <= 4
       && Math.abs(left.width - right.width) <= 4 && Math.abs(left.height - right.height) <= 4;
     const fingerprintOf = (element, role, name) => {
-      const canonical = [normalize(role, 64), normalize(element.localName, 32), normalize(role, 64), normalize(element.getAttribute("type"), 32), normalize(name, 160)].join("\u001f");
+      const inputType = element.localName === "input" ? (element.getAttribute("type") || "text").toLowerCase() : undefined;
+      const canonical = [normalize(role, 64), normalize(element.localName, 32), normalize(role, 64), normalize(inputType, 32), normalize(name, 160)].join("\u001f");
       let hash = 2166136261;
       for (let index = 0; index < canonical.length; index += 1) {
         hash ^= canonical.charCodeAt(index);
@@ -1462,7 +1488,32 @@ export function buildManagedDomClickExpression(input: {
     if (matches.length > 1) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_AMBIGUOUS", message: "DOM candidate is ambiguous" };
     const element = matches[0].element;
     if (element.disabled === true || element.getAttribute("aria-disabled") === "true") return { status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED", message: "managed-browser DOM control is disabled" };
+    const inputType = (element.getAttribute("type") || "text").toLowerCase();
+    const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
+    if (target.verifyFocusOnly === true) {
+      if (!editable || !document.hasFocus() || (element.getRootNode?.() ?? document).activeElement !== element) return { status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", message: "managed-browser page/control does not own keyboard focus; no keyboard input was sent" };
+      return { status: "completed", message: "managed-browser input focus verified" };
+    }
+    if (target.validateOnly === true) {
+      // Native dispatch uses the observation-bound CSS center transformed by
+      // the Adapter, rather than the potentially drifted live frame center.
+      const frame = target.frame;
+      // A clipped public bbox has a different native center from the raw
+      // CSS frame. Reject rather than validate one point and dispatch another.
+      if (frame.x < 0 || frame.y < 0 || frame.x + frame.width > window.innerWidth || frame.y + frame.height > window.innerHeight) return { status: "refused", driverCode: "DOM_CLICK_CLIPPED", message: "managed-browser control is partly outside the viewport; scroll into full view and observe again; no input sent" };
+      let hit = document.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
+      for (let depth = 0; depth < 16 && hit?.shadowRoot?.elementFromPoint; depth += 1) {
+        const child = hit.shadowRoot.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
+        if (!child || child === hit) break;
+        hit = child;
+      }
+      if (hit !== element && !element.contains?.(hit)) return { status: "refused", driverCode: "DOM_CLICK_OCCLUDED", message: "managed-browser click point is obscured; no input sent" };
+      return { status: "completed", message: "managed-browser click candidate verified; no input sent" };
+    }
     try {
+      // Programmatic click does not perform the browser's native focus default.
+      // This assists an editable control; verifyFocus still gates later input.
+      if (editable) element.focus({ preventScroll: true });
       element.click();
       return { status: "completed", message: "managed-browser DOM click dispatched" };
     } catch (_) {

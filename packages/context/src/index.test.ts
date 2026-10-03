@@ -155,6 +155,7 @@ describe("DefaultContextCompiler", () => {
   });
 
   it("rejects a shortcut that disagrees with the latest observation event and honors cancellation", async () => {
+    // Cancellation remains independent of browser readiness guidance.
     const latest = observation("obs-latest");
     const other = observation("obs-other");
     const compiler = new DefaultContextCompiler(createDefaultComputerTools());
@@ -163,6 +164,15 @@ describe("DefaultContextCompiler", () => {
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
     await expect(compiler.compile({ runId, goal: "goal", recentEvents: events }, controller.signal)).rejects.toThrow("cancelled");
+  });
+
+  it("guides fresh observation when managed browser content grounding is not ready", async () => {
+    const latest = { ...observation("obs-browser-not-ready"), grounding: { version: "grounding-catalog-v2" as const, source: "hybrid" as const, observationId: "obs-browser-not-ready" as ObservationId, computerSessionId: sessionId, completeness: "partial" as const, degraded: true, maxElements: 16, elements: [{ elementRef: "uia-toolbar", role: "button", source: "uia" as const, name: "Back" }] } };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({ runId, goal: "search fixture", recentEvents: [event(0, { type: "observation.created", observation: latest })], latestObservation: latest }, new AbortController().signal);
+    const text = JSON.stringify(input.messages);
+    expect(text).toContain("Managed browser content grounding is unavailable in this observation");
+    expect(text).toContain("Use an available wait tool briefly, then use the automatic fresh observation");
+    expect(text).toContain("or use drag as a substitute for a click");
   });
 
   it("projects a ModelTurn continuation into the assistant history", async () => {
@@ -432,6 +442,9 @@ describe("DefaultContextCompiler", () => {
     expect(batch.system).toContain("same-turn writes alongside GUI");
     expect(batch.system).toContain("state writes");
     expect(batch.system).toContain("click→type");
+    expect(batch.system).toContain("hotkey with exact keys [CTRL, A]");
+    expect(batch.system).toContain("click_element and CMD/Meta+A are not supported in batches");
+    expect(batch.system).toContain("Never combine a read tool such as memory_get with a Computer call");
     expect(batch.system).toContain("2-4 predictable click micro-steps");
     expect(batch.system).toContain("Call it immediately before the first GUI click");
     expect(batch.system).toContain("Do not create one for a simple one-click screen or every click");

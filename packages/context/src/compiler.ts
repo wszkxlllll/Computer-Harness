@@ -385,6 +385,9 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
   const sourceLabel = catalog.source === "hybrid" ? "UIA+DOM" : catalog.source.toUpperCase();
   const lines = [
     `${sourceLabel} grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
+    ...(catalog.source === "hybrid" && catalog.degraded && !catalog.elements.some((element) => element.source === "dom")
+      ? ["Managed browser content grounding is unavailable in this observation. Toolbar-only UIA does not establish the page content region. Use an available wait tool briefly, then use the automatic fresh observation after the page becomes ready; do not invent page refs, guess the content origin, or use drag as a substitute for a click."]
+      : []),
     ...projected.map((element) => {
       const box = element.bbox === undefined
         ? "bbox=unknown"

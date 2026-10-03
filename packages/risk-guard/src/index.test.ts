@@ -71,7 +71,140 @@ function keypressContext(effect: "unknown" | "navigate" = "unknown"): ActionPoli
   };
 }
 
+function addressBarEnterContext(target = "Chrome 地址栏", summary = "回车提交地址栏 URL，导航到 Apple 中国官网首页"): ActionPolicyContext {
+  const snapshot = initialRunSnapshot(runId);
+  return {
+    runId,
+    goal: "打开 https://www.apple.com.cn/",
+    recentUserInputs: [],
+    candidate: {
+      calls: [{
+        id: "address-bar-enter-call" as ToolCallId,
+        name: "keypress",
+        arguments: { keys: ["ENTER"] },
+        declaredEffect: { effects: ["navigate"], target, summary },
+      }],
+      actions: [{ actionId: "address-bar-enter-action" as ActionId, basedOn: observation.id, kind: "keypress", keys: ["ENTER"] }],
+      decisionObservation: observation,
+      session,
+    },
+    snapshot,
+  };
+}
+
 describe("LayeredRiskGuard", () => {
+  function focusedTyping(summary = "向当前聚焦的 Search 输入框逐字输入指定文本，不涉及提交或导航"): ActionPolicyContext {
+    const candidate = context("local_edit", "Search 输入框", summary, "type");
+    candidate.candidate.decisionObservation = {
+      ...observation,
+      grounding: {
+        version: "grounding-catalog-v2", source: "hybrid", observationId: observation.id,
+        computerSessionId: session.id, completeness: "partial", degraded: false, maxElements: 256,
+        elements: [{ elementRef: "search-1", source: "dom", browserRegion: "content", role: "textbox", name: "Search", state: { focused: true, enabled: true, editable: true } }],
+      },
+    };
+    return candidate;
+  }
+
+  it("allows the observed single local-edit terminal disclaimer without invoking the assessor", async () => {
+    let reviews = 0;
+    const guard = new LayeredRiskGuard({ assessor: { id: "must-not-run", async classify() { reviews += 1; throw new Error("unexpected review"); } } });
+    await expect(guard.evaluate(focusedTyping(), new AbortController().signal)).resolves.toMatchObject({ decision: "allow", path: "local", reasonCode: "declared_low_impact", policyVersion: "layered-effects-v2", modelRequestCount: 0 });
+    expect(reviews).toBe(0);
+  });
+
+  it.each([
+    "向Search输入文本，不涉及提交或导航。",
+    "向Search输入文本, 不涉及提交或导航.",
+  ])("accepts only the exact terminal disclaimer boundary: %s", async (summary) => {
+    await expect(new LayeredRiskGuard({ maxModelRequests: 0 }).evaluate(focusedTyping(summary), new AbortController().signal)).resolves.toMatchObject({ decision: "allow", path: "local" });
+  });
+
+  it("accepts the actual partial nondegraded Runtime hot-subset shape without calling review", async () => {
+    const candidate = focusedTyping();
+    const current = candidate.candidate.decisionObservation;
+    const catalog = current.grounding!;
+    const elements = [...catalog.elements, ...Array.from({ length: 15 }, (_, index) => ({ elementRef: `other-${index}`, source: index < 7 ? "dom" as const : "uia" as const, role: "button", state: { focused: false, enabled: true } }))];
+    candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, elements, selection: { strategy: "bounded-fusion-v1", candidateElementCount: 34, selectedElementRefs: elements.map((element) => element.elementRef), sourceCounts: { dom: 8, uia: 26 }, truncated: true, reasons: [] } } };
+    await expect(new LayeredRiskGuard({ maxModelRequests: 0 }).evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "allow", path: "local", modelRequestCount: 0 });
+  });
+
+  it.each(["missing-counts", "omitted-dom", "wrong-total", "wrong-strategy", "wrong-refs"])("rejects inconsistent hot-subset provenance: %s", async (scenario) => {
+    const candidate = focusedTyping();
+    const current = candidate.candidate.decisionObservation;
+    const catalog = current.grounding!;
+    const selection = {
+      strategy: scenario === "wrong-strategy" ? "deterministic-lexical-v1" as const : "bounded-fusion-v1" as const,
+      candidateElementCount: scenario === "wrong-total" ? 4 : 3,
+      selectedElementRefs: [scenario === "wrong-refs" ? "other-ref" : "search-1"],
+      ...(scenario === "missing-counts" ? {} : { sourceCounts: { dom: scenario === "omitted-dom" ? 2 : 1, uia: 2 } }),
+      truncated: true, reasons: [],
+    };
+    candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, selection } };
+    await expect(new LayeredRiskGuard().evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "fallback", reasonCode: "semantic_review_unavailable" });
+  });
+
+  it.each([
+    "不涉及提交或导航",
+    "向Search输入文本，不涉及提交或导航，随后提交订单",
+    "向Search输入文本，不涉及提交或导航但发送消息",
+    "输入提交订单文本，不涉及提交或导航",
+    "发送消息，不涉及提交或导航",
+    "购买商品，不涉及提交或导航",
+    "Buy the item, 不涉及提交或导航",
+    "下单，不涉及提交或导航",
+    "买入股票，不涉及提交或导航",
+    "永久删除数据，不涉及提交或导航",
+    "修改密码，不涉及提交或导航",
+    "输入文本，不是不涉及提交或导航",
+    "输入短语‘不涉及提交或导航’",
+    "引用‘输入文本，不涉及提交或导航",
+    "Write text, do not submit or navigate",
+  ])("keeps other or nonterminal risk wording fail-closed: %s", async (summary) => {
+    await expect(new LayeredRiskGuard().evaluate(focusedTyping(summary), new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "fallback", reasonCode: "semantic_review_unavailable" });
+  });
+
+  it.each([
+    "missing", "degraded", "unknown", "stale-catalog", "stale-action", "wrong-session", "unfocused", "disabled", "readonly", "multiple", "uia", "chrome", "button", "truncated", "newline", "control", "click", "enter", "batch", "risky-target", "old-version", "uia-catalog",
+  ])("does not exempt typing without bounded current evidence: %s", async (scenario) => {
+    const candidate = focusedTyping();
+    const current = candidate.candidate.decisionObservation;
+    const catalog = current.grounding!;
+    const element = catalog.elements[0]!;
+    const changedElement = { ...element, state: { ...element.state } };
+    if (scenario === "missing") candidate.candidate.decisionObservation = { ...current, grounding: undefined };
+    else if (scenario === "degraded") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, degraded: true } };
+    else if (scenario === "unknown") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, completeness: "unknown" } };
+    else if (scenario === "old-version") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, version: "uia-catalog-v1" } };
+    else if (scenario === "uia-catalog") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, source: "uia" } };
+    else if (scenario === "stale-catalog") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, observationId: "old" as ObservationId } };
+    else if (scenario === "wrong-session") candidate.candidate.decisionObservation = { ...current, computerSessionId: "other" as ComputerSessionId };
+    else if (scenario === "truncated") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, selection: { strategy: "deterministic-lexical-v1", candidateElementCount: 2, selectedElementRefs: ["wrong-ref"], truncated: true, reasons: [] } } };
+    else if (scenario === "multiple") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, elements: [element, { ...element, elementRef: "other" }] } };
+    else if (["unfocused", "disabled", "readonly", "uia", "chrome", "button"].includes(scenario)) {
+      if (scenario === "unfocused") changedElement.state.focused = false;
+      if (scenario === "disabled") changedElement.state.enabled = false;
+      if (scenario === "readonly") changedElement.state.editable = false;
+      candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, elements: [{ ...changedElement, ...(scenario === "uia" ? { source: "uia" as const } : {}), ...(scenario === "chrome" ? { browserRegion: "chrome" as const } : {}), ...(scenario === "button" ? { role: "button" } : {}) }] } };
+    } else if (scenario === "stale-action") candidate.candidate.actions[0] = { actionId: "old" as ActionId, basedOn: "old" as ObservationId, kind: "type", text: "hello" };
+    else if (scenario === "newline") candidate.candidate.actions[0] = { actionId: "newline" as ActionId, basedOn: current.id, kind: "type", text: "hello\n" };
+    else if (scenario === "control") candidate.candidate.actions[0] = { actionId: "control" as ActionId, basedOn: current.id, kind: "type", text: "hello\t" };
+    else if (scenario === "click") candidate.candidate.actions[0] = { actionId: "click" as ActionId, basedOn: current.id, kind: "click", point: { x: 10, y: 20 } };
+    else if (scenario === "enter") candidate.candidate.actions[0] = { actionId: "enter" as ActionId, basedOn: current.id, kind: "keypress", keys: ["ENTER"] };
+    else if (scenario === "batch") candidate.candidate.actions = [...candidate.candidate.actions, { actionId: "enter" as ActionId, basedOn: current.id, kind: "keypress", keys: ["ENTER"] }];
+    else if (scenario === "risky-target") candidate.candidate.calls[0]!.declaredEffect!.target = "Submit order";
+    await expect(new LayeredRiskGuard().evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "fallback", reasonCode: "semantic_review_unavailable" });
+  });
+
+  it("retains mandatory declared-high and protected-input boundaries with the disclaimer", async () => {
+    const high = focusedTyping();
+    high.candidate.calls[0]!.declaredEffect!.effects = ["external_commitment"];
+    await expect(new LayeredRiskGuard().evaluate(high, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "local", reasonCode: "declared_high_impact" });
+    const protectedInput = focusedTyping();
+    protectedInput.candidate.actions[0] = { actionId: "protected" as ActionId, basedOn: observation.id, kind: "type", text: "password=SYNTHETIC_ONLY" };
+    await expect(new LayeredRiskGuard().evaluate(protectedInput, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "local", reasonCode: "protected_input" });
+  });
+
   it("allows declared low-impact actions and requires approval for declared financial actions without a reviewer", async () => {
     const guard = new LayeredRiskGuard();
     await expect(guard.evaluate(context("navigate"), new AbortController().signal)).resolves.toMatchObject({ decision: "allow", path: "local", modelRequestCount: 0 });
@@ -87,6 +220,62 @@ describe("LayeredRiskGuard", () => {
   it("reviews risk words quoted in typed content", async () => {
     const guard = new LayeredRiskGuard();
     await expect(guard.evaluate(context("local_edit", "Draft", "Write the phrase \"do not send\"", "type"), new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "fallback", reasonCode: "semantic_review_unavailable" });
+  });
+
+  it("allows a navigation-only search submission without spending the semantic review budget", async () => {
+    const search = context("navigate", "提交搜索 button", "Submit the site search for the typed query");
+    search.goal = "Open the site and search for MacBook Air";
+    await expect(new LayeredRiskGuard({ maxModelRequests: 0 }).evaluate(search, new AbortController().signal)).resolves.toMatchObject({
+      decision: "allow",
+      path: "local",
+      reasonCode: "declared_low_impact",
+      modelRequestCount: 0,
+    });
+
+    const enter = context("navigate", "搜索框 (MacBook Air)", "Press Enter in the focused search field to submit the search", "click");
+    enter.goal = "Search the site for MacBook Air";
+    enter.candidate.actions[0] = { actionId: "search-enter-action" as ActionId, basedOn: observation.id, kind: "keypress", keys: ["ENTER"] };
+    await expect(new LayeredRiskGuard({ maxModelRequests: 0 }).evaluate(enter, new AbortController().signal)).resolves.toMatchObject({
+      decision: "allow",
+      path: "local",
+      reasonCode: "declared_low_impact",
+      modelRequestCount: 0,
+    });
+  });
+
+  it("does not exempt a search phrase that also names an external commitment", async () => {
+    const candidate = context("navigate", "Submit order search", "Submit the order search");
+    candidate.goal = "Search the order system";
+    await expect(new LayeredRiskGuard({
+      assessor: new ScriptedRiskAssessor({ effects: ["local_edit"], alignment: "aligned", evidence: "Synthetic low-risk review" }),
+      maxModelRequests: 0,
+    }).evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval",
+      path: "fallback",
+      reasonCode: "risk_model_budget_exhausted",
+    });
+  });
+
+  it("allows Enter navigation from an explicitly identified URL address bar", async () => {
+    await expect(new LayeredRiskGuard({ maxModelRequests: 0 }).evaluate(addressBarEnterContext(), new AbortController().signal)).resolves.toMatchObject({
+      decision: "allow",
+      path: "local",
+      reasonCode: "declared_low_impact",
+      modelRequestCount: 0,
+    });
+  });
+
+  it("keeps ordinary form submission and high-risk URL navigation protected", async () => {
+    const exhausted = { assessor: new ScriptedRiskAssessor({ effects: ["local_edit"], alignment: "aligned", evidence: "Synthetic low-risk review" }), maxModelRequests: 0 };
+    await expect(new LayeredRiskGuard(exhausted).evaluate(
+      addressBarEnterContext("Checkout form", "按回车提交订单表单"),
+      new AbortController().signal,
+    )).resolves.toMatchObject({ decision: "require_approval", reasonCode: "risk_model_budget_exhausted" });
+
+    await expect(new LayeredRiskGuard(exhausted).evaluate(
+      addressBarEnterContext("Chrome 地址栏", "回车提交地址栏 https://example.test/delete-account，导航到页面"),
+      new AbortController().signal,
+    )).resolves.toMatchObject({ decision: "require_approval", reasonCode: "risk_model_budget_exhausted" });
   });
 
   it.each([

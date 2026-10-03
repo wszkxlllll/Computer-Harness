@@ -531,6 +531,7 @@ export class RunController {
   private async run(goal: string): Promise<RunOutcome> {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
+    let providerFailureSummary: string | undefined;
     try {
       await this.commitEvent({ type: "run.created", goal });
       this.throwIfAborted();
@@ -733,7 +734,8 @@ export class RunController {
                 ...details,
               });
               if (!retry) {
-                outcome = this.isAborted() ? "cancelled" : "failed";
+                outcome = this.snapshot.unresolvedActionId !== undefined ? "outcome_unknown" : this.isAborted() ? "cancelled" : "failed";
+                if (outcome === "failed") providerFailureSummary = this.providerFailureProgressSummary();
                 providerFailed = true;
                 break;
               }
@@ -855,7 +857,7 @@ export class RunController {
       }
 
       if (this.snapshot.status !== "finished") {
-        outcome = await this.commitRunFinished({ outcome });
+        outcome = await this.commitRunFinished({ outcome, ...(outcome === "failed" && providerFailureSummary !== undefined ? { summary: providerFailureSummary } : {}) });
       }
       return outcome;
     } catch (error) {
@@ -2381,6 +2383,20 @@ export class RunController {
     if (sourceCatalog === undefined) return observation;
     const grounding = this.groundingSelector.select(sourceCatalog, this.groundingSelectionQuery(sourceCatalog));
     return { ...observation, grounding };
+  }
+
+  private providerFailureProgressSummary(): string {
+    const guiIds = new Set(this.events.filter((event) => event.type === "action.execution.started" && event.action.kind !== "wait")
+      .map((event) => event.type === "action.execution.started" ? event.action.actionId : undefined));
+    const terminals = this.events.filter((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") && guiIds.has(event.receipt.actionId));
+    const count = (status: string) => terminals.filter((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") && event.receipt.status === status).length;
+    const completed = count("completed");
+    const lastTerminal = terminals.at(-1);
+    const observation = [...this.events].reverse().find((event) => event.type === "observation.created");
+    const postActionScreenshot = completed > 0 && lastTerminal !== undefined && observation?.type === "observation.created" && observation.sequence > lastTerminal.sequence
+      ? `最近动作后的截图已保存（assetId=${observation.observation.screenshot.assetId}），可供人工核对；截图内容未被此反馈验证。`
+      : completed > 0 ? "没有最近动作后的截图可供此反馈确认。" : "";
+    return `后续模型响应未完成，任务完成未确认。已保留 ${completed} 个非等待 GUI 动作完成回执，${count("refused")} 个拒绝回执，${count("failed")} 个失败回执；完成回执不等于目标已达成。${postActionScreenshot}未自动重放 GUI 动作。`;
   }
 
   private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {

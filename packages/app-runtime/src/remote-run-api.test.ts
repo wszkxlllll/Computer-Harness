@@ -18,6 +18,13 @@ import { ApplicationSession } from "./application-session.js";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
 import { ApplicationRemoteRunApi, RemoteRunApiError } from "./remote-run-api.js";
 
+// Exercise current Runtime source across this package boundary without
+// rebuilding the shared dist that may belong to a real-test reservation.
+vi.mock("@computer-harness/runtime", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@computer-harness/runtime")>(),
+  RunController: (await import("../../runtime/src/run-controller.js")).RunController,
+}));
+
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
 
 function config(outputDir: string): ApplicationSessionConfig {
@@ -66,7 +73,7 @@ function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promi
   } as unknown as Computer;
 }
 
-function providerFor(options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[] }): ProviderAdapter {
+function providerFor(options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[]; failAfterTurns?: boolean }): ProviderAdapter {
   let turns = 0;
   return {
     id: "remote-api-provider",
@@ -74,6 +81,7 @@ function providerFor(options: { askFirst?: boolean; summary: string; turns?: rea
       turns += 1;
       const scriptedTurn = options.turns?.[turns - 1];
       if (scriptedTurn !== undefined) return structuredClone(scriptedTurn);
+      if (options.failAfterTurns === true) throw Object.assign(new Error("fixture request deadline"), { code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
       if (options.askFirst === true && turns === 1) return { type: "user_input_required", question: "Which date should I check?" };
       return { type: "finish", summary: options.summary };
     },
@@ -86,6 +94,7 @@ function createFixture(
     askFirst?: boolean;
     summary: string;
     turns?: readonly ModelTurn[];
+    failAfterTurns?: boolean;
     guardDecisions?: readonly ActionPolicyDecision[];
     screen?: Viewport;
     windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
@@ -391,6 +400,38 @@ describe("ApplicationRemoteRunApi", () => {
       expect(events.length).toBeGreaterThan(0);
       expect(events).toEqual(events.map((_value, index) => index + 1));
       expect(() => api.subscribe("device-two", first.runId, 0, () => undefined)).toThrow(RemoteRunApiError);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("projects failed Provider progress replies and preserves authorized post-action screenshots", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-provider-progress-"));
+    const { api, session } = createFixture(outputDir, {
+      summary: "must not become success",
+      failAfterTurns: true,
+      turns: [{ type: "tool_calls", calls: [{ id: "progress-click" as ToolCallId, name: "click", arguments: { x: 1, y: 2 } }] }],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "timeout-progress", "fixture click", choices.candidates[0]!.token);
+      await session.waitForActiveRun();
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.status).toBe("finished");
+      expect(snapshot.reply).toContain("已保留 1 个非等待 GUI 动作完成回执");
+      expect(snapshot.reply).toContain("任务完成未确认");
+      expect(snapshot.reply).toContain(`assetId=${snapshot.latestAssetId}`);
+      const streamed: unknown[] = [];
+      api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event)).close();
+      expect(streamed).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.event", data: expect.objectContaining({ type: "run.reply", outcome: "failed", reply: snapshot.reply }) })]));
+      const screenshot = await api.getAsset("device-one", started.runId, snapshot.latestAssetId!);
+      expect(screenshot?.mediaType).toBe("image/png");
+      expect(await api.getAsset("device-two", started.runId, snapshot.latestAssetId!)).toBeUndefined();
+      expect(streamed.filter((event) => {
+        const projected = event as { data?: { phase?: string; status?: string } };
+        return projected.data?.phase === "action" && projected.data.status === "started";
+      })).toHaveLength(1);
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });

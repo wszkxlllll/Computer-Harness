@@ -69,6 +69,14 @@ function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelI
 }
 
 describe("GLM provider adapter", () => {
+  it("defers batching to the Context contract while preserving coordinate instructions", async () => {
+    const client = new Client({ choices: [{ message: { content: "ok" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await adapter.generate({ ...input(), system: "Only click→type is permitted as a batch; click_element must be alone." }, { signal: new AbortController().signal });
+    expect(JSON.stringify(client.body)).toContain("follow the Context tool-call and batching contract");
+    expect(JSON.stringify(client.body)).toContain("absent an explicit permitted batch");
+    expect(JSON.stringify(client.body)).toContain("Coordinates must be normalized to 0..1000");
+  });
   it("keeps prepared wire state private to the creating adapter", async () => {
     const client = new Client({ choices: [{ message: { content: "prepared" } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
@@ -188,7 +196,43 @@ describe("GLM provider adapter", () => {
     const client = new Client({ choices: [{ message: { content: "done" } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
     await adapter.generate(input(), { signal: new AbortController().signal });
-    expect(client.body?.max_tokens).toBe(4096);
+    expect(client.body?.max_tokens).toBe(8192);
+  });
+
+  it.each([undefined, 16384, 131072])("bounds custom output configuration %s and snapshots it", async (budget) => {
+    const profile = { ...normalizedProfile, ...(budget === undefined ? {} : { maxOutputTokens: budget }) };
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: "done" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile, assetReader: new Reader(), httpClient: client });
+    profile.maxOutputTokens = 1;
+    await adapter.generate(input(), { signal: new AbortController().signal });
+    expect(client.body?.max_tokens).toBe(budget ?? 8192);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, 131073, Number.MAX_SAFE_INTEGER + 1])("rejects invalid output budget %s before HTTP", (budget) => {
+    const client = new Client({});
+    expect(() => new GlmAdapter({ apiKey: "key", profile: { ...normalizedProfile, maxOutputTokens: budget }, assetReader: new Reader(), httpClient: client })).toThrow(/maxOutputTokens/u);
+    expect(client.body).toBeUndefined();
+  });
+
+  it("preserves a complete long result without locally truncating its text", async () => {
+    const summary = "完整输出".repeat(2000);
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: summary } }] });
+    await expect(new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client }).generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", summary });
+  });
+
+  it("rejects length before parsing a complete-looking tool call and keeps only safe diagnostics", async () => {
+    const client = new Client({ choices: [{ finish_reason: "length", message: { content: "PRIVATE_CONTENT", reasoning_content: "PRIVATE_REASONING", tool_calls: [{ id: "partial", function: { name: "click", arguments: "{\"x\":1,\"y\":2,\"private\":\"PRIVATE_ARGS\"}" } }] } }], usage: { prompt_tokens: 100, completion_tokens: 8192, total_tokens: 8292, completion_tokens_details: { reasoning_tokens: 8000 } } });
+    const error = await new GlmAdapter({ apiKey: "PRIVATE_KEY", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client }).generate(input(), { signal: new AbortController().signal }).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "GLM_INCOMPLETE_RESPONSE", retryable: false, retryMode: "feedback" });
+    expect(String(error)).toContain('"finish_reason":"length","max_tokens":8192,"thinking":"enabled","prompt_tokens":100,"completion_tokens":8192,"total_tokens":8292,"reasoning_tokens":8000');
+    expect(String(error)).not.toMatch(/PRIVATE_CONTENT|PRIVATE_REASONING|PRIVATE_ARGS|PRIVATE_KEY/u);
+  });
+
+  it("does not log arbitrary finish reasons or malformed token counts", async () => {
+    const client = new Client({ choices: [{ finish_reason: "PRIVATE_FINISH", message: { content: "PRIVATE_BODY" } }], usage: { prompt_tokens: "PRIVATE_COUNT", completion_tokens: -1, total_tokens: Number.MAX_SAFE_INTEGER + 1, completion_tokens_details: { reasoning_tokens: "PRIVATE_REASONING_COUNT" } } });
+    const error = await new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client }).generate(input(), { signal: new AbortController().signal }).catch((failure: unknown) => failure);
+    expect(String(error)).toContain('"finish_reason":"unknown","max_tokens":8192,"thinking":"enabled"');
+    expect(String(error)).not.toMatch(/PRIVATE_|prompt_tokens|completion_tokens|total_tokens|reasoning_tokens/u);
   });
 
   it("rejects malformed, duplicate, and out-of-range provider output", async () => {
@@ -417,6 +461,7 @@ describe("GLM provider adapter", () => {
         code: "GLM_REQUEST_TIMEOUT",
         retryable: false,
         retryMode: "feedback",
+        message: expect.stringMatching(/phase=reading_body elapsedMs=\d+ deadlineMs=10 headersElapsedMs=\d+ httpStatus=200/u),
       });
       expect(observedSignal?.aborted).toBe(true);
     } finally {
@@ -424,7 +469,33 @@ describe("GLM provider adapter", () => {
     }
   });
 
+  it("identifies a timeout before Response headers without exposing request data", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    })));
+    try {
+      const client = new FetchGlmHttpClient({ requestTimeoutMs: 10 });
+      const error = await client.post("https://private.invalid/secret-path", { secret: "PRIVATE_BODY" }, { authorization: "PRIVATE_KEY" }, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback", message: expect.stringMatching(/phase=awaiting_headers elapsedMs=\d+ deadlineMs=10/u) });
+      expect(String(error)).not.toMatch(/secret-path|PRIVATE_BODY|PRIVATE_KEY/u);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("preserves cancellation while reading a response body", async () => {
+    const cancellation = new Error("user cancelled body");
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => ({ ok: true, status: 200, json: () => new Promise<never>((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      controller.abort(cancellation);
+    }) })));
+    try {
+      await expect(new FetchGlmHttpClient({ requestTimeoutMs: 100 }).post("https://fixture.invalid", {}, {}, controller.signal)).rejects.toBe(cancellation);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("preserves user cancellation instead of classifying it as a retryable timeout", async () => {
+    // User cancellation remains distinct from the transport deadline.
     let observedSignal: AbortSignal | undefined;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => {
       observedSignal = options.signal;

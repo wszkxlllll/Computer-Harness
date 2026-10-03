@@ -39,7 +39,7 @@ export const glmProfiles: Readonly<Record<GlmProfileName, GlmProfile>> = {
     name: "glm-5.3-flash",
     thinking: "enabled",
     coordinateMode: "actual_pixels",
-    maxOutputTokens: 4096,
+    maxOutputTokens: 8192,
   },
 };
 
@@ -87,7 +87,11 @@ export class GlmAdapter implements ProviderAdapter {
     if (options.apiKey.trim().length === 0) {
       throw new Error("GLM apiKey must be non-empty");
     }
-    this.profile = typeof options.profile === "string" ? glmProfiles[options.profile] : options.profile;
+    const profile = typeof options.profile === "string" ? glmProfiles[options.profile] : options.profile;
+    const maxOutputTokens = profile.maxOutputTokens ?? 8192;
+    if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 131072) throw new Error("GLM maxOutputTokens must be a positive integer no greater than 131072");
+    if (profile.thinking !== "enabled" && profile.thinking !== "disabled") throw new Error("GLM thinking mode is invalid");
+    this.profile = Object.freeze({ ...profile, maxOutputTokens });
     this.id = this.profile.name;
     this.assetReader = options.assetReader;
     this.endpoint = options.endpoint ?? "https://open.bigmodel.cn/api/paas/v4/chat/completions";
@@ -203,7 +207,7 @@ export class GlmAdapter implements ProviderAdapter {
 
   private parseResponse(value: unknown, input: ModelInput): ModelTurn {
     const response = readResponse(value);
-    assertCompleteFinishReason(response.finishReason);
+    assertCompleteFinishReason(response.finishReason, this.profile, response.usage, response.reasoningTokens);
     const message = response.message;
     const usage = response.usage;
     const rawToolCalls = message.tool_calls;
@@ -276,6 +280,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
     signal: AbortSignal,
   ): Promise<unknown> {
     const requestController = new AbortController();
+    const startedAt = Date.now();
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -300,7 +305,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
         if (signal.aborted) throw signal.reason ?? error;
         if (timedOut) {
           throw new GlmProviderError(
-            `GLM request timed out after ${this.requestTimeoutMs}ms`,
+            `GLM request timed out after ${this.requestTimeoutMs}ms (phase=awaiting_headers elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs})`,
             "GLM_REQUEST_TIMEOUT",
             // A timeout leaves the outcome of the remote request unknown. Do
             // not replay a potentially large image/tool prompt automatically:
@@ -317,11 +322,12 @@ export class FetchGlmHttpClient implements GlmHttpClient {
           "same_input",
         );
       }
+      const headersElapsedMs = Date.now() - startedAt;
       const payload = await response.json().catch((error: unknown) => {
         if (signal.aborted) throw signal.reason ?? error;
         if (timedOut) {
           throw new GlmProviderError(
-            `GLM response body timed out after ${this.requestTimeoutMs}ms`,
+            `GLM response body timed out after ${this.requestTimeoutMs}ms (phase=reading_body elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs} headersElapsedMs=${headersElapsedMs} httpStatus=${response.status})`,
             "GLM_REQUEST_TIMEOUT",
             false,
             "feedback",
@@ -446,7 +452,7 @@ function toDataUrl(mediaType: string, bytes: Uint8Array): string {
   return `data:${mediaType};base64,${Buffer.from(bytes).toString("base64")}`;
 }
 
-function readResponse(value: unknown): { message: { content?: unknown; tool_calls?: unknown; reasoning_content?: unknown }; finishReason?: string; usage?: ModelUsage } {
+function readResponse(value: unknown): { message: { content?: unknown; tool_calls?: unknown; reasoning_content?: unknown }; finishReason?: string; usage?: ModelUsage; reasoningTokens?: number } {
   if (!isRecord(value) || !Array.isArray(value.choices) || value.choices.length === 0) {
     throw new GlmProviderError("GLM response has no choices", "GLM_INVALID_RESPONSE");
   }
@@ -458,10 +464,13 @@ function readResponse(value: unknown): { message: { content?: unknown; tool_call
     throw new GlmProviderError("GLM response has an invalid finish_reason", "GLM_INVALID_RESPONSE");
   }
   const usage = readUsage(value);
+  const details = isRecord(value.usage) && isRecord(value.usage.completion_tokens_details) ? value.usage.completion_tokens_details : undefined;
+  const reasoningTokens = details?.reasoning_tokens;
   return {
     message: first.message,
     ...(typeof first.finish_reason === "string" ? { finishReason: first.finish_reason } : {}),
     ...(usage === undefined ? {} : { usage }),
+    ...(typeof reasoningTokens === "number" && Number.isSafeInteger(reasoningTokens) && reasoningTokens >= 0 ? { reasoningTokens } : {}),
   };
 }
 
@@ -473,9 +482,16 @@ function reasoningContinuation(value: unknown, providerId: string): ModelContinu
   return { providerId, kind: "reasoning_content", content: value };
 }
 
-function assertCompleteFinishReason(reason: string | undefined): void {
+function assertCompleteFinishReason(reason: string | undefined, profile: GlmProfile, usage?: ModelUsage, reasoningTokens?: number): void {
   if (reason !== undefined && reason !== "stop" && reason !== "tool_calls" && reason !== "function_call") {
-    throw new GlmProviderError(`GLM response ended with incomplete finish_reason: ${reason}`, "GLM_INCOMPLETE_RESPONSE");
+    const safeReason = ["length", "content_filter", "sensitive"].includes(reason) ? reason : "unknown";
+    const diagnostic = JSON.stringify({ finish_reason: safeReason, max_tokens: profile.maxOutputTokens, thinking: profile.thinking,
+      ...(usage?.inputTokens === undefined ? {} : { prompt_tokens: usage.inputTokens }),
+      ...(usage?.outputTokens === undefined ? {} : { completion_tokens: usage.outputTokens }),
+      ...(usage?.totalTokens === undefined ? {} : { total_tokens: usage.totalTokens }),
+      ...(reasoningTokens === undefined ? {} : { reasoning_tokens: reasoningTokens }),
+    });
+    throw new GlmProviderError(`GLM response ended with incomplete finish_reason: ${safeReason}; diagnostic=${diagnostic}`, "GLM_INCOMPLETE_RESPONSE", false, "feedback");
   }
 }
 
@@ -486,9 +502,9 @@ function readUsage(value: unknown): ModelUsage | undefined {
   const outputTokens = usage.completion_tokens;
   const totalTokens = usage.total_tokens;
   const parsed = {
-    ...(typeof inputTokens === "number" && Number.isInteger(inputTokens) && inputTokens >= 0 ? { inputTokens } : {}),
-    ...(typeof outputTokens === "number" && Number.isInteger(outputTokens) && outputTokens >= 0 ? { outputTokens } : {}),
-    ...(typeof totalTokens === "number" && Number.isInteger(totalTokens) && totalTokens >= 0 ? { totalTokens } : {}),
+    ...(typeof inputTokens === "number" && Number.isSafeInteger(inputTokens) && inputTokens >= 0 ? { inputTokens } : {}),
+    ...(typeof outputTokens === "number" && Number.isSafeInteger(outputTokens) && outputTokens >= 0 ? { outputTokens } : {}),
+    ...(typeof totalTokens === "number" && Number.isSafeInteger(totalTokens) && totalTokens >= 0 ? { totalTokens } : {}),
   };
   return Object.keys(parsed).length === 0 ? undefined : parsed;
 }
@@ -565,8 +581,8 @@ function addCoordinateBounds(schema: JsonValue, fields: readonly CoordinateField
 
 function profilePrompt(profile: GlmProfile): string {
   return profile.coordinateMode === "normalized_1000"
-    ? "GLM GUI contract: emit at most one Computer tool call per turn. Coordinates must be normalized to 0..1000 relative to the current image."
-    : "GLM GUI contract: emit at most one Computer tool call per turn. Coordinates are pixels in the current image viewport.";
+    ? "GLM GUI contract: follow the Context tool-call and batching contract; absent an explicit permitted batch, emit at most one Computer tool call per turn. Coordinates must be normalized to 0..1000 relative to the current image."
+    : "GLM GUI contract: follow the Context tool-call and batching contract; absent an explicit permitted batch, emit at most one Computer tool call per turn. Coordinates are pixels in the current image viewport.";
 }
 
 function latestViewport(input: ModelInput): Viewport | undefined {
@@ -616,8 +632,7 @@ function isRetryableGlmErrorCode(code: string): boolean {
     || code === "GLM_INVALID_TOOL_CALL"
     || code === "GLM_DUPLICATE_TOOL_CALL"
     || code === "GLM_UNAVAILABLE_TOOL"
-    || code === "GLM_EMPTY_RESPONSE"
-    || code === "GLM_INCOMPLETE_RESPONSE";
+    || code === "GLM_EMPTY_RESPONSE";
 }
 
 function isJsonValue(value: unknown): value is JsonValue {

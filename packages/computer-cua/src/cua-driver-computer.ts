@@ -131,6 +131,8 @@ export interface CuaDriverComputerOptions {
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
   driverFactory?: CuaDriverFactory;
+  /** Test seam for the pinned platform coordinate contract; defaults to process.platform. */
+  platform?: NodeJS.Platform;
   /** Test seam for capture retry timing; production uses bounded real delays. */
   windowCaptureRetry?: WindowCaptureRetryOptions;
 }
@@ -168,6 +170,7 @@ interface PendingDriverCleanup {
 
 interface PrivateObservation {
   sessionId: string;
+  captureSource?: "verify_state" | "get_window_state_registered" | "get_window_state_fallback";
   /**
    * The image coordinate space that the model used for this observation.
    * Window actions must be projected from this viewport, not from the
@@ -213,6 +216,8 @@ export class CuaDriverComputer implements Computer {
   private readonly observations = new Map<string, PrivateObservation>();
   private readonly groundings = new Map<string, PrivateGrounding>();
   private latestObservationId: ObservationId | undefined;
+  private expectedDomInput: DomClickRequest | undefined;
+  private browserChromeInput = false;
   private session: PrivateSession | undefined;
   private pendingCleanup: PendingDriverCleanup | undefined;
 
@@ -288,7 +293,7 @@ export class CuaDriverComputer implements Computer {
         }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
-        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry);
+        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, this.options.platform ?? process.platform);
         windowBinding = capture.binding;
         viewport = capture.viewport;
       }
@@ -331,6 +336,8 @@ export class CuaDriverComputer implements Computer {
         ...(windowBinding === undefined ? {} : { windowBinding }),
         ...(this.options.browserTarget === undefined ? {} : { browserTarget: this.options.browserTarget }),
       };
+      this.expectedDomInput = undefined;
+      this.browserChromeInput = false;
       return descriptor;
     } catch (error) {
       const cleanupCompleted = await bestEffortCloseDriver(driver, label, this.options.cleanupWaitMs, sessionStarted);
@@ -351,7 +358,7 @@ export class CuaDriverComputer implements Computer {
         throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session"), "observe");
       }
       try {
-        const capture = await captureWindowWithRetry(current.driver, current.label, current.windowBinding.target, signal, this.options.windowCaptureRetry);
+        const capture = await captureWindowWithRetry(current.driver, current.label, current.windowBinding.target, signal, this.options.windowCaptureRetry, this.options.platform ?? process.platform);
         const liveBinding = capture.binding;
         current.windowBinding = liveBinding;
         current.descriptor = { ...current.descriptor, viewport: capture.viewport };
@@ -392,6 +399,7 @@ export class CuaDriverComputer implements Computer {
         );
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
+          captureSource: capture.source,
           viewport: capture.viewport,
           geometry: liveBinding.bounds,
         });
@@ -532,7 +540,7 @@ export class CuaDriverComputer implements Computer {
     if (this.options.windowDeliveryMode === "foreground") {
       await bringWindowToFrontOnce(current.driver, current.label, candidate, signal);
     }
-    const capture = await captureWindowWithRetry(current.driver, current.label, candidate, signal, this.options.windowCaptureRetry);
+    const capture = await captureWindowWithRetry(current.driver, current.label, candidate, signal, this.options.windowCaptureRetry, this.options.platform ?? process.platform);
     signal.throwIfAborted();
     // No GUI input is sent here. Commit the new binding only after a fresh,
     // exact-identity capture; old frame and element references cannot survive.
@@ -576,6 +584,13 @@ export class CuaDriverComputer implements Computer {
       const executionObservationId = options?.executionObservationId ?? action.basedOn;
       if (executionObservationId !== this.latestObservationId) {
         return refused(action.actionId, "STALE_OBSERVATION", `action executes against stale observation ${String(executionObservationId)}`);
+      }
+      if ((this.options.platform ?? process.platform) === "darwin" && current.windowBinding !== undefined
+        && ["click", "double_click", "right_click", "scroll", "drag"].includes(action.kind)) {
+        const executionViewport = this.observations.get(String(executionObservationId))?.viewport;
+        if (executionViewport === undefined || executionViewport.width !== decisionObservation.viewport.width || executionViewport.height !== decisionObservation.viewport.height || executionViewport.coordinateSpace !== decisionObservation.viewport.coordinateSpace) {
+          return refused(action.actionId, "WINDOW_VIEWPORT_CHANGED", "window screenshot dimensions changed since the decision observation; observe and ground a new action; no input was sent");
+        }
       }
     }
     if (action.kind === "wait") {
@@ -724,7 +739,8 @@ export class CuaDriverComputer implements Computer {
     const browserGrounding = domEquivalent ?? (
       resolvedGrounding?.element.source === "dom" ? resolvedGrounding : undefined
     );
-    if (action.kind === "click"
+    let validatedEditablePoint: { x: number; y: number } | undefined;
+    domClickDispatch: if (action.kind === "click"
       && action.groundingRef !== undefined
       && browserGrounding !== undefined
       && browserTarget !== undefined
@@ -767,6 +783,21 @@ export class CuaDriverComputer implements Computer {
         },
       };
       try {
+        this.browserChromeInput = false;
+        if (browserGrounding.element.state?.editable === true) {
+          if (domTransport.validateClick === undefined || domTransport.verifyFocus === undefined || this.options.windowDeliveryMode !== "foreground") {
+            return refused(action.actionId, "DOM_INPUT_FOCUS_UNAVAILABLE", "editable browser click requires verified native foreground delivery; no input was sent");
+          }
+          const validation = await domTransport.validateClick(request, signal);
+          if (validation.status !== "completed" || validation.tabId !== browserTarget.tabId || validation.generation !== browserTarget.generation) {
+            return refused(action.actionId, validation.driverCode ?? "DOM_CLICK_GENERATION_MISMATCH", validation.message ?? "editable browser click binding changed; no input was sent");
+          }
+          this.expectedDomInput = request;
+          // One native click performs the browser's actual focus default.
+          // DOM validation above is read-only; no programmatic click is sent.
+          validatedEditablePoint = browserGrounding.point;
+          break domClickDispatch;
+        }
         const result = await domTransport.click(request, signal);
         if (result.status === "completed" && (result.tabId !== browserTarget.tabId || result.generation !== browserTarget.generation)) {
           return refused(action.actionId, "DOM_CLICK_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before clicking");
@@ -783,6 +814,40 @@ export class CuaDriverComputer implements Computer {
         if (details.tag === "Transport") current.active = false;
         if (details.tag === "Tool") return refused(action.actionId, details.errorCode ?? "DOM_CLICK_REFUSED", details.message);
         throw normalizeDriverError(error, "execute");
+      }
+    }
+    // A completed page click is not proof that native typing will reach it.
+    // Preserve the expectation across observations, scrolls and waits; only
+    // an explicit location-bar shortcut may switch to browser chrome input.
+    const locationBarShortcut = action.kind === "keypress" && action.keys.length === 2
+      && action.keys.some((key) => key.toUpperCase() === "L")
+      && action.keys.some((key) => ["CMD", "META", "CTRL"].includes(key.toUpperCase()));
+    if (action.kind === "type" && browserTarget !== undefined && this.expectedDomInput === undefined && !this.browserChromeInput) {
+      const latestGrounding = this.groundings.get(String(options?.executionObservationId ?? action.basedOn));
+      const focused = [...(latestGrounding?.elements.values() ?? [])].filter((item) => item.element.source === "dom" && item.element.state?.focused === true && item.element.state.editable === true);
+      const candidate = focused.length === 1 ? focused[0] : undefined;
+      if (candidate?.candidateFingerprint === undefined || candidate.element.bbox === undefined || latestGrounding?.browserTarget === undefined) {
+        return refused(action.actionId, "DOM_INPUT_FOCUS_MISMATCH", "no unique observed editable browser control owns page focus; no keyboard input was sent. Observe again, click the current editable control, then observe before typing");
+      }
+      this.expectedDomInput = {
+        observationId: options?.executionObservationId ?? action.basedOn,
+        computerSessionId: session.id,
+        viewport: decisionObservation?.viewport ?? session.viewport,
+        browserTarget: latestGrounding.browserTarget,
+        candidate: { role: candidate.element.role, ...(candidate.candidateName === undefined ? {} : { name: candidate.candidateName }), bbox: candidate.element.bbox, ...(candidate.candidateFrame === undefined ? {} : { frame: candidate.candidateFrame }), fingerprint: candidate.candidateFingerprint },
+      };
+    }
+    if ((action.kind === "type" || action.kind === "keypress") && !locationBarShortcut && this.expectedDomInput !== undefined) {
+      if (domTransport?.verifyFocus === undefined) return refused(action.actionId, "DOM_INPUT_FOCUS_UNAVAILABLE", "managed-browser focus verification unavailable; no keyboard input was sent");
+      const expected = this.expectedDomInput;
+      try {
+        const result = await domTransport.verifyFocus(expected, signal);
+        if (result.status !== "completed" || result.tabId !== expected.browserTarget.tabId || result.generation !== expected.browserTarget.generation) {
+          return refused(action.actionId, result.driverCode ?? "DOM_INPUT_FOCUS_MISMATCH", "managed-browser input identity or focus changed; no keyboard input was sent. Observe again and click the current editable control before typing");
+        }
+      } catch (error) {
+        signal.throwIfAborted();
+        return refused(action.actionId, "DOM_INPUT_FOCUS_UNAVAILABLE", "managed-browser input focus could not be verified; no keyboard input was sent");
       }
     }
     let requestAction = action;
@@ -806,6 +871,7 @@ export class CuaDriverComputer implements Computer {
       }
       requestAction = { ...action, point: resolved.point };
     }
+    if (validatedEditablePoint !== undefined && requestAction.kind === "click") requestAction = { ...requestAction, point: validatedEditablePoint };
     let request: { name: string; arguments: Record<string, unknown> };
     try {
       request = actionRequest(
@@ -814,6 +880,7 @@ export class CuaDriverComputer implements Computer {
         current.windowBinding,
         this.options.windowDeliveryMode,
         decisionObservation?.viewport,
+        this.options.platform ?? process.platform,
       );
     } catch (error) {
       if (error instanceof WindowCoordinateMappingError) {
@@ -839,6 +906,10 @@ export class CuaDriverComputer implements Computer {
       }
     }
     try {
+      if (action.kind === "click" && browserTarget !== undefined) this.browserChromeInput = false;
+      // A successful location-bar shortcut permits just one text dispatch.
+      // Consume before dispatch so an unknown outcome cannot reuse it.
+      if (action.kind === "type" && browserTarget !== undefined) this.browserChromeInput = false;
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
         const driverCode = windowRefusalCode(result.errorCode, result.text);
@@ -850,7 +921,13 @@ export class CuaDriverComputer implements Computer {
       if (result.degraded) {
         return { actionId: action.actionId, status: "failed", driverCode: "CUA_DEGRADED", message: result.text };
       }
-      return { actionId: action.actionId, status: "completed", ...(result.text ? { message: result.text } : {}) };
+      if (locationBarShortcut) { this.expectedDomInput = undefined; this.browserChromeInput = true; }
+      else if (action.kind === "click") this.browserChromeInput = false;
+      else if (action.kind === "keypress" && !action.keys.some((key) => ["CMD", "META", "CTRL"].includes(key.toUpperCase()))) this.browserChromeInput = false;
+      const diagnostic = current.windowBinding !== undefined && ["click", "scroll", "drag"].includes(action.kind)
+        ? `cua-window-pixels source=${decisionObservation?.captureSource ?? "unknown"} viewport=${decisionObservation?.viewport.width}x${decisionObservation?.viewport.height} bounds=${current.windowBinding.bounds.width}x${current.windowBinding.bounds.height} target=${current.windowBinding.target.pid}/${current.windowBinding.target.windowId} delivery=${this.options.windowDeliveryMode ?? "background"} point=${JSON.stringify(Object.fromEntries(Object.entries(request.arguments).filter(([key]) => ["x", "y", "from_x", "from_y", "to_x", "to_y"].includes(key))))}`
+        : undefined;
+      return { actionId: action.actionId, status: "completed", ...((result.text || diagnostic) ? { message: [result.text, diagnostic].filter(Boolean).join("; ") } : {}) };
     } catch (error) {
       const details = driverErrorDetails(error);
       if (details.tag === "Transport") {
@@ -949,12 +1026,13 @@ function actionRequest(
   windowBinding?: CuaWindowBinding,
   configuredDeliveryMode?: CuaWindowDeliveryMode,
   decisionViewport?: Viewport,
+  platform: NodeJS.Platform = process.platform,
 ): { name: string; arguments: Record<string, unknown> } {
   const target = windowBinding === undefined ? PRIMARY_DESKTOP : windowActionTarget(windowBinding);
   const deliveryMode = windowBinding === undefined ? "foreground" : configuredDeliveryMode ?? "background";
   const point = (value: { x: number; y: number }) => windowBinding === undefined
     ? value
-    : mapWindowPoint(value, decisionViewport, windowBinding.bounds);
+    : mapWindowPoint(value, decisionViewport, windowBinding.bounds, platform);
   switch (action.kind) {
     case "click":
       return { name: "click", arguments: { session, target, ...point(action.point), delivery_mode: deliveryMode } };
@@ -1615,7 +1693,7 @@ function parseStructuredRecord(value: unknown): Record<string, unknown> | undefi
 }
 
 /**
- * Convert model/image-local coordinates to the CUA window-local coordinates.
+ * Validate image-local coordinates and apply the pinned platform contract.
  * The decision frame is the source of truth: an approved action may execute
  * against a later observation, but its coordinates were still produced from
  * action.basedOn. Geometry is checked by the caller before this projection.
@@ -1624,6 +1702,7 @@ function mapWindowPoint(
   point: { x: number; y: number },
   sourceViewport: Viewport | undefined,
   targetBounds: CuaWindowGeometry,
+  platform: NodeJS.Platform,
 ): { x: number; y: number } {
   if (sourceViewport === undefined) {
     throw new WindowCoordinateMappingError("WINDOW_VIEWPORT_UNKNOWN", "window action has no source observation viewport");
@@ -1641,8 +1720,13 @@ function mapWindowPoint(
     throw new WindowCoordinateMappingError("WINDOW_COORDINATE_INVALID", `window action point (${point.x}, ${point.y}) is outside source viewport ${sourceViewport.width}x${sourceViewport.height}`);
   }
   return {
-    x: clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),
-    y: clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height), targetBounds.height),
+    // CUA 0.22.2 macOS click/scroll/drag consume get_window_state PNG pixels.
+    // The driver reverses its per-window resize ratio and Retina backing
+    // scale itself. A bounds projection here would apply a second transform.
+    // Keep the historical Windows/Linux contract unchanged: Windows capture
+    // through observation-only verify_state does not refresh its resize map.
+    x: platform === "darwin" ? clampCoordinate(Math.round(point.x), sourceViewport.width) : clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),
+    y: platform === "darwin" ? clampCoordinate(Math.round(point.y), sourceViewport.height) : clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height), targetBounds.height),
   };
 }
 

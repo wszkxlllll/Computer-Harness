@@ -36,7 +36,23 @@ function fixture(target: { readonly pid: number; readonly windowId: number }) {
       const input = JSON.parse(inputJson) as Record<string, unknown>;
       calls.push({ name, input });
       if (name === "list_windows") return toolResult({ structuredJson: JSON.stringify({ windows: [{ pid: target.pid, window_id: target.windowId, title: "fixture", app_name: "fixture", bounds: { x: 100, y: 120, width: 960, height: 680 } }] }) });
-      if (name === "get_window_state") return toolResult({ structuredJson: JSON.stringify({ elements_complete: true, elements: [{ role: "Document", frame: { x: 0, y: 0, width: 960, height: 680 }, enabled: true }] }) });
+      if (name === "get_window_state") return toolResult({
+        images: input.include_screenshot === true ? [{ mimeType: "image/png", dataBase64: pngWithDimensions(958, 678) }] : [],
+        structuredJson: JSON.stringify({
+          ...(input.include_screenshot === true ? {
+            pid: target.pid,
+            window_id: target.windowId,
+            window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+            screenshot_frame_valid: true,
+            screenshot_scale: 1,
+            screenshot_width: 958,
+            screenshot_height: 678,
+            screenshot_mime_type: "image/png",
+          } : {}),
+          elements_complete: true,
+          elements: [{ role: "Document", frame: { x: 0, y: 0, width: 960, height: 680 }, enabled: true }],
+        }),
+      });
       return toolResult();
     },
     uniffiDestroy() {},
@@ -87,7 +103,7 @@ async function openFixture(mode: SelectOptionFixtureMode = "success") {
   const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "edge", profileId: "fixture", windowTarget, tabId: "tab-1", generation: "generation-1", delivery: "loopback-cdp" };
   const fake = fixture(windowTarget);
   const selected = makeTransport(browserTarget, mode);
-  const computer = new CuaDriverComputer({ socketPath: "fixture.sock", screenshotDir: directory, windowTarget, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: selected.transport, driverFactory: () => fake.driver });
+  const computer = new CuaDriverComputer({ platform: "darwin", socketPath: "fixture.sock", screenshotDir: directory, windowTarget, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: selected.transport, driverFactory: () => fake.driver });
   const session = await computer.open({}, new AbortController().signal);
   await computer.observe(session, "select-option-observation" as ObservationId, new AbortController().signal);
   return { directory, browserTarget, fake, selected, computer, session, observationId: "select-option-observation" as ObservationId };
@@ -161,6 +177,7 @@ describe("managed-browser select_option adapter", () => {
       expect(select).toBeDefined();
       const receipt = await opened.computer.execute(opened.session, { actionId: "select-action" as ActionId, basedOn: "select-option-current" as ObservationId, kind: "select_option", groundingRef: select!.elementRef, optionText: "08:00" }, new AbortController().signal);
       expect(receipt).toMatchObject({ status: "completed" });
+      expect(opened.fake.calls.filter((call) => call.name === "get_window_state" && call.input?.include_screenshot === true).length).toBeGreaterThan(0);
       expect(opened.selected.requests[0]).toMatchObject({ optionText: "08:00", candidate: { role: "combobox", name: "Departure", fingerprint: expect.stringMatching(/^domf-/u), frame: { x: 100, y: 100 } } });
       expect(opened.fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
     } finally {

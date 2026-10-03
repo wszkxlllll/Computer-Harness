@@ -10,6 +10,9 @@ import { createPlanningRunModule, FilePlanStore, InMemoryPlanStore, type Plannin
 import { readRuntimeEvents, reduceRuntimeEvents } from "@computer-harness/trajectory";
 import { createRun, createRunFactory, writeRunReport, type ResolvedRunConfig } from "./index.js";
 
+// Check effective report defaults against current source without rebuilding dist.
+vi.mock("@computer-harness/provider-glm", () => import("../../provider-glm/src/index.js"));
+
 function config(outputDir: string): ResolvedRunConfig {
   return {
     runId: "app-runtime-test" as RunId,
@@ -358,7 +361,7 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it("assembles a fake Run without starting it, then closes Controller-owned resources once", async () => {
+  it.each([undefined, 16384])("assembles a fake Run with effective output budget %s, then closes Controller-owned resources once", async (budget) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-"));
     const calls = { provider: 0, open: 0, observe: 0, close: 0 };
     const provider: ProviderAdapter = {
@@ -369,7 +372,7 @@ describe("app-runtime RunHandle", () => {
       },
     };
     try {
-      const handle = await createRun(config(outputDir), {
+      const handle = await createRun({ ...config(outputDir), ...(budget === undefined ? {} : { glmMaxOutputTokens: budget }) }, {
         credentials: { glmApiKey: "must-not-be-serialized" },
         createProvider: (options) => {
           expect(options.credentials.glmApiKey).toBe("must-not-be-serialized");
@@ -394,6 +397,8 @@ describe("app-runtime RunHandle", () => {
         memoryRetrieval: "off",
         monitor: "off",
         runtimeOutcome: "succeeded",
+        glmMaxOutputTokens: budget ?? 8192,
+        glmThinking: "enabled",
       });
       expect(report.events.map((event) => event.type)).toEqual([
         "run.created",

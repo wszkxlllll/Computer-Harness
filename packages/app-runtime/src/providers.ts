@@ -49,6 +49,7 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
     // thinking=disabled with HTTP 400/1210. Keep this provider boundary
     // compatible even if an older caller passes the legacy disabled setting.
     thinking: "enabled",
+    ...(options.config.glmMaxOutputTokens === undefined ? {} : { maxOutputTokens: options.config.glmMaxOutputTokens }),
   };
   return new GlmAdapter({
     apiKey,

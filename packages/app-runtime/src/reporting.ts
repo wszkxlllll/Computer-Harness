@@ -4,6 +4,7 @@ import type { RunOutcome, RunId, RuntimeEvent } from "@computer-harness/protocol
 import type { CleanupDiagnostic } from "@computer-harness/runtime";
 import { reduceRuntimeEvents, readRuntimeEvents, type RunSnapshot } from "@computer-harness/trajectory";
 import type { ResolvedRunConfig } from "./config.js";
+import { glmProfiles } from "@computer-harness/provider-glm";
 
 export interface RunReport {
   readonly runId: RunId;
@@ -51,7 +52,8 @@ export async function buildRunReport(
     coordinateMode: config.qwenCoordinateMode ?? null,
     thinkingMode: config.qwenThinking ?? null,
     outputMode: config.qwenOutputMode ?? null,
-    glmThinking: config.glmThinking ?? "enabled",
+    glmThinking: "enabled",
+    glmMaxOutputTokens: config.glmMaxOutputTokens ?? glmProfiles["glm-5.3-flash"].maxOutputTokens ?? 8192,
     planning: config.planning,
     memory: config.memory,
     memoryRetrieval,

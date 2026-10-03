@@ -40,6 +40,7 @@ export interface CuaWindowCapture {
   readonly binding: CuaWindowBinding;
   readonly viewport: Viewport;
   readonly data: Uint8Array;
+  readonly source: "verify_state" | "get_window_state_registered" | "get_window_state_fallback";
 }
 
 /**
@@ -109,6 +110,7 @@ export async function captureWindow(
   session: string,
   binding: CuaWindowBinding,
   signal: AbortSignal,
+  osPlatform: NodeJS.Platform = process.platform,
 ): Promise<CuaWindowCapture> {
   const predicate = StatePredicate.new({
     window: WindowPredicate.new({
@@ -129,7 +131,9 @@ export async function captureWindow(
     session,
     timeoutMs: BigInt(0),
     stableSamples: BigInt(1),
-    includeScreenshot: true,
+    // macOS verify_state invokes get_window_state in observation-only mode,
+    // which deliberately does not register the PNG's resize ratio for input.
+    includeScreenshot: osPlatform !== "darwin",
   }), { signal });
   if (result.isError) {
     throw new WindowContractError(
@@ -142,12 +146,42 @@ export async function captureWindow(
   if (verification === undefined || verification.status !== 0 || verification.stable !== true) {
     throw new WindowContractError("WINDOW_GEOMETRY_UNCONFIRMED", "configured CUA window geometry was not verified");
   }
+  if (osPlatform === "darwin") return captureRegisteredMacWindow(driver, session, binding, signal);
   const { data, dimensions } = parseWindowCaptureImages(result.images, "CUA window capture");
   return {
     binding,
     viewport: { ...dimensions, coordinateSpace: "physical" },
     data,
+    source: "verify_state",
   };
+}
+
+async function captureRegisteredMacWindow(driver: CuaDriverLike, session: string, binding: CuaWindowBinding, signal: AbortSignal): Promise<CuaWindowCapture> {
+  signal.throwIfAborted();
+  const result = await driver.callTool("get_window_state", JSON.stringify({ pid: binding.target.pid, window_id: binding.target.windowId, include_screenshot: true, max_depth: 1, max_elements: 1, session }), { signal });
+  signal.throwIfAborted();
+  if (result.isError) throw new WindowContractError("WINDOW_CAPTURE_REFUSED", captureRefusalMessage("get_window_state registered", binding.target, result.errorCode, result.text));
+  const metadata = parseStructured(result.structuredJson);
+  if ((result.degraded || metadata?.degraded === true) && (typeof metadata?.degraded_reason !== "string" || !/^(?:ax_tree_empty|ax_window_unresolved)(?::|$)/u.test(metadata.degraded_reason))) {
+    throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_DEGRADED", "registered window capture reported an unrecognized degradation; no unregistered fallback is permitted");
+  }
+  const bounds = metadata?.window_bounds;
+  if (metadata?.pid !== binding.target.pid || metadata?.window_id !== binding.target.windowId || metadata?.screenshot_frame_valid !== true || !isRecord(bounds)
+    || bounds.x !== binding.bounds.x || bounds.y !== binding.bounds.y || bounds.width !== binding.bounds.width || bounds.height !== binding.bounds.height) {
+    throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_UNCONFIRMED", "registered screenshot identity or geometry does not match the verified window");
+  }
+  let parsed: ReturnType<typeof parseWindowCaptureImages>;
+  try { parsed = parseWindowCaptureImages(result.images, "CUA registered window capture"); }
+  catch { throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_SCHEMA", "registered window capture did not return one valid PNG; no unregistered fallback is permitted"); }
+  if (metadata.screenshot_width !== parsed.dimensions.width || metadata.screenshot_height !== parsed.dimensions.height || metadata.screenshot_mime_type !== "image/png" || (metadata.screenshot_scale !== 1 && metadata.screenshot_scale !== 2)
+    || parsed.dimensions.width > binding.bounds.width * metadata.screenshot_scale || parsed.dimensions.height > binding.bounds.height * metadata.screenshot_scale) {
+    throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_UNCONFIRMED", "registered PNG dimensions or backing scale do not match its window metadata");
+  }
+  // A fresh exact identity read catches move/resize between verification and
+  // registered capture. It never captures a desktop or replays an action.
+  const after = await discoverWindowChecked(driver, session, binding.target, signal);
+  if (!sameWindowGeometry(after.bounds, binding.bounds)) throw new WindowContractError("WINDOW_GEOMETRY_CHANGED", "window geometry changed during registered capture");
+  return { binding, viewport: { ...parsed.dimensions, coordinateSpace: "physical" }, data: parsed.data, source: "get_window_state_registered" };
 }
 
 /**
@@ -165,6 +199,7 @@ export async function captureWindowWithRetry(
   target: CuaWindowTarget,
   signal: AbortSignal,
   options: WindowCaptureRetryOptions = {},
+  osPlatform: NodeJS.Platform = process.platform,
 ): Promise<CuaWindowCapture> {
   let retryStartedAt: number | undefined;
   let schemaFailure: WindowContractError | undefined;
@@ -175,7 +210,7 @@ export async function captureWindowWithRetry(
     signal.throwIfAborted();
     const binding = await discoverWindowChecked(driver, session, target, signal);
     try {
-      const capture = await captureWindow(driver, session, binding, signal);
+      const capture = await captureWindow(driver, session, binding, signal, osPlatform);
       signal.throwIfAborted();
       return capture;
     } catch (error) {
@@ -242,6 +277,7 @@ async function captureWindowFallbackAfterSchema(
     binding,
     viewport: { ...dimensions, coordinateSpace: "physical" },
     data,
+    source: "get_window_state_fallback",
   };
 }
 
