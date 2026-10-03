@@ -2,7 +2,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
+import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
 import { createMockDomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
@@ -12,6 +14,8 @@ const ONE_BY_ONE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+
+installFakeCuaSdkModuleForTests();
 
 function result(overrides: Partial<ToolResult> = {}): ToolResult {
   return {
@@ -115,7 +119,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     async callTool(name: string, inputJson: string) {
       const input = JSON.parse(inputJson) as Record<string, unknown>;
       calls.push({ name, input });
-      if (name === "health_report") return result({ structuredJson: JSON.stringify({ schema_version: "1", platform, driver_version: "0.22.2" }) });
+      if (name === "health_report") return result({ structuredJson: JSON.stringify({ schema_version: "1", platform, driver_version: cuaSdkVersionForPlatform() }) });
       if (name === "bring_to_front") {
         return activationRefusal
           ? result({ isError: true, text: "fixture activation refused" })

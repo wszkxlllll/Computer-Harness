@@ -49,14 +49,15 @@ pnpm.cmd test
 
 如果执行策略阻止 `.ps1`，持续使用 `pnpm.cmd` 即可；这与路径转换问题是独立问题。
 
-## 3. CUA 0.22.2
+## 3. CUA SDK 按平台路由
 
-TypeScript workspace 会安装 `@trycua/cua-driver@0.22.2` 的客户端和平台 binding，但不会自动安装或启动官方 daemon。请使用固定 release，而不是 `latest`：
+TypeScript workspace 同时安装两个固定版本的 SDK alias；computer-cua 按运行平台懒加载对应客户端和平台 binding。不会自动安装或启动 daemon。受支持的版本配对是 Windows/macOS 使用 SDK 与 daemon `0.22.2`，Linux 使用 SDK 与 daemon `0.32.0`；SDK 与 daemon 必须同版本且 contract 版本匹配。跨版本组合（例如 SDK `0.22.2` 连 daemon `0.32.0`）会由 doctor 标记为 `unknown`，不能作为受支持组合：
 
 - [官方 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)
 - [官方 daemon 生命周期文档（main 分支可变参考；固定版本以 release 为准）](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/keep-running.mdx)
+- Linux `0.32.0` 的仓库内验证记录：[CUA Linux 0.32.0 升级验证](./cua-linux-0320-upgrade-verification-2026-10-02.md)。该记录覆盖 Plasma X11，不代表 Wayland 或其他 compositor 已验证。
 
-Release 中提供 Windows x64/arm64、macOS universal/arm64/x86_64 和 Linux x86_64/arm64 资产。选择当前平台后，用同一 release 的 `checksums.txt` 校验下载物；不要把新 daemon 与 0.22.2 npm client 混用。
+选择当前平台对应的 daemon release，并按该 release 提供的 checksum 校验下载物。不要用另一平台的 SDK alias 或把不同版本的 SDK 与 daemon 混用。
 
 平台准备要点：
 
@@ -81,6 +82,8 @@ node apps/cli/dist/index.js --doctor --computer cua --cua-socket "<private-socke
 诊断可能返回 `unknown` 并以非零码结束；这表示字段、权限、session 或 cleanup 无法确认，不是可以忽略的“全通过”。`--doctor` 不读取 `--env-file`，不截图、不输入窗口、不调用模型，但会建立、检查并结束临时诊断 session；也不支持 TUI、interactive 或 window target。
 
 ### CUA 探针
+
+`spikes/cua-driver` 的直接 SDK 依赖仍固定为 `0.22.2`，下列旧探针不会采用 computer-cua 的平台 alias 路由；不要用它们验证 Linux `0.32.0` daemon。当前平台配对请先使用上方 Harness `--doctor`，再按专用桌面授权执行当前 adapter 的集成验证。
 
 默认探针只做只读能力检查；输出目录可能包含当前桌面截图，只能在专用桌面运行并保持本地。输入探针不是任务执行器，也不会判断点击是否符合目标：
 
@@ -144,7 +147,7 @@ Gate 2 和模型 runner 的完整参数以上述 Bridge/Stage 5 文档为准；R
 | `--tui requires an interactive terminal` | stdin/stdout 是否真实 TTY；PowerShell 重定向、CI 和普通管道不能启动 TUI |
 | 普通 Run 报 `--model is required` | Run 必须显式 `--model`；只有 doctor 使用内部占位值 |
 | Qwen 参数报 coordinate 错误 | 加 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`，并按需选择 thinking/output mode |
-| CUA socket 连接失败 | daemon/client 版本是否都是 0.22.2、socket 是否相同、桌面会话和平台权限是否有效 |
+| CUA socket 连接失败 | 当前平台的 SDK/daemon 版本是否配对（Windows/macOS 0.22.2、Linux 0.32.0）、socket 是否相同、桌面会话和平台权限是否有效 |
 | doctor 输出 `unknown` | 把它当作未确认边界；不要以 npm 版本、RPC envelope 或静态 tool 名单推断实际 daemon 能力 |
 | window action 被拒绝 | window PID/ID、observation 和 geometry 是否仍有效；当前不支持 keyboard、自动发现或 desktop fallback |
 | 运行后找不到“回复” | 查看 TUI 的 waiting/failure/final reply 区块与 `runs/<output>`；没有终稿时 UI 会明确显示 unknown/failure，不生成虚构答案 |

@@ -1,11 +1,5 @@
-import {
-  BoundsExpectation,
-  StatePredicate,
-  VerifyStateInput,
-  WindowPredicate,
-  type CuaDriverLike,
-  type ToolResult,
-} from "@trycua/cua-driver";
+import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
+import { loadCuaSdkModule } from "./cua-sdk-platform.js";
 import type { Viewport } from "@computer-harness/protocol";
 import { mergeWindowRelationshipInventory, type WindowRelationshipProbe } from "./window-relationship-probe.js";
 
@@ -180,6 +174,7 @@ export async function captureWindow(
   binding: CuaWindowBinding,
   signal: AbortSignal,
 ): Promise<CuaWindowCapture> {
+  const { StatePredicate, WindowPredicate, BoundsExpectation, VerifyStateInput } = await loadCuaSdkModule();
   const predicate = StatePredicate.new({
     window: WindowPredicate.new({
       exists: true,
@@ -201,13 +196,14 @@ export async function captureWindow(
     stableSamples: BigInt(1),
     includeScreenshot: true,
   }), { signal });
-  if (result.isError) throw captureRefusalError("verify_state", binding.target, result.errorCode, result.text);
-  if (result.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window capture is degraded");
-  const verification = result.verification;
+  const verify = result as unknown as ToolResult;
+  if (verify.isError) throw captureRefusalError("verify_state", binding.target, verify.errorCode, verify.text);
+  if (verify.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window capture is degraded");
+  const verification = verify.verification;
   if (verification === undefined || verification.status !== 0 || verification.stable !== true) {
     throw new WindowContractError("WINDOW_GEOMETRY_UNCONFIRMED", "configured CUA window geometry was not verified");
   }
-  const { data, dimensions } = parseWindowCaptureImages(result.images, "CUA window capture");
+  const { data, dimensions } = parseWindowCaptureImages(verify.images, "CUA window capture");
   return {
     binding,
     viewport: { ...dimensions, coordinateSpace: "physical" },

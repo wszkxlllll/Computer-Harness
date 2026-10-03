@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-审计日期：2026-10-03。本文核对当前 `pnpm-lock.yaml`、根目录及所有 pnpm workspace manifest 的直接运行/开发依赖，并单独核验了集成的 CUA Driver 0.22.2 及其平台可选包。内部 `@computer-harness/*` workspace 包不是第三方依赖；本项目根目录的 Apache-2.0 许可不会把第三方代码改成 Apache-2.0。
+审计日期：2026-10-03。本文核对当前 `pnpm-lock.yaml`、根目录及所有 pnpm workspace manifest 的直接运行/开发依赖，并单独核验了集成的 CUA Driver 0.22.2、0.32.0 及其平台可选包。Runtime 按平台选择 SDK：Windows/macOS 使用 0.22.2，Linux 使用 0.32.0；两者通过 npm alias 同时锁定。内部 `@computer-harness/*` workspace 包不是第三方依赖；本项目根目录的 Apache-2.0 许可不会把第三方代码改成 Apache-2.0。
 
 除另有说明外，每个表格条目的实际版本与 license 字段均以锁定版本对应的 npm 包 `package.json` 为准，并检查了已安装包附带的许可文本和 notice 文件。包名链接指向精确 npm 版本。运行时包与开发工具按当前源码使用方式区分；仓库当前是 pnpm 源码工作区，没有 npm 发布包或独立应用安装包。Web 生产构建会将 Web 运行依赖打入前端静态资源；Host、CLI、CUA 等 Node 运行依赖仍由 pnpm 安装管理。
 
@@ -9,12 +9,16 @@
 | 包名与版本 | License | 用途与交付方式 | 核验来源 |
 | --- | --- | --- | --- |
 | [`@trycua/cua-driver@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver/v/0.22.2) | MIT | Runtime：`packages/computer-cua` 使用的 CUA TypeScript SDK 客户端；npm 包不包含单独运行的 CUA daemon。 | 锁文件 importer、npm 包 metadata；[CUA 0.22.2 上游 LICENSE](https://github.com/trycua/cua/blob/cua-driver-rs-v0.22.2/LICENSE.md) 声明 MIT。 |
+| [`@trycua/cua-driver@0.32.0`](https://www.npmjs.com/package/@trycua/cua-driver/v/0.32.0) | MIT | Runtime：Linux 路由使用的 CUA SDK，alias 为 `@trycua/cua-driver-0.32.0`；npm 包不包含独立 daemon。 | 锁文件 importer、已安装包 metadata；[CUA 0.32.0 上游 LICENSE](https://github.com/trycua/cua/blob/cua-driver-rs-v0.32.0/LICENSE.md) 声明 MIT。 |
 | [`@trycua/cua-driver-darwin-arm64@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver-darwin-arm64/v/0.22.2) | MIT AND MPL-2.0 | Runtime 可选原生 binding；pnpm 按目标平台安装，不进入 Web bundle。 | CUA SDK `optionalDependencies`、精确 npm metadata；本机未安装此平台包。 |
 | [`@trycua/cua-driver-darwin-x64@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver-darwin-x64/v/0.22.2) | MIT AND MPL-2.0 | Runtime 可选原生 binding；pnpm 按目标平台安装，不进入 Web bundle。 | CUA SDK `optionalDependencies`、精确 npm metadata；本机未安装此平台包。 |
 | [`@trycua/cua-driver-linux-arm64-gnu@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver-linux-arm64-gnu/v/0.22.2) | MIT AND MPL-2.0 | Runtime 可选原生 binding；pnpm 按目标平台安装，不进入 Web bundle。 | CUA SDK `optionalDependencies`、精确 npm metadata；本机未安装此平台包。 |
 | [`@trycua/cua-driver-linux-x64-gnu@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver-linux-x64-gnu/v/0.22.2) | MIT AND MPL-2.0 | Runtime 可选原生 binding；pnpm 按目标平台安装，不进入 Web bundle。 | CUA SDK `optionalDependencies`、精确 npm metadata；本机未安装此平台包。 |
 | [`@trycua/cua-driver-win32-arm64-msvc@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver-win32-arm64-msvc/v/0.22.2) | MIT AND MPL-2.0 | Runtime 可选原生 binding；pnpm 按目标平台安装，不进入 Web bundle。 | CUA SDK `optionalDependencies`、精确 npm metadata；本机未安装此平台包。 |
 | [`@trycua/cua-driver-win32-x64-msvc@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver-win32-x64-msvc/v/0.22.2) | MIT AND MPL-2.0 | Runtime 可选原生 binding；包含 CUA SDK DLL、Node runtime 和 `node-runtime-NOTICE.md`；不随 Computer Harness 源码仓库提交。 | 锁文件与已安装包 `package.json`、notice 文件；其 license 字段也经 pinned pnpm 对精确 npm 版本核验。 |
+| [`@trycua/cua-driver-linux-arm64-gnu@0.32.0`](https://www.npmjs.com/package/@trycua/cua-driver-linux-arm64-gnu/v/0.32.0) | MIT AND MPL-2.0 | Linux Runtime 可选原生 binding；pnpm 按目标平台安装，不进入 Web bundle。 | SDK `optionalDependencies`、锁文件与 2026-10-03 精确 npm registry metadata；本机未安装此平台包。 |
+| [`@trycua/cua-driver-linux-x64-gnu@0.32.0`](https://www.npmjs.com/package/@trycua/cua-driver-linux-x64-gnu/v/0.32.0) | MIT AND MPL-2.0 | Linux Runtime 可选原生 binding；pnpm 按目标平台安装，不进入 Web bundle。 | SDK `optionalDependencies`、锁文件与 2026-10-03 精确 npm registry metadata；本机未安装此平台包。 |
+| [`@trycua/cua-driver-darwin-arm64@0.32.0`](https://www.npmjs.com/package/@trycua/cua-driver-darwin-arm64/v/0.32.0)、[`darwin-x64@0.32.0`](https://www.npmjs.com/package/@trycua/cua-driver-darwin-x64/v/0.32.0)、[`win32-arm64-msvc@0.32.0`](https://www.npmjs.com/package/@trycua/cua-driver-win32-arm64-msvc/v/0.32.0)、[`win32-x64-msvc@0.32.0`](https://www.npmjs.com/package/@trycua/cua-driver-win32-x64-msvc/v/0.32.0) | MIT AND MPL-2.0 | 0.32.0 SDK 的其他平台可选包也进入锁文件并可能按平台安装；当前 Windows/macOS Runtime 路由仍选择 0.22.2。 | SDK `optionalDependencies`、锁文件与 2026-10-03 四个精确 npm registry metadata；具体 tarball notice 待对应分发包核验。 |
 | [`fastify@5.12.5`](https://www.npmjs.com/package/fastify/v/5.12.5) | MIT | Runtime：Host HTTP server，Node 运行依赖。 | 锁定版本的 npm metadata 与包内 `LICENSE`。 |
 | [`ws@8.21.3`](https://www.npmjs.com/package/ws/v/8.21.3) | MIT | Runtime：Relay、Relay Connector 与实时语音连接，Node 运行依赖。 | 锁定版本的 npm metadata 与包内 `LICENSE`。 |
 | [`string-width@7.2.0`](https://www.npmjs.com/package/string-width/v/7.2.0) | MIT | Runtime：TUI 终端文本宽度和布局，Node 运行依赖。 | 锁定版本的 npm metadata 与包内 `license`。 |
@@ -40,23 +44,24 @@
 
 本仓库不把这些第三方包改写为 Apache-2.0。若单独发布 Web 静态 bundle，应随发布物保留其中运行时依赖对应 npm 版本提供的许可文本和版权声明；Host/CLI 或 CUA 发布物也应保留其随包提供的许可/notice 文件。本仓库没有提交 `node_modules` 或生成的 `dist` 产物，本表链接用于定位精确发行物及其包内许可文件。
 
-## CUA 0.22.2 的边界与保留声明
+## CUA 平台版本的边界与保留声明
 
-Computer Harness 自行维护 `computer-cua` adapter、窗口/Surface Registry 和 Runtime 接线；CUA SDK、平台原生 binding 与 CUA daemon 来自 [trycua/cua](https://github.com/trycua/cua)，不是本项目原创组件。SDK 包 metadata 声明 MIT，精确 release tag 的 [LICENSE.md](https://github.com/trycua/cua/blob/cua-driver-rs-v0.22.2/LICENSE.md) 为 MIT。六个平台 binding 包各自的 npm metadata 均声明 `MIT AND MPL-2.0`；不得将它们统称为 MIT-only 或 Apache-2.0。
+Computer Harness 自行维护 `computer-cua` adapter、窗口/Surface Registry 和 Runtime 接线；CUA SDK、平台原生 binding 与 CUA daemon 来自 [trycua/cua](https://github.com/trycua/cua)，不是本项目原创组件。两个 SDK 版本的包 metadata 和对应 release tag 的 LICENSE 均声明 MIT。0.22.2 与 0.32.0 各六个平台 binding 包的 npm metadata 均声明 `MIT AND MPL-2.0`；不得将它们统称为 MIT-only 或 Apache-2.0。
 
 | 外部组件 | 版本 | License | 用途与交付方式 | 核验来源 |
 | --- | --- | --- | --- | --- |
 | CUA Driver daemon（非 npm 包） | 0.22.2 | MIT | Runtime 前置条件；使用者按平台单独取得，不包含在 pnpm 安装、Computer Harness 源码仓库或 Web bundle 中。 | [CUA 0.22.2 官方 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2) 与同 tag [LICENSE.md](https://github.com/trycua/cua/blob/cua-driver-rs-v0.22.2/LICENSE.md)。 |
+| CUA Driver daemon（非 npm 包，Linux 配对） | 0.32.0 | MIT | Linux Runtime 前置条件；需与本平台 SDK 版本一致，由使用者单独取得，不随源码或 pnpm 安装交付。 | [CUA 0.32.0 官方 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.32.0) 与同 tag [LICENSE.md](https://github.com/trycua/cua/blob/cua-driver-rs-v0.32.0/LICENSE.md)。 |
 
 已安装的 Windows x64 binding 附带以下 `node-runtime-NOTICE.md` 声明。其余平台包未安装在本次审计主机上；它们的 metadata 已核对，具体 tarball 内文件仍需在向对应平台分发前逐包检查。
 
 > `cua_driver_node_runtime.node` is a compatibility build derived from the N-API runtime in `uniffi-bindgen-react-native` 0.31.0-3, copyright its contributors and licensed under the Mozilla Public License 2.0. The corresponding source is the pinned npm development dependency plus the deterministic transformations in `scripts/build-node-runtime.mjs`. The source and build script are available in the Cua repository at the release tag that matches this package.
 
-MPL-2.0 正文：[Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/)。MIT 授权文本与版权行见上方精确 CUA release 的 `LICENSE.md`。如果发布物包含任一 CUA 平台 binding，保留该平台包内 `node-runtime-NOTICE.md`、对应 license 声明及适用的上游 MIT/MPL 文本。CUA daemon 是用户在仓库外单独准备的程序，不随此仓库打包；其当前开发指南固定到 0.22.2 release 并要求校验官方 checksum。
+MPL-2.0 正文：[Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/)。MIT 授权文本与版权行见上方精确 CUA release 的 `LICENSE.md`。如果发布物包含任一 CUA 平台 binding，保留该平台包内 `node-runtime-NOTICE.md`、对应 license 声明及适用的上游 MIT/MPL 文本。CUA daemon 是用户在仓库外单独准备的程序，不随此仓库打包；Windows/macOS 配对 0.22.2，Linux 配对 0.32.0，取得对应 release 时应校验官方 checksum。
 
 ## 完整传递依赖清单
 
-上表只展开 workspace 直接运行/开发依赖与 CUA 0.22.2 平台可选包，不手工抄列数百个传递包。完整已安装依赖 license JSON 应在每次发行准备时从锁文件安装结果生成并保存：
+上表只展开 workspace 直接运行/开发依赖与两个 CUA 版本的平台可选包，不手工抄列数百个传递包。完整已安装依赖 license JSON 应在每次发行准备时从锁文件安装结果生成并保存：
 
 ```powershell
 $licenseJson = pnpm licenses list --json --long

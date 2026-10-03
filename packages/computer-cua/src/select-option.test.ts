@@ -3,13 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
 import { domCandidateFingerprint, type DomGroundingTransport, type DomSelectOptionRequest, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { buildManagedDomSelectOptionExpression } from "./managed-browser-host.js";
 
 const ONE_BY_ONE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+
+installFakeCuaSdkModuleForTests();
 
 function pngWithDimensions(width: number, height: number): string {
   const bytes = Buffer.from(ONE_BY_ONE_PNG);

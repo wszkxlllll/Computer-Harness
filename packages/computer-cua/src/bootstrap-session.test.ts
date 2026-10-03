@@ -1,14 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CuaDriverLike } from "./cua-sdk-contract.js";
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 
 const driverMock = vi.hoisted(() => ({ connect: vi.fn() }));
 
-vi.mock("@trycua/cua-driver", () => ({
-  CuaDriver: { connect: driverMock.connect },
-  EndSessionInput: { new: (value: { session: string }) => value },
-  StartSessionInput: { new: (value: { session: string }) => value },
-}));
-
 import { CuaBootstrapSessionError, openCuaBootstrapSession } from "./managed-browser-host.js";
+
+installFakeCuaSdkModuleForTests((socketPath) => driverMock.connect(socketPath) as CuaDriverLike);
 
 function fixture(fixtureOptions: {
   readonly startError?: Error;

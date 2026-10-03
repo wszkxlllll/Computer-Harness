@@ -5,7 +5,7 @@ import { execFile as execFileCallback, spawn, type ChildProcess } from "node:chi
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
-import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
+import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import { validateWindowTarget, type CuaWindowTarget } from "./window-contract.js";
 import {
   DomGroundingUnavailableError,
@@ -290,11 +290,12 @@ export class CuaBootstrapSessionError extends Error {
 const CUA_BOOTSTRAP_CLEANUP_TIMEOUT_MS = 5_000;
 
 export async function openCuaBootstrapSession(socketPath: string, label: string, signal: AbortSignal): Promise<CuaBootstrapSession> {
-  const driver = CuaDriver.connect(socketPath);
+  const sdkModule = await loadCuaSdkModule();
+  const driver = sdkModule.CuaDriver.connect(socketPath);
   try {
-    await driver.startSession(StartSessionInput.new({ session: label }), { signal });
+    await driver.startSession(sdkModule.StartSessionInput.new({ session: label }), { signal });
   } catch (error) {
-    const cleanupErrors = await closeBootstrapDriver(driver, label);
+    const cleanupErrors = await closeBootstrapDriver(driver, label, sdkModule);
     const failures = [error, ...cleanupErrors];
     const cause = failures.length === 1 ? error : new AggregateError(failures, "Cua bootstrap startup and cleanup failed");
     throw new CuaBootstrapSessionError(cleanupErrors.length === 0 ? "confirmed" : "unknown", cause);
@@ -306,7 +307,7 @@ export async function openCuaBootstrapSession(socketPath: string, label: string,
     label,
     close() {
       closePromise ??= (async () => {
-        const cleanupErrors = await closeBootstrapDriver(driver, label);
+        const cleanupErrors = await closeBootstrapDriver(driver, label, sdkModule);
         if (cleanupErrors.length > 0) {
           const cause = cleanupErrors.length === 1
             ? cleanupErrors[0]
@@ -319,10 +320,10 @@ export async function openCuaBootstrapSession(socketPath: string, label: string,
   };
 }
 
-async function closeBootstrapDriver(driver: CuaDriverLike, label: string): Promise<unknown[]> {
+async function closeBootstrapDriver(driver: CuaDriverLike, label: string, sdkModule: Awaited<ReturnType<typeof loadCuaSdkModule>>): Promise<unknown[]> {
   const cleanupErrors: unknown[] = [];
   try {
-    await endCuaBootstrapSessionBounded(driver, label);
+    await endCuaBootstrapSessionBounded(driver, label, sdkModule);
   } catch (error) {
     cleanupErrors.push(error);
   }
@@ -351,9 +352,9 @@ async function closeBootstrapDriver(driver: CuaDriverLike, label: string): Promi
   return cleanupErrors;
 }
 
-async function endCuaBootstrapSessionBounded(driver: CuaDriverLike, label: string): Promise<void> {
+async function endCuaBootstrapSessionBounded(driver: CuaDriverLike, label: string, sdkModule: Awaited<ReturnType<typeof loadCuaSdkModule>>): Promise<void> {
   await runBootstrapCleanupBounded(
-    (signal) => driver.endSession(EndSessionInput.new({ session: label }), { signal }).then(() => undefined),
+    (signal) => driver.endSession(sdkModule.EndSessionInput.new({ session: label }), { signal }).then(() => undefined),
     "Cua bootstrap endSession timed out",
   );
 }

@@ -1,12 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import {
-  CuaDriver,
-  EndSessionInput,
-  StartSessionInput,
-  type CuaDriverLike,
-} from "@trycua/cua-driver";
+import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import type {
   ActionIntent,
   ActionReceipt,
@@ -776,11 +771,14 @@ export class CuaDriverComputer implements Computer {
       throw new Error(`computer session ${this.session.descriptor.id} is still retained; close it before opening another`);
     }
     signal.throwIfAborted();
-    const driver = (this.options.driverFactory ?? ((socketPath) => CuaDriver.connect(socketPath)))(this.options.socketPath);
+    const sdkModule = await loadCuaSdkModule();
+    const driver = this.options.driverFactory !== undefined
+      ? this.options.driverFactory(this.options.socketPath)
+      : sdkModule.CuaDriver.connect(this.options.socketPath);
     const label = this.options.sessionLabel ?? `computer-harness-${Date.now()}`;
     let sessionStarted = false;
     try {
-      await driver.startSession(StartSessionInput.new({ session: label }), { signal });
+      await driver.startSession(sdkModule.StartSessionInput.new({ session: label }), { signal });
       sessionStarted = true;
       const platform = await detectCuaPlatform(driver, signal);
       let viewport: Viewport;
@@ -2199,11 +2197,12 @@ export class CuaDriverComputer implements Computer {
     current.surfaceRegistry = closeSurfaceRegistry(current.surfaceRegistry);
     delete current.pendingSurfaceTransitionReason;
     const deadline = Date.now() + this.options.cleanupWaitMs;
+    const sdkModule = await loadCuaSdkModule();
     try {
       let result;
       try {
         result = await awaitWithDeadline(
-          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          () => current.driver.endSession(sdkModule.EndSessionInput.new({ session: current.label })),
           deadline,
           "endSession",
         );
@@ -2214,7 +2213,7 @@ export class CuaDriverComputer implements Computer {
         }
         await waitForCleanupPoll(deadline);
         result = await awaitWithDeadline(
-          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          () => current.driver.endSession(sdkModule.EndSessionInput.new({ session: current.label })),
           deadline,
           "endSession",
         );
@@ -2222,7 +2221,7 @@ export class CuaDriverComputer implements Computer {
       if (result.active) {
         await waitForCleanupPoll(deadline);
         result = await awaitWithDeadline(
-          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          () => current.driver.endSession(sdkModule.EndSessionInput.new({ session: current.label })),
           deadline,
           "endSession",
         );
@@ -2230,7 +2229,7 @@ export class CuaDriverComputer implements Computer {
       if (result.active) {
         await waitForCleanupPoll(deadline);
         result = await awaitWithDeadline(
-          () => current.driver.endSession(EndSessionInput.new({ session: current.label })),
+          () => current.driver.endSession(sdkModule.EndSessionInput.new({ session: current.label })),
           deadline,
           "endSession",
         );
@@ -2885,7 +2884,7 @@ async function detectCuaPlatform(driver: CuaDriverLike, signal: AbortSignal): Pr
     const result = await callTool(driver, "health_report", {}, signal);
     if (result.isError || result.degraded) return undefined;
     const report = parseStructuredRecord(result.structuredJson);
-    if (report?.schema_version !== "1" || report.driver_version !== "0.22.2") return undefined;
+    if (report?.schema_version !== "1" || report.driver_version !== cuaSdkVersionForPlatform()) return undefined;
     return report.platform === "win32" || report.platform === "darwin" || report.platform === "linux"
       ? report.platform
       : undefined;
@@ -3019,12 +3018,13 @@ function normalizeDriverError(error: unknown, operation: string): Error {
 }
 
 async function bestEffortCloseDriver(driver: CuaDriverLike, label: string, waitMs: number, sessionStarted: boolean): Promise<boolean> {
+  const sdkModule = await loadCuaSdkModule();
   const deadline = Date.now() + waitMs;
   let safeToDestroy = !sessionStarted;
   try {
     let result;
     try {
-      result = await awaitWithDeadline(() => driver.endSession(EndSessionInput.new({ session: label })), deadline, "endSession");
+      result = await awaitWithDeadline(() => driver.endSession(sdkModule.EndSessionInput.new({ session: label })), deadline, "endSession");
     } catch (error) {
       const details = driverErrorDetails(error);
       if (details.errorCode !== "session_cleanup_pending" && !/session_cleanup_pending/i.test(details.message)) {
@@ -3034,11 +3034,11 @@ async function bestEffortCloseDriver(driver: CuaDriverLike, label: string, waitM
         throw error;
       }
       await waitForCleanupPoll(deadline);
-      result = await awaitWithDeadline(() => driver.endSession(EndSessionInput.new({ session: label })), deadline, "endSession");
+      result = await awaitWithDeadline(() => driver.endSession(sdkModule.EndSessionInput.new({ session: label })), deadline, "endSession");
     }
     if (result.active) {
       await waitForCleanupPoll(deadline);
-      result = await awaitWithDeadline(() => driver.endSession(EndSessionInput.new({ session: label })), deadline, "endSession");
+      result = await awaitWithDeadline(() => driver.endSession(sdkModule.EndSessionInput.new({ session: label })), deadline, "endSession");
       if (result.active) return false;
     }
     safeToDestroy = true;

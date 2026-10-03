@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike } from "@trycua/cua-driver";
+import type { CuaDriverLike } from "./cua-sdk-contract.js";
 import { ManagedBrowserWindowResolutionError, resolveOwnedManagedBrowserWindow } from "./managed-browser-resolver.js";
 
 function driverWithWindows(windows: unknown[]): { driver: CuaDriverLike; calls: Array<{ name: string; input: Record<string, unknown> }> } {
