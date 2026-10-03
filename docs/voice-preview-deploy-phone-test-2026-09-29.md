@@ -1,16 +1,27 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29
-状态：隔离 Preview 已于 2026-10-02 切换到跨窗口版本并完成公网基础检查；手机重新配对及端到端实测仍待用户执行
+状态：隔离 Preview 已于 2026-10-03 切换到 Runtime / Surface Registry 冻结版本并完成公网基础检查；手机重新配对及端到端实测仍待用户执行
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
 
 ## 部署状态
 
-- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-02-cross-window-v1`；Preview 的 `current` 符号链接已切换到该 release。此前 Preview release `/opt/computer-harness-preview/releases/2026-09-29-voice-natural-v6` 保留，可作为应用版本回滚点。
+- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-03-runtime-surface-v2`；Preview 的 `current` 符号链接已切换到该 release。此前 `2026-10-02-cross-window-v1` 仍保留，可作为应用版本回滚点。
 - `computer-harness-relay-preview` 服务处于 active，只监听 loopback `8788`。Nginx 在 `8443` 提供 TLS：`https://47.108.197.221:8443`，使用现有有效 IP 证书。用户已开放 `8443`。
 - 旧入口 `https://47.108.197.221` 及旧服务、旧 `current` 均未修改，仍健康。
 - stable release 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`；本次未切换或重启 stable。
-- 公网检查结果及边界见下方 2026-10-02 更新记录。它们不代表手机麦克风或完整语音任务已经验收。
+- 公网检查结果及边界见下方 2026-10-03 更新记录。它们不代表手机麦克风或完整语音任务已经验收。
+
+## 2026-10-03 Runtime / Surface Preview 更新记录
+
+部署源码来自分支 `codex/runtime-surface-preview-20261003` 的 commit `600ccecc713737049267b350cfc983cb3942d80c`；源码归档 SHA-256 为 `09931D26140D9FB4CB80BBD361E07567CBF3225E94ECD7DE2E3A2B97D4884562`。服务器 release 内保存 `.release-source`，记录分支、commit 与归档哈希。
+
+- 本机 Node 24 冻结回归为 106 个测试文件、1274/1274 通过；根类型构建和历史 CUA spike 类型检查通过。Notepad 实机验证在同一 ComputerSession 中完成父窗口 → 菜单 child Surface → 父窗口，记录 `child_push` 与 `child_pop`，两次动作均 completed，Run、owner 与 lease 正常释放。
+- Preview release 在切换前完成 frozen lockfile 安装、Web 构建、Relay 及其 workspace 依赖构建、Relay 入口 `node --check`。`current` 从 `2026-10-02-cross-window-v1` 原子切换到 `2026-10-03-runtime-surface-v2` 后重启 Preview unit。
+- Preview unit 为 active；loopback health 与 `https://47.108.197.221:8443/healthz` 均返回 `200`。根页面引用 `/assets/index-BcxT7NPa.js`，该 asset 返回 `200`；匿名 `GET /api/runs` 返回 `401`。旧 stable health 仍返回 `200`，本次未切换 stable。
+- 本轮只更新服务器 Relay/Web release；电脑端 Host 仍需从同一分支启动，才能实际使用本轮 Surface Registry、平台 SDK 路由和 Runtime 修复。Relay 重启会清除内存会话，手机需要重新配对。
+
+如需回退本轮 Preview，仅将 Preview `current` 原子恢复到保留的 `2026-10-02-cross-window-v1`、重启 `computer-harness-relay-preview.service`，再复查 health、静态 asset 与匿名 API 拒绝。不得改动 stable 的 `current`。
 
 ## 2026-10-02 Preview 更新记录
 
