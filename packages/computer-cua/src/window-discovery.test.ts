@@ -1,5 +1,6 @@
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { CuaWindowDiscovery } from "./window-discovery.js";
 
 function result(overrides: Partial<ToolResult> = {}): ToolResult {
@@ -12,6 +13,8 @@ function result(overrides: Partial<ToolResult> = {}): ToolResult {
     ...overrides,
   };
 }
+
+installFakeCuaSdkModuleForTests();
 
 describe("CuaWindowDiscovery", () => {
   it("lists host windows through a temporary read-only session and cleans it up", async () => {

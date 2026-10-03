@@ -26,7 +26,7 @@
     "@computer-harness/protocol": "workspace:*",
     "@computer-harness/runtime": "workspace:*",
     "@computer-harness/trajectory": "workspace:*",
-    "@trycua/cua-driver": "0.22.2"
+    "@trycua/cua-driver-0.22.2": "npm:@trycua/cua-driver@0.22.2"
   },
   "devDependencies": {
     "tsx": "4.19.2"

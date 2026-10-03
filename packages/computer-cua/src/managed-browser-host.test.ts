@@ -1,3 +1,4 @@
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { describe, expect, it, vi } from "vitest";
 import { access, mkdir, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
@@ -7,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, cleanupManagedBrowser, closeManagedBrowserGracefully, createManagedBrowserPage, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+
+installFakeCuaSdkModuleForTests();
 
 describe("managed browser host pilot", () => {
   it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {

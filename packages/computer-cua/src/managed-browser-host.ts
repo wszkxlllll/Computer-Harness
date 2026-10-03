@@ -5,7 +5,7 @@ import { execFile as execFileCallback, spawn, type ChildProcess } from "node:chi
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
-import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
+import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import { validateWindowTarget, type CuaWindowTarget } from "./window-contract.js";
 import {
   DomGroundingUnavailableError,
@@ -204,10 +204,11 @@ export interface CuaBootstrapSession {
 }
 
 export async function openCuaBootstrapSession(socketPath: string, label: string, signal: AbortSignal): Promise<CuaBootstrapSession> {
-  const driver = CuaDriver.connect(socketPath);
+  const sdkModule = await loadCuaSdkModule();
+  const driver = sdkModule.CuaDriver.connect(socketPath);
   let started = false;
   try {
-    await driver.startSession(StartSessionInput.new({ session: label }), { signal });
+    await driver.startSession(sdkModule.StartSessionInput.new({ session: label }), { signal });
     started = true;
     return {
       driver,
@@ -215,13 +216,13 @@ export async function openCuaBootstrapSession(socketPath: string, label: string,
       async close() {
         if (started) {
           started = false;
-          await driver.endSession(EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
+          await driver.endSession(sdkModule.EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
         }
         (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
       },
     };
   } catch (error) {
-    if (started) await driver.endSession(EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
+    if (started) await driver.endSession(sdkModule.EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
     (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
     throw error;
   }

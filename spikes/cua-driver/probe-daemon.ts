@@ -8,7 +8,7 @@ import {
   GetDesktopStateInput,
   GetScreenSizeInput,
   StartSessionInput,
-} from "@trycua/cua-driver";
+} from "@trycua/cua-driver-0.22.2";
 
 interface ProbeOptions {
   binaryPath: string;

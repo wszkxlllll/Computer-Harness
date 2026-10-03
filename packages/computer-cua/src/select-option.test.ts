@@ -1,9 +1,10 @@
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
 import { domCandidateFingerprint, type DomGroundingTransport, type DomSelectOptionRequest, type ManagedBrowserTarget } from "./dom-grounding.js";
@@ -84,6 +85,8 @@ async function openFixture(mode: Parameters<typeof makeTransport>[1] = "success"
   await computer.observe(session, "select-option-observation" as ObservationId, new AbortController().signal);
   return { directory, browserTarget, fake, selected, computer, session, observationId: "select-option-observation" as ObservationId };
 }
+
+installFakeCuaSdkModuleForTests();
 
 describe("managed-browser select_option adapter", () => {
   it("builds a bounded native-select expression with independent select overflow handling", () => {

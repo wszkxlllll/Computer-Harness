@@ -13,7 +13,7 @@ import {
   StartSessionInput,
   type CuaDriverLike,
   type ToolResult,
-} from "@trycua/cua-driver";
+} from "@trycua/cua-driver-0.22.2";
 import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import type { ActionId, ActionIntent, ComputerSessionDescriptor, ObservationId } from "@computer-harness/protocol";
 

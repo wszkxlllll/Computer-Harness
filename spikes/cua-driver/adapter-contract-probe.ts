@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { join, resolve } from "node:path";
-import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
+import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver-0.22.2";
 import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import type { ActionId, ComputerSessionDescriptor, ObservationId } from "@computer-harness/protocol";
 

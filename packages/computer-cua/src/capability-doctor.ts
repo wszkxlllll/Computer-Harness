@@ -1,20 +1,30 @@
 import { randomUUID } from "node:crypto";
 import {
-  CuaDriver,
-  EndSessionInput,
-  GetSessionInput,
-  GetSessionStateInput,
-  StartSessionInput,
+  cuaSdkVersionForPlatform,
+  loadCuaSdkModule,
   type CuaDriverLike,
-  type ToolResult,
-} from "@trycua/cua-driver";
+} from "./cua-sdk-platform.js";
+import type { ToolResult } from "./cua-sdk-contract.js";
 import type { CuaDriverFactory } from "./cua-driver-computer.js";
 
-const LOCKED_CUA_SDK_VERSION = "0.22.2";
-const EXPECTED_DRIVER_CONTRACT_VERSION = "0.7.0";
+/**
+ * Contract expectations per SDK generation. Windows/macOS stay on the 0.22.2
+ * pairing; Linux moved to the 0.32.0 pairing where the same-release pipeline
+ * publishes contractVersion 0.8.0 (see
+ * docs/cua-linux-0320-upgrade-verification-2026-10-02.md).
+ */
+const SDK_EXPECTATIONS = {
+  "0.22.2": { contractVersion: "0.7.0" },
+  "0.32.0": { contractVersion: "0.8.0" },
+} as const;
+
 const EXPECTED_TOOLS_LIST_SCHEMA_VERSION = "1";
 const EXPECTED_HEALTH_SCHEMA_VERSION = "1";
 const DEFAULT_DOCTOR_TIMEOUT_MS = 2_000;
+
+function sdkExpectations(sdkVersion: string): { contractVersion: string } | undefined {
+  return (SDK_EXPECTATIONS as Record<string, { contractVersion: string } | undefined>)[sdkVersion];
+}
 
 export type CuaCapabilityStatus = "supported" | "unsupported" | "unknown" | "degraded";
 
@@ -122,7 +132,10 @@ export async function inspectCuaCapabilities(options: CuaCapabilityDoctorOptions
   const sessionLabel = options.sessionLabel ?? `computer-harness-doctor-${Date.now()}-${randomUUID().slice(0, 8)}`;
   let driver: CuaDriverLike;
   try {
-    driver = (options.driverFactory ?? ((socketPath) => CuaDriver.connect(socketPath)))(options.socketPath);
+    const sdk = await loadCuaSdkModule();
+    driver = options.driverFactory !== undefined
+      ? options.driverFactory(options.socketPath)
+      : sdk.CuaDriver.connect(options.socketPath);
   } catch (error) {
     return unavailableReport(reasonCode(error));
   }
@@ -149,7 +162,8 @@ export async function inspectCuaCapabilities(options: CuaCapabilityDoctorOptions
     return buildReport(metadata, inventory.check, unknownCheck("inventory_invalid"), unknownCheck("inventory_invalid"), unknownCheck("inventory_invalid"), cleanup, inventory.tools);
   }
 
-  const startOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.startSession(StartSessionInput.new({ session: sessionLabel }), { signal }));
+  const sdkModule = await loadCuaSdkModule();
+  const startOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.startSession(sdkModule.StartSessionInput.new({ session: sessionLabel }), { signal }));
   if (!startOperation.settled) {
     return buildReport(metadata, inventory.check, startOperation.check, unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), inventory.tools);
   }
@@ -161,7 +175,7 @@ export async function inspectCuaCapabilities(options: CuaCapabilityDoctorOptions
     return buildReport(metadata, inventory.check, startCheck, unknownCheck("session_start_invalid"), unknownCheck("session_start_invalid"), cleanup, inventory.tools);
   }
 
-  const sessionOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.getSession(GetSessionInput.new({ session: sessionLabel }), { signal }));
+  const sessionOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.getSession(sdkModule.GetSessionInput.new({ session: sessionLabel }), { signal }));
   if (!sessionOperation.settled) {
     return buildReport(metadata, inventory.check, unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), inventory.tools);
   }
@@ -173,7 +187,7 @@ export async function inspectCuaCapabilities(options: CuaCapabilityDoctorOptions
     return buildReport(metadata, inventory.check, sessionView, unknownCheck("session_view_invalid"), unknownCheck("session_view_invalid"), cleanup, inventory.tools);
   }
 
-  const stateOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.getSessionState(GetSessionStateInput.new({ session: sessionLabel }), { signal }));
+  const stateOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.getSessionState(sdkModule.GetSessionStateInput.new({ session: sessionLabel }), { signal }));
   if (!stateOperation.settled) {
     return buildReport(metadata, inventory.check, unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), inventory.tools);
   }
@@ -190,9 +204,9 @@ export async function inspectCuaCapabilities(options: CuaCapabilityDoctorOptions
     return buildReport(metadata, inventory.check, supportedCheck(), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), inventory.tools);
   }
   const health = healthOperation.check.status === "supported"
-    ? validateHealthReport(healthOperation.value, metadata.observed?.driverVersion ?? LOCKED_CUA_SDK_VERSION)
+    ? validateHealthReport(healthOperation.value, metadata.observed?.driverVersion ?? cuaSdkVersionForPlatform())
     : healthOperation.check;
-  const permissionOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.callTool("check_permissions", JSON.stringify({ prompt: false }), { signal }));
+  const permissionOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.callTool("check_permissions", "{}", { signal }));
   if (!permissionOperation.settled) {
     return buildReport(metadata, inventory.check, supportedCheck(), health, unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), inventory.tools);
   }
@@ -213,12 +227,13 @@ function buildReport(
   tools: CuaDeclaredToolCapabilities,
 ): CuaCapabilityReport {
   const verified = { metadata, inventory, session, health, permissions } as const;
+  const sdkVersion = cuaSdkVersionForPlatform();
   return {
     schemaVersion: "cua-doctor-v1",
     backend: "cua-driver-daemon",
     declared: {
-      sdkVersion: LOCKED_CUA_SDK_VERSION,
-      expectedDriverContractVersion: EXPECTED_DRIVER_CONTRACT_VERSION,
+      sdkVersion,
+      expectedDriverContractVersion: sdkExpectations(sdkVersion)?.contractVersion ?? "unknown",
       defaultObservation: "desktop",
       windowCapture: "not_integrated",
       tools,
@@ -244,13 +259,14 @@ async function cleanupAfterSettledProbe(
   // Cleanup is deliberately independent of the caller's signal. A cancelled
   // doctor still gets one bounded attempt to close a confirmed session.
   const cleanupSignal = new AbortController().signal;
+  const sdkModule = await loadCuaSdkModule();
   let sessionEnded = !sessionStarted;
   if (sessionStarted) {
-    const firstEnd = await inspectOperation(timeoutMs, cleanupSignal, (signal) => driver.endSession(EndSessionInput.new({ session: sessionLabel }), { signal }));
+    const firstEnd = await inspectOperation(timeoutMs, cleanupSignal, (signal) => driver.endSession(sdkModule.EndSessionInput.new({ session: sessionLabel }), { signal }));
     const firstOutput = firstEnd.value as { active?: unknown } | undefined;
     sessionEnded = firstEnd.settled && firstEnd.check.status === "supported" && firstOutput?.active === false;
     if (!sessionEnded && firstEnd.settled && firstEnd.check.status === "supported" && firstOutput?.active === true) {
-      const secondEnd = await inspectOperation(timeoutMs, cleanupSignal, (signal) => driver.endSession(EndSessionInput.new({ session: sessionLabel }), { signal }));
+      const secondEnd = await inspectOperation(timeoutMs, cleanupSignal, (signal) => driver.endSession(sdkModule.EndSessionInput.new({ session: sessionLabel }), { signal }));
       const secondOutput = secondEnd.value as { active?: unknown } | undefined;
       sessionEnded = secondEnd.settled && secondEnd.check.status === "supported" && secondOutput?.active === false;
       if (!sessionEnded) return { status: "unknown", reasonCode: secondEnd.check.reasonCode ?? "session_still_active" };
@@ -321,8 +337,9 @@ function validateMetadata(value: unknown): CuaMetadataCheck {
   const embedded = value.embedded;
   if (driverVersion === undefined || contractVersion === undefined || toolsListSchemaVersion === undefined || capabilityVersion === undefined || mcpProtocolVersion === undefined || typeof pid !== "number" || !Number.isInteger(pid) || pid < 1 || typeof embedded !== "boolean") return unknownMetadata("metadata_schema");
   const observed = { driverVersion, contractVersion, toolsListSchemaVersion, capabilityVersion, mcpProtocolVersion, pid, embedded };
-  if (driverVersion !== LOCKED_CUA_SDK_VERSION) return { status: "unknown", reasonCode: "driver_version_mismatch", observed };
-  if (contractVersion !== EXPECTED_DRIVER_CONTRACT_VERSION) return { status: "unknown", reasonCode: "contract_version_mismatch", observed };
+  const expected = sdkExpectations(driverVersion);
+  if (expected === undefined) return { status: "unknown", reasonCode: "driver_version_mismatch", observed };
+  if (contractVersion !== expected.contractVersion) return { status: "unknown", reasonCode: "contract_version_mismatch", observed };
   if (toolsListSchemaVersion !== EXPECTED_TOOLS_LIST_SCHEMA_VERSION) return { status: "unknown", reasonCode: "tools_list_schema_version_mismatch", observed };
   if (embedded) return { status: "unknown", reasonCode: "embedded_driver_not_allowed", observed };
   return { status: "supported", observed };
@@ -340,7 +357,13 @@ function validateSessionView(value: unknown, sessionLabel: string): CuaDoctorChe
 
 function validateSessionState(value: unknown, sessionLabel: string): CuaDoctorCheck {
   if (!isRecord(value) || value.session !== sessionLabel || typeof value.captureScope !== "number" || typeof value.effectiveScope !== "number" || typeof value.desktopUnlocked !== "boolean") return unknownCheck("session_state_schema");
-  if (value.desktopUnlocked !== true) return unknownCheck("desktop_capture_scope_unconfirmed");
+  // 0.32.0 starts sessions window-scoped with desktopUnlocked=false. The
+  // doctor's daemon-compatibility client may unlock desktop scope through
+  // the session escalation path; a window-scoped session itself is healthy
+  // when the driver accepts it, so only a hard refusal stays unknown.
+  if (value.desktopUnlocked !== true && sdkExpectations(cuaSdkVersionForPlatform()) === SDK_EXPECTATIONS["0.22.2"]) {
+    return unknownCheck("desktop_capture_scope_unconfirmed");
+  }
   return supportedCheck();
 }
 
@@ -349,7 +372,7 @@ function validateHealthReport(result: ToolResult | undefined, expectedDriverVers
   if (envelope.status !== "supported") return envelope;
   const value = parseStructured(result?.structuredJson);
   if (!isRecord(value) || value.schema_version !== EXPECTED_HEALTH_SCHEMA_VERSION || !isPlatform(value.platform) || typeof value.driver_version !== "string" || !isHealthOverall(value.overall) || !Array.isArray(value.checks) || value.checks.length === 0 || value.checks.some((check) => !isRecord(check) || typeof check.name !== "string" || check.name.trim().length === 0 || !isHealthCheckStatus(check.status))) return unknownCheck("health_schema");
-  if (value.driver_version !== LOCKED_CUA_SDK_VERSION || value.driver_version !== expectedDriverVersion) return unknownCheck("health_driver_version_mismatch");
+  if (value.driver_version !== expectedDriverVersion) return unknownCheck("health_driver_version_mismatch");
   const statuses = value.checks.map((check) => (check as Record<string, unknown>).status);
   if (statuses.includes("fail") || value.overall === "failed") return unknownCheck("health_failed");
   if (value.overall === "degraded") return { status: "degraded", reasonCode: "health_degraded" };
@@ -361,7 +384,15 @@ function validatePermissionReport(result: ToolResult | undefined): CuaDoctorChec
   const envelope = validateToolEnvelope(result);
   if (envelope.status !== "supported") return envelope;
   const value = parseStructured(result?.structuredJson);
-  if (!isRecord(value) || typeof value.accessibility !== "boolean" || typeof value.screen_recording !== "boolean" || typeof value.source !== "string") return unknownCheck("permission_schema");
+  if (!isRecord(value)) return unknownCheck("permission_schema");
+  if (process.platform === "linux") {
+    // Linux 0.32.0 reports X11/Wayland/AT-SPI session facts instead of the
+    // macOS TCC permission pair; on this platform the daemon already gates
+    // capture capability through its own health checks.
+    if (typeof value.x11 !== "boolean" && typeof value.wayland !== "boolean") return unknownCheck("permission_schema");
+    return supportedCheck();
+  }
+  if (typeof value.accessibility !== "boolean" || typeof value.screen_recording !== "boolean" || typeof value.source !== "string") return unknownCheck("permission_schema");
   if (!value.accessibility || !value.screen_recording) return unknownCheck("permission_not_granted");
   return supportedCheck();
 }

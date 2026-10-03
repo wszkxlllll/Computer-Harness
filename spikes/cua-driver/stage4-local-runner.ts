@@ -3,7 +3,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
-import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
+import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver-0.22.2";
 
 type ModelName = "glm-5.3-flash" | "qwen3.8-flash";
 type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
