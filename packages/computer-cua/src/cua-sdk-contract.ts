@@ -75,27 +75,35 @@ export type VerifyStateOutput = {
   [key: string]: unknown;
 };
 
+export type BoundsExpectation = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  tolerancePx?: number;
+};
+
+export type WindowPredicate = {
+  exists?: boolean;
+  bounds?: BoundsExpectation;
+};
+
+export type ElementSelector = {
+  role?: string;
+  labelContains?: string;
+};
+
+export type ElementPredicate = {
+  selector: ElementSelector;
+  exists?: boolean;
+  valueEquals?: string;
+  enabled?: boolean;
+  selected?: boolean;
+};
+
 export type StatePredicate = {
-  window?: {
-    exists?: boolean;
-    bounds?: {
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      tolerancePx?: number;
-    };
-  };
-  element?: {
-    selector: {
-      role?: string;
-      labelContains?: string;
-    };
-    exists?: boolean;
-    valueEquals?: string;
-    enabled?: boolean;
-    selected?: boolean;
-  };
+  window?: WindowPredicate;
+  element?: ElementPredicate;
 };
 
 export interface StartSessionInput {

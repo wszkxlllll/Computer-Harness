@@ -1,10 +1,13 @@
 import type {
   CuaDriverLike,
+  BoundsExpectation,
   EndSessionInput,
   GetSessionInput,
   GetSessionStateInput,
   StartSessionInput,
+  StatePredicate,
   VerifyStateInput,
+  WindowPredicate,
 } from "./cua-sdk-contract.js";
 
 export type { CuaDriverLike } from "./cua-sdk-contract.js";
@@ -33,9 +36,9 @@ export interface CuaSdkModule {
   readonly GetSessionInput: InputFactory<GetSessionInput>;
   readonly GetSessionStateInput: InputFactory<GetSessionStateInput>;
   readonly VerifyStateInput: InputFactory<VerifyStateInput>;
-  readonly StatePredicate: InputFactory<unknown>;
-  readonly WindowPredicate: InputFactory<unknown>;
-  readonly BoundsExpectation: InputFactory<unknown>;
+  readonly StatePredicate: InputFactory<StatePredicate>;
+  readonly WindowPredicate: InputFactory<WindowPredicate>;
+  readonly BoundsExpectation: InputFactory<BoundsExpectation>;
 }
 
 export interface InputFactory<T> {
