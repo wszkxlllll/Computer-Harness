@@ -2,7 +2,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike, type ToolResult } from "@trycua/cua-driver";
+import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike, type ToolResult } from "@trycua/cua-driver-0.22.2";
 import { CuaDriverComputer } from "@computer-harness/computer-cua";
 import { groundingComputerTools } from "@computer-harness/runtime";
 import type { ActionIntent, GroundingCatalog, ObservationFrame, ObservationId, RunId, Viewport } from "@computer-harness/protocol";
@@ -261,7 +261,7 @@ async function main(): Promise<void> {
       driverFactory: (socketPath) => {
         productionDriver = CuaDriver.connect(socketPath);
         const driver = productionDriver;
-        const callTool = driver.callTool.bind(driver);
+        const callTool = driver.callTool.bind(driver) as unknown as (name: string, input: string, callOptions?: { signal: AbortSignal }) => Promise<ToolResult>;
         driver.callTool = async (name: string, input: string, callOptions?: { signal: AbortSignal }) => {
           const result = await callTool(name, input, callOptions);
           if (name === "list_windows") {
@@ -270,7 +270,7 @@ async function main(): Promise<void> {
           }
           return result;
         };
-        return driver;
+        return driver as unknown as import("@computer-harness/computer-cua").CuaDriverLike;
       },
     });
     productionSession = await productionComputer.open({}, new AbortController().signal);

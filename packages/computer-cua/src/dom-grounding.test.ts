@@ -1,3 +1,4 @@
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { describe, expect, it } from "vitest";
 import type { ComputerSessionId, ObservationId, Viewport } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
@@ -17,6 +18,8 @@ const request: DomGroundingCollectRequest = {
   viewport,
   browserTarget: { kind: "managed-chromium", browser: "edge", profileId: "fixture-profile", windowTarget: { pid: 123, windowId: 456 }, tabId: "tab-fixture", generation: "generation-1", delivery: "loopback-cdp" },
 };
+
+installFakeCuaSdkModuleForTests();
 
 describe("managed DOM grounding transport gate", () => {
   it("materializes visible controls, point/neighbor hits and custom tabindex divs without exposing backend tokens", () => {

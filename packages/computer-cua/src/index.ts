@@ -6,6 +6,21 @@ export {
   type CuaGroundingMode,
   type CuaWindowDeliveryMode,
 } from "./cua-driver-computer.js";
+export type {
+  CuaDriverLike,
+  ToolResult,
+} from "./cua-sdk-contract.js";
+export {
+  cuaSdkAliasForPlatform,
+  cuaSdkVersionForPlatform,
+  loadCuaSdkModule,
+  resetCuaSdkModuleCacheForTests,
+  setCuaSdkModuleOverrideForTests,
+  CUA_SDK_VERSION_LINUX,
+  CUA_SDK_VERSION_MACOS,
+  CUA_SDK_VERSION_WINDOWS,
+  type CuaSdkModule,
+} from "./cua-sdk-platform.js";
 export {
   inspectCuaCapabilities,
   type CuaCapabilityDoctorOptions,

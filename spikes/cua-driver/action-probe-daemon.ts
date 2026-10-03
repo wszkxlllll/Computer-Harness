@@ -10,7 +10,7 @@ import {
   GetScreenSizeInput,
   StartSessionInput,
   type CuaDriverLike,
-} from "@trycua/cua-driver";
+} from "@trycua/cua-driver-0.22.2";
 
 type DaemonProcess = ChildProcessByStdio<null, Readable, Readable>;
 

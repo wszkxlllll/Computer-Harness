@@ -1,5 +1,6 @@
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike } from "@trycua/cua-driver";
+import type { CuaDriverLike } from "./cua-sdk-contract.js";
 import { ManagedBrowserWindowResolutionError, resolveOwnedManagedBrowserWindow } from "./managed-browser-resolver.js";
 
 function driverWithWindows(windows: unknown[]): { driver: CuaDriverLike; calls: Array<{ name: string; input: Record<string, unknown> }> } {
@@ -12,6 +13,8 @@ function driverWithWindows(windows: unknown[]): { driver: CuaDriverLike; calls: 
   } as unknown as CuaDriverLike;
   return { driver, calls };
 }
+
+installFakeCuaSdkModuleForTests();
 
 describe("managed browser CUA window resolver", () => {
   it("uses strict pid/on_screen_only and returns one owned window", async () => {

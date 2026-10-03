@@ -10,7 +10,7 @@ import {
   StartSessionInput,
   type CuaDriverLike,
   type ToolResult,
-} from "@trycua/cua-driver";
+} from "@trycua/cua-driver-0.22.2";
 
 type Daemon = ChildProcessByStdio<null, Readable, Readable>;
 type Frame = { x: number; y: number; width: number; height: number };

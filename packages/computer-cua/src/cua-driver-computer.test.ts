@@ -1,8 +1,9 @@
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import type { CuaDriverLike, ToolResult, VerifyStateOutput } from "./cua-sdk-contract.js";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
 import { createMockDomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
@@ -165,6 +166,8 @@ function fakeDriver() {
   } as unknown as CuaDriverLike;
   return { driver, calls };
 }
+
+installFakeCuaSdkModuleForTests();
 
 describe("CuaDriverComputer", () => {
   it("activates the exact HWND once before fresh capture and never reactivates before an action", async () => {
@@ -1245,7 +1248,7 @@ describe("CuaDriverComputer", () => {
     });
     try {
       const session = await computer.open({}, new AbortController().signal);
-      fake.driver.verifyState = async () => result({ isError: true, images: [] });
+      fake.driver.verifyState = async () => ({ isError: true, status: 1, stable: false, text: "capture refused", errorCode: "WINDOW_CAPTURE_REFUSED", images: [], degraded: false, rawJson: "{}" } as unknown as VerifyStateOutput);
       await expect(computer.observe(session, "window-refused-capture" as ObservationId, new AbortController().signal))
         .rejects.toThrow(/capture was refused/iu);
       expect(retryDelays).toEqual([]);

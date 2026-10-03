@@ -15,6 +15,7 @@
   "dependencies": {
     "@computer-harness/protocol": "workspace:*",
     "@computer-harness/runtime": "workspace:*",
-    "@trycua/cua-driver": "0.22.2"
+    "@trycua/cua-driver-0.22.2": "npm:@trycua/cua-driver@0.22.2",
+    "@trycua/cua-driver-0.32.0": "npm:@trycua/cua-driver@0.32.0"
   }
 }
