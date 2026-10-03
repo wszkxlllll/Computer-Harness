@@ -1,4 +1,12 @@
-export type RelayHttpMethod = "GET" | "POST" | "DELETE";
+import {
+  VOICE_INPUT_MAX_BATCH_BYTES,
+  VOICE_INPUT_MAX_BATCH_CHUNKS,
+  VOICE_INPUT_MAX_CHUNK_BYTES,
+  VOICE_INPUT_MAX_CHUNKS,
+} from "@computer-harness/voice";
+import { normalizeRunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
+
+export type RelayHttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 export type ApiResponseKind = "json" | "sse" | "asset";
 
 export interface AllowedApiRoute {
@@ -47,6 +55,29 @@ function identifyRoute(method: RelayHttpMethod, pathname: string): Omit<AllowedA
   if (method === "GET" && pathname === "/api/windows") {
     return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
   }
+  if (method === "GET" && pathname === "/api/managed-browser-profile") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "PUT" && pathname === "/api/managed-browser-profile/preference") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "POST" && /^\/api\/managed-browser-profile\/(prepare|complete|relogin)$/u.test(pathname)) {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "GET" && pathname === "/api/voice/capabilities") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "POST" && pathname === "/api/voice/sessions") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  const voiceAudioMatch = /^\/api\/voice\/sessions\/([A-Za-z0-9_-]{1,128})\/audio$/u.exec(pathname);
+  if (voiceAudioMatch !== null && method === "POST") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  const voiceControlMatch = /^\/api\/voice\/sessions\/([A-Za-z0-9_-]{1,128})\/(finish|cancel)$/u.exec(pathname);
+  if (voiceControlMatch !== null && method === "POST") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
 
   const pairStatus = /^\/api\/pair\/requests\/([A-Za-z0-9_-]{1,128})$/u.exec(pathname);
   if (pairStatus !== null && method === "GET") {
@@ -92,7 +123,7 @@ function identifyRoute(method: RelayHttpMethod, pathname: string): Omit<AllowedA
 
 /** Resolve the finite browser API surface that may cross the relay. */
 export function resolveAllowedApiRoute(methodText: string, requestTarget: string): AllowedApiRoute | null {
-  if (methodText !== "GET" && methodText !== "POST" && methodText !== "DELETE") return null;
+  if (methodText !== "GET" && methodText !== "POST" && methodText !== "PUT" && methodText !== "DELETE") return null;
   if (requestTarget.length > 4096 || !requestTarget.startsWith("/")) return null;
   if (requestTarget.includes("\\") || requestTarget.includes("%") || requestTarget.includes("#")) return null;
   const rawPath = requestTarget.split("?", 1)[0] ?? "";
@@ -128,6 +159,15 @@ function hasExactKeys(value: Record<string, unknown>, allowedKeys: readonly stri
   return keys.length === allowedKeys.length && keys.every((key) => allowedKeys.includes(key));
 }
 
+function isValidAssistantPreferences(value: unknown): boolean {
+  try {
+    normalizeRunAssistantPreferencesSnapshot(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isValidWindowTargetToken(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]{32}$/u.test(value);
 }
@@ -156,17 +196,28 @@ function isValidBrowserSessionMode(value: unknown): value is "temporary" | "save
   return value === "temporary" || value === "saved";
 }
 
+function isValidOperationId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
+}
+
+function hasOptionalSwitchWindows(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return hasExactKeys(value, keys) ||
+    (hasExactKeys(value, [...keys, "switchWindows"]) && typeof value.switchWindows === "boolean");
+}
+
 function isValidRunTarget(value: unknown): boolean {
   if (!isRecord(value) || typeof value.mode !== "string") return false;
-  if (value.mode === "auto") return hasExactKeys(value, ["mode"]);
+  if (Object.hasOwn(value, "switchWindows") && typeof value.switchWindows !== "boolean") return false;
+  if (value.mode === "auto") return hasOptionalSwitchWindows(value, ["mode"]);
+  if (value.mode === "desktop") return hasOptionalSwitchWindows(value, ["mode"]);
   if (value.mode === "window") {
-    return hasExactKeys(value, ["mode", "targetToken"]) && isValidWindowTargetToken(value.targetToken);
+    return hasOptionalSwitchWindows(value, ["mode", "targetToken"]) && isValidWindowTargetToken(value.targetToken);
   }
   if (value.mode === "browser") {
-    if (hasExactKeys(value, ["mode"])) return true;
-    if (hasExactKeys(value, ["mode", "url"])) return isValidBrowserStartUrl(value.url);
-    if (hasExactKeys(value, ["mode", "sessionMode"])) return isValidBrowserSessionMode(value.sessionMode);
-    return hasExactKeys(value, ["mode", "sessionMode", "url"])
+    if (hasOptionalSwitchWindows(value, ["mode"])) return true;
+    if (hasOptionalSwitchWindows(value, ["mode", "url"])) return isValidBrowserStartUrl(value.url);
+    if (hasOptionalSwitchWindows(value, ["mode", "sessionMode"])) return isValidBrowserSessionMode(value.sessionMode);
+    return hasOptionalSwitchWindows(value, ["mode", "sessionMode", "url"])
       && isValidBrowserSessionMode(value.sessionMode)
       && isValidBrowserStartUrl(value.url);
   }
@@ -175,18 +226,69 @@ function isValidRunTarget(value: unknown): boolean {
 
 /** Validate the only route-specific browser start payload without accepting OS handles or paths. */
 export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject | undefined): boolean {
+  if (route.method === "PUT" && route.path === "/api/managed-browser-profile/preference") {
+    return body !== undefined && hasExactKeys(body, ["defaultSession"])
+      && (body.defaultSession === "saved" || body.defaultSession === "temporary");
+  }
+  if (route.method === "POST" && /^\/api\/managed-browser-profile\/(?:prepare|relogin)$/u.test(route.path)) {
+    return body !== undefined && Object.keys(body).length === 0;
+  }
+  if (route.method === "POST" && route.path === "/api/managed-browser-profile/complete") {
+    return body !== undefined && hasExactKeys(body, ["operationId"]) && isValidOperationId(body.operationId);
+  }
+  if (route.method === "POST" && route.path === "/api/voice/sessions") {
+    return body !== undefined && hasExactKeys(body, ["requestId"]) && isValidIdentifier(body.requestId);
+  }
+  if (route.method === "POST" && /^\/api\/voice\/sessions\/[A-Za-z0-9_-]{1,128}\/audio$/u.test(route.path)) {
+    if (body === undefined || !hasExactKeys(body, ["chunks", "afterEventSequence"])
+      || !Number.isSafeInteger(body.afterEventSequence) || (body.afterEventSequence as number) < 0
+      || !Array.isArray(body.chunks) || body.chunks.length === 0 || body.chunks.length > VOICE_INPUT_MAX_BATCH_CHUNKS) return false;
+    let totalBytes = 0;
+    let previousSequence = -1;
+    for (const value of body.chunks) {
+      if (!isRecord(value) || !hasExactKeys(value, ["sequence", "audio"])
+        || !Number.isSafeInteger(value.sequence) || (value.sequence as number) < 0
+        || (value.sequence as number) >= VOICE_INPUT_MAX_CHUNKS
+        || (value.sequence as number) <= previousSequence
+        || typeof value.audio !== "string" || value.audio.length === 0
+        || value.audio.length > Math.ceil(VOICE_INPUT_MAX_CHUNK_BYTES / 3) * 4
+        || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value.audio)) return false;
+      previousSequence = value.sequence as number;
+      const decoded = Buffer.from(value.audio, "base64");
+      const validChunk = decoded.byteLength > 0 && decoded.byteLength <= VOICE_INPUT_MAX_CHUNK_BYTES
+        && decoded.byteLength % 2 === 0 && decoded.toString("base64") === value.audio;
+      decoded.fill(0);
+      if (!validChunk) return false;
+      totalBytes += decoded.byteLength;
+      if (totalBytes > VOICE_INPUT_MAX_BATCH_BYTES) return false;
+    }
+    return true;
+  }
+  if (route.method === "POST" && /^\/api\/voice\/sessions\/[A-Za-z0-9_-]{1,128}\/(?:finish|cancel)$/u.test(route.path)) {
+    return body !== undefined && hasExactKeys(body, ["afterEventSequence"])
+      && Number.isSafeInteger(body.afterEventSequence) && (body.afterEventSequence as number) >= 0;
+  }
   if (route.method !== "POST" || route.path !== "/api/runs") return true;
   if (body === undefined) return false;
   const hasLegacyTarget = Object.hasOwn(body, "targetToken");
   const hasTaggedTarget = Object.hasOwn(body, "target");
   if (hasLegacyTarget === hasTaggedTarget) return false;
-  const outerKeys = hasLegacyTarget ? ["commandId", "goal", "targetToken"] : ["commandId", "goal", "target"];
+  const hasAssistantPreferences = Object.hasOwn(body, "assistantPreferences");
+  const hasRunNoticeContentEnabled = Object.hasOwn(body, "runNoticeContentEnabled");
+  const targetKeys = hasLegacyTarget ? ["commandId", "goal", "targetToken"] : ["commandId", "goal", "target"];
+  const outerKeys = [
+    ...targetKeys,
+    ...(hasAssistantPreferences ? ["assistantPreferences"] : []),
+    ...(hasRunNoticeContentEnabled ? ["runNoticeContentEnabled"] : []),
+  ];
   if (!hasExactKeys(body, outerKeys)) return false;
   const validBase = isValidIdentifier(body.commandId)
     && typeof body.goal === "string"
     && body.goal.length > 0
     && body.goal.length <= 20_000;
   if (!validBase) return false;
+  if (hasAssistantPreferences && !isValidAssistantPreferences(body.assistantPreferences)) return false;
+  if (hasRunNoticeContentEnabled && typeof body.runNoticeContentEnabled !== "boolean") return false;
   return hasLegacyTarget
     ? isValidWindowTargetToken(body.targetToken)
     : isValidRunTarget(body.target);

@@ -5,7 +5,7 @@ import { execFile as execFileCallback, spawn, type ChildProcess } from "node:chi
 import { homedir, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
-import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
+import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import { validateWindowTarget, type CuaWindowTarget } from "./window-contract.js";
 import {
   DomGroundingUnavailableError,
@@ -26,6 +26,8 @@ const MAX_CDP_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const CDP_PROTOCOL_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const execFile = promisify(execFileCallback);
 const MANAGED_BROWSER_STARTUP_METADATA_FILE = "managed-browser-startup.json";
+const MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES = 4_096;
+const MAX_MANAGED_BROWSER_STDERR_EXCERPT_CHARS = 768;
 export const MAX_MANAGED_BROWSER_STARTUP_URLS = 8;
 
 export type ManagedBrowserProfileMode = "ephemeral" | "persistent";
@@ -61,6 +63,73 @@ export function managedBrowserExecutableCandidates(
       : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
   }
   return [];
+}
+
+export type ManagedBrowserCleanupDiagnostic = "graceful_close_failed" | "process_exit_timeout" | "profile_cleanup_failed" | "profile_lock_release_failed";
+
+export type ManagedBrowserStartupStage =
+  | "resolve_executable"
+  | "prepare_profile"
+  | "read_startup_urls"
+  | "prepare_devtools"
+  | "spawn_browser"
+  | "wait_devtools_port"
+  | "wait_cdp_endpoint"
+  | "create_startup_target"
+  | "resolve_startup_page"
+  | "discover_owned_processes"
+  | "resolve_owned_window"
+  | "register_startup_url";
+
+export interface ManagedBrowserStartupDiagnostic {
+  readonly stage: ManagedBrowserStartupStage;
+  readonly elapsedMs: number;
+  readonly processState: "not_spawned" | "child_exited" | "child_not_exited_or_unreported";
+  readonly exitCode?: number;
+  readonly signal?: string;
+  readonly devToolsPortObserved: boolean;
+  readonly cleanup: "confirmed" | "unknown";
+  /** Sanitized tail of browser stderr; never includes URLs, credentials, or filesystem paths. */
+  readonly stderrExcerpt?: string;
+}
+
+/** Stable host-local formatter; every field in the diagnostic has an operator-facing consumer. */
+export function formatManagedBrowserStartupDiagnostic(diagnostic: ManagedBrowserStartupDiagnostic): string {
+  const exit = diagnostic.exitCode === undefined ? "unknown" : String(diagnostic.exitCode);
+  const signal = diagnostic.signal === undefined ? "none" : diagnostic.signal;
+  const stderr = diagnostic.stderrExcerpt === undefined ? "none" : JSON.stringify(diagnostic.stderrExcerpt);
+  return `managed browser startup stage=${diagnostic.stage} elapsed_ms=${diagnostic.elapsedMs} process=${diagnostic.processState} exit_code=${exit} signal=${signal} devtools_port=${diagnostic.devToolsPortObserved ? "observed" : "not_observed"} cleanup=${diagnostic.cleanup} stderr=${stderr}`;
+}
+
+class ManagedBrowserStderrCapture {
+  private tail = Buffer.alloc(0);
+
+  public append(chunk: unknown): void {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    const bounded = bytes.length > MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES
+      ? bytes.subarray(bytes.length - MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES)
+      : bytes;
+    this.tail = Buffer.concat([this.tail, bounded]).subarray(-MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES);
+  }
+
+  public excerpt(): string | undefined {
+    if (this.tail.length === 0) return undefined;
+    const safe = this.tail.toString("utf8")
+      .replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|data:)[^\s"'<>)]*/giu, "<url>")
+      .replace(/\b[A-Za-z]:\\[^\r\n"'<>]*/gu, "<path>")
+      .replace(/\\\\[^\r\n"'<>]*/gu, "<path>")
+      .replace(/\b--(?:user-data-dir|profile-directory|password|token|cookie|api[-_]?key)=\S+/giu, "<redacted-argument>")
+      .replace(/\b([\w-]*(?:password|token|secret|authorization|cookie|api[-_]?key)[\w-]*)\s*[:=]\s*["']?[^,\s"']+/giu, "$1=<redacted>")
+      .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "<email>")
+      .replace(/(?:^|[\s"'(])\/(?:[^\s"'()]+\/)*[^\s"'()]+/gu, " <path>")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufffd]/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (safe.length === 0) return undefined;
+    return safe.length > MAX_MANAGED_BROWSER_STDERR_EXCERPT_CHARS
+      ? safe.slice(-MAX_MANAGED_BROWSER_STDERR_EXCERPT_CHARS)
+      : safe;
+  }
 }
 
 export interface ManagedBrowserStartupMetadata {
@@ -177,7 +246,13 @@ export interface ManagedBrowserHostOptions {
   readonly resolveOwnedWindowTarget: (browserProcessId: number, signal: AbortSignal, hint?: ManagedBrowserWindowBindingHint) => Promise<ManagedBrowserWindowResolution | undefined>;
   readonly executablePath?: string;
   readonly startupTimeoutMs?: number;
-  readonly onCleanupDiagnostic?: (kind: "graceful_close_failed" | "process_exit_timeout" | "profile_cleanup_failed" | "profile_lock_release_failed") => void;
+  readonly onCleanupDiagnostic?: (kind: ManagedBrowserCleanupDiagnostic) => void;
+  /** Host-local typed failure evidence; the payload contains no URL or filesystem path. */
+  readonly onStartupDiagnostic?: (diagnostic: ManagedBrowserStartupDiagnostic) => void;
+  /** Test seam; production uses the imported child_process.spawn. */
+  readonly spawnManagedBrowser?: (executablePath: string, args: string[], options: { stdio: ["ignore", "ignore", "pipe"]; windowsHide: false }) => ChildProcess;
+  /** Test seam for bounded cleanup after a browser child was started. */
+  readonly cleanupHooks?: ManagedBrowserCleanupHooks;
   /** Host-local redacted evidence for diagnosing a failed window binding. */
   readonly onWindowResolutionDiagnostic?: (diagnostic: ManagedBrowserWindowResolutionDiagnostic) => void;
   /** Host-local redacted page-set evidence; never contains URL or page text. */
@@ -238,27 +313,101 @@ export interface CuaBootstrapSession {
   close(): Promise<void>;
 }
 
+export class CuaBootstrapSessionError extends Error {
+  public constructor(
+    public readonly cleanupCertainty: "confirmed" | "unknown",
+    cause: unknown,
+  ) {
+    super("Cua bootstrap session lifecycle failed", { cause });
+    this.name = "CuaBootstrapSessionError";
+  }
+}
+
+const CUA_BOOTSTRAP_CLEANUP_TIMEOUT_MS = 5_000;
+
 export async function openCuaBootstrapSession(socketPath: string, label: string, signal: AbortSignal): Promise<CuaBootstrapSession> {
-  const driver = CuaDriver.connect(socketPath);
-  let started = false;
+  const sdkModule = await loadCuaSdkModule();
+  const driver = sdkModule.CuaDriver.connect(socketPath);
   try {
-    await driver.startSession(StartSessionInput.new({ session: label }), { signal });
-    started = true;
-    return {
-      driver,
-      label,
-      async close() {
-        if (started) {
-          started = false;
-          await driver.endSession(EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
-        }
-        (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
-      },
-    };
+    await driver.startSession(sdkModule.StartSessionInput.new({ session: label }), { signal });
   } catch (error) {
-    if (started) await driver.endSession(EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
-    (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
-    throw error;
+    const cleanupErrors = await closeBootstrapDriver(driver, label, sdkModule);
+    const failures = [error, ...cleanupErrors];
+    const cause = failures.length === 1 ? error : new AggregateError(failures, "Cua bootstrap startup and cleanup failed");
+    throw new CuaBootstrapSessionError(cleanupErrors.length === 0 ? "confirmed" : "unknown", cause);
+  }
+
+  let closePromise: Promise<void> | undefined;
+  return {
+    driver,
+    label,
+    close() {
+      closePromise ??= (async () => {
+        const cleanupErrors = await closeBootstrapDriver(driver, label, sdkModule);
+        if (cleanupErrors.length > 0) {
+          const cause = cleanupErrors.length === 1
+            ? cleanupErrors[0]
+            : new AggregateError(cleanupErrors, "Cua bootstrap session cleanup failed");
+          throw new CuaBootstrapSessionError("unknown", cause);
+        }
+      })();
+      return closePromise;
+    },
+  };
+}
+
+async function closeBootstrapDriver(driver: CuaDriverLike, label: string, sdkModule: Awaited<ReturnType<typeof loadCuaSdkModule>>): Promise<unknown[]> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    await endCuaBootstrapSessionBounded(driver, label, sdkModule);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  let shutdownConfirmed = false;
+  try {
+    await runBootstrapCleanupBounded(
+      (signal) => driver.shutdown({ signal }),
+      "Cua bootstrap shutdown timed out",
+    );
+    shutdownConfirmed = true;
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  // A connected SDK object must be shut down before destroying its UniFFI
+  // handle. If shutdown did not settle, retain the handle rather than freeing
+  // memory that an in-flight native operation may still reference.
+  if (shutdownConfirmed) {
+    try {
+      (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  return cleanupErrors;
+}
+
+async function endCuaBootstrapSessionBounded(driver: CuaDriverLike, label: string, sdkModule: Awaited<ReturnType<typeof loadCuaSdkModule>>): Promise<void> {
+  await runBootstrapCleanupBounded(
+    (signal) => driver.endSession(sdkModule.EndSessionInput.new({ session: label }), { signal }).then(() => undefined),
+    "Cua bootstrap endSession timed out",
+  );
+}
+
+async function runBootstrapCleanupBounded<T>(operation: (signal: AbortSignal) => Promise<T>, message: string): Promise<T> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(message));
+    }, CUA_BOOTSTRAP_CLEANUP_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => operation(controller.signal)), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -809,16 +958,22 @@ export class ManagedBrowserHost {
   public async start(signal: AbortSignal): Promise<ManagedBrowserHostRecord> {
     if (this.state !== undefined) throw new DomGroundingUnavailableError("managed browser host is already running");
     signal.throwIfAborted();
-    const executablePath = await resolveManagedBrowserExecutable(this.options.browser, this.options.executablePath);
+    const startedAt = Date.now();
+    const stderrCapture = new ManagedBrowserStderrCapture();
     let profileRoot: string | undefined;
     let profileLock: FileHandle | undefined;
     let profileMode: ManagedBrowserProfileMode = this.options.profileMode ?? "ephemeral";
     let child: ChildProcess | undefined;
     let browserWebSocketDebuggerUrl: string | undefined;
+    let devToolsPortObserved = false;
+    let stage: ManagedBrowserStartupStage = "resolve_executable";
     try {
+      const executablePath = await resolveManagedBrowserExecutable(this.options.browser, this.options.executablePath);
+      stage = "prepare_profile";
       const profile = await prepareManagedBrowserProfile(this.options);
       profileRoot = profile.profileRoot;
       profileLock = profile.profileLock;
+      stage = "read_startup_urls";
       const preparedStartupUrls = profileMode === "persistent"
         ? await readManagedBrowserStartupUrls(profileRoot)
         : [];
@@ -835,15 +990,23 @@ export class ManagedBrowserHost {
         "--new-window",
         ...launchUrls,
       ];
+      stage = "prepare_devtools";
       const freshnessBoundaryMs = await prepareManagedBrowserDevToolsLaunch(profileRoot);
-      child = spawn(executablePath, args, { stdio: "ignore", windowsHide: false });
+      stage = "spawn_browser";
+      child = (this.options.spawnManagedBrowser ?? spawn)(executablePath, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: false });
+      child.stderr?.on("data", (chunk: unknown) => stderrCapture.append(chunk));
+      child.stderr?.on("error", () => undefined);
       const processId = child.pid;
       if (processId === undefined || !Number.isSafeInteger(processId) || processId <= 0) throw new DomGroundingUnavailableError("managed browser process did not expose a valid PID");
       const ownedProcessId = processId;
+      stage = "wait_devtools_port";
       const devTools = await waitForDevToolsPort(profileRoot, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal, freshnessBoundaryMs);
+      devToolsPortObserved = true;
+      stage = "wait_cdp_endpoint";
       const browserEndpoint = await waitForDevToolsBrowserEndpoint(devTools.port, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal);
       browserWebSocketDebuggerUrl = browserEndpoint;
       const bootstrapPages = await listDevToolsPages(devTools.port, signal).catch(() => [] as ManagedBrowserDevToolsPage[]);
+      stage = "create_startup_target";
       const startupTargetId = await createManagedBrowserPage(browserEndpoint, this.options.url, signal);
       const needsNavigationReadiness = this.options.url.startsWith("http://") || this.options.url.startsWith("https://");
       // HTTP(S) needs a bounded redirect/DOM readiness window. Blank and data
@@ -869,6 +1032,7 @@ export class ManagedBrowserHost {
           await closeManagedBrowserPage(browserEndpoint, bootstrapCandidates[0]!.id as string, signal).catch(() => undefined);
         }
       }
+      stage = "resolve_startup_page";
       const startupPageSet = await waitForManagedBrowserStartupPageSet(
         devTools.port,
         browserEndpoint,
@@ -892,6 +1056,7 @@ export class ManagedBrowserHost {
         // Diagnostic consumers are best-effort and must not affect startup.
       }
       const tabId = selected.page.id as string;
+      stage = "discover_owned_processes";
       const ownedProcessIds = await discoverManagedBrowserProcessIds(ownedProcessId, profileRoot, signal);
       const windowHint: ManagedBrowserWindowBindingHint = {
         browserWindowId: selected.browserWindowId,
@@ -899,6 +1064,7 @@ export class ManagedBrowserHost {
         ownedProcessIds: [...ownedProcessIds],
         ...(this.options.onWindowResolutionDiagnostic === undefined ? {} : { onDiagnostic: this.options.onWindowResolutionDiagnostic }),
       };
+      stage = "resolve_owned_window";
       const resolution = await this.options.resolveOwnedWindowTarget(ownedProcessId, signal, windowHint);
       const windowTarget = validateOwnedWindowResolution(ownedProcessId, resolution, windowHint);
       const generation = shortHash(`${ownedProcessId}:${tabId}:${selected.navigationKey ?? "unknown"}:${Date.now()}`);
@@ -912,15 +1078,58 @@ export class ManagedBrowserHost {
         delivery: "loopback-cdp",
       };
       if (profileMode === "persistent" && this.options.registerStartupUrl === true) {
+        stage = "register_startup_url";
         await registerManagedBrowserStartupUrl(profileRoot, this.options.url);
       }
       this.state = { target, processId: ownedProcessId, profileId: profile.profileId, tabId, generation, ...(selected.navigationKey === undefined ? {} : { navigationKey: selected.navigationKey }), browserWindowId: selected.browserWindowId, child, profileRoot, debuggerPort: devTools.port, browserWebSocketDebuggerUrl: browserEndpoint, profileMode, profileLock };
       return { target, processId: ownedProcessId, profileId: profile.profileId, tabId, generation, profileMode };
     } catch (error) {
-      if (signal.aborted) signal.throwIfAborted();
-      if (profileRoot !== undefined) await cleanupManagedBrowser(child, child?.pid, browserWebSocketDebuggerUrl, profileRoot, profileMode, profileLock, this.options.onCleanupDiagnostic);
-      if (error instanceof DomGroundingUnavailableError) throw error;
-      throw new DomGroundingUnavailableError("managed browser host failed to start");
+      const cleanupDiagnostics: ManagedBrowserCleanupDiagnostic[] = [];
+      let cleanupError: unknown;
+      if (profileRoot !== undefined) {
+        try {
+          await cleanupManagedBrowser(
+            child,
+            child?.pid,
+            browserWebSocketDebuggerUrl,
+            profileRoot,
+            profileMode,
+            profileLock,
+            (diagnostic) => {
+              cleanupDiagnostics.push(diagnostic);
+              try { this.options.onCleanupDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+            },
+            this.options.cleanupHooks,
+          );
+        } catch (failure) {
+          cleanupError = failure;
+        }
+      }
+      const criticalDiagnostics = criticalManagedBrowserCleanupDiagnostics(cleanupDiagnostics);
+      const cleanup = cleanupError !== undefined || criticalDiagnostics.length > 0 ? "unknown" : "confirmed";
+      const processState = child === undefined
+        ? "not_spawned"
+        : child.exitCode !== null || child.signalCode !== null
+          ? "child_exited"
+          : "child_not_exited_or_unreported";
+      const stderrExcerpt = stderrCapture.excerpt();
+      const diagnostic: ManagedBrowserStartupDiagnostic = {
+        stage,
+        elapsedMs: Math.max(0, Date.now() - startedAt),
+        processState,
+        ...(child?.exitCode === null || child?.exitCode === undefined ? {} : { exitCode: child.exitCode }),
+        ...(child?.signalCode === null || child?.signalCode === undefined ? {} : { signal: child.signalCode }),
+        devToolsPortObserved,
+        cleanup,
+        ...(stderrExcerpt === undefined ? {} : { stderrExcerpt }),
+      };
+      try { this.options.onStartupDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+      if (cleanupError !== undefined || criticalDiagnostics.length > 0) {
+        const failures = [error, ...(cleanupError === undefined ? [] : [cleanupError])];
+        if (criticalDiagnostics.length > 0) failures.push(new Error(`managed browser cleanup was not confirmed (${criticalDiagnostics.join(", ")})`));
+        throw new AggregateError(failures, "managed browser startup failed and cleanup was not confirmed", { cause: error });
+      }
+      throw error;
     }
   }
 
@@ -934,7 +1143,24 @@ export class ManagedBrowserHost {
     this.closing = true;
     const state = this.state;
     this.state = undefined;
-    await cleanupManagedBrowser(state.child, state.processId, state.browserWebSocketDebuggerUrl, state.profileRoot, state.profileMode, state.profileLock, this.options.onCleanupDiagnostic);
+    const cleanupDiagnostics: ManagedBrowserCleanupDiagnostic[] = [];
+    await cleanupManagedBrowser(
+      state.child,
+      state.processId,
+      state.browserWebSocketDebuggerUrl,
+      state.profileRoot,
+      state.profileMode,
+      state.profileLock,
+      (diagnostic) => {
+        cleanupDiagnostics.push(diagnostic);
+        try { this.options.onCleanupDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+      },
+      this.options.cleanupHooks,
+    );
+    const criticalDiagnostics = criticalManagedBrowserCleanupDiagnostics(cleanupDiagnostics);
+    if (criticalDiagnostics.length > 0) {
+      throw new Error(`managed browser cleanup was not confirmed (${criticalDiagnostics.join(", ")})`);
+    }
   }
 
   public getRecord(): ManagedBrowserHostRecord | undefined {
@@ -1745,6 +1971,9 @@ export async function cleanupManagedBrowser(
   onDiagnostic: ManagedBrowserHostOptions["onCleanupDiagnostic"],
   hooks: ManagedBrowserCleanupHooks = {},
 ): Promise<void> {
+  const report = (diagnostic: ManagedBrowserCleanupDiagnostic): void => {
+    try { onDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+  };
   let processExited = true;
   const shouldManageBrowserLifecycle = child !== undefined && (
     child.exitCode === null
@@ -1758,36 +1987,48 @@ export async function cleanupManagedBrowser(
       } catch {
         gracefulRequestAccepted = false;
       }
-      if (!gracefulRequestAccepted) onDiagnostic?.("graceful_close_failed");
+      if (!gracefulRequestAccepted) report("graceful_close_failed");
     }
-    processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 5_000);
+    try {
+      processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 5_000);
+    } catch {
+      processExited = false;
+    }
     if (!processExited) {
-      await (hooks.forceTerminate ?? forceTerminateManagedBrowserTree)(child, hostProcessId, profileRoot);
-      processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 1_500);
+      try { await (hooks.forceTerminate ?? forceTerminateManagedBrowserTree)(child, hostProcessId, profileRoot); } catch { /* retain ownership and continue releasing safe resources */ }
+      try {
+        processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 1_500);
+      } catch {
+        processExited = false;
+      }
     }
-    if (!processExited) onDiagnostic?.("process_exit_timeout");
+    if (!processExited) report("process_exit_timeout");
   }
   if (profileLock !== undefined) {
-    try { await profileLock.close(); } catch { onDiagnostic?.("profile_lock_release_failed"); }
-    if (processExited) {
-      try { await rm(join(profileRoot, ".computer-harness-profile.lock"), { force: true }); } catch { onDiagnostic?.("profile_lock_release_failed"); }
+    let lockHandleClosed = true;
+    try { await profileLock.close(); } catch { lockHandleClosed = false; report("profile_lock_release_failed"); }
+    if (processExited && lockHandleClosed) {
+      try { await rm(join(profileRoot, ".computer-harness-profile.lock"), { force: true }); } catch { report("profile_lock_release_failed"); }
     }
   }
   if (profileMode === "ephemeral") {
-    // Never remove a profile while its browser process may still be alive.
-    // Deleting an active Chromium profile can corrupt the process state and
-    // makes a later cleanup/recovery impossible. Preserve the directory and
-    // surface the existing diagnostic boundary instead.
     if (!processExited) {
-      onDiagnostic?.("profile_cleanup_failed");
-      return;
-    }
-    try {
-      await rm(profileRoot, { recursive: true, force: true });
-    } catch {
-      onDiagnostic?.("profile_cleanup_failed");
+      // Do not remove a profile directory that may still be in use by a live
+      // browser. Leave the temporary data and surface an unresolved cleanup.
+      report("profile_cleanup_failed");
+    } else {
+      try {
+        await rm(profileRoot, { recursive: true, force: true });
+      } catch {
+        report("profile_cleanup_failed");
+      }
     }
   }
+}
+
+function criticalManagedBrowserCleanupDiagnostics(diagnostics: readonly ManagedBrowserCleanupDiagnostic[]): ManagedBrowserCleanupDiagnostic[] {
+  const critical = new Set<ManagedBrowserCleanupDiagnostic>(["process_exit_timeout", "profile_cleanup_failed", "profile_lock_release_failed"]);
+  return [...new Set(diagnostics.filter((diagnostic) => critical.has(diagnostic)))];
 }
 
 const MANAGED_BROWSER_GRACEFUL_CLOSE_TIMEOUT_MS = 1_000;
@@ -1824,7 +2065,7 @@ export async function closeManagedBrowserGracefully(
   }
 }
 
-interface ManagedBrowserCleanupHooks {
+export interface ManagedBrowserCleanupHooks {
   readonly closeGracefully?: typeof closeManagedBrowserGracefully;
   readonly waitForProcessTree?: typeof waitForManagedBrowserProcessTree;
   readonly forceTerminate?: typeof forceTerminateManagedBrowserTree;

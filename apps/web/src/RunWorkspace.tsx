@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CorrectionForm } from "./components/CorrectionForm";
 import { ConnectionNote } from "./components/ConnectionNote";
 import { EventTimeline } from "./components/EventTimeline";
@@ -11,9 +11,13 @@ import { usePreferences } from "./PreferencesContext";
 import { useRunCommands } from "./hooks/useRunCommands";
 import { useRunFeed } from "./hooks/useRunFeed";
 import type { PendingRequestBase } from "./types";
+import { BrowserSpeechOutput, RunNoticeCursor, RunNoticeSpeechController, VOICE_INPUT_STARTED_EVENT } from "./run-notice-speech";
+import type { VoiceCapabilities } from "./voice-capabilities";
+import type { VoiceSpeechRate } from "@computer-harness/voice";
 
 interface RunWorkspaceProps {
   runId: string;
+  voiceCapabilities?: VoiceCapabilities;
 }
 
 interface ViewerReview {
@@ -21,15 +25,92 @@ interface ViewerReview {
   request?: PendingRequestBase;
 }
 
-export function RunWorkspace({ runId }: RunWorkspaceProps) {
-  const { snapshot, events, connection, error, refresh } = useRunFeed(runId);
+export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
+  const { snapshot, pendingRequestState, events, notices, connection, error, refresh } = useRunFeed(runId);
   const commands = useRunCommands({ runId, snapshot, refresh });
   const [viewerReview, setViewerReview] = useState<ViewerReview>();
   const [blockedRequestId, setBlockedRequestId] = useState<string>();
   const [refreshingAfterViewer, setRefreshingAfterViewer] = useState(false);
+  const [voiceOutputMessage, setVoiceOutputMessage] = useState<string>();
   const runHeadingRef = useRef<HTMLHeadingElement>(null);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
+  const pendingRequestStateRef = useRef(pendingRequestState);
+  pendingRequestStateRef.current = pendingRequestState;
+  const currentSpeechPendingRequest = () => pendingRequestStateRef.current === undefined
+    ? snapshotRef.current?.pendingRequest
+    : pendingRequestStateRef.current.request;
   const { preferences } = usePreferences();
+  const speechController = useMemo(() => new RunNoticeSpeechController(
+    () => voiceCapabilities?.createOutputAdapter?.() ?? new BrowserSpeechOutput(),
+    setVoiceOutputMessage,
+  ), [runId, voiceCapabilities]);
+  const noticeCursor = useMemo(() => new RunNoticeCursor(runId), [runId]);
+  const speechLifecycleRef = useRef(new Map<RunNoticeSpeechController, number>());
   const isTerminal = snapshot?.status === "finished";
+
+  useEffect(() => {
+    const lifecycle = (speechLifecycleRef.current.get(speechController) ?? 0) + 1;
+    speechLifecycleRef.current.set(speechController, lifecycle);
+    return () => {
+      // React StrictMode performs a setup/cleanup/setup probe. Defer disposal one microtask
+      // so that probe setup can renew this controller before a real unmount cancels it.
+      queueMicrotask(() => {
+        if (speechLifecycleRef.current.get(speechController) !== lifecycle) return;
+        speechLifecycleRef.current.delete(speechController);
+        void speechController.cancel("run_changed");
+      });
+    };
+  }, [speechController]);
+
+  useEffect(() => {
+    const rate: VoiceSpeechRate = preferences.voice.speechRate === "slow"
+      ? 0.85
+      : preferences.voice.speechRate === "fast" ? 1.15 : 1;
+    speechController.setSpeechRate(rate);
+    const newNotices = noticeCursor.select(runId, notices, preferences.voice.runNoticesEnabled);
+    if (!preferences.voice.runNoticesEnabled) {
+      void speechController.cancel("user");
+      return;
+    }
+    for (const notice of newNotices) {
+      void speechController.deliver(notice, {
+        enabled: preferences.voice.runNoticesEnabled,
+        speechRate: rate,
+        snapshotSequence: pendingRequestStateRef.current?.sequence ?? snapshotRef.current?.sequence,
+        currentPendingRequest: currentSpeechPendingRequest,
+      }).then((state) => {
+        if (state === "handled") noticeCursor.acknowledge(notice.noticeId);
+      });
+    }
+  }, [notices, noticeCursor, pendingRequestState?.request?.requestId, pendingRequestState?.request?.kind, pendingRequestState?.sequence, preferences.voice.runNoticesEnabled, preferences.voice.speechRate, runId, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind, snapshot?.sequence, speechController]);
+
+  useEffect(() => {
+    speechController.syncPendingRequest(currentSpeechPendingRequest());
+  }, [speechController, pendingRequestState?.request?.requestId, pendingRequestState?.request?.kind, pendingRequestState?.sequence, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind]);
+
+  useEffect(() => {
+    const onTextInput = (event: Event) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.matches("input, textarea, select, [contenteditable='true']")) {
+        speechController.notifyUserStartedInput();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.matches("input, textarea, [contenteditable='true']") &&
+          event.key.length === 1) speechController.notifyUserStartedInput();
+    };
+    const onVoiceInputStarted = () => speechController.notifyUserStartedInput();
+    document.addEventListener("input", onTextInput, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener(VOICE_INPUT_STARTED_EVENT, onVoiceInputStarted);
+    return () => {
+      document.removeEventListener("input", onTextInput, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener(VOICE_INPUT_STARTED_EVENT, onVoiceInputStarted);
+    };
+  }, [speechController]);
 
   useEffect(() => {
     if (!snapshot || !viewerReview) return;
@@ -117,16 +198,20 @@ export function RunWorkspace({ runId }: RunWorkspaceProps) {
             <button className="text-button refresh-run" type="button" onClick={() => void refreshManually()}>刷新任务状态</button>
           </div>
           <h1 ref={runHeadingRef} id="run-goal" tabIndex={-1}>{snapshot.goal}</h1>
-          {(snapshot.target?.appName || snapshot.target?.title) && (
+          {(snapshot.target?.appName || snapshot.target?.title || snapshot.target?.provenance === "unknown_after_switch" || snapshot.target?.provenance === "selected_target") && (
             <p className="run-target-label">
-              <span>运行窗口</span>
-              <strong>{[snapshot.target?.appName, snapshot.target?.title].filter((value) => value?.trim()).join(" · ")}</strong>
+              <span>{snapshot.target?.provenance === "starting_target" ? "起始目标" : snapshot.target?.provenance === "selected_target" ? "最近确认目标" : snapshot.target?.provenance === "unknown_after_switch" ? "当前目标" : "运行目标"}</span>
+              <strong>{snapshot.target?.provenance === "unknown_after_switch"
+                ? "目标无法确认；请查看运行结果。"
+                : [snapshot.target?.appName, snapshot.target?.title].filter((value) => value?.trim()).join(" · ") || "已确认窗口，名称不可用。"}</strong>
+              {snapshot.target?.provenance === "selected_target" && <small>窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。</small>}
             </p>
           )}
           {snapshot.error && <p className="notice notice-error" role="alert">{snapshot.error}</p>}
         </section>
 
         {commands.notice && <div className={`notice notice-${commands.notice.tone}`} role="status" aria-live="polite">{commands.notice.text}</div>}
+        {voiceOutputMessage && <p className="notice notice-warning" role="note" aria-live="off">{voiceOutputMessage}</p>}
         {error && <div className="notice notice-warning" role="status">{error}</div>}
         {refreshingAfterViewer && <p className="notice notice-info" role="status">正在重新读取任务状态；暂不发送请求…</p>}
 

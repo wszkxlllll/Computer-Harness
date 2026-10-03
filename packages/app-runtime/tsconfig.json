@@ -20,6 +20,7 @@
     { "path": "../provider-glm" },
     { "path": "../provider-qwen" },
     { "path": "../computer-cua" },
-    { "path": "../computer-osworld" }
+    { "path": "../computer-osworld" },
+    { "path": "../voice" }
   ]
 }

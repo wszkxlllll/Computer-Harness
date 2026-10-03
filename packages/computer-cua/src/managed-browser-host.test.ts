@@ -5,9 +5,10 @@ import { createHash } from "node:crypto";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { runInNewContext } from "node:vm";
 import { domCandidateFingerprint, type DomGroundingRawCandidate } from "./dom-grounding.js";
-import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
   it("selects a platform browser and bounded executable candidates", () => {
@@ -279,6 +280,82 @@ describe("managed browser host pilot", () => {
     expect(await transport.verifyFocus!(request, signal)).toMatchObject({ status: "refused" });
     expect(validate).toHaveBeenCalledWith(request, signal);
     expect(verify).toHaveBeenCalledWith(request, signal);
+  });
+
+  it("cleans an already-spawned browser and ephemeral profile when startup is aborted", async () => {
+    const abort = new AbortController();
+    const child = { pid: 654321, exitCode: null } as unknown as ChildProcess;
+    const waitForProcessTree = vi.fn(async () => true);
+    let profileRoot: string | undefined;
+    const host = new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      executablePath: process.execPath,
+      startupTimeoutMs: 100,
+      resolveOwnedWindowTarget: async () => undefined,
+      spawnManagedBrowser: (_executable, args) => {
+        const profileArgument = args.find((argument) => argument.startsWith("--user-data-dir="));
+        if (profileArgument === undefined) throw new Error("test did not receive the owned profile argument");
+        profileRoot = profileArgument.slice("--user-data-dir=".length);
+        abort.abort(new Error("fixture abort after spawn"));
+        return child;
+      },
+      cleanupHooks: { waitForProcessTree, closeGracefully: async () => true },
+    });
+
+    await expect(host.start(abort.signal)).rejects.toThrow("fixture abort after spawn");
+    expect(waitForProcessTree).toHaveBeenCalledOnce();
+    expect(profileRoot).toBeDefined();
+    await expect(access(profileRoot!)).rejects.toThrow();
+  });
+
+  it("reports the exact startup phase with bounded redacted stderr and cleanup certainty", async () => {
+    const stderr = new PassThrough();
+    const child = { pid: 654322, exitCode: 7, signalCode: null, stderr } as unknown as ChildProcess;
+    const diagnostics: Parameters<NonNullable<ManagedBrowserHostOptions["onStartupDiagnostic"]>>[0][] = [];
+    const host = new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      executablePath: process.execPath,
+      resolveOwnedWindowTarget: async () => undefined,
+      spawnManagedBrowser: (_executable, _args, options) => {
+        expect(options.stdio).toEqual(["ignore", "ignore", "pipe"]);
+        stderr.write("x".repeat(10_000));
+        stderr.write("[123:ERROR] profile C:\\Users\\private\\AppData\\Local\\Temp\\profile https://private.example/?token=secret\n");
+        stderr.write("[123:ERROR] remote endpoint https://private.example/?token=secret\n");
+        stderr.write("[123:ERROR] request token=secret2 api_key=secret3\n");
+        return child;
+      },
+      cleanupHooks: { waitForProcessTree: async () => true, closeGracefully: async () => true },
+      onStartupDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    await expect(host.start(new AbortController().signal)).rejects.toThrow(/exited before DevTools became ready/iu);
+    stderr.destroy();
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      stage: "wait_devtools_port",
+      processState: "child_exited",
+      exitCode: 7,
+      devToolsPortObserved: false,
+      cleanup: "confirmed",
+    });
+    expect(diagnostics[0]?.stderrExcerpt).toContain("<path>");
+    expect(diagnostics[0]?.stderrExcerpt).toContain("<url>");
+    expect(diagnostics[0]?.stderrExcerpt).toContain("token=<redacted>");
+    expect(diagnostics[0]?.stderrExcerpt?.length).toBeLessThanOrEqual(768);
+    const formatted = formatManagedBrowserStartupDiagnostic(diagnostics[0]!);
+    expect(formatted).toContain("stage=wait_devtools_port");
+    expect(formatted).toContain("elapsed_ms=");
+    expect(formatted).toContain("process=child_exited");
+    expect(formatted).toContain("exit_code=7");
+    expect(formatted).toContain("signal=none");
+    expect(formatted).toContain("devtools_port=not_observed");
+    expect(formatted).toContain("cleanup=confirmed");
+    expect(formatted).not.toContain("C:\\Users");
+    expect(formatted).not.toContain("private.example");
+    expect(formatted).not.toContain("secret");
   });
 
   it("locks persistent Harness-owned profiles and leaves state for later Runs", async () => {

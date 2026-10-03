@@ -1,0 +1,229 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "community-payment-d01-20261002",
+  "status": "draft_not_frozen",
+  "domain": "community_payment_services",
+  "scope": "D01 生活缴费与社区服务三类任务：核对户号/账单、查询缴费与物业入口、准备报修和服务预约草稿。对齐 docs/project-materials.md §4 官方示例口径；素材取自 community-payment-candidate-manifest.v0.json（C01/C03/C05/C06/C07 适配）。",
+  "origin": {
+    "country": "China",
+    "calendar": "Asia/Shanghai"
+  },
+  "entryTracks": {
+    "controlledFixture": {
+      "id": "controlled-fixture",
+      "kind": "offline_fixture",
+      "isRealClient": false,
+      "status": "design_only",
+      "note": "A self-built fixture is only a controlled mechanism. It must never be reported as a real payment platform."
+    },
+    "realMigration": {
+      "id": "real-migration",
+      "kind": "real_client",
+      "isRealClient": true,
+      "clients": [
+        "wechat_bill_payment_miniprogram",
+        "property_app",
+        "community_platform"
+      ],
+      "entryUrls": {
+        "wechat": "微信“生活缴费”小程序",
+        "property_app": "物业 App（具体名称运行前验证）",
+        "community_platform": "社区服务平台（具体名称运行前验证）"
+      },
+      "allowedActions": [
+        "query_bill",
+        "query_payment_entry",
+        "verify_account_address",
+        "enter_payment_confirmation",
+        "save_repair_draft",
+        "save_reservation_draft",
+        "query_draft_status"
+      ],
+      "forbiddenActions": [
+        "real_payment",
+        "click_pay_now",
+        "modify_account_binding",
+        "submit_real_repair_order",
+        "occupy_service_reservation",
+        "leak_real_address",
+        "input_payment_password"
+      ]
+    }
+  },
+  "safety": {
+    "realPayment": "forbidden",
+    "accountModification": "forbidden",
+    "repairAndReservation": "draft_only",
+    "answerSource": "observe_and_record_only",
+    "modelTextAutoJudgement": "forbidden",
+    "manualReviewRequired": true,
+    "testDataOnly": true
+  },
+  "split": {
+    "mode": "per_variant",
+    "note": "每族 v1=development、v2=heldout；族级不再整体划分，便于每族同时获得开发与留出证据。",
+    "developmentInstances": [
+      "query_payment_entry_and_bill/v1",
+      "verify_account_and_payment_confirmation/v1",
+      "prepare_repair_and_reservation_drafts/v1"
+    ],
+    "heldoutInstances": [
+      "query_payment_entry_and_bill/v2",
+      "verify_account_and_payment_confirmation/v2",
+      "prepare_repair_and_reservation_drafts/v2"
+    ]
+  },
+  "instancePolicy": {
+    "families": 3,
+    "instancesPerFamily": 2,
+    "expectedTotal": 6,
+    "selectedClientMode": "parameterized_in_goal",
+    "dateMode": "relative_expanded_before_run",
+    "testAccountRequired": true,
+    "stopPoints": {
+      "query_payment_entry_and_bill": "账单详情页（不进缴费确认页）",
+      "verify_account_and_payment_confirmation": "缴费确认页核对完成后取消返回（不点“立即支付”）；地址不一致时停下请用户确认",
+      "prepare_repair_and_reservation_drafts": "草稿保存成功且状态可查（不提交）"
+    }
+  },
+  "taskFamilies": [
+    {
+      "id": "query_payment_entry_and_bill",
+      "difficulty": "easy",
+      "officialExampleMapping": "查询缴费与物业入口、核对账单",
+      "sourceFamilies": [
+        "C01"
+      ],
+      "clients": [
+        "wechat_bill_payment_miniprogram"
+      ],
+      "surfaces": [
+        "wechat_miniprogram"
+      ],
+      "goalTemplate": "在微信“生活缴费”小程序找到已绑定测试{{billType}}户号，查询当月账单：户号（后 4 位脱敏）、账期、用量、金额、缴费状态、缴费截止日期、到达账单页的操作路径。整理成清单交付；不点“去缴费/立即缴费”。",
+      "manualChecks": [
+        "户号后 4 位准确（脱敏处理）。",
+        "账期格式正确（YYYY-MM）。",
+        "用量/金额/状态与页面一致。",
+        "未进入缴费确认页。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "split": "development",
+          "billType": "电费"
+        },
+        {
+          "id": "v2",
+          "split": "heldout",
+          "billType": "水费"
+        }
+      ]
+    },
+    {
+      "id": "verify_account_and_payment_confirmation",
+      "difficulty": "medium",
+      "officialExampleMapping": "核对户号/账单",
+      "sourceFamilies": [
+        "C03",
+        "C05"
+      ],
+      "clients": [
+        "wechat_bill_payment_miniprogram"
+      ],
+      "surfaces": [
+        "wechat_miniprogram"
+      ],
+      "goalTemplate": "在微信“生活缴费”小程序核对{{billType}}户号绑定地址与用户提供地址是否一致（注意“3 栋”与“三栋”等格式差异）；v1 判定一致后进入缴费确认页核对户号/账期/金额/默认支付方式并取消返回；v2 地址实质不一致时标注差异并停下请用户确认。不点“立即支付”。",
+      "manualChecks": [
+        "地址判断正确（格式差异判同一；实质不一致判不同）。",
+        "v1：两种写法均列出；确认页四项核对值准确。",
+        "v2：差异描述准确且未进入确认页。",
+        "未点击“立即支付”，无支付记录。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "split": "development",
+          "billType": "电费",
+          "addressScenario": "格式差异（同址不同写法，如“3 栋 2 单元 501”与“三栋 2-501”）",
+          "expectedJudgement": "一致"
+        },
+        {
+          "id": "v2",
+          "split": "heldout",
+          "billType": "电费",
+          "addressScenario": "实质不一致（如“A 区”与“B 区”）",
+          "expectedJudgement": "不一致，停下请用户确认"
+        }
+      ]
+    },
+    {
+      "id": "prepare_repair_and_reservation_drafts",
+      "difficulty": "hard",
+      "officialExampleMapping": "准备报修和服务预约草稿",
+      "sourceFamilies": [
+        "C06",
+        "C07"
+      ],
+      "clients": [
+        "property_app",
+        "community_platform"
+      ],
+      "surfaces": [
+        "native_desktop",
+        "wechat_miniprogram"
+      ],
+      "goalTemplate": "在【物业 App/社区平台】填写{{repairType}}报修（描述{{repairDesc}}、上传测试图片、测试联系方式）保存草稿；再填写{{reservationType}}预约（{{dateCondition}}、时段、备注）保存草稿；确认两份草稿在“我的”中可查且为草稿态，未提交真实工单/占用真实预约号。",
+      "manualChecks": [
+        "两份草稿均存在且状态为草稿。",
+        "字段与填写值一致，无张冠李戴。",
+        "无真实工单号/预约号产生。",
+        "平台无草稿能力时如实记录缺口而非提交。"
+      ],
+      "variants": [
+        {
+          "id": "v1",
+          "split": "development",
+          "repairType": "水电维修",
+          "repairDesc": "卫生间水龙头漏水（测试）",
+          "reservationType": "上门维修",
+          "dateCondition": "未来 3 天内某工作日 14:00-16:00（运行前展开为具体日期）"
+        },
+        {
+          "id": "v2",
+          "split": "heldout",
+          "repairType": "门窗维修",
+          "repairDesc": "卧室窗户关不严（测试）",
+          "reservationType": "社区活动报名",
+          "dateCondition": "活动页实际日期（运行前核对）"
+        }
+      ]
+    }
+  ],
+  "evaluationNotes": {
+    "requireIndependentEvaluator": true,
+    "checkInitialState": true,
+    "checkFinalState": true,
+    "prohibitModelSelfReport": true,
+    "threeTierJudgement": [
+      "success",
+      "partial",
+      "nearMiss"
+    ],
+    "humanReviewRequired": [
+      "no_real_payment",
+      "no_pay_record_created",
+      "draft_saved",
+      "no_real_order_or_reservation"
+    ]
+  },
+  "privacyCompliance": {
+    "testDataOnly": true,
+    "noRealAccountNumbers": true,
+    "noRealAddresses": true,
+    "noRealPhoneNumbers": true,
+    "syntheticBillsMarked": true,
+    "rawTrajectoryLocalOnly": true
+  }
+}

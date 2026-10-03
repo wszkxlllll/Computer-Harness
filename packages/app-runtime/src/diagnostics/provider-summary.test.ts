@@ -50,7 +50,7 @@ describe("safe provider response summaries", () => {
         },
       }],
       usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, private_value: "do-not-log" },
-    }, options);
+    }, { ...options, structuredContentExpected: true });
 
     expect(projectCalls(native)).toEqual(projectCalls(flat));
     expect(native.toolCallCount).toBe(2);
@@ -65,11 +65,12 @@ describe("safe provider response summaries", () => {
 
   it("reports malformed arguments and unknown flat envelopes without raw content", () => {
     const malformed = "not-json private text https://example.invalid/card=1234";
-    const native = summarizeProviderResponse({ choices: [{ message: { tool_calls: [{ id: "bad-call", type: "function", function: { name: "type", arguments: malformed } }] } }] });
+    const native = summarizeProviderResponse({ choices: [{ message: { content: "I attempted the action.", tool_calls: [{ id: "bad-call", type: "function", function: { name: "type", arguments: malformed } }] } }] });
     expect(native.toolCalls).toMatchObject([{ arguments: { shape: "string", parse: "invalid_json", serializedLength: malformed.length, diagnosticCodes: ["native_arguments_invalid_json"] } }]);
+    expect(native.diagnosticCodes).not.toContain("structured_invalid_json");
     expect(JSON.stringify(native)).not.toContain(malformed);
 
-    const flat = summarizeProviderResponse({ choices: [{ message: { content: JSON.stringify({ calls: [{ id: "flat-call", name: "type", arguments: "raw-not-object" }, "invalid-call"] }) } }] });
+    const flat = summarizeProviderResponse({ choices: [{ message: { content: JSON.stringify({ calls: [{ id: "flat-call", name: "type", arguments: "raw-not-object" }, "invalid-call"] }) } }] }, { structuredContentExpected: true });
     expect(flat.toolCalls).toHaveLength(2);
     expect(flat.toolCalls).toMatchObject([
       { arguments: { shape: "string", serializedLength: "raw-not-object".length, diagnosticCodes: ["structured_arguments_not_object"] } },
@@ -96,11 +97,46 @@ describe("safe provider response summaries", () => {
     const flat = summarizeProviderResponse({ choices: [{ message: { content: JSON.stringify({ calls: [
       { id: "scalar", name: "click", arguments: 42 },
       { id: "array", name: "click", arguments: [1, 2] },
-    ] }) } }] });
+    ] }) } }] }, { structuredContentExpected: true });
     expect(flat.toolCalls).toMatchObject([
       { arguments: { shape: "number", diagnosticCodes: ["structured_arguments_not_object"] } },
       { arguments: { shape: "array", itemCount: 2, diagnosticCodes: ["structured_arguments_not_object"] } },
     ]);
+  });
+
+  it("does not parse native-call assistant text as a flat ModelTurn envelope", () => {
+    const native = summarizeProviderResponse({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          content: "I opened the requested blank tab.",
+          tool_calls: [{ id: "native-call", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 10, y: 20 }) } }],
+        },
+      }],
+    }, { allowedToolNames: ["click"], structuredContentExpected: false });
+
+    expect(native.toolCallCount).toBe(1);
+    expect(native.toolCalls).toMatchObject([{ name: "click", arguments: { parse: "valid_json" } }]);
+    expect(native.structuredContent).toBeNull();
+    expect(native.diagnosticCodes).not.toContain("structured_invalid_json");
+  });
+
+  it("does not parse assistant text when a native tool_calls envelope is present", () => {
+    const mixed = summarizeProviderResponse({
+      choices: [{ message: { content: "ordinary assistant text", tool_calls: [null] } }],
+    }, { structuredContentExpected: true });
+
+    expect(mixed.diagnosticCodes).toContain("native_tool_call_invalid");
+    expect(mixed.diagnosticCodes).not.toContain("structured_invalid_json");
+  });
+
+  it("reports malformed content only when the request required strict JSON", () => {
+    const summary = summarizeProviderResponse({
+      choices: [{ finish_reason: "stop", message: { content: "not-json" } }],
+    }, { structuredContentExpected: true });
+
+    expect(summary.structuredContent).toMatchObject({ json: false, diagnosticCodes: ["structured_invalid_json"] });
+    expect(summary.diagnosticCodes).toContain("structured_invalid_json");
   });
 
   it("uses opaque ids and rejects control or unknown labels", () => {

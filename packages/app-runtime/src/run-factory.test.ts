@@ -1,14 +1,16 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, type MemoryRunModule, type MemoryStore } from "@computer-harness/memory";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import type { EventId, JsonValue, MemoryMutation, RunId, RuntimeEvent, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { EventId, JsonValue, MemoryMutation, RunId, RuntimeEvent, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { createDefaultToolRegistry, type Computer, type MemoryRecallService, type ModelInput, type NonComputerToolDefinition, type PlanningTaskMutation, type ProviderAdapter } from "@computer-harness/runtime";
 import { createPlanningRunModule, FilePlanStore, InMemoryPlanStore, type PlanningRunModule } from "@computer-harness/planning";
 import { readRuntimeEvents, reduceRuntimeEvents } from "@computer-harness/trajectory";
-import { createRun, createRunFactory, writeRunReport, type ResolvedRunConfig } from "./index.js";
+import { buildRunReport, createRun, createRunFactory, writeRunReport, type ResolvedRunConfig } from "./index.js";
+
+const fixtureSurfaceRef = { surfaceId: "run-factory-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 // Check effective report defaults against current source without rebuilding dist.
 vi.mock("@computer-harness/provider-glm", () => import("../../provider-glm/src/index.js"));
@@ -56,6 +58,7 @@ function fakeComputer(calls: { open: number; observe: number; close: number }): 
       return {
         capturedAt: "2026-09-17T00:00:00.000Z",
         viewport,
+        surfaceRef: fixtureSurfaceRef,
         screenshot: { mediaType: "image/png", data: new Uint8Array([1, 2, 3]) },
       };
     },
@@ -68,7 +71,92 @@ function fakeComputer(calls: { open: number; observe: number; close: number }): 
   };
 }
 
+function recoveryReportBaseEvents(runId: RunId): RuntimeEvent[] {
+  const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+  const sessionId = `${runId}-session` as import("@computer-harness/protocol").ComputerSessionId;
+  const observationId = `${runId}-observation` as import("@computer-harness/protocol").ObservationId;
+  const time = (offset: number) => `2026-10-01T02:00:0${offset}.000Z`;
+  return [
+    { eventId: `${runId}-event-0` as EventId, runId, sequence: 0, occurredAt: time(0), type: "run.created", goal: "Inspect the requested information." },
+    { eventId: `${runId}-event-1` as EventId, runId, sequence: 1, occurredAt: time(1), type: "run.started" },
+    { eventId: `${runId}-event-2` as EventId, runId, sequence: 2, occurredAt: time(2), type: "computer.open.started" },
+    {
+      eventId: `${runId}-event-3` as EventId,
+      runId,
+      sequence: 3,
+      occurredAt: time(3),
+      type: "computer.open.completed",
+      session: {
+        id: sessionId,
+        backend: "fixture",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: time(3),
+      },
+    },
+    {
+      eventId: `${runId}-event-4` as EventId,
+      runId,
+      sequence: 4,
+      occurredAt: time(4),
+      type: "observation.created",
+      observation: {
+        id: observationId,
+        runId,
+        computerSessionId: sessionId,
+        surfaceRef: { ...fixtureSurfaceRef, surfaceId: `${runId}-surface` as SurfaceId },
+        capturedAt: time(4),
+        viewport,
+        screenshot: { assetId: `${runId}-asset` as import("@computer-harness/protocol").AssetId, relativePath: "screenshots/current.png", mediaType: "image/png", byteLength: 1 },
+      },
+    },
+  ];
+}
+
 describe("app-runtime RunHandle", () => {
+  it("passes the frozen Run preference snapshot to Context but not provider factories", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-assistant-preferences-"));
+    const preferences = {
+      version: 1 as const,
+      responseDetail: "detailed" as const,
+      stepExplanation: "more" as const,
+      preferredLanguage: "zh-CN" as const,
+      additionalGuidance: "Group findings by topic.",
+    };
+    const inputs: ModelInput[] = [];
+    let providerConfig: ResolvedRunConfig | undefined;
+    try {
+      const handle = await createRun({ ...config(outputDir), assistantPreferences: preferences }, {
+        createProvider: (options) => {
+          providerConfig = options.config;
+          return {
+            id: "assistant-preferences-provider",
+            async generate(input) {
+              inputs.push(input);
+              return { type: "finish", summary: "The page was summarized." };
+            },
+          };
+        },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      expect(handle.config.assistantPreferences).toEqual(preferences);
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const trace = inputs[0]?.contextBudget?.trace;
+      expect(providerConfig).not.toHaveProperty("assistantPreferences");
+      expect(inputs[0]?.messages.some((message) => message.content.some((block) =>
+        block.type === "text" && block.text.includes("Group findings by topic."),
+      ))).toBe(true);
+      expect(JSON.stringify(trace)).not.toContain("Group findings by topic.");
+      expect(trace?.assistantPreferences).toMatchObject({ included: true, responseDetail: "detailed", additionalGuidancePresent: true });
+      const report = await handle.report();
+      const modelRequest = report.events.find((event) => event.type === "model.request.started");
+      expect(modelRequest?.type === "model.request.started" ? JSON.stringify(modelRequest.contextBudget?.trace) : "").not.toContain("Group findings by topic.");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the default Planning and Memory module tools and Context path working", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-default-modules-"));
     let request = 0;
@@ -361,7 +449,9 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it.each([undefined, 16384])("assembles a fake Run with effective output budget %s, then closes Controller-owned resources once", async (budget) => {
+  it.each([
+    [undefined, "enabled"], [16384, "low"], [8192, "high"], [8192, "max"], [8192, "disabled"],
+  ] as const)("assembles a fake Run with output budget %s and thinking %s, then closes Controller-owned resources once", async (budget, thinking) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-"));
     const calls = { provider: 0, open: 0, observe: 0, close: 0 };
     const provider: ProviderAdapter = {
@@ -372,7 +462,7 @@ describe("app-runtime RunHandle", () => {
       },
     };
     try {
-      const handle = await createRun({ ...config(outputDir), ...(budget === undefined ? {} : { glmMaxOutputTokens: budget }) }, {
+      const handle = await createRun({ ...config(outputDir), glmThinking: thinking, ...(budget === undefined ? {} : { glmMaxOutputTokens: budget }) }, {
         credentials: { glmApiKey: "must-not-be-serialized" },
         createProvider: (options) => {
           expect(options.credentials.glmApiKey).toBe("must-not-be-serialized");
@@ -398,13 +488,14 @@ describe("app-runtime RunHandle", () => {
         monitor: "off",
         runtimeOutcome: "succeeded",
         glmMaxOutputTokens: budget ?? 8192,
-        glmThinking: "enabled",
+        glmThinking: thinking === "disabled" ? "enabled" : thinking,
       });
       expect(report.events.map((event) => event.type)).toEqual([
         "run.created",
         "run.started",
         "computer.open.started",
         "computer.open.completed",
+        "computer.surface.transitioned",
         "observation.created",
         "model.request.started",
         "model.response.received",
@@ -417,6 +508,234 @@ describe("app-runtime RunHandle", () => {
       expect(calls.close).toBe(1);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes non-model recovery evidence for a budget-stopped Run without promoting Plan or Memory to verified facts", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-recovery-report-"));
+    const runId = "recovery-report-run" as RunId;
+    const viewport = { width: 800, height: 600, coordinateSpace: "physical" as const };
+    const session = {
+      id: "recovery-session",
+      backend: "fixture",
+      viewport,
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-10-01T01:00:00.000Z",
+    };
+    const events: RuntimeEvent[] = [
+      { eventId: "recovery-event-0" as EventId, runId, sequence: 0, occurredAt: "2026-10-01T01:00:00.000Z", type: "run.created", goal: "Compare the requested options." },
+      { eventId: "recovery-event-1" as EventId, runId, sequence: 1, occurredAt: "2026-10-01T01:00:00.001Z", type: "run.started" },
+      { eventId: "recovery-event-2" as EventId, runId, sequence: 2, occurredAt: "2026-10-01T01:00:00.002Z", type: "computer.open.started" },
+      { eventId: "recovery-event-3" as EventId, runId, sequence: 3, occurredAt: "2026-10-01T01:00:00.003Z", type: "computer.open.completed", session },
+      {
+        eventId: "recovery-event-4" as EventId,
+        runId,
+        sequence: 4,
+        occurredAt: "2026-10-01T01:00:00.004Z",
+        type: "observation.created",
+        observation: {
+          id: "recovery-observation" as import("@computer-harness/protocol").ObservationId,
+          runId,
+          computerSessionId: session.id as import("@computer-harness/protocol").ComputerSessionId,
+          surfaceRef: { ...fixtureSurfaceRef, surfaceId: "recovery-desktop" as SurfaceId },
+          capturedAt: "2026-10-01T01:00:00.004Z",
+          viewport,
+          screenshot: { assetId: "recovery-asset" as import("@computer-harness/protocol").AssetId, relativePath: "screenshots/observation.png", mediaType: "image/png", byteLength: 1 },
+        },
+      },
+      {
+        eventId: "recovery-event-5" as EventId,
+        runId,
+        sequence: 5,
+        occurredAt: "2026-10-01T01:00:00.005Z",
+        type: "planning.task.updated",
+        callId: "recovery-plan-call" as ToolCallId,
+        mutation: { operation: "created", task: { id: "phase-1", subject: "sensitive plan text", status: "in_progress" } },
+      },
+      {
+        eventId: "recovery-event-6" as EventId,
+        runId,
+        sequence: 6,
+        occurredAt: "2026-10-01T01:00:00.006Z",
+        type: "memory.updated",
+        callId: "recovery-memory-call" as ToolCallId,
+        source: "tool",
+        mutation: { operation: "upsert_fact", fact: { id: "memory-id", subject: { type: "run" }, key: "sensitive-memory-key", value: "sensitive-memory-value", sourceEventId: "recovery-event-6" as EventId, status: "active", updatedSequence: 6 } },
+      },
+      { eventId: "recovery-event-7" as EventId, runId, sequence: 7, occurredAt: "2026-10-01T01:00:00.007Z", type: "runtime.error", category: "budget", message: "action budget exhausted at 5; finish or continue without GUI actions" },
+      { eventId: "recovery-event-8" as EventId, runId, sequence: 8, occurredAt: "2026-10-01T01:00:00.008Z", type: "run.finished", outcome: "budget_exhausted" },
+    ];
+    try {
+      await writeFile(join(outputDir, "trajectory.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+      const report = await buildRunReport({ ...config(outputDir), runId, planning: true, memory: "facts" }, runId, [], []);
+      expect(report.summary).toMatchObject({ runtimeOutcome: "budget_exhausted", modelSummary: null });
+      expect(report.summary.recoveryReport).toMatchObject({
+        businessResult: "not_assessed",
+        modelReply: { status: "not_recorded" },
+        notDeliveredNote: expect.stringContaining("No final model reply was recorded"),
+        latestObservation: { sourceEventId: "recovery-event-4", observationId: "recovery-observation", capturedAt: "2026-10-01T01:00:00.004Z", sourceUrl: null, sourceUrlStatus: "unknown_not_recorded" },
+        budget: { exhaustedKinds: ["gui_actions"], evidenceEventIds: ["recovery-event-7"] },
+        planState: { tasks: [{ id: "phase-1", status: "in_progress", sourceEventId: "recovery-event-5" }] },
+        memoryState: { facts: [{ id: "memory-id", status: "active", sourceEventId: "recovery-event-6" }] },
+      });
+      await writeRunReport(report, outputDir);
+      const markdown = await readFile(join(outputDir, "report.md"), "utf8");
+      expect(markdown).toContain("## Model reply");
+      expect(markdown).toContain("## Program-generated Runtime evidence");
+      expect(markdown).toContain("source URL: unknown");
+      expect(markdown).toContain("Plan state references (not environment verification)");
+      expect(markdown).toContain("Run Memory state references (model-authored, values omitted, not independently verified)");
+      expect(markdown).not.toContain("sensitive plan text");
+      expect(markdown).not.toContain("sensitive-memory-key");
+      expect(markdown).not.toContain("sensitive-memory-value");
+      expect(JSON.parse(await readFile(join(outputDir, "summary.json"), "utf8"))).toMatchObject({ runtimeOutcome: "budget_exhausted", modelSummary: null });
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves timeout, cancellation, and unknown-side-effect evidence in the non-model report", async () => {
+    const scenarios = [
+      { id: "api-timeout", outcome: "failed" as const, category: "provider", code: "API_TIMEOUT", message: "Request timed out; opaque private body remains in the original event." },
+      { id: "cancelled", outcome: "cancelled" as const, category: "cancelled", code: "ABORTED", message: "Request was cancelled." },
+    ];
+    for (const scenario of scenarios) {
+      const outputDir = await mkdtemp(join(tmpdir(), `harness-app-runtime-recovery-${scenario.id}-`));
+      const runId = `recovery-${scenario.id}` as RunId;
+      const events = [
+        ...recoveryReportBaseEvents(runId),
+        { eventId: `${runId}-event-5` as EventId, runId, sequence: 5, occurredAt: "2026-10-01T02:00:05.000Z", type: "model.request.started", providerId: "fixture-provider", requestId: `${runId}-request` },
+        { eventId: `${runId}-event-6` as EventId, runId, sequence: 6, occurredAt: "2026-10-01T02:00:06.000Z", type: "model.request.failed", category: scenario.category, code: scenario.code, message: scenario.message, retryable: false, requestId: `${runId}-request` },
+        { eventId: `${runId}-event-7` as EventId, runId, sequence: 7, occurredAt: "2026-10-01T02:00:07.000Z", type: "run.finished", outcome: scenario.outcome },
+      ] as RuntimeEvent[];
+      try {
+        await writeFile(join(outputDir, "trajectory.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+        const report = await buildRunReport({ ...config(outputDir), runId }, runId, [], []);
+        expect(report.summary).toMatchObject({ runtimeOutcome: scenario.outcome, modelSummary: null });
+        expect(report.summary.recoveryReport).toMatchObject({
+          modelReply: { status: "not_recorded" },
+          notDeliveredNote: expect.stringContaining("No final model reply was recorded"),
+          evidenceEvents: [{ eventId: `${runId}-event-6`, type: "model.request.failed", category: scenario.category, code: scenario.code, retryable: false }],
+        });
+        expect((report.summary.metrics as { providerErrors: Array<{ message: string }> }).providerErrors[0]?.message).toBe(scenario.message);
+        await writeRunReport(report, outputDir);
+        const markdown = await readFile(join(outputDir, "report.md"), "utf8");
+        expect(markdown).not.toContain("opaque private body");
+        expect(markdown).toContain("Failure/error event references");
+      } finally {
+        await rm(outputDir, { recursive: true, force: true });
+      }
+    }
+
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-recovery-unknown-side-effect-"));
+    const runId = "recovery-unknown-side-effect" as RunId;
+    const latestObservationId = `${runId}-observation` as import("@computer-harness/protocol").ObservationId;
+    const callId = `${runId}-call` as ToolCallId;
+    const action = { actionId: "unknown-action" as import("@computer-harness/protocol").ActionId, basedOn: latestObservationId, kind: "click" as const, point: { x: 20, y: 30 } };
+    const call = { id: callId, name: "click", arguments: { x: 20, y: 30 } };
+    const events: RuntimeEvent[] = [
+      ...recoveryReportBaseEvents(runId),
+      { eventId: `${runId}-event-5` as EventId, runId, sequence: 5, occurredAt: "2026-10-01T02:00:05.000Z", type: "model.request.started", providerId: "fixture-provider", requestId: `${runId}-request` },
+      { eventId: `${runId}-event-6` as EventId, runId, sequence: 6, occurredAt: "2026-10-01T02:00:06.000Z", type: "model.response.received", requestId: `${runId}-request`, turn: { type: "tool_calls", calls: [call] } },
+      { eventId: `${runId}-event-7` as EventId, runId, sequence: 7, occurredAt: "2026-10-01T02:00:07.000Z", type: "tool.call.received", call },
+      { eventId: `${runId}-event-8` as EventId, runId, sequence: 8, occurredAt: "2026-10-01T02:00:08.000Z", type: "action.proposed", callId, action },
+      { eventId: `${runId}-event-9` as EventId, runId, sequence: 9, occurredAt: "2026-10-01T02:00:09.000Z", type: "action.execution.started", action },
+      { eventId: `${runId}-event-10` as EventId, runId, sequence: 10, occurredAt: "2026-10-01T02:00:10.000Z", type: "run.finished", outcome: "outcome_unknown" },
+    ];
+    try {
+      await writeFile(join(outputDir, "trajectory.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+      const report = await buildRunReport({ ...config(outputDir), runId }, runId, [], []);
+      expect(report.summary).toMatchObject({ runtimeOutcome: "outcome_unknown", modelSummary: null });
+      expect(report.summary.recoveryReport).toMatchObject({
+        businessResult: "not_assessed",
+        modelReply: { status: "not_recorded" },
+        unknownSideEffects: { status: "unknown", actionIds: ["unknown-action"] },
+        notDeliveredNote: expect.stringContaining("program does not recommend replay"),
+      });
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not revive the old Observation after a completed window handoff with no fresh frame", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-recovery-handoff-no-frame-"));
+    const runId = "recovery-handoff-no-frame" as RunId;
+    const nextSession = {
+      id: `${runId}-session` as import("@computer-harness/protocol").ComputerSessionId,
+      backend: "fixture",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-10-01T02:00:03.000Z",
+    };
+    const events: RuntimeEvent[] = [
+      ...recoveryReportBaseEvents(runId),
+      { eventId: "recovery-handoff-no-frame-event-5" as EventId, runId, sequence: 5, occurredAt: "2026-10-01T02:00:05.000Z", type: "computer.window.handoff.requested", sourceActionId: "handoff-action", reasonCode: "foreground_mismatch" },
+      { eventId: "recovery-handoff-no-frame-event-6" as EventId, runId, sequence: 6, occurredAt: "2026-10-01T02:00:06.000Z", type: "computer.window.handoff.completed", target: { pid: 2345, windowId: 6789 }, session: nextSession },
+      { eventId: "recovery-handoff-no-frame-event-7" as EventId, runId, sequence: 7, occurredAt: "2026-10-01T02:00:07.000Z", type: "run.finished", outcome: "cancelled" },
+    ];
+    try {
+      await writeFile(join(outputDir, "trajectory.jsonl"), events.map((event) => JSON.stringify(event)).join("\n") + "\n", "utf8");
+      const report = await buildRunReport({ ...config(outputDir), runId }, runId, [], []);
+      expect(report.snapshot.latestObservationId).toBeUndefined();
+      expect(report.summary.recoveryReport).toMatchObject({
+        runId,
+        runtimeOutcome: "cancelled",
+        latestObservation: null,
+        notDeliveredNote: expect.stringContaining("No final model reply was recorded"),
+      });
+      await writeRunReport(report, outputDir);
+      expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain("Latest observation: unavailable in the committed event set.");
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unknown final target after any started switch without a newer confirmed handoff", async () => {
+    for (const scenario of [
+      { id: "refused", terminal: true, receiptStatus: "refused" as const, outcome: "failed" as const },
+      { id: "failed", terminal: true, receiptStatus: "failed" as const, outcome: "outcome_unknown" as const },
+      { id: "unresolved", terminal: false, receiptStatus: undefined, outcome: "outcome_unknown" as const },
+    ]) {
+      const outputDir = await mkdtemp(join(tmpdir(), `harness-app-runtime-window-switch-${scenario.id}-`));
+      const runId = `window-switch-${scenario.id}` as RunId;
+      const baseEvents = recoveryReportBaseEvents(runId);
+      const observationId = `${runId}-observation` as import("@computer-harness/protocol").ObservationId;
+      const callId = `${runId}-call` as ToolCallId;
+      const action = {
+        actionId: `${runId}-action` as import("@computer-harness/protocol").ActionId,
+        basedOn: observationId,
+        kind: "switch_window" as const,
+        windowRef: "opaque-window-ref",
+      };
+      const call = { id: callId, name: "switch_window", arguments: { windowRef: "opaque-window-ref" } };
+      const events: RuntimeEvent[] = [
+        ...baseEvents,
+        { eventId: `${runId}-event-5` as EventId, runId, sequence: 5, occurredAt: "2026-10-01T02:00:05.000Z", type: "model.request.started", providerId: "fixture-provider", requestId: `${runId}-request` },
+        { eventId: `${runId}-event-6` as EventId, runId, sequence: 6, occurredAt: "2026-10-01T02:00:06.000Z", type: "model.response.received", requestId: `${runId}-request`, turn: { type: "tool_calls", calls: [call] } },
+        { eventId: `${runId}-event-7` as EventId, runId, sequence: 7, occurredAt: "2026-10-01T02:00:07.000Z", type: "tool.call.received", call },
+        { eventId: `${runId}-event-8` as EventId, runId, sequence: 8, occurredAt: "2026-10-01T02:00:08.000Z", type: "action.proposed", callId, action },
+        { eventId: `${runId}-event-9` as EventId, runId, sequence: 9, occurredAt: "2026-10-01T02:00:09.000Z", type: "action.execution.started", action },
+        ...(scenario.terminal ? [
+          { eventId: `${runId}-event-10` as EventId, runId, sequence: 10, occurredAt: "2026-10-01T02:00:10.000Z", type: "action.execution.failed", receipt: { actionId: action.actionId, status: scenario.receiptStatus, message: `fixture ${scenario.receiptStatus}` } },
+          { eventId: `${runId}-event-11` as EventId, runId, sequence: 11, occurredAt: "2026-10-01T02:00:11.000Z", type: "tool.call.failed", result: { callId, status: "failed", error: { code: `ACTION_${scenario.receiptStatus!.toUpperCase()}`, message: `fixture ${scenario.receiptStatus}` } } },
+        ] : []),
+        { eventId: `${runId}-event-12` as EventId, runId, sequence: scenario.terminal ? 12 : 10, occurredAt: "2026-10-01T02:00:12.000Z", type: "run.finished", outcome: scenario.outcome },
+      ];
+      try {
+        await writeFile(join(outputDir, "trajectory.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+        const report = await buildRunReport({
+          ...config(outputDir),
+          runId,
+          windowSwitch: "opened-windows-v1",
+          computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } },
+        }, runId, [], []);
+        expect(report.summary).toMatchObject({ windowSwitch: "opened-windows-v1", runtimeOutcome: scenario.outcome, finalComputerTarget: null });
+        expect(report.snapshot.latestObservationId).toBeUndefined();
+        await writeRunReport(report, outputDir);
+        expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain("Final target: unknown after a model-selected window switch began");
+      } finally {
+        await rm(outputDir, { recursive: true, force: true });
+      }
     }
   });
 
@@ -443,6 +762,30 @@ describe("app-runtime RunHandle", () => {
       expect(report.summary.tools).not.toContain("right_click");
       expect(report.summary.tools).not.toContain("drag");
       expect(report.summary.tools).not.toContain("hotkey");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("enables manual handoff confirmation as part of the explicit window-switch opt-in", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-window-switch-handoff-config-"));
+    const calls = { open: 0, observe: 0, close: 0 };
+    const baseComputer = fakeComputer(calls);
+    const computer: Computer = {
+      ...baseComputer,
+      async listWindows() { return []; },
+    };
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } },
+        windowSwitch: "opened-windows-v1",
+      }, {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "unused" }; } }),
+        createComputer: async () => computer,
+      });
+      expect(handle.config).toMatchObject({ windowSwitch: "opened-windows-v1", windowHandoff: "confirm-v1" });
       await handle.close();
     } finally {
       await rm(outputDir, { recursive: true, force: true });
@@ -573,6 +916,69 @@ describe("app-runtime RunHandle", () => {
       expect(JSON.stringify(report.summary)).not.toContain("secret=not-for-model");
       expect(JSON.stringify(report.summary)).not.toContain("HarnessOwned");
       await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the Host-selected browser companion for desktop startup without exposing private fields", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-browser-companion-"));
+    let providerConfig: ResolvedRunConfig | undefined;
+    let computerConfig: ResolvedRunConfig["computer"] | undefined;
+    const calls = { open: 0, observe: 0, close: 0 };
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        computer: {
+          kind: "cua",
+          socketPath: "fixture.sock",
+          screenshotDir: "screenshots",
+          managedBrowserCompanion: true,
+          managedBrowserProfileMode: "persistent",
+          managedBrowserProfileLabel: "default",
+          managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles",
+        },
+        windowSwitch: "opened-windows-v1",
+      }, {
+        createProvider: (options) => {
+          providerConfig = options.config;
+          return { id: "fixture-provider", async generate() { return { type: "finish", summary: "companion configured" }; } };
+        },
+        createComputer: (options) => {
+          computerConfig = options.config;
+          const computer = fakeComputer(calls);
+          return Promise.resolve({ ...computer, async listWindows() { return []; } });
+        },
+      });
+
+      expect(handle.config.grounding).toBe("hybrid-catalog-v1");
+      expect(handle.config.computer).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank" });
+      expect(computerConfig).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank", managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles" });
+      expect(providerConfig?.computer).not.toHaveProperty("managedBrowserCompanion");
+      expect(providerConfig?.computer).not.toHaveProperty("managedBrowserProfileRoot");
+      expect(providerConfig?.computer).not.toHaveProperty("managedBrowserProfileLabel");
+      expect(JSON.stringify(providerConfig)).not.toContain("HarnessOwned");
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const report = await handle.report();
+      expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
+      expect(JSON.stringify(report.summary)).not.toContain("managedBrowserCompanion");
+      expect(JSON.stringify(report.summary)).not.toContain("HarnessOwned");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a Host companion projection when cross-window opt-in is off before creating resources", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-browser-companion-off-"));
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    try {
+      await expect(createRun({
+        ...config(outputDir),
+        computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", managedBrowserCompanion: true },
+      }, { createProvider })).rejects.toThrow(/requires the opened-windows-v1 Run opt-in/iu);
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

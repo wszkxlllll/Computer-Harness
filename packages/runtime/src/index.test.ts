@@ -7,15 +7,19 @@ import type {
   ActionId,
   ActionIntent,
   ComputerWindowCandidate,
+  ComputerWindowOption,
   AssetId,
   ComputerSessionId,
   EventId,
   GroundingCatalog,
   ModelTurn,
+  ObservationAssessment,
   ObservationFrame,
   ObservationId,
   RunId,
   RuntimeEvent,
+  SurfaceId,
+  SurfaceRef,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -25,6 +29,7 @@ import {
   type AssetStore,
   FileAssetStore,
   JsonlRunEventWriter,
+  initialRunSnapshot,
   readRuntimeEvents,
   reduceRuntimeEvents,
   type RunEventWriter,
@@ -47,11 +52,16 @@ import {
   type ContextCompiler,
   validateActionIntent,
   groundingComputerTools,
+  windowSwitchTools,
 } from "./index.js";
+import { currentObservationAssessmentBinding } from "./observation-assessment.js";
 
 const runId = "runtime-test" as RunId;
 const sessionId = "fake-computer" as ComputerSessionId;
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+const desktopSurfaceRef: SurfaceRef = { surfaceId: "runtime-test-desktop" as SurfaceId, generation: 1, kind: "desktop" };
+const nativePeerSurfaceRef: SurfaceRef = { surfaceId: "runtime-test-native-peer" as SurfaceId, generation: 1, kind: "native_window" };
+const legacyUnknownSurfaceRef: SurfaceRef = { surfaceId: "legacy-unknown-runtime-fixture" as SurfaceId, generation: 0, kind: "unknown" };
 
 class TestIds implements IdFactory {
   private count = 0;
@@ -103,6 +113,7 @@ class FakeComputer implements Computer {
     return {
       capturedAt: `2026-08-28T00:00:0${this.observationCount}.000Z`,
       viewport,
+      surfaceRef: desktopSurfaceRef,
       screenshot: { mediaType: "image/png" as const, data: new Uint8Array([this.stableScreenshots ? 1 : this.observationCount]) },
     };
   }
@@ -122,6 +133,57 @@ class FakeComputer implements Computer {
 
   public async close(_session: ComputerSession): Promise<void> {
     this.calls.push("close");
+  }
+}
+
+class WindowSwitchComputer extends FakeComputer {
+  public inventoryCalls = 0;
+  public failTargetObservation = false;
+  private switched = false;
+  public targetWindowRef = "opaque-target";
+  public readonly closedSessionIds: string[] = [];
+  public switchOutcome: "completed" | "refused" | "throw" | "wrong-backend" = "completed";
+  public readonly targetSession: ComputerSession = {
+    ...this.session,
+    viewport: { width: 640, height: 480, coordinateSpace: "physical" },
+  };
+
+  public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowOption[]> {
+    signal.throwIfAborted();
+    this.inventoryCalls += 1;
+    this.calls.push("listWindows");
+    return [
+      { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true, pid: 101, hwnd: 501 } as ComputerWindowOption,
+      { windowRef: this.targetWindowRef, appName: "Browser", title: "Search results", isCurrent: false, pid: 202, hwnd: 502 } as ComputerWindowOption,
+    ];
+  }
+
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+    if (this.failTargetObservation && this.switched && session.id === this.targetSession.id) throw new Error("target screenshot unavailable");
+    const capture = await super.observe(session, observationId, signal);
+    return {
+      ...capture,
+      viewport: session.viewport,
+      surfaceRef: this.switched ? nativePeerSurfaceRef : desktopSurfaceRef,
+      ...(this.switched ? { surfaceTransitionReason: "peer_switch" as const } : {}),
+    };
+  }
+
+  public override async close(session: ComputerSession): Promise<void> {
+    this.closedSessionIds.push(String(session.id));
+    await super.close(session);
+  }
+
+  public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+    signal.throwIfAborted();
+    if (action.kind !== "switch_window") return super.execute(session, action, signal);
+    this.calls.push(`execute:${action.kind}:${action.windowRef}`);
+    if (action.windowRef !== this.targetWindowRef) return { actionId: action.actionId, status: "refused" as const, driverCode: "WINDOW_REF_STALE" };
+    if (this.switchOutcome === "throw") throw new Error("activation outcome not observable");
+    if (this.switchOutcome === "refused") return { actionId: action.actionId, status: "refused" as const, driverCode: "WINDOW_ACTIVATION_REFUSED" };
+    const sessionAfter = this.switchOutcome === "wrong-backend" ? { ...this.targetSession, backend: "other" } : this.targetSession;
+    this.switched = true;
+    return { actionId: action.actionId, status: "completed" as const, sessionAfter };
   }
 }
 
@@ -145,6 +207,7 @@ class MismatchedGroundingComputer extends FakeComputer {
       source: "uia",
       observationId: "wrong-observation" as ObservationId,
       computerSessionId: "wrong-session" as ComputerSessionId,
+      surfaceRef: desktopSurfaceRef,
       completeness: "partial",
       degraded: false,
       maxElements: 16,
@@ -178,6 +241,7 @@ class ManyGroundingComputer extends FakeComputer {
         source: "uia",
         observationId,
         computerSessionId: session.id,
+        surfaceRef: capture.surfaceRef,
         completeness: "partial",
         degraded: false,
         maxElements: 256,
@@ -280,6 +344,24 @@ class ScriptedProvider implements ProviderAdapter {
   }
 }
 
+class EventAwareProvider implements ProviderAdapter {
+  public readonly id = "event-aware-provider";
+  public readonly inputs: ModelInput[] = [];
+
+  public constructor(
+    private readonly turns: Array<(input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn>,
+    private readonly getEvents: () => readonly RuntimeEvent[],
+  ) {}
+
+  public async generate(input: ModelInput, options: { signal: AbortSignal }): Promise<ModelTurn> {
+    options.signal.throwIfAborted();
+    this.inputs.push(input);
+    const turn = this.turns.shift();
+    if (turn === undefined) throw new Error("event-aware provider script exhausted");
+    return turn(input, this.getEvents());
+  }
+}
+
 class RawOnlyGroundingComputer extends FakeComputer {
   public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal): Promise<import("@computer-harness/protocol").ObservationCapture> {
     const capture = await super.observe(session, observationId, signal);
@@ -297,6 +379,7 @@ class RawOnlyGroundingComputer extends FakeComputer {
         source: "uia",
         observationId,
         computerSessionId: session.id,
+        surfaceRef: capture.surfaceRef,
         completeness: "complete",
         degraded: false,
         maxElements: 256,
@@ -322,10 +405,13 @@ class ApprovalSideEffectPolicy extends DefaultRuntimePolicy {
 
 /** Runtime tests use a local contract double; the real Context package is tested separately. */
 class TestContextCompiler implements ContextCompiler {
+  public readonly inputs: Parameters<ContextCompiler["compile"]>[0][] = [];
+
   public constructor(private readonly registry: ToolRegistry) {}
 
   public async compile(input: Parameters<ContextCompiler["compile"]>[0], signal: AbortSignal): Promise<ModelInput> {
     signal.throwIfAborted();
+    this.inputs.push(structuredClone(input));
     const messages: ModelMessage[] = [{ role: "user", content: [{ type: "text", text: input.goal }] }];
     let viewport = input.latestObservation?.viewport;
     const orderedEvents = [...input.recentEvents].sort((left, right) => left.sequence - right.sequence);
@@ -386,7 +472,14 @@ class TestContextCompiler implements ContextCompiler {
     if (input.monitorGuidance !== undefined) {
       messages.push({ role: "user", content: [{ type: "text", text: input.monitorGuidance.text }] });
     }
-    return { system: "runtime test context", messages, tools: this.registry.modelTools() };
+    return {
+      system: "runtime test context",
+      messages,
+      tools: this.registry.modelTools("main", {
+        ...(input.enabledCategories === undefined ? {} : { enabledCategories: input.enabledCategories }),
+        ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
+      }),
+    };
   }
 }
 
@@ -591,6 +684,12 @@ function clickRegistry(): ToolRegistry {
   return registry;
 }
 
+function windowSwitchRegistry(): ToolRegistry {
+  const registry = clickRegistry();
+  registry.registerMany(windowSwitchTools());
+  return registry;
+}
+
 function waitRegistry(): ToolRegistry {
   const registry = clickRegistry();
   registry.registerMany(groundingComputerTools());
@@ -683,6 +782,7 @@ async function makeController(
     actionPolicy?: ActionPolicy;
     features?: RunFeatureConfig;
     windowHandoff?: "off" | "confirm-v1";
+    windowSwitch?: "off" | "opened-windows-v1";
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -713,6 +813,7 @@ async function makeController(
     ...(overrides.enabledCategories === undefined ? {} : { enabledCategories: overrides.enabledCategories }),
     ...(overrides.enabledToolNames === undefined ? {} : { enabledToolNames: overrides.enabledToolNames }),
     ...(overrides.windowHandoff === undefined ? {} : { windowHandoff: overrides.windowHandoff }),
+    ...(overrides.windowSwitch === undefined ? {} : { windowSwitch: overrides.windowSwitch }),
   });
   return { controller, computer: activeComputer, directory };
 }
@@ -737,6 +838,19 @@ function committedApprovalSignal(occurrence = 1) {
     requested,
     onEventCommitted(event: RuntimeEvent): void {
       if (event.type === "approval.requested" && ++observed === occurrence) resolve(event);
+    },
+  };
+}
+
+function committedUserInputRequestSignal() {
+  let resolve!: (event: Extract<RuntimeEvent, { type: "user.input.requested" }>) => void;
+  const requested = new Promise<Extract<RuntimeEvent, { type: "user.input.requested" }>>((complete) => {
+    resolve = complete;
+  });
+  return {
+    requested,
+    onEventCommitted(event: RuntimeEvent): void {
+      if (event.type === "user.input.requested") resolve(event);
     },
   };
 }
@@ -802,7 +916,7 @@ describe("RunController confirmed window handoff", () => {
       public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
         signal.throwIfAborted();
         this.calls.push("handoff");
-        return { ...session, id: "proactive-window" as ComputerSessionId };
+        return session;
       }
     }
     const computer = new ProactiveHandoffComputer();
@@ -857,7 +971,7 @@ describe("RunController confirmed window handoff", () => {
         signal.throwIfAborted();
         expect(candidate).toMatchObject({ pid: 42, windowId: 88 });
         this.calls.push("handoff");
-        return { ...session, id: "handoff-computer" as ComputerSessionId, viewport: { width: 640, height: 480, coordinateSpace: "physical" } };
+        return { ...session, viewport: { width: 640, height: 480, coordinateSpace: "physical" } };
       }
     }
     const computer = new HandoffComputer();
@@ -884,7 +998,7 @@ describe("RunController confirmed window handoff", () => {
       expect(events.map((event) => event.type)).toContain("computer.window.handoff.completed");
       const observations = events.filter((event): event is Extract<(typeof events)[number], { type: "observation.created" }> => event.type === "observation.created");
       expect(observations).toHaveLength(2);
-      expect(observations[0]?.observation.computerSessionId).not.toBe(observations[1]?.observation.computerSessionId);
+      expect(observations[0]?.observation.computerSessionId).toBe(observations[1]?.observation.computerSessionId);
       const completed = events.find((event) => event.type === "computer.window.handoff.completed");
       expect(completed?.type === "computer.window.handoff.completed" ? completed.target : undefined).toEqual({ pid: 42, windowId: 88 });
       expect(controller.getSnapshot().computerSession?.viewport).toMatchObject({ width: 640, height: 480 });
@@ -1347,6 +1461,7 @@ describe("shared GUI Action validation", () => {
     id: "validation-observation" as ObservationId,
     runId,
     computerSessionId: sessionId,
+    surfaceRef: desktopSurfaceRef,
     capturedAt: "2026-08-28T00:00:00.000Z",
     viewport,
     screenshot: {
@@ -1359,6 +1474,20 @@ describe("shared GUI Action validation", () => {
 
   it("checks keyboard capability for type and keypress actions", async () => {
     expect(() => validateActionIntent({
+      actionId: "type-grounded-action" as ActionId,
+      basedOn: observation.id,
+      kind: "type",
+      text: "first\nsecond",
+      groundingRef: "uia-current-ref",
+    }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: true } })).not.toThrow();
+    expect(() => validateActionIntent({
+      actionId: "type-invalid-grounding" as ActionId,
+      basedOn: observation.id,
+      kind: "type",
+      text: "first\nsecond",
+      groundingRef: " ",
+    }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: true } })).toThrow(/groundingRef/iu);
+    expect(() => validateActionIntent({
       actionId: "type-action" as ActionId,
       basedOn: observation.id,
       kind: "type",
@@ -1370,6 +1499,26 @@ describe("shared GUI Action validation", () => {
       kind: "keypress",
       keys: ["ENTER"],
     }, { observation, capabilities: { screenshot: true, pointer: true, keyboard: false, accessibility: false } })).toThrow(/keyboard/);
+  });
+
+  it("requires a current observation and screenshot capability for switch_window", () => {
+    const action: ActionIntent = {
+      actionId: "switch-validation-action" as ActionId,
+      basedOn: observation.id,
+      kind: "switch_window",
+      windowRef: "opaque-window-ref",
+    };
+    expect(() => validateActionIntent(action, {
+      observation,
+      capabilities: { screenshot: true, pointer: false, keyboard: false, accessibility: false },
+    })).not.toThrow();
+    expect(() => validateActionIntent(action, {
+      observation,
+      capabilities: { screenshot: false, pointer: false, keyboard: false, accessibility: false },
+    })).toThrow(/screenshot/iu);
+    expect(() => validateActionIntent(action, {
+      capabilities: { screenshot: true, pointer: false, keyboard: false, accessibility: false },
+    })).toThrow(/requires a current observation/iu);
   });
 
   it("rejects a GUI action bound to an older observation", () => {
@@ -2246,7 +2395,9 @@ describe("RunController S2-4 failure boundaries", () => {
     await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
     const before = created.controller.getEvents();
     const guard = before.find((event) => event.type === "action.guard.evaluated");
-    expect(guard).toMatchObject({ decision: "require_approval", path: "local", modelRequestCount: 0 });
+    expect(guard).toMatchObject({ decision: "require_approval", path: "local", modelRequestCount: 0, evaluatedSurfaceRef: desktopSurfaceRef });
+    const approval = before.find((event) => event.type === "approval.requested");
+    expect(approval).toMatchObject({ evidence: { surfaceRef: desktopSurfaceRef } });
     expect(before.some((event) => event.type === "action.proposed")).toBe(false);
     const approvedActionId = guard?.type === "action.guard.evaluated" ? guard.actions[0]?.actionId : undefined;
     const requestId = created.controller.getSnapshot().pendingApproval?.requestId;
@@ -2327,6 +2478,39 @@ describe("RunController S2-4 failure boundaries", () => {
     await expect(running).resolves.toBe("succeeded");
     expect(created.controller.getEvents().some((event) => event.type === "approval.requested")).toBe(false);
     expect(created.controller.getEvents().find((event) => event.type === "tool.call.rejected")).toMatchObject({ reason: expect.stringContaining("viewport or coordinate space changed") });
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not request or execute approval when the fresh evidence belongs to another Surface generation", async () => {
+    class SurfaceChangedDuringApprovalCaptureComputer extends FakeComputer {
+      private captures = 0;
+
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal): Promise<import("@computer-harness/protocol").ObservationCapture> {
+        const capture = await super.observe(session, observationId, signal);
+        this.captures += 1;
+        return this.captures === 1
+          ? capture
+          : { ...capture, surfaceRef: { ...desktopSurfaceRef, generation: 2 }, surfaceTransitionReason: "generation_advanced" };
+      }
+    }
+
+    const actionPolicy: ActionPolicy = {
+      async evaluate() {
+        return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "declared_high_impact", reason: "Synthetic approval boundary.", path: "local", policyVersion: "test-v1", modelRequestCount: 0 };
+      },
+    };
+    const computer = new SurfaceChangedDuringApprovalCaptureComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [{ ...clickCall("approval-surface-changed"), declaredEffect: { effects: ["external_commitment"], target: "Submit order", summary: "Submit the order" } }] },
+      { type: "finish", summary: "surface changed" },
+    ]);
+    const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { actionPolicy });
+    await expect(created.controller.start("do not approve actions against a different Surface")).resolves.toBe("succeeded");
+
+    expect(created.controller.getEvents().some((event) => event.type === "approval.requested")).toBe(false);
+    expect(created.controller.getEvents().find((event) => event.type === "tool.call.rejected"))
+      .toMatchObject({ reason: expect.stringContaining("different Surface generations") });
     expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     await rm(created.directory, { recursive: true, force: true });
   });
@@ -2649,6 +2833,91 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("fails closed on a legacy unknown live Surface and never offers a GUI action", async () => {
+    class UnknownSurfaceComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef: legacyUnknownSurfaceRef };
+      }
+    }
+
+    const computer = new UnknownSurfaceComputer();
+    const created = await makeController(
+      new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("legacy-unknown-click")] }]),
+      computer,
+    );
+    try {
+      await expect(created.controller.start("do not execute from legacy surface data")).resolves.toBe("failed");
+      const events = created.controller.getEvents();
+      expect(events.some((event) => event.type === "runtime.error" && event.message.includes("LEGACY_SURFACE_UNRESOLVED"))).toBe(true);
+      expect(events.some((event) => event.type === "observation.created" || event.type === "computer.surface.transitioned")).toBe(false);
+      expect(events.some((event) => event.type === "model.request.started" || event.type === "action.proposed")).toBe(false);
+      expect(computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects legacy unknown resume and approval recovery before state transition", async () => {
+    const created = await makeController(new ScriptedProvider([{ type: "finish", summary: "unused" }]));
+    const internals = created.controller as unknown as {
+      snapshot: ReturnType<typeof initialRunSnapshot>;
+      pendingApproval?: { requestId: string; definition: { category: "computer" }; executionSurfaceRef?: SurfaceRef };
+      events: RuntimeEvent[];
+      applyCommand(command: { kind: string; requestId?: string; approved?: boolean }): Promise<unknown>;
+      assertActionSurfaceBinding(action: ActionIntent, executionObservation: ObservationFrame | undefined): void;
+    };
+    try {
+      const legacyObservation: ObservationFrame = {
+        id: "legacy-observation" as ObservationId,
+        runId,
+        computerSessionId: sessionId,
+        surfaceRef: legacyUnknownSurfaceRef,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport,
+        screenshot: { assetId: "legacy-action-asset" as AssetId, relativePath: "assets/legacy-action.png", mediaType: "image/png", byteLength: 1 },
+      };
+      internals.events.push({
+        eventId: "legacy-observation-event" as EventId,
+        runId,
+        sequence: 0,
+        occurredAt: legacyObservation.capturedAt,
+        type: "observation.created",
+        observation: legacyObservation,
+      });
+      const legacyAction: ActionIntent = {
+        actionId: "legacy-action" as ActionId,
+        basedOn: legacyObservation.id,
+        kind: "click",
+        point: { x: 1, y: 1 },
+      };
+      expect(() => internals.assertActionSurfaceBinding(legacyAction, { ...legacyObservation, surfaceRef: desktopSurfaceRef }))
+        .toThrow("LEGACY_SURFACE_UNRESOLVED");
+
+      internals.snapshot = { ...initialRunSnapshot(runId), status: "paused", activeSurfaceRef: legacyUnknownSurfaceRef };
+      await expect(internals.applyCommand({ kind: "resume" })).rejects.toThrow("LEGACY_SURFACE_UNRESOLVED");
+      expect(internals.snapshot.status).toBe("paused");
+
+      internals.snapshot = {
+        ...initialRunSnapshot(runId),
+        status: "waiting_approval",
+        computerSession: created.computer.session,
+        pendingApproval: { requestId: "legacy-approval", callId: "legacy-call" as ToolCallId, reason: "legacy" },
+      };
+      internals.pendingApproval = {
+        requestId: "legacy-approval",
+        definition: { category: "computer" },
+        // A pre-Surface approval has no persistent binding and cannot recover as executable.
+        executionSurfaceRef: undefined,
+      };
+      await expect(internals.applyCommand({ kind: "approval_resolution", requestId: "legacy-approval", approved: true }))
+        .rejects.toThrow("LEGACY_SURFACE_UNRESOLVED");
+      expect(internals.snapshot.status).toBe("waiting_approval");
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
   it("separates open/observe/close failures from GUI action execution", async () => {
     class OpenFailComputer extends FakeComputer {
       public override async open(_options: ComputerOpenOptions, _signal: AbortSignal): Promise<ComputerSession> {
@@ -2730,6 +2999,31 @@ describe("RunController S2-4 failure boundaries", () => {
     const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
     expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "cancelled")).toBe(true);
     expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("terminates after a partial receipt, records unknown outcome, and never requests a retry", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("call-partial-effect")] },
+      { type: "finish", summary: "must not continue", reportedStatus: "success" },
+    ]);
+    const computer = new FakeComputer();
+    computer.execute = async (_session, action) => ({
+      actionId: action.actionId,
+      status: "partial",
+      driverCode: "TYPE_TEXT_PARTIAL",
+      message: "Some input segments were applied; inspect before continuing.",
+    });
+    const created = await makeController(provider, computer);
+
+    await expect(created.controller.start("partial effect")).resolves.toBe("outcome_unknown");
+    expect(provider.inputs).toHaveLength(1);
+    expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(1);
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "partial")).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.failed" && event.result.error.code === "TYPE_TEXT_PARTIAL")).toBe(true);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "partial_side_effect")).toBe(true);
+    expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -2818,6 +3112,7 @@ describe("RunController Monitor online consumer", () => {
   });
 
   it("does not emit a monitor diagnostic when an approval barrier is entered", async () => {
+    const approvalSignal = committedApprovalSignal();
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return {
@@ -2838,9 +3133,11 @@ describe("RunController Monitor online consumer", () => {
     const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(), {
       actionPolicy,
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered", monitor: "guidance" },
+      onEventCommitted: approvalSignal.onEventCommitted,
     });
     const running = created.controller.start("approval monitor boundary");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
     expect(created.controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "monitor_diagnostic")).toBe(false);
     const requestId = created.controller.getSnapshot().pendingApproval?.requestId;
     await created.controller.resolveApproval(requestId ?? "", true);
@@ -2870,6 +3167,137 @@ describe("RunController Monitor online consumer", () => {
     expect(events.some((event) => event.type === "monitor.transition" && event.transition === "unchanged")).toBe(true);
     expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("no observable change"))))).toBe(true);
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("persists a fresh assessment on a normal control turn and keeps Monitor guidance in the next Context", async () => {
+    let controller: RunController | undefined;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("assessment-first-action")] }),
+      (input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        expect(input.messages.some((message) => message.content.some((block) =>
+          block.type === "text" && block.text.includes("no observable change")))).toBe(true);
+        return {
+          type: "finish",
+          summary: "done",
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "no_effect",
+            evidence: "The current screen matches the previous screen.",
+          },
+        };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    controller = created.controller;
+    await expect(created.controller.start("assess current state")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    const response = events.filter((event) => event.type === "model.response.received").at(-1);
+    expect(response?.type).toBe("model.response.received");
+    if (response?.type === "model.response.received") {
+      expect(response.turn).toMatchObject({ observationAssessment: { actionOutcome: "no_effect", evidence: "The current screen matches the previous screen." } });
+    }
+    expect(provider.inputs).toHaveLength(2);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("turns an assessment conflict into actionable Monitor guidance in the following Context", async () => {
+    let controller: RunController | undefined;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("assessment-conflict-first")] }),
+      (_input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        return {
+          type: "tool_calls",
+          calls: [{ ...clickCall("assessment-conflict-second"), arguments: { x: 60, y: 70 } }],
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "no_effect",
+            evidence: "The screenshot visibly changed after the action.",
+          },
+        };
+      },
+      (input) => {
+        expect(input.messages.some((message) => message.content.some((block) =>
+          block.type === "text" && block.text.includes("result is uncertain")))).toBe(true);
+        return { type: "finish", summary: "checked current state" };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider, new SequencedScreenshotComputer([1, 2, 3, 4]), clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+    });
+    controller = created.controller;
+    await expect(created.controller.start("reconcile assessment conflict")).resolves.toBe("succeeded");
+    expect(created.controller.getEvents().some((event) => event.type === "monitor.proposal"
+      && event.proposal === "guidance" && event.guidanceText?.includes("result is uncertain"))).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("drops missing or stale assessment observations but does not gate progress on diagnostic action id", async () => {
+    const invalidAssessments: Array<(assessment: ObservationAssessment) => ObservationAssessment> = [
+      (assessment) => ({ ...assessment, observationId: "stale-observation" as ObservationId }),
+      (assessment) => Object.fromEntries(Object.entries(assessment).filter(([key]) => key !== "observationId")) as unknown as ObservationAssessment,
+      (assessment) => Object.fromEntries(Object.entries(assessment).filter(([key]) => key !== "actionId")) as unknown as ObservationAssessment,
+    ];
+    for (const [index, invalid] of invalidAssessments.entries()) {
+      let controller: RunController | undefined;
+      const provider = new EventAwareProvider([
+        () => ({ type: "tool_calls", calls: [clickCall(`invalid-assessment-${index}`)] }),
+        (_input, events) => {
+          const binding = currentObservationAssessmentBinding(events);
+          expect(binding).toBeDefined();
+          const valid: ObservationAssessment = {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "expected_change",
+            evidence: "Some visible evidence.",
+          };
+          return { type: "finish", summary: "still finished", observationAssessment: invalid(valid) };
+        },
+      ], () => controller?.getEvents() ?? []);
+      const created = await makeController(provider);
+      controller = created.controller;
+      await expect(created.controller.start("drop invalid optional assessment")).resolves.toBe("succeeded");
+      const response = created.controller.getEvents().filter((event) => event.type === "model.response.received").at(-1);
+      expect(response?.type).toBe("model.response.received");
+      if (response?.type === "model.response.received") expect(response.turn).not.toHaveProperty("observationAssessment");
+      await rm(created.directory, { recursive: true, force: true });
+    }
+
+    let controller: RunController | undefined;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("diagnostic-action-id")] }),
+      (_input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        return {
+          type: "finish",
+          summary: "still finished",
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: "diagnostic-action-id-is-stale" as ActionId,
+            actionOutcome: "uncertain",
+            evidence: "Action attribution is uncertain, but the current screenshot is available.",
+            progress: { kind: "milestone", summary: "The result is visible now." },
+          },
+        };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider);
+    controller = created.controller;
+    await expect(created.controller.start("preserve observation progress diagnostics")).resolves.toBe("succeeded");
+    const response = created.controller.getEvents().filter((event) => event.type === "model.response.received").at(-1);
+    expect(response?.type).toBe("model.response.received");
+    if (response?.type === "model.response.received") {
+      expect(response.turn).toMatchObject({ observationAssessment: { actionId: "diagnostic-action-id-is-stale", progress: { kind: "milestone" } } });
+    }
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -2921,6 +3349,7 @@ describe("RunController Monitor online consumer", () => {
   });
 
   it("defers Monitor help until the action, ToolResult and post-action observation are committed", async () => {
+    const inputRequestSignal = committedUserInputRequestSignal();
     const turns: ModelTurn[] = [];
     for (let index = 0; index < 8; index += 1) {
       turns.push({
@@ -2931,9 +3360,11 @@ describe("RunController Monitor online consumer", () => {
     turns.push({ type: "finish", summary: "done" });
     const created = await makeController(new ScriptedProvider(turns), new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+      onEventCommitted: inputRequestSignal.onEventCommitted,
     });
     const running = created.controller.start("monitor help boundary");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_user");
+    await inputRequestSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_user");
     const beforeInput = created.controller.getEvents();
     const requestIndex = beforeInput.findIndex((event) => event.type === "user.input.requested");
     expect(requestIndex).toBeGreaterThan(-1);
@@ -2950,6 +3381,7 @@ describe("RunController Monitor online consumer", () => {
   });
 
   it("stops a legal Plan/Memory-before-GUI multi-call turn at the Inbox boundary", async () => {
+    const inputRequestSignal = committedUserInputRequestSignal();
     const registry = clickRegistry();
     registry.register({
       name: "remember",
@@ -2971,6 +3403,7 @@ describe("RunController Monitor online consumer", () => {
     ]), undefined, registry, new DefaultRuntimePolicy(), {
       features: { planning: "tasks-v1", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
       onEventCommitted: (event) => {
+        inputRequestSignal.onEventCommitted(event);
         if (!injected && event.type === "tool.call.completed" && event.result.callId === "plan-before-help") {
           injected = true;
           (controller as unknown as { monitorPendingHelp: { kind: "help_requested"; reason: "guidance_budget_exhausted"; fingerprint: string } }).monitorPendingHelp = {
@@ -2984,7 +3417,8 @@ describe("RunController Monitor online consumer", () => {
     controller = created.controller;
     const activeController = created.controller;
     const running = activeController.start("stop the remaining GUI call at review");
-    await waitUntil(() => activeController.getSnapshot().status === "waiting_user");
+    await inputRequestSignal.requested;
+    expect(activeController.getSnapshot().status).toBe("waiting_user");
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     expect(activeController.getEvents().some((event) => event.type === "action.proposed" && event.callId === "gui-after-help")).toBe(false);
     expect(activeController.getEvents().some((event) => event.type === "user.input.requested")).toBe(true);
@@ -3011,5 +3445,413 @@ describe("RunController Monitor online consumer", () => {
     expect(created.controller.getSnapshot().outcome).toBe("succeeded");
     expect(created.controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "monitor_diagnostic")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
+  });
+});
+
+describe("RunController model-directed window switching", () => {
+  const listWindowsCall = (id: string): ToolCall => ({ id: id as ToolCallId, name: "list_windows", arguments: {} });
+  const switchWindowCall = (id: string, windowRef = "opaque-target"): ToolCall => ({
+    id: id as ToolCallId,
+    name: "switch_window",
+    arguments: { windowRef },
+  });
+
+  it("keeps listed refs across an ordinary observation and commits an isolated target transition", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("inventory-call")] },
+      { type: "tool_calls", calls: [clickCall("ordinary-action-between-list-and-switch")] },
+      { type: "tool_calls", calls: [switchWindowCall("switch-call")] },
+      { type: "finish", summary: "switched and observed" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("switch to the listed Browser window")).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(1);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual([
+        "execute:click",
+        "execute:switch_window:opaque-target",
+      ]);
+      expect(controller.getSnapshot()).toMatchObject({ computerSession: { id: computer.targetSession.id }, stepCount: 2 });
+
+      const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      const inventoryResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("inventory-call" as ToolCallId),
+      );
+      expect(inventoryResult?.result.output).toEqual([
+        { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true },
+        { windowRef: "opaque-target", appName: "Browser", title: "Search results", isCurrent: false },
+      ]);
+      expect(JSON.stringify(inventoryResult?.result.output)).not.toMatch(/pid|hwnd|adapterHandle/iu);
+
+      const observations = events.filter((event): event is Extract<RuntimeEvent, { type: "observation.created" }> => event.type === "observation.created");
+      expect(observations).toHaveLength(3);
+      expect(observations.map((event) => event.observation.computerSessionId)).toEqual([
+        computer.session.id,
+        computer.session.id,
+        computer.targetSession.id,
+      ]);
+      expect(computer.targetSession.id).toBe(computer.session.id);
+      expect(observations.map((event) => event.observation.surfaceRef)).toEqual([
+        desktopSurfaceRef,
+        desktopSurfaceRef,
+        nativePeerSurfaceRef,
+      ]);
+      const switchStarted = events.find((event): event is Extract<RuntimeEvent, { type: "action.execution.started" }> =>
+        event.type === "action.execution.started" && event.action.kind === "switch_window",
+      );
+      expect(events.filter((event) => event.type === "computer.surface.transitioned").map((event) => ({
+        from: event.type === "computer.surface.transitioned" ? event.from : undefined,
+        to: event.type === "computer.surface.transitioned" ? event.to : undefined,
+        reason: event.type === "computer.surface.transitioned" ? event.reason : undefined,
+      }))).toEqual([
+        { from: null, to: desktopSurfaceRef, reason: "initial_observation" },
+        { from: desktopSurfaceRef, to: nativePeerSurfaceRef, reason: "peer_switch" },
+      ]);
+      expect(switchStarted?.action).toMatchObject({ kind: "switch_window", windowRef: "opaque-target", basedOn: observations[1]?.observation.id });
+      const switchCompletedIndex = events.findIndex((event) => event.type === "action.execution.completed" && event.receipt.actionId === switchStarted?.action.actionId);
+      const transitionSnapshot = reduceRuntimeEvents(events.slice(0, switchCompletedIndex + 1), runId);
+      expect(transitionSnapshot.computerSession?.id).toBe(computer.targetSession.id);
+      expect(transitionSnapshot.latestObservationId).toBeUndefined();
+
+      expect(contextCompiler.inputs[1]?.windowSwitchState?.currentWindow).toEqual({ appName: "Editor", title: "Draft" });
+      expect(contextCompiler.inputs[1]?.windowSwitchState?.options?.map((option) => option.windowRef)).toEqual(["opaque-current", "opaque-target"]);
+      expect(contextCompiler.inputs[2]?.windowSwitchState?.options?.map((option) => option.windowRef)).toEqual(["opaque-current", "opaque-target"]);
+      expect(contextCompiler.inputs[3]?.computerSession?.id).toBe(computer.targetSession.id);
+      expect(contextCompiler.inputs[3]?.windowSwitchState).toMatchObject({ currentWindow: { appName: "Browser", title: "Search results" } });
+      expect(contextCompiler.inputs[3]?.windowSwitchState?.options).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the shared definitions hidden and denies their calls when the Run opt-in is off", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("off-inventory")] },
+      { type: "finish", summary: "kept the original target" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry);
+    try {
+      expect(controller.getEffectiveToolNames()).not.toContain("list_windows");
+      expect(controller.getEffectiveToolNames()).not.toContain("switch_window");
+      await expect(controller.start("do not switch")).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(0);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && /disabled/u.test(event.reason))).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects switch_window mixed with another tool before dispatch", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("mix-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("mixed-switch"), clickCall("mixed-click")] },
+      { type: "finish", summary: "no mixed actions were sent" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("switch targets without combining actions")).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+      expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected").map((event) => event.reason))
+        .toContain("switch_window must be the only ToolCall in its ModelTurn");
+      expect(controller.getSnapshot().stepCount).toBe(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("checks the ordinary Computer action budget before dispatching switch_window", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("budget-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("budget-switch")] },
+      { type: "finish", summary: "the GUI action budget prevented switching" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(0, 10), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("switch the active window")).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(1);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && /action budget exhausted/u.test(event.reason))).toBe(true);
+      expect(controller.getSnapshot().stepCount).toBe(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("honors ActionPolicy deny and does not dispatch the switch", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("guard-deny-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("guard-deny-switch")] },
+      { type: "finish", summary: "the switch was denied by the host policy" },
+    ]);
+    const actionPolicy: ActionPolicy = {
+      evaluate: async () => ({
+        decision: "deny",
+        categories: [],
+        reasonCode: "test_switch_denied",
+        reason: "test host policy denied the target switch",
+        path: "local",
+        policyVersion: "test-switch-policy",
+        modelRequestCount: 0,
+      }),
+    };
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      actionPolicy,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("switch only when permitted")).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+      expect(controller.getEvents().some((event) => event.type === "action.guard.evaluated" && event.decision === "deny")).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "action.proposed")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("executes an opted-in switch without a per-window approval when ActionPolicy allows it", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("guard-approval-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("guard-approval-switch")] },
+      { type: "finish", summary: "the approved target was observed" },
+    ]);
+    const actionPolicy: ActionPolicy = {
+      evaluate: async (context) => {
+        expect(context.candidate.actions).toHaveLength(1);
+        expect(context.candidate.actions[0]?.kind).toBe("switch_window");
+        return {
+        decision: "allow",
+        categories: [],
+        reasonCode: "run_scoped_switch",
+        reason: "Run opt-in authorizes a listed target switch",
+        path: "local",
+        policyVersion: "test-switch-policy",
+        modelRequestCount: 0,
+        };
+      },
+    };
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      actionPolicy,
+      windowSwitch: "opened-windows-v1",
+    });
+    let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      run = controller.start("switch under the Run-level opt-in");
+      await expect(run).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toEqual(["execute:switch_window:opaque-target"]);
+      expect(controller.getSnapshot().pendingApproval).toBeUndefined();
+      expect(controller.getEvents().some((event) => event.type === "approval.requested")).toBe(false);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await run?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("stops and never replays when Abort arrives during switch execution", async () => {
+    class AbortDuringSwitchComputer extends WindowSwitchComputer {
+      private notifyStarted: (() => void) | undefined;
+      public readonly started = new Promise<void>((resolve) => { this.notifyStarted = resolve; });
+
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        if (action.kind !== "switch_window") return super.execute(session, action, signal);
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}:${action.windowRef}`);
+        this.notifyStarted?.();
+        return await new Promise<import("@computer-harness/protocol").ActionReceipt>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("switch interrupted")), { once: true });
+        });
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new AbortDuringSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("abort-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("abort-switch")] },
+      { type: "finish", summary: "must not be reached" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      run = controller.start("switch only while the Run is active");
+      await computer.started;
+      controller.cancel("test abort during window switch");
+      await expect(run).resolves.toBe("outcome_unknown");
+      expect(provider.inputs).toHaveLength(2);
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      expect(controller.getSnapshot().latestObservationId).toBeUndefined();
+      const replayed = reduceRuntimeEvents(await readRuntimeEvents(join(directory, "trajectory.jsonl")), runId);
+      expect(replayed.latestObservationId).toBeUndefined();
+      expect(replayed.outcome).toBe("outcome_unknown");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await run?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the returned private session for cleanup if the switch receipt cannot be committed", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("writer-failure-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("writer-failure-switch")] },
+      { type: "finish", summary: "must not be reached" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+      eventWriter: (path) => new FailingWriter(
+        new JsonlRunEventWriter(path, runId, { next: (() => { let count = 0; return () => `switch-writer-${count++}` as EventId; })() }),
+        (draft) => draft.type === "action.execution.completed" && "sessionAfter" in draft.receipt && draft.receipt.sessionAfter !== undefined,
+      ),
+    });
+    try {
+      await expect(controller.start("switch to the new window")).resolves.toBe("outcome_unknown");
+      expect(provider.inputs).toHaveLength(2);
+      expect(computer.closedSessionIds).toContain(computer.targetSession.id);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(1);
+      expect(controller.getSnapshot().latestObservationId).toBeUndefined();
+      const replayed = reduceRuntimeEvents(await readRuntimeEvents(join(directory, "trajectory.jsonl")), runId);
+      expect(replayed.latestObservationId).toBeUndefined();
+      expect(replayed.outcome).toBe("outcome_unknown");
+      expect(replayed.unresolvedActionKind).toBe("switch_window");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["refused", "failed"],
+    ["throw", "outcome_unknown"],
+    ["wrong-backend", "outcome_unknown"],
+  ] as const)("clears stale observations and stops after a %s window activation result", async (switchOutcome, expectedOutcome) => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    computer.switchOutcome = switchOutcome;
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall(`failure-inventory-${switchOutcome}`)] },
+      { type: "tool_calls", calls: [switchWindowCall(`failure-switch-${switchOutcome}`)] },
+      { type: "finish", summary: "must not be reached" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("switch only if activation is verifiable")).resolves.toBe(expectedOutcome);
+      expect(controller.getSnapshot().latestObservationId).toBeUndefined();
+      expect(provider.inputs).toHaveLength(2);
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      expect(controller.getEvents().some((event) => event.type === "action.execution.failed" && event.receipt.status !== "completed")).toBe(true);
+      const replayed = reduceRuntimeEvents(await readRuntimeEvents(join(directory, "trajectory.jsonl")), runId);
+      expect(replayed.latestObservationId).toBeUndefined();
+      expect(replayed.outcome).toBe(expectedOutcome);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not keep the old frame after a successful activation whose fresh capture fails", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    computer.failTargetObservation = true;
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("capture-failure-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("capture-failure-switch")] },
+      { type: "finish", summary: "must not be reached" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("observe the target after activation")).resolves.toBe("failed");
+      expect(provider.inputs).toHaveLength(2);
+      expect(controller.getSnapshot()).toMatchObject({ computerSession: { id: computer.targetSession.id }, outcome: "failed" });
+      expect(controller.getSnapshot().latestObservationId).toBeUndefined();
+      const replayed = reduceRuntimeEvents(await readRuntimeEvents(join(directory, "trajectory.jsonl")), runId);
+      expect(replayed.computerSession?.id).toBe(computer.targetSession.id);
+      expect(replayed.latestObservationId).toBeUndefined();
+      expect((await readRuntimeEvents(join(directory, "trajectory.jsonl"))).filter((event) => event.type === "observation.created")).toHaveLength(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("expires listed refs when the legacy popup picker refreshes inventory and the Host chooses C", async () => {
+    class PopupWindowSwitchComputer extends WindowSwitchComputer {
+      public override async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [{ pid: 303, windowId: 909, appName: "Popup", title: "Incidental dialog" }];
+      }
+
+      public override async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        this.targetWindowRef = "opaque-target-after-picker";
+        return [{ pid: 303, windowId: 909, appName: "Popup", title: "Incidental dialog" }];
+      }
+
+      public override async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        return session;
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new PopupWindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("popup-inventory-before")] },
+      { type: "tool_calls", calls: [clickCall("popup-trigger")] },
+      { type: "tool_calls", calls: [listWindowsCall("popup-inventory-after")] },
+      { type: "tool_calls", calls: [switchWindowCall("popup-switch-after", "opaque-target-after-picker")] },
+      { type: "finish", summary: "switched after refreshing the window list" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+    });
+    let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      run = controller.start("inspect the open windows, dismiss the incidental dialog, and continue in the Browser");
+      await waitUntil(() => controller.getSnapshot().status === "waiting_window");
+      await controller.listWindowHandoffCandidates(new AbortController().signal);
+      await controller.ignoreNewWindowAndContinueOnCurrentTarget();
+      await expect(run).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(2);
+      expect(contextCompiler.inputs[2]?.windowSwitchState?.options).toBeUndefined();
+      expect(contextCompiler.inputs[3]?.windowSwitchState?.options?.map((option) => option.windowRef)).toEqual([
+        "opaque-current",
+        "opaque-target-after-picker",
+      ]);
+      expect(computer.calls).toContain("execute:switch_window:opaque-target-after-picker");
+      expect(computer.calls).not.toContain("execute:switch_window:opaque-target");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await run?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

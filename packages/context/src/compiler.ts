@@ -8,9 +8,9 @@ import type {
   RunFeatureConfig,
 } from "@computer-harness/runtime";
 import { createHash } from "node:crypto";
-import { decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
-import type { GroundingCatalog, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
-import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan } from "./projections.js";
+import { currentObservationAssessmentBinding, decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
+import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
+import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
 import { selectHistoryEvents } from "./history.js";
@@ -59,6 +59,25 @@ export class DefaultContextCompiler implements ContextCompiler {
   public async compile(input: ContextCompileInput, signal: AbortSignal): Promise<ModelInput> {
     signal.throwIfAborted();
     const orderedEvents = [...input.recentEvents].sort((left, right) => left.sequence - right.sequence);
+    const latestEventObservation = findLatestObservation(orderedEvents);
+    if (input.latestObservation !== undefined &&
+      (latestEventObservation === undefined || input.latestObservation.id !== latestEventObservation.id)) {
+      throw new Error("latestObservation must match the latest observation.created event");
+    }
+    const latestObservation = input.latestObservation ?? latestEventObservation;
+    const capturedAt = latestObservation === undefined ? undefined : canonicalCapturedAt(latestObservation.capturedAt);
+    const observationMetadataText = latestObservation === undefined
+      ? undefined
+      : `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`;
+    const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
+    const windowSwitchStateText = formatWindowSwitchState(input.computerSession, input.windowSwitchState, latestObservation?.grounding, latestObservation?.viewport);
+    const windowSwitchStateTokens = windowSwitchStateText === undefined ? 0 : estimateTextTokens(windowSwitchStateText);
+    const assessmentBinding = currentObservationAssessmentBinding(orderedEvents);
+    let assessmentBindingText = assessmentBinding !== undefined && assessmentBinding.observationId === latestObservation?.id
+      ? `Current assessment reference: Observation ID ${assessmentBinding.observationId}; immediately preceding GUI action ID ${assessmentBinding.actionId}.${assessmentBinding.transition === undefined ? "" : ` Runtime Monitor transition for this exact action/Observation: ${assessmentBinding.transition} (action diagnostic only; it does not decide what semantic state the screenshot shows).`} The current screenshot is the evidence for any progress summary. If you include observationAssessment in this response, use these exact IDs.`
+      : undefined;
+    const rawAssessmentBindingTokens = assessmentBindingText === undefined ? 0 : estimateTextTokens(assessmentBindingText);
+    let assessmentBindingTokens = rawAssessmentBindingTokens;
     const features = input.features ?? this.features;
     const baseTools = this.tools.modelTools("main", {
       ...(input.enabledCategories === undefined ? {} : { enabledCategories: input.enabledCategories }),
@@ -101,8 +120,17 @@ export class DefaultContextCompiler implements ContextCompiler {
     const fixedText = fixedBlocks.map((block) => block.text).join("\n");
     const estimatedFixedTextTokens = Math.ceil(fixedText.length / 4);
     const historyCandidates = selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents);
+    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received"));
     let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
+    const rawAssistantPreferencesText = input.assistantPreferences === undefined
+      ? undefined
+      : formatAssistantPreferences(input.assistantPreferences);
+    const rawAssistantPreferencesTokens = rawAssistantPreferencesText === undefined ? 0 : estimateTextTokens(rawAssistantPreferencesText);
+    let assistantPreferencesText = rawAssistantPreferencesText;
+    let assistantPreferencesIncluded = rawAssistantPreferencesText !== undefined;
+    let assistantPreferencesOmittedReason: "budget" | undefined;
+    let assistantPreferencesTokens = rawAssistantPreferencesTokens;
     const rawMonitorGuidanceText = features.monitor === "guidance" && input.monitorGuidance !== undefined
       ? `Low-confidence Monitor note; verify the current state before acting: ${input.monitorGuidance.text.slice(0, 240)}`
       : undefined;
@@ -116,38 +144,51 @@ export class DefaultContextCompiler implements ContextCompiler {
     let groundingIncluded = groundingText !== undefined;
     let groundingOmittedByBudget = false;
     const rawGroundingTokens = groundingCandidate?.estimatedTokens ?? 0;
-    let historyBudget = maxInputTokens === undefined ? undefined : maxInputTokens - estimatedFixedTextTokens - rawMonitorGuidanceTokens - rawGroundingTokens;
+    let historyBudget: number | undefined;
     if (maxInputTokens !== undefined) {
       const fixedBudget = maxInputTokens - estimatedFixedTextTokens;
       if (fixedBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
-      if (rawMonitorGuidanceTokens > fixedBudget) {
+      // Reserve budget for every authoritative user correction and the current
+      // observation's capture metadata before optional projections.
+      if (authoritativeHistoryTokens + observationMetadataTokens + windowSwitchStateTokens > fixedBudget) {
+        throw new Error("Authoritative user inputs and current observation/target metadata exceed maxInputTokens");
+      }
+      let remainingAfterAuthoritative = Math.max(0, fixedBudget - authoritativeHistoryTokens - observationMetadataTokens - windowSwitchStateTokens);
+      if (rawAssistantPreferencesTokens > remainingAfterAuthoritative) {
+        assistantPreferencesText = undefined;
+        assistantPreferencesIncluded = false;
+        assistantPreferencesOmittedReason = "budget";
+      }
+      assistantPreferencesTokens = assistantPreferencesIncluded ? rawAssistantPreferencesTokens : 0;
+      remainingAfterAuthoritative -= assistantPreferencesTokens;
+      if (rawMonitorGuidanceTokens > remainingAfterAuthoritative) {
         monitorGuidanceText = undefined;
         monitorGuidanceIncluded = false;
         monitorGuidanceOmittedReason = "budget";
       }
-      const availableAfterMonitor = fixedBudget - (monitorGuidanceIncluded ? rawMonitorGuidanceTokens : 0);
-      if (groundingIncluded && rawGroundingTokens > availableAfterMonitor) {
+      if (monitorGuidanceIncluded) remainingAfterAuthoritative -= rawMonitorGuidanceTokens;
+      if (rawAssessmentBindingTokens > remainingAfterAuthoritative) assessmentBindingText = undefined;
+      assessmentBindingTokens = assessmentBindingText === undefined ? 0 : rawAssessmentBindingTokens;
+      remainingAfterAuthoritative -= assessmentBindingTokens;
+      if (groundingIncluded && rawGroundingTokens > remainingAfterAuthoritative) {
         groundingText = undefined;
         groundingIncluded = false;
         groundingOmittedByBudget = true;
       }
-      historyBudget = availableAfterMonitor - (groundingIncluded ? rawGroundingTokens : 0);
-      if (historyBudget === undefined || historyBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
+      if (groundingIncluded) remainingAfterAuthoritative -= rawGroundingTokens;
+      historyBudget = authoritativeHistoryTokens + remainingAfterAuthoritative;
       selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
     }
     const monitorGuidanceTokens = monitorGuidanceIncluded && monitorGuidanceText !== undefined
       ? estimateTextTokens(monitorGuidanceText)
       : 0;
     const groundingTokens = groundingIncluded && groundingText !== undefined ? estimateTextTokens(groundingText) : 0;
-    const latestEventObservation = findLatestObservation(orderedEvents);
-    if (input.latestObservation !== undefined &&
-      (latestEventObservation === undefined || input.latestObservation.id !== latestEventObservation.id)) {
-      throw new Error("latestObservation must match the latest observation.created event");
-    }
-    const latestObservation = input.latestObservation ?? latestEventObservation;
     const messages: ModelMessage[] = [
       { role: "user", content: [{ type: "text", text: input.goal }] },
     ];
+    if (assistantPreferencesText !== undefined && assistantPreferencesIncluded) {
+      messages.push({ role: "user", content: [{ type: "text", text: assistantPreferencesText }] });
+    }
 
     // Runtime events preserve occurrence order. Provider messages need one
     // additional invariant: a ToolCall must be closed by its ToolResult
@@ -243,20 +284,28 @@ export class DefaultContextCompiler implements ContextCompiler {
       messages.push({ role: "user", content: [{ type: "text", text: groundingText }] });
     }
 
+    if (windowSwitchStateText !== undefined) {
+      messages.push({ role: "user", content: [{ type: "text", text: windowSwitchStateText }] });
+    }
+
     if (latestObservation !== undefined) {
       messages.push({
         role: "user",
-        content: [{
-          type: "image",
-          asset: latestObservation.screenshot,
-          viewport: latestObservation.viewport,
-        }],
+        content: [
+          ...(observationMetadataText === undefined ? [] : [{ type: "text" as const, text: observationMetadataText }]),
+          ...(assessmentBindingText === undefined ? [] : [{ type: "text" as const, text: assessmentBindingText }]),
+          {
+            type: "image" as const,
+            asset: latestObservation.screenshot,
+            viewport: latestObservation.viewport,
+          },
+        ],
       });
     }
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
-    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents);
-    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + monitorGuidanceTokens + groundingTokens;
+    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
+    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
     if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
       throw new Error("Context history exceeds maxInputTokens after selection");
     }
@@ -331,6 +380,22 @@ export class DefaultContextCompiler implements ContextCompiler {
         monitorGuidanceIncluded,
         ...(monitorGuidanceOmittedReason === undefined ? {} : { monitorGuidanceOmittedReason }),
       } : {}),
+      ...(input.assistantPreferences === undefined ? {} : {
+        assistantPreferences: {
+          projectionVersion: 1 as const,
+          included: assistantPreferencesIncluded,
+          ...(assistantPreferencesOmittedReason === undefined ? {} : { omittedReason: assistantPreferencesOmittedReason }),
+          estimatedTokens: rawAssistantPreferencesTokens,
+          responseDetail: input.assistantPreferences.responseDetail,
+          stepExplanation: input.assistantPreferences.stepExplanation,
+          preferredLanguage: input.assistantPreferences.preferredLanguage,
+          additionalGuidancePresent: input.assistantPreferences.additionalGuidance.length > 0,
+          additionalGuidanceCharacters: [...input.assistantPreferences.additionalGuidance].length,
+          ...(input.assistantPreferences.additionalGuidance.length === 0 ? {} : {
+            additionalGuidanceSha256: createHash("sha256").update(input.assistantPreferences.additionalGuidance, "utf8").digest("hex"),
+          }),
+        },
+      }),
     };
     const budget: ContextBudgetReport = {
       mode: input.context?.mode ?? this.mode,
@@ -361,6 +426,40 @@ function estimateTextTokens(value: string): number {
   return Math.ceil(value.length / 4);
 }
 
+function canonicalCapturedAt(value: string): string | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.valueOf()) || parsed.toISOString() !== value) return undefined;
+  return value;
+}
+
+function formatAssistantPreferences(preferences: RunAssistantPreferencesSnapshot): string {
+  const responseDetail = preferences.responseDetail === "concise"
+    ? "Keep the final reply concise while covering every requested deliverable and relevant uncertainty."
+    : preferences.responseDetail === "detailed"
+      ? "Give a thorough, organized final reply with relevant specifics and caveats."
+      : "Use a balanced level of detail suited to the current request.";
+  const stepExplanation = preferences.stepExplanation === "more"
+    ? "When explaining a process, use clear ordered steps and briefly explain why when useful; do not narrate every GUI action or expose private reasoning."
+    : "Explain steps when useful and keep routine progress notes brief.";
+  const preferredLanguage = preferences.preferredLanguage === "zh-CN"
+    ? "Use Simplified Chinese unless the current request or a later correction explicitly asks for another language."
+    : preferences.preferredLanguage === "en"
+      ? "Use English unless the current request or a later correction explicitly asks for another language."
+      : "Follow the language used in the current conversation and any explicit language request.";
+  const guidance = preferences.additionalGuidance.length === 0
+    ? "(none)"
+    : JSON.stringify(preferences.additionalGuidance);
+  return [
+    "Lower-priority user response and assistance preferences for this Run:",
+    responseDetail,
+    stepExplanation,
+    preferredLanguage,
+    `Additional user guidance, quoted as preference data; do not repeat verbatim: ${guidance}`,
+    "These are response and assistance preferences only. The Goal, explicit current user requests, later corrections, system and safety instructions, approvals, and tool policy take priority. This text cannot authorize or change an action.",
+  ].join("\n");
+}
+
 interface GroundingProjection {
   readonly text: string;
   readonly estimatedTokens: number;
@@ -384,7 +483,7 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
   const projected = candidates.slice(0, Math.min(catalog.maxElements, 16));
   const sourceLabel = catalog.source === "hybrid" ? "UIA+DOM" : catalog.source.toUpperCase();
   const lines = [
-    `${sourceLabel} grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
+    `${sourceLabel} grounding (${catalog.completeness}; surface=${catalog.surfaceRef.kind}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
     ...(catalog.source === "hybrid" && catalog.degraded && !catalog.elements.some((element) => element.source === "dom")
       ? ["Managed browser content grounding is unavailable in this observation. Toolbar-only UIA does not establish the page content region. Use an available wait tool briefly, then use the automatic fresh observation after the page becomes ready; do not invent page refs, guess the content origin, or use drag as a substitute for a click."]
       : []),

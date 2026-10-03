@@ -24,6 +24,7 @@ export interface RunSummary {
 export interface WindowTargetLabel {
   appName?: string;
   title?: string;
+  provenance?: "starting_target" | "selected_target" | "unknown_after_switch";
 }
 
 export interface WindowTarget {
@@ -38,9 +39,25 @@ export interface WindowTargetList {
 }
 
 export type RunTarget =
-  | { mode: "auto" }
-  | { mode: "window"; targetToken: string }
-  | { mode: "browser"; sessionMode?: "temporary" | "saved"; url?: string };
+  | { mode: "auto"; switchWindows?: boolean }
+  | { mode: "desktop"; switchWindows?: boolean }
+  | { mode: "window"; targetToken: string; switchWindows?: boolean }
+  | { mode: "browser"; url?: string; switchWindows?: boolean };
+
+export type ManagedBrowserProfileStatus = "unprepared" | "preparing" | "ready" | "in_use" | "relogin_required" | "cleanup_failed";
+export type ManagedBrowserDefaultSession = "saved" | "temporary";
+
+export interface ManagedBrowserProfileSettings {
+  status: ManagedBrowserProfileStatus;
+  defaultSession: ManagedBrowserDefaultSession;
+  commands: { prepare: string; complete: string; relogin: string };
+  operationId?: string;
+}
+
+export interface BrowserSiteChoice {
+  label: string;
+  url: string;
+}
 
 export interface RunCapabilities {
   pause?: boolean;
@@ -67,6 +84,12 @@ export interface PendingRequestBase {
 
 export interface ApprovalActionPreview {
   actions: ApprovalActionPreviewItem[];
+  selectedWindowLabel?: {
+    status: "matched" | "unavailable";
+    appName?: string;
+    title?: string;
+    source: "latest_list_windows_inventory" | "unavailable";
+  };
   modelDeclaredEffect?: {
     target: string;
     summary: string;
@@ -85,6 +108,12 @@ export interface ApprovalEvidence {
     coordinateSpace: "physical" | "logical" | "reference";
   };
   decisionObservationId: string;
+  surfaceRef: {
+    surfaceId: string;
+    generation: number;
+    kind: "desktop" | "native_window" | "browser_tab" | "dom" | "overlay" | "unknown";
+    parentSurfaceId?: string;
+  };
 }
 
 export interface ApprovalActionPreviewItem {
@@ -114,6 +143,21 @@ export interface RemoteEvent {
   sequence: number;
   type: string;
   data?: Record<string, unknown>;
+}
+
+export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
+export type RunNoticeDelivery = "polite" | "interrupt";
+
+/** Minimal public notice projection carried inside an ordered `run.event`. */
+export interface RunNotice {
+  noticeId: string;
+  kind: RunNoticeKind;
+  text: string;
+  delivery: RunNoticeDelivery;
+  eventSequence: number;
+  /** Remote SSE cursor used locally to defer interaction notices until their snapshot is current. */
+  feedSequence?: number;
+  pendingRequestId?: string;
 }
 
 export type CommandReceiptStatus = "accepted" | "applied" | "rejected" | "outcome_unknown";

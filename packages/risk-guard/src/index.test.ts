@@ -1,14 +1,16 @@
-import type { ActionId, AssetId, ComputerSessionId, ObservationId, RunId, ToolCallId } from "@computer-harness/protocol";
+import type { ActionId, AssetId, ComputerSessionId, ObservationId, RunId, SurfaceId, ToolCallId } from "@computer-harness/protocol";
 import { describe, expect, it } from "vitest";
 import type { ActionPolicyContext, ProviderAdapter } from "@computer-harness/runtime";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
 import { LayeredRiskGuard, ProviderRiskAssessor, ScriptedRiskAssessor } from "./index.js";
 
 const runId = "risk-run" as RunId;
+const surfaceRef = { surfaceId: "risk-guard-index-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 const observation = {
   id: "observation-1" as ObservationId,
   runId,
   computerSessionId: "computer-1" as ComputerSessionId,
+  surfaceRef,
   capturedAt: "2026-09-16T00:00:00.000Z",
   viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
   screenshot: { assetId: "asset-1" as AssetId, relativePath: "screenshots/one.png", mediaType: "image/png", byteLength: 1 },
@@ -16,12 +18,12 @@ const observation = {
 const session = { id: observation.computerSessionId, backend: "fake", viewport: observation.viewport, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false }, openedAt: observation.capturedAt };
 
 function context(effect: "navigate" | "financial" | "local_edit" | "unknown", target = "Details", summary = "Open details", kind: "click" | "type" = "click", groundingRef?: string): ActionPolicyContext {
-  const call = { id: "call-1" as ToolCallId, name: groundingRef === undefined ? kind : "click_element", arguments: groundingRef === undefined ? kind === "click" ? { x: 10, y: 20 } : { text: "hello" } : { elementRef: groundingRef }, declaredEffect: { effects: [effect], target, summary } };
+  const call = { id: "call-1" as ToolCallId, name: groundingRef === undefined ? kind : kind === "click" ? "click_element" : "type", arguments: groundingRef === undefined ? kind === "click" ? { x: 10, y: 20 } : { text: "hello" } : kind === "click" ? { elementRef: groundingRef } : { elementRef: groundingRef, text: "hello" }, declaredEffect: { effects: [effect], target, summary } };
   const action = kind === "click"
     ? { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "click" as const, point: { x: 10, y: 20 }, ...(groundingRef === undefined ? {} : { groundingRef }) }
-    : { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "type" as const, text: "hello" };
+    : { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "type" as const, text: "hello", ...(groundingRef === undefined ? {} : { groundingRef }) };
   const snapshot = initialRunSnapshot(runId);
-  return { runId, goal: "Inspect a product and buy it only after confirmation", recentUserInputs: [], candidate: { calls: [call], actions: [action], decisionObservation: observation, session }, snapshot };
+  return { runId, goal: "Inspect a product and buy it only after confirmation", recentUserInputs: [], evaluatedSurfaceRef: observation.surfaceRef, candidate: { calls: [call], actions: [action], decisionObservation: observation, session }, snapshot };
 }
 
 function protectedContext(
@@ -73,7 +75,7 @@ function keypressContext(effect: "unknown" | "navigate" = "unknown"): ActionPoli
 
 function addressBarEnterContext(target = "Chrome 地址栏", summary = "回车提交地址栏 URL，导航到 Apple 中国官网首页"): ActionPolicyContext {
   const snapshot = initialRunSnapshot(runId);
-  return {
+  return withNavigationGrounding({
     runId,
     goal: "打开 https://www.apple.com.cn/",
     recentUserInputs: [],
@@ -89,6 +91,47 @@ function addressBarEnterContext(target = "Chrome 地址栏", summary = "回车�
       session,
     },
     snapshot,
+  }, "address");
+}
+
+function withNavigationGrounding(candidate: ActionPolicyContext, kind: "search" | "address"): ActionPolicyContext {
+  const action = candidate.candidate.actions[0];
+  const click = action?.kind === "click";
+  if (action?.kind === "click") candidate.candidate.actions[0] = { ...action, groundingRef: "navigation-control" };
+  candidate.candidate.decisionObservation = { ...observation, grounding: {
+    version: "grounding-catalog-v2", source: "hybrid", observationId: observation.id,
+    computerSessionId: session.id, surfaceRef, completeness: "complete", degraded: false, maxElements: 256,
+    elements: [{ elementRef: "navigation-control", source: kind === "search" ? "dom" : "uia",
+      browserRegion: kind === "search" ? "content" : "chrome", role: click ? "button" : "textbox",
+      name: kind === "search" ? "Search" : "Address and search bar",
+      bbox: { x: 0, y: 0, width: 40, height: 40, coordinateSpace: "physical" },
+      state: { focused: true, enabled: true, editable: !click } }],
+  } };
+  return candidate;
+}
+
+function switchWindowContext(
+  effect?: "navigate" | "financial" | "external_commitment" | "observe" | "unknown",
+  target = "Listed Browser window",
+  summary = "Switch the active window binding",
+): ActionPolicyContext {
+  const snapshot = initialRunSnapshot(runId);
+  return {
+    runId,
+    goal: "Review two already-open applications",
+    recentUserInputs: [],
+    candidate: {
+      calls: [{
+        id: "switch-call" as ToolCallId,
+        name: "switch_window",
+        arguments: { windowRef: "opaque-window-ref" },
+        ...(effect === undefined ? {} : { declaredEffect: { effects: [effect], target, summary } }),
+      }],
+      actions: [{ actionId: "switch-action" as ActionId, basedOn: observation.id, kind: "switch_window", windowRef: "opaque-window-ref" }],
+      decisionObservation: observation,
+      session,
+    },
+    snapshot,
   };
 }
 
@@ -99,7 +142,7 @@ describe("LayeredRiskGuard", () => {
       ...observation,
       grounding: {
         version: "grounding-catalog-v2", source: "hybrid", observationId: observation.id,
-        computerSessionId: session.id, completeness: "partial", degraded: false, maxElements: 256,
+        computerSessionId: session.id, surfaceRef, completeness: "partial", degraded: false, maxElements: 256,
         elements: [{ elementRef: "search-1", source: "dom", browserRegion: "content", role: "textbox", name: "Search", state: { focused: true, enabled: true, editable: true } }],
       },
     };
@@ -211,6 +254,30 @@ describe("LayeredRiskGuard", () => {
     await expect(guard.evaluate(context("financial", "Confirm payment", "Pay for order"), new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "local", modelRequestCount: 0, categories: ["financial"] });
   });
 
+  it("uses the Run-scoped switch as the approval boundary and ignores its claimed content effects", async () => {
+    const guard = new LayeredRiskGuard();
+    for (const candidate of [
+      switchWindowContext("navigate"),
+      switchWindowContext("financial", "Submit payment; password settings", "Send private information"),
+      switchWindowContext("external_commitment", "Publish this draft", "Submit the form"),
+      switchWindowContext("observe"),
+      switchWindowContext(),
+    ]) {
+      await expect(guard.evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({
+        decision: "allow",
+        path: "local",
+        reasonCode: "run_scoped_window_switch",
+        categories: [],
+        modelRequestCount: 0,
+      });
+    }
+    await expect(guard.evaluate(context("financial", "Confirm payment", "Pay for order"), new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval",
+      reasonCode: "declared_high_impact",
+      categories: ["financial"],
+    });
+  });
+
   it("reviews a low-risk declaration whose target implies an undeclared commitment", async () => {
     const assessor = new ScriptedRiskAssessor({ effects: ["external_commitment"], alignment: "aligned", evidence: "The target submits the form." });
     const guard = new LayeredRiskGuard({ assessor });
@@ -223,7 +290,7 @@ describe("LayeredRiskGuard", () => {
   });
 
   it("allows a navigation-only search submission without spending the semantic review budget", async () => {
-    const search = context("navigate", "提交搜索 button", "Submit the site search for the typed query");
+    const search = withNavigationGrounding(context("navigate", "提交搜索 button", "Submit the site search for the typed query"), "search");
     search.goal = "Open the site and search for MacBook Air";
     await expect(new LayeredRiskGuard({ maxModelRequests: 0 }).evaluate(search, new AbortController().signal)).resolves.toMatchObject({
       decision: "allow",
@@ -235,12 +302,48 @@ describe("LayeredRiskGuard", () => {
     const enter = context("navigate", "搜索框 (MacBook Air)", "Press Enter in the focused search field to submit the search", "click");
     enter.goal = "Search the site for MacBook Air";
     enter.candidate.actions[0] = { actionId: "search-enter-action" as ActionId, basedOn: observation.id, kind: "keypress", keys: ["ENTER"] };
+    withNavigationGrounding(enter, "search");
     await expect(new LayeredRiskGuard({ maxModelRequests: 0 }).evaluate(enter, new AbortController().signal)).resolves.toMatchObject({
       decision: "allow",
       path: "local",
       reasonCode: "declared_low_impact",
       modelRequestCount: 0,
     });
+  });
+
+  it.each(["missing", "stale", "surface", "degraded", "truncated", "message-focus", "modifier", "non-enter"])("does not trust navigation declarations without matching current evidence: %s", async (scenario) => {
+    for (const kind of ["search", "address"] as const) {
+      const candidate = addressBarEnterContext();
+      if (kind === "search") {
+        candidate.goal = "Search for a product";
+        candidate.candidate.calls[0]!.declaredEffect = { effects: ["navigate"], target: "Search", summary: "Submit the search query" };
+        withNavigationGrounding(candidate, "search");
+      }
+      const current = candidate.candidate.decisionObservation;
+      const catalog = current.grounding!;
+      if (scenario === "missing") { const { grounding: _grounding, ...without } = current; candidate.candidate.decisionObservation = without; }
+      if (scenario === "stale") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, observationId: "old" as ObservationId } };
+      if (scenario === "surface") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, surfaceRef: { ...surfaceRef, generation: 2 } } };
+      if (scenario === "degraded") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, degraded: true } };
+      if (scenario === "truncated") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, selection: { strategy: "bounded-fusion-v1", candidateElementCount: 2, selectedElementRefs: ["navigation-control"], truncated: true, reasons: [] } } };
+      if (scenario === "message-focus") candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, elements: [{ ...catalog.elements[0]!, name: "Message", source: "dom", browserRegion: "content" }] } };
+      if (scenario === "modifier" || scenario === "non-enter") candidate.candidate.actions[0] = { actionId: "shortcut" as ActionId, basedOn: observation.id, kind: "keypress", keys: scenario === "modifier" ? ["CTRL", "ENTER"] : ["CTRL", "W"] };
+      await expect(new LayeredRiskGuard().evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", reasonCode: "semantic_review_unavailable" });
+    }
+  });
+
+  it.each(["search", "address"] as const)("reviews partial %s evidence even without a selection trace", async (kind) => {
+    const candidate = addressBarEnterContext();
+    if (kind === "search") {
+      candidate.goal = "Search for a product";
+      candidate.candidate.calls[0]!.declaredEffect = { effects: ["navigate"], target: "Search", summary: "Submit the search query" };
+      withNavigationGrounding(candidate, "search");
+    }
+    const current = candidate.candidate.decisionObservation;
+    const catalog = current.grounding!;
+    expect(catalog.selection).toBeUndefined();
+    candidate.candidate.decisionObservation = { ...current, grounding: { ...catalog, completeness: "partial" } };
+    await expect(new LayeredRiskGuard().evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", reasonCode: "semantic_review_unavailable" });
   });
 
   it("does not exempt a search phrase that also names an external commitment", async () => {
@@ -334,6 +437,18 @@ describe("LayeredRiskGuard", () => {
       },
     };
     await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown", "Details", "Open details", "click", "element-ref"), new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval",
+      path: "local",
+      reasonCode: "unknown_grounding_evidence_unavailable",
+      modelRequestCount: 0,
+    });
+    expect(reviewerCalls).toBe(0);
+  });
+
+  it("keeps grounded type target evidence visible to Guard preflight", async () => {
+    let reviewerCalls = 0;
+    const assessor = { id: "low-risk-reviewer", async classify() { reviewerCalls += 1; return { effects: ["local_edit"] as const, alignment: "aligned" as const, evidence: "Synthetic low-risk review" }; } };
+    await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown", "Document", "Replace multiline text", "type", "uia-current-ref"), new AbortController().signal)).resolves.toMatchObject({
       decision: "require_approval",
       path: "local",
       reasonCode: "unknown_grounding_evidence_unavailable",

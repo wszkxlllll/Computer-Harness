@@ -10,6 +10,8 @@
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"],
   "references": [
-    { "path": "../app-runtime" }
+    { "path": "../protocol" },
+    { "path": "../app-runtime" },
+    { "path": "../voice" }
   ]
 }

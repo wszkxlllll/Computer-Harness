@@ -41,6 +41,28 @@ describe("managed browser preparation seam", () => {
     expect(loadCua).not.toHaveBeenCalled();
   });
 
+  it("never registers about:blank as a startup URL", async () => {
+    const bootstrap: CuaBootstrapSession = { driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", async close() {} };
+    const host = { async start() { return {}; }, async close() {} } as ManagedBrowserPreparationHost;
+    const createHost = vi.fn((options: ManagedBrowserPreparationHostOptions) => {
+      expect(options.url).toBe("about:blank");
+      expect(options.registerStartupUrl).toBe(false);
+      return host;
+    });
+    await prepareManagedBrowserProfile({
+      socketPath: "fixture.sock",
+      managedBrowserUrl: "about:blank",
+      profileLabel: "fixture",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    }, {
+      openBootstrap: async () => bootstrap,
+      createHost,
+      resolveOwnedWindow: async () => undefined,
+      waitForContinue: async () => "enter",
+    });
+    expect(createHost).toHaveBeenCalledOnce();
+  });
+
   it("reports host cleanup diagnostics and does not claim retention when cleanup is unconfirmed", async () => {
     const calls = { bootstrapClose: 0, hostClose: 0 };
     const bootstrap: CuaBootstrapSession = { driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", async close() { calls.bootstrapClose += 1; } };
@@ -92,7 +114,11 @@ describe("managed browser preparation seam", () => {
       } as ManagedBrowserPreparationHost),
       resolveOwnedWindow: async () => undefined,
       waitForContinue: async () => "interrupt",
-    })).rejects.toBe(hostCloseError);
+    })).rejects.toMatchObject({
+      name: "ManagedBrowserPreparationError",
+      cleanup: "unknown",
+      cause: hostCloseError,
+    });
     expect(bootstrapClose).toHaveBeenCalledOnce();
   });
 
@@ -111,6 +137,134 @@ describe("managed browser preparation seam", () => {
       } as ManagedBrowserPreparationHost),
       resolveOwnedWindow: async () => undefined,
       waitForContinue: async () => "enter",
-    })).rejects.toBe(bootstrapCloseError);
+    })).rejects.toMatchObject({
+      name: "ManagedBrowserPreparationError",
+      cleanup: "unknown",
+      cause: bootstrapCloseError,
+    });
+  });
+
+  it("allows a noncritical graceful-close diagnostic when cleanup otherwise completes", async () => {
+    const bootstrap: CuaBootstrapSession = { driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", async close() {} };
+    const host = { async start() { return {}; }, async close() {} } as ManagedBrowserPreparationHost;
+    let reportDiagnostic: ((kind: Parameters<NonNullable<ManagedBrowserPreparationHostOptions["onCleanupDiagnostic"]>>[0]) => void) | undefined;
+    const result = await prepareManagedBrowserProfile({
+      socketPath: "fixture.sock",
+      managedBrowserUrl: "about:blank",
+      profileLabel: "fixture",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    }, {
+      openBootstrap: async () => bootstrap,
+      createHost: (options) => {
+        reportDiagnostic = options.onCleanupDiagnostic;
+        return host;
+      },
+      resolveOwnedWindow: async () => undefined,
+      waitForContinue: async () => {
+        reportDiagnostic?.("graceful_close_failed");
+        return "interrupt";
+      },
+    });
+    expect(result).toEqual({
+      outcome: "interrupt",
+      cleanupDiagnostics: ["graceful_close_failed"],
+      profileRetention: "confirmed",
+    });
+  });
+
+  it("marks constructor failure cleanup confirmed when bootstrap close succeeds", async () => {
+    const bootstrapClose = vi.fn(async () => undefined);
+    await expect(prepareManagedBrowserProfile({
+      socketPath: "fixture.sock",
+      managedBrowserUrl: "about:blank",
+      profileLabel: "fixture",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    }, {
+      openBootstrap: async () => ({ driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", close: bootstrapClose }),
+      createHost: () => { throw new Error("constructor failed"); },
+      resolveOwnedWindow: async () => undefined,
+      waitForContinue: async () => "enter",
+    })).rejects.toMatchObject({
+      name: "ManagedBrowserPreparationError",
+      cleanup: "confirmed",
+    });
+    expect(bootstrapClose).toHaveBeenCalledOnce();
+  });
+
+  it("marks startup failure cleanup confirmed after host and bootstrap close", async () => {
+    const bootstrapClose = vi.fn(async () => undefined);
+    const hostClose = vi.fn(async () => undefined);
+    await expect(prepareManagedBrowserProfile({
+      socketPath: "fixture.sock",
+      managedBrowserUrl: "about:blank",
+      profileLabel: "fixture",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    }, {
+      openBootstrap: async () => ({ driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", close: bootstrapClose }),
+      createHost: () => ({
+        async start() { throw new Error("startup failed"); },
+        close: hostClose,
+      } as ManagedBrowserPreparationHost),
+      resolveOwnedWindow: async () => undefined,
+      waitForContinue: async () => "enter",
+    })).rejects.toMatchObject({
+      name: "ManagedBrowserPreparationError",
+      cleanup: "confirmed",
+    });
+    expect(hostClose).toHaveBeenCalledOnce();
+    expect(bootstrapClose).toHaveBeenCalledOnce();
+  });
+
+  it("preserves uncertain cleanup from a partially started bootstrap session", async () => {
+    const bootstrapError = Object.assign(new Error("bootstrap start was ambiguous"), { cleanupCertainty: "unknown" as const });
+    await expect(prepareManagedBrowserProfile({
+      socketPath: "fixture.sock",
+      managedBrowserUrl: "about:blank",
+      profileLabel: "fixture",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    }, {
+      openBootstrap: async () => { throw bootstrapError; },
+      createHost: () => { throw new Error("host must not be created"); },
+      resolveOwnedWindow: async () => undefined,
+      waitForContinue: async () => "enter",
+    })).rejects.toMatchObject({
+      name: "ManagedBrowserPreparationError",
+      cleanup: "unknown",
+    });
+  });
+
+  it("treats a custom bootstrap opener error without explicit cleanup certainty as unknown", async () => {
+    await expect(prepareManagedBrowserProfile({
+      socketPath: "fixture.sock",
+      managedBrowserUrl: "about:blank",
+      profileLabel: "fixture",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    }, {
+      openBootstrap: async () => { throw new Error("custom opener failed"); },
+      createHost: () => { throw new Error("host must not be created"); },
+      resolveOwnedWindow: async () => undefined,
+      waitForContinue: async () => "enter",
+    })).rejects.toMatchObject({
+      name: "ManagedBrowserPreparationError",
+      cleanup: "unknown",
+    });
+  });
+
+  it("accepts an explicit confirmed cleanup result from a custom bootstrap opener", async () => {
+    const bootstrapError = Object.assign(new Error("custom opener failed after confirmed cleanup"), { cleanupCertainty: "confirmed" as const });
+    await expect(prepareManagedBrowserProfile({
+      socketPath: "fixture.sock",
+      managedBrowserUrl: "about:blank",
+      profileLabel: "fixture",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    }, {
+      openBootstrap: async () => { throw bootstrapError; },
+      createHost: () => { throw new Error("host must not be created"); },
+      resolveOwnedWindow: async () => undefined,
+      waitForContinue: async () => "enter",
+    })).rejects.toMatchObject({
+      name: "ManagedBrowserPreparationError",
+      cleanup: "confirmed",
+    });
   });
 });

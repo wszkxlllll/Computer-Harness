@@ -34,6 +34,16 @@ export function EventTimeline({ events, simplified = false }: EventTimelineProps
 
 function eventLabel(event: RemoteEvent): string | undefined {
   if (event.type === "run.progress") return progressLabel(event.data);
+  if (event.type === "run.notice" && typeof event.data?.text === "string") return event.data.text.slice(0, 320);
+  if (event.type === "run.surface_transition") {
+    const reason = event.data?.reason;
+    if (reason === "initial_observation") return "电脑确认了初始操作界面";
+    if (reason === "peer_switch") return "电脑切换了操作窗口";
+    if (reason === "child_push") return "电脑打开了弹窗或子界面";
+    if (reason === "child_pop") return "电脑返回到父界面";
+    if (reason === "generation_advanced") return "电脑检测到界面版本或尺寸变化";
+    return "电脑检测到操作界面变化";
+  }
   const labels: Record<string, string> = {
     "run.started": "电脑开始处理任务",
     "run.status": "电脑更新了任务状态",

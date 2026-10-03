@@ -30,6 +30,7 @@ param(
   [string] $CuaWindowId,
   [ValidateSet('off', 'auto', 'uia-catalog-v1', 'dom-catalog-v1', 'hybrid-catalog-v1')]
   [string] $Grounding,
+  [switch] $WindowSwitch,
   [ValidateSet('native_tools', 'strict_json')]
   [string] $QwenOutputMode,
   [switch] $AllowExistingOutputDir,
@@ -372,6 +373,7 @@ $arguments = @(
 )
 if ($selectedRiskGuard -eq 'off') { $arguments += '--confirm-risk-guard-off' }
 if (-not [string]::IsNullOrWhiteSpace($Grounding)) { $arguments += @('--grounding', $Grounding) }
+if ($WindowSwitch) { $arguments += '--window-switch' }
 if ($selectedWindowSelector -eq 'jev' -and $Command -eq 'tui') {
   if (-not $selectedShareWindowTitles) { throw 'Jev window selection requires explicit -ShareWindowTitles or local ShareWindowTitles = $true.' }
   $arguments += @('--window-selection', 'jev', '--allow-window-title-sharing')

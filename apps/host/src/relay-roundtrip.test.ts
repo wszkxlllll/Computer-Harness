@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { Computer, ComputerSession, ProviderAdapter, Viewport } from "@computer-harness/runtime";
-import type { ComputerSessionId } from "@computer-harness/protocol";
+import type { Computer, ComputerSession, ProviderAdapter } from "@computer-harness/runtime";
+import type { ComputerSessionId, RunAssistantPreferencesSnapshot, SurfaceId, Viewport } from "@computer-harness/protocol";
 import {
   ApplicationRemoteRunApi,
   ApplicationSession,
@@ -15,11 +15,13 @@ import {
 } from "@computer-harness/app-runtime";
 import { InProcessEnvironmentOwner } from "@computer-harness/app-runtime";
 import { HostRelayConnector } from "@computer-harness/relay-connector";
+import type { RelayBridgeRequest } from "@computer-harness/relay-connector/protocol";
 import { createRelayServer } from "../../relay/src/server.js";
 import * as webApi from "../../web/src/api.js";
 import { createHostServer } from "./server.js";
 
 const viewport: Viewport = { width: 16, height: 12, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "relay-roundtrip-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
 
 function sessionConfig(outputDir: string): ApplicationSessionConfig {
@@ -60,6 +62,7 @@ function fixtureComputer(): Computer {
       return {
         capturedAt: new Date().toISOString(),
         viewport,
+        surfaceRef,
         screenshot: { mediaType: "image/png" as const, data: new Uint8Array([0x52, 0x54, observations]) },
       };
     },
@@ -109,6 +112,8 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
     let host: ReturnType<typeof createHostServer> | undefined;
     let connector: HostRelayConnector | undefined;
     let relayCookie: string | undefined;
+    const bridgeRequests: RelayBridgeRequest[] = [];
+    const hostStartPreferences: Array<RunAssistantPreferencesSnapshot | undefined> = [];
     const originalFetch = globalThis.fetch;
 
     try {
@@ -129,6 +134,13 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
         assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
       });
+      const originalStartRun = api.startRun.bind(api);
+      const hostRunNoticeContentOptIns: boolean[] = [];
+      api.startRun = (deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled) => {
+        hostStartPreferences.push(assistantPreferences);
+        if (runNoticeContentEnabled === true) hostRunNoticeContentOptIns.push(true);
+        return originalStartRun(deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled);
+      };
       host = createHostServer({
         api,
         allowedOrigins: [localOrigin, relayOrigin],
@@ -144,12 +156,19 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         port: hostPort,
       });
       await host.listen();
+      const hostRelayHandler = host.relayHandler;
       connector = new HostRelayConnector({
         relayUrl: relayOrigin,
         hostId,
         credential,
         allowInsecureLocalhost: true,
-        handlers: host.relayHandler,
+        handlers: {
+          ...hostRelayHandler,
+          request: async (request: RelayBridgeRequest) => {
+            bridgeRequests.push(request);
+            return hostRelayHandler.request(request);
+          },
+        },
       });
       await connector.start();
 
@@ -200,18 +219,63 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       const windowChoices = await webApi.listWindowTargets();
       expect(windowChoices.candidates).toHaveLength(1);
       expect(JSON.stringify(windowChoices)).not.toMatch(/pid|windowId/iu);
+      const assistantPreferences: RunAssistantPreferencesSnapshot = {
+        version: 1,
+        responseDetail: "detailed",
+        stepExplanation: "more",
+        preferredLanguage: "zh-CN",
+        additionalGuidance: "Group findings by topic.",
+      };
       let accepted: { runId: string; status: string };
       try {
         accepted = await webApi.createRun("Complete a fixture task", "web-start-roundtrip", {
           mode: "window",
           targetToken: windowChoices.candidates[0]!.token,
-        });
+        }, assistantPreferences, true);
       } catch (error) {
         const apiError = error as { status?: number; code?: string };
         throw new Error("Fixture run start failed with HTTP " + String(apiError.status) + " " + String(apiError.code));
       }
       expect(accepted.runId).toBeTruthy();
+      const bridgedStart = bridgeRequests.find((request) => request.method === "POST"
+        && request.path === "/api/runs"
+        && request.body?.commandId === "web-start-roundtrip");
+      expect(bridgedStart?.body).toEqual({
+        commandId: "web-start-roundtrip",
+        goal: "Complete a fixture task",
+        target: { mode: "window", targetToken: windowChoices.candidates[0]!.token },
+        assistantPreferences,
+        runNoticeContentEnabled: true,
+      });
+      expect(hostStartPreferences).toEqual([assistantPreferences]);
+      expect(hostRunNoticeContentOptIns).toEqual([true]);
       await session.waitForActiveRun();
+
+      const bridgedRunCountBeforeInvalidStarts = bridgeRequests.filter((request) => request.method === "POST" && request.path === "/api/runs").length;
+      for (const [index, invalidPreferences] of [
+        { ...assistantPreferences, version: 2 },
+        { ...assistantPreferences, presentation: { textSize: "large" } },
+      ].entries()) {
+        const invalidStart = await originalFetch(relayOrigin + "/api/runs", {
+          method: "POST",
+          headers: {
+            Origin: relayOrigin,
+            Cookie: relayCookie!,
+            "Content-Type": "application/json",
+            "x-csrf-token": phoneSession.csrfToken,
+          },
+          body: JSON.stringify({
+            commandId: `invalid-preferences-${index}`,
+            goal: "This request must stop at Relay",
+            target: { mode: "auto" },
+            assistantPreferences: invalidPreferences,
+          }),
+        });
+        expect(invalidStart.status).toBe(400);
+      }
+      expect(bridgeRequests.filter((request) => request.method === "POST" && request.path === "/api/runs")).toHaveLength(bridgedRunCountBeforeInvalidStarts);
+      expect(hostStartPreferences).toHaveLength(1);
+
       const summaries = await webApi.listRuns();
       expect(summaries).toHaveLength(1);
       const completed = await webApi.getRun(accepted.runId);

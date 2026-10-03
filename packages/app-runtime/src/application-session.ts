@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import type { RunId, RunOutcome } from "@computer-harness/protocol";
+import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot, type RunId, type RunOutcome } from "@computer-harness/protocol";
 import type { RunReport } from "./reporting.js";
 import { createRun } from "./run-factory.js";
 import {
@@ -12,7 +12,7 @@ import {
 } from "./environment-owner.js";
 import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
 
-export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId">;
+export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId" | "assistantPreferences">;
 
 export interface WindowTargetInfo {
   readonly pid: number;
@@ -35,7 +35,7 @@ export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
 /** Feature-only overrides selected by an interactive UI for the next Run. */
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
-  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding" | "windowHandoff"
+  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding" | "windowHandoff" | "windowSwitch"
 >> & {
   windowTarget?: ApplicationSessionWindowTarget | null;
   windowDeliveryMode?: "background" | "foreground" | null;
@@ -44,7 +44,14 @@ export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   managedBrowserProfileLabel?: string;
   /** Host-private and never projected to Provider or Run reports. */
   managedBrowserProfileRoot?: string;
+  /** Run-only opt-in projected onto the CUA Computer at the Host boundary. */
+  managedBrowserCompanion?: boolean;
 };
+
+/** Per-Run non-feature input kept separate from computer and Guard overrides. */
+export interface ApplicationSessionRunOptions {
+  readonly assistantPreferences?: RunAssistantPreferencesSnapshot;
+}
 
 export type ApplicationSessionStatus = "idle" | "running" | "blocked" | "closed";
 
@@ -118,6 +125,10 @@ export class ApplicationSession {
     return this.environmentIdentity;
   }
 
+  public get supportsWindowSwitching(): boolean {
+    return this.config.computer.kind === "cua" && this.windowDiscovery !== undefined;
+  }
+
   public inspectEnvironment(): EnvironmentLeaseInfo | undefined {
     return this.owner.inspect(this.environmentIdentity);
   }
@@ -147,9 +158,13 @@ export class ApplicationSession {
     goal: string,
     featureOverrides: ApplicationSessionRunFeatureOverrides = {},
     starter?: Parameters<RunHandle["start"]>[0],
+    runOptions: ApplicationSessionRunOptions = {},
   ): Promise<RunHandle> {
     if (this.closed) throw new Error("application session is closed");
     if (goal.trim().length === 0) throw new Error("application session requires a non-empty goal");
+    const assistantPreferences = runOptions.assistantPreferences === undefined
+      ? undefined
+      : normalizeRunAssistantPreferencesSnapshot(runOptions.assistantPreferences);
     await this.waitUntilIdleAfterTerminal();
     // waitUntilIdleAfterTerminal() is async even when the session was already
     // idle. The caller may close the session during that yield; do not acquire
@@ -163,6 +178,7 @@ export class ApplicationSession {
       managedBrowserProfileMode,
       managedBrowserProfileLabel,
       managedBrowserProfileRoot,
+      managedBrowserCompanion,
       ...featureConfig
     } = featureOverrides;
     const config: ResolvedRunConfig = {
@@ -171,6 +187,9 @@ export class ApplicationSession {
       goal,
       runId,
       outputDir: resolve(this.config.outputDir, runId),
+      ...(assistantPreferences === undefined
+        ? {}
+        : { assistantPreferences }),
     };
     if (config.computer.kind === "cua" && (windowTarget !== undefined || windowDeliveryMode !== undefined)) {
       if (windowTarget === null || windowDeliveryMode === null) {
@@ -196,6 +215,14 @@ export class ApplicationSession {
         ...(managedBrowserProfileMode === undefined ? {} : { managedBrowserProfileMode }),
         ...(managedBrowserProfileLabel === undefined ? {} : { managedBrowserProfileLabel }),
         ...(managedBrowserProfileRoot === undefined ? {} : { managedBrowserProfileRoot }),
+      };
+    }
+    if (managedBrowserCompanion !== undefined) {
+      if (config.computer.kind !== "cua") throw new Error("managed browser companion requires the CUA computer");
+      const { managedBrowserCompanion: _existingCompanion, ...computer } = config.computer;
+      config.computer = {
+        ...computer,
+        ...(managedBrowserCompanion ? { managedBrowserCompanion: true } : {}),
       };
     }
     const lease = this.owner.acquire(this.environmentIdentity, runId);

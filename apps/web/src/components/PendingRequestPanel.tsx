@@ -3,6 +3,9 @@ import { canIgnoreWindow } from "../command-contract";
 import { ApprovalActionParameters, ApprovalActionPreview } from "./ApprovalActionPreview";
 import { ApprovalEvidencePanel } from "./ApprovalEvidencePanel";
 import type { PendingRequestBase, WindowCandidate } from "../types";
+import { VoiceInputControl } from "./VoiceInputControl";
+import { appendVoiceInputText } from "../voice-input-text";
+import type { VoiceAudioCaptureAdapter } from "@computer-harness/voice";
 
 interface PendingRequestPanelProps {
   request: PendingRequestBase;
@@ -12,6 +15,7 @@ interface PendingRequestPanelProps {
   canApprove?: boolean;
   canChooseWindow?: boolean;
   reviewBlocked?: boolean;
+  voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
   onApprove: (approved: boolean) => Promise<void>;
   onRespond: (text: string) => Promise<boolean>;
   onChooseWindow: (candidate: WindowCandidate) => Promise<void>;
@@ -28,6 +32,7 @@ export function PendingRequestPanel({
   canApprove = true,
   canChooseWindow = true,
   reviewBlocked = false,
+  voiceCaptureAdapterFactory,
   onApprove,
   onRespond,
   onChooseWindow,
@@ -124,7 +129,7 @@ export function PendingRequestPanel({
         <p className="field-hint" role="status">电脑暂时没有提供处理这项确认的能力，请刷新任务状态。</p>
       )}
 
-      {request.kind === "user_input" && <UserReplyForm busy={controlsDisabled} onSubmit={onRespond} />}
+      {request.kind === "user_input" && <UserReplyForm key={request.requestId} busy={controlsDisabled} voiceCaptureAdapterFactory={voiceCaptureAdapterFactory} onSubmit={onRespond} />}
 
       {request.kind === "window_handoff" && canChooseWindow && (
         <div className="window-choice-list" role="group" aria-label="可选择的窗口">
@@ -159,21 +164,24 @@ export function PendingRequestPanel({
   );
 }
 
-function UserReplyForm({ busy, onSubmit }: { busy: boolean; onSubmit: (text: string) => Promise<boolean> }) {
+function UserReplyForm({ busy, voiceCaptureAdapterFactory, onSubmit }: { busy: boolean; voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter; onSubmit: (text: string) => Promise<boolean> }) {
   const [text, setText] = useState("");
+  const [voiceActive, setVoiceActive] = useState(false);
+  const formDisabled = busy || voiceActive;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = text.trim();
-    if (!value || busy) return;
+    if (!value || formDisabled) return;
     if (await onSubmit(value)) setText("");
   }
 
   return (
     <form className="reply-form" onSubmit={submit}>
       <label htmlFor="request-reply">你的补充</label>
-      <textarea id="request-reply" rows={3} value={text} onChange={(event) => setText(event.currentTarget.value)} required disabled={busy} />
-      <button className="button button-primary button-large" type="submit" disabled={busy || !text.trim()}>发送补充</button>
+      <textarea id="request-reply" rows={3} value={text} onChange={(event) => setText(event.currentTarget.value)} required disabled={formDisabled} />
+      <VoiceInputControl disabled={busy} onActiveChange={setVoiceActive} onTranscript={(recognized) => setText((current) => appendVoiceInputText(current, recognized))} createCaptureAdapter={voiceCaptureAdapterFactory} />
+      <button className="button button-primary button-large" type="submit" disabled={formDisabled || !text.trim()}>发送补充</button>
     </form>
   );
 }

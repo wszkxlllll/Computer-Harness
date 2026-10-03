@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ActionIntent, EventId, ObservationTransition, RunId, RuntimeEvent, Viewport } from "@computer-harness/protocol";
+import type { ActionIntent, EventId, ObservationActionOutcome, ObservationTransition, RunId, RuntimeEvent, SurfaceRef, Viewport } from "@computer-harness/protocol";
 
 const DEFAULT_LIMITS = {
   maxObservations: 32,
@@ -31,6 +31,8 @@ export type ProgressMonitorReasonCode =
   | "repeated_refusal"
   | "repeated_failure"
   | "plan_memory_churn"
+  | "unexpected_change"
+  | "assessment_uncertain"
   | "unknown_outcome";
 
 export type ProgressMonitorEvidenceKind =
@@ -44,6 +46,7 @@ export type ProgressMonitorEvidenceKind =
   | "memory_update"
   | "visual_feature_unavailable"
   | "action_binding_unavailable"
+  | "semantic_assessment"
   | "partition_changed"
   | "unknown_outcome";
 
@@ -67,6 +70,8 @@ export interface ProgressMonitorOutput {
   reasons: readonly ProgressMonitorReason[];
   evidence: readonly ProgressMonitorEvidence[];
   eventIds: readonly EventId[];
+  /** Reconciled semantic outcome; uncertain whenever deterministic evidence is missing or disagrees. */
+  assessmentOutcome?: ObservationActionOutcome;
 }
 
 interface ObservationBinding {
@@ -74,7 +79,7 @@ interface ObservationBinding {
   eventId: EventId;
 }
 
-type ActionStatus = "proposed" | "completed" | "refused" | "failed" | "cancelled";
+type ActionStatus = "proposed" | "completed" | "refused" | "failed" | "cancelled" | "partial";
 
 interface ActionRecord {
   actionKey: string;
@@ -86,10 +91,12 @@ interface ActionRecord {
 }
 
 interface TransitionRecord {
+  readonly actionId: string;
   readonly partitionKey?: string;
   readonly signature?: string;
   readonly postObservationId: string;
   readonly transition: ObservationTransition;
+  readonly eventIds: readonly EventId[];
 }
 
 /**
@@ -146,6 +153,8 @@ export function reduceProgressMonitor(state: ProgressMonitorState, event: Runtim
       return onActionReceipt(current, event);
     case "monitor.transition":
       return onTransition(current, event);
+    case "model.response.received":
+      return onObservationAssessment(current, event);
     case "planning.task.updated":
       return onProgressUpdate(current, event.eventId, "planning_update");
     case "memory.updated":
@@ -161,7 +170,7 @@ function onObservation(
   state: ProgressMonitorState,
   event: Extract<RuntimeEvent, { type: "observation.created" }>,
 ): ProgressMonitorUpdate {
-  const partitionKey = observationPartition(event.observation.computerSessionId, event.observation.viewport);
+  const partitionKey = observationPartition(event.observation.computerSessionId, event.observation.surfaceRef, event.observation.viewport);
   const previousPartition = state.lastObservationPartition;
   const observations = boundedMap(
     state.observations,
@@ -268,8 +277,8 @@ function onActionReceipt(
       if (refused.length >= state.limits.refusalThreshold) {
         reasons.push({ code: "repeated_refusal", eventIds: refused.map((item) => item.eventId).concat(event.eventId) });
       }
-    } else if (updated.status === "failed" || updated.status === "cancelled") {
-      const failed = trailingStatus(comparable, updated.signature, "failed", "cancelled");
+    } else if (updated.status === "failed" || updated.status === "cancelled" || updated.status === "partial") {
+      const failed = trailingStatus(comparable, updated.signature, "failed", "cancelled", "partial");
       if (failed.length >= state.limits.refusalThreshold) {
         reasons.push({ code: "repeated_failure", eventIds: failed.map((item) => item.eventId).concat(event.eventId) });
       }
@@ -324,11 +333,32 @@ function onTransition(
     };
   }
 
+  const preObservation = event.preObservationId === undefined
+    ? undefined
+    : state.observations.get(opaqueHash(`observation:${String(event.preObservationId)}`));
+  const postObservation = state.observations.get(opaqueHash(`observation:${String(event.postObservationId)}`));
+  if (preObservation === undefined || postObservation === undefined || preObservation.partitionKey !== postObservation.partitionKey ||
+      action.partitionKey !== preObservation.partitionKey) {
+    evidence.push({ kind: "action_binding_unavailable", eventIds: [event.eventId] });
+    return {
+      state: { ...state, lastTransition: undefined },
+      output: makeOutput(
+        state.limits,
+        false,
+        [],
+        [{ kind: "visual_transition_unknown", eventIds: evidenceEventIds }, ...evidence.slice(1)],
+        evidenceEventIds,
+      ),
+    };
+  }
+
   const transition: TransitionRecord = {
+    actionId: String(event.actionId),
     ...(action.partitionKey === undefined ? {} : { partitionKey: action.partitionKey }),
     ...(action.signature === undefined ? {} : { signature: action.signature }),
     postObservationId: String(event.postObservationId),
     transition: event.transition,
+    eventIds: evidenceEventIds,
   };
   const reasons: ProgressMonitorReason[] = event.transition === "unchanged"
     ? [{
@@ -339,6 +369,63 @@ function onTransition(
   return {
     state: { ...state, lastTransition: transition },
     output: makeOutput(state.limits, reasons.length > 0, reasons, evidence, evidenceEventIds),
+  };
+}
+
+function onObservationAssessment(
+  state: ProgressMonitorState,
+  event: Extract<RuntimeEvent, { type: "model.response.received" }>,
+): ProgressMonitorUpdate {
+  const assessment = event.turn.observationAssessment;
+  if (assessment === undefined) {
+    return { state, output: makeOutput(state.limits, false, [], [], [event.eventId]) };
+  }
+  const transition = state.lastTransition;
+  const action = state.actionRecords.get(opaqueHash(`action:${String(assessment.actionId)}`));
+  const matchingTransition = transition?.actionId === String(assessment.actionId)
+    && transition.postObservationId === String(assessment.observationId);
+  const bound = state.lastObservationId === String(assessment.observationId)
+    && matchingTransition
+    && action?.status === "completed";
+  let assessmentOutcome: ObservationActionOutcome = "uncertain";
+  if (bound && transition !== undefined && assessment.evidence.trim().length > 0) {
+    if (assessment.actionOutcome === "uncertain") assessmentOutcome = "uncertain";
+    else if (transition.transition === "changed"
+      && (assessment.actionOutcome === "expected_change" || assessment.actionOutcome === "unexpected_change")) {
+      assessmentOutcome = assessment.actionOutcome;
+    } else if (transition.transition === "unchanged" && assessment.actionOutcome === "no_effect") {
+      assessmentOutcome = "no_effect";
+    }
+  }
+
+  const eventIds = [...(matchingTransition ? transition.eventIds : []), event.eventId];
+  const evidence: ProgressMonitorEvidence[] = [
+    { kind: "semantic_assessment", eventIds: [event.eventId] },
+    ...(!matchingTransition || transition === undefined
+      ? [{ kind: "visual_transition_unknown" as const, eventIds: [event.eventId] }]
+      : [{
+          kind: transition.transition === "changed"
+            ? "visual_transition_changed" as const
+            : transition.transition === "unchanged"
+              ? "visual_transition_unchanged" as const
+              : "visual_transition_unknown" as const,
+          eventIds: transition.eventIds,
+        }]),
+    ...(action === undefined ? [] : [{ kind: "action_receipt" as const, eventIds: [action.eventId, event.eventId] }]),
+  ];
+  const reasons: ProgressMonitorReason[] = assessmentOutcome === "no_effect"
+    ? [{ code: "no_observed_change", eventIds: matchingTransition ? transition.eventIds : [event.eventId] }]
+    : assessmentOutcome === "unexpected_change"
+      ? [{ code: "unexpected_change", eventIds: matchingTransition ? transition.eventIds : [event.eventId] }]
+      : assessmentOutcome === "uncertain"
+        ? [{ code: "assessment_uncertain", eventIds: matchingTransition ? transition.eventIds : [event.eventId] }]
+        : [];
+  return {
+    state,
+    output: {
+      ...makeOutput(state.limits, reasons.length > 0, reasons, evidence, eventIds),
+      assessmentOutcome,
+    },
   };
 }
 
@@ -409,9 +496,11 @@ function normalizedAction(action: ActionIntent): unknown {
     case "drag":
       return { kind: action.kind, fromX: action.from.x, fromY: action.from.y, toX: action.to.x, toY: action.to.y };
     case "type":
-      return { kind: action.kind, text: action.text };
+      return { kind: action.kind, ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }), text: action.text };
     case "keypress":
       return { kind: action.kind, keys: [...action.keys] };
+    case "switch_window":
+      return { kind: action.kind, windowRef: action.windowRef };
     case "wait":
       return { kind: action.kind, durationMs: action.durationMs };
   }
@@ -462,8 +551,8 @@ function completedActionReasons(
   return reasons;
 }
 
-function observationPartition(sessionId: string, viewport: Viewport): string {
-  return `session:${opaqueHash(String(sessionId))}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
+function observationPartition(sessionId: string, surfaceRef: SurfaceRef, viewport: Viewport): string {
+  return `session:${opaqueHash(String(sessionId))}|surface:${opaqueHash(String(surfaceRef.surfaceId))}:${surfaceRef.generation}:${surfaceRef.kind}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
 }
 
 function makeOutput(

@@ -1,0 +1,122 @@
+# 项目材料与待补内容
+
+更新：2026-10-03。用途：集中保存可复用的项目说明、技术与开放边界、证据入口和待补材料；不是正式报告，也不另设开发路线或人员分工。
+
+## 1. 项目说明
+
+Computer Harness 是面向日常生活与桌面应用的可组合 GUI Agent。用户通过终端或手机输入目标，也可以使用语音输入、查看截图和进度、补充要求或处理审批。模型结合视觉与可选的控件信息提出操作，Harness 管理实际执行、状态、人工介入与运行记录。
+
+项目覆盖浏览器、原生桌面应用和可访问的微信/小程序界面，不预设必须通过网页完成。不同入口的可用性仍需真实验证。手机、大字显示、语音和个性化用于降低操作负担；未完成目标用户试用前，只描述这些具体能力，不宣称已经解决全部适老化或无障碍需求。
+
+可长期保留的产品特点：可替换模型与执行后端、围绕 GUI 状态组织执行、允许用户介入、保留可追溯事实、提供多种交互入口。Skill SOP、轨迹经验、自进化及长期记忆可以继续探索，尚未实现的能力放在后续计划中。
+
+## 2. 技术说明与自主开发边界
+
+### 核心链路
+
+```text
+用户目标 / 纠正 / 审批
+        ↓
+TUI 或手机 Web → 应用装配层（手机经 Relay / Host）
+        ↓
+Runtime → Context → Provider → ModelTurn / ToolCalls
+        ↓
+工具与参数校验 → 状态工具，或 GUI 动作准入 / 审批
+        ↓
+Computer Adapter → CUA 执行 → Receipt + 新 Observation
+        ↓
+RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
+```
+
+| 内容 | 已整理的说明 | 源码/已有材料入口 |
+| --- | --- | --- |
+| GUI 原生协议 | ComputerSession 表示执行环境；ObservationFrame 表示观察；ActionIntent/Receipt 区分操作意图与执行结果；ModelTurn/ToolCall连接模型与Runtime | `packages/protocol`；[架构](./ARCHITECTURE-AND-COMPOSITION.md) |
+| 执行与控制 | 同一主循环处理预算、暂停/恢复、纠正、审批、Abort；动作开始和终态记录进入事件链；未知副作用不能自动重试 | `packages/runtime`、`packages/trajectory`；[安全合同](./RUNTIME-AND-SAFETY-CONTRACTS.md) |
+| 组件替换 | 通过Run级工厂装配Provider、Computer、Context、Planning、Memory及策略，避免应用入口另建循环 | `packages/app-runtime`；[SDK示例](./sdk-run-composition.md)、[模块装配](./pi-module-composition-2026-09-23.md) |
+| 工具和上下文 | Provider消费统一工具注册表；Context组织目标、观察、历史、纠正及启用模块状态，区分稳定前缀与动态内容 | `packages/context`、`packages/provider-*`；[模块说明](./MODULES-AND-CAPABILITY-STATUS.md) |
+| Planning / Run Memory | Planning维护阶段进度；Memory保存继续任务所需事实及适用范围，通过工具写入、状态更新、召回和Context消费 | `packages/planning`、`packages/memory`；不是跨Run长期用户画像 |
+| 视觉与结构化定位 | 视觉坐标操作与UIA/DOM元素工具共存；结构候选由适配层产生，受当前观察/窗口约束；DOM依赖受管浏览器 | `packages/computer-cua`；截图完整性、缩放、候选失效和弹层仍需实机检查 |
+| Guard / Monitor | Guard负责动作准入和人工确认；Monitor结合执行/观察信号及可选模型assessment提供后续提示 | `packages/risk-guard`、`packages/runtime`；不等于全风险识别或业务成功证明 |
+| 手机、语音、个性化 | 手机经中继使用同一Runtime；通知从已提交事件投影；语音识别经Host；偏好冻结到新Run并进入Context | `apps/host`、`apps/relay`、`apps/web`、`packages/voice*`；[手机指南](./mobile-control-guide-2026-09-26.md)、[语音记录](./voice-streaming-and-notices-implementation-2026-09-28.md)、[偏好记录](./assistant-preferences-p1-implementation-2026-09-29.md) |
+
+团队自主内容主要是上述协议、Runtime与装配、策略和状态模块、Provider/Computer适配、终端及手机产品入口和测试。CUA提供底层输入/截图能力，模型服务提供理解和决策，第三方库提供通用功能；不将这些底层能力算作团队自行实现。
+
+已有接口和测试可以证明实现存在。模块是否提高成功率、降低步骤或延迟，需要分别用真实结果证明；全开能运行不能代替模块收益结论。事件重建不等于自动重放桌面，窗口绑定不等于操作系统沙箱。
+
+## 3. 开源、第三方资源与过程材料
+
+下表整理关键来源和使用边界。直接运行/开发依赖与 CUA Driver 0.22.2 的当前核验范围和来源见[第三方依赖声明](../THIRD_PARTY_NOTICES.md)；完整传递依赖 JSON、未安装平台包的 notice 与实际发布物仍需逐项补核。
+
+| 资源 | 来源/已知许可 | 项目使用与自主边界 | 还需补什么 |
+| --- | --- | --- | --- |
+| 本项目源码 | [公开仓库](https://github.com/wszkxlllll/Computer-Harness)；根目录提供Apache-2.0 LICENSE和package metadata | 本项目原创代码、文档、任务与测试；不自动覆盖第三方代码、素材或服务 | 核心贡献成员已于2026-10-03确认本项目原创代码采用Apache-2.0；第三方代码、素材与服务仍按各自许可和条款处理 |
+| CUA Driver | [CUA 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)：SDK package metadata与精确tag LICENSE为MIT；六个可选平台binding metadata为`MIT AND MPL-2.0` | 上游桌面驱动SDK及平台原生binding；本项目维护Computer Adapter、Surface Registry和Runtime接线 | 已核Windows x64包附带的`node-runtime-NOTICE.md`；其他平台包的tarball notice需在对应平台发行前分别检查并保留适用文本 |
+| GLM / Qwen | [智谱](https://open.bigmodel.cn/)、[阿里云Model Studio](https://help.aliyun.com/zh/model-studio/)；云API服务条款 | 模型调用与实时ASR；团队实现协议、工具、坐标和语音适配 | 实际模型/参数、服务条款、数据处理边界；不写成开放模型权重 |
+| Jev（可选） | TypeSafe服务，官方入口与条款需按实际账户核对 | 当前可选窗口候选选择 | 是否实际启用、分享哪些标题信息；不宣称已证明全任务降延迟 |
+| 前后端运行库 | React/React DOM、Fastify、ws、Zod、qrcode、string-width等直接metadata声明MIT | 通用框架/通信/校验；界面、协议和业务逻辑由团队实现 | 直接依赖版本、用途与核验来源见[第三方依赖声明](../THIRD_PARTY_NOTICES.md)；完整传递依赖JSON仍待pnpm store恢复后生成 |
+| 构建、测试及传递组件 | TypeScript 5.7.2为Apache-2.0开发依赖，npm包带`ThirdPartyNoticeText.txt`；Vitest/Vite/tsx为MIT；其余依赖按具体包metadata和许可文本核验 | 工程工具；团队维护测试用例和CI | 不把所有传递组件统一写成MIT；发行前生成完整机器可读清单，并按实际许可保留notice |
+| 系统和运行环境 | Node、pnpm、Python、浏览器、系统语音、部署组件及各自许可/条款 | 运行与设备语音；Browser TTS不是云TTS服务 | 环境版本、分发边界与必要声明；不捆绑个人profile/系统语音模型 |
+| 历史评测组件 | OSWorld代码采用Apache-2.0；VM/应用/素材另有边界 | 已有辅助验证资源 | 仅作资源披露和必要历史说明，不安排新增评测 |
+| 业务入口与素材 | 实际网站、应用、小程序和测试文件的来源/条款 | 查询操作、截图演示和测试 | 分别说明展示授权、脱敏和获取方式；不公开Cookie、私人聊天或无权分发素材 |
+| AI辅助工具 | 实际使用平台、模型和适用条款 | 辅助代码、测试、审查、文档等 | 记录团队需求/设计决策、审核修改与验证；AI生成物不默认等于团队独占权利 |
+
+完整资源清单按“名称/类型、版本/来源、许可证或授权、使用方式、义务限制、自主边界、核验状态”填写。可以沿用一个表，不必建立另一套管理系统。LICENSE/NOTICE按实际许可义务处理，不机械给每个组件加同一种文件。
+
+### 已有社区贡献
+
+2026-10-03核对：[CUA Issue #4477](https://github.com/trycua/cua/issues/4477)记录0.22.2 foreground多行输入损坏。[PR #4500](https://github.com/trycua/cua/pull/4500)已合并；最终方案修复 foreground input drain，并保留我方 fixtures、app-owned oracle 和 tests。该合并不自动表示修复已进入本项目锁定的 CUA release。[PR #3450](https://github.com/trycua/cua/pull/3450)当前为 Open / Changes Requested；其上游验证报告仍保留 Windows native lane 42/43 和一项失败。此前[OpenClaw PR #126399](https://github.com/openclaw/openclaw/pull/126399)和[#127177](https://github.com/openclaw/openclaw/pull/127177)已合并，分别涉及Run完成后的computer复用和Windows设备重复审批。这些上游修改不自动代表当前Harness或CUA release中的功能。
+
+这些可作为问题发现、修复与开放协作记录。它们与当前Harness源码分开说明，贡献人与成果范围由团队核对；不能把历史上游修复当成本项目当前功能。后续只更新真实链接和状态，保留原作者和第三方署名。
+
+### 已有证据怎样复用
+
+安装与运行引用[上手指南](./getting-started.md)，架构引用现有主文档；代码与测试引用具体包。版本化测试结果引用[已有验证记录](./voice-preview-deploy-phone-test-2026-09-29.md)，不把过去测试数量写成最新head结果。手机/语音探针、真实任务、模拟后端和用户反馈分别标注，原始记录留本地，材料使用脱敏摘要。
+
+公开成果需要另一位成员从新目录按文档安装并运行。尚未发布npm不妨碍提供源码和SDK示例；需要外部驱动、模型凭据或中继时，把准备条件写清楚，不向使用者提供我们的密钥或登录数据。
+
+## 4. 真实场景范围与验证内容
+
+沿用此前确定的**六类生活场景**，名称与[原方案第4.1节](./history/2026-09-26-handoff-convergence/docs/scenario-evaluation-and-three-person-plan-2026-09-19.md)一致。本轮整理材料不重新选择任务范围、不修改原任务规模或分集。场景覆盖与实际验证状态分别记录，不把候选任务写成已完成。
+
+| 场景 | 可以设计的任务示例 |
+| --- | --- |
+| 政务与公共服务 | 找到办事入口、核对材料清单、按用户条件整理办理步骤、准备表单草稿 |
+| 就医与健康服务 | 查询科室/院区、按时间筛选号源、核对预约草稿、整理就诊准备 |
+| 购物与售后 | 按预算/规格比较商品、核对物流/退换条件、整理售后材料 |
+| 出行与票务 | 比较车次/航班、路线与接驳、住宿或行程条件；沿用已有[出行任务卡](./travel-task-cards-and-feedback.md) |
+| 生活缴费与社区服务 | 核对户号/账单、查询缴费与物业入口、准备报修和服务预约草稿 |
+| 通信、日程与个人资料 | 微信/邮件草稿、附件准备、通知转日程、提醒修改、文档与个人资料整理 |
+
+桌面应用、浏览器和微信/小程序是使用入口，跨窗口/跨应用是流程与难度维度，语音、显示偏好、纠正、审批和恢复是交互检查项；均不另增为第七类。各类沿用简单、中等、复杂任务覆盖。微信/小程序等入口先确认本机可操作性，不能因为写进表就承诺已支持。
+
+当前按既有任务计划补齐代表性任务与证据，不在材料文件里另定一套数量、分工或评测路线。每个任务保留Goal、初态、约束、完成依据和人工评分；涉及发送、提交、付款等副作用明确授权边界。任务日期、账号状态、页面和可用信息在运行前核对。
+
+每次结果记录：
+
+- **实际完成情况**：完整/部分/阻塞/失败/未知，以及最终画面、文件或可观察结果；与Runtime outcome分开。
+- **成本与过程**：总耗时、API等待、模型请求/动作/截图数、tokens、失败与重试、人工纠正/接管；缺失数据不填零。
+- **模块实际作用**：Plan是否影响后续步骤，Memory是否召回并正确消费，Batch是否执行，Monitor是否促成恢复，Guard是否误审批，UIA/DOM是否实际命中。触发次数不等于效果。
+- **体验**：中文录音完整性、播报原因/进展是否准确、语速、显示和读屏、控制键/手机操作是否清楚。
+
+原始轨迹、录屏和账号信息留在现有忽略目录；公开材料脱敏并获展示同意。使用测试文件/内容，说明截图、标题或语音会发给哪些服务及留存方式。历史开发试验和后续留出验证分开，不把精选成功Demo当整体成功率。
+
+## 5. 材料还缺什么、怎样补
+
+| 待补内容 | 具体做法 |
+| --- | --- |
+| 项目许可和完整第三方表 | 根项目采用Apache-2.0；核心贡献成员已于2026-10-03确认本项目原创代码授权。直接运行/开发依赖与CUA 0.22.2见[第三方依赖声明](../THIRD_PARTY_NOTICES.md)；完整传递依赖JSON和未安装平台包的notice待补 |
+| 一个可复现版本 | 对齐源码、部署和文档，记录commit、锁文件、模型/驱动参数与功能开关；队友冷安装复现 |
+| 各生活场景的真实案例 | 选择实际可用入口，补任务初态、结果、人工帮助和失败；已经测过的先整理，不必全部重跑 |
+| 稳定展示素材 | 保留完整成功流程、用户纠正/审批、截图结果及实际播报；剪辑等待时说明真实耗时 |
+| 用户反馈与辅助交互验收 | 邀请同意试用者，记录可理解性和遇到的问题；未做目标人群测试就不扩大结论 |
+| 技术效果数据 | 从现有轨迹提取性能和模块消费；只有需要宣称改进时做单变量对照，不为材料新增复杂系统 |
+| 团队开发过程与AI说明 | 按现有commit/PR整理成员实际工作、AI参与、人工审查、修改和验证；不虚拟贡献 |
+| 最终简介、报告和视频 | 上述证据到位后再成稿，复用本文件及现有架构/测试资料，不先填假结果 |
+
+近期不必因此新增Skill引擎、长期Memory、Subagent或新Provider；一般性可靠性缺陷按原开发路线修复。技术材料重点是清楚解释现有实现与真实效果，开放材料重点是权利明确和他人可复用。
+
+## 6. 输出材料的格式备忘
+
+按已读要求：作品名≤20字、简介≤300字；报告PDF≤10MB、正文建议15页以内，第三方表作为附件；视频MP4、3–5分钟、≤300MB；成果链接评审期可访问，必要时可受限提供并附开放计划。决赛PPT后续按通知提供PDF。评审材料不能显示学校名称、学校标识或指导教师信息；同时保留第三方所要求的版权归属。
+
+规则出处：[官方通知与附件](https://www.aicomp.cn/tracks/tracks-5/4924.html)。这些仅约束最终输出格式，日常开发仍沿用当前项目文档和流程。

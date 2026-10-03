@@ -11,7 +11,7 @@ PR #15 已合并；修复提交为 `4215599`，其 Windows/macOS/Linux CI 全部
 
 已实现：手机配对、任务与结果、截图查看、审批、暂停/纠正/取消；标准与大字简洁、对比度和减少动效设置；可组合的 Context、Planning、Run Memory、Guard 等已有模块。
 
-尚未实现或未验收：完整 STT/TTS、回答偏好进入 Context、长期个人资料、用户可配置 Guard 策略、三平台真实任务等价支持。`VoiceCapabilities` 只有可注入接口；助手偏好目前只存浏览器。Host 当前固定 layered Guard、Grounding off、Monitor shadow，不能用 TUI 的配置说明代替手机实际配置。
+尚未实现或未验收：真实 TTS Provider、完整 Android/iOS/弱网语音矩阵、长期个人资料、用户可配置 Guard 策略、三平台真实任务等价支持。手机录音、Host 流式 ASR 会话和 Qwen Provider 已接入，仍需扩大真机准确率与弱网验证。`@computer-harness/voice` 提供可替换合同；Host/RemoteRunAPI 可生成最小 `run.notice` SSE 投影，手机 Web 使用默认关闭、可中断的 Browser `speechSynthesis`。用户开启播报后，新 Run 才允许消费通过筛查的动态正文；审批使用结构化中文风险提示，不朗读 Guard 英文 reason。助手偏好已经按 Run 快照进入 Context，但长期效果与跨设备同步尚未验收。Host 当前固定 layered Guard、Grounding off、Monitor shadow，不能用 TUI 的配置说明代替手机实际配置。
 
 阶段目标是让用户完成常见生活任务，知道系统在做什么，能够纠正、审批和停止，并留下可信的成功/失败证据。先稳定日常入口与关键链路，再扩大高级研究能力。
 
@@ -48,14 +48,15 @@ R1/R2 不以工具返回 completed 判断业务完成。错误输入、错窗口
 - 手机按一下开始、再按一下结束；录音状态、时长、取消和麦克风权限失败有明确反馈。识别内容完整展示，默认可编辑并确认提交。
 - 同一入口支持新 Goal、运行中纠正和回答提问，提交走现有 Run/inbox 合同，不绕开暂停与审批。首版不把普通语音“好的”自动当作风险批准。
 - STT 厂商通过适配器替换，密钥保留在 Host/服务端；手机上传至哪个服务、音频保留多久明确可见。默认不长期保存原始音频，记录必要耗时/状态；用户主动允许后才存排障样本。
-- 现有 `transcribeOnce` 可承接首版；若引入流式输入，再增加有消费者的 start/partial/final/cancel 事件。必须合并最终完整转写，不能只保留最后一句。
+- 现有 `transcribeOnce` 可由旧调用方继续使用；`@computer-harness/voice` 已定义每次录音 session 的 start/partial/final/finish/cancel 合同与按 segment/revision 合并逻辑。Web/Host Provider 和编辑确认界面仍待接入。必须等待 session 终止后提交完整转写，不能把一个 segment 的 final 当成录音结束。
 - 中文多句、数字/日期/地点、长停顿、背景噪声、60–120 秒录音、断网、拒绝权限和取消均验证；每例保存脱敏期望文本和人工错误标记。先验证一种服务，第二个用合同测试证明可替换，不阻塞首版。
 
-### V2：结果播报、可打断和辅助通知
+### V2：结果播报、可打断和辅助通知（B1 已接入，等待真机验收）
 
-- 优先播报最终结果、需要用户回答/审批及明确故障；每步播报为后续可选项，避免刷屏式朗读。
-- 支持停止、重播、音量/语速及显示同一份文本；新结果到来不会与旧语音重叠。取消任务同时取消其未播放队列；播放失败保留文字和重试入口。
-- TTS 适配器可替换，评估浏览器/系统语音作为低成本候选，不能假定各手机音色、后台播放、自动播放权限一致。首轮用户手势后启用；退后台、锁屏和恢复需真机验证。
+- `@computer-harness/voice` 按 committed RuntimeEvent 投影通知；普通 action receipt 不产生进度，已验证 milestone 需同时匹配当前 Observation/action、completed receipt、Monitor 来源事件以及 `changed + expected_change`。Host 允许动态正文，但每个 Run 默认关闭，只有手机开启播报后新建任务才 opt in。审批按 `callId` 关联结构化 Guard 类别与动作类型生成中文，不传英文内部 reason、坐标、输入值或模型未验证说明。
+- 手机 Web 以 `noticeId` 去重，避免 SSE replay 重复播报。通知播报由用户在偏好中显式开启，默认关闭；Browser `speechSynthesis` 是首个可替换低延迟输出 Adapter，语速提供慢/标准/稍快三档。审批、提问、错误和结果为 interrupt notice，会取消当前 utterance；Run 切换、页面卸载、用户文字输入、pending 请求失效及未来录音接口也能取消。
+- 播放失败保留文字通知并显示错误，不影响任务；浏览器不支持 `speechSynthesis` 时明确显示不可用。现有 `VoiceCapabilities.readAloud` / `transcribeOnce` facade 保留，`createOutputAdapter()` 可注入替代实现。
+- 未实现停止/重播按钮、音量控制和真实 TTS Provider；也没有后台/锁屏连续播放或低延迟数字承诺。iOS 真机已确认系统普通话与任务播报可用，审批原因/阶段摘要新版仍需复测；Android Chrome、弱网、焦点、取消与后台行为仍待系统验证。
 - 若使用分块合成，以可读句子为边界，保留顺序与取消语义。测试首段可听耗时、完整播报耗时、截断/重复；不先承诺一个未经测量的延迟数字。
 
 完成标准：手机语音 Goal → 可编辑转写 → 真实本地无外发任务 → 文字结果及可中断播报；同一 Run 至少一次语音纠正。两种手机系统分别列出结果，不把 Web mock 当作真机通过。
@@ -64,13 +65,13 @@ R1/R2 不以工具返回 completed 判断业务完成。错误输入、错窗口
 
 ### P1：落实现有回答偏好
 
-当前入口：`apps/web/src/preferences.ts`、`PreferencesScreen.tsx`；消费入口应经 Host → app-runtime 组合根 → `packages/context`。
+当前入口：`apps/web/src/preferences.ts`、`PreferencesScreen.tsx`；消费入口经 Host → app-runtime 组合根 → `packages/context`。P1 的代码闭环已实现，真实模型输出效果与手机真机无障碍尚未验收。
 
-流程：用户保存 → 本地界面立即应用显示偏好 → 创建 Run 时提交助手偏好白名单 → Host 校验 → 冻结带版本的本 Run 偏好 → Context 投影 → GLM/Qwen 使用 → trace 记录实际投影。
+流程：用户保存 → 本地界面立即应用显示偏好 → Home 创建 Run 时提交带版本的助手偏好白名单 → Host 严格校验并规范化 → RemoteRunAPI 按偏好计算幂等指纹 → 克隆并冻结本 Run 快照 → app-runtime Run config → Runtime ContextCompileInput → `packages/context` 投影 → GLM/Qwen 共用同一 ModelInput → trace 记录实际投影。没有设置对象的旧调用保持默认且不投影；运行中改默认只影响下一 Run。浏览器 localStorage 不提供跨设备同步。
 
-先接 responseDetail、stepExplanation、preferredLanguage。字体/对比度只影响界面，不塞进模型；当前用户要求优先于默认偏好，偏好不能覆盖系统权限/审批要求。稳定投影放在稳定说明区域，减少无谓前缀变化。运行中修改默认只影响下一 Run；若用户明确纠正当前 Run，复用 inbox 并留事件。
+快照 v1 包含 `responseDetail`、`stepExplanation`、`preferredLanguage` 和可空 `additionalGuidance`（最多 600 个 Unicode 字符）。字体/对比度/语音设置只影响界面或通知，不进入模型。稳定系统前缀只说明偏好的低优先级；本 Run 实际枚举值和自定义文字在 Goal 后作为动态用户消息，并先于后续历史纠正与观察，以保持偏好变化不改 stablePrefixHash，同时让更新的用户纠正更近。预算先为所有权威用户输入保留空间，再考虑偏好；不足时省略偏好并记录 `omittedReason=budget`。当前明确请求与纠正优先，偏好不能覆盖系统指令、安全规则、审批或工具策略。trace 记录投影版本、是否纳入/预算省略、估算 token、枚举、说明字符数和 SHA-256，不保存自定义文字；文本只在模型输入所需位置出现。
 
-完成标准：两 Provider 下对同一任务分别产生简洁/详细或指定语言结果；trace 能定位生效偏好；关闭后无残留；多个 Run/配对设备按既定存储范围隔离；重置生效。浏览器本地偏好不会被宣称为跨设备同步。
+代码完成标准：v2→v3 迁移、创建 Run 白名单、Host 严格校验、幂等冲突、快照隔离、Context 预算/trace 脱敏、stablePrefixHash 缓存不变量与 GLM/Qwen 共用编译投影均有离线测试；重置和清空已覆盖。离线代码实现阶段未调用付费 API；随后受控验证实际发起四次真实 API 请求，详见[验证记录](./semantic-assessment-and-preferences-real-api-validation-2026-09-29.md)。真实模型回答质量的稳定性、两个手机系统的读屏/软键盘体验仍待验收。详见[实施记录](./assistant-preferences-p1-implementation-2026-09-29.md)。
 
 ### P2：可管理的个人需求资料
 
@@ -221,11 +222,11 @@ E1：先固定全功能体验基线，再从暴露的问题选择单变量对照
 
 | ID | 顺序 / 当前状态 | 可认领任务与产物 | 依赖 / 完成判据 |
 | --- | --- | --- | --- |
-| V01 | 近期 / 只有接口 | V1录音、完整转写、编辑确认、错误/取消 | 至少一服务真链路；长语音不丢句；不自动批准风险操作 |
-| V02 | 近期 / 只有接口 | V2结果/提问播报、暂停/重播/打断与队列 | 两手机平台真机播放；语音失败保留文本 |
-| V03 | 随后 / 未实现 | 流式STT/TTS、分块、端点检测与延迟优化 | V01/V02基线；量化首段延迟、完整准确率、费用及取消效果 |
+| V01 | 近期 / 核心合同已建，Provider/UI未接 | V1录音、完整转写、编辑确认、错误/取消 | 至少一服务真链路；长语音不丢句；不自动批准风险操作 |
+| V02 | 近期 / RunNotice与Browser TTS已接，真机未验收 | 两手机平台结果/提问/关键进度播报；补足停止/重播等体验后评估是否需要 | Android/iOS真机；后台/锁屏、低延迟、pending失效取消；播报失败保留文本 |
+| V03 | 随后 / 核心合同已建，Provider/设备未接 | 流式STT/TTS、分块、端点检测与延迟优化 | V01/V02基线；量化首段延迟、完整准确率、费用及取消效果 |
 | V04 | 随后 / 可替换目标 | 本地小模型/第二语音厂商适配、配置及隐私说明 | 模型硬件与许可先核验；保持同一语音合同，不能只mock |
-| P01 | 近期 / 偏好仅本地 | P1回答语言、详略、步骤解释进入Context | 两Provider实测、trace可查、默认/纠正优先级明确 |
+| P01 | 近期 / 代码闭环已实现，真实体验待验收 | P1回答语言、详略、步骤解释和最多600字补充说明进入Context | 离线验证双Provider共用投影、trace与隔离；后续验真实输出、手机无障碍，默认/纠正优先级明确 |
 | P02 | 随后 / 未实现 | P2显式个人资料、编辑/删除/导出与按需投影 | P01；用户确认、字段来源、持久化范围及清除测试 |
 | P03 | 随后 / 未实现 | 跨设备偏好同步及冲突，界面偏好与行为偏好分层 | 身份/设备范围明确；不同用户不得串用；提供本地不上传模式 |
 | P04 | 研究 / 未实现 | 自动发现候选偏好→用户确认→更新/遗忘 | P02；错误候选可纠正；不把瞬时GUI状态当长期个人事实 |

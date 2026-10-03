@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { AssetId, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
-import { approvalRequiresVisualReview, projectApprovalPreview } from "./approval-preview.js";
+import type { AssetId, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, SurfaceId, ToolCallId } from "@computer-harness/protocol";
+import { approvalRequiresVisualReview, projectApprovalPreview, projectApprovalVoiceContext } from "./approval-preview.js";
+
+const surfaceRef = { surfaceId: "approval-preview-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 function event(sequence: number, data: Record<string, unknown>): RuntimeEvent {
   return {
@@ -50,6 +52,7 @@ describe("projectApprovalPreview", () => {
       decisionObservationId: "decision-frame" as ObservationId,
       capturedAt: "2026-09-26T12:00:00.000Z",
       viewport: { width: 900, height: 700, coordinateSpace: "physical" as const },
+      surfaceRef,
     };
     const events: RuntimeEvent[] = [
       event(1, {
@@ -58,6 +61,7 @@ describe("projectApprovalPreview", () => {
           id: evidence.decisionObservationId,
           runId: "approval-preview-test" as RunId,
           computerSessionId: "approval-preview-session" as ComputerSessionId,
+          surfaceRef,
           capturedAt: "2026-09-26T11:59:00.000Z",
           viewport: evidence.viewport,
           screenshot: { assetId: "decision-frame-asset" as AssetId, relativePath: "screenshots/decision-frame.png", mediaType: "image/png", byteLength: 4 },
@@ -69,6 +73,7 @@ describe("projectApprovalPreview", () => {
           id: evidence.observationId,
           runId: "approval-preview-test" as RunId,
           computerSessionId: "approval-preview-session" as ComputerSessionId,
+          surfaceRef,
           capturedAt: evidence.capturedAt,
           viewport: evidence.viewport,
           screenshot: { assetId: evidence.assetId, relativePath: "screenshots/approval-frame.png", mediaType: "image/png", byteLength: 4 },
@@ -111,6 +116,7 @@ describe("projectApprovalPreview", () => {
       }),
       event(2, {
         type: "action.guard.evaluated",
+        evaluatedSurfaceRef: surfaceRef,
         callIds: ["older-call"],
         actions: [{ actionId: "older-action", kind: "click", basedOn: "old-observation", point: { x: 10, y: 20 } }],
         decision: "allow",
@@ -131,6 +137,7 @@ describe("projectApprovalPreview", () => {
       }),
       event(5, {
         type: "action.guard.evaluated",
+        evaluatedSurfaceRef: surfaceRef,
         callIds: ["pending-call", "batch-call"],
         actions: [
           { actionId: "pending-action", kind: "click", basedOn: "observation", point: { x: 408, y: 667 } },
@@ -146,6 +153,7 @@ describe("projectApprovalPreview", () => {
       }),
       event(6, {
         type: "action.guard.evaluated",
+        evaluatedSurfaceRef: surfaceRef,
         callIds: ["older-call"],
         actions: [{ actionId: "unrelated-later-action", kind: "click", basedOn: "later-observation", point: { x: 1, y: 2 } }],
         decision: "require_approval",
@@ -171,5 +179,81 @@ describe("projectApprovalPreview", () => {
     expect(JSON.stringify(preview)).not.toContain("Unrelated claim");
     expect(projectApprovalPreview(events, "another-request", "pending-call" as ToolCallId)).toBeUndefined();
     expect(projectApprovalPreview(events, "approval-current", "older-call" as ToolCallId)).toBeUndefined();
+  });
+});
+
+describe("projectApprovalVoiceContext", () => {
+  it("uses Guard categories and action kind from the exact approval call, not the latest Guard event", () => {
+    const targetCallId = "approval-voice-target" as ToolCallId;
+    const otherCallId = "approval-voice-other" as ToolCallId;
+    const targetGuard = event(1, {
+      type: "action.guard.evaluated",
+      evaluatedSurfaceRef: surfaceRef,
+      callIds: [targetCallId],
+      actions: [{ actionId: "target-action", basedOn: "obs" as ObservationId, kind: "click", point: { x: 1, y: 1 } }],
+      decision: "require_approval",
+      categories: ["external_commitment"],
+      reasonCode: "declared_high_impact",
+      reason: "Untrusted English text for the target call.",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const unrelatedGuard = event(2, {
+      type: "action.guard.evaluated",
+      evaluatedSurfaceRef: surfaceRef,
+      callIds: [otherCallId],
+      actions: [{ actionId: "other-action", basedOn: "obs" as ObservationId, kind: "type", textLength: 9 }],
+      decision: "require_approval",
+      categories: ["financial", "privacy_account"],
+      reasonCode: "protected_input",
+      reason: "Unrelated recent Guard record.",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const approval = event(3, {
+      type: "approval.requested",
+      requestId: "approval-voice-request",
+      callId: targetCallId,
+      reason: "Never read this free-form English reason.",
+    });
+
+    const projected = projectApprovalVoiceContext([targetGuard, unrelatedGuard, approval], "approval-voice-request", targetCallId);
+    expect(projected).toEqual({ categories: ["external_commitment"], reasonCode: "declared_high_impact", actionKind: "click" });
+    expect(JSON.stringify(projected)).not.toContain("Untrusted English text");
+  });
+
+  it("maps an approval call to its matching action index in a batch Guard event", () => {
+    const firstCallId = "approval-batch-first" as ToolCallId;
+    const targetCallId = "approval-batch-target" as ToolCallId;
+    const batchGuard = event(1, {
+      type: "action.guard.evaluated",
+      evaluatedSurfaceRef: surfaceRef,
+      callIds: [firstCallId, targetCallId],
+      actions: [
+        { actionId: "batch-type-action", basedOn: "obs" as ObservationId, kind: "type", textLength: 12 },
+        { actionId: "batch-key-action", basedOn: "obs" as ObservationId, kind: "keypress", keys: ["ENTER"] },
+      ],
+      decision: "require_approval",
+      categories: ["financial", "external_commitment"],
+      reasonCode: "declared_high_impact",
+      reason: "Batch Guard event.",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const approval = event(2, {
+      type: "approval.requested",
+      requestId: "approval-batch-request",
+      callId: targetCallId,
+      reason: "This English reason is not voice content.",
+    });
+
+    expect(projectApprovalVoiceContext([batchGuard, approval], "approval-batch-request", targetCallId)).toEqual({
+      categories: ["financial", "external_commitment"],
+      reasonCode: "declared_high_impact",
+      actionKind: "keypress",
+    });
   });
 });

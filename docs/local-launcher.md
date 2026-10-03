@@ -53,6 +53,28 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 
 两个参数必须成对提供；它们是脚本/调试接口，不要求日常用户手填编号，显式编号入口默认 background。日常 TUI 可直接输入 goal；唯一可信窗口由本地匹配自动绑定，多个/没有匹配时保留草稿并进入可滚动的选择列表。也可先按 `Esc` 退出编辑、按 `W` 手选；手选窗口或 desktop 后不会被自动覆盖。菜单选窗使用 foreground 预览，可能激活目标且不保证自动恢复原前台。列表不可用或窗口关闭会明确报错，不自动改成 desktop；直接 `run` 命令未启用 TUI 自动选窗。窗口动作能力以[最新实测边界](./travel-pilot-preparation-2026-09-20.md#115-无人工输入的窗口重测与放行边界)为准。
 
+## 同一 Run 内切换已打开窗口（显式 opt-in）
+
+默认仍是单目标 Run。跨应用开关与起点解耦：auto、手动 window、managed browser、desktop 四种起点均可单独 opt in。TUI 用 `F` 在下一次 Run 的 Feature 页面打开 `Window switching`；`W` 仍是可选的起点/手动窗口选择，不是开启跨应用切换的前置权限。CUA desktop 起点支持列出并切换到受支持窗口；不支持该工具的 OSWorld/external 后端会明确拒绝，不静默忽略。
+
+交互使用时可以这样启动：
+
+```powershell
+.\scripts\harness.ps1 start -WindowSwitch
+```
+
+在 TUI 首页直接输入 Goal，按 `F` 开启/关闭 `Window switching` 即可；初始 binding 仍由现有 auto/manual/browser/desktop 流程确定，模型随后使用真实 `list_windows` 结果自主选择。PowerShell `-WindowSwitch` 与 CLI `--window-switch` 是同一 per-Run opt-in，不要求额外 PID/HWND 或手工预选目的窗口。这个开关授权本 Run 查看并切换 Host 范围内的窗口，不代表 Host 能证明选择符合 Goal，也不意味着任务业务成功。
+
+仅供非交互脚本或受控 fixture 使用：如果调用方已经通过 Host 获得确切 PID/window ID，可显式绑定：
+
+```powershell
+.\scripts\harness.ps1 start -WindowSwitch -CuaWindowPid <pid> -CuaWindowId <window-id>
+```
+
+启用后，驱动可报告的所有受支持已打开顶层窗口会列入目录，其中可能有后台或最小化窗口；应用名和标题会发给当前模型，因此可能含文件名/个人信息。切换操作仍需 fresh identity、activation、geometry 和 capture 验证，列出不等于可用。Host-only `windowSwitchAllowedTargets` 省略代表 opt-in 下使用全量支持目录；空数组是 deny-all；非空列表表示精确 scope。对 browser initial/companion，如果该模式要求把自有 browser target 加入显式范围，空数组会在创建资源前作为矛盾配置拒绝；普通 native Run 不会因空目录而扩大范围。仅在 browser initial target 或明确 `managedBrowserCompanion` 时，Host 才将本 Run 自有的确切 browser target 加入非空列表，不会自动加其他窗口。个人浏览器永不因名称而获得 DOM。
+
+启用后，`list_windows` / `switch_window` 由本 Run opt-in 授权，不逐窗口请求审批；每次切换仍独占一轮并经过 Runtime 的参数、ref、scope、身份、预算、Abort、foreground 与 fresh capture 校验。旧观察和坐标立刻失效，只有成功取得新 Observation 后模型才继续。真正高风险副作用仍服从既有 Guard。Managed-browser Host/profile 在切到其他原生窗口时保持到 Run 结束；回切后只在准确匹配 Run-owned browser binding 时重新启用 DOM。失败或结果未知不会沿用旧坐标，也不会自动重试。Browser 仍是当前 binding 时的 legacy popup/foreground-mismatch handoff 不是此能力的通用承诺。
+
 ## 托管浏览器与登录状态
 
 希望先进入界面再选浏览器，可运行：
@@ -61,7 +83,7 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 .\scripts\harness.ps1 start -Grounding auto
 ```
 
-在首页按 `W` 选择 Harness-managed browser，再输入 HTTP(S) 起始网址；目标编辑中先按 `Esc` 保留草稿。普通窗口使用 UIA，托管浏览器使用 DOM + UIA，整桌面不启用 Grounding。个人浏览器不会因此开放 DOM 权限。
+在首页按 `W` 可选择 Harness-managed browser 起点；填写 HTTP(S) URL 可启动到对应页面，留空则从空白页开始。native/desktop 起点开启跨应用后，可以使用 Host 默认 browser companion。普通窗口使用 UIA/视觉合同，托管浏览器使用 DOM + UIA，desktop 根据其捕获合同工作。个人浏览器不会因此开放 DOM 权限。
 
 需要保留登录状态时，先确保 CUA daemon 已运行；若未运行，在另一个终端执行 `.\scripts\harness.ps1 daemon` 并保持打开。然后手动登录 Harness 自己的持久 profile：
 
@@ -71,7 +93,7 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 
 登录完成后回到终端按 Enter 关闭并保留 profile。可使用同一 label 为其他站点重复此步骤；只登记最多 8 个去重后的 HTTP(S) origin/path，剥离 query/fragment，不读取个人浏览器历史。同一 profile 的后续 Run 恢复已登记站点，登录能否继续有效仍取决于站点会话。
 
-把 `.harness.local.psd1` 中的 `ManagedBrowserProfileMode` 设为 `persistent`、`ManagedBrowserProfileLabel` 设为 `daily`，日常启动便无需重复这些参数。默认临时 profile 不保留登录。Harness 不自动登录，不读取或输出密码、cookie 或 localStorage；不要把个人浏览器 profile 作为托管目录。
+本机 TUI/CLI 从 `.harness.local.psd1` 的 `ManagedBrowserProfileMode`、`ManagedBrowserProfileLabel` 和 profile root 读取本地默认配置；跨应用 companion 沿用该默认偏好，不另加每任务 profile 选择参数。saved/persistent profile 不存在、占用或清理状态不确定时应明确失败，不可静默换成临时 profile。默认 temporary profile 不保留登录。手机 Web 的 Host profile settings 是另一条受管流程：手机发起 prepare/relogin，电脑可见 Edge 中由用户手动登录，再从手机 complete；细节见[手机控制指南](./mobile-control-guide-2026-09-26.md#真手机使用)。Harness 不自动登录，不读取或输出密码、cookie 或 localStorage；不要把个人浏览器 profile 作为托管目录。
 
 ## Jev 辅助选窗（可选）
 

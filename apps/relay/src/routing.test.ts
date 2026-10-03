@@ -45,6 +45,36 @@ describe("relay API route allowlist", () => {
     expect(parseBoundedJson(encode(`{"a":${"[".repeat(18)}0${"]".repeat(18)}}`))).toBeNull();
   });
 
+  it("allowlists authenticated voice routes and bounds ordered adaptive PCM16 batches", () => {
+    expect(resolveAllowedApiRoute("GET", "/api/voice/capabilities")?.path).toBe("/api/voice/capabilities");
+    const startRoute = resolveAllowedApiRoute("POST", "/api/voice/sessions");
+    const audioRoute = resolveAllowedApiRoute("POST", "/api/voice/sessions/session-1/audio");
+    const finishRoute = resolveAllowedApiRoute("POST", "/api/voice/sessions/session-1/finish");
+    const cancelRoute = resolveAllowedApiRoute("POST", "/api/voice/sessions/session-1/cancel");
+    expect(resolveAllowedApiRoute("GET", "/api/voice/sessions/session-1/audio")).toBeNull();
+    expect(resolveAllowedApiRoute("POST", "/api/voice/sessions/session-1/events")).toBeNull();
+    expect(startRoute).not.toBeNull();
+    expect(audioRoute).not.toBeNull();
+    expect(finishRoute).not.toBeNull();
+    expect(cancelRoute).not.toBeNull();
+    expect(isValidApiRequestBody(startRoute!, { requestId: "start-1" })).toBe(true);
+    expect(isValidApiRequestBody(startRoute!, { requestId: "start-1", apiKey: "secret" })).toBe(false);
+
+    const audio = Buffer.alloc(3_200).toString("base64");
+    const one = [{ sequence: 0, audio }];
+    expect(isValidApiRequestBody(audioRoute!, { chunks: one, afterEventSequence: 2 })).toBe(true);
+    expect(isValidApiRequestBody(audioRoute!, { chunks: [{ sequence: 0, audio: "AQ==" }], afterEventSequence: 2 })).toBe(false);
+    expect(isValidApiRequestBody(audioRoute!, { chunks: [{ sequence: 0, audio: Buffer.alloc(4_098).toString("base64") }], afterEventSequence: 2 })).toBe(false);
+    expect(isValidApiRequestBody(audioRoute!, { chunks: [{ sequence: 2, audio }, { sequence: 3, audio }], afterEventSequence: 2 })).toBe(true);
+    expect(isValidApiRequestBody(audioRoute!, { chunks: [{ sequence: 2, audio }, { sequence: 2, audio }], afterEventSequence: 2 })).toBe(false);
+    expect(isValidApiRequestBody(audioRoute!, { chunks: Array.from({ length: 5 }, (_, sequence) => ({ sequence, audio })), afterEventSequence: 2 })).toBe(false);
+    expect(isValidApiRequestBody(audioRoute!, { chunks: [{ sequence: 1_200, audio }], afterEventSequence: 2 })).toBe(false);
+    expect(isValidApiRequestBody(audioRoute!, { chunks: one, afterEventSequence: 2, deviceId: "raw-device" })).toBe(false);
+    expect(isValidApiRequestBody(finishRoute!, { afterEventSequence: 3 })).toBe(true);
+    expect(isValidApiRequestBody(cancelRoute!, { afterEventSequence: 3 })).toBe(true);
+    expect(isValidApiRequestBody(finishRoute!, { afterEventSequence: 3, transcript: "do not accept caller text" })).toBe(false);
+  });
+
   it("accepts legacy and tagged run targets while rejecting unsafe or ambiguous selectors", () => {
     const route = resolveAllowedApiRoute("POST", "/api/runs");
     expect(route).not.toBeNull();
@@ -95,5 +125,69 @@ describe("relay API route allowlist", () => {
     ]) {
       expect(isValidApiRequestBody(route!, body), JSON.stringify(body)).toBe(false);
     }
+  });
+
+  it("accepts only the shared versioned assistant-preferences snapshot on legacy and tagged starts", () => {
+    const route = resolveAllowedApiRoute("POST", "/api/runs");
+    expect(route).not.toBeNull();
+    const base = { commandId: "start_preferences", goal: "Open the selected application" };
+    const targetToken = "a".repeat(32);
+    const assistantPreferences = {
+      version: 1,
+      responseDetail: "detailed",
+      stepExplanation: "more",
+      preferredLanguage: "zh-CN",
+      additionalGuidance: "Group findings by topic.",
+    } as const;
+
+    for (const body of [
+      { ...base, targetToken },
+      { ...base, target: { mode: "auto" } },
+      { ...base, targetToken, assistantPreferences },
+      { ...base, target: { mode: "auto" }, assistantPreferences },
+      { ...base, target: { mode: "auto" }, assistantPreferences, runNoticeContentEnabled: true },
+      {
+        ...base,
+        target: { mode: "auto" },
+        assistantPreferences: { ...assistantPreferences, additionalGuidance: "  Keep\nrows\u0000 safely\u202E  " },
+      },
+    ]) {
+      expect(isValidApiRequestBody(route!, body), JSON.stringify(body)).toBe(true);
+    }
+
+    const invalidPreferences = [
+      { ...assistantPreferences, version: 2 },
+      { ...assistantPreferences, responseDetail: "verbose" },
+      { ...assistantPreferences, stepExplanation: "all" },
+      { ...assistantPreferences, preferredLanguage: "fr" },
+      { ...assistantPreferences, additionalGuidance: "x".repeat(601) },
+      { ...assistantPreferences, additionalGuidance: 12 },
+      { ...assistantPreferences, presentation: { textSize: "large" } },
+      { ...assistantPreferences, voice: { preferredVoice: "calm" } },
+      { ...assistantPreferences, guard: "off" },
+      { ...assistantPreferences, unknownField: true },
+    ];
+    for (const [index, preferences] of invalidPreferences.entries()) {
+      const body = { ...base, target: { mode: "auto" }, assistantPreferences: preferences };
+      expect(isValidApiRequestBody(route!, body), `invalid preferences ${index}`).toBe(false);
+    }
+
+    expect(isValidApiRequestBody(route!, {
+      ...base,
+      targetToken,
+      assistantPreferences,
+      riskGuard: "off",
+    })).toBe(false);
+    expect(isValidApiRequestBody(route!, {
+      ...base,
+      targetToken,
+      target: { mode: "auto" },
+      assistantPreferences,
+    })).toBe(false);
+    expect(isValidApiRequestBody(route!, {
+      ...base,
+      target: { mode: "auto" },
+      runNoticeContentEnabled: "true",
+    })).toBe(false);
   });
 });

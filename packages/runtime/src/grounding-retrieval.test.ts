@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { GroundingCatalog, GroundingElement } from "@computer-harness/protocol";
+import type { GroundingCatalog, GroundingElement, SurfaceId, SurfaceRef } from "@computer-harness/protocol";
 import {
   DeterministicGroundingRetrieval,
   normalizeGroundingLabel,
@@ -8,6 +8,7 @@ import {
 } from "./grounding-retrieval.js";
 
 const box = (x: number, y: number, width = 100, height = 30) => ({ x, y, width, height, coordinateSpace: "physical" as const });
+const surfaceRef: SurfaceRef = { surfaceId: "retrieval-desktop" as SurfaceId, generation: 1, kind: "desktop" };
 
 function element(
   elementRef: string,
@@ -29,6 +30,7 @@ function catalog(elements: readonly GroundingElement[], source: GroundingCatalog
     source,
     observationId: "retrieval-observation" as GroundingCatalog["observationId"],
     computerSessionId: "retrieval-session" as GroundingCatalog["computerSessionId"],
+    surfaceRef,
     completeness: "complete",
     degraded: false,
     maxElements: 256,

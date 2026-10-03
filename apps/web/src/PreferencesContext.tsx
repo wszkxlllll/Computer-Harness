@@ -7,6 +7,7 @@ import {
   type DisplayPreset,
   type PresentationPreferences,
   type UserPreferences,
+  type VoicePreferences,
 } from "./preferences";
 
 interface PreferencesContextValue {
@@ -15,6 +16,7 @@ interface PreferencesContextValue {
   setPresentation<K extends keyof PresentationPreferences>(key: K, value: PresentationPreferences[K]): boolean;
   setDisplayPreset(preset: DisplayPreset): boolean;
   setAssistant<K extends keyof AssistantPreferences>(key: K, value: AssistantPreferences[K]): boolean;
+  setVoice<K extends keyof VoicePreferences>(key: K, value: VoicePreferences[K]): boolean;
   reset(): boolean;
 }
 
@@ -71,6 +73,14 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     return wasSaved;
   }, [preferences]);
 
+  const setVoice = useCallback(<K extends keyof VoicePreferences>(key: K, value: VoicePreferences[K]) => {
+    const next: UserPreferences = { ...preferences, voice: { ...preferences.voice, [key]: value } };
+    setPreferences(next);
+    const wasSaved = saveToBrowser(next);
+    setSaved(wasSaved);
+    return wasSaved;
+  }, [preferences]);
+
   const reset = useCallback(() => {
     const next = cloneDefaults();
     setPreferences(next);
@@ -87,7 +97,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     root.dataset.reduceMotion = String(preferences.presentation.reduceMotion);
   }, [preferences.presentation]);
 
-  const contextValue = useMemo(() => ({ preferences, saved, setPresentation, setDisplayPreset, setAssistant, reset }), [preferences, saved, setPresentation, setDisplayPreset, setAssistant, reset]);
+  const contextValue = useMemo(() => ({ preferences, saved, setPresentation, setDisplayPreset, setAssistant, setVoice, reset }), [preferences, saved, setPresentation, setDisplayPreset, setAssistant, setVoice, reset]);
   return <PreferencesContext.Provider value={contextValue}>{children}</PreferencesContext.Provider>;
 }
 

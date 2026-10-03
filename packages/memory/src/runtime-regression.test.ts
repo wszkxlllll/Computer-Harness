@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ActionId, ActionIntent, AssetId, ComputerSessionId, EventId, MemoryMutation, MemoryFact, ModelTurn, ObservationId, RunId, RuntimeEvent, RuntimeEventDraft, ToolCall, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { ActionId, ActionIntent, AssetId, ComputerSessionId, EventId, MemoryMutation, MemoryFact, ModelTurn, ObservationId, RunId, RuntimeEvent, RuntimeEventDraft, SurfaceId, ToolCall, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { DefaultRuntimePolicy, RunController, ToolRegistry, type Computer, type ComputerOpenOptions, type ComputerSession, type ContextCompiler, type IdFactory, type ModelInput, type ModelMessage, type NonComputerToolDefinition, type ProviderAdapter } from "@computer-harness/runtime";
 import type { AssetStore, RunEventWriter } from "@computer-harness/trajectory";
 import { InMemoryMemoryStore, createMemoryTools } from "./index.js";
@@ -7,6 +7,7 @@ import { InMemoryMemoryStore, createMemoryTools } from "./index.js";
 const runId = "memory-runtime-regression" as RunId;
 const sessionId = "memory-runtime-computer" as ComputerSessionId;
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "memory-runtime-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 class FakeComputer implements Computer {
   private observationCount = 0;
@@ -29,6 +30,7 @@ class FakeComputer implements Computer {
     return {
       capturedAt: `2026-09-17T00:00:0${this.observationCount}.000Z`,
       viewport,
+      surfaceRef,
       screenshot: { mediaType: "image/png" as const, data: new Uint8Array([this.observationCount]) },
     };
   }

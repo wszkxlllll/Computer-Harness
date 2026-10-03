@@ -750,7 +750,7 @@ export function createRelayServer(config: RelayServerConfig): RelayServerHandle 
   const checkOrigin = (request: IncomingMessage): boolean => {
     const origin = request.headers.origin;
     if (origin !== undefined && origin !== publicOrigin.origin) return false;
-    if ((request.method === "POST" || request.method === "DELETE") && origin !== publicOrigin.origin) return false;
+    if ((request.method === "POST" || request.method === "PUT" || request.method === "DELETE") && origin !== publicOrigin.origin) return false;
     const host = request.headers.host;
     if (host === undefined || host.toLowerCase() !== publicOrigin.host.toLowerCase()) return false;
     return true;
@@ -939,7 +939,7 @@ export function createRelayServer(config: RelayServerConfig): RelayServerHandle 
     }
     const { cookieHash: sessionCookieHash, session } = selectedSession;
     const csrfHeader = request.headers["x-csrf-token"];
-    if ((route.method === "POST" || route.method === "DELETE")
+    if ((route.method === "POST" || route.method === "PUT" || route.method === "DELETE")
       && (typeof csrfHeader !== "string" || !safeEqual(csrfHeader, session.csrfToken))) {
       writeError(response, 403, "csrf_check_failed");
       return;

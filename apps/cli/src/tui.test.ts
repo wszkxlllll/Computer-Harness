@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import type { ActionId, EventId, ObservationId, RunId, RuntimeEvent, RunOutcome, ToolCallId } from "@computer-harness/protocol";
+import type { ActionId, EventId, ObservationId, RunId, RuntimeEvent, RunOutcome, SurfaceId, SurfaceRef, ToolCallId } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { RunHandle, ResolvedRunConfig, WindowTargetDiscovery } from "@computer-harness/app-runtime";
 import { ApplicationSession, createRunEventFeed, InProcessEnvironmentOwner, type ApplicationSessionConfig } from "@computer-harness/app-runtime";
@@ -8,6 +8,8 @@ import { initialRunSnapshot, type RunSnapshot } from "@computer-harness/trajecto
 import { buildTuiFrame, runApplicationTui } from "./tui.js";
 import { limitTuiInput, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
 import stringWidth from "string-width";
+
+const desktopSurfaceRef: SurfaceRef = { surfaceId: "cli-tui-desktop" as SurfaceId, generation: 1, kind: "desktop" };
 
 function makePendingCorrectionFixture(
   pauseBarrier: () => Promise<void>,
@@ -382,6 +384,147 @@ describe("TUI renderer", () => {
     await tui;
   });
 
+  it("keeps window switching enabled for an explicitly chosen primary-desktop Run", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "runs/tui-desktop-window-switch/screenshots",
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      managedBrowserProfileRoot: "/local/profiles/Travel",
+    });
+    fixture.output.columns = 80;
+    fixture.output.rows = 30;
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-desktop-window-switch",
+      profile: "live-interactive",
+      riskGuard: "layered",
+      windowSelectionAvailable: false,
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+    }, { terminal: { input: fixture.input, output: fixture.output } });
+    const goal = "Switch from the desktop to a listed task window";
+
+    fixture.input.emit("keypress", "F", { name: "f" });
+    for (let index = 0; index < 8; index += 1) fixture.input.emit("keypress", "", { name: "down" });
+    expect(fixture.outputText.join("")).toContain("Feature 9 of 9");
+    expect(fixture.outputText.join("")).toContain("Window switching");
+    expect(fixture.outputText.join("")).toContain("Window switching is off");
+    fixture.input.emit("keypress", "", { name: "space" });
+    expect(fixture.outputText.join("")).toContain("Window switching is on");
+    fixture.input.emit("keypress", "", { name: "return" });
+
+    fixture.input.emit("keypress", goal, {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("WINDOW TARGET"));
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("Primary desktop selected"));
+    fixture.input.emit("keypress", "", { name: "i" });
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+
+    const startedConfig = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(startedConfig.windowSwitch).toBe("opened-windows-v1");
+    expect(startedConfig.windowHandoff).toBe("confirm-v1");
+    expect(startedConfig.computer).toMatchObject({
+      managedBrowserCompanion: true,
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      managedBrowserProfileRoot: "/local/profiles/Travel",
+    });
+    expect(startedConfig.computer).not.toHaveProperty("windowTarget");
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("adds a local managed-browser companion to a native-window Run when switching is enabled", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "runs/tui-native-companion/screenshots",
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      managedBrowserProfileRoot: "/local/profiles/Travel",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-native-companion",
+      profile: "live-interactive",
+      riskGuard: "layered",
+      windowSelectionAvailable: true,
+      cuaWindowTarget: { pid: 42, windowId: 84 },
+      cuaWindowDeliveryMode: "foreground",
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      features: {
+        planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw",
+        riskGuard: "layered", monitor: "off", grounding: "off", windowSwitch: true,
+      },
+    }, { terminal: { input: fixture.input, output: fixture.output }, initialGoal: "Inspect the native task window" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+
+    const startedConfig = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(startedConfig.windowSwitch).toBe("opened-windows-v1");
+    expect(startedConfig.computer).toMatchObject({
+      kind: "cua",
+      windowTarget: { pid: 42, windowId: 84 },
+      managedBrowserCompanion: true,
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      managedBrowserProfileRoot: "/local/profiles/Travel",
+    });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("keeps native window switching without fabricating a managed-browser companion when no URL is configured", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "runs/tui-native-no-companion/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-native-no-companion",
+      profile: "live-interactive",
+      riskGuard: "layered",
+      windowSelectionAvailable: true,
+      cuaWindowTarget: { pid: 42, windowId: 84 },
+      cuaWindowDeliveryMode: "foreground",
+      features: {
+        planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw",
+        riskGuard: "layered", monitor: "off", grounding: "off", windowSwitch: true,
+      },
+    }, { terminal: { input: fixture.input, output: fixture.output }, initialGoal: "Inspect the native task window" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+
+    const startedConfig = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(startedConfig.windowSwitch).toBe("opened-windows-v1");
+    expect(startedConfig.computer).toMatchObject({ kind: "cua", windowTarget: { pid: 42, windowId: 84 } });
+    expect(startedConfig.computer).not.toHaveProperty("managedBrowserCompanion");
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
   it("blocks UIA grounding before start when no CUA window is selected", async () => {
     const fixture = makePendingCorrectionFixture(async () => undefined, undefined, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-grounding/screenshots" });
     const tui = runApplicationTui(fixture.session, {
@@ -474,11 +617,15 @@ describe("TUI renderer", () => {
     const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows: async () => [{ pid: 22, windowId: 33, appName: "Microsoft Edge", title: "Inbox" }] }, {
       kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-managed-auto/screenshots",
       managedBrowserUrl: "https://example.test/inbox",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      managedBrowserProfileRoot: "/local/profiles/Travel",
     });
     const tui = runApplicationTui(fixture.session, {
       provider: "glm", computer: "cua", output: "runs/tui-managed-auto", profile: "live-interactive",
       riskGuard: "layered", windowSelectionAvailable: true, managedBrowserUrl: "https://example.test/inbox",
-      features: { planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", riskGuard: "layered", monitor: "off", grounding: "auto" },
+      managedBrowserProfileMode: "persistent", managedBrowserProfileLabel: "Travel",
+      features: { planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw", riskGuard: "layered", monitor: "off", grounding: "auto", windowSwitch: true },
     }, { terminal: { input: fixture.input, output: fixture.output } });
     fixture.input.emit("keypress", "", { name: "escape" });
     fixture.input.emit("keypress", "", { name: "w" });
@@ -493,8 +640,55 @@ describe("TUI renderer", () => {
     await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
     const started = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
     expect(started.grounding).toBe("hybrid-catalog-v1");
+    expect(started.windowSwitch).toBe("opened-windows-v1");
     expect(started.computer).not.toHaveProperty("windowTarget");
+    expect(started.computer).not.toHaveProperty("managedBrowserCompanion");
     expect(started.computer).toMatchObject({ managedBrowserUrl: "https://example.test/inbox" });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("keeps explicit hybrid-grounded browser-initial Runs out of companion mode", async () => {
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "runs/tui-explicit-hybrid-initial/screenshots",
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      managedBrowserProfileRoot: "/local/profiles/Travel",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm",
+      computer: "cua",
+      output: "runs/tui-explicit-hybrid-initial",
+      profile: "live-interactive",
+      riskGuard: "layered",
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      features: {
+        planning: false, memory: "off", memoryRetrieval: "off", batching: "off", contextMode: "raw",
+        riskGuard: "layered", monitor: "off", grounding: "hybrid-catalog-v1", windowSwitch: true,
+      },
+    }, { terminal: { input: fixture.input, output: fixture.output }, initialGoal: "Open the configured managed browser" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+
+    const started = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(started.grounding).toBe("hybrid-catalog-v1");
+    expect(started.windowSwitch).toBe("opened-windows-v1");
+    expect(started.computer).toMatchObject({
+      kind: "cua",
+      managedBrowserUrl: "https://portal.example/start",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "Travel",
+      managedBrowserProfileRoot: "/local/profiles/Travel",
+    });
+    expect(started.computer).not.toHaveProperty("windowTarget");
+    expect(started.computer).not.toHaveProperty("managedBrowserCompanion");
     fixture.input.emit("keypress", "", { name: "a" });
     await waitForTui(() => fixture.session.status === "idle");
     fixture.input.emit("keypress", "", { name: "escape" });
@@ -586,7 +780,7 @@ describe("TUI renderer", () => {
     fixture.input.emit("keypress", "", { name: "f" });
     for (let index = 0; index < 7; index += 1) fixture.input.emit("keypress", "", { name: "down" });
     const frame = fixture.outputText.join("").split("\u001b[H\u001b[2J").at(-1) ?? "";
-    expect(frame).toContain("Feature 8 of 8");
+    expect(frame).toContain("Feature 8 of 9");
     expect(frame).toContain("❯ Grounding");
     expect(frame).toContain("Risk Guard: ENABLED");
     fixture.input.emit("keypress", "", { name: "escape" });
@@ -1669,7 +1863,7 @@ describe("TUI renderer", () => {
       profile: "live-interactive",
       riskGuard: "layered",
     }, { editMode: false, input: "", notice: "" });
-    expect(frame).toContain("Target: window selected window pid=1234 id=5678 (host-selected, delivery=background)");
+    expect(frame).toContain("Starting target: window selected window pid=1234 id=5678 (host-selected, delivery=background)");
     expect(frame).toContain("Focus evidence: UNKNOWN");
   });
 
@@ -1758,6 +1952,7 @@ describe("TUI renderer", () => {
         sequence: 2,
         occurredAt: "2026-09-20T00:00:00.001Z",
         type: "action.guard.evaluated",
+        evaluatedSurfaceRef: desktopSurfaceRef,
         callIds: [callId],
         actions: [],
         decision: "require_approval",
@@ -1773,7 +1968,7 @@ describe("TUI renderer", () => {
     expect(frame).toContain("APPROVAL REQUIRED: Run is waiting");
     expect(frame).toContain("Approval is pending: the Run is waiting and no GUI action is executing.");
     expect(frame).toContain("Action: click");
-    expect(frame).toContain("Target: 查询按钮");
+    expect(frame).toContain("Model-declared target (unverified): 查询按钮");
     expect(frame).toContain("Intent: 提交查询结果，不创建订单");
     expect(frame).toContain("Effects: external_commitment");
     expect(frame).toContain("Guard detail: require_approval via fallback (semantic_review_unavailable)");
@@ -1783,6 +1978,80 @@ describe("TUI renderer", () => {
     const compactFrame = buildTuiFrame(snapshot, events, "查询车票", { provider: "glm", computer: "cua", output: "runs/test", profile: "live-interactive", riskGuard: "layered" }, { editMode: false, input: "", notice: "", columns: 100, rows: 24 });
     expect(compactFrame).toContain("Why: Risk semantics are unclear and no reviewer is configured.");
     expect(compactFrame).toContain("Approval controls: Y approve   N reject   I correct   A abort");
+  });
+
+  it("resolves a switch approval label only from the latest completed host inventory", () => {
+    const runId = "tui-window-switch-approval" as RunId;
+    const listCallId = "list-windows-call" as ToolCallId;
+    const switchCallId = "switch-window-call" as ToolCallId;
+    const call: RuntimeEvent = {
+      eventId: "switch-call-received" as EventId,
+      runId,
+      sequence: 3,
+      occurredAt: "2026-10-02T00:00:00.003Z",
+      type: "tool.call.received",
+      call: {
+        id: switchCallId,
+        name: "switch_window",
+        arguments: { windowRef: "selected-ref" },
+        declaredEffect: { effects: ["navigate"], target: "model-invented-target", summary: "Switch windows" },
+      },
+    };
+    const events: RuntimeEvent[] = [
+      {
+        eventId: "list-call-received" as EventId,
+        runId,
+        sequence: 1,
+        occurredAt: "2026-10-02T00:00:00.001Z",
+        type: "tool.call.received",
+        call: { id: listCallId, name: "list_windows", arguments: {} },
+      },
+      {
+        eventId: "list-call-completed" as EventId,
+        runId,
+        sequence: 2,
+        occurredAt: "2026-10-02T00:00:00.002Z",
+        type: "tool.call.completed",
+        result: { callId: listCallId, status: "completed", output: [{ windowRef: "selected-ref", appName: "WPS", title: "Travel draft", isCurrent: false }] },
+      },
+      call,
+      {
+        eventId: "switch-guard" as EventId,
+        runId,
+        sequence: 4,
+        occurredAt: "2026-10-02T00:00:00.004Z",
+        type: "action.guard.evaluated",
+        evaluatedSurfaceRef: desktopSurfaceRef,
+        callIds: [switchCallId],
+        actions: [],
+        decision: "require_approval",
+        categories: ["external_commitment"],
+        reasonCode: "fixture",
+        reason: "Confirm the selected target.",
+        path: "fallback",
+        policyVersion: "fixture-v1",
+        modelRequestCount: 0,
+      },
+    ];
+    const snapshot = {
+      ...initialRunSnapshot(runId),
+      status: "waiting_approval" as const,
+      pendingApproval: { requestId: "switch-approval", callId: switchCallId, reason: "Confirm the selected target." },
+    };
+    const metadata = { provider: "glm", computer: "cua", output: "runs/test", profile: "live-interactive" as const, riskGuard: "layered" as const };
+    const frame = buildTuiFrame(snapshot, events, "Switch to the selected target", metadata, { editMode: false, input: "", notice: "", columns: 120, rows: 44 });
+    expect(frame).toContain("Host-listed target: WPS — Travel draft");
+    expect(frame).toContain("request-bound screenshot");
+    expect(frame).toContain("old window");
+    expect(frame).toContain("Model-declared target (unverified): model-invented-target");
+    expect(frame).not.toContain("selected-ref");
+    expect(frame).not.toContain("pid=");
+
+    const invalidCall = structuredClone(call) as Extract<RuntimeEvent, { type: "tool.call.received" }>;
+    invalidCall.call.arguments = { windowRef: "not-listed" };
+    const invalidFrame = buildTuiFrame(snapshot, [...events.slice(0, 2), invalidCall, events[3]!], "Switch to the selected target", metadata, { editMode: false, input: "", notice: "", columns: 120, rows: 44 });
+    expect(invalidFrame).toContain("Host-listed target: unavailable; not matched to the latest completed list_windows result");
+    expect(invalidFrame).not.toContain("WPS — Travel draft");
   });
 
   it("wraps graphemes by terminal display width without splitting emoji or combining marks", () => {

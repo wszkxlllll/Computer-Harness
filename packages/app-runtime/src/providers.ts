@@ -48,7 +48,7 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
     // The configured glm-5.3-flash deployment is reasoning-only and rejects
     // thinking=disabled with HTTP 400/1210. Keep this provider boundary
     // compatible even if an older caller passes the legacy disabled setting.
-    thinking: "enabled",
+    thinking: options.config.glmThinking === "disabled" ? "enabled" : options.config.glmThinking ?? "enabled",
     ...(options.config.glmMaxOutputTokens === undefined ? {} : { maxOutputTokens: options.config.glmMaxOutputTokens }),
   };
   return new GlmAdapter({

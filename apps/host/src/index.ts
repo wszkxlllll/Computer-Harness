@@ -6,6 +6,8 @@ import {
   ApplicationSession,
   createFileRemoteAssetReader,
   createWindowTargetDiscovery,
+  defaultEnvironmentOwner,
+  environmentIdentityForConfig,
   resolveManagedBrowserProfileConfig,
   type ApplicationSessionConfig,
   type ProviderCredentials,
@@ -15,6 +17,9 @@ import { HostRelayConnector } from "@computer-harness/relay-connector";
 import type { RunModel } from "@computer-harness/app-runtime";
 import { createHostServer } from "./server.js";
 import { parseGlmOutputBudget } from "./glm-output-budget.js";
+import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
+import { HostVoiceSessionService } from "./voice-session-service.js";
+import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 
 interface HostArguments {
   envFile: string;
@@ -42,7 +47,17 @@ async function main(): Promise<void> {
   const outputDir = resolve(args.output);
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
-  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=enabled requestTimeoutMs=90000\n`);
+  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} requestTimeoutMs=90000\n`);
+  const environmentOwner = defaultEnvironmentOwner;
+  const environmentIdentity = environmentIdentityForConfig(config.computer);
+  const managedBrowserProfileService = new ManagedBrowserProfileService({
+    socketPath: args.socket,
+    profileLabel: managedBrowserProfile.profileLabel,
+    profileRoot: managedBrowserProfile.profileRoot,
+    environmentOwner,
+    environmentIdentity,
+  });
+  await managedBrowserProfileService.getState();
   const windowDiscovery = createWindowTargetDiscovery(config.computer);
   if (windowDiscovery === undefined) throw new Error("Mobile Host requires the CUA backend's read-only window discovery.");
   const dependencies = {
@@ -54,6 +69,7 @@ async function main(): Promise<void> {
     config,
     dependencies,
     windowDiscovery,
+    owner: environmentOwner,
   });
   const capabilities = {
     pause: true,
@@ -63,10 +79,16 @@ async function main(): Promise<void> {
     approval: true,
     windowHandoff: config.windowHandoff === "confirm-v1",
   } as const;
+  const voiceProvider = createConfiguredVoiceProvider();
+  const voiceInput = new HostVoiceSessionService(voiceProvider === undefined ? {} : { provider: voiceProvider });
   const api = new ApplicationRemoteRunApi({
     session,
     capabilities,
+    // The Host permits safe dynamic notice text; each phone must explicitly
+    // opt in when starting the Run. Sensitive text is still redacted by the projector.
+    runNotices: { enabled: true, dynamicContentEnabled: true },
     managedBrowserProfile,
+    managedBrowserProfileCoordinator: managedBrowserProfileService,
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
   });
@@ -101,6 +123,8 @@ async function main(): Promise<void> {
       unregisterPairingToken: (pairingId: string) => relay?.unregisterPairingToken(pairingId),
       revokeDeviceSession: (deviceId: string) => relay?.revokeDeviceSession(deviceId),
     }),
+    voiceInput,
+    managedBrowserProfile: managedBrowserProfileService,
     staticRoot: webRoot,
     port: args.port,
   });
@@ -237,11 +261,7 @@ function createSessionConfig(
     // blocking a phone-driven action while the interaction path is under test.
     monitor: "shadow",
     windowHandoff: "confirm-v1",
-    // glm-5.3-flash is a reasoning-only model on the configured API account;
-    // sending thinking=disabled returns HTTP 400/1210. Keep the wire mode
-    // compatible and bound its output below instead of using an unsupported
-    // disable switch.
-    glmThinking: "enabled",
+    glmThinking: readGlmThinking(process.env.GLM_THINKING),
     glmMaxOutputTokens: args.glmMaxOutputTokens,
     // GLM can take longer on image-heavy turns; allow one bounded 90-second
     // response window while keeping the runtime's single retry finite.
@@ -268,6 +288,12 @@ function readProviderCredentials(): ProviderCredentials {
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
+}
+
+function readGlmThinking(value: string | undefined): "enabled" | "low" | "high" | "max" {
+  return value === "enabled" || value === "low" || value === "high" || value === "max"
+    ? value
+    : "enabled";
 }
 
 async function loadEnvFile(path: string): Promise<void> {

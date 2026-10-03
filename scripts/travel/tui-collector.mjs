@@ -168,6 +168,68 @@ function reportSource(summary, events) {
   return null;
 }
 
+function recoveryReportSource(summary, events, runId) {
+  const report = summary?.recoveryReport;
+  if (typeof runId !== "string" || summary?.runId !== runId || !isRecord(report) || report.runId !== runId ||
+      report.schemaVersion !== 1 || report.kind !== "program_run_evidence" ||
+      report.source !== "committed_runtime_events_and_reducer" ||
+      !["succeeded", "failed", "cancelled", "budget_exhausted", "outcome_unknown"].includes(report.runtimeOutcome) ||
+      report.businessResult !== "not_assessed" || !isRecord(report.modelReply) || !isRecord(report.budget) ||
+      !isRecord(report.unknownSideEffects) || !Array.isArray(report.evidenceEvents) ||
+      (report.latestObservation !== null && !isRecord(report.latestObservation)) ||
+      (report.planState !== undefined && (!isRecord(report.planState) || !Array.isArray(report.planState.tasks))) ||
+      (report.memoryState !== undefined && (!isRecord(report.memoryState) || !Array.isArray(report.memoryState.facts) || !Array.isArray(report.memoryState.entities)))) {
+    return null;
+  }
+  const latestObservationEvent = currentObservationEvent(events);
+  if (report.latestObservation === null) {
+    if (latestObservationEvent !== undefined) return null;
+  } else if (latestObservationEvent === undefined || latestObservationEvent.eventId !== report.latestObservation.sourceEventId ||
+      latestObservationEvent.observation?.id !== report.latestObservation.observationId ||
+      canonicalObservationCapturedAt(latestObservationEvent.observation?.capturedAt) !== report.latestObservation.capturedAt) {
+    return null;
+  }
+  return report;
+}
+
+function currentObservationEvent(events) {
+  let current;
+  const pendingWindowSwitchActions = new Set();
+  const orderedEvents = [...events].sort((left, right) => Number(left?.sequence ?? 0) - Number(right?.sequence ?? 0));
+  for (const event of orderedEvents) {
+    if (event?.type === "observation.created") {
+      current = event;
+      continue;
+    }
+    if (event?.type === "computer.window.handoff.completed" || event?.type === "computer.window.handoff.ignored") {
+      current = undefined;
+    }
+    if (event?.type === "action.execution.started" && isRecord(event.action) && event.action.kind === "switch_window" && typeof event.action.actionId === "string") {
+      pendingWindowSwitchActions.add(event.action.actionId);
+      current = undefined;
+    }
+    if ((event?.type === "action.execution.completed" || event?.type === "action.execution.failed") && isRecord(event.receipt) &&
+        typeof event.receipt.actionId === "string" && pendingWindowSwitchActions.has(event.receipt.actionId)) {
+      current = undefined;
+      pendingWindowSwitchActions.delete(event.receipt.actionId);
+    }
+    if (event?.type === "run.finished" && pendingWindowSwitchActions.size > 0) current = undefined;
+  }
+  return current;
+}
+
+function reportToken(value, maxLength = 128) {
+  return typeof value === "string"
+    ? value.replace(/[\u0000-\u001f\u007f`|]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, maxLength)
+    : "unknown";
+}
+
+function canonicalObservationCapturedAt(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === value ? value : null;
+}
+
 function goalSource(summary, events, runId) {
   if (typeof summary?.goal === "string") return { source: "summary.goal", text: summary.goal };
   if (runId === null) return null;
@@ -203,7 +265,7 @@ function manualReviewText({ sessionId, runDirectory, runId, taskId }) {
   ].join("\n");
 }
 
-function reportText({ sessionId, runDirectory, runId, taskId, metrics, summary, report, conflict }) {
+function reportText({ sessionId, runDirectory, runId, taskId, metrics, summary, report, recoveryReport, conflict }) {
   const lines = [
     "# Travel TUI Run report",
     "",
@@ -224,6 +286,59 @@ function reportText({ sessionId, runDirectory, runId, taskId, metrics, summary, 
         ? ["未产生最终回复，未导出原始回复。"]
         : [`<!-- source: ${report.source} -->`, report.text]),
   ];
+  lines.push("", "## Program-generated Runtime evidence");
+  if (conflict) {
+    lines.push("数据冲突，未导出运行证据摘要。Runtime outcome 和业务结果仍不得混同。");
+  } else if (recoveryReport === null) {
+    lines.push("此 summary 没有兼容的程序运行证据报告；旧 schema 继续按原始模型回复和轨迹字段读取。");
+  } else {
+    lines.push(
+      "程序报告由已提交 Runtime 事件与重放状态生成，不是模型回复，也不验证业务成功。",
+      `- Runtime outcome: ${reportToken(recoveryReport.runtimeOutcome, 48)}`,
+      `- Business result: ${reportToken(recoveryReport.businessResult, 48)}`,
+    );
+    if (typeof recoveryReport.notDeliveredNote === "string" && recoveryReport.notDeliveredNote.length > 0) {
+      lines.push(`- Delivery note: ${reportToken(recoveryReport.notDeliveredNote, 320)}`);
+    }
+    if (recoveryReport.latestObservation === null) {
+      lines.push("- Latest observation: unavailable in the committed event set.");
+    } else {
+      const capturedAt = typeof recoveryReport.latestObservation.capturedAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(recoveryReport.latestObservation.capturedAt)
+        ? recoveryReport.latestObservation.capturedAt
+        : "unknown";
+      lines.push(`- Latest observation: ${reportToken(recoveryReport.latestObservation.observationId)}; capturedAt: ${capturedAt}; source URL: unknown (not recorded).`);
+    }
+    const budget = recoveryReport.budget;
+    lines.push(`- Runtime budget: ${Number.isSafeInteger(budget.observed?.guiActions) ? budget.observed.guiActions : "unknown"}/${Number.isSafeInteger(budget.configured?.guiActions) ? budget.configured.guiActions : "unknown"} GUI actions; ${Number.isSafeInteger(budget.observed?.modelRequests) ? budget.observed.modelRequests : "unknown"}/${Number.isSafeInteger(budget.configured?.modelRequests) ? budget.configured.modelRequests : "unknown"} model requests.`);
+    if (Array.isArray(budget.exhaustedKinds) && budget.exhaustedKinds.length > 0) {
+      const refs = Array.isArray(budget.evidenceEventIds) ? budget.evidenceEventIds.map((value) => reportToken(value)).join(", ") : "unknown";
+      lines.push(`- Exhausted budget evidence: ${budget.exhaustedKinds.map((value) => reportToken(value, 48)).join(", ")} (events: ${refs || "unknown"}).`);
+    }
+    if (recoveryReport.unknownSideEffects.status === "unknown") {
+      const actions = Array.isArray(recoveryReport.unknownSideEffects.actionIds) ? recoveryReport.unknownSideEffects.actionIds.map((value) => reportToken(value)).join(", ") : "";
+      lines.push(`- Side-effect outcome: unknown${actions.length === 0 ? "" : ` for action ${actions}`}; inspect before further action, do not blindly replay.`);
+    }
+    if (recoveryReport.planState !== undefined) {
+      const tasks = recoveryReport.planState.tasks.map((task) => isRecord(task)
+        ? `${reportToken(task.id)}:${reportToken(task.status, 48)}@${reportToken(task.sourceEventId)}`
+        : "invalid_reference");
+      lines.push(`- Plan state references (not environment verification): ${tasks.join(", ") || "none recorded"}.`);
+    }
+    if (recoveryReport.memoryState !== undefined) {
+      const refs = [
+        ...recoveryReport.memoryState.facts.map((fact) => isRecord(fact) ? `fact ${reportToken(fact.id)}:${reportToken(fact.status, 48)}@${reportToken(fact.sourceEventId)}` : "invalid_fact_reference"),
+        ...recoveryReport.memoryState.entities.map((entity) => isRecord(entity) ? `entity ${reportToken(entity.id)}:${reportToken(entity.status, 48)}@${reportToken(entity.sourceEventId)}` : "invalid_entity_reference"),
+      ];
+      lines.push(`- Run Memory state references (model-authored, values omitted, not independently verified): ${refs.join(", ") || "none recorded"}.`);
+    }
+    if (recoveryReport.evidenceEvents.length > 0) {
+      const refs = recoveryReport.evidenceEvents.map((item) => isRecord(item)
+        ? `${reportToken(item.eventId)}:${reportToken(item.type, 48)}${typeof item.category === "string" ? `(${reportToken(item.category, 48)})` : ""}${typeof item.code === "string" ? `/${reportToken(item.code, 48)}` : ""}`
+        : "invalid_event_reference");
+      lines.push(`- Failure/error event references: ${refs.join(", ")}.`);
+    }
+  }
+  lines.push(`- Report data quality: ${metrics.dataQuality.status}; a partial report is not a pass.`);
   // report.text is intentionally inserted verbatim when IDs are consistent;
   // this is local evidence, not a claim that the task was correct.
   return lines.join("\n");
@@ -286,6 +401,7 @@ export async function collectRun(runDirectory, { root = TRAVEL_RUN_ROOT, session
   const runId = metrics.runId;
   const conflictingIds = metrics.dataQuality.runIds.length > 1 || metrics.dataQuality.eventDataIsolated === true;
   const report = conflictingIds ? null : reportSource(summary, events);
+  const recoveryReport = conflictingIds ? null : recoveryReportSource(summary, events, runId);
   const goal = conflictingIds ? null : goalSource(summary, events, runId);
   const metadata = {
     schemaVersion: 1,
@@ -305,15 +421,17 @@ export async function collectRun(runDirectory, { root = TRAVEL_RUN_ROOT, session
     businessOutcome: metrics.businessOutcome,
     dataQuality: metrics.dataQuality,
     report: {
-      status: report === null ? (conflictingIds ? "data_conflict" : "missing_source") : "written",
-      source: report?.source ?? null,
+      status: report !== null || recoveryReport !== null ? "written" : (conflictingIds ? "data_conflict" : "missing_source"),
+      source: report?.source ?? (recoveryReport === null ? null : "summary.recoveryReport"),
+      modelReplyStatus: report === null ? "missing_source" : "written",
+      recoveryEvidenceStatus: recoveryReport === null ? (conflictingIds ? "data_conflict" : "missing_source") : "written",
     },
   };
   await safeWriteJson(join(directory, "metrics.json"), metrics, "metrics.json");
   await safeWriteJson(join(directory, "run-metadata.json"), metadata, "run-metadata.json");
   await writeManualReviewOnce(join(directory, "manual-review.md"), manualReviewText({ sessionId, runDirectory: basename(directory), runId, taskId }));
   await assertNoSymlink(join(directory, "report.md"), "report.md");
-  await writeFile(join(directory, "report.md"), reportText({ sessionId, runDirectory: basename(directory), runId, taskId, metrics, summary, report, conflict: conflictingIds }), "utf8");
+  await writeFile(join(directory, "report.md"), reportText({ sessionId, runDirectory: basename(directory), runId, taskId, metrics, summary, report, recoveryReport, conflict: conflictingIds }), "utf8");
   return { ...safeRunResult({ runDirectory: directory, runId, taskId, metrics, reportStatus: metadata.report.status, changed: true }), reportSource: report?.source ?? null };
 }
 

@@ -7,7 +7,7 @@ describe("Host GLM output budget", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     expect(source).toContain('parseGlmOutputBudget(one("--glm-max-output-tokens"))');
     expect(source).toContain("glmMaxOutputTokens: args.glmMaxOutputTokens");
-    expect(source).toContain("max_tokens=${args.glmMaxOutputTokens} thinking=enabled requestTimeoutMs=90000");
+    expect(source).toContain("max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} requestTimeoutMs=90000");
   });
   it("uses the bounded 8192 default and accepts explicit supported overrides", () => {
     expect(parseGlmOutputBudget()).toBe(8192);

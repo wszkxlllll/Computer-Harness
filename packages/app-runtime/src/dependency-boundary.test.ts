@@ -33,6 +33,7 @@ describe("app-runtime dependency boundaries", () => {
           "@computer-harness/risk-guard",
           "@computer-harness/runtime",
           "@computer-harness/trajectory",
+          "@computer-harness/voice",
         ]),
       },
       {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import type { ActionIntent, AssetId, ComputerSessionId, ModelTurn, ObservationCapture, ObservationId, RunId, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { ActionIntent, AssetId, ComputerSessionId, ModelTurn, ObservationCapture, ObservationId, RunId, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import {
   DefaultRuntimePolicy,
   RunController,
@@ -25,6 +25,7 @@ const context = { runId, session: {} as never, signal: new AbortController().sig
 
 const loopRunId = "planning-loop" as RunId;
 const loopViewport: Viewport = { width: 100, height: 100, coordinateSpace: "physical" };
+const loopSurfaceRef = { surfaceId: "planning-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 describe("ExecutionSegment tools", () => {
   it("creates a short-lived segment that is distinct from PlanningTask state", async () => {
@@ -72,7 +73,7 @@ class NoGuiComputer implements Computer {
 
   public async observe(_session: ComputerSession, _observationId: ObservationId, signal: AbortSignal): Promise<ObservationCapture> {
     signal.throwIfAborted();
-    return { capturedAt: "2026-09-07T00:00:00.000Z", viewport: loopViewport, screenshot: { mediaType: "image/png", data: new Uint8Array([1]) } };
+    return { capturedAt: "2026-09-07T00:00:00.000Z", viewport: loopViewport, surfaceRef: loopSurfaceRef, screenshot: { mediaType: "image/png", data: new Uint8Array([1]) } };
   }
 
   public async execute(_session: ComputerSession, _action: ActionIntent, _signal: AbortSignal): Promise<never> {

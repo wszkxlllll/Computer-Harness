@@ -38,6 +38,8 @@ export interface ProviderSummaryOptions {
   allowedToolNames?: ReadonlySet<string> | readonly string[];
   /** Provider model selected by trusted local configuration. */
   trustedModel?: string;
+  /** True only when the outbound request requires a flat JSON ModelTurn in message.content. */
+  structuredContentExpected?: boolean;
 }
 
 export interface ProviderUsageOptions {
@@ -130,6 +132,12 @@ export function providerRequestToolProjection(body: Record<string, unknown>): Pr
   return { toolNames, allowedToolNames };
 }
 
+/** The wire request, not the provider/model label, determines whether content is a JSON envelope. */
+export function providerRequestRequiresStructuredContent(body: Record<string, unknown>): boolean {
+  const responseFormat = body.response_format;
+  return isPlainRecord(responseFormat) && responseFormat.type === "json_schema";
+}
+
 export function trustedProviderModel(value: unknown): string | null {
   return typeof value === "string" && TRUSTED_MODELS.has(value) ? value : null;
 }
@@ -147,7 +155,13 @@ export function summarizeProviderResponse(value: unknown, options: ProviderSumma
 
   const allowedToolNames = normalizeAllowedToolNames(options.allowedToolNames);
   const native = summarizeNativeCalls(message?.tool_calls, diagnostics, allowedToolNames);
-  const structuredProjection = summarizeStructuredContentProjection(message?.content, allowedToolNames);
+  const nativeToolCallsPresent = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
+  // Native function calls already carry their own JSON arguments. Do not reinterpret
+  // accompanying assistantText as a second, flat ModelTurn envelope. Content is
+  // parsed only when the actual request explicitly required the JSON-schema protocol.
+  const structuredProjection = options.structuredContentExpected === true && !nativeToolCallsPresent
+    ? summarizeStructuredContentProjection(message?.content, allowedToolNames)
+    : { summary: null, calls: [] };
   const structured = structuredProjection.summary;
   const structuredCalls = structuredProjection.calls;
   const calls = native.calls.length > 0 ? native.calls : structuredCalls;

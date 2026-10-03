@@ -59,7 +59,7 @@ describe("recording client diagnostic paths", () => {
       choices: [{
         finish_reason: "tool_calls",
         message: {
-          content: "",
+          content: "I selected a target from the current UIA observation.",
           tool_calls: [
             { id: "native-1", type: "function", function: { name: "type", arguments: JSON.stringify({ text: typedText, token: "token-secret" }) } },
             { id: "native-2", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 10, y: 20 }) } },
@@ -88,6 +88,8 @@ describe("recording client diagnostic paths", () => {
     expectForwarded(fake.requests[0], url, body, headers, signal);
     expect(record).toMatchObject({ provider: "glm", request: 1, requestedModel: "glm-5.3-flash", toolNames: ["type", "click"] });
     expect((record.response as Record<string, unknown>).toolCallCount).toBe(2);
+    expect((record.response as Record<string, unknown>).structuredContent).toBeNull();
+    expect((record.response as Record<string, unknown>).diagnosticCodes).not.toContain("structured_invalid_json");
     expect((record.response as Record<string, unknown>).usage).not.toHaveProperty("cachedReadTokens");
     expect((record.response as Record<string, unknown>).usage).toMatchObject({ diagnosticCodes: expect.arrayContaining(["usage_unknown_fields_omitted"]) });
     expect((record.response as Record<string, unknown>).toolCalls).toMatchObject([
@@ -150,6 +152,30 @@ describe("recording client diagnostic paths", () => {
     expect(serialized).not.toContain("private/file.txt");
     expect(serialized).not.toContain("example.invalid");
     expect(serialized).not.toContain("header-secret");
+  });
+
+  it("reports malformed assistant content for a Qwen request that actually requires strict JSON", async () => {
+    const fake = new FakeQwenHttpClient({
+      model: "qwen3.8-flash",
+      choices: [{ finish_reason: "stop", message: { content: "not-json" } }],
+    });
+    const directory = await mkdtemp(join(tmpdir(), "harness-qwen-malformed-strict-diagnostic-"));
+    const path = join(directory, "provider-exchanges.jsonl");
+    const recorder = new RecordingQwenHttpClient(path, "normalized_1000", "low", "strict_json", fake);
+    const body = {
+      model: "qwen3.8-flash",
+      response_format: { type: "json_schema", json_schema: { schema: { type: "object", properties: { calls: { type: "array" } } } } },
+      messages: [{ role: "user", content: "synthetic request" }],
+    };
+
+    await expect(recorder.post("https://example.invalid/qwen", body, {}, new AbortController().signal)).resolves.toBeDefined();
+
+    const record = await readRecord(path);
+    expect((record.response as Record<string, unknown>).structuredContent).toMatchObject({
+      json: false,
+      diagnosticCodes: ["structured_invalid_json"],
+    });
+    expect((record.response as Record<string, unknown>).diagnosticCodes).toContain("structured_invalid_json");
   });
 
   it("does not persist safe-looking secrets from either recorder response", async () => {

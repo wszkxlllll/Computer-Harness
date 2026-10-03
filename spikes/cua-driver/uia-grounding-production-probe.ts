@@ -172,7 +172,7 @@ function observationFrame(
   runId: RunId,
   observationId: ObservationId,
   session: { id: string },
-  capture: { capturedAt: string; viewport: Viewport; grounding?: GroundingCatalog },
+  capture: { capturedAt: string; viewport: Viewport; surfaceRef: ObservationFrame["surfaceRef"]; grounding?: GroundingCatalog },
 ): ObservationFrame {
   return {
     id: observationId,
@@ -180,6 +180,7 @@ function observationFrame(
     computerSessionId: session.id as ObservationFrame["computerSessionId"],
     capturedAt: capture.capturedAt,
     viewport: capture.viewport,
+    surfaceRef: capture.surfaceRef,
     screenshot: { assetId: `${String(observationId)}-asset` as ObservationFrame["screenshot"]["assetId"], relativePath: `screenshots/${String(observationId)}.png`, mediaType: "image/png", byteLength: 1 },
     ...(capture.grounding === undefined ? {} : { grounding: capture.grounding }),
   };

@@ -2,13 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { ComputerSessionId, RunId, RunOutcome, Viewport } from "@computer-harness/protocol";
+import type { ComputerSessionId, RunId, RunOutcome, SurfaceId, Viewport } from "@computer-harness/protocol";
 import type { Computer, ComputerSession, RunController, ProviderAdapter } from "@computer-harness/runtime";
 import type { RunHandle, ResolvedRunConfig } from "./config.js";
 import { ApplicationSession, type ApplicationSessionConfig } from "./application-session.js";
 import { createRun } from "./run-factory.js";
 import { createRunEventFeed } from "./event-feed.js";
 import { environmentIdentityForConfig, InProcessEnvironmentOwner } from "./environment-owner.js";
+
+const fixtureSurfaceRef = { surfaceId: "application-session-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 function baseConfig(outputDir: string, bridgeUrl = "http://fixture-a"): ApplicationSessionConfig {
   return {
@@ -129,7 +131,7 @@ describe("ApplicationSession", () => {
     const computerSession: ComputerSession = { id: "session-real" as ComputerSessionId, backend: "fixture", viewport, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false }, openedAt: "2026-09-17T00:00:00.000Z" };
     const computer: Computer = {
       async open() { return computerSession; },
-      async observe() { return { capturedAt: "2026-09-17T00:00:00.000Z", viewport, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) } }; },
+      async observe() { return { capturedAt: "2026-09-17T00:00:00.000Z", viewport, surfaceRef: fixtureSurfaceRef, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) } }; },
       async execute() { throw new Error("fixture should not execute"); },
       async close() {},
     } as unknown as Computer;
@@ -311,7 +313,7 @@ describe("ApplicationSession", () => {
       };
       return {
         async open() { return computerSession; },
-        async observe() { return { capturedAt: "2026-09-21T00:00:00.000Z", viewport, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) } }; },
+        async observe() { return { capturedAt: "2026-09-21T00:00:00.000Z", viewport, surfaceRef: fixtureSurfaceRef, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) } }; },
         async execute(_session: ComputerSession, action: import("@computer-harness/protocol").ActionIntent) { return { actionId: action.actionId, status: "completed" as const }; },
         async close() {},
       } satisfies Computer;

@@ -11,6 +11,8 @@
     "@computer-harness/app-runtime": "workspace:*",
     "@computer-harness/protocol": "workspace:*",
     "@computer-harness/relay-connector": "workspace:*",
+    "@computer-harness/voice": "workspace:*",
+    "@computer-harness/voice-provider-qwen": "workspace:*",
     "fastify": "5.12.5"
   }
 }

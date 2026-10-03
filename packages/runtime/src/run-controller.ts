@@ -3,6 +3,9 @@ import type {
   ActionId,
   ApprovalEvidence,
   ComputerWindowCandidate,
+  ComputerWindowOption,
+  ComputerSessionId,
+  ComputerSessionDescriptor,
   ActionEffectDeclaration,
   ActionIntent,
   AssetId,
@@ -18,6 +21,8 @@ import type {
   ObservationFrame,
   ObservationId,
   RunId,
+  SurfaceRef,
+  RunAssistantPreferencesSnapshot,
   RunOutcome,
   RuntimeEvent,
   RuntimeEventData,
@@ -66,6 +71,7 @@ import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeated
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 import { DeterministicGroundingSelector, type GroundingSelector, type GroundingSelectionQuery, type GroundingStructuredToolHint } from "./grounding-selector.js";
 import { finishSummaryRejectionReason } from "./finish-summary.js";
+import { currentObservationAssessmentBinding, parseObservationAssessment } from "./observation-assessment.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -103,6 +109,8 @@ export interface RunControllerDependencies {
   memoryMutationApplier?: (runId: RunId, mutation: MemoryMutation) => Promise<void>;
   /** One immutable source for prompt, Runtime and Registry feature semantics. */
   features?: RunFeatureConfig;
+  /** User-level response preferences frozen for this Run; never affects action policy. */
+  assistantPreferences?: RunAssistantPreferencesSnapshot;
   /** Disabled by default so the existing one-computer-call baseline is stable. */
   batching?: "off" | "same-control-input-v1";
   /** Runtime-owned, deterministic hot-element projection; Computer stays context-agnostic. */
@@ -116,6 +124,8 @@ export interface RunControllerDependencies {
    */
   onEventCommitted?: CommittedEventListener;
   windowHandoff?: "off" | "confirm-v1";
+  /** Explicit per-Run opt-in for model-directed switches among opened windows. */
+  windowSwitch?: "off" | "opened-windows-v1";
 }
 
 export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close" | "planning_module.close" | "memory_module.close";
@@ -262,6 +272,7 @@ interface PendingApproval {
   session: ComputerSession;
   preparedAction?: PreparedComputerAction;
   executionObservationId?: ObservationId;
+  executionSurfaceRef?: SurfaceRef;
 }
 
 interface PreparedComputerAction {
@@ -271,6 +282,7 @@ interface PreparedComputerAction {
 
 interface ObservationFingerprint {
   readonly sessionId: string;
+  readonly surfaceRef: SurfaceRef;
   readonly mediaType: string;
   readonly byteLength: number;
   readonly viewport: ObservationFrame["viewport"];
@@ -308,6 +320,7 @@ export class RunController {
   private readonly provider: ProviderAdapter;
   private readonly computer: Computer;
   private readonly windowHandoff: "off" | "confirm-v1";
+  private readonly windowSwitch: "off" | "opened-windows-v1";
   private activeComputerSession: ComputerSession | undefined;
   private readonly contextCompiler: ContextCompiler;
   private readonly toolRegistry: ToolRegistry;
@@ -329,12 +342,18 @@ export class RunController {
   private readonly batching: "off" | "same-control-input-v1";
   private readonly groundingSelector: GroundingSelector;
   private readonly features: RunFeatureConfig;
+  private readonly assistantPreferences: RunAssistantPreferencesSnapshot | undefined;
   private readonly monitorMode: MonitorPolicyMode;
   private readonly cleanupDeadlineMs: number;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
   /** Full bounded adapter catalog for the latest observation; the model only sees the hot projection. */
   private readonly groundingCandidates = new Map<string, import("@computer-harness/protocol").GroundingCatalog>();
+  /** Most recent explicit window inventory; kept across ordinary observations. */
+  private latestWindowOptions: readonly ComputerWindowOption[] | undefined;
+  /** Human-readable evidence for the active binding, separate from expiring refs. */
+  private activeWindowMetadataSnapshot: { readonly appName?: string; readonly title?: string } | undefined;
+  private readonly endedMemorySessionIds = new Set<ComputerSessionId>();
   private readonly callStates = new Map<ToolCallId, CallState>();
   private readonly actionCallIds = new Map<ActionId, ToolCallId>();
   private readonly commandInbox = new CommandInbox();
@@ -365,13 +384,13 @@ export class RunController {
   private monitorProposalCount = 0;
   private monitorLastPersistedKey: string | undefined;
   private monitorLastPartitionKey: string | undefined;
-  private sessionMemoryScopeEnded = false;
 
   public constructor(dependencies: RunControllerDependencies) {
     this.runId = dependencies.runId;
     this.provider = dependencies.provider;
     this.computer = dependencies.computer;
     this.windowHandoff = dependencies.windowHandoff ?? "off";
+    this.windowSwitch = dependencies.windowSwitch ?? "off";
     this.contextCompiler = dependencies.contextCompiler;
     this.toolRegistry = dependencies.toolRegistry;
     this.policy = dependencies.policy;
@@ -392,6 +411,9 @@ export class RunController {
       memory: this.enabledCategories.has("side") ? "facts-v1" : "off",
       batching: this.batching,
     };
+    this.assistantPreferences = dependencies.assistantPreferences === undefined
+      ? undefined
+      : Object.freeze({ ...dependencies.assistantPreferences });
     this.monitorMode = this.features.monitor ?? "off";
     if (this.monitorMode !== "off") {
       this.monitorState = createProgressMonitorState(this.runId);
@@ -412,6 +434,10 @@ export class RunController {
       modelRequestCount: 0,
       guardEvaluationCount: 0,
       riskModelRequestCount: 0,
+      surfaceLineage: [],
+      surfaceGenerationHighWater: {},
+      surfaceParentsById: {},
+      legacyComputerSessionAliases: [],
       plan: { runId: this.runId, tasks: [] },
       memory: { runId: this.runId, facts: [], entities: [] },
     };
@@ -477,6 +503,9 @@ export class RunController {
     if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.listWindowHandoffCandidates === undefined) {
       throw new Error("no window handoff is waiting for candidate discovery");
     }
+    // The legacy picker discovery may refresh the adapter's shared inventory
+    // and expire model-visible windowRefs even if the Host later chooses C.
+    this.latestWindowOptions = undefined;
     return this.computer.listWindowHandoffCandidates(this.activeComputerSession, signal);
   }
 
@@ -485,6 +514,7 @@ export class RunController {
       throw new Error("no window handoff is waiting for candidate discovery");
     }
     if (this.computer.listNewWindowHandoffCandidates === undefined) return [];
+    this.latestWindowOptions = undefined;
     return this.computer.listNewWindowHandoffCandidates(this.activeComputerSession, signal);
   }
 
@@ -524,8 +554,19 @@ export class RunController {
   public getEffectiveToolNames(): readonly string[] {
     return this.toolRegistry.modelTools(this.toolAudience, {
       enabledCategories: [...this.enabledCategories],
-      ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
+      enabledToolNames: this.modelEnabledToolNames(),
     }).map((tool) => tool.name);
+  }
+
+  private windowSwitchAvailable(): boolean {
+    return this.windowSwitch === "opened-windows-v1" && this.computer.listWindows !== undefined;
+  }
+
+  private modelEnabledToolNames(): string[] {
+    const names = this.enabledToolNames === undefined
+      ? this.toolRegistry.list().map((definition) => definition.name)
+      : [...this.enabledToolNames];
+    return names.filter((name) => this.isToolEnabled(name));
   }
 
   private async run(goal: string): Promise<RunOutcome> {
@@ -542,8 +583,6 @@ export class RunController {
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
       this.activeComputerSession = session;
-      const restrictedToolNames = restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, this.enabledToolNames === undefined ? undefined : [...this.enabledToolNames]);
-      this.enabledToolNames = restrictedToolNames === undefined ? undefined : new Set(restrictedToolNames);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 
@@ -566,6 +605,7 @@ export class RunController {
             const pending = this.approvedPendingApproval;
             this.approvedPendingApproval = undefined;
             await this.executeApprovedCall(pending);
+            session = this.activeComputerSession ?? session;
           }
           if ((this.snapshot.status as string) === "running" && this.pendingToolTurn !== undefined) {
             const pendingTurn = this.pendingToolTurn;
@@ -575,6 +615,7 @@ export class RunController {
             } else {
               await this.executePendingEntries(pendingTurn);
             }
+            session = this.activeComputerSession ?? session;
           }
           continue;
         }
@@ -621,17 +662,27 @@ export class RunController {
           turn = pendingModelTurn.turn;
         } else {
           if (turn === undefined) {
+          const currentWindow = this.currentWindowMetadata();
+          const windowSwitchState = this.windowSwitchAvailable()
+            ? {
+                ...(currentWindow === undefined ? {} : { currentWindow }),
+                ...(this.latestWindowOptions === undefined ? {} : { options: this.latestWindowOptions }),
+              }
+            : undefined;
           const context = await this.contextCompiler.compile(
             {
               runId: this.runId,
               goal,
               recentEvents: this.events,
               enabledCategories: [...this.enabledCategories],
+              enabledToolNames: this.modelEnabledToolNames(),
               ...(this.planningEnabled ? { plan: this.snapshot.plan } : {}),
               ...(this.snapshot.executionSegment === undefined ? {} : { executionSegment: this.snapshot.executionSegment }),
               ...(this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
-              ...(this.enabledToolNames === undefined ? {} : { enabledToolNames: [...this.enabledToolNames] }),
+              ...(this.snapshot.computerSession === undefined ? {} : { computerSession: this.snapshot.computerSession }),
+              ...(windowSwitchState === undefined ? {} : { windowSwitchState }),
               features: this.features,
+              ...(this.assistantPreferences === undefined ? {} : { assistantPreferences: this.assistantPreferences }),
               ...(this.monitorPendingGuidance === undefined ? {} : { monitorGuidance: this.monitorPendingGuidance }),
                ...(this.latestObservation === undefined ? {} : { latestObservation: this.observationForContext(this.latestObservation) }),
             },
@@ -769,6 +820,7 @@ export class RunController {
           }
 
           this.throwIfAborted();
+          turn = this.validateTurnObservationAssessment(turn);
           await this.commitEvent({
             type: "model.response.received",
             turn,
@@ -845,6 +897,7 @@ export class RunController {
           continue;
         }
         await this.processToolCalls(session, turn.calls);
+        session = this.activeComputerSession ?? session;
         // A planning/memory-only turn does not create a new Observation. Give
         if ((this.snapshot.status as string) === "paused") {
           continue;
@@ -889,7 +942,7 @@ export class RunController {
       return outcome;
     } finally {
       this.commandInbox.close();
-      await this.cleanup(session);
+      await this.cleanup(this.activeComputerSession ?? session);
       this.activeComputerSession = undefined;
     }
   }
@@ -905,6 +958,7 @@ export class RunController {
       });
     }
     this.latestObservationFingerprint = undefined;
+    this.latestWindowOptions = undefined;
   }
 
   private async closeComputerResources(session: ComputerSession | undefined): Promise<void> {
@@ -1035,6 +1089,41 @@ export class RunController {
     await this.observeAndCommit(session);
   }
 
+  /** Shared reset after the private binding changes (or a confirmed popup is
+   * ignored). Old frames, grounding and deferred model work cannot cross this
+   * boundary. */
+  private resetAfterTargetTransition(
+    session: ComputerSession,
+    deferObservation: boolean,
+    invalidateWindowOptions = true,
+    activeWindow?: { readonly appName?: string; readonly title?: string },
+  ): void {
+    this.activeComputerSession = session;
+    this.activeWindowMetadataSnapshot = activeWindow;
+    this.latestObservation = undefined;
+    this.latestObservationFingerprint = undefined;
+    this.groundingCandidates.clear();
+    this.groundingRecoveryHint = undefined;
+    if (invalidateWindowOptions) this.latestWindowOptions = undefined;
+    if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
+    if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+    this.pendingReobserve = deferObservation;
+  }
+
+  /** Drop all target-dependent state when switch execution cannot establish
+   * a trustworthy new binding. The Run must terminate after recording this. */
+  private invalidateTargetAfterFailedSwitch(): void {
+    this.latestObservation = undefined;
+    this.latestObservationFingerprint = undefined;
+    this.activeWindowMetadataSnapshot = undefined;
+    this.latestWindowOptions = undefined;
+    this.groundingCandidates.clear();
+    this.groundingRecoveryHint = undefined;
+    if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
+    if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+    this.pendingReobserve = false;
+  }
+
   private async rejectModelTurn(turn: Extract<ModelTurn, { type: "tool_calls" }>, reason: string): Promise<void> {
     for (const call of turn.calls) {
       if (this.callStates.has(call.id)) continue;
@@ -1119,6 +1208,11 @@ export class RunController {
         if (pending === undefined || pending.requestId !== command.requestId) {
           throw new Error(`approval ${command.requestId} has no pending ToolCall`);
         }
+        if (command.approved && pending.definition.category === "computer" &&
+            (pending.executionSurfaceRef === undefined || pending.executionSurfaceRef.kind === "unknown" ||
+              this.latestObservation === undefined || !sameSurfaceRef(this.latestObservation.surfaceRef, pending.executionSurfaceRef))) {
+          throw new Error("LEGACY_SURFACE_UNRESOLVED: approval has no current, generation-bound Surface evidence");
+        }
         await this.commitEvent({
           type: "approval.resolved",
           requestId: command.requestId,
@@ -1145,6 +1239,9 @@ export class RunController {
         if (this.snapshot.status !== "paused") {
           throw new Error(`resume requires paused status, got ${this.snapshot.status}`);
         }
+        if (this.snapshot.activeSurfaceRef?.kind === "unknown" || this.latestObservation?.surfaceRef.kind === "unknown") {
+          throw new Error("LEGACY_SURFACE_UNRESOLVED: paused Run cannot resume from an Observation without a resolvable live Surface");
+        }
         await this.commitEvent({ type: "run.resumed" });
         return { correction: false };
       case "window_handoff":
@@ -1156,6 +1253,10 @@ export class RunController {
         }
         {
           const session = await this.computer.handoffWindow(this.activeComputerSession, command.candidate, this.abortController.signal);
+          this.resetAfterTargetTransition(session, true, true, {
+            ...(command.candidate.appName === undefined ? {} : { appName: command.candidate.appName }),
+            ...(command.candidate.title === undefined ? {} : { title: command.candidate.title }),
+          });
           try {
             await this.commitEvent({ type: "computer.window.handoff.completed", target: { pid: command.candidate.pid, windowId: command.candidate.windowId }, session });
           } catch (error) {
@@ -1164,14 +1265,6 @@ export class RunController {
             this.abortController.abort(new Error("window handoff could not be recorded", { cause: error }));
             throw error;
           }
-          this.activeComputerSession = session;
-          this.latestObservation = undefined;
-          this.latestObservationFingerprint = undefined;
-          this.groundingCandidates.clear();
-          this.groundingRecoveryHint = undefined;
-          if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
-          if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
-          this.pendingReobserve = true;
           return { correction: true };
         }
       case "ignore_new_window":
@@ -1188,13 +1281,7 @@ export class RunController {
           await this.commitEvent({ type: "computer.window.handoff.ignored", sourceActionId });
           // Drop every old frame/grounding reference before observing the
           // still-bound target. No action from the completed decision is replayed.
-          this.latestObservation = undefined;
-          this.latestObservationFingerprint = undefined;
-          this.groundingCandidates.clear();
-          this.groundingRecoveryHint = undefined;
-          if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
-          if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
-          this.pendingReobserve = false;
+          this.resetAfterTargetTransition(session, false, true, this.activeWindowMetadataSnapshot);
           try {
             await this.observeAndCommit(session);
           } catch (error) {
@@ -1211,6 +1298,7 @@ export class RunController {
   private async requestApproval(candidate: Omit<PendingApproval, "requestId">, baseReason: string): Promise<void> {
     let preparedAction = candidate.preparedAction;
     let executionObservationId: ObservationId | undefined;
+    let executionSurfaceRef: SurfaceRef | undefined;
     let evidence: ApprovalEvidence | undefined;
     let actions: import("@computer-harness/protocol").ActionGuardActionSummary[] | undefined;
     let reason = baseReason;
@@ -1293,9 +1381,19 @@ export class RunController {
         return;
       }
 
+      if (decisionObservation.surfaceRef.kind === "unknown" || evidenceObservation.surfaceRef.kind === "unknown") {
+        await this.rejectToolCall(candidate.call.id, "LEGACY_SURFACE_UNRESOLVED: approval cannot bind an action to a legacy unknown Surface");
+        return;
+      }
+      if (!sameSurfaceRef(decisionObservation.surfaceRef, evidenceObservation.surfaceRef)) {
+        await this.rejectToolCall(candidate.call.id, "the action Observation and approval screenshot belong to different Surface generations; propose again on the current Surface");
+        return;
+      }
+
       const executionObservation = this.currentExecutionObservation();
       try {
-        if (executionObservation === undefined || executionObservation.id !== evidenceObservation.id) {
+        if (executionObservation === undefined || executionObservation.id !== evidenceObservation.id ||
+            !sameSurfaceRef(executionObservation.surfaceRef, evidenceObservation.surfaceRef)) {
           throw new Error("fresh approval observation is not current");
         }
         validateActionIntent(preparedAction.action, {
@@ -1309,12 +1407,14 @@ export class RunController {
       }
 
       executionObservationId = evidenceObservation.id;
+      executionSurfaceRef = evidenceObservation.surfaceRef;
       evidence = {
         observationId: evidenceObservation.id,
         decisionObservationId,
         assetId: evidenceObservation.screenshot.assetId,
         capturedAt: evidenceObservation.capturedAt,
         viewport: { ...evidenceObservation.viewport },
+        surfaceRef: decisionObservation.surfaceRef,
       };
       actions = [summarizeGuardAction(preparedAction.action)];
       reason = approvalHumanReviewReason(baseReason, preparedAction.action);
@@ -1336,26 +1436,26 @@ export class RunController {
       requestId,
       ...(preparedAction === undefined ? {} : { preparedAction }),
       ...(executionObservationId === undefined ? {} : { executionObservationId }),
+      ...(executionSurfaceRef === undefined ? {} : { executionSurfaceRef }),
     };
   }
 
   private async executeApprovedCall(pending: PendingApproval): Promise<void> {
-    let context: ToolExecutionContext = {
-      runId: this.runId,
-      session: pending.session,
-      signal: this.abortController.signal,
-      ...this.currentExecutionObservationContext(),
-    };
+    let context = this.toolExecutionContext(pending.session);
     if (pending.definition.category === "computer") {
       const observation = this.latestObservation;
       const executionObservationId = pending.executionObservationId;
       if (pending.preparedAction === undefined || executionObservationId === undefined
         || observation === undefined || observation.id !== executionObservationId
         || observation.computerSessionId !== pending.session.id
+        || pending.executionSurfaceRef === undefined || !sameSurfaceRef(observation.surfaceRef, pending.executionSurfaceRef)
         || this.activeComputerSession?.id !== pending.session.id) {
+        const legacy = pending.executionSurfaceRef?.kind === "unknown" || observation?.surfaceRef.kind === "unknown";
         await this.rejectToolCall(
           pending.call.id,
-          "the request-bound approval screenshot is no longer the current observation; the computer action was not executed",
+          legacy
+            ? "LEGACY_SURFACE_UNRESOLVED: an approval from a legacy unknown Surface cannot authorize execution"
+            : "the request-bound approval screenshot is no longer the current observation; the computer action was not executed",
         );
         return;
       }
@@ -1366,6 +1466,12 @@ export class RunController {
           pending.call.id,
           "approval was superseded by a user control command; the computer action was not executed",
         );
+        return;
+      }
+      const currentApprovedObservation = this.latestObservation;
+      if (currentApprovedObservation === undefined || currentApprovedObservation.id !== executionObservationId ||
+          pending.executionSurfaceRef === undefined || !sameSurfaceRef(currentApprovedObservation.surfaceRef, pending.executionSurfaceRef)) {
+        await this.rejectToolCall(pending.call.id, "the approved screenshot Surface generation is no longer current; the computer action was not executed");
         return;
       }
       context = { ...context, ...this.currentExecutionObservationContext() };
@@ -1379,7 +1485,67 @@ export class RunController {
   }
 
   private isToolEnabled(name: string): boolean {
+    if ((name === "list_windows" || name === "switch_window") && !this.windowSwitchAvailable()) return false;
+    // Keep the Run's configured upper bound intact across window switches;
+    // only the current session and observed Surface determine availability.
+    const session = this.activeComputerSession;
+    if (session !== undefined && !restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, [name])?.includes(name)) return false;
+    if (name === "click") {
+      const surface = this.latestObservation?.surfaceRef.kind;
+      // A managed browser remains browser_tab while DOM is unavailable.
+      // Missing DOM must never restore coordinate clicking on that target.
+      if (surface === "browser_tab" || surface === "dom" || surface === "unknown") return false;
+    }
     return this.enabledToolNames === undefined || this.enabledToolNames.has(name);
+  }
+
+  private currentWindowMetadata(): { appName?: string; title?: string } | undefined {
+    return this.activeWindowMetadataSnapshot;
+  }
+
+  private toolExecutionContext(session: ComputerSession): ToolExecutionContext {
+    return {
+      runId: this.runId,
+      session,
+      signal: this.abortController.signal,
+      ...(this.windowSwitchAvailable() ? { listWindows: () => this.refreshWindowOptions(session) } : {}),
+      ...this.currentExecutionObservationContext(),
+    };
+  }
+
+  private async refreshWindowOptions(session: ComputerSession): Promise<readonly ComputerWindowOption[]> {
+    if (!this.windowSwitchAvailable() || this.computer.listWindows === undefined) {
+      throw new Error("window inventory is unavailable for this Run");
+    }
+    if (this.activeComputerSession?.id !== session.id || this.snapshot.computerSession?.id !== session.id || this.latestObservation?.computerSessionId !== session.id) {
+      throw new Error("window inventory requires the active Computer session and its current observation");
+    }
+    // The adapter may expire references as soon as refresh starts, including
+    // when discovery ultimately fails. Drop the old projection first.
+    this.latestWindowOptions = undefined;
+    const discovered = await this.computer.listWindows(session, this.abortController.signal);
+    this.throwIfAborted();
+    const options = validateComputerWindowOptions(discovered);
+    this.latestWindowOptions = options;
+    const current = options.filter((option) => option.isCurrent);
+    this.activeWindowMetadataSnapshot = current.length === 1
+      ? {
+          ...(current[0]!.appName === undefined ? {} : { appName: current[0]!.appName }),
+          ...(current[0]!.title === undefined ? {} : { title: current[0]!.title }),
+        }
+      : undefined;
+    return options;
+  }
+
+  private assertSwitchTargetWasListed(windowRef: string, session: ComputerSession): ComputerWindowOption {
+    if (!this.windowSwitchAvailable()) throw new Error("cross-window switching is disabled for this Run");
+    if (this.activeComputerSession?.id !== session.id || this.snapshot.computerSession?.id !== session.id) {
+      throw new Error("switch_window requires the active Computer session");
+    }
+    const matches = this.latestWindowOptions?.filter((option) => option.windowRef === windowRef) ?? [];
+    if (matches.length !== 1) throw new Error("switch_window.windowRef was not returned by the latest list_windows call");
+    if (matches[0]?.isCurrent === true) throw new Error("switch_window cannot select the current window");
+    return matches[0]!;
   }
 
   /** Internal execution view: the model still sees only the hot projection. */
@@ -1569,7 +1735,7 @@ export class RunController {
         preflight.push({ call, definition, rejection: `tool category ${definition.category} is disabled for this run` });
         continue;
       }
-      if (this.enabledToolNames !== undefined && !this.enabledToolNames.has(definition.name)) {
+      if (!this.isToolEnabled(definition.name)) {
         preflight.push({ call, definition, rejection: `tool ${definition.name} is disabled for this run` });
         continue;
       }
@@ -1606,12 +1772,7 @@ export class RunController {
     }
 
     if (this.actionPolicy !== undefined) {
-      const preparationContext: ToolExecutionContext = {
-        runId: this.runId,
-        session,
-        signal: this.abortController.signal,
-        ...this.currentExecutionObservationContext(),
-      };
+        const preparationContext = this.toolExecutionContext(session);
       for (const entry of preflight) {
         if (entry.rejection !== undefined || entry.definition?.category !== "computer") continue;
         try {
@@ -1628,11 +1789,16 @@ export class RunController {
     // Preserve the most specific schema/policy rejection when an entry is
     // already invalid; ordering is checked only after individual preflight.
     const orderRejection = preflight.some((entry) => entry.rejection !== undefined) ? undefined : validateCompositeCallOrder(preflight);
+    const isolatedTurnRejection = preflight.some((entry) => entry.definition?.category === "computer" && entry.definition.isolatedTurn)
+      && calls.length !== 1
+      ? "switch_window must be the only ToolCall in its ModelTurn"
+      : undefined;
     const batchAllowed = this.batching !== "off" && computerEntries > 1 && orderRejection === undefined && isSameControlInputBatch(calls, preflight);
     const hasApproval = preflight.some(
       (entry) => entry.rejection === undefined && entry.decision?.decision === "require_approval",
     );
-    const groupRejection = orderRejection
+    const groupRejection = isolatedTurnRejection
+      ?? orderRejection
       ?? (computerEntries > 1 && !batchAllowed
         ? this.batching === "off" ? "a ModelTurn may contain at most one computer ToolCall" : "computer calls do not match the same-control input batch shape"
         : preflight.find((entry) => entry.rejection !== undefined)?.rejection
@@ -1662,6 +1828,7 @@ export class RunController {
         runId: this.runId,
         goal,
         recentUserInputs: this.events.filter((event): event is Extract<RuntimeEvent, { type: "user.input.received" }> => event.type === "user.input.received").slice(-4).map((event) => event.text),
+        evaluatedSurfaceRef: decisionObservation.surfaceRef,
         candidate: {
           calls: computerPreflight.map((entry) => entry.call),
           actions: computerPreflight.map((entry) => entry.preparedAction.action),
@@ -1686,7 +1853,15 @@ export class RunController {
         }
         return afterGuard;
       }
-      await this.commitGuardDecision(computerPreflight, guardDecision);
+      const latestAfterGuard = this.latestObservation;
+      if (latestAfterGuard === undefined || latestAfterGuard.id !== decisionObservation.id ||
+          !sameSurfaceRef(latestAfterGuard.surfaceRef, decisionObservation.surfaceRef)) {
+        for (const call of calls) {
+          await this.rejectToolCall(call.id, "the observed Surface changed during Guard evaluation; observe the current Surface and propose again");
+        }
+        return { correction: false };
+      }
+      await this.commitGuardDecision(computerPreflight, guardDecision, decisionObservation.surfaceRef);
       if (guardDecision.decision === "deny") {
         for (const call of calls) await this.rejectToolCall(call.id, guardDecision.reason);
         return { correction: false };
@@ -1761,12 +1936,7 @@ export class RunController {
       if (entry === undefined || entry.rejection !== undefined || entry.definition === undefined) {
         throw new Error("internal preflight state is incomplete");
       }
-      const context: ToolExecutionContext = {
-        runId: this.runId,
-        session: pendingTurn.session,
-        signal: this.abortController.signal,
-        ...this.currentExecutionObservationContext(),
-      };
+      const context = this.toolExecutionContext(pendingTurn.session);
       this.throwIfAborted();
       if (entry.definition.category === "computer") {
         if (pendingTurn.batch) {
@@ -1946,10 +2116,13 @@ export class RunController {
     const executionObservationId = this.snapshot.latestObservationId;
     const preActionFingerprint = this.latestObservationFingerprint;
     let candidate: PreparedComputerAction;
+    let switchTarget: ComputerWindowOption | undefined;
     try {
       candidate = prepared ?? this.prepareComputerAction(call, definition, context, decisionObservationId);
       const action = candidate.action;
+      if (action.kind === "switch_window") switchTarget = this.assertSwitchTargetWasListed(action.windowRef, context.session);
       const executionObservation = this.currentExecutionObservation();
+      this.assertActionSurfaceBinding(action, executionObservation);
       validateActionIntent(action, {
         capabilities: context.session.capabilities,
         ...(executionObservation === undefined ? {} : { observation: executionObservation }),
@@ -2016,11 +2189,32 @@ export class RunController {
     let receipt: import("@computer-harness/protocol").ActionReceipt;
     try {
       const executeOptions: ComputerExecuteOptions = executionObservationId === undefined ? {} : { executionObservationId };
-      receipt = await this.computer.execute(context.session, action, this.abortController.signal, {
+      const rawReceipt = await this.computer.execute(context.session, action, this.abortController.signal, {
         ...executeOptions,
-        ...(this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
+        ...(action.kind !== "switch_window" && this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
       });
+      receipt = normalizeActionReceiptForAction(action, rawReceipt, context.session);
     } catch (error) {
+      if (action.kind === "switch_window") {
+        this.invalidateTargetAfterFailedSwitch();
+        const receipt: import("@computer-harness/protocol").ActionReceipt = {
+          actionId: action.actionId,
+          status: "failed",
+          driverCode: "WINDOW_SWITCH_OUTCOME_UNKNOWN",
+          message: errorMessage(error),
+        };
+        await this.commitEvent({ type: "action.execution.failed", receipt });
+        const result: ToolResult = {
+          callId: call.id,
+          status: "failed",
+          error: { code: receipt.driverCode!, message: receipt.message ?? "window switch outcome is unknown" },
+        };
+        await this.commitEvent({ type: "tool.call.failed", result });
+        this.callStates.set(call.id, "failed");
+        await this.commitEvent({ type: "runtime.error", category: "unknown_side_effect", message: errorMessage(error) });
+        await this.commitRunFinished({ outcome: "outcome_unknown" });
+        return;
+      }
       await this.commitEvent({
         type: "runtime.error",
         category: "unknown_side_effect",
@@ -2029,6 +2223,19 @@ export class RunController {
       await this.commitRunFinished({ outcome: "outcome_unknown" });
       this.callStates.set(call.id, "executing");
       return;
+    }
+
+    if (action.kind === "switch_window" && receipt.status === "completed") {
+      const sessionAfter = receipt.sessionAfter;
+      if (sessionAfter === undefined || switchTarget === undefined) {
+        throw new Error("validated switch_window receipt is missing its target binding");
+      }
+      this.resetAfterTargetTransition(sessionAfter, false, true, {
+        ...(switchTarget.appName === undefined ? {} : { appName: switchTarget.appName }),
+        ...(switchTarget.title === undefined ? {} : { title: switchTarget.title }),
+      });
+    } else if (action.kind === "switch_window") {
+      this.invalidateTargetAfterFailedSwitch();
     }
 
     let terminalActionEvent: RuntimeEvent;
@@ -2057,6 +2264,27 @@ export class RunController {
       if (this.snapshot.executionSegment?.status === "active") {
         await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: this.snapshot.executionSegment.id, reason: "bound_computer_action_failed" } });
       }
+    }
+    if (receipt.status === "partial") {
+      await this.commitEvent({
+        type: "runtime.error",
+        category: "partial_side_effect",
+        message: receipt.message ?? "Computer action was only partially applied; inspect the current screen before continuing.",
+      });
+      await this.commitRunFinished({ outcome: "outcome_unknown" });
+      return;
+    }
+    if (action.kind === "switch_window") {
+      if (receipt.status !== "completed") {
+        // A failed/refused/cancelled activation is terminal for this Run. Do
+        // not observe the old target or let the Provider retry the same ref.
+        await this.commitRunFinished({ outcome: receipt.status === "refused" ? "failed" : "outcome_unknown" });
+        return;
+      }
+      const sessionAfter = receipt.sessionAfter;
+      if (sessionAfter === undefined) throw new Error("completed switch_window did not return sessionAfter");
+      await this.observeAndCommit(sessionAfter, { requireSessionViewportMatch: true });
+      return;
     }
     if (receipt.status === "refused" && receipt.driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
         this.windowHandoff === "confirm-v1" && this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined) {
@@ -2107,6 +2335,7 @@ export class RunController {
     const transition: ObservationTransition = receiptStatus !== "completed"
       || preActionFingerprint === undefined
       || postActionFingerprint === undefined
+      || !sameSurfaceRef(preActionFingerprint.fingerprint.surfaceRef, postActionFingerprint.fingerprint.surfaceRef)
       ? "unknown"
       : sameObservationFingerprint(preActionFingerprint.fingerprint, postActionFingerprint.fingerprint)
         ? "unchanged"
@@ -2133,7 +2362,9 @@ export class RunController {
     this.throwIfAborted();
     const executionObservationId = this.snapshot.latestObservationId;
     const action = makeActionIntent(this.idFactory.actionId(), decisionObservationId, draft);
+    if (action.kind === "switch_window") this.assertSwitchTargetWasListed(action.windowRef, context.session);
     const executionObservation = this.currentExecutionObservation();
+    this.assertActionSurfaceBinding(action, executionObservation);
     validateActionIntent(action, {
       capabilities: context.session.capabilities,
       ...(executionObservation === undefined ? {} : { observation: executionObservation }),
@@ -2142,12 +2373,28 @@ export class RunController {
     return { action, ...(decisionObservationId === undefined ? {} : { decisionObservationId }) };
   }
 
+  private assertActionSurfaceBinding(action: ActionIntent, executionObservation: ObservationFrame | undefined): void {
+    if (action.kind === "wait") return;
+    const decisionObservation = this.events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> =>
+      event.type === "observation.created" && event.observation.id === action.basedOn,
+    )?.observation;
+    if (decisionObservation?.surfaceRef.kind === "unknown" || executionObservation?.surfaceRef.kind === "unknown") {
+      throw new Error("LEGACY_SURFACE_UNRESOLVED: a Computer action cannot execute from a legacy Observation without a live Surface identity");
+    }
+    if (decisionObservation === undefined || executionObservation === undefined ||
+        !sameSurfaceRef(decisionObservation.surfaceRef, executionObservation.surfaceRef)) {
+      throw new Error("action decision Observation belongs to a stale Surface generation; re-observe before proposing the action");
+    }
+  }
+
   private async commitGuardDecision(
     entries: readonly (PreflightEntry & { definition: ComputerToolDefinition; preparedAction: PreparedComputerAction })[],
     decision: ActionPolicyDecision,
+    evaluatedSurfaceRef: SurfaceRef,
   ): Promise<void> {
     await this.commitEvent({
       type: "action.guard.evaluated",
+      evaluatedSurfaceRef,
       callIds: entries.map((entry) => entry.call.id),
       actions: entries.map((entry) => summarizeGuardAction(entry.preparedAction.action)),
       decision: decision.decision,
@@ -2261,7 +2508,10 @@ export class RunController {
     this.callStates.set(callId, "rejected");
   }
 
-  private async observeAndCommit(session: ComputerSession): Promise<ObservationFrame> {
+  private async observeAndCommit(
+    session: ComputerSession,
+    options: { requireSessionViewportMatch?: boolean } = {},
+  ): Promise<ObservationFrame> {
     const observationId = this.idFactory.observationId();
     const assetId = this.idFactory.assetId();
     let capture: import("@computer-harness/protocol").ObservationCapture;
@@ -2270,9 +2520,17 @@ export class RunController {
     } catch (error) {
       throw new ObservationCaptureError(error);
     }
+    if (options.requireSessionViewportMatch === true && !sameViewport(capture.viewport, session.viewport)) {
+      throw new ObservationCaptureError(new Error("SESSION_VIEWPORT_MISMATCH: fresh switch observation does not match sessionAfter viewport"));
+    }
+    if (!isValidSurfaceRef(capture.surfaceRef)) {
+      const code = isLegacyUnknownSurfaceRef(capture.surfaceRef) ? "LEGACY_SURFACE_UNRESOLVED" : "SURFACE_REF_INVALID";
+      throw new ObservationCaptureError(new Error(`${code}: Computer capture did not identify one current, executable Surface incarnation`));
+    }
     if (capture.grounding !== undefined) {
-      if (capture.grounding.observationId !== observationId || capture.grounding.computerSessionId !== session.id) {
-        throw new ObservationCaptureError(new Error("GROUNDING_CAPTURE_MISMATCH: grounding catalog is not bound to the current observation and computer session"));
+      if (capture.grounding.observationId !== observationId || capture.grounding.computerSessionId !== session.id ||
+          !sameSurfaceRef(capture.grounding.surfaceRef, capture.surfaceRef)) {
+        throw new ObservationCaptureError(new Error("GROUNDING_CAPTURE_MISMATCH: grounding catalog is not bound to the current observation, session, and Surface generation"));
       }
       this.groundingCandidates.set(String(observationId), capture.grounding);
       while (this.groundingCandidates.size > 4) {
@@ -2296,11 +2554,21 @@ export class RunController {
       id: observationId,
       runId: this.runId,
       computerSessionId: session.id,
+      surfaceRef: capture.surfaceRef,
       capturedAt: capture.capturedAt,
       viewport: capture.viewport,
       screenshot: asset,
       ...(grounding === undefined ? {} : { grounding }),
     };
+    const previousSurfaceRef = this.snapshot.activeSurfaceRef;
+    if (previousSurfaceRef === undefined || !sameSurfaceRef(previousSurfaceRef, capture.surfaceRef)) {
+      await this.commitEvent({
+        type: "computer.surface.transitioned",
+        from: previousSurfaceRef ?? null,
+        to: capture.surfaceRef,
+        reason: previousSurfaceRef === undefined ? "initial_observation" : capture.surfaceTransitionReason ?? "surface_changed",
+      });
+    }
     const persisted = await this.commitEvent({ type: "observation.created", observation });
     if (persisted.type !== "observation.created") {
       throw new Error("observation commit returned an unexpected event type");
@@ -2422,12 +2690,17 @@ export class RunController {
     });
     this.groundingCandidates.clear();
     this.groundingRecoveryHint = undefined;
+    this.latestWindowOptions = undefined;
     return outcome;
   }
 
   private async markSessionMemoryScopeEnded(): Promise<void> {
-    if (this.sessionMemoryScopeEnded || !this.memoryEnabled || this.snapshot.computerSession === undefined) return;
-    const sessionId = this.snapshot.computerSession.id;
+    if (this.snapshot.computerSession === undefined) return;
+    await this.markComputerSessionMemoryScopeEnded(this.snapshot.computerSession.id);
+  }
+
+  private async markComputerSessionMemoryScopeEnded(sessionId: ComputerSessionId): Promise<void> {
+    if (!this.memoryEnabled || this.endedMemorySessionIds.has(sessionId)) return;
     const facts = this.snapshot.memory.facts.filter((fact) => {
       const scope = memoryFactScope(fact);
       return scope.kind === "computer_session" && scope.sessionId === sessionId && fact.status !== "superseded";
@@ -2451,7 +2724,7 @@ export class RunController {
     if (firstError !== undefined) {
       throw firstError;
     }
-    this.sessionMemoryScopeEnded = true;
+    this.endedMemorySessionIds.add(sessionId);
   }
 
   private async commitEvent(data: RuntimeEventData): Promise<RuntimeEvent> {
@@ -2572,6 +2845,19 @@ export class RunController {
       // committed, leave the already-completed action outcome untouched.
       await this.recordMonitorDiagnosticFailure(error);
     }
+  }
+
+  private validateTurnObservationAssessment(turn: ModelTurn): ModelTurn {
+    if (turn.observationAssessment === undefined) return turn;
+    const assessment = parseObservationAssessment(turn.observationAssessment);
+    const binding = currentObservationAssessmentBinding(this.events);
+    if (assessment !== undefined && binding !== undefined
+      && assessment.observationId === binding.observationId
+      && this.latestObservation?.id === binding.observationId) {
+      return { ...turn, observationAssessment: assessment };
+    }
+    const { observationAssessment: _discarded, ...validTurn } = turn;
+    return validTurn as ModelTurn;
   }
 
   private clearMonitorPendingRecommendations(): void {
@@ -2818,6 +3104,85 @@ function actionReceiptOutput(receipt: import("@computer-harness/protocol").Actio
   return output;
 }
 
+function normalizeActionReceiptForAction(
+  action: ActionIntent,
+  value: import("@computer-harness/protocol").ActionReceipt,
+  currentSession: ComputerSession,
+): import("@computer-harness/protocol").ActionReceipt {
+  if (typeof value !== "object" || value === null || value.actionId !== action.actionId) {
+    throw new Error("Computer receipt actionId does not match the dispatched action");
+  }
+  if (!(["completed", "refused", "failed", "cancelled", "partial"] as const).includes(value.status)) {
+    throw new Error("Computer receipt has an invalid status");
+  }
+  if (value.driverCode !== undefined && (typeof value.driverCode !== "string" || value.driverCode.trim().length === 0)) {
+    throw new Error("Computer receipt driverCode must be a non-empty string");
+  }
+  if (value.message !== undefined && typeof value.message !== "string") {
+    throw new Error("Computer receipt message must be a string");
+  }
+  const hasSessionAfter = Object.hasOwn(value, "sessionAfter");
+  if (hasSessionAfter && (action.kind !== "switch_window" || value.status !== "completed")) {
+    throw new Error("sessionAfter is valid only on a completed switch_window action");
+  }
+  if (action.kind === "switch_window" && value.status === "completed" && !hasSessionAfter) {
+    throw new Error("completed switch_window receipt is missing sessionAfter");
+  }
+
+  const base = {
+    actionId: action.actionId,
+    status: value.status,
+    ...(value.driverCode === undefined ? {} : { driverCode: value.driverCode }),
+    ...(value.message === undefined ? {} : { message: value.message }),
+  };
+  if (!hasSessionAfter) return base as import("@computer-harness/protocol").ActionReceipt;
+
+  const sessionAfter = normalizeComputerSessionDescriptor((value as { sessionAfter?: unknown }).sessionAfter);
+  if (sessionAfter.id !== currentSession.id || sessionAfter.backend !== currentSession.backend) {
+    throw new Error("switch_window sessionAfter must retain the active ComputerSession identity and backend");
+  }
+  if (!sessionAfter.capabilities.screenshot) {
+    throw new Error("switch_window sessionAfter must support a fresh screenshot");
+  }
+  return { ...base, sessionAfter } as import("@computer-harness/protocol").ActionReceipt;
+}
+
+function normalizeComputerSessionDescriptor(value: unknown): ComputerSessionDescriptor {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("switch_window sessionAfter must be a ComputerSessionDescriptor");
+  }
+  const candidate = value as Record<string, unknown>;
+  const viewport = candidate.viewport as Record<string, unknown> | undefined;
+  const capabilities = candidate.capabilities as Record<string, unknown> | undefined;
+  const coordinateSpace = viewport?.coordinateSpace;
+  if (typeof candidate.id !== "string" || candidate.id.trim().length === 0
+      || typeof candidate.backend !== "string" || candidate.backend.trim().length === 0
+      || typeof candidate.openedAt !== "string" || candidate.openedAt.trim().length === 0
+      || typeof viewport?.width !== "number" || !Number.isInteger(viewport.width) || viewport.width <= 0
+      || typeof viewport.height !== "number" || !Number.isInteger(viewport.height) || viewport.height <= 0
+      || (coordinateSpace !== "physical" && coordinateSpace !== "logical" && coordinateSpace !== "reference")
+      || typeof capabilities?.screenshot !== "boolean" || typeof capabilities.pointer !== "boolean"
+      || typeof capabilities.keyboard !== "boolean" || typeof capabilities.accessibility !== "boolean") {
+    throw new Error("switch_window sessionAfter has invalid identity, viewport, or capabilities");
+  }
+  return {
+    id: candidate.id as ComputerSessionId,
+    backend: candidate.backend,
+    viewport: {
+      width: viewport.width,
+      height: viewport.height,
+      coordinateSpace,
+    },
+    capabilities: {
+      screenshot: capabilities.screenshot,
+      pointer: capabilities.pointer,
+      keyboard: capabilities.keyboard,
+      accessibility: capabilities.accessibility,
+    },
+    openedAt: candidate.openedAt,
+  };
+}
+
 /** Capture failure is retryable at the approval boundary; asset/event
  * persistence failures are deliberately left as fatal Run errors. */
 class ObservationCaptureError extends Error {
@@ -2833,6 +3198,7 @@ function fingerprintObservation(
 ): ObservationFingerprint {
   return {
     sessionId: String(sessionId),
+    surfaceRef: capture.surfaceRef,
     mediaType: capture.screenshot.mediaType,
     byteLength: capture.screenshot.data.byteLength,
     viewport: { ...capture.viewport },
@@ -2842,6 +3208,7 @@ function fingerprintObservation(
 
 function sameObservationFingerprint(left: ObservationFingerprint, right: ObservationFingerprint): boolean {
   return left.sessionId === right.sessionId
+    && sameSurfaceRef(left.surfaceRef, right.surfaceRef)
     && left.mediaType === right.mediaType
     && left.byteLength === right.byteLength
     && left.viewport.width === right.viewport.width
@@ -2861,6 +3228,71 @@ function approvalHumanReviewReason(reason: string, action: ActionIntent): string
     ? "Inspect the shown current screenshot and independently verify the intended target and keyboard focus before approving this one action. The computer backend cannot verify which control has focus."
     : "Inspect the shown current screenshot and the displayed action coordinates before approving this one action.";
   return `${reason} ${review}`;
+}
+
+function isValidSurfaceRef(value: unknown): value is SurfaceRef {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const sourceValid = candidate.admissionSource === undefined ||
+    candidate.admissionSource === "same_hwnd_overlay_root_proof" ||
+    candidate.admissionSource === "owned_transient_window_root_proof" ||
+    candidate.admissionSource === "win32_relationship_probe";
+  const sourceMatchesKind = candidate.admissionSource === undefined ||
+    candidate.admissionSource === "same_hwnd_overlay_root_proof" && candidate.kind === "overlay" ||
+    (candidate.admissionSource === "owned_transient_window_root_proof" || candidate.admissionSource === "win32_relationship_probe") &&
+      candidate.kind === "native_window" && candidate.parentSurfaceId !== undefined;
+  return typeof candidate.surfaceId === "string" && candidate.surfaceId.length > 0 && candidate.surfaceId.length <= 128 &&
+    Number.isSafeInteger(candidate.generation) && Number(candidate.generation) > 0 &&
+    sourceValid && sourceMatchesKind &&
+    (candidate.kind === "desktop" || candidate.kind === "native_window" || candidate.kind === "browser_tab" ||
+      candidate.kind === "dom" || candidate.kind === "overlay") &&
+    candidate.parentSurfaceId !== candidate.surfaceId &&
+    ((candidate.kind !== "browser_tab" && candidate.kind !== "dom" && candidate.kind !== "overlay") ||
+      (typeof candidate.parentSurfaceId === "string" && candidate.parentSurfaceId.length > 0 && candidate.parentSurfaceId.length <= 128)) &&
+    (candidate.kind !== "desktop" || candidate.parentSurfaceId === undefined);
+}
+
+function isLegacyUnknownSurfaceRef(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    (value as Record<string, unknown>).kind === "unknown";
+}
+
+function sameSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
+  return left.surfaceId === right.surfaceId && left.generation === right.generation && left.kind === right.kind &&
+    left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
+}
+
+function validateComputerWindowOptions(value: readonly ComputerWindowOption[]): readonly ComputerWindowOption[] {
+  if (!Array.isArray(value) || value.length > 128) throw new Error("Computer window inventory must contain at most 128 options");
+  const refs = new Set<string>();
+  let currentCount = 0;
+  const options = value.map((item, index): ComputerWindowOption => {
+    if (typeof item !== "object" || item === null || typeof item.windowRef !== "string" ||
+        item.windowRef.trim().length === 0 || item.windowRef.length > 128 || typeof item.isCurrent !== "boolean") {
+      throw new Error(`Computer window inventory option ${index} has an invalid windowRef/isCurrent`);
+    }
+    if (refs.has(item.windowRef)) throw new Error("Computer window inventory contains duplicate windowRef values");
+    refs.add(item.windowRef);
+    if (item.isCurrent) currentCount += 1;
+    for (const [label, text, maxLength] of [
+      ["appName", item.appName, 256],
+      ["title", item.title, 512],
+    ] as const) {
+      if (text !== undefined && (typeof text !== "string" || text.length > maxLength)) {
+        throw new Error(`Computer window inventory ${label} must be at most ${maxLength} characters`);
+      }
+    }
+    // Explicitly project public selector fields; any backend-specific fields
+    // on a malformed adapter object are never returned to Context/Providers.
+    return {
+      windowRef: item.windowRef,
+      ...(item.appName === undefined ? {} : { appName: item.appName }),
+      ...(item.title === undefined ? {} : { title: item.title }),
+      isCurrent: item.isCurrent,
+    };
+  });
+  if (currentCount > 1) throw new Error("Computer window inventory marked more than one option as current");
+  return options;
 }
 
 function pointInBox(point: { x: number; y: number }, box: GroundingBoundingBox): boolean {
@@ -2971,9 +3403,8 @@ function providerErrorDetails(error: unknown): { code?: string; retryable?: bool
 }
 
 function summarizeGuardAction(action: ActionIntent): import("@computer-harness/protocol").ActionGuardActionSummary {
-  return action.kind === "type"
-    ? { actionId: action.actionId, basedOn: action.basedOn, kind: "type", textLength: action.text.length }
-    : action;
+  if (action.kind === "type") return { actionId: action.actionId, basedOn: action.basedOn, kind: "type", ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }), textLength: action.text.length };
+  return action;
 }
 
 function isExplicitStopInput(text: string): boolean {

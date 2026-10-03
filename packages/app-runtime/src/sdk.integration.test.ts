@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import type { ComputerSessionDescriptor, RunId, RuntimeEvent, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { ComputerSessionDescriptor, RunId, RuntimeEvent, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import {
   createDefaultToolRegistry,
   type CleanupDiagnostic,
@@ -13,6 +13,8 @@ import {
   type ProviderAdapter,
 } from "@computer-harness/runtime";
 import { createRunFactory, type ResolvedRunConfig } from "./index.js";
+
+const fixtureSurfaceRef = { surfaceId: "sdk-mock-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 function config(outputDir: string, runId = "sdk-mock-run"): ResolvedRunConfig {
   return {
@@ -63,6 +65,7 @@ function mockComputer(
       return {
         capturedAt: `2026-09-23T00:00:0${observationCount}.000Z`,
         viewport,
+        surfaceRef: fixtureSurfaceRef,
         screenshot: { mediaType: "image/png", data: new Uint8Array([observationCount]) },
       };
     },

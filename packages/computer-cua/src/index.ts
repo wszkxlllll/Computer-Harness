@@ -5,6 +5,7 @@ export {
   type CuaDriverFactory,
   type CuaGroundingMode,
   type CuaWindowDeliveryMode,
+  type CuaWindowSwitchMode,
 } from "./cua-driver-computer.js";
 export {
   inspectCuaCapabilities,
@@ -20,6 +21,12 @@ export {
   type CuaWindowInfo,
   type CuaWindowTarget,
 } from "./window-contract.js";
+export {
+  mergeWindowRelationshipInventory,
+  type WindowRelationshipProbe,
+  type WindowRelationshipProbeSnapshot,
+  type WindowRelationshipProbeWindow,
+} from "./window-relationship-probe.js";
 export {
   CuaWindowDiscovery,
   CuaWindowDiscoveryCleanupError,
@@ -49,6 +56,8 @@ export {
   ManagedBrowserHost,
   defaultManagedBrowserKind,
   managedBrowserExecutableCandidates,
+  CuaBootstrapSessionError,
+  formatManagedBrowserStartupDiagnostic,
   acquireManagedBrowserProfileLease,
   buildManagedBrowserLaunchUrls,
   clearManagedBrowserDevToolsPort,
@@ -65,6 +74,8 @@ export {
   validateOwnedWindowResolution,
   managedBrowserWindowBoundsMatch,
   type ManagedBrowserHostOptions,
+  type ManagedBrowserStartupDiagnostic,
+  type ManagedBrowserStartupStage,
   type ManagedBrowserStartupMetadata,
   type ManagedBrowserWindowBindingHint,
   type ManagedBrowserWindowResolutionDiagnostic,

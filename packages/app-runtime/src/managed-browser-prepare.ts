@@ -1,6 +1,5 @@
 import { createInterface } from "node:readline";
-import { defaultManagedBrowserKind } from "@computer-harness/computer-cua";
-import type { CuaBootstrapSession, ManagedBrowserHost, ManagedBrowserHostOptions, ManagedBrowserWindowBindingHint, ManagedBrowserWindowResolution } from "@computer-harness/computer-cua";
+import { defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, type CuaBootstrapSession, type ManagedBrowserHost, type ManagedBrowserHostOptions, type ManagedBrowserStartupDiagnostic, type ManagedBrowserWindowBindingHint, type ManagedBrowserWindowResolution } from "@computer-harness/computer-cua";
 
 export type ManagedBrowserPreparationBootstrap = CuaBootstrapSession;
 export type ManagedBrowserPreparationHost = ManagedBrowserHost;
@@ -8,6 +7,8 @@ export type ManagedBrowserPreparationHostOptions = ManagedBrowserHostOptions;
 export type ManagedBrowserPreparationWindowHint = ManagedBrowserWindowBindingHint;
 export type ManagedBrowserPreparationWindowResolution = ManagedBrowserWindowResolution;
 export type ManagedBrowserPreparationCleanupDiagnostic = Parameters<NonNullable<ManagedBrowserHostOptions["onCleanupDiagnostic"]>>[0];
+export type ManagedBrowserPreparationStartupDiagnostic = ManagedBrowserStartupDiagnostic;
+export { formatManagedBrowserStartupDiagnostic };
 
 export interface ManagedBrowserPreparationCuaModule {
   readonly openCuaBootstrapSession: typeof import("@computer-harness/computer-cua").openCuaBootstrapSession;
@@ -40,6 +41,20 @@ export interface ManagedBrowserPreparationResult {
   readonly profileRetention: "confirmed" | "unknown";
 }
 
+/**
+ * Preparation failed, but reports whether every acquired resource was
+ * confirmed closed. Callers must fail closed when cleanup is unknown.
+ */
+export class ManagedBrowserPreparationError extends Error {
+  public constructor(
+    public readonly cleanup: "confirmed" | "unknown",
+    cause: unknown,
+  ) {
+    super("Managed browser preparation failed", { cause });
+    this.name = "ManagedBrowserPreparationError";
+  }
+}
+
 export interface ManagedBrowserPreparationDependencies {
   readonly loadCua?: () => Promise<ManagedBrowserPreparationCuaModule>;
   readonly openBootstrap?: ManagedBrowserPreparationCuaModule["openCuaBootstrapSession"];
@@ -47,6 +62,7 @@ export interface ManagedBrowserPreparationDependencies {
   readonly resolveOwnedWindow?: ManagedBrowserPreparationCuaModule["resolveOwnedManagedBrowserWindow"];
   readonly waitForContinue?: (signal: AbortSignal) => Promise<"enter" | "interrupt">;
   readonly onReady?: (ready: ManagedBrowserPreparationReady) => void;
+  readonly onStartupDiagnostic?: (diagnostic: ManagedBrowserPreparationStartupDiagnostic) => void;
 }
 
 /**
@@ -60,23 +76,32 @@ export async function prepareManagedBrowserProfile(
   const signal = options.signal ?? new AbortController().signal;
   let cuaModule: ManagedBrowserPreparationCuaModule | undefined;
   const load = async (): Promise<ManagedBrowserPreparationCuaModule> => cuaModule ??= await (dependencies.loadCua ?? loadCuaModule)();
-  const openBootstrap = dependencies.openBootstrap ?? (await load()).openCuaBootstrapSession;
-  const resolveOwnedWindow = dependencies.resolveOwnedWindow ?? (await load()).resolveOwnedManagedBrowserWindow;
-  let createHost: (hostOptions: ManagedBrowserPreparationHostOptions) => ManagedBrowserPreparationHost;
-  if (dependencies.createHost !== undefined) createHost = dependencies.createHost;
-  else {
-    const module = await load();
-    createHost = (hostOptions) => new module.ManagedBrowserHost(hostOptions);
-  }
   const label = `computer-harness-managed-login-${Date.now()}`;
   let bootstrap: ManagedBrowserPreparationBootstrap | undefined;
   let host: ManagedBrowserPreparationHost | undefined;
   const cleanupDiagnostics: ManagedBrowserPreparationCleanupDiagnostic[] = [];
   let outcome: "enter" | "interrupt" | undefined;
   let operationError: unknown;
+  let operationFailed = false;
+  let bootstrapOpenFailed = false;
+  let bootstrapCleanupConfirmed = false;
   const cleanupErrors: unknown[] = [];
   try {
-    bootstrap = await openBootstrap(options.socketPath, label, signal);
+    const openBootstrap = dependencies.openBootstrap ?? (await load()).openCuaBootstrapSession;
+    const resolveOwnedWindow = dependencies.resolveOwnedWindow ?? (await load()).resolveOwnedManagedBrowserWindow;
+    let createHost: (hostOptions: ManagedBrowserPreparationHostOptions) => ManagedBrowserPreparationHost;
+    if (dependencies.createHost !== undefined) createHost = dependencies.createHost;
+    else {
+      const module = await load();
+      createHost = (hostOptions) => new module.ManagedBrowserHost(hostOptions);
+    }
+    try {
+      bootstrap = await openBootstrap(options.socketPath, label, signal);
+    } catch (error) {
+      bootstrapOpenFailed = true;
+      bootstrapCleanupConfirmed = hasConfirmedBootstrapCleanup(error);
+      throw error;
+    }
     const bootstrapSession = bootstrap;
     host = createHost({
       browser: defaultManagedBrowserKind(),
@@ -84,14 +109,18 @@ export async function prepareManagedBrowserProfile(
       profileMode: "persistent",
       profileLabel: options.profileLabel,
       persistentProfileRoot: options.persistentProfileRoot,
-      registerStartupUrl: true,
+      registerStartupUrl: isHttpStartupUrl(options.managedBrowserUrl),
       onCleanupDiagnostic: (kind) => cleanupDiagnostics.push(kind),
+      onStartupDiagnostic: (diagnostic) => {
+        try { dependencies.onStartupDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+      },
       resolveOwnedWindowTarget: (browserProcessId, resolverSignal, hint) => resolveOwnedWindow(bootstrapSession.driver, bootstrapSession.label, browserProcessId, resolverSignal, hint),
     });
     await host.start(signal);
     dependencies.onReady?.({ profileLabel: options.profileLabel, urlHost: new URL(options.managedBrowserUrl).host });
     outcome = await (dependencies.waitForContinue ?? ((waitSignal) => waitForManagedBrowserPreparationContinue(waitSignal)))(signal);
   } catch (error) {
+    operationFailed = true;
     operationError = error;
   }
   if (host !== undefined) {
@@ -108,17 +137,44 @@ export async function prepareManagedBrowserProfile(
       cleanupErrors.push(error);
     }
   }
-  if (operationError !== undefined || cleanupErrors.length > 0) {
-    const failures = operationError === undefined ? cleanupErrors : [operationError, ...cleanupErrors];
-    if (failures.length === 1) throw failures[0];
-    throw new AggregateError(failures, "managed browser preparation and cleanup failed");
+  if (operationFailed || cleanupErrors.length > 0) {
+    const failures = operationFailed ? [operationError, ...cleanupErrors] : cleanupErrors;
+    const cause = failures.length === 1 ? failures[0] : new AggregateError(failures, "managed browser preparation and cleanup failed");
+    throw new ManagedBrowserPreparationError(
+      cleanupErrors.length === 0 && !hasCriticalCleanupDiagnostic(cleanupDiagnostics) &&
+        (!bootstrapOpenFailed || bootstrapCleanupConfirmed) ? "confirmed" : "unknown",
+      cause,
+    );
   }
   if (outcome === undefined) throw new Error("managed browser preparation finished without an outcome");
   return {
     outcome,
     cleanupDiagnostics,
-    profileRetention: cleanupDiagnostics.length === 0 ? "confirmed" : "unknown",
+    profileRetention: hasCriticalCleanupDiagnostic(cleanupDiagnostics) ? "unknown" : "confirmed",
   };
+}
+
+function hasConfirmedBootstrapCleanup(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "cleanupCertainty" in error &&
+    (error as { readonly cleanupCertainty?: unknown }).cleanupCertainty === "confirmed";
+}
+
+function isHttpStartupUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function hasCriticalCleanupDiagnostic(diagnostics: readonly ManagedBrowserPreparationCleanupDiagnostic[]): boolean {
+  const critical = new Set<ManagedBrowserPreparationCleanupDiagnostic>([
+    "process_exit_timeout",
+    "profile_cleanup_failed",
+    "profile_lock_release_failed",
+  ]);
+  return diagnostics.some((diagnostic) => critical.has(diagnostic));
 }
 
 export function waitForManagedBrowserPreparationContinue(

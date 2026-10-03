@@ -1,6 +1,7 @@
 import type {
   ActionEffectDeclaration,
   DeclaredActionEffect,
+  GroundingElement,
   JsonValue,
   ModelUsage,
   RiskCategory,
@@ -152,6 +153,14 @@ export class ProviderRiskAssessor implements RiskAssessor {
 }
 
 function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<string>): RiskRoute {
+  if (isRunScopedWindowSwitch(context)) {
+    return {
+      route: "allow",
+      categories: [],
+      reasonCode: "run_scoped_window_switch",
+      reason: "A window-binding change is governed by the Run-level switch capability and exact target/session validation, not per-switch Risk Guard approval.",
+    };
+  }
   const declarations = context.candidate.calls.map((call) => call.declaredEffect);
   if (declarations.some((item) => item === undefined)) return { route: "deny", categories: [], reasonCode: "missing_effect_declaration", reason: "A Computer call has no effect declaration." };
   for (const action of context.candidate.actions) {
@@ -188,12 +197,19 @@ function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<str
   return { route: "allow", categories: [], reasonCode: "declared_low_impact", reason: "The current action declares only low-impact effects and has no escalation signal." };
 }
 
+function isRunScopedWindowSwitch(context: ActionPolicyContext): boolean {
+  return context.candidate.calls.length === 1
+    && context.candidate.calls[0]?.name === "switch_window"
+    && context.candidate.actions.length === 1
+    && context.candidate.actions[0]?.kind === "switch_window";
+}
+
 function findContradiction(context: ActionPolicyContext, declarations: ActionEffectDeclaration[]): { code: string; reason: string; categories: RiskCategory[] } | undefined {
   for (let index = 0; index < context.candidate.actions.length; index += 1) {
     const action = context.candidate.actions[index];
     const declaration = declarations[index];
     if (action === undefined || declaration === undefined) continue;
-    if (action.kind === "type" && declaration.effects.includes("observe")) return { code: "effect_action_mismatch", reason: "A typing action is declared as observation-only.", categories: [] };
+    if (action.kind === "type" && declaration.effects.includes("observe")) return { code: "effect_action_mismatch", reason: "A text-modifying action is declared as observation-only.", categories: [] };
     if (action.kind === "keypress" && action.keys.map((item) => item.toUpperCase()).includes("DELETE") && declaration.effects.includes("navigate")) return { code: "effect_action_mismatch", reason: "A delete key action is declared as navigation.", categories: ["destructive"] };
   }
   return undefined;
@@ -234,7 +250,7 @@ function scanDeclarationText(context: ActionPolicyContext, declarations: ActionE
       // the Enter key, but it does not commit a form, order, message, or
       // payment. Keep this exception narrower than search: it must be an
       // Enter keypress explicitly scoped to a URL/address bar navigation.
-      const readOnlyAddressBarNavigation = isReadOnlyAddressBarNavigation(declaration, action);
+      const readOnlyAddressBarNavigation = isReadOnlyAddressBarNavigation(context, declaration, action);
       for (const match of matches) {
         const pattern = new RegExp(match.pattern.source, `${match.pattern.flags}g`);
         for (const result of text.matchAll(pattern)) {
@@ -269,6 +285,7 @@ function isObservedLocalTyping(
   if (action.basedOn !== observation.id || observation.runId !== context.runId
     || observation.computerSessionId !== context.candidate.session.id
     || catalog?.observationId !== observation.id || catalog.computerSessionId !== observation.computerSessionId
+    || !hasCurrentGroundingSurface(context)
     || catalog.version !== "grounding-catalog-v2" || (catalog.source !== "dom" && catalog.source !== "hybrid")
     || catalog.completeness === "unknown" || catalog.degraded) return false;
   // Runtime's hot subset is not proof of globally unique focus or of no
@@ -301,6 +318,10 @@ function isReadOnlySearchSubmission(
 ): boolean {
   if (declaration.effects.length !== 1 || declaration.effects[0] !== "navigate") return false;
   if (action?.kind !== "click" && action?.kind !== "keypress") return false;
+  const target = observedNavigationTarget(context, action);
+  if (target?.source !== "dom" || target.browserRegion !== "content"
+    || !/^(?:search|搜索|查询|检索)$/iu.test(target.name?.trim() ?? "")) return false;
+  if (action.kind === "click" ? target.role !== "button" : !["textbox", "searchbox"].includes(target.role)) return false;
   const declarationText = normalizeRiskText(`${declaration.target} ${declaration.summary}`);
   const goalText = normalizeRiskText(context.goal);
   if (!/(?:search|query|搜索|查询|检索)/iu.test(declarationText) || !/(?:search|query|搜索|查询|检索)/iu.test(goalText)) return false;
@@ -312,11 +333,16 @@ function isReadOnlySearchSubmission(
 }
 
 function isReadOnlyAddressBarNavigation(
+  context: ActionPolicyContext,
   declaration: ActionEffectDeclaration,
   action: ActionPolicyContext["candidate"]["actions"][number] | undefined,
 ): boolean {
   if (declaration.effects.length !== 1 || declaration.effects[0] !== "navigate") return false;
-  if (action?.kind !== "keypress" || !action.keys.some((key) => key.toUpperCase() === "ENTER")) return false;
+  if (action?.kind !== "keypress") return false;
+  const target = observedNavigationTarget(context, action);
+  if (target?.source !== "uia" || target.browserRegion !== "chrome"
+    || !["textbox", "searchbox"].includes(target.role)
+    || !/^(?:address(?: and search)? bar|地址栏|地址和搜索栏|网址)$/iu.test(target.name?.trim() ?? "")) return false;
   const text = normalizeRiskText(`${declaration.target} ${declaration.summary}`);
   if (!/(?:address\s*(?:and\s*search\s*)?bar|地址栏|网址|\burl\b)/iu.test(text)) return false;
   if (!/(?:navigate|navigation|load|open|导航|加载|打开)/iu.test(text)) return false;
@@ -324,6 +350,47 @@ function isReadOnlyAddressBarNavigation(
   // keep the normal fail-closed route even when it also mentions the URL bar.
   if (/(?:pay|purchase|checkout|transfer|delete|erase|wipe|send|publish|post|order|application|comment|review|付款|支付|购买|结算|转账|删除|清空|发送|发布|订单|申请|评论|评价)/iu.test(text)) return false;
   return true;
+}
+
+/** A model's target description cannot establish the actual keyboard/click target. */
+function observedNavigationTarget(
+  context: ActionPolicyContext,
+  action: ActionPolicyContext["candidate"]["actions"][number],
+): GroundingElement | undefined {
+  if (action.kind !== "click" && action.kind !== "keypress") return undefined;
+  if (context.candidate.calls.length !== 1 || context.candidate.actions.length !== 1) return undefined;
+  const observation = context.candidate.decisionObservation;
+  const catalog = observation.grounding;
+  if (action.basedOn !== observation.id || observation.runId !== context.runId
+    || observation.computerSessionId !== context.candidate.session.id
+    || catalog?.observationId !== observation.id || catalog.computerSessionId !== observation.computerSessionId
+    || catalog.version !== "grounding-catalog-v2" || catalog.completeness !== "complete"
+    || catalog.degraded || catalog.selection?.truncated || !hasCurrentGroundingSurface(context)) return undefined;
+  if (action.kind === "keypress") {
+    if (action.keys.length !== 1 || action.keys[0]?.toUpperCase() !== "ENTER") return undefined;
+    const focused = catalog.elements.filter((element) => element.state?.focused === true);
+    const target = focused.length === 1 ? focused[0] : undefined;
+    return target?.state?.enabled === true && target.state.editable === true ? target : undefined;
+  }
+  if (action.kind !== "click" || action.groundingRef === undefined) return undefined;
+  const matches = catalog.elements.filter((element) => element.elementRef === action.groundingRef);
+  const target = matches.length === 1 ? matches[0] : undefined;
+  const box = target?.bbox;
+  if (target?.state?.enabled !== true || box === undefined || box.coordinateSpace !== "physical"
+    || ![box.x, box.y, box.width, box.height, action.point.x, action.point.y].every(Number.isFinite)
+    || box.width <= 0 || box.height <= 0 || action.point.x < box.x || action.point.x > box.x + box.width
+    || action.point.y < box.y || action.point.y > box.y + box.height) return undefined;
+  return target;
+}
+
+function hasCurrentGroundingSurface(context: ActionPolicyContext): boolean {
+  const observation = context.candidate.decisionObservation;
+  const observed = observation.surfaceRef;
+  const grounded = observation.grounding?.surfaceRef;
+  return observed !== undefined && grounded !== undefined && observed.kind !== "unknown"
+    && observed.surfaceId === grounded.surfaceId && observed.generation === grounded.generation
+    && observed.kind === grounded.kind && observed.parentSurfaceId === grounded.parentSurfaceId
+    && observed.admissionSource === grounded.admissionSource;
 }
 
 function normalizeRiskText(value: string): string {
@@ -416,7 +483,7 @@ function groundingEvidenceUnavailable(context: ActionPolicyContext): boolean {
 
 function redactAction(action: ActionPolicyContext["candidate"]["actions"][number] | undefined): JsonValue {
   if (action === undefined) return null;
-  if (action.kind === "type") return { kind: "type", textLength: action.text.length };
+  if (action.kind === "type") return { kind: "type", ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }), textLength: action.text.length };
   return action as unknown as JsonValue;
 }
 

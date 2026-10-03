@@ -22,8 +22,17 @@ function run(command, args) {
 run(pnpm, vitestArgs);
 run(process.execPath, [
   "--test",
+  "scripts/cross-window/cua-probe.selftest.mjs",
+  "scripts/cross-window/cw01-runner.selftest.mjs",
+  "scripts/cross-window/life-task-policy.selftest.mjs",
+  "scripts/cross-window/local-screen-recorder.selftest.mjs",
+  "scripts/cross-window/provider-description-probe.selftest.mjs",
+  "scripts/cross-window/sdk-managed-browser-probe.selftest.mjs",
+  "scripts/cua-window-handoff-probe.test.mjs",
   "scripts/execution-segment-api-conformance-metrics.test.mjs",
   "scripts/travel/metrics.test.mjs",
   "scripts/travel/travel.test.mjs",
   "scripts/travel/tui-collector.test.mjs",
+  "scripts/travel/shanghai-pilot-policy.selftest.mjs",
+  "scripts/voice/probe-qwen-asr.test.mjs",
 ]);
