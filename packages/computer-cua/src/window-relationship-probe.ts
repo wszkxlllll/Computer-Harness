@@ -14,6 +14,10 @@ export interface WindowRelationshipProbeWindow {
   readonly minimized: boolean;
   readonly bounds: CuaWindowGeometry;
   readonly windowClass?: string;
+  /** Optional top-level caption; control contents are never included. */
+  readonly title?: string;
+  /** Optional process basename without an executable path. */
+  readonly appName?: string;
 }
 
 export interface WindowRelationshipProbeSnapshot {
@@ -33,8 +37,10 @@ export interface WindowRelationshipProbe {
  * Use one complete relationship-probe snapshot as the current topology and
  * bounds authority. CUA is independently sampled and contributes only exact
  * PID/HWND labels, unless it explicitly contradicts a relationship field for
- * an identity present in both snapshots. Row churn and geometry movement are
- * expected between these non-atomic reads and do not invalidate the probe.
+ * an identity present in both snapshots. When CUA omits a label for an exact
+ * identity, the probe's optional caption/process-name label is used. Row churn
+ * and geometry movement are expected between these non-atomic reads and do not
+ * invalidate the probe.
  */
 export function mergeWindowRelationshipInventory(
   cua: CuaWindowInventory,
@@ -84,11 +90,13 @@ export function mergeWindowRelationshipInventory(
   const windows = selectedRows.map((row) => {
     const identity = { pid: row.pid, windowId: row.windowId };
     const cuaRow = cuaRows.get(identityKey(identity));
+    const title = cuaRow?.title ?? row.title;
+    const appName = cuaRow?.appName ?? row.appName;
     return {
       target: identity,
       bounds: { ...row.bounds },
-      ...(cuaRow?.title === undefined ? {} : { title: cuaRow.title }),
-      ...(cuaRow?.appName === undefined ? {} : { appName: cuaRow.appName }),
+      ...(title === undefined ? {} : { title }),
+      ...(appName === undefined ? {} : { appName }),
       ...(row.zIndex === undefined ? {} : { zIndex: row.zIndex }),
       isOnScreen: row.isOnScreen,
       ...(row.ownerPid === undefined ? {} : { ownerPid: row.ownerPid }),
@@ -139,6 +147,8 @@ function mergePartialExactRows(
       ...(cuaRow.isOnScreen === undefined ? { isOnScreen: probeRow.isOnScreen } : {}),
       ...(cuaRow.minimized === undefined ? { minimized: probeRow.minimized } : {}),
       ...(cuaRow.windowClass === undefined && probeRow.windowClass !== undefined ? { windowClass: probeRow.windowClass } : {}),
+      ...(cuaRow.title === undefined && probeRow.title !== undefined ? { title: probeRow.title } : {}),
+      ...(cuaRow.appName === undefined && probeRow.appName !== undefined ? { appName: probeRow.appName } : {}),
     } satisfies CuaWindowInfo];
   });
 
@@ -183,7 +193,10 @@ function validateProbeRows(
         (value.windowClass !== undefined && !isAsciiClass(value.windowClass))) {
       return undefined;
     }
-    result.push(value as unknown as WindowRelationshipProbeWindow);
+    const sanitized = { ...value };
+    if (!isBoundedLabel(value.title, 240)) delete sanitized.title;
+    if (!isBoundedLabel(value.appName, 128)) delete sanitized.appName;
+    result.push(sanitized as unknown as WindowRelationshipProbeWindow);
   }
   return result;
 }
@@ -245,6 +258,22 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isAsciiClass(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 128 && /^[\x20-\x7e]+$/u.test(value);
+}
+
+function isBoundedLabel(value: unknown, maxLength: number): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength ||
+      value.trim() !== value || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function identityKey(value: CuaWindowTarget | WindowRelationshipProbeWindow): string {

@@ -121,6 +121,12 @@ export function buildExactTargetScope(nativeTargets, ownedBrowserTarget) {
 }
 
 export function validateWindowInventory(output, fixtureTitle, expectedCurrent) {
+  if (!Array.isArray(output)) {
+    if (output?.truncated !== false || output?.omittedCount !== 0) {
+      throw new ProbeFailure("WINDOW_INVENTORY_INVALID", "The scoped public inventory was incomplete or malformed.");
+    }
+    output = output?.windows ?? output?.options;
+  }
   if (!Array.isArray(output) || output.length !== 2) {
     throw new ProbeFailure("WINDOW_INVENTORY_SCOPE_MISMATCH", "Expected only the WPS fixture and this Run's managed browser in the exact host scope.");
   }

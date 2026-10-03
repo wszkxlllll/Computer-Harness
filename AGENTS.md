@@ -24,6 +24,8 @@
 
 # Explicit cross-window feature authorization
 
+- The 2026-10-04 window repair supersedes the historical requirement above to fail a Run merely because the global inventory is partial. Preserve the completed receipt; use fresh exact-target evidence and never infer child disappearance from a partial inventory. An unresolved transient becomes a user-confirmation boundary rather than an action replay. Complete Win32 snapshots may prove an exact cross-process owner relationship; same-PID and UIA root classification are not universal prerequisites. See `docs/window-and-progress-repair-results-2026-10-04.md` for the verified scope.
+
 - On 2026-10-02 the user approved the opt-in model-requested `list_windows` / `switch_window` plan in `docs/cross-window-execution-plan-2026-10-02.md`. This is a separate explicitly authorized target-switch operation, not a relaxation of the legacy automatic foreground-mismatch/new-popup handoff rules above.
 - Reuse exact activation and identity/capture verification. A model may select only a Run-scoped candidate reference discovered by the adapter and allowed by the Host. Background/minimized candidates require fresh verification after activation before subsequent input; inclusion in inventory alone does not prove operability.
 - Preserve default single-target behavior, per-action foreground guards, desktop ownership, Abort/approval and unknown-side-effect handling. Switching never silently enables whole-desktop capture or personal-browser DOM access.

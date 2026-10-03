@@ -408,7 +408,8 @@ async function runProtocolScenario({ modules, provider, contextMode, httpClient,
 
 function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId, scenarioConfig, requestLimit) {
   if (scenario.outcome !== "succeeded") {
-    throw new ProbeFailure("PROTOCOL_SCENARIO_FAILED", `${provider}/${contextMode}/${scenarioId} synthetic switch scenario did not succeed.`);
+    const failure = scenario.events.findLast((event) => event.type === "runtime.error");
+    throw new ProbeFailure("PROTOCOL_SCENARIO_FAILED", `${provider}/${contextMode}/${scenarioId} synthetic switch scenario did not succeed: ${failure?.message ?? "unknown runtime outcome"}`);
   }
   if (httpClient.records.length > requestLimit || httpClient.records.length !== scenario.snapshot.modelRequestCount) {
     throw new ProbeFailure("PROTOCOL_REQUEST_COUNT", `${provider}/${contextMode}/${scenarioId} exceeded the bounded request cap or model-request accounting differed.`);
@@ -451,10 +452,10 @@ function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId,
     if (catalogText === undefined || listDescription === undefined || switchDescription === undefined ||
         listDescription.length > 180 || switchDescription.length > 180 ||
         !listLine?.endsWith(listDescription) || !switchLine?.endsWith(switchDescription) ||
-        !listDescription.startsWith("List opened windows (") ||
-        !listDescription.includes("windowRef, appName, title, isCurrent") ||
-        !listDescription.includes("untrusted") || !listDescription.includes("survive ordinary observations") ||
-        !listDescription.includes("expire on refresh, switch, Run end") ||
+        !listDescription.startsWith("List {windows,truncated,omittedCount}") ||
+        !listDescription.includes("untrusted") || !listDescription.includes("survive observations") ||
+        !listDescription.includes("expire on refresh/switch/end") ||
+        !listDescription.includes("unlisted apps may exist") ||
         !switchDescription.includes("Switch to a listed open window using windowRef") ||
         !switchDescription.includes("sole call this turn") ||
         !switchDescription.includes("wait for a fresh observation before any further action")) {
@@ -465,8 +466,8 @@ function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId,
   let latestInventory;
   let latestListCallId;
   for (const event of scenario.events) {
-    if (event.type === "tool.call.completed" && event.result.callId === latestListCallId && Array.isArray(event.result.output)) {
-      latestInventory = event.result.output;
+    if (event.type === "tool.call.completed" && event.result.callId === latestListCallId && Array.isArray(event.result.output?.windows)) {
+      latestInventory = event.result.output.windows;
     }
     if (event.type !== "model.response.received" || event.turn.type !== "tool_calls") continue;
     for (const call of event.turn.calls) {
@@ -609,9 +610,9 @@ function latestWindowInventoryFromRequest(body) {
     if (start < 0) continue;
     try {
       const parsed = JSON.parse(content.slice(start));
-      if (parsed?.status === "completed" && Array.isArray(parsed.output) &&
-          parsed.output.some((option) => option !== null && typeof option === "object" && typeof option.windowRef === "string")) {
-        return parsed.output;
+      if (parsed?.status === "completed" && Array.isArray(parsed.output?.windows) &&
+          parsed.output.windows.some((option) => option !== null && typeof option === "object" && typeof option.windowRef === "string")) {
+        return parsed.output.windows;
       }
     } catch {
       // A different tool-result shape or a non-result message is not inventory evidence.
@@ -1107,6 +1108,7 @@ class SyntheticComputer {
     this.observedTargetKeys = [];
     this.observationPngs = [];
     this.observationCounter = 0;
+    this.surfaceGeneration = 1;
     this.closedSessionId = undefined;
     this.currentRefs = new Map();
     this.targetKeyForWindowRef = new Map();
@@ -1135,7 +1137,7 @@ class SyntheticComputer {
       return { windowRef, appName: window.appName, title: window.title, isCurrent: this.activeTargetKey === window.key };
     });
     this.listedInventories.push(inventory);
-    return inventory;
+    return { options: inventory, truncated: false, omittedCount: 0 };
   }
 
   async observe(session, _observationId, signal) {
@@ -1150,6 +1152,7 @@ class SyntheticComputer {
     return {
       capturedAt: `2026-10-02T00:00:${String(this.observationCounter).padStart(2, "0")}.000Z`,
       viewport: session.viewport,
+      surfaceRef: { surfaceId: `synthetic-${this.activeTargetKey}`, generation: this.surfaceGeneration, kind: this.activeTargetKey === "desktop" ? "desktop" : "native_window" },
       screenshot: { mediaType: "image/png", data: new Uint8Array(screenshot) },
     };
   }
@@ -1169,6 +1172,7 @@ class SyntheticComputer {
     if (nextSession === undefined) return { actionId: action.actionId, status: "refused", driverCode: "SYNTHETIC_TARGET_MISMATCH" };
     this.switches.push({ fromTargetKey: this.activeTargetKey, targetKey, windowRef: action.windowRef, wasLatest: this.currentRefs.has(action.windowRef) });
     this.activeTargetKey = targetKey;
+    this.surfaceGeneration += 1;
     this.activeSession = nextSession;
     this.currentRefs.clear();
     return { actionId: action.actionId, status: "completed", sessionAfter: nextSession };
@@ -1251,8 +1255,8 @@ function summarizeScenario(scenario, provider, contextMode) {
   const inventoryResult = listCallId === undefined ? undefined : scenario.events.find((event) =>
     event.type === "tool.call.completed" && event.result.callId === listCallId,
   );
-  const inventoryOptions = inventoryResult?.type === "tool.call.completed" && Array.isArray(inventoryResult.result.output)
-    ? inventoryResult.result.output.filter((option) => option !== null && typeof option === "object" && !Array.isArray(option))
+  const inventoryOptions = inventoryResult?.type === "tool.call.completed" && Array.isArray(inventoryResult.result.output?.windows)
+    ? inventoryResult.result.output.windows.filter((option) => option !== null && typeof option === "object" && !Array.isArray(option))
         .map((option) => ({ windowRef: option.windowRef, appName: option.appName, title: option.title, isCurrent: option.isCurrent }))
     : [];
   const switchCall = modelTurns.flatMap((event) => event.type === "model.response.received" && event.turn.type === "tool_calls" ? event.turn.calls : [])

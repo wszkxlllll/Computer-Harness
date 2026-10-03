@@ -1,6 +1,6 @@
 import type { ActionGuardActionSummary, EventId, ObservationAssessment, ObservationId, PlanningTask, RiskCategory, RunId, RuntimeEvent } from "@computer-harness/protocol";
 
-export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
+export type RunNoticeKind = "progress" | "approval" | "question" | "handoff" | "error" | "result";
 export type RunNoticeDelivery = "polite" | "interrupt";
 export type RunNoticeProgressSemantic = "run_start" | "observation_milestone" | "observation_blocker";
 
@@ -98,9 +98,19 @@ export class RunNoticeProjector {
         return this.projectApproval(event, context);
       case "user.input.requested":
         return this.projectQuestion(event);
+      case "computer.window.handoff.requested":
+        return this.notice(
+          event,
+          "handoff",
+          "任务正在等待你选择或确认一个窗口。",
+          "interrupt",
+          `handoff:${event.sourceActionId}`,
+          "fixed",
+          event.sourceActionId,
+        );
       case "user.input.received":
       case "approval.resolved":
-        // The scheduler checks these notices against the live pending-request snapshot at dequeue time.
+        // The scheduler checks interactive notices against the live pending request at dequeue time.
         return undefined;
       case "runtime.error":
         return this.projectRuntimeError(event);

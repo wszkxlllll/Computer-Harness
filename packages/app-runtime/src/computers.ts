@@ -1,7 +1,7 @@
 import { CuaWindowDiscovery, ManagedBrowserHost, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
-import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowOption, ObservationCapture, ObservationId } from "@computer-harness/protocol";
+import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList, ObservationCapture, ObservationId } from "@computer-harness/protocol";
 import type { WindowTargetDiscovery } from "./application-session.js";
 import { createWindowsWindowRelationshipProbe } from "./windows-window-relationship-probe.js";
 
@@ -388,7 +388,7 @@ class ManagedBrowserComputer implements Computer {
     return this.delegate.execute(session, action, signal, options);
   }
 
-  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowOption[]> {
+  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<ComputerWindowList> {
     if (this.delegate?.listWindows === undefined) throw new Error("managed browser Computer has no opened-window inventory");
     return this.delegate.listWindows(session, signal);
   }

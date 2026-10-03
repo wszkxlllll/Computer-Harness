@@ -4,7 +4,7 @@ export const OBSERVATION_ASSESSMENT_FIELD = "observationAssessment";
 
 /** Stable instructions/schema shared by both Provider adapters. Per-turn IDs stay in user messages. */
 export const OBSERVATION_ASSESSMENT_GUIDANCE =
-  "Optional ObservationAssessment: attach one observationAssessment object inside the arguments of the normal action or control call only when useful. Progress has a one-turn delay: after an action, wait for its fresh post-action Observation and report only in the next ModelTurn; do not announce a result in the action-producing turn. Report what the exact current screenshot visibly confirms in this response's fresh Observation. Use the exact latest Observation ID and preceding GUI action ID supplied in the current user message. progress.kind=milestone means a distinct user-level stage result is visible now; it may be a stable result that was already present before the immediately preceding action, so do not claim that action caused it. Examples include the requested search results being visible or requested content visible in the destination application after a fresh screenshot. progress.kind=blocked means the current screenshot shows a concrete blocker or something the user needs to handle. Do not add progress for routine clicks, focus changes, menu openings, cursors, unverified typing, action receipts, planned next steps, or the whole task merely because the screen looks stable. Report meaningful stage results, not every step. Never use raw assistant narration, future intent, or a Planning declaration as evidence. actionOutcome, evidence and any supplied Runtime Monitor transition describe action diagnostics; they do not prove or disprove the semantic state shown in the current screenshot. Do not invent IDs or include confidence scores. This annotation does not replace the normal action/control decision.";
+  `When a valid current assessment reference is supplied, include one observationAssessment object inside the arguments of the normal action or control call. The outer field remains optional in the wire schema for compatibility; on this referenced turn, do not confuse schema optionality with whether you should report. Its progress field is REQUIRED and must be an explicit choice: use null when this fresh screenshot confirms neither a meaningful user-requested subgoal result nor a concrete blocker; use {kind: milestone, summary: ...} when it confirms a meaningful requested result; use {kind: blocked, summary: ...} only for a concrete blocker or something the user needs to handle. Null means no speech notice. Judge progress against the Goal's user-visible subgoals, not only whether the whole Goal is finished: when the screenshot confirms any meaningful requested subgoal, report that milestone now even if later Goal steps remain. For example, results now displayed or requested content now present in its destination can be a milestone while the broader task continues. Do not call a partial milestone final completion. Use the exact current Observation ID and preceding GUI action ID in the supplied reference. The full object shape is {"observationId":"<exact current Observation ID>","actionId":"<exact preceding GUI action ID>","actionOutcome":"<accurate diagnostic enum>","evidence":"<brief non-sensitive screenshot fact>","progress":{"kind":"milestone","summary":"<what this screenshot confirms; mention remaining work only if relevant>"}}. Replace every placeholder with this turn's exact IDs and screenshot-grounded facts; do not output placeholders or mechanically reuse the example summary. For no meaningful subgoal or blocker, set progress to null instead. Progress has a one-turn delay: after an action, wait for its fresh post-action Observation and report only in the next ModelTurn; do not announce a result in the action-producing turn. The current screenshot is the evidence for this turn. A result may have existed before the immediately preceding action; report what is visible without claiming that action caused it, and do not require a changed action or Monitor transition. Do not add a milestone for routine clicks, focus changes, menu openings, cursors, unverified typing, action receipts, planned next steps, or the whole task merely because the screen looks stable. Report meaningful stage results, not every step. Never use raw assistant narration, future intent, a Planning declaration, actionOutcome, evidence, or a Runtime Monitor transition as proof of semantic state; those diagnostics do not decide what the screenshot shows. Do not copy private on-screen text into a summary. Do not invent IDs or include confidence scores. This annotation does not replace the normal action/control decision.`;
 
 export const observationAssessmentSchema: JsonValue = {
   type: "object",
@@ -14,7 +14,8 @@ export const observationAssessmentSchema: JsonValue = {
     actionOutcome: { type: "string", enum: ["expected_change", "no_effect", "unexpected_change", "uncertain"] },
     evidence: { type: "string", minLength: 1, maxLength: 240 },
     progress: {
-      type: "object",
+      type: ["object", "null"],
+      description: "Required explicit choice: null means no progress/blocker and produces no speech notice. If the fresh screenshot confirms a meaningful requested subgoal result, use an object with kind=milestone and a concise user-facing summary (for example, requested text is visible in its destination app or requested results are displayed). Use kind=blocked only for a concrete blocker. Base it on screenshot semantics, independent of actionOutcome or Monitor transition; do not require a changed transition, quote private screen text, or report routine actions.",
       properties: {
         kind: { type: "string", enum: ["milestone", "blocked"] },
         summary: { type: "string", minLength: 1, maxLength: 160 },
@@ -23,7 +24,7 @@ export const observationAssessmentSchema: JsonValue = {
       additionalProperties: false,
     },
   },
-  required: ["observationId", "actionId", "actionOutcome", "evidence"],
+  required: ["observationId", "actionId", "actionOutcome", "evidence", "progress"],
   additionalProperties: false,
 };
 
@@ -119,7 +120,7 @@ export function parseObservationAssessment(value: unknown): ObservationAssessmen
   const evidence = conciseText(value.evidence, 240);
   if (evidence === undefined) return undefined;
   let progress: ObservationAssessment["progress"];
-  if (value.progress !== undefined) {
+  if (value.progress !== undefined && value.progress !== null) {
     if (!isRecord(value.progress)
       || Object.keys(value.progress).some((key) => key !== "kind" && key !== "summary")
       || (value.progress.kind !== "milestone" && value.progress.kind !== "blocked")) return undefined;

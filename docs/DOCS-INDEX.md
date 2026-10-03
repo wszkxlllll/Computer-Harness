@@ -6,6 +6,10 @@
 
 ## 当前交接主线
 
+最新修复验收：[窗口与中途播报修复（2026-10-04）](./window-and-progress-repair-results-2026-10-04.md)。Windows 记事本菜单返回、WPS 列窗切换与辅助窗复测通过；真实 API 已产生可消费的 Notepad milestone，携程仍有漏报。历史失败诊断见[携程→记事本轨迹](./travel-window-and-speech-diagnosis-2026-10-03.md)，用户已确认开始/取消有声音，缺的是中途播报，不是完全静音。
+
+最新 main 与三平台跨窗口验收：[三平台进度同步（2026-10-03）](./platform-cross-window-status-2026-10-03.md)。PR #21 已合并，三平台 CI 全绿；macOS/Linux 跨窗口实机仍待验收，Windows 合并前窄路径成功也不替代新 main 回归。当前 Preview/本机 Host 尚未自动更新到该整合 main。
+
 Surface Registry 与 Windows transient-child 当前交接：[Surface Registry 队友交接](./surface-registry-team-handoff-2026-10-03.md)。集中记录稳定 ComputerSession/Surface 谱系、Windows relationship probe 与权威合并、menu/dialog/overlay 准入、多行自动 element binding、跨平台队友边界和细粒度 PR 切片。最终冻结源码定向 254/254、全量 105 文件/1271 tests 通过；Notepad menu bounded runner 的 `child_push`/`child_pop` 已实机通过，Open dialog 与 WPS 独立 dialog/menu 仍为 pending。
 
 多行文本输入可靠性与 Provider 验证：[多行输入修复与 Provider 验证记录](./multiline-type-implementation-results-2026-10-03.md)。Windows CUA 原始/Adapter 多行路径已通过受控 Notepad 验证；唯一一次 GLM Run 暴露 foreground keyboard 工具未进入 outbound catalog，尚未通过 Provider 端到端多行输入。文档记录真实边界、诊断误报修复和下一次受控验证命令。
@@ -33,6 +37,8 @@ Surface Registry 与 Windows transient-child 当前交接：[Surface Registry �
 P1 助手回答偏好实施记录：[版本化 Run 快照与 Context 投影](./assistant-preferences-p1-implementation-2026-09-29.md)。代码闭环和离线合同测试已完成；真实模型行为与手机真机无障碍尚未验收。
 
 受控真实 API 验证：[ObservationAssessment 与助手偏好](./semantic-assessment-and-preferences-real-api-validation-2026-09-29.md)。GLM/Qwen 共发起四次合成请求；Qwen assessment 经 Monitor/Context 消费，GLM 简中偏好有单次正向样本，Qwen 个性化选择 `wait` 且 assessment 与 unchanged transition 冲突。终端汇总截断了部分逐项指标，报告明确保留该证据限制。
+
+ObservationAssessment wire schema 与 producer 指令实测：[GLM 真实 API 探针记录](./observation-assessment-live-probe-2026-10-04.md)。`progress` 现要求显式 object/null，解析器兼容旧缺字段响应；最终提示轮中 Notepad milestone 经 RunNoticeProjector/Scheduler 消费，Ctrip 正确结果图仍未返回外层 annotation。共 6 次受限真实请求；样本选择校正、隐私边界与尚未证实的物理播报详见报告。
 
 当前交付：[手机 App 式界面与审批修复](./mobile-accessible-ui-implementation-2026-09-26.md)。已按成熟 App 参考重做实际界面；756 项测试通过，最终小屏裁切已修复并重建。2026-09-27 已部署公网 Web、启动新版本机 Host 并验证配对注册；未完成手机读屏及真实任务验收。
 

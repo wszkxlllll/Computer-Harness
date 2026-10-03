@@ -179,6 +179,18 @@ describe("DefaultContextCompiler", () => {
       }),
     ]);
     expect(JSON.stringify(exact.messages)).toContain("Runtime Monitor transition for this exact action/Observation: changed");
+    const unchanged = await compileEvents([
+      event(7, {
+        type: "monitor.transition", actionId, postObservationId: latest.id,
+        sourceActionEventId: "event-2" as EventId, sourceObservationEventId: "event-3" as EventId, transition: "unchanged",
+      }),
+    ]);
+    const unchangedText = JSON.stringify(unchanged.messages);
+    expect(unchangedText).toContain("Runtime Monitor transition for this exact action/Observation: unchanged");
+    expect(unchangedText).toContain("progress field is REQUIRED: choose explicit null");
+    expect(unchangedText).toContain("choose kind=milestone");
+    expect(unchangedText).toContain("Base the choice on screenshot semantics, not on actionOutcome or Monitor transition");
+    expect(unchangedText).toContain("even when the whole Goal has later steps");
     expect(exact.contextBudget?.trace?.stablePrefixHash).toBe(input.contextBudget?.trace?.stablePrefixHash);
     expect(mismatched.contextBudget?.trace?.stablePrefixHash).toBe(input.contextBudget?.trace?.stablePrefixHash);
   });

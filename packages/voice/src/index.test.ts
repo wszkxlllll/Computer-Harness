@@ -248,6 +248,24 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(projector.project(actionCompleted(6, "action-2"))).toBeUndefined();
   });
 
+  it("projects a fixed, current-request-bound window handoff notice without window labels", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    const sourceActionId = "action-window-handoff" as ActionId;
+    const handoff = projector.project(event(1, {
+      type: "computer.window.handoff.requested",
+      sourceActionId,
+      reasonCode: "new_window_detected",
+    }));
+
+    expect(handoff).toMatchObject({
+      kind: "handoff",
+      delivery: "interrupt",
+      text: "任务正在等待你选择或确认一个窗口。",
+      pendingRequestId: sourceActionId,
+    });
+    expect(handoff?.text).not.toContain(sourceActionId);
+  });
+
   it("speaks a user-level milestone only when its exact fresh observation was included in the response request", () => {
     const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     projector.project(observation(1, "observation-1"));
@@ -655,6 +673,25 @@ describe("RunNoticeScheduler", () => {
     const current = notice(3, { kind: "question", delivery: "interrupt", pendingRequestId: "question-3", text: "请回答", dedupeKey: "question-3" });
     secondScheduler.offer(current, secondGeneration);
     expect(secondScheduler.takeNext(new Set([pendingId(current)]))?.noticeId).toBe(current.noticeId);
+
+    const expiredHandoffScheduler = new RunNoticeScheduler();
+    const expiredHandoffGeneration = expiredHandoffScheduler.activateRun(runId);
+    const handoff = notice(4, {
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: "action-window-4",
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+    expiredHandoffScheduler.offer(handoff, expiredHandoffGeneration);
+    expect(expiredHandoffScheduler.takeNext(new Set())).toBeUndefined();
+
+    const currentHandoffScheduler = new RunNoticeScheduler();
+    const currentHandoffGeneration = currentHandoffScheduler.activateRun(runId);
+    currentHandoffScheduler.offer(handoff, currentHandoffGeneration);
+    expect(currentHandoffScheduler.takeNext(new Set(["action-window-4"]))).toMatchObject({
+      noticeId: handoff.noticeId,
+      pendingRequestId: "action-window-4",
+    });
   });
 
   it("drops polite progress on errors but keeps current interactions, while results replace all pending notices", () => {

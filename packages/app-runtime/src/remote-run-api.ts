@@ -1316,9 +1316,9 @@ function targetHasExactKeys(record: Record<string, unknown>, expected: readonly 
 }
 
 function decodeWindowInventory(value: JsonValue): Array<{ windowRef: string; label: RemoteWindowTargetLabel; isCurrent: boolean }> {
-  if (!Array.isArray(value)) return [];
+  if (typeof value !== "object" || value === null || Array.isArray(value) || !Array.isArray(value.windows)) return [];
   const options: Array<{ windowRef: string; label: RemoteWindowTargetLabel; isCurrent: boolean }> = [];
-  for (const item of value) {
+  for (const item of value.windows) {
     if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
     const option = item as Record<string, JsonValue>;
     if (typeof option.windowRef !== "string" || option.windowRef.length === 0 || typeof option.isCurrent !== "boolean") continue;

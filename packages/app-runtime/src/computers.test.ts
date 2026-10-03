@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDefaultToolRegistry, type Computer } from "@computer-harness/runtime";
-import type { ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowOption } from "@computer-harness/protocol";
+import type { ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList } from "@computer-harness/protocol";
 import type { DomGroundingTransport, ManagedBrowserHost, ManagedBrowserHostOptions, ManagedBrowserTarget, CuaBootstrapSession } from "@computer-harness/computer-cua";
 import { createComputer, prepareComputerRunAssembly } from "./computers.js";
 
@@ -33,9 +33,11 @@ const nativeWindowCandidate: ComputerWindowCandidate = {
   title: "Review draft",
 };
 
-const managedWindowInventory: readonly ComputerWindowOption[] = [
-  { windowRef: "fixture-wps-ref", appName: "WPS", title: "Review draft", isCurrent: false },
-];
+const managedWindowInventory: ComputerWindowList = {
+  options: [{ windowRef: "fixture-wps-ref", appName: "WPS", title: "Review draft", isCurrent: false }],
+  truncated: false,
+  omittedCount: 0,
+};
 
 describe("prepareComputerRunAssembly", () => {
   it("keeps CUA grounding and window tool limits with Computer assembly", () => {

@@ -828,6 +828,15 @@ export interface ComputerWindowOption {
   readonly isCurrent: boolean;
 }
 
+/** A bounded, deterministic projection of the latest opened-window topology.
+ * `omittedCount` makes the fixed option budget visible to the model so it
+ * cannot mistake a truncated candidate list for a complete inventory. */
+export interface ComputerWindowList {
+  readonly options: readonly ComputerWindowOption[];
+  readonly truncated: boolean;
+  readonly omittedCount: number;
+}
+
 export type SwitchWindowAction = GuiActionBase & {
   kind: "switch_window";
   windowRef: string;

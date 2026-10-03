@@ -603,9 +603,11 @@ describe("CuaDriverComputer", () => {
         point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
       expect(receipt.status).toBe("completed");
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-        .rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
-      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const candidates = await computer.detectNewWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([{
+        pid: popup.pid, windowId: popup.windowId, appName: popup.appName, title: popup.title,
+      }]);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual(candidates);
       expect(fake.calls.filter((call) => call.name === "get_accessibility_tree" || call.name === "get_window_state"))
         .toHaveLength(globalRootCallsBefore);
       expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
@@ -635,7 +637,7 @@ describe("CuaDriverComputer", () => {
       const startingObservation = await computer.observe(session, "switch-window-before-list" as ObservationId, signal);
       expect(startingObservation.surfaceRef.kind).toBe("native_window");
       const initial = await computer.listWindows(session, signal);
-      const editor = initial.find((window) => window.title === "Draft")!;
+      const editor = initial.options.find((window) => window.title === "Draft")!;
       expect(editor).toMatchObject({ appName: "Editor", isCurrent: false });
       expect(Object.keys(editor).sort()).toEqual(["appName", "isCurrent", "title", "windowRef"]);
       expect(fake.calls.filter((call) => call.name === "list_windows").at(-1)?.input)
@@ -668,7 +670,7 @@ describe("CuaDriverComputer", () => {
       expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
 
       // Ordinary observation does not invalidate refs from the latest list.
-      const editorRef = refreshed.find((window) => window.title === "Draft")!.windowRef;
+      const editorRef = refreshed.options.find((window) => window.title === "Draft")!.windowRef;
       await computer.observe(session, "switch-window-after-observation" as ObservationId, signal);
       fake.setBounds(
         { x: 500, y: 300, width: 802, height: 602 },
@@ -736,7 +738,7 @@ describe("CuaDriverComputer", () => {
       const session = await computer.open({}, signal);
       await computer.observe(session, "switch-window-uncertain-before" as ObservationId, signal);
       const windows = await computer.listWindows(session, signal);
-      const selected = windows.find((window) => window.title === "Draft")!;
+      const selected = windows.options.find((window) => window.title === "Draft")!;
       // The transition's pre-activation inventory succeeds, then its fresh
       // post-activation identity capture reports that the target disappeared.
       fake.setMissingAfterListCall(fake.getListWindowsCallCount() + 2);
@@ -773,7 +775,7 @@ describe("CuaDriverComputer", () => {
     try {
       const session = await computer.open({}, signal);
       await computer.observe(session, "closed-current-window-observation" as ObservationId, signal);
-      const currentRef = (await computer.listWindows(session, signal)).find((window) => window.isCurrent)!;
+      const currentRef = (await computer.listWindows(session, signal)).options.find((window) => window.isCurrent)!;
       fake.setMissing(true);
       const receipt = await computer.execute(session, {
         actionId: "closed-current-window-switch" as ActionId,
@@ -809,9 +811,9 @@ describe("CuaDriverComputer", () => {
     try {
       const session = await computer.open({}, new AbortController().signal);
       const windows = await computer.listWindows(session, new AbortController().signal);
-      expect(windows).toHaveLength(1);
-      expect(windows[0]).toMatchObject({ appName: "Computer Harness", isCurrent: true });
-      expect(windows.some((window) => window.title === "Draft")).toBe(false);
+      expect(windows.options).toHaveLength(1);
+      expect(windows.options[0]).toMatchObject({ appName: "Computer Harness", isCurrent: true });
+      expect(windows.options.some((window) => window.title === "Draft")).toBe(false);
       expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
       await computer.close(session);
     } finally {
@@ -838,12 +840,7 @@ describe("CuaDriverComputer", () => {
       const session = await computer.open({}, signal);
       await computer.observe(session, "handoff-scope-observation" as ObservationId, signal);
       const candidates = await computer.listWindowHandoffCandidates(session, signal);
-      expect(candidates).toEqual([{
-        pid: fake.target.pid,
-        windowId: fake.target.windowId,
-        appName: "Computer Harness",
-        title: "Safe fixture",
-      }]);
+      expect(candidates).toEqual([]);
       await expect(computer.handoffWindow(session, unauthorized, signal))
         .rejects.toMatchObject({ code: "WINDOW_SWITCH_UNAUTHORIZED" });
       expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
@@ -888,8 +885,7 @@ describe("CuaDriverComputer", () => {
         point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
       expect(click.status).toBe("completed");
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-        .rejects.toMatchObject({ code: "WINDOW_SCOPE_REQUIRED" });
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
       expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
       await computer.close(session);
@@ -948,7 +944,7 @@ describe("CuaDriverComputer", () => {
       expect(managed.grounding?.source).toBe("hybrid");
       expect(collectCount).toBe(1);
 
-      const nativeOption = (await computer.listWindows(session, signal)).find((window) => window.title === "Personal profile")!;
+      const nativeOption = (await computer.listWindows(session, signal)).options.find((window) => window.title === "Personal profile")!;
       const toNative = await computer.execute(session, {
         actionId: "managed-to-native" as ActionId,
         basedOn: "managed-before-switch" as ObservationId,
@@ -962,7 +958,7 @@ describe("CuaDriverComputer", () => {
       expect(native.grounding?.source).toBe("uia");
       expect(collectCount).toBe(1);
 
-      const managedOption = (await computer.listWindows(toNative.sessionAfter, signal)).find((window) => window.title === "Safe fixture")!;
+      const managedOption = (await computer.listWindows(toNative.sessionAfter, signal)).options.find((window) => window.title === "Safe fixture")!;
       const backToManaged = await computer.execute(toNative.sessionAfter, {
         actionId: "native-to-managed" as ActionId,
         basedOn: "native-personal-edge" as ObservationId,
@@ -1095,7 +1091,7 @@ describe("CuaDriverComputer", () => {
         basedOn: "foreground-id-missing-baseline" as ObservationId,
         kind: "click", point: { x: 10, y: 20 },
       }, signal)).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
-      expect(await computer.listWindowHandoffCandidates(session, signal)).toHaveLength(2);
+      expect(await computer.listWindowHandoffCandidates(session, signal)).toHaveLength(1);
       expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
       await computer.close(session);
     } finally {
@@ -1189,7 +1185,8 @@ describe("CuaDriverComputer", () => {
     const fake = windowDriver();
     const computer = new CuaDriverComputer({
       socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
-      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+      windowDeliveryMode: "foreground", windowSwitchAllowedTargets: [fake.target, { pid: 4321, windowId: 8765 }],
+      driverFactory: () => fake.driver,
     });
     const signal = new AbortController().signal;
     try {
@@ -1198,7 +1195,7 @@ describe("CuaDriverComputer", () => {
       const candidate = { pid: 4321, windowId: 8765, appName: "Editor", title: "Save As" };
       fake.setExtraWindowAfterClick(candidate);
       await computer.execute(session, {
-        actionId: "proactive-cross-process-click" as ActionId,
+      actionId: "proactive-cross-process-click" as ActionId,
         basedOn: "proactive-cross-process-before" as ObservationId,
         kind: "click", point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
@@ -1305,7 +1302,7 @@ describe("CuaDriverComputer", () => {
         kind: "click", point: { x: 10, y: 20 },
       }, signal)).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
       const candidates = await computer.listWindowHandoffCandidates(session, signal);
-      expect(candidates.some((candidate) => candidate.pid === 4321 && candidate.title === "Save As")).toBe(true);
+      expect(candidates.some((candidate) => candidate.pid === 4321 && candidate.title === "Save As")).toBe(false);
       expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
       await computer.close(session);
     } finally {
@@ -1330,8 +1327,8 @@ describe("CuaDriverComputer", () => {
         actionId: "other-process-refused-click" as ActionId, basedOn: "other-process-baseline" as ObservationId,
         kind: "click", point: { x: 10, y: 20 },
       }, signal)).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
-      const candidate = (await computer.listWindowHandoffCandidates(session, signal)).find((window) => window.title === "Save As")!;
-      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([candidate]);
+      expect(await computer.listWindowHandoffCandidates(session, signal)).toEqual([]);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1358,10 +1355,40 @@ describe("CuaDriverComputer", () => {
         kind: "click", point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
       expect(receipt.status).toBe("completed");
-      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([popup]);
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
       expect(fake.calls.some((call) => call.name === "get_accessibility_tree")).toBe(false);
       const stillParent = await computer.observe(session, "truncated-popup-still-parent" as ObservationId, signal);
       expect(stillParent.surfaceRef).toEqual(before.surfaceRef);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("continues with a fresh exact observation when the post-action inventory is partial and has no related window", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-partial-post-action-no-child-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const before = await computer.observe(session, "partial-post-action-before" as ObservationId, signal);
+      const receipt = await computer.execute(session, {
+        actionId: "partial-post-action-click" as ActionId,
+        basedOn: "partial-post-action-before" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+      fake.setWindowInventoryComplete(false);
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const after = await computer.observe(session, "partial-post-action-after" as ObservationId, signal);
+      expect(after.surfaceRef).toEqual(before.surfaceRef);
+      expect(after.surfaceTransitionReason).toBeUndefined();
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1607,6 +1634,248 @@ describe("CuaDriverComputer", () => {
       const returned = await computer.observe(session, "menu-owner-restored" as ObservationId, signal);
       expect(returned.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
       expect(fake.calls.filter((call) => call.name === "verifyState").at(-1)?.input).toEqual({ window_id: fake.target.windowId });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses an exact Win32 child-foreground relationship to push a child when UIA root data is unavailable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-owned-child-no-uia-root-"));
+    const fake = windowDriver();
+    const child = {
+      pid: fake.target.pid,
+      windowId: 8766,
+      appName: "Notepad",
+      title: "Edit",
+      bounds: { x: 300, y: 200, width: 300, height: 200 },
+      zIndex: 2,
+      ownerPid: fake.target.pid,
+      ownerWindowId: fake.target.windowId,
+      isOnScreen: true,
+      minimized: false,
+    };
+    fake.setWindowImageSize(child.windowId, 298, 198);
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "off", windowRelationshipProbe: relationshipProbeFor(fake),
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const parent = await computer.observe(session, "owner-stack-no-uia-parent" as ObservationId, signal);
+      fake.setExtraWindowAfterClick(child);
+      await computer.execute(session, {
+        actionId: "owner-stack-no-uia-open" as ActionId,
+        basedOn: "owner-stack-no-uia-parent" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const opened = await computer.observe(session, "owner-stack-no-uia-child" as ObservationId, signal);
+      expect(opened.surfaceTransitionReason).toBe("child_push");
+      expect(opened.surfaceRef).toMatchObject({
+        kind: "native_window",
+        parentSurfaceId: parent.surfaceRef.surfaceId,
+        admissionSource: "win32_relationship_probe",
+      });
+      expect(fake.calls.filter((call) => call.name === "get_window_state" && call.input?.window_id === child.windowId)).toHaveLength(0);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a generic exact-owned auxiliary non-blocking while the parent remains foreground", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-owned-auxiliary-nonblocking-"));
+    const fake = windowDriver();
+    const auxiliary = {
+      pid: fake.target.pid,
+      windowId: 8767,
+      appName: "WPS Office",
+      title: "Selection tools",
+      bounds: { x: 300, y: 200, width: 300, height: 80 },
+      zIndex: 2,
+      ownerPid: fake.target.pid,
+      ownerWindowId: fake.target.windowId,
+      isOnScreen: true,
+      minimized: false,
+      windowClass: "FloatingToolbarWindow",
+    };
+    const unrelatedHelper = {
+      pid: 9876,
+      windowId: 8768,
+      appName: "Background helper",
+      title: "Helper window",
+      zIndex: 3,
+    };
+    fake.setWindowImageSize(auxiliary.windowId, 298, 78);
+    const baseProbe = relationshipProbeFor(fake);
+    const parentForegroundProbe = {
+      async read() {
+        const snapshot = await baseProbe.read();
+        return {
+          ...snapshot,
+          foregroundPid: fake.target.pid,
+          foregroundWindowId: fake.target.windowId,
+        };
+      },
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "off", windowSwitch: "opened-windows-v1",
+      windowRelationshipProbe: parentForegroundProbe, driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const parent = await computer.observe(session, "owned-auxiliary-parent" as ObservationId, signal);
+      fake.setExtraWindowAfterClick(auxiliary);
+      fake.setSecondExtraWindowAfterClick(unrelatedHelper);
+      const receipt = await computer.execute(session, {
+        actionId: "owned-auxiliary-trigger" as ActionId,
+        basedOn: "owned-auxiliary-parent" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+
+      // The exact owner + visible geometry/z-order rows are known, but the
+      // generic helper did not take foreground and supplied no modal root.
+      // Continue with a fresh observation of the same parent Surface rather
+      // than handing an irrelevant toolbar to the Host as a modal dialog.
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const after = await computer.observe(session, "owned-auxiliary-parent-fresh" as ObservationId, signal);
+      expect(after.surfaceRef).toMatchObject({
+        kind: "native_window",
+        surfaceId: parent.surfaceRef.surfaceId,
+        generation: parent.surfaceRef.generation,
+      });
+      expect(after.surfaceTransitionReason).not.toBe("child_push");
+      expect(fake.calls.filter((call) => call.name === "get_window_state" && call.input?.window_id === auxiliary.windowId)).toHaveLength(0);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a cross-process exact Win32-owned auxiliary non-blocking while its parent remains foreground", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-cross-process-owned-auxiliary-"));
+    const fake = windowDriver();
+    const auxiliary = {
+      pid: 9876,
+      windowId: 8867,
+      appName: "WPS floating toolbar",
+      title: "Selection tools",
+      bounds: { x: 300, y: 200, width: 300, height: 80 },
+      zIndex: 2,
+      ownerPid: fake.target.pid,
+      ownerWindowId: fake.target.windowId,
+      isOnScreen: true,
+      minimized: false,
+      windowClass: "Qt5QWindowToolSaveBits",
+    };
+    fake.setWindowImageSize(auxiliary.windowId, 298, 78);
+    const baseProbe = relationshipProbeFor(fake);
+    const parentForegroundProbe = {
+      async read() {
+        const snapshot = await baseProbe.read();
+        return { ...snapshot, foregroundPid: fake.target.pid, foregroundWindowId: fake.target.windowId };
+      },
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "off", windowSwitch: "opened-windows-v1",
+      windowRelationshipProbe: parentForegroundProbe, driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const parent = await computer.observe(session, "cross-process-owned-aux-parent" as ObservationId, signal);
+      fake.setExtraWindowAfterClick(auxiliary);
+      const receipt = await computer.execute(session, {
+        actionId: "cross-process-owned-aux-trigger" as ActionId,
+        basedOn: "cross-process-owned-aux-parent" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const after = await computer.observe(session, "cross-process-owned-aux-parent-fresh" as ObservationId, signal);
+      expect(after.surfaceRef).toMatchObject({ kind: "native_window", surfaceId: parent.surfaceRef.surfaceId });
+      expect(after.surfaceTransitionReason).not.toBe("child_push");
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an unowned cross-process foreground window in manual handoff", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-cross-process-unowned-window-"));
+    const fake = windowDriver();
+    const candidate = {
+      pid: 9877,
+      windowId: 8868,
+      appName: "Unowned helper",
+      title: "Manual candidate",
+      bounds: { x: 300, y: 200, width: 300, height: 80 },
+      zIndex: 2,
+      ownerPid: 0,
+      ownerWindowId: 0,
+      isOnScreen: true,
+      minimized: false,
+      windowClass: "GenericHelperWindow",
+    };
+    const candidateTarget = { pid: candidate.pid, windowId: candidate.windowId };
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "off", windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, candidateTarget],
+      windowRelationshipProbe: {
+        async read() {
+          const candidateVisible = fake.getExtraWindow() !== undefined;
+          return {
+            source: "win32_relationship_probe" as const,
+            complete: true,
+            windows: [
+              {
+                pid: fake.target.pid, windowId: fake.target.windowId, ownerPid: 0, ownerWindowId: 0,
+                zIndex: 1, isOnScreen: true, minimized: false,
+                bounds: { x: 100, y: 120, width: 960, height: 680 }, windowClass: "WPS",
+              },
+              ...(candidateVisible ? [{
+                pid: candidate.pid, windowId: candidate.windowId, ownerPid: 0, ownerWindowId: 0,
+                zIndex: candidate.zIndex, isOnScreen: true, minimized: false,
+                bounds: candidate.bounds, windowClass: candidate.windowClass,
+              }] : []),
+            ],
+            foregroundPid: candidateVisible ? candidate.pid : fake.target.pid,
+            foregroundWindowId: candidateVisible ? candidate.windowId : fake.target.windowId,
+          };
+        },
+      },
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "cross-process-unowned-parent" as ObservationId, signal);
+      fake.setExtraWindowAfterClick(candidate);
+      const receipt = await computer.execute(session, {
+        actionId: "cross-process-unowned-trigger" as ActionId,
+        basedOn: "cross-process-unowned-parent" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([{
+        pid: candidate.pid,
+        windowId: candidate.windowId,
+        appName: candidate.appName,
+        title: candidate.title,
+      }]);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1899,7 +2168,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("withholds an allowed exact-owned candidate whose root proof is not Dialog", async () => {
+  it("keeps an allowed exact-owned candidate in the manual picker when UIA root evidence contradicts it", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-transient-not-dialog-"));
     const fake = windowDriver();
     const dialog = {
@@ -1932,9 +2201,9 @@ describe("CuaDriverComputer", () => {
         kind: "click",
         point: { x: 12, y: 18 },
       }, signal, { detectNewWindowHandoff: true });
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-        .rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
-      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const candidates = await computer.detectNewWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([{ pid: dialog.pid, windowId: dialog.windowId, appName: dialog.appName, title: dialog.title }]);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual(candidates);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1993,7 +2262,7 @@ describe("CuaDriverComputer", () => {
       expect(fake.calls.find((call) => call.name === "get_window_state" && call.input?.window_id === dialog.windowId)?.input)
         .toMatchObject({ pid: dialog.pid, window_id: dialog.windowId, include_screenshot: false });
 
-      const peerOption = (await computer.listWindows(session, signal)).find((window) => window.appName === peer.appName)!;
+      const peerOption = (await computer.listWindows(session, signal)).options.find((window) => window.appName === peer.appName)!;
       const activationsBefore = fake.calls.filter((call) => call.name === "bring_to_front").length;
       const blocked = await computer.execute(session, {
         actionId: "owned-dialog-peer-switch" as ActionId,
@@ -2228,8 +2497,8 @@ describe("CuaDriverComputer", () => {
             ...window, bounds: { ...window.bounds, x: window.bounds.x + 1 },
             zIndex: window.windowId === menu.windowId ? 699 : window.windowId === fake.target.windowId ? 639 : window.zIndex,
           })),
-          foregroundPid: 9999,
-          foregroundWindowId: 9990,
+          foregroundPid: menu.pid,
+          foregroundWindowId: menu.windowId,
         };
       },
     };
@@ -2254,9 +2523,10 @@ describe("CuaDriverComputer", () => {
 
       expect(receipt.status).toBe("completed");
       if (rootRole === "Window") {
-        await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toMatchObject({
-          code: "TRANSIENT_SURFACE_UNKNOWN",
-        });
+        expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+        const child = await computer.observe(session, "counted-menu-child" as ObservationId, signal);
+        expect(child.surfaceTransitionReason).toBe("child_push");
+        expect(child.surfaceRef).toMatchObject({ kind: "native_window", parentSurfaceId: parent.surfaceRef.surfaceId });
         await computer.close(session);
         return;
       }
@@ -2318,9 +2588,9 @@ describe("CuaDriverComputer", () => {
         point: { x: 12, y: 18 },
       }, signal, { detectNewWindowHandoff: true });
       expect(receipt.status).toBe("completed");
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-        .rejects.toMatchObject({ code: "WINDOW_INVENTORY_UNKNOWN" });
-      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const candidates = await computer.detectNewWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([{ pid: menu.pid, windowId: menu.windowId, appName: menu.appName, title: menu.title }]);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual(candidates);
       const current = await computer.observe(session, "probe-menu-ambiguous-still-parent" as ObservationId, signal);
       expect(current.surfaceRef).toEqual(parent.surfaceRef);
       expect(fake.calls.filter((call) => call.name === "get_window_state" && call.input?.window_id === menu.windowId)).toHaveLength(0);
@@ -2330,7 +2600,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("withholds an out-of-scope candidate when exact root role proof is wrong", async () => {
+  it("requires Host confirmation when exact root role proof is wrong", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-owned-root-role-"));
     const fake = windowDriver();
     const popup = {
@@ -2365,11 +2635,12 @@ describe("CuaDriverComputer", () => {
         kind: "click",
         point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-        .rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
-      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
-      const after = await computer.observe(session, "owned-root-rejected-parent" as ObservationId, signal);
-      expect(after.surfaceRef).toEqual(parent.surfaceRef);
+      const candidates = await computer.detectNewWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([{ pid: popup.pid, windowId: popup.windowId, appName: popup.appName, title: popup.title }]);
+      const selected = await computer.handoffWindow(session, candidates[0]!, signal);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(2);
+      const after = await computer.observe(selected, "owned-root-host-selected" as ObservationId, signal);
+      expect(after.surfaceRef.kind).toBe("native_window");
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -2411,9 +2682,9 @@ describe("CuaDriverComputer", () => {
         kind: "click",
         point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-        .rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
-      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const candidates = await computer.detectNewWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([{ pid: popup.pid, windowId: popup.windowId, appName: popup.appName, title: popup.title }]);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual(candidates);
       const after = await computer.observe(session, "owned-wrong-root-hwnd-parent-restored" as ObservationId, signal);
       expect(after.surfaceRef).toEqual(parent.surfaceRef);
       await computer.close(session);
@@ -2452,9 +2723,9 @@ describe("CuaDriverComputer", () => {
         point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
       fake.setFallbackRefusal("UIA_REFUSED", "exact fixture root proof refused");
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-        .rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
-      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const candidates = await computer.detectNewWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([{ pid: popup.pid, windowId: popup.windowId, appName: popup.appName, title: popup.title }]);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual(candidates);
       const proofCalls = fake.calls.filter((call) => call.name === "get_window_state" && call.input?.window_id === popup.windowId);
       expect(proofCalls).toHaveLength(1);
       expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
@@ -3799,7 +4070,7 @@ describe("CuaDriverComputer", () => {
       expect(managedBefore.grounding?.source).toBe("hybrid");
       expect(collectCount).toBe(1);
 
-      const wpsOption = (await computer.listWindows(managedSession, signal)).find((window) => window.title === "HarnessProbe-WPS-Doc")!;
+      const wpsOption = (await computer.listWindows(managedSession, signal)).options.find((window) => window.title === "HarnessProbe-WPS-Doc")!;
       const toWps = await computer.execute(managedSession, {
         actionId: "managed-manual-to-wps" as ActionId,
         basedOn: "managed-manual-before" as ObservationId,
@@ -3837,7 +4108,7 @@ describe("CuaDriverComputer", () => {
       expect(dialogObservation.viewport).toEqual(nativeSession.viewport);
       expect(collectCount).toBe(1);
 
-      const managedReturnOption = (await computer.listWindows(nativeSession, signal)).find((window) => window.title === "Safe fixture")!;
+      const managedReturnOption = (await computer.listWindows(nativeSession, signal)).options.find((window) => window.title === "Safe fixture")!;
       const toManaged = await computer.execute(nativeSession, {
         actionId: "managed-manual-return-browser" as ActionId,
         basedOn: "managed-manual-wps-dialog" as ObservationId,
@@ -4204,7 +4475,8 @@ describe("CuaDriverComputer", () => {
     fake.setGroundingState({ snapshot_id: "s00000001", elements_complete: true, elements: [
       { role: "Document", frame: { x: 140, y: 160, width: 700, height: 420 }, element_token: "private-document-token" },
     ] });
-    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
     const signal = new AbortController().signal;
     try {
       const session = await computer.open({}, signal);
@@ -4477,7 +4749,10 @@ describe("CuaDriverComputer", () => {
     ] });
     const candidate = { pid: 4321, windowId: 8765, title: "New surface", appName: "Fixture", bounds: { x: 10, y: 20, width: 640, height: 480 } };
     fake.setExtraWindowAfterTypeText(candidate);
-    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "uia-catalog-v1",
+      windowSwitchAllowedTargets: [fake.target, { pid: candidate.pid, windowId: candidate.windowId }],
+      driverFactory: () => fake.driver });
     const signal = new AbortController().signal;
     try {
       const session = await computer.open({}, signal);
@@ -4676,6 +4951,85 @@ describe("CuaDriverComputer", () => {
         point: { x: 1, y: 1 },
       }, new AbortController().signal);
       expect(afterNewSession.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("window repair integration boundaries", () => {
+  it.each(["confirmed", "owner_changed", "unrelated"] as const)("checks temporary exact-owner Host authorization: %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-owner-boundary-"));
+    const fake = windowDriver();
+    const popup = {
+      pid: fake.target.pid, windowId: 8767, appName: "Fixture", title: "Owned popup",
+      zIndex: 2, isOnScreen: true, minimized: false,
+      ownerPid: fake.target.pid, ownerWindowId: fake.target.windowId,
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitchAllowedTargets: [fake.target],
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const before = await computer.observe(session, "owner-boundary-before" as ObservationId, signal);
+      fake.setExtraWindowAfterClick(popup);
+      const receipt = await computer.execute(session, {
+        actionId: "owner-boundary-click" as ActionId, basedOn: "owner-boundary-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([
+        { pid: popup.pid, windowId: popup.windowId, appName: popup.appName, title: popup.title },
+      ]);
+      const activationsBefore = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      if (scenario === "owner_changed") {
+        fake.setExtraWindowOnListCall(fake.getListWindowsCallCount() + 3, { ...popup, ownerWindowId: 9999 });
+      } else if (scenario === "unrelated") {
+        fake.setExtraWindow({ ...popup, ownerPid: 4321, ownerWindowId: 9999 });
+      }
+      if (scenario === "confirmed") {
+        const selected = await computer.handoffWindow(session, popup, signal);
+        const after = await computer.observe(selected, "owner-boundary-after" as ObservationId, signal);
+        expect(after.surfaceRef.surfaceId).not.toBe(before.surfaceRef.surfaceId);
+        expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationsBefore + 1);
+      } else {
+        await expect(computer.handoffWindow(session, popup, signal)).rejects.toMatchObject({
+          code: scenario === "owner_changed" ? "WINDOW_HANDOFF_STALE" : "WINDOW_SWITCH_UNAUTHORIZED",
+        });
+        expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationsBefore);
+      }
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replay an uncertain action while refreshing popup discovery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-uncertain-popup-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "uncertain-popup-before" as ObservationId, signal);
+      fake.degradeActionOnCall(1);
+      const receipt = await computer.execute(session, {
+        actionId: "uncertain-popup-click" as ActionId, basedOn: "uncertain-popup-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).not.toBe("completed");
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      await computer.observe(session, "uncertain-popup-after" as ObservationId, signal);
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
       await computer.close(session);
     } finally {

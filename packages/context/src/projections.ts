@@ -36,6 +36,8 @@ export function formatWindowSwitchState(
   state: {
     readonly currentWindow?: { readonly appName?: string; readonly title?: string };
     readonly options?: readonly ComputerWindowOption[];
+    readonly truncated?: boolean;
+    readonly omittedCount?: number;
   } | undefined,
   grounding: GroundingCatalog | undefined,
   currentViewport: import("@computer-harness/protocol").Viewport | undefined,
@@ -66,7 +68,7 @@ export function formatWindowSwitchState(
   } else {
     lines.push("Latest list_windows inventory (choose only a listed windowRef; references remain valid across ordinary observations and expire when the list is refreshed, a target changes, or the Run ends. App/title labels reflect discovery time and may be stale):");
     for (const option of state.options.slice(0, 128)) lines.push(formatWindowOption(option));
-    if (state.options.length > 128) lines.push(`- ${state.options.length - 128} additional options were omitted from this bounded projection; refresh or use the Host picker.`);
+    if (state.truncated === true) lines.push(`- This candidate projection is truncated: ${state.omittedCount ?? "an unknown number of"} additional selectable windows were omitted. Do not infer that an unlisted app is absent; ask the user to choose from the operating system's window switcher.`);
     if (state.options.length === 0) lines.push("- no selectable opened windows were returned");
   }
   return lines.join("\n");

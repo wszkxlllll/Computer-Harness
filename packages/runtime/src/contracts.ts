@@ -32,6 +32,7 @@ import type {
   GroundingBrowserRegion,
   GroundingElementSource,
   ComputerWindowCandidate,
+  ComputerWindowList,
   ComputerWindowOption,
   ModelUsage,
   ToolCall,
@@ -72,7 +73,7 @@ export interface Computer {
   /** Optional read-only inventory of opened windows. References are opaque
    * Adapter-owned values and remain valid until the next inventory refresh,
    * a successful switch, or Run cleanup. */
-  listWindows?(session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowOption[]>;
+  listWindows?(session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList>;
   /** Rebind the same host ComputerSession only after a host-confirmed handoff. */
   handoffWindow?(session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession>;
   /**
@@ -194,6 +195,8 @@ export interface ContextCompileInput {
   windowSwitchState?: {
     readonly currentWindow?: { readonly appName?: string; readonly title?: string };
     readonly options?: readonly ComputerWindowOption[];
+    readonly truncated?: boolean;
+    readonly omittedCount?: number;
   };
 }
 
@@ -292,7 +295,7 @@ export interface ToolExecutionContext {
   rawGrounding?: import("@computer-harness/protocol").GroundingCatalog;
   /** Runtime-owned read bridge; no Computer adapter or private handle is
    * exposed to tool definitions or Providers. */
-  listWindows?: () => Promise<readonly ComputerWindowOption[]>;
+  listWindows?: () => Promise<ComputerWindowList>;
   signal: AbortSignal;
 }
 

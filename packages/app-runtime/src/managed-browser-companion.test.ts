@@ -174,10 +174,12 @@ function listedWindowsFrom(input: ModelInput, callId: string): readonly ListedWi
   const result = input.messages
     .flatMap((message) => message.content)
     .find((block) => block.type === "tool_result" && block.result.callId === callId);
-  if (result?.type !== "tool_result" || result.result.status !== "completed" || !Array.isArray(result.result.output)) {
+  const output = result?.type === "tool_result" ? result.result.output : undefined;
+  if (result?.type !== "tool_result" || result.result.status !== "completed" ||
+      output === null || typeof output !== "object" || Array.isArray(output) || !Array.isArray(output.windows)) {
     throw new Error(`fixture could not find completed list_windows result '${callId}'`);
   }
-  return result.result.output as unknown as readonly ListedWindow[];
+  return output.windows as unknown as readonly ListedWindow[];
 }
 
 function scriptedProvider(steps: readonly RunStep[], trace: ProviderTrace): ProviderAdapter {

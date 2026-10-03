@@ -86,7 +86,7 @@ function fixtureComputer(
       }
       return { actionId: action.actionId, status: "completed" as const };
     },
-    async listWindows() { return windowInventory; },
+    async listWindows() { return { options: windowInventory, truncated: false, omittedCount: 0 }; },
     async close() { await closeComputer(); },
   } as unknown as Computer;
 }

@@ -241,11 +241,15 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(nativeTurn).toMatchObject({ type: "finish", summary: "Observed result", observationAssessment });
     expect(native.postCount).toBe(1);
     const systemText = String((native.body?.messages as Array<Record<string, unknown>>)[0]?.content);
-    expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).toContain("When a valid current assessment reference is supplied, include one observationAssessment object");
+    expect(systemText).toContain("do not confuse schema optionality with whether you should report");
+    expect(systemText).toContain("progress field is REQUIRED and must be an explicit choice");
+    expect(systemText).toContain("use null when this fresh screenshot confirms neither a meaningful user-requested subgoal result nor a concrete blocker");
+    expect(systemText).toContain("Null means no speech notice");
     expect(systemText).toContain("current screenshot");
     expect(systemText).toContain("one-turn delay");
     expect(systemText).toContain("not every step");
-    expect(systemText).toContain("progress.kind=blocked");
+    expect(systemText).toContain("use {kind: blocked, summary: ...} only for a concrete blocker");
     expect(systemText).not.toContain("observation-current");
     expect(JSON.stringify(native.body?.tools)).not.toContain("Sensitive account detail");
 

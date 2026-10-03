@@ -145,7 +145,7 @@ export interface RemoteEvent {
   data?: Record<string, unknown>;
 }
 
-export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
+export type RunNoticeKind = "progress" | "approval" | "question" | "handoff" | "error" | "result";
 export type RunNoticeDelivery = "polite" | "interrupt";
 
 /** Minimal public notice projection carried inside an ordered `run.event`. */

@@ -292,7 +292,7 @@ describe("SurfaceRegistry pure state machine", () => {
     const popupResult = pushChild(active, registered.ref, nonRootPopupRole);
 
     expect(overlayResult.decision).toBe("rejected");
-    expect(popupResult.decision).toBe("rejected");
+    expect(popupResult.decision).toBe("manual");
     expect(overlayResult.state).toBe(active);
     expect(popupResult.state).toBe(active);
     expect(overlayResult.state.surfaces.size).toBe(1);

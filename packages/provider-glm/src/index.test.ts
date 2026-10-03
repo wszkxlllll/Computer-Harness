@@ -243,11 +243,16 @@ describe("GLM provider adapter", () => {
     });
     expect(JSON.stringify(client.body?.tools)).toContain("observationAssessment");
     const systemText = String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content);
-    expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).toContain("When a valid current assessment reference is supplied");
     expect(systemText).toContain("current screenshot");
     expect(systemText).toContain("one-turn delay");
+    expect(systemText).toContain("report that milestone now even if later Goal steps remain");
+    expect(systemText).toContain("do not require a changed action or Monitor transition");
+    expect(systemText).toContain("requested content now present in its destination");
     expect(systemText).toContain("not every step");
-    expect(systemText).toContain("progress.kind=blocked");
+    expect(systemText).toContain("use {kind: blocked, summary: ...}");
+    expect(systemText).toContain("progress field is REQUIRED");
+    expect(systemText).toContain("Null means no speech notice");
     expect(systemText).not.toContain("observation-current");
     expect(JSON.stringify(client.body?.tools)).not.toContain("123456");
     const clickTool = (client.body?.tools as Array<Record<string, unknown>>).find((tool) =>
@@ -257,6 +262,13 @@ describe("GLM provider adapter", () => {
     const assessmentSchema = (parameters.properties as Record<string, unknown>).observationAssessment as Record<string, unknown>;
     const progressSchema = (assessmentSchema.properties as Record<string, unknown>).progress as Record<string, unknown>;
     const progressProperties = progressSchema.properties as Record<string, unknown>;
+    expect(progressSchema.type).toEqual(["object", "null"]);
+    expect(progressSchema.description).toContain("meaningful requested subgoal result");
+    expect(progressSchema.description).toContain("null means no progress/blocker");
+    expect(progressSchema.description).toContain("independent of actionOutcome or Monitor transition");
+    expect(progressSchema.description).toContain("do not require a changed transition");
+    expect(assessmentSchema.required).toContain("progress");
+    expect((parameters.required as string[] | undefined) ?? []).not.toContain("observationAssessment");
     expect((progressProperties.kind as Record<string, unknown>).enum).toEqual(["milestone", "blocked"]);
 
     const invalid = new Client({ choices: [{ message: { content: "", tool_calls: [{
@@ -265,6 +277,31 @@ describe("GLM provider adapter", () => {
     const invalidTurn = await new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: invalid }).generate(input(), { signal: new AbortController().signal });
     expect(invalidTurn).toMatchObject({ type: "tool_calls", calls: [{ arguments: { x: 400, y: 150 } }] });
     expect(invalidTurn).not.toHaveProperty("observationAssessment");
+  });
+
+  it("accepts explicit no-progress null and legacy missing progress without losing current binding", async () => {
+    const base = {
+      observationId: "observation-current",
+      actionId: "action-previous",
+      actionOutcome: "expected_change",
+      evidence: "The current screenshot was checked.",
+    };
+    const explicitNull = new Client({ choices: [{ message: { content: "", tool_calls: [{
+      id: "null-progress-call", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, observationAssessment: { ...base, progress: null } }) },
+    }] } }] });
+    const nullTurn = await new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: explicitNull }).generate(input(), { signal: new AbortController().signal });
+    expect(nullTurn).toMatchObject({
+      type: "tool_calls",
+      observationAssessment: { observationId: base.observationId, actionId: base.actionId, actionOutcome: base.actionOutcome, evidence: base.evidence },
+    });
+    expect(nullTurn).not.toMatchObject({ observationAssessment: { progress: expect.anything() } });
+
+    const legacyMissing = new Client({ choices: [{ message: { content: "", tool_calls: [{
+      id: "legacy-progress-call", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, observationAssessment: base }) },
+    }] } }] });
+    const legacyTurn = await new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: legacyMissing }).generate(input(), { signal: new AbortController().signal });
+    expect(legacyTurn).toMatchObject({ observationAssessment: { observationId: base.observationId, actionId: base.actionId } });
+    expect(legacyTurn).not.toMatchObject({ observationAssessment: { progress: expect.anything() } });
   });
 
   it("keeps the stable system and tool schema prefix unchanged when historical assessment content changes", async () => {

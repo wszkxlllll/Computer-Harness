@@ -31,9 +31,9 @@ function decodeNotice(event: RemoteEvent): RunNotice | undefined {
   if (!data || data.type !== "run.notice" || typeof data.noticeId !== "string" ||
       typeof data.text !== "string" || !Number.isSafeInteger(data.eventSequence) ||
       (data.delivery !== "polite" && data.delivery !== "interrupt") ||
-      !["progress", "approval", "question", "error", "result"].includes(String(data.kind))) return undefined;
+      !["progress", "approval", "question", "handoff", "error", "result"].includes(String(data.kind))) return undefined;
   const kind = data.kind as RunNotice["kind"];
-  if ((kind === "approval" || kind === "question") && typeof data.pendingRequestId !== "string") return undefined;
+  if ((kind === "approval" || kind === "question" || kind === "handoff") && typeof data.pendingRequestId !== "string") return undefined;
   return {
     noticeId: data.noticeId,
     kind,

@@ -3,6 +3,7 @@ import type {
   ActionId,
   ApprovalEvidence,
   ComputerWindowCandidate,
+  ComputerWindowList,
   ComputerWindowOption,
   ComputerSessionId,
   ComputerSessionDescriptor,
@@ -349,6 +350,7 @@ export class RunController {
   private readonly groundingCandidates = new Map<string, import("@computer-harness/protocol").GroundingCatalog>();
   /** Most recent explicit window inventory; kept across ordinary observations. */
   private latestWindowOptions: readonly ComputerWindowOption[] | undefined;
+  private latestWindowListStatus: Pick<ComputerWindowList, "truncated" | "omittedCount"> | undefined;
   /** Human-readable evidence for the active binding, separate from expiring refs. */
   private activeWindowMetadataSnapshot: { readonly appName?: string; readonly title?: string } | undefined;
   private readonly endedMemorySessionIds = new Set<ComputerSessionId>();
@@ -504,6 +506,7 @@ export class RunController {
     // The legacy picker discovery may refresh the adapter's shared inventory
     // and expire model-visible windowRefs even if the Host later chooses C.
     this.latestWindowOptions = undefined;
+    this.latestWindowListStatus = undefined;
     return this.computer.listWindowHandoffCandidates(this.activeComputerSession, signal);
   }
 
@@ -513,6 +516,7 @@ export class RunController {
     }
     if (this.computer.listNewWindowHandoffCandidates === undefined) return [];
     this.latestWindowOptions = undefined;
+    this.latestWindowListStatus = undefined;
     return this.computer.listNewWindowHandoffCandidates(this.activeComputerSession, signal);
   }
 
@@ -666,6 +670,7 @@ export class RunController {
             ? {
                 ...(currentWindow === undefined ? {} : { currentWindow }),
                 ...(this.latestWindowOptions === undefined ? {} : { options: this.latestWindowOptions }),
+                ...(this.latestWindowListStatus === undefined ? {} : this.latestWindowListStatus),
               }
             : undefined;
           const context = await this.contextCompiler.compile(
@@ -957,6 +962,7 @@ export class RunController {
     }
     this.latestObservationFingerprint = undefined;
     this.latestWindowOptions = undefined;
+    this.latestWindowListStatus = undefined;
   }
 
   private async closeComputerResources(session: ComputerSession | undefined): Promise<void> {
@@ -1102,7 +1108,10 @@ export class RunController {
     this.latestObservationFingerprint = undefined;
     this.groundingCandidates.clear();
     this.groundingRecoveryHint = undefined;
-    if (invalidateWindowOptions) this.latestWindowOptions = undefined;
+    if (invalidateWindowOptions) {
+      this.latestWindowOptions = undefined;
+      this.latestWindowListStatus = undefined;
+    }
     if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
     if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
     this.pendingReobserve = deferObservation;
@@ -1115,6 +1124,7 @@ export class RunController {
     this.latestObservationFingerprint = undefined;
     this.activeWindowMetadataSnapshot = undefined;
     this.latestWindowOptions = undefined;
+    this.latestWindowListStatus = undefined;
     this.groundingCandidates.clear();
     this.groundingRecoveryHint = undefined;
     if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
@@ -1493,7 +1503,7 @@ export class RunController {
     };
   }
 
-  private async refreshWindowOptions(session: ComputerSession): Promise<readonly ComputerWindowOption[]> {
+  private async refreshWindowOptions(session: ComputerSession): Promise<ComputerWindowList> {
     if (!this.windowSwitchAvailable() || this.computer.listWindows === undefined) {
       throw new Error("window inventory is unavailable for this Run");
     }
@@ -1503,18 +1513,20 @@ export class RunController {
     // The adapter may expire references as soon as refresh starts, including
     // when discovery ultimately fails. Drop the old projection first.
     this.latestWindowOptions = undefined;
+    this.latestWindowListStatus = undefined;
     const discovered = await this.computer.listWindows(session, this.abortController.signal);
     this.throwIfAborted();
-    const options = validateComputerWindowOptions(discovered);
-    this.latestWindowOptions = options;
-    const current = options.filter((option) => option.isCurrent);
+    const inventory = validateComputerWindowList(discovered);
+    this.latestWindowOptions = inventory.options;
+    this.latestWindowListStatus = { truncated: inventory.truncated, omittedCount: inventory.omittedCount };
+    const current = inventory.options.filter((option) => option.isCurrent);
     this.activeWindowMetadataSnapshot = current.length === 1
       ? {
           ...(current[0]!.appName === undefined ? {} : { appName: current[0]!.appName }),
           ...(current[0]!.title === undefined ? {} : { title: current[0]!.title }),
         }
       : undefined;
-    return options;
+    return inventory;
   }
 
   private assertSwitchTargetWasListed(windowRef: string, session: ComputerSession): ComputerWindowOption {
@@ -2277,7 +2289,20 @@ export class RunController {
         this.computer.detectNewWindowHandoffCandidates !== undefined) {
       // Action and ToolCall receipts are durable before this read-only diff.
       // A discovered window pauses the run; the completed action is never replayed.
-      const surfaced = await this.computer.detectNewWindowHandoffCandidates(context.session, this.abortController.signal);
+      let surfaced: readonly ComputerWindowCandidate[];
+      try {
+        surfaced = await this.computer.detectNewWindowHandoffCandidates(context.session, this.abortController.signal);
+      } catch (error) {
+        this.throwIfAborted();
+        const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+        if (code !== "TRANSIENT_SURFACE_UNKNOWN" && code !== "WINDOW_INVENTORY_UNKNOWN") throw error;
+        await beforeWindowHandoff?.();
+        await this.commitEvent({
+          type: "user.input.requested",
+          question: "当前弹窗状态暂时无法确认，请在电脑上确认或关闭弹窗后继续。",
+        });
+        return;
+      }
       this.throwIfAborted();
       if (surfaced.length > 0) {
         await beforeWindowHandoff?.();
@@ -2657,6 +2682,7 @@ export class RunController {
     this.groundingCandidates.clear();
     this.groundingRecoveryHint = undefined;
     this.latestWindowOptions = undefined;
+    this.latestWindowListStatus = undefined;
     return outcome;
   }
 
@@ -3225,11 +3251,17 @@ function sameSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
     left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
 }
 
-function validateComputerWindowOptions(value: readonly ComputerWindowOption[]): readonly ComputerWindowOption[] {
-  if (!Array.isArray(value) || value.length > 128) throw new Error("Computer window inventory must contain at most 128 options");
+function validateComputerWindowList(value: ComputerWindowList): ComputerWindowList {
+  if (typeof value !== "object" || value === null || !Array.isArray(value.options) || value.options.length > 128) {
+    throw new Error("Computer window candidate projection must contain at most 128 options");
+  }
+  if (typeof value.truncated !== "boolean" || !Number.isSafeInteger(value.omittedCount) || value.omittedCount < 0 ||
+      value.truncated !== (value.omittedCount > 0)) {
+    throw new Error("Computer window candidate projection has invalid truncation metadata");
+  }
   const refs = new Set<string>();
   let currentCount = 0;
-  const options = value.map((item, index): ComputerWindowOption => {
+  const options = value.options.map((item, index): ComputerWindowOption => {
     if (typeof item !== "object" || item === null || typeof item.windowRef !== "string" ||
         item.windowRef.trim().length === 0 || item.windowRef.length > 128 || typeof item.isCurrent !== "boolean") {
       throw new Error(`Computer window inventory option ${index} has an invalid windowRef/isCurrent`);
@@ -3255,7 +3287,7 @@ function validateComputerWindowOptions(value: readonly ComputerWindowOption[]): 
     };
   });
   if (currentCount > 1) throw new Error("Computer window inventory marked more than one option as current");
-  return options;
+  return { options, truncated: value.truncated, omittedCount: value.omittedCount };
 }
 
 function pointInBox(point: { x: number; y: number }, box: GroundingBoundingBox): boolean {

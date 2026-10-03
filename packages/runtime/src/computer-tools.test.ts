@@ -149,9 +149,17 @@ describe("default Computer tools", () => {
       runId: "run" as never,
       session: {} as never,
       signal: new AbortController().signal,
-      listWindows: async () => [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+      listWindows: async () => ({
+        options: [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+        truncated: true,
+        omittedCount: 3,
+      }),
     });
-    expect(inventory).toEqual([{ windowRef: "opaque-1", title: "Search", isCurrent: false }]);
+    expect(inventory).toEqual({
+      windows: [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+      truncated: true,
+      omittedCount: 3,
+    });
     expect(() => change.validate({ windowRef: "" })).toThrow(/opaque reference/iu);
     expect(() => change.validate({ windowRef: "opaque-1", pid: 123 })).toThrow(/only the windowRef argument/iu);
     expect(() => change.validate({ windowRef: "opaque-1", windowId: 456 })).toThrow(/only the windowRef argument/iu);
