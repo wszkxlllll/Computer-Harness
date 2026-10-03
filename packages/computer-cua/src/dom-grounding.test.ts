@@ -52,6 +52,23 @@ describe("managed DOM grounding transport gate", () => {
     expect(() => validateManagedBrowserTarget({ ...request.browserTarget, profileId: "C:\\Users\\me\\profile" })).toThrow(/profileId|opaque/iu);
   });
 
+  it("keeps raw DOM names private when public labels are redacted", () => {
+    const materialized = materializeDomGrounding(request, {
+      complete: true,
+      candidates: [{
+        tagName: "button",
+        name: "Contact user@example.com at 13800138000",
+        frame: { x: 100, y: 100, width: 120, height: 30 },
+        visible: true,
+        interactive: true,
+      }],
+    });
+    const element = materialized.catalog.elements[0];
+    const privateElement = materialized.privateElements.get(element!.elementRef);
+    expect(element?.name).toBe("Contact [redacted-email] at [redacted-phone]");
+    expect(privateElement?.candidateName).toBe("Contact user@example.com at 13800138000");
+  });
+
   it("projects CDP CSS frames into the current physical window capture", () => {
     const projected = projectDomCssFrame(
       { x: 352, y: 317, width: 164, height: 30 },
@@ -136,7 +153,7 @@ describe("managed DOM grounding transport gate", () => {
   });
 
   it("does not silently attach a personal browser when DOM mode is enabled", () => {
-    expect(() => new CuaDriverComputer({ socketPath: "fixture.sock", screenshotDir: "runs/dom-gate", grounding: "dom-catalog-v1" })).toThrow(/explicit CUA window target/iu);
+    expect(() => new CuaDriverComputer({ socketPath: "fixture.sock", screenshotDir: "runs/dom-gate", grounding: "dom-catalog-v1" })).toThrow(/explicit managed Chromium\/Edge target/iu);
     expect(() => new CuaDriverComputer({
       socketPath: "fixture.sock",
       screenshotDir: "runs/dom-gate",

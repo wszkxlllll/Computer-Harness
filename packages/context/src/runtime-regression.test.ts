@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ActionIntent, AssetId, ComputerSessionId, EventId, ModelTurn, ObservationId, RunId, RuntimeEvent, RuntimeEventDraft, Viewport } from "@computer-harness/protocol";
+import type { ActionIntent, AssetId, ComputerSessionId, EventId, ModelTurn, ObservationId, RunId, RuntimeEvent, RuntimeEventDraft, SurfaceId, SurfaceRef, Viewport } from "@computer-harness/protocol";
 import { DefaultRuntimePolicy, RunController, type Computer, type ComputerOpenOptions, type ComputerSession, type ModelInput, type ProviderAdapter } from "@computer-harness/runtime";
 import { createDefaultComputerTools } from "@computer-harness/runtime";
 import { DefaultContextCompiler } from "./index.js";
@@ -7,6 +7,7 @@ import { DefaultContextCompiler } from "./index.js";
 const runId = "context-runtime-regression" as RunId;
 const sessionId = "context-runtime-computer" as ComputerSessionId;
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+const surfaceRef: SurfaceRef = { surfaceId: "context-runtime-desktop" as SurfaceId, generation: 1, kind: "desktop" };
 
 class FakeComputer implements Computer {
   private observationCount = 0;
@@ -29,6 +30,7 @@ class FakeComputer implements Computer {
     return {
       capturedAt: `2026-09-17T00:00:0${this.observationCount}.000Z`,
       viewport,
+      surfaceRef,
       screenshot: { mediaType: "image/png" as const, data: new Uint8Array([this.observationCount]) },
     };
   }

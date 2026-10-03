@@ -2,11 +2,95 @@ export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
 export type RunId = Brand<string, "RunId">;
 export type ComputerSessionId = Brand<string, "ComputerSessionId">;
+export type SurfaceId = Brand<string, "SurfaceId">;
 export type ObservationId = Brand<string, "ObservationId">;
 export type ActionId = Brand<string, "ActionId">;
 export type ToolCallId = Brand<string, "ToolCallId">;
 export type EventId = Brand<string, "EventId">;
 export type AssetId = Brand<string, "AssetId">;
+
+/** A run-scoped, generation-checked address for the exact UI surface captured by an Observation. */
+/** `unknown` is reserved for legacy trajectory decoding; live producers must never emit it. */
+export type SurfaceKind = "desktop" | "native_window" | "browser_tab" | "dom" | "overlay" | "unknown";
+
+/** Adapter-attested source for transient child Surface admission; never an HWND or UI label. */
+export type SurfaceAdmissionSource =
+  | "same_hwnd_overlay_root_proof"
+  | "owned_transient_window_root_proof"
+  | "win32_relationship_probe";
+
+export type SurfaceTransitionReason =
+  | "initial_observation"
+  | "peer_switch"
+  | "child_push"
+  | "child_pop"
+  | "generation_advanced"
+  | "surface_changed";
+
+export interface SurfaceRef {
+  readonly surfaceId: SurfaceId;
+  readonly generation: number;
+  readonly kind: SurfaceKind;
+  /** Exact direct parent for a registry-backed child Surface; omitted for root peers and legacy unknowns. */
+  readonly parentSurfaceId?: SurfaceId;
+  /** Present only when a transient child was admitted from exact root/owner evidence. */
+  readonly admissionSource?: SurfaceAdmissionSource;
+}
+
+export type ResponseDetailPreference = "concise" | "standard" | "detailed";
+export type StepExplanationPreference = "standard" | "more";
+export type PreferredLanguagePreference = "follow_conversation" | "zh-CN" | "en";
+
+/** Versioned, provider-neutral answer preferences frozen for one Run. */
+export interface RunAssistantPreferencesSnapshot {
+  readonly version: 1;
+  readonly responseDetail: ResponseDetailPreference;
+  readonly stepExplanation: StepExplanationPreference;
+  readonly preferredLanguage: PreferredLanguagePreference;
+  readonly additionalGuidance: string;
+}
+
+export const RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS = 600;
+
+/** Strictly validates and safely normalizes the only assistant preferences accepted by a Run. */
+export function normalizeRunAssistantPreferencesSnapshot(value: unknown): RunAssistantPreferencesSnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("assistantPreferences must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const expectedKeys = ["version", "responseDetail", "stepExplanation", "preferredLanguage", "additionalGuidance"] as const;
+  const ownKeys = Reflect.ownKeys(record);
+  if ((Object.getPrototypeOf(record) !== Object.prototype && Object.getPrototypeOf(record) !== null) ||
+      ownKeys.length !== expectedKeys.length || ownKeys.some((key) => typeof key !== "string" || !expectedKeys.includes(key as typeof expectedKeys[number]))) {
+    throw new Error("assistantPreferences contains unsupported fields");
+  }
+  if (record.version !== 1) throw new Error("assistantPreferences.version must be 1");
+  if (record.responseDetail !== "concise" && record.responseDetail !== "standard" && record.responseDetail !== "detailed") {
+    throw new Error("assistantPreferences.responseDetail is invalid");
+  }
+  if (record.stepExplanation !== "standard" && record.stepExplanation !== "more") {
+    throw new Error("assistantPreferences.stepExplanation is invalid");
+  }
+  if (record.preferredLanguage !== "follow_conversation" && record.preferredLanguage !== "zh-CN" && record.preferredLanguage !== "en") {
+    throw new Error("assistantPreferences.preferredLanguage is invalid");
+  }
+  if (typeof record.additionalGuidance !== "string") throw new Error("assistantPreferences.additionalGuidance must be text");
+  if ([...record.additionalGuidance].length > RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS) {
+    throw new Error(`assistantPreferences.additionalGuidance exceeds ${RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} characters`);
+  }
+  const additionalGuidance = record.additionalGuidance
+    .normalize("NFC")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return Object.freeze({
+    version: 1,
+    responseDetail: record.responseDetail,
+    stepExplanation: record.stepExplanation,
+    preferredLanguage: record.preferredLanguage,
+    additionalGuidance,
+  });
+}
 
 /** Shared task description used by Planning and future read-only consumers. */
 export interface TaskSpec {
@@ -560,6 +644,8 @@ export interface GroundingCatalog {
   readonly source: GroundingCatalogSource;
   readonly observationId: ObservationId;
   readonly computerSessionId: ComputerSessionId;
+  /** Exact Surface incarnation whose pixels/UIA/DOM produced this catalog. */
+  readonly surfaceRef: SurfaceRef;
   readonly completeness: GroundingCompleteness;
   readonly degraded: boolean;
   /** Adapter safety cap (currently at most 256); Runtime persists a hot subset. */
@@ -573,6 +659,8 @@ export interface ObservationFrame {
   id: ObservationId;
   runId: RunId;
   computerSessionId: ComputerSessionId;
+  /** Exact Surface incarnation represented by screenshot and grounding. */
+  surfaceRef: SurfaceRef;
   capturedAt: string;
   viewport: Viewport;
   screenshot: AssetRef;
@@ -586,12 +674,18 @@ export interface ApprovalEvidence {
   readonly assetId: AssetId;
   readonly capturedAt: string;
   readonly viewport: Viewport;
+  /** The decision Observation's exact Surface incarnation. */
+  readonly surfaceRef: SurfaceRef;
 }
 
 /** Raw computer output before Runtime persists its screenshot asset. */
 export interface ObservationCapture {
   capturedAt: string;
   viewport: Viewport;
+  /** Producer-owned address of the Surface represented by this capture. */
+  surfaceRef: SurfaceRef;
+  /** Producer hint for the observed ref change; absent when the Surface is unchanged. */
+  readonly surfaceTransitionReason?: SurfaceTransitionReason;
   screenshot: {
     mediaType: "image/png" | "image/jpeg";
     data: Uint8Array;
@@ -668,17 +762,44 @@ export interface ModelContinuation {
   content: string;
 }
 
+export type ObservationActionOutcome = "expected_change" | "no_effect" | "unexpected_change" | "uncertain";
+
+export interface ObservationAssessment {
+  /** Exact current Observation that the assessment describes. */
+  observationId: ObservationId;
+  /** The immediately preceding GUI action associated with that Observation. */
+  actionId: ActionId;
+  actionOutcome: ObservationActionOutcome;
+  /** Concise, untrusted evidence from the visible state. */
+  evidence: string;
+  /**
+   * Optional user-facing report grounded in the exact current observation.
+   * `milestone` is a user-level stage result visible now, including a stable
+   * result that may have existed before the immediately preceding action;
+   * it does not claim that action caused the result. `blocked` is an explicit
+   * visible blocker or request for user attention. Consumers must validate
+   * that this observation was included in the response request and sanitize
+   * the summary before speaking it. Action and Monitor fields remain diagnostic.
+   */
+  progress?: {
+    kind: "milestone" | "blocked";
+    summary: string;
+  };
+}
+
 export type ModelTurn =
   | {
       type: "tool_calls";
       calls: ToolCall[];
       assistantText?: string;
+      observationAssessment?: ObservationAssessment;
       continuation?: ModelContinuation;
       usage?: ModelUsage;
     }
   | {
       type: "user_input_required";
       question: string;
+      observationAssessment?: ObservationAssessment;
       usage?: ModelUsage;
     }
   | {
@@ -686,15 +807,31 @@ export type ModelTurn =
       summary: string;
       /** Structured termination status supplied by providers that expose it. */
       reportedStatus?: "success" | "failure";
+      observationAssessment?: ObservationAssessment;
       usage?: ModelUsage;
     };
 
 export interface GuiActionBase {
   actionId: ActionId;
   basedOn: ObservationId;
-  /** Adapter-validated opaque grounding reference, when a grounded action was used. */
+  /** Public observation element reference, revalidated by the Computer adapter; never a raw driver token. */
   groundingRef?: string;
 }
+
+/** A model-visible reference to one host-discovered opened window. The
+ * reference is opaque and is resolved only by the Computer adapter that
+ * created it; host window identifiers and adapter handles stay private. */
+export interface ComputerWindowOption {
+  readonly windowRef: string;
+  readonly appName?: string;
+  readonly title?: string;
+  readonly isCurrent: boolean;
+}
+
+export type SwitchWindowAction = GuiActionBase & {
+  kind: "switch_window";
+  windowRef: string;
+};
 
 export type ActionIntent =
   | (GuiActionBase & { kind: "click"; point: Point })
@@ -711,6 +848,7 @@ export type ActionIntent =
       ticks: number;
     })
   | (GuiActionBase & { kind: "drag"; from: Point; to: Point })
+  | SwitchWindowAction
   | { actionId: ActionId; kind: "wait"; durationMs: number };
 
 /** Redacted action shape persisted by the Guard; typed text remains only in the ToolCall/action execution path. */
@@ -718,12 +856,22 @@ export type ActionGuardActionSummary =
   | Exclude<ActionIntent, GuiActionBase & { kind: "type" }>
   | (GuiActionBase & { kind: "type"; textLength: number });
 
-export interface ActionReceipt {
-  actionId: ActionId;
-  status: "completed" | "refused" | "failed" | "cancelled";
-  driverCode?: string;
-  message?: string;
-}
+export type ActionReceipt =
+  | {
+      actionId: ActionId;
+      status: "completed";
+      driverCode?: string;
+      message?: string;
+      /** Present only on a completed `switch_window`; it carries the updated
+       * active-target viewport/capabilities while retaining the same ComputerSession id. */
+      sessionAfter?: ComputerSessionDescriptor;
+    }
+  | {
+      actionId: ActionId;
+      status: "refused" | "failed" | "cancelled" | "partial";
+      driverCode?: string;
+      message?: string;
+    };
 
 /**
  * Runtime-owned, low-confidence visual evidence for one completed action.
@@ -792,6 +940,8 @@ export interface RuntimeEventBase {
   runId: RunId;
   sequence: number;
   occurredAt: string;
+  /** Current JSONL writers set this; absent on pre-versioned legacy trajectories. */
+  schemaVersion?: 1 | 2;
 }
 
 export type ContextTraceDiscardReason = "history_limit" | "input_budget";
@@ -838,6 +988,21 @@ export interface ContextGroundingTrace {
   readonly recovery?: GroundingRecoveryTrace;
 }
 
+/** Redacted accounting for the late, provider-neutral answer-preference message. */
+export interface ContextAssistantPreferencesTrace {
+  readonly projectionVersion: 1;
+  readonly included: boolean;
+  readonly omittedReason?: "budget";
+  /** Candidate projection token estimate, including values omitted by the budget. */
+  readonly estimatedTokens: number;
+  readonly responseDetail: ResponseDetailPreference;
+  readonly stepExplanation: StepExplanationPreference;
+  readonly preferredLanguage: PreferredLanguagePreference;
+  readonly additionalGuidancePresent: boolean;
+  readonly additionalGuidanceCharacters: number;
+  readonly additionalGuidanceSha256?: string;
+}
+
 /** Private diagnostic metadata emitted alongside a prepared Provider request;
  * it contains no body/path, and its hash is not an anonymity guarantee. */
 export interface PreparedRequestEstimate {
@@ -877,6 +1042,7 @@ export interface ContextTrace {
   memorySelection?: ContextMemorySelectionTrace;
   memoryRetrieval?: ContextMemoryRetrievalTrace;
   grounding?: ContextGroundingTrace;
+  assistantPreferences?: ContextAssistantPreferencesTrace;
   observationIncluded: boolean;
   monitorGuidanceIncluded?: boolean;
   monitorGuidanceOmittedReason?: "budget";
@@ -892,6 +1058,12 @@ export type RuntimeEventData =
   | { type: "computer.window.handoff.completed"; target: ComputerWindowIdentity; session: ComputerSessionDescriptor }
   | { type: "computer.window.handoff.ignored"; sourceActionId: ActionId }
   | { type: "observation.created"; observation: ObservationFrame }
+  | {
+      type: "computer.surface.transitioned";
+      from: SurfaceRef | null;
+      to: SurfaceRef;
+      reason: SurfaceTransitionReason;
+    }
   | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
@@ -925,6 +1097,7 @@ export type RuntimeEventData =
     }
   | {
       type: "action.guard.evaluated";
+      evaluatedSurfaceRef: SurfaceRef;
       callIds: ToolCallId[];
       actions: ActionGuardActionSummary[];
       decision: ActionGuardDecision;
@@ -1009,6 +1182,7 @@ export const runtimeEventTypes = [
   "computer.window.handoff.completed",
   "computer.window.handoff.ignored",
   "observation.created",
+  "computer.surface.transitioned",
   "model.request.started",
   "model.response.received",
   "model.request.failed",

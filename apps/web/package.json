@@ -11,6 +11,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@computer-harness/protocol": "workspace:*",
+    "@computer-harness/voice": "workspace:*",
     "qrcode": "1.5.4",
     "react": "19.3.0",
     "react-dom": "19.3.0"

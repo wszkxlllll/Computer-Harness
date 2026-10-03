@@ -1,20 +1,90 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { ApiError, completeManagedBrowserLogin, getManagedBrowserProfileSettings, prepareManagedBrowserLogin, reloginManagedBrowser, setManagedBrowserDefaultSession } from "./api";
 import { PhoneLayout } from "./components/PhoneLayout";
 import { usePreferences } from "./PreferencesContext";
-import type { AssistantPreferences, DisplayPreset, PreferredLanguage, ResponseDetail, StepExplanation, TextSize } from "./preferences";
+import { RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS } from "./preferences";
+import type { AssistantPreferences, DisplayPreset, PreferredLanguage, ResponseDetail, SpeechRate, StepExplanation, TextSize } from "./preferences";
 import type { VoiceCapabilities } from "./voice-capabilities";
+import { BrowserSpeechOutput, isBrowserSpeechOutputAvailable } from "./run-notice-speech";
+import type { ManagedBrowserDefaultSession, ManagedBrowserProfileSettings, ManagedBrowserProfileStatus } from "./types";
 
 export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
-  const { preferences, saved, setAssistant, setPresentation, setDisplayPreset, reset } = usePreferences();
+  const { preferences, saved, setAssistant, setPresentation, setDisplayPreset, setVoice, reset } = usePreferences();
   const [message, setMessage] = useState("");
   const [voiceInputText, setVoiceInputText] = useState("");
   const [voiceMessage, setVoiceMessage] = useState("");
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [browserProfile, setBrowserProfile] = useState<ManagedBrowserProfileSettings>();
+  const [browserProfileLoading, setBrowserProfileLoading] = useState(true);
+  const [browserProfileBusy, setBrowserProfileBusy] = useState(false);
+  const [browserProfileMessage, setBrowserProfileMessage] = useState("");
+  const [browserProfileError, setBrowserProfileError] = useState("");
+  const voiceOutputAvailable = voiceCapabilities?.readAloud !== undefined
+    || voiceCapabilities?.createOutputAdapter !== undefined
+    || isBrowserSpeechOutputAvailable();
   const preset: DisplayPreset | undefined = preferences.presentation.layoutMode === "simple" && preferences.presentation.textSize === "large"
     ? "large_simple"
     : preferences.presentation.layoutMode === "standard" && preferences.presentation.textSize === "standard"
       ? "standard"
       : undefined;
+
+  async function refreshBrowserProfile() {
+    setBrowserProfileLoading(true);
+    setBrowserProfileError("");
+    try {
+      setBrowserProfile(await getManagedBrowserProfileSettings());
+    } catch (error) {
+      setBrowserProfile(undefined);
+      setBrowserProfileError(error instanceof Error ? error.message : "暂时无法读取电脑上的浏览器状态。");
+    } finally {
+      setBrowserProfileLoading(false);
+    }
+  }
+
+  useEffect(() => { void refreshBrowserProfile(); }, []);
+
+  async function updateManagedBrowserProfile(action: () => Promise<ManagedBrowserProfileSettings>, readyMessage: string) {
+    if (browserProfileBusy) return;
+    setBrowserProfileBusy(true);
+    setBrowserProfileError("");
+    setBrowserProfileMessage("");
+    try {
+      const next = await action();
+      setBrowserProfile(next);
+      setBrowserProfileMessage(next.status === "ready" ? readyMessage : managedBrowserNonReadyMessage(next.status));
+    } catch (error) {
+      setBrowserProfileError(error instanceof Error ? error.message : "浏览器状态操作没有完成。");
+      if (error instanceof ApiError && error.code === "PROFILE_OPERATION_STALE") await refreshBrowserProfile();
+    } finally {
+      setBrowserProfileBusy(false);
+    }
+  }
+
+  function chooseManagedBrowserSession(value: ManagedBrowserDefaultSession) {
+    void updateManagedBrowserProfile(
+      () => setManagedBrowserDefaultSession(value),
+      value === "saved" ? "本机已保存的浏览器状态将用于之后的新任务。" : "之后的新任务将使用空白临时浏览器。",
+    );
+  }
+
+  function prepareManagedBrowser(relogin: boolean) {
+    void updateManagedBrowserProfile(
+      relogin ? reloginManagedBrowser : prepareManagedBrowserLogin,
+      "本机浏览器登录状态已准备好，可用于之后的新任务。",
+    );
+  }
+
+  function completeManagedBrowserPreparation() {
+    const operationId = browserProfile?.operationId;
+    if (operationId === undefined) {
+      setBrowserProfileError("当前没有可确认的浏览器准备操作。请刷新状态后重试。");
+      return;
+    }
+    void updateManagedBrowserProfile(
+      () => completeManagedBrowserLogin(operationId),
+      "浏览器登录状态已保存在本机。网站可能会在以后要求重新登录。",
+    );
+  }
 
   function savePresentation<K extends keyof typeof preferences.presentation>(key: K, value: (typeof preferences.presentation)[K]) {
     setMessage(setPresentation(key, value) ? "偏好已保存到此浏览器。" : "偏好已更新，但浏览器未能保存。");
@@ -32,18 +102,32 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
     setMessage(reset() ? "已恢复默认偏好，并保存到此浏览器。" : "已恢复默认偏好，但浏览器未能保存。");
   }
 
-  async function readPreferenceHelp() {
-    if (!voiceCapabilities?.readAloud || voiceBusy) return;
+  async function playVoicePreview(text: string) {
+    if (voiceBusy) return;
     setVoiceBusy(true);
     setVoiceMessage("");
     try {
-      await voiceCapabilities.readAloud("你正在查看个人偏好。这里的回答选项尚未连接到助手 Context。");
-      setVoiceMessage("已将这段说明交给接入的语音能力。");
+      if (voiceCapabilities?.readAloud) {
+        await voiceCapabilities.readAloud(text);
+      } else {
+        const rate = preferences.voice.speechRate === "slow" ? 0.85 : preferences.voice.speechRate === "fast" ? 1.15 : 1;
+        const adapter = voiceCapabilities?.createOutputAdapter?.() ?? new BrowserSpeechOutput();
+        const session = await adapter.openSession({ speechRate: rate });
+        await session.enqueueText({ chunkId: crypto.randomUUID(), sequence: 0, text });
+        await session.finish();
+      }
+      setVoiceMessage("语音播报测试已完成。");
     } catch {
       setVoiceMessage("语音读出没有启动。你仍可阅读页面上的说明。");
     } finally {
       setVoiceBusy(false);
     }
+  }
+
+  function changeRunNoticeSpeech(enabled: boolean) {
+    const savedVoice = setVoice("runNoticesEnabled", enabled);
+    setMessage(savedVoice ? "语音偏好已保存到此浏览器。" : "语音偏好已更新，但浏览器未能保存。");
+    if (enabled) void playVoicePreview("语音播报已开启。");
   }
 
   async function capturePreferenceText() {
@@ -130,12 +214,77 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
           />
         </section>
 
+        <section className="preferences-section managed-browser-preferences" aria-labelledby="managed-browser-preferences-title">
+          <h2 id="managed-browser-preferences-title">浏览器与登录状态</h2>
+          <p className="field-hint">登录状态仅保存在这台电脑上的 Harness 受管浏览器配置中，不会发送到手机或模型。任务开启“跨应用完成任务”时，受管浏览器页面内容可能用于该任务。准备完成仅表示电脑端浏览器已关闭且设置已确认，不保证网站一直保持登录。</p>
+
+          <div className="managed-browser-status" aria-live="polite">
+            <strong>本机状态</strong>
+            <span>{browserProfileLoading ? "正在读取…" : browserProfile ? managedBrowserStatusLabel(browserProfile.status) : "暂不可用"}</span>
+          </div>
+          <p className="field-hint" role="status">
+            {browserProfileLoading
+              ? "正在读取电脑上的受管浏览器状态。"
+              : browserProfile === undefined
+                ? "请确认电脑上的 Harness Host 正在运行，然后刷新状态。"
+                : managedBrowserStatusDescription(browserProfile.status)}
+          </p>
+
+          <fieldset className="preference-choice-group" disabled={browserProfileBusy || browserProfileLoading || browserProfile === undefined}>
+            <legend>新任务默认浏览器</legend>
+            <div className="preference-radio-row">
+              <PreferenceRadio<ManagedBrowserDefaultSession>
+                name="managed-browser-default-session"
+                value="saved"
+                selected={browserProfile?.defaultSession}
+                title="本机已准备的登录状态"
+                description="保存于电脑；如果尚未准备，使用前需要先完成设置。"
+                onChange={chooseManagedBrowserSession}
+              />
+              <PreferenceRadio<ManagedBrowserDefaultSession>
+                name="managed-browser-default-session"
+                value="temporary"
+                selected={browserProfile?.defaultSession}
+                title="临时空白浏览器"
+                description="每次使用新的空白临时配置，不复用登录状态。"
+                onChange={chooseManagedBrowserSession}
+              />
+            </div>
+          </fieldset>
+
+          <div className="managed-browser-actions">
+            <button
+              className="button button-secondary"
+              type="button"
+              disabled={browserProfileBusy || browserProfileLoading || browserProfile === undefined || browserProfile.status === "in_use" || browserProfile.status === "preparing" || browserProfile.status === "cleanup_failed"}
+              onClick={() => prepareManagedBrowser(false)}
+            >
+              准备登录状态
+            </button>
+            {browserProfile?.status === "preparing" && (
+              <button className="button button-primary" type="button" disabled={browserProfileBusy || browserProfile.operationId === undefined} onClick={completeManagedBrowserPreparation}>
+                我已在电脑完成登录
+              </button>
+            )}
+            <button
+              className="button button-secondary"
+              type="button"
+              disabled={browserProfileBusy || browserProfileLoading || browserProfile === undefined || browserProfile.status === "in_use" || browserProfile.status === "preparing" || browserProfile.status === "cleanup_failed"}
+              onClick={() => prepareManagedBrowser(true)}
+            >
+              重新登录
+            </button>
+            <button className="text-button" type="button" disabled={browserProfileBusy || browserProfileLoading} onClick={() => void refreshBrowserProfile()}>
+              刷新状态
+            </button>
+          </div>
+          {browserProfileError && <p className="inline-error" role="alert">{browserProfileError}</p>}
+          <p className="preference-save-status" role="status" aria-live="polite">{browserProfileMessage}</p>
+        </section>
+
         <section className="preferences-section assistant-preferences" aria-labelledby="assistant-preferences-title">
           <h2 id="assistant-preferences-title">助手回答偏好</h2>
-          <details className="preferences-not-connected">
-            <summary>仅保存在此浏览器；尚未连接助手 Context</summary>
-            <p>这些选项不会改变当前任务、电脑操作或审批规则。</p>
-          </details>
+          <p className="field-hint">这些回答偏好只保存在此浏览器。开始新任务时会随白名单发送给电脑端，并作为该 Run 的 Context 提交给已配置的模型；修改不会影响已开始的任务，也不会在设备间同步。它们不会改变电脑操作或审批规则。</p>
 
           <fieldset className="preference-choice-group">
             <legend>回答详略</legend>
@@ -167,22 +316,81 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
               <option value="en">English</option>
             </select>
           </div>
+
+          <div className="assistant-guidance">
+            <label htmlFor="assistant-additional-guidance">补充回答说明</label>
+            <textarea
+              id="assistant-additional-guidance"
+              className="preference-textarea"
+              value={preferences.assistant.additionalGuidance}
+              maxLength={RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS * 2}
+              aria-describedby="assistant-guidance-help assistant-guidance-count"
+              onChange={(event) => {
+                const guidance = Array.from(event.currentTarget.value)
+                  .slice(0, RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS)
+                  .join("");
+                setMessage(setAssistant("additionalGuidance", guidance)
+                  ? "补充说明已保存在此浏览器，并会用于下一次新任务。"
+                  : "补充说明已更新，但浏览器未能保存。");
+              }}
+            />
+            <div className="assistant-guidance-footer">
+              <p id="assistant-guidance-help" className="field-hint">写下你希望回答采用的格式或解释方式。每次最多 {RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} 个字符；内容只保存在此浏览器，并仅用于之后开始的新任务。</p>
+              <span id="assistant-guidance-count" className="guidance-counter" aria-label={`${[...preferences.assistant.additionalGuidance].length} / ${RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} 个字符`}>
+                {[...preferences.assistant.additionalGuidance].length} / {RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS}
+              </span>
+            </div>
+            <button
+              className="text-button guidance-clear"
+              type="button"
+              disabled={preferences.assistant.additionalGuidance.length === 0}
+              onClick={() => setMessage(setAssistant("additionalGuidance", "")
+                ? "补充说明已清除，并保存在此浏览器。"
+                : "补充说明已清除，但浏览器未能保存。")}
+            >
+              清空补充说明
+            </button>
+          </div>
         </section>
 
         <details className="preferences-section voice-capability">
-          <summary>语音功能 · {voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce ? "已接入" : "暂不可用"}</summary>
+          <summary>语音功能 · {voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce ? "已接入" : voiceOutputAvailable ? "任务播报可用" : "暂不可用"}</summary>
           <div className="voice-capability-content">
-            <p>{voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce
-              ? "由宿主按需接入；不会自动朗读或录音。"
-              : "不会自动朗读，也不会调用浏览器语音或麦克风接口。"}</p>
-            {(voiceCapabilities?.readAloud || voiceCapabilities?.transcribeOnce) && (
+            <p>任务通知使用当前浏览器语音合成。只有明确开启开关并在开启状态下新建任务，电脑才会向配对设备发送可读的审批原因和已确认进度；检测到敏感内容时会退回固定提示。此功能不会录音，也不会申请麦克风权限。</p>
+            <fieldset className="preference-choice-group">
+              <legend>任务通知播报</legend>
+              <PreferenceToggle
+                id="run-notices-speech"
+                title="朗读任务关键通知"
+                description="朗读任务进度、等待确认、错误和最终结果；审批或提问变化时会停止过期播报。"
+                checked={preferences.voice.runNoticesEnabled}
+                disabled={!voiceOutputAvailable}
+                onChange={changeRunNoticeSpeech}
+              />
+              {!voiceOutputAvailable && <p className="field-hint">当前环境不支持语音播报，任务通知仍会显示为文字。</p>}
+            </fieldset>
+            <div className="preference-language-row">
+              <label className="preference-select-label" htmlFor="speech-rate">朗读速度</label>
+              <select
+                className="preference-select"
+                id="speech-rate"
+                value={preferences.voice.speechRate}
+                disabled={!voiceOutputAvailable}
+                onChange={(event) => setMessage(setVoice("speechRate", event.currentTarget.value as SpeechRate) ? "朗读速度已保存到此浏览器。" : "朗读速度已更新，但浏览器未能保存。")}
+              >
+                <option value="slow">慢</option>
+                <option value="normal">标准</option>
+                <option value="fast">稍快</option>
+              </select>
+            </div>
+            {(voiceOutputAvailable || voiceCapabilities?.transcribeOnce) && (
               <div className="voice-actions">
-                {voiceCapabilities.readAloud && (
-                  <button className="button button-secondary" type="button" disabled={voiceBusy} onClick={() => void readPreferenceHelp()}>
-                    朗读偏好说明
+                {voiceOutputAvailable && (
+                  <button className="button button-secondary" type="button" disabled={voiceBusy} onClick={() => void playVoicePreview("语音播报测试正常。")}>
+                    测试语音播报
                   </button>
                 )}
-                {voiceCapabilities.transcribeOnce && (
+                {voiceCapabilities?.transcribeOnce && (
                   <button className="button button-secondary" type="button" disabled={voiceBusy} onClick={() => void capturePreferenceText()}>
                     语音输入测试
                   </button>
@@ -202,6 +410,38 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
       </main>
     </PhoneLayout>
   );
+}
+
+function managedBrowserStatusLabel(status: ManagedBrowserProfileStatus): string {
+  switch (status) {
+    case "unprepared": return "未准备";
+    case "preparing": return "正在等待电脑端登录";
+    case "ready": return "已准备（本机）";
+    case "in_use": return "正在使用";
+    case "relogin_required": return "需要重新登录";
+    case "cleanup_failed": return "清理状态未确认";
+  }
+}
+
+function managedBrowserStatusDescription(status: ManagedBrowserProfileStatus): string {
+  switch (status) {
+    case "unprepared": return "如需复用登录状态，可在电脑上准备受管 Edge。也可以选择临时空白浏览器。";
+    case "preparing": return "请在电脑上可见的受管 Edge 中手动登录；完成后回到这里点击“我已在电脑完成登录”。";
+    case "ready": return "你已确认准备完成，且电脑端浏览器已关闭。此状态不保证每个网站始终保持登录。";
+    case "in_use": return "受管浏览器正被一个任务或设置操作使用，暂时不能修改默认值或重新登录。";
+    case "relogin_required": return "需要在电脑上重新登录。登录过程始终发生在电脑上的受管浏览器中。";
+    case "cleanup_failed": return "电脑无法确认浏览器已安全关闭。暂时不能使用保存状态；请先检查电脑端 Harness 状态。";
+  }
+}
+
+function managedBrowserNonReadyMessage(status: Exclude<ManagedBrowserProfileStatus, "ready">): string {
+  switch (status) {
+    case "unprepared": return "本机登录状态尚未准备。请在电脑端准备并登录受管浏览器。";
+    case "preparing": return "电脑端浏览器仍在准备。请完成登录后回到这里确认。";
+    case "in_use": return "受管浏览器仍在使用。等待电脑端任务或操作结束后刷新状态。";
+    case "relogin_required": return "本机登录状态需要重新验证。请在电脑端重新登录后再确认。";
+    case "cleanup_failed": return "电脑未能确认受管浏览器已关闭。请检查电脑端 Harness 状态；在状态恢复前不要依赖本机登录信息。";
+  }
 }
 
 function PreferenceRadio<T extends string>({
@@ -238,12 +478,14 @@ function PreferenceToggle({
   title,
   description,
   checked,
+  disabled = false,
   onChange,
 }: {
   id: string;
   title: string;
   description: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (value: boolean) => void;
 }) {
   return (
@@ -252,7 +494,7 @@ function PreferenceToggle({
         <strong>{title}</strong>
         <span className="sr-only">{description}</span>
       </span>
-      <input id={id} type="checkbox" role="switch" checked={checked} onChange={(event) => onChange(event.currentTarget.checked)} />
+      <input id={id} type="checkbox" role="switch" checked={checked} disabled={disabled} onChange={(event) => onChange(event.currentTarget.checked)} />
     </label>
   );
 }

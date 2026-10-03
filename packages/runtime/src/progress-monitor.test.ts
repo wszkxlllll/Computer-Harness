@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ActionId, ActionIntent, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, ToolCallId } from "@computer-harness/protocol";
+import type { ActionId, ActionIntent, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, SurfaceRef, ToolCallId } from "@computer-harness/protocol";
 import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange } from "./progress-monitor.js";
 
 let sequence = 0;
+const defaultSurfaceRef: SurfaceRef = { surfaceId: "monitor-desktop" as SurfaceRef["surfaceId"], generation: 1, kind: "desktop" };
 
 function eventForRun(runId: RunId, data: Record<string, unknown>): RuntimeEvent {
   const current = sequence++;
@@ -21,6 +22,7 @@ function observation(
   width = 800,
   height = 600,
   screenshot = true,
+  surfaceRef: SurfaceRef = defaultSurfaceRef,
 ): RuntimeEvent {
   return eventForRun(runId, {
     type: "observation.created",
@@ -28,6 +30,7 @@ function observation(
       id: id as ObservationId,
       runId,
       computerSessionId: "fixture-session" as ComputerSessionId,
+      surfaceRef,
       capturedAt: "2026-09-18T00:00:00Z",
       viewport: { width, height, coordinateSpace: "physical" },
       ...(screenshot
@@ -52,9 +55,9 @@ function keypress(runId: RunId, id: string, basedOn: string, keys: string[]): Ru
   return eventForRun(runId, { type: "action.proposed", callId: `call-${id}` as ToolCallId, action });
 }
 
-function receipt(runId: RunId, actionId: string, status: "completed" | "refused" | "failed" | "cancelled"): RuntimeEvent {
+function receipt(runId: RunId, actionId: string, status: "completed" | "refused" | "failed" | "cancelled" | "partial"): RuntimeEvent {
   return eventForRun(runId, {
-    type: "action.execution.completed",
+    type: status === "completed" ? "action.execution.completed" : "action.execution.failed",
     receipt: { actionId: actionId as ActionId, status },
   });
 }
@@ -90,6 +93,27 @@ function transition(
     sourceActionEventId: "action-terminal" as EventId,
     sourceObservationEventId: "observation-event" as EventId,
     transition: transitionKind,
+  });
+}
+
+function assessmentResponse(
+  runId: RunId,
+  observationId: string,
+  actionId: string,
+  actionOutcome: "expected_change" | "no_effect" | "unexpected_change" | "uncertain",
+): RuntimeEvent {
+  return eventForRun(runId, {
+    type: "model.response.received",
+    turn: {
+      type: "finish",
+      summary: "done",
+      observationAssessment: {
+        observationId: observationId as ObservationId,
+        actionId: actionId as ActionId,
+        actionOutcome,
+        evidence: "Visible state compared with the prior observation.",
+      },
+    },
   });
 }
 
@@ -145,6 +169,18 @@ describe("progress monitor foundation", () => {
     expect(secondRefusal.output.reasons.map((reason) => reason.code)).toContain("repeated_refusal");
   });
 
+  it("retains partial receipts in the repeated-failure status tail", () => {
+    let state = createProgressMonitorState(runId, { refusalThreshold: 2 });
+    state = reduceProgressMonitor(state, observation(runId, "partial-observation")).state;
+    state = reduceProgressMonitor(state, typed(runId, "partial-1", "partial-observation", "first\nsecond")).state;
+    state = reduceProgressMonitor(state, receipt(runId, "partial-1", "partial")).state;
+    state = reduceProgressMonitor(state, typed(runId, "partial-2", "partial-observation", "first\nsecond")).state;
+    const repeatedPartial = reduceProgressMonitor(state, receipt(runId, "partial-2", "partial"));
+
+    expect(repeatedPartial.output.candidate).toBe(true);
+    expect(repeatedPartial.output.reasons.map((reason) => reason.code)).toContain("repeated_failure");
+  });
+
   it("does not equate same-length text or keys, and separates proposal repetition from execution repetition", () => {
     let state = createProgressMonitorState(runId, { repeatThreshold: 2 });
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
@@ -169,6 +205,28 @@ describe("progress monitor foundation", () => {
     state = reduceProgressMonitor(state, click(runId, "executed-2", "observation-4")).state;
     const executedRepeat = reduceProgressMonitor(state, receipt(runId, "executed-2", "completed"));
     expect(executedRepeat.output.reasons.map((reason) => reason.code)).toContain("repeated_action");
+  });
+
+  it("isolates repeated-action history across three Surfaces in one session and viewport", () => {
+    const surface = (id: string, kind: SurfaceRef["kind"]): SurfaceRef => ({
+      surfaceId: id as SurfaceRef["surfaceId"],
+      generation: 1,
+      kind,
+    });
+    let state = createProgressMonitorState(runId, { repeatThreshold: 2 });
+    state = reduceProgressMonitor(state, observation(runId, "surface-a-observation", 800, 600, true, surface("surface-a", "native_window"))).state;
+    state = reduceProgressMonitor(state, click(runId, "surface-a-action", "surface-a-observation", 10, 20)).state;
+    state = reduceProgressMonitor(state, receipt(runId, "surface-a-action", "completed")).state;
+    state = reduceProgressMonitor(state, observation(runId, "surface-b-observation", 800, 600, true, surface("surface-b", "overlay"))).state;
+    state = reduceProgressMonitor(state, click(runId, "surface-b-action", "surface-b-observation", 20, 20)).state;
+    state = reduceProgressMonitor(state, receipt(runId, "surface-b-action", "completed")).state;
+    state = reduceProgressMonitor(state, observation(runId, "surface-c-observation", 800, 600, true, surface("surface-c", "native_window"))).state;
+    const surfaceC = reduceProgressMonitor(state, click(runId, "surface-c-action", "surface-c-observation", 10, 20));
+
+    expect(surfaceC.output.candidate).toBe(false);
+    expect(surfaceC.output.reasons.map((reason) => reason.code)).not.toContain("action_cycle");
+    expect(surfaceC.output.reasons.map((reason) => reason.code)).not.toContain("repeated_proposal");
+    expect(surfaceC.output.reasons.map((reason) => reason.code)).not.toContain("repeated_action");
   });
 
   it("requires a consecutive signature tail rather than all-history frequency", () => {
@@ -211,18 +269,32 @@ describe("progress monitor foundation", () => {
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
     state = reduceProgressMonitor(state, click(runId, "same-1", "observation-1", 10, 20)).state;
     state = reduceProgressMonitor(state, receipt(runId, "same-1", "completed")).state;
+    state = reduceProgressMonitor(state, observation(runId, "observation-2")).state;
     const first = reduceProgressMonitor(state, transition(runId, "same-1", "observation-2", "unchanged"));
     expect(first.output.candidate).toBe(true);
     expect(first.output.reasons.map((reason) => reason.code)).toEqual(["no_observed_change"]);
     expect(first.output.evidence.map((item) => item.kind)).toContain("visual_transition_unchanged");
 
-    const current = reduceProgressMonitor(first.state, observation(runId, "observation-2")).state;
+    const current = first.state;
     expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(true);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "rounded" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10.866, y: 20.122 } })).toBe(true);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 11, y: 20 } })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-3" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
+    expect(shouldRejectRepeatedNoChange(current, { actionId: "relocated" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, groundingRef: "uia-current", point: { x: 11, y: 20 } })).toBe(false);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-scroll" as ActionId, kind: "scroll", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 }, direction: "down", ticks: 1 })).toBe(false);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-type" as ActionId, kind: "type", basedOn: "observation-2" as ObservationId, text: "same input" })).toBe(false);
     expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-key" as ActionId, kind: "keypress", basedOn: "observation-2" as ObservationId, keys: ["ARROWDOWN"] })).toBe(false);
+  });
+
+  it("blocks an ungrounded same-coordinate click after a fresh unchanged-page observation", () => {
+    let state = createProgressMonitorState(runId);
+    state = reduceProgressMonitor(state, observation(runId, "same-page-1")).state;
+    state = reduceProgressMonitor(state, click(runId, "same-page-click", "same-page-1", 100, 200)).state;
+    state = reduceProgressMonitor(state, receipt(runId, "same-page-click", "completed")).state;
+    state = reduceProgressMonitor(state, observation(runId, "same-page-2")).state;
+    // Production commits the post-action observation before its transition;
+    // only then can the monitor verify that both frames share one Surface.
+    state = reduceProgressMonitor(state, transition(runId, "same-page-click", "same-page-2", "unchanged", "same-page-1")).state;
+    expect(shouldRejectRepeatedNoChange(state, { actionId: "same-page-repeat" as ActionId, kind: "click", basedOn: "same-page-2" as ObservationId, point: { x: 100, y: 200 } })).toBe(true);
   });
 
   it("does not treat changed or unknown transition evidence as a no-change candidate", () => {
@@ -230,6 +302,7 @@ describe("progress monitor foundation", () => {
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
     state = reduceProgressMonitor(state, click(runId, "changed-1", "observation-1")).state;
     state = reduceProgressMonitor(state, receipt(runId, "changed-1", "completed")).state;
+    state = reduceProgressMonitor(state, observation(runId, "observation-2")).state;
     const changed = reduceProgressMonitor(state, transition(runId, "changed-1", "observation-2", "changed"));
     expect(changed.output.candidate).toBe(false);
     expect(changed.output.evidence.map((item) => item.kind)).toContain("visual_transition_changed");
@@ -238,6 +311,7 @@ describe("progress monitor foundation", () => {
     state = reduceProgressMonitor(state, observation(runId, "observation-2")).state;
     state = reduceProgressMonitor(state, click(runId, "unknown-1", "observation-2")).state;
     state = reduceProgressMonitor(state, receipt(runId, "unknown-1", "failed")).state;
+    state = reduceProgressMonitor(state, observation(runId, "observation-3")).state;
     const unknown = reduceProgressMonitor(state, transition(runId, "unknown-1", "observation-3", "unknown", "observation-2"));
     expect(unknown.output.candidate).toBe(false);
     expect(unknown.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
@@ -253,6 +327,41 @@ describe("progress monitor foundation", () => {
     expect(forged.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
     expect(forged.output.evidence.map((item) => item.kind)).toContain("action_binding_unavailable");
     expect(shouldRejectRepeatedNoChange(forged.state, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
+  });
+
+  it("reconciles assessments with the exact action, latest observation, receipt, and visual transition", () => {
+    const stateFor = (transitionKind: "changed" | "unchanged" | "unknown", receiptStatus: "completed" | "failed" = "completed") => {
+      let state = createProgressMonitorState(runId);
+      state = reduceProgressMonitor(state, observation(runId, "assessment-before")).state;
+      state = reduceProgressMonitor(state, click(runId, "assessment-action", "assessment-before")).state;
+      state = reduceProgressMonitor(state, receipt(runId, "assessment-action", receiptStatus)).state;
+      state = reduceProgressMonitor(state, observation(runId, "assessment-current")).state;
+      state = reduceProgressMonitor(state, transition(runId, "assessment-action", "assessment-current", transitionKind, "assessment-before")).state;
+      return state;
+    };
+
+    const noEffect = reduceProgressMonitor(stateFor("unchanged"), assessmentResponse(runId, "assessment-current", "assessment-action", "no_effect"));
+    expect(noEffect.output.assessmentOutcome).toBe("no_effect");
+    expect(noEffect.output.reasons.map((reason) => reason.code)).toContain("no_observed_change");
+    expect(noEffect.output.evidence.map((item) => item.kind)).toContain("semantic_assessment");
+    expect(noEffect.output.evidence.map((item) => item.kind)).toContain("visual_transition_unchanged");
+
+    const unexpected = reduceProgressMonitor(stateFor("changed"), assessmentResponse(runId, "assessment-current", "assessment-action", "unexpected_change"));
+    expect(unexpected.output.assessmentOutcome).toBe("unexpected_change");
+    expect(unexpected.output.reasons.map((reason) => reason.code)).toContain("unexpected_change");
+
+    const conflict = reduceProgressMonitor(stateFor("unchanged"), assessmentResponse(runId, "assessment-current", "assessment-action", "expected_change"));
+    expect(conflict.output.assessmentOutcome).toBe("uncertain");
+    expect(conflict.output.reasons.map((reason) => reason.code)).toContain("assessment_uncertain");
+
+    const receiptError = reduceProgressMonitor(stateFor("unknown", "failed"), assessmentResponse(runId, "assessment-current", "assessment-action", "expected_change"));
+    expect(receiptError.output.assessmentOutcome).toBe("uncertain");
+    expect(receiptError.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
+
+    const staleObservation = reduceProgressMonitor(stateFor("changed"), assessmentResponse(runId, "assessment-before", "assessment-action", "expected_change"));
+    expect(staleObservation.output.assessmentOutcome).toBe("uncertain");
+    const staleAction = reduceProgressMonitor(stateFor("changed"), assessmentResponse(runId, "assessment-current", "older-action", "expected_change"));
+    expect(staleAction.output.assessmentOutcome).toBe("uncertain");
   });
 
   it("bounds observation/action history and resets it when the run changes", () => {

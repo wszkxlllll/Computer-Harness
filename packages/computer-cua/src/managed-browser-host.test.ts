@@ -5,10 +5,23 @@ import { createHash } from "node:crypto";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { runInNewContext } from "node:vm";
-import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, cleanupManagedBrowser, closeManagedBrowserGracefully, createManagedBrowserPage, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { domCandidateFingerprint, type DomGroundingRawCandidate } from "./dom-grounding.js";
+import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
+  it("selects a platform browser and bounded executable candidates", () => {
+    expect(defaultManagedBrowserKind("win32")).toBe("edge");
+    expect(defaultManagedBrowserKind("darwin")).toBe("chromium");
+    expect(defaultManagedBrowserKind("linux")).toBe("chromium");
+    expect(managedBrowserExecutableCandidates("chromium", "darwin", "/Users/fixture"))
+      .toContain("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    expect(managedBrowserExecutableCandidates("edge", "win32"))
+      .toContain("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe");
+    expect(managedBrowserExecutableCandidates("chromium", "linux"))
+      .toContain("/usr/bin/chromium");
+  });
   it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("shadowRoot");
     expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("deviceScaleFactor");
@@ -102,7 +115,106 @@ describe("managed browser host pilot", () => {
     expect(evaluation.candidates.length).toBeLessThanOrEqual(256);
   });
 
+  it("reuses label and aria-labelledby names when revalidating a DOM click", () => {
+    const label = syntheticElement("label", { attrs: { for: "arrival" }, textContent: "Arrival time" });
+    const labelledInput = syntheticElement("input", {
+      attrs: { id: "arrival", type: "text" },
+      labels: [label],
+      rect: { x: 10, y: 10, width: 120, height: 24 },
+    });
+    const ariaLabel = syntheticElement("span", { attrs: { id: "departure-label" }, textContent: "Departure time" });
+    const ariaInput = syntheticElement("input", {
+      attrs: { id: "departure", type: "text", "aria-labelledby": "departure-label" },
+      rect: { x: 10, y: 50, width: 120, height: 24 },
+    });
+    const emailButton = syntheticElement("button", {
+      attrs: { "aria-label": "user@example.com" },
+      rect: { x: 10, y: 90, width: 120, height: 24 },
+    });
+    const page = new SyntheticDocument([label, labelledInput, ariaLabel, ariaInput, emailButton]);
+    const context = {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }),
+    };
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
+      ...context,
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1 },
+    }) as SyntheticEvaluation;
+    for (const expected of [
+      { role: "textbox", name: "Arrival time", element: labelledInput },
+      { role: "textbox", name: "Departure time", element: ariaInput },
+      { role: "button", name: "user@example.com", element: emailButton },
+    ]) {
+      const candidate = evaluation.candidates.find((item) => item.name === expected.name);
+      expect(candidate).toBeDefined();
+      const result = runInNewContext(buildManagedDomClickExpression({
+        role: expected.role,
+        name: expected.name,
+        frame: candidate?.frame as { x: number; y: number; width: number; height: number },
+        fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate),
+      }), context) as { status: string };
+      expect(result).toMatchObject({ status: "completed" });
+      expect(expected.element.clicked).toBe(true);
+    }
+  });
+
+  it.each([undefined, "SEARCH", "text"])("round-trips production collector fingerprints for input type %s", (type) => {
+    const input = syntheticElement("input", { attrs: { "aria-label": "Query", ...(type === undefined ? {} : { type }) } });
+    const page = new SyntheticDocument([input]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const binding = { role: "textbox", name: "Query", frame: candidate.frame as { x: number; y: number; width: number; height: number }, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate) };
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(page.activeElement).toBe(input);
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "completed" });
+    page.focused = false; // Chrome address bar owns focus, activeElement is retained.
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]?.state).toMatchObject({ focused: false });
+    input.clicked = false;
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+    expect(input.clicked).toBe(false);
+    page.focused = true;
+    page.activeElement = null;
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, fingerprint: "domf-00000000" }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE" });
+    const replacement = syntheticElement("input", { attrs: { "aria-label": "Query", type: type === "SEARCH" ? "text" : "search" } });
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: new SyntheticDocument([replacement]) })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE" });
+    expect(replacement.clicked).toBe(false);
+  });
+
+  it("ignores non-input type and refuses occluded native click probes without dispatch", () => {
+    const button = syntheticElement("button", { attrs: { type: "submit", "aria-label": "Go" } });
+    const page = new SyntheticDocument([button]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const binding = { role: "button", name: "Go", frame: candidate.frame as { x: number; y: number; width: number; height: number }, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate) };
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, validateOnly: true }), context)).toMatchObject({ status: "completed" });
+    expect(button.clicked).toBe(false);
+    page.hitTarget = syntheticElement("div");
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, validateOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
+    expect(button.clicked).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+  });
+
+  it.each([
+    { x: -10, y: 10, width: 120, height: 24 },
+    { x: 10, y: -10, width: 120, height: 24 },
+    { x: 950, y: 10, width: 120, height: 24 },
+    { x: 10, y: 790, width: 120, height: 24 },
+  ])("refuses a clipped editable native-click probe at %j without input", (rect) => {
+    const input = syntheticElement("input", { attrs: { "aria-label": "Query" }, rect });
+    const page = new SyntheticDocument([input]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const result = runInNewContext(buildManagedDomClickExpression({ role: "textbox", name: "Query", frame: rect, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate), validateOnly: true }), context);
+    expect(result).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CLIPPED" });
+    expect(input.clicked).toBe(false);
+    expect(page.activeElement).toBeNull();
+  });
+
   it("keeps the local fixture coverage explicit for controls, canvas, shadow DOM and iframe boundaries", async () => {
+    // Fixture strings are supplementary; executable round-trip tests above
+    // and below exercise the production collector and fingerprint function.
     const fixture = await readFile(new URL("./fixtures/managed-dom-fixture.html", import.meta.url), "utf8");
     expect(fixture).toContain('role="button"');
     expect(fixture).toContain("<input");
@@ -153,6 +265,97 @@ describe("managed browser host pilot", () => {
       profileMode: "persistent",
       resolveOwnedWindowTarget: async () => undefined,
     })).toThrow(/persistent.*profile label.*root/iu);
+  });
+
+  it("exposes both read-only gates through the production managed transport", async () => {
+    const host = new ManagedBrowserHost({ browser: "chromium", url: "about:blank", resolveOwnedWindowTarget: async () => undefined });
+    // Attest a fixture state only; no browser process is launched in this test.
+    (host as unknown as { state: object }).state = {};
+    const validate = vi.spyOn(host, "validateClick").mockResolvedValue({ status: "completed" });
+    const verify = vi.spyOn(host, "verifyFocus").mockResolvedValue({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+    const transport = host.createTransport();
+    const request = {} as Parameters<ManagedBrowserHost["validateClick"]>[0];
+    const signal = new AbortController().signal;
+    expect(await transport.validateClick!(request, signal)).toMatchObject({ status: "completed" });
+    expect(await transport.verifyFocus!(request, signal)).toMatchObject({ status: "refused" });
+    expect(validate).toHaveBeenCalledWith(request, signal);
+    expect(verify).toHaveBeenCalledWith(request, signal);
+  });
+
+  it("cleans an already-spawned browser and ephemeral profile when startup is aborted", async () => {
+    const abort = new AbortController();
+    const child = { pid: 654321, exitCode: null } as unknown as ChildProcess;
+    const waitForProcessTree = vi.fn(async () => true);
+    let profileRoot: string | undefined;
+    const host = new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      executablePath: process.execPath,
+      startupTimeoutMs: 100,
+      resolveOwnedWindowTarget: async () => undefined,
+      spawnManagedBrowser: (_executable, args) => {
+        const profileArgument = args.find((argument) => argument.startsWith("--user-data-dir="));
+        if (profileArgument === undefined) throw new Error("test did not receive the owned profile argument");
+        profileRoot = profileArgument.slice("--user-data-dir=".length);
+        abort.abort(new Error("fixture abort after spawn"));
+        return child;
+      },
+      cleanupHooks: { waitForProcessTree, closeGracefully: async () => true },
+    });
+
+    await expect(host.start(abort.signal)).rejects.toThrow("fixture abort after spawn");
+    expect(waitForProcessTree).toHaveBeenCalledOnce();
+    expect(profileRoot).toBeDefined();
+    await expect(access(profileRoot!)).rejects.toThrow();
+  });
+
+  it("reports the exact startup phase with bounded redacted stderr and cleanup certainty", async () => {
+    const stderr = new PassThrough();
+    const child = { pid: 654322, exitCode: 7, signalCode: null, stderr } as unknown as ChildProcess;
+    const diagnostics: Parameters<NonNullable<ManagedBrowserHostOptions["onStartupDiagnostic"]>>[0][] = [];
+    const host = new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      executablePath: process.execPath,
+      resolveOwnedWindowTarget: async () => undefined,
+      spawnManagedBrowser: (_executable, _args, options) => {
+        expect(options.stdio).toEqual(["ignore", "ignore", "pipe"]);
+        stderr.write("x".repeat(10_000));
+        stderr.write("[123:ERROR] profile C:\\Users\\private\\AppData\\Local\\Temp\\profile https://private.example/?token=secret\n");
+        stderr.write("[123:ERROR] remote endpoint https://private.example/?token=secret\n");
+        stderr.write("[123:ERROR] request token=secret2 api_key=secret3\n");
+        return child;
+      },
+      cleanupHooks: { waitForProcessTree: async () => true, closeGracefully: async () => true },
+      onStartupDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    await expect(host.start(new AbortController().signal)).rejects.toThrow(/exited before DevTools became ready/iu);
+    stderr.destroy();
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      stage: "wait_devtools_port",
+      processState: "child_exited",
+      exitCode: 7,
+      devToolsPortObserved: false,
+      cleanup: "confirmed",
+    });
+    expect(diagnostics[0]?.stderrExcerpt).toContain("<path>");
+    expect(diagnostics[0]?.stderrExcerpt).toContain("<url>");
+    expect(diagnostics[0]?.stderrExcerpt).toContain("token=<redacted>");
+    expect(diagnostics[0]?.stderrExcerpt?.length).toBeLessThanOrEqual(768);
+    const formatted = formatManagedBrowserStartupDiagnostic(diagnostics[0]!);
+    expect(formatted).toContain("stage=wait_devtools_port");
+    expect(formatted).toContain("elapsed_ms=");
+    expect(formatted).toContain("process=child_exited");
+    expect(formatted).toContain("exit_code=7");
+    expect(formatted).toContain("signal=none");
+    expect(formatted).toContain("devtools_port=not_observed");
+    expect(formatted).toContain("cleanup=confirmed");
+    expect(formatted).not.toContain("C:\\Users");
+    expect(formatted).not.toContain("private.example");
+    expect(formatted).not.toContain("secret");
   });
 
   it("locks persistent Harness-owned profiles and leaves state for later Runs", async () => {
@@ -242,6 +445,44 @@ describe("managed browser host pilot", () => {
     expect(selectManagedBrowserStartupActivity([{ ...activity, visibilityState: "unloaded" as const }], "current-target", true)).toBeUndefined();
   });
 
+  it("waits for the explicit startup target to leave blank and expose a ready redirected document", async () => {
+    const target = { id: "startup-target", type: "page" };
+    const readiness = vi.fn()
+      .mockResolvedValueOnce({ url: "about:blank", readyState: "complete", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "interactive", hasDocumentElement: true, hasBody: true });
+
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 1_000))
+      .resolves.toMatchObject({ url: "https://redirected.example/path", readyState: "interactive" });
+    expect(readiness).toHaveBeenCalledTimes(3);
+    expect(readiness.mock.calls.every(([page]) => page.id === "startup-target")).toBe(true);
+  });
+
+  it("does not treat a blank, non-http, loading, or bodyless page as navigation ready", async () => {
+    const target = { id: "startup-target", type: "page" };
+    const readiness = vi.fn().mockResolvedValue({
+      url: "about:blank",
+      readyState: "complete",
+      hasDocumentElement: true,
+      hasBody: true,
+    });
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 20)).resolves.toBeUndefined();
+    expect(readiness).toHaveBeenCalled();
+  });
+
+  it("bounds a navigation readiness reader that never resolves and aborts its signal", async () => {
+    const target = { id: "startup-target", type: "page" };
+    let readerSignal: AbortSignal | undefined;
+    const readiness = vi.fn((_page, signal: AbortSignal) => {
+      readerSignal = signal;
+      return new Promise<undefined>(() => undefined);
+    });
+    const startedAt = Date.now();
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 30)).resolves.toBeUndefined();
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(readerSignal?.aborted).toBe(true);
+  });
+
   it("requests Browser.close and treats the expected websocket shutdown as graceful", async () => {
     const command = vi.fn(async (method: string) => {
       expect(method).toBe("Browser.close");
@@ -281,6 +522,26 @@ describe("managed browser host pilot", () => {
       await expect(stat(cookiesPath)).resolves.toMatchObject({ size: expect.any(Number) });
     } finally {
       await lock.close().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an ephemeral profile when browser exit cannot be proven", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-ephemeral-timeout-"));
+    const markerPath = join(root, "active-profile-marker");
+    await writeFile(markerPath, "must-remain-until-process-exits", "utf8");
+    const diagnostics: string[] = [];
+    const child = { exitCode: null } as unknown as ChildProcess;
+    try {
+      await cleanupManagedBrowser(child, 4321, "ws://127.0.0.1:1234/devtools/browser/fixture", root, "ephemeral", undefined, (kind) => diagnostics.push(kind), {
+        closeGracefully: async () => false,
+        waitForProcessTree: async () => false,
+        forceTerminate: async () => undefined,
+      });
+      expect(diagnostics).toEqual(["graceful_close_failed", "process_exit_timeout", "profile_cleanup_failed"]);
+      await expect(access(root)).resolves.toBeUndefined();
+      await expect(readFile(markerPath, "utf8")).resolves.toBe("must-remain-until-process-exits");
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -572,6 +833,7 @@ interface SyntheticEvaluation {
 }
 
 class SyntheticElement {
+  public onFocus: (() => void) | undefined;
   public readonly localName: string;
   public readonly children: readonly SyntheticElement[];
   public readonly labels: readonly SyntheticElement[] | undefined;
@@ -581,6 +843,7 @@ class SyntheticElement {
   public readonly disabled: boolean;
   public readonly isContentEditable: boolean;
   public readonly shadowRoot: undefined;
+  public clicked = false;
   private readonly attrs: Readonly<Record<string, string>>;
   private readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 
@@ -606,6 +869,12 @@ class SyntheticElement {
     return this.rect;
   }
 
+  public click(): void {
+    this.clicked = true;
+  }
+
+  public focus(): void { this.onFocus?.(); }
+
   public querySelectorAll(selector: string): readonly SyntheticElement[] {
     const descendants = this.descendants();
     if (selector === "*") return descendants;
@@ -629,10 +898,15 @@ class SyntheticElement {
 
 class SyntheticDocument {
   public activeElement: SyntheticElement | null = null;
+  public focused = true;
+  public hitTarget: SyntheticElement | undefined;
+  public elementFromPoint(): SyntheticElement | null { return this.hitTarget ?? this.allElements()[0] ?? null; }
+  public hasFocus(): boolean { return this.focused; }
   private readonly roots: readonly SyntheticElement[];
 
   public constructor(roots: readonly SyntheticElement[]) {
     this.roots = roots;
+    for (const element of this.allElements()) element.onFocus = () => { this.activeElement = element; };
   }
 
   public querySelectorAll(selector: string): readonly SyntheticElement[] {

@@ -40,13 +40,29 @@ export function matchGoalToWindow(goal: string, targets: readonly WindowTargetIn
   const normalizedGoal = goal.normalize("NFKC").toLocaleLowerCase();
   const goalLatinTerms = extractLatinTerms(normalizedGoal);
   const goalCompact = normalizedGoal.replace(/[\s\p{P}\p{S}]/gu, "");
+  const titledAppNames = new Set(
+    targets
+      .filter((target) => target.appName !== undefined && target.title !== undefined)
+      .map((target) => normalizeWindowLabel(target.appName)),
+  );
+  // Automatic matching owns the policy of ignoring untitled siblings when a
+  // titled identity exists for the same app. The CUA adapter deliberately
+  // keeps real untitled sheets/dialogs in its inventory, so they remain
+  // available to manual selection and explicit handoff. Distinct titled
+  // windows remain separate candidates and therefore remain ambiguous.
+  const matchableTargets = targets.filter((target) =>
+    target.title !== undefined || target.appName === undefined || !titledAppNames.has(normalizeWindowLabel(target.appName)));
 
-  const confident = targets
+  const confident = matchableTargets
     .map((target) => scoreTarget(target, normalizedGoal, goalLatinTerms, goalCompact))
     .filter((candidate) => candidate.score >= MIN_CONFIDENT_SCORE);
   if (confident.length === 1) return { kind: "matched", match: { target: confident[0]!.target } };
   if (confident.length > 1) return { kind: "ambiguous" };
   return { kind: "none" };
+}
+
+function normalizeWindowLabel(value: string | undefined): string {
+  return value?.normalize("NFKC").trim().toLocaleLowerCase() ?? "";
 }
 
 function scoreTarget(

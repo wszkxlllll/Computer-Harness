@@ -4,12 +4,17 @@ import { shouldClearAfterFailure } from "./command-id-registry";
 import { GoalComposer } from "./components/GoalComposer";
 import { PhoneLayout } from "./components/PhoneLayout";
 import { StatusLabel } from "./components/StatusLabel";
-import type { RunStatus, RunSummary, RunTarget, WindowTarget } from "./types";
+import type { BrowserSiteChoice, RunStatus, RunSummary, RunTarget, WindowTarget } from "./types";
 import { isValidBrowserUrl } from "./run-target";
+import { usePreferences } from "./PreferencesContext";
+import { toRunAssistantPreferencesSnapshot } from "./preferences";
+import { announceBrowserText } from "./run-notice-speech";
+import { navigateWithinApp } from "./navigation";
 
 const activeStatuses = new Set<RunStatus>(["created", "running", "waiting_user", "waiting_window", "waiting_approval", "paused"]);
 
-export function HomeScreen() {
+export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: readonly BrowserSiteChoice[] }) {
+  const { preferences } = usePreferences();
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -21,15 +26,19 @@ export function HomeScreen() {
   const [windowTargetsExpired, setWindowTargetsExpired] = useState(false);
   const [selectedTargetToken, setSelectedTargetToken] = useState<string>();
   const [windowTargetsError, setWindowTargetsError] = useState<string>();
-  const [targetMode, setTargetMode] = useState<RunTarget["mode"]>("auto");
-  const [browserSessionMode, setBrowserSessionMode] = useState<"temporary" | "saved">("temporary");
+  // Web tasks are the safest default for phone-driven work: the managed
+  // browser provides observation-bound DOM actions instead of unverified native
+  // coordinate clicks. Native windows remain available via the explicit picker.
+  const [targetMode, setTargetMode] = useState<RunTarget["mode"]>("browser");
   const [browserUrl, setBrowserUrl] = useState("");
+  const [browserSetupRequired, setBrowserSetupRequired] = useState(false);
   const commandIdByTarget = useRef(new Map<string, string>());
   const activeRun = runs.find((run) => activeStatuses.has(run.status));
   const windowExpiresAtMs = windowExpiresAt ? Date.parse(windowExpiresAt) : Number.NaN;
   const hasCurrentTarget = selectedTargetToken !== undefined && windowTargets.some((candidate) => candidate.token === selectedTargetToken);
   const canStart = !loading && !listError && !activeRun && !sending && (
     targetMode === "auto"
+    || targetMode === "desktop"
     || (targetMode === "browser" && (!browserUrl.trim() || isValidBrowserUrl(browserUrl)))
     || (targetMode === "window"
       && !windowTargetsLoading
@@ -98,6 +107,7 @@ export function HomeScreen() {
   function changeTargetMode(mode: RunTarget["mode"]) {
     setTargetMode(mode);
     setError(undefined);
+    setBrowserSetupRequired(false);
     if (mode === "window") void refreshWindowTargets();
   }
 
@@ -113,13 +123,19 @@ export function HomeScreen() {
 
     setSending(true);
     setError(undefined);
-    const actionKey = JSON.stringify([goal, target]);
+    setBrowserSetupRequired(false);
+    if (preferences.voice.runNoticesEnabled) {
+      const rate = preferences.voice.speechRate === "slow" ? 0.85 : preferences.voice.speechRate === "fast" ? 1.15 : 1;
+      announceBrowserText("正在发送任务。", rate);
+    }
+    const assistantPreferences = toRunAssistantPreferencesSnapshot(preferences.assistant);
+    const actionKey = JSON.stringify([goal, target, assistantPreferences, preferences.voice.runNoticesEnabled]);
     const commandId = commandIdByTarget.current.get(actionKey) ?? crypto.randomUUID();
     commandIdByTarget.current.set(actionKey, commandId);
     try {
-      const response = await createRun(goal, commandId, target);
+      const response = await createRun(goal, commandId, target, assistantPreferences, preferences.voice.runNoticesEnabled);
       commandIdByTarget.current.delete(actionKey);
-      window.location.assign(`/run/${encodeURIComponent(response.runId)}`);
+      navigateWithinApp(`/run/${encodeURIComponent(response.runId)}`);
     } catch (caught) {
       if (shouldClearAfterFailure(caught) || (caught instanceof ApiError && caught.code === "WINDOW_DISCOVERY_FAILED")) {
         commandIdByTarget.current.delete(actionKey);
@@ -135,6 +151,9 @@ export function HomeScreen() {
         setWindowExpiresAt(undefined);
         setWindowTargetsExpired(true);
         setWindowTargetsError(caught.message);
+      } else if (caught instanceof ApiError && caught.code === "MANAGED_BROWSER_SETUP_REQUIRED") {
+        setBrowserSetupRequired(true);
+        setError(caught.message);
       } else {
         setError(caught instanceof Error ? caught.message : "任务没有发送成功。网络恢复后可以再次尝试。");
         if (caught instanceof ApiError && caught.code === "RUN_BUSY") await refresh();
@@ -164,10 +183,9 @@ export function HomeScreen() {
           busy={sending}
           canStart={canStart}
           targetMode={targetMode}
-          browserSessionMode={browserSessionMode}
           browserUrl={browserUrl}
+          commonSiteChoices={commonSiteChoices}
           onTargetModeChange={changeTargetMode}
-          onBrowserSessionModeChange={setBrowserSessionMode}
           onBrowserUrlChange={setBrowserUrl}
           targetPicker={{
             candidates: windowTargets,
@@ -182,6 +200,7 @@ export function HomeScreen() {
           }}
           onSubmit={start}
           error={error}
+          setupRequired={browserSetupRequired}
         />
         {activeRun && <p className="field-hint">当前电脑一次处理一个任务；当前任务结束后即可开始新的任务。</p>}
 

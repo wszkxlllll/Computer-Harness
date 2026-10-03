@@ -33,6 +33,17 @@ export function EventTimeline({ events, simplified = false }: EventTimelineProps
 }
 
 function eventLabel(event: RemoteEvent): string | undefined {
+  if (event.type === "run.progress") return progressLabel(event.data);
+  if (event.type === "run.notice" && typeof event.data?.text === "string") return event.data.text.slice(0, 320);
+  if (event.type === "run.surface_transition") {
+    const reason = event.data?.reason;
+    if (reason === "initial_observation") return "电脑确认了初始操作界面";
+    if (reason === "peer_switch") return "电脑切换了操作窗口";
+    if (reason === "child_push") return "电脑打开了弹窗或子界面";
+    if (reason === "child_pop") return "电脑返回到父界面";
+    if (reason === "generation_advanced") return "电脑检测到界面版本或尺寸变化";
+    return "电脑检测到操作界面变化";
+  }
   const labels: Record<string, string> = {
     "run.started": "电脑开始处理任务",
     "run.status": "电脑更新了任务状态",
@@ -50,4 +61,26 @@ function eventLabel(event: RemoteEvent): string | undefined {
     "action.execution.completed": "电脑完成了一步操作",
   };
   return labels[event.type];
+}
+
+function progressLabel(data: Record<string, unknown> | undefined): string {
+  const phase = typeof data?.phase === "string" ? data.phase : "";
+  const status = typeof data?.status === "string" ? data.status : "";
+  if (phase === "model") {
+    if (status === "started") return "模型正在分析当前画面";
+    if (status === "completed") return "模型已完成一次判断";
+    if (status === "failed") return data?.retryable === true ? "模型请求失败，系统正在处理" : "模型请求失败，任务可能结束";
+  }
+  if (phase === "action") {
+    if (status === "proposed") return "电脑准备执行下一步操作";
+    if (status === "started") return "电脑正在执行一步操作";
+    if (status === "completed") return "电脑完成了一步操作";
+    if (status === "failed") return "这一步操作未完成";
+  }
+  if (phase === "monitor") {
+    if (status === "candidate" || status === "guidance") return "系统正在检查任务是否有进展";
+    if (status === "help_requested") return "任务需要你检查当前画面";
+    if (status === "transition") return "系统已记录操作后的画面变化";
+  }
+  return "任务正在处理";
 }

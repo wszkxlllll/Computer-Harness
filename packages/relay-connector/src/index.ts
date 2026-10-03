@@ -92,7 +92,7 @@ function validPairingRegistration(value: unknown): value is HostPairingRegister 
 
 function validBridgeRequest(value: unknown): value is RelayBridgeRequest {
   if (!isRecord(value) || value.type !== "bridge.request" || !isValidIdentifier(value.requestId)) return false;
-  if (value.method !== "GET" && value.method !== "POST" && value.method !== "DELETE") return false;
+  if (value.method !== "GET" && value.method !== "POST" && value.method !== "PUT" && value.method !== "DELETE") return false;
   if (typeof value.path !== "string" || resolveAllowedApiRoute(value.method, value.path) === null) return false;
   if (value.deviceId !== undefined && !isValidIdentifier(value.deviceId)) return false;
   if (value.sessionToken !== undefined && !isSafeString(value.sessionToken, 4096)) return false;

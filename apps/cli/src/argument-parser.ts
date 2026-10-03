@@ -44,6 +44,7 @@ const FLAG_OPTIONS = new Set([
   "--interactive",
   "--tui",
   "--planning",
+  "--window-switch",
   "--confirm-risk-guard-off",
   "--allow-window-title-sharing",
   "--help",

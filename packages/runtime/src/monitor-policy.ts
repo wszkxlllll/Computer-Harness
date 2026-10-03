@@ -149,9 +149,12 @@ export function reduceMonitorPolicy(state: MonitorPolicyState, input: MonitorPol
     // budget is consumed only by a currently observed, sustained candidate.
     return { state: clearCandidate(candidateState), proposal: { kind: "none", reason: "no_candidate" } };
   }
+  const freshUncertainAssessment = input.monitor.assessmentOutcome === "unexpected_change"
+    || input.monitor.assessmentOutcome === "uncertain";
   if (candidateState.candidateClock?.modelDecisionCount === currentClock.modelDecisionCount
     && candidateState.candidateClock.guiActionCount === currentClock.guiActionCount
-    && !hasEvidence(input.monitor, "visual_transition_unchanged")) {
+    && !hasEvidence(input.monitor, "visual_transition_unchanged")
+    && !freshUncertainAssessment) {
     return { state: candidateState, proposal: options.mode === "shadow" ? { kind: "none", reason: "shadow" } : { kind: "none", reason: "candidate_observed" } };
   }
   if (options.mode === "shadow") return { state: candidateState, proposal: { kind: "none", reason: "shadow" } };
@@ -228,7 +231,13 @@ function candidateFingerprint(output: ProgressMonitorOutput): string {
 function guidanceText(output: ProgressMonitorOutput, maxChars: number): string {
   const reasons = [...new Set(output.reasons.map((reason) => reason.code))].sort();
   const evidence = [...new Set(output.evidence.map((item) => item.kind))].sort();
-  const text = reasons.includes("no_observed_change")
+  const text = output.assessmentOutcome === "no_effect"
+    ? "The previous GUI action appears to have had no effect. Re-observe the current screen, re-localize the target, and choose a different action instead of blindly repeating it."
+    : output.assessmentOutcome === "unexpected_change"
+      ? "The current screen changed in an unexpected way. Inspect the visible state, confirm how it relates to the goal, and choose the next action from the new state."
+      : output.assessmentOutcome === "uncertain"
+        ? "The previous GUI action's result is uncertain. Inspect the current screen and confirm its state before choosing what to do next; do not assume success or repeat the action blindly."
+        : reasons.includes("no_observed_change")
     ? "The previous GUI action produced no observable change. Re-observe and re-localize the target before continuing; do not blindly repeat the same action."
     : `Monitor candidate; review current state before continuing. Reasons: ${reasons.join(", ") || "unspecified"}. Evidence: ${evidence.join(", ") || "unspecified"}.`;
   return text.slice(0, maxChars);

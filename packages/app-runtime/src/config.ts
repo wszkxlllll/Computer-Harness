@@ -1,6 +1,6 @@
 import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryRunModule, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
 import type { PlanStore, PlanningRunModule } from "@computer-harness/planning";
-import type { RunId, RunOutcome } from "@computer-harness/protocol";
+import type { RunAssistantPreferencesSnapshot, RunId, RunOutcome } from "@computer-harness/protocol";
 import type {
   ActionPolicy,
   AssetReader,
@@ -67,12 +67,16 @@ export interface ResolvedRunConfig {
   contextMode: "raw" | "recent";
   contextMaxHistoryEvents: number;
   contextMaxInputTokens?: number;
+  /** Frozen, provider-neutral answer preferences for this Run only. */
+  assistantPreferences?: RunAssistantPreferencesSnapshot;
   riskProfile: "experiment" | "live-interactive";
   riskGuard: "off" | "layered";
   /** Defaults to off; DOM/hybrid require an explicit HTTP(S) URL or about:blank. */
   grounding?: "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
   /** Interactive native-window handoff; off unless a host explicitly opts in. */
   windowHandoff?: "off" | "confirm-v1";
+  /** Model-selected switching among already-open windows; off by default. */
+  windowSwitch?: "off" | "opened-windows-v1";
   riskModel: AppRuntimeRiskModel;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;
@@ -82,8 +86,12 @@ export interface ResolvedRunConfig {
   qwenOutputMode?: "native_tools" | "strict_json";
   qwenEndpoint?: string;
   qwenWorkspaceId?: string;
-  glmThinking?: "disabled" | "enabled";
+  glmThinking?: "disabled" | "enabled" | "low" | "high" | "max";
+  /** Total GLM completion/reasoning budget; defaults to 8192, bounded at 131072. */
+  glmMaxOutputTokens?: number;
   glmEndpoint?: string;
+  /** Bounded live-interactive deadline for one GLM request. */
+  glmRequestTimeoutMs?: number;
   fixtureResult?: string;
   monitor?: MonitorPolicyMode;
 }

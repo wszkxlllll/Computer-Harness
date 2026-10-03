@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { GlmAdapter, glmProfiles, type GlmProfile } from "@computer-harness/provider-glm";
+import { FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmProfile } from "@computer-harness/provider-glm";
 import { Qwen38FlashAdapter } from "@computer-harness/provider-qwen";
 import type { ProviderAdapter } from "@computer-harness/runtime";
 import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
@@ -45,13 +45,20 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
   }
   const profile: GlmProfile = {
     ...glmProfiles["glm-5.3-flash"],
-    thinking: options.config.glmThinking === "disabled" ? "disabled" : "enabled",
+    // The configured glm-5.3-flash deployment is reasoning-only and rejects
+    // thinking=disabled with HTTP 400/1210. Keep this provider boundary
+    // compatible even if an older caller passes the legacy disabled setting.
+    thinking: options.config.glmThinking === "disabled" ? "enabled" : options.config.glmThinking ?? "enabled",
+    ...(options.config.glmMaxOutputTokens === undefined ? {} : { maxOutputTokens: options.config.glmMaxOutputTokens }),
   };
   return new GlmAdapter({
     apiKey,
     profile,
     assetReader: options.assetReader,
-    httpClient: options.httpClients?.glm ?? new RecordingGlmHttpClient(resolve(options.outputDir, "provider-exchanges.jsonl")),
+    httpClient: options.httpClients?.glm ?? new RecordingGlmHttpClient(
+      resolve(options.outputDir, "provider-exchanges.jsonl"),
+      new FetchGlmHttpClient({ requestTimeoutMs: options.config.glmRequestTimeoutMs ?? 90_000 }),
+    ),
     ...(options.config.glmEndpoint === undefined ? {} : { endpoint: options.config.glmEndpoint }),
   });
 }

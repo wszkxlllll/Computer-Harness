@@ -27,8 +27,8 @@ export function validateActionIntent(
     return;
   }
 
-  if (action.groundingRef !== undefined && action.kind !== "click" && action.kind !== "select_option") {
-    throw new Error("groundingRef is only valid for grounded click/select_option actions");
+  if (action.groundingRef !== undefined && action.kind !== "click" && action.kind !== "select_option" && action.kind !== "type") {
+    throw new Error("groundingRef is only valid for grounded click/type/select_option actions");
   }
 
   const observation = context.observation;
@@ -79,6 +79,9 @@ export function validateActionIntent(
       return;
     case "type":
       requireCapability(context.capabilities.keyboard, action.kind, "keyboard");
+      if (action.groundingRef !== undefined && (action.groundingRef.trim().length === 0 || action.groundingRef.length > 96)) {
+        throw new Error("type groundingRef must be a non-empty string of at most 96 characters");
+      }
       return;
     case "keypress":
       requireCapability(context.capabilities.keyboard, action.kind, "keyboard");
@@ -92,6 +95,12 @@ export function validateActionIntent(
       }
       if (action.optionText.trim().length === 0 || action.optionText.length > 160) {
         throw new Error("select_option optionText must be a non-empty string of at most 160 characters");
+      }
+      return;
+    case "switch_window":
+      requireCapability(context.capabilities.screenshot, action.kind, "screenshot");
+      if (action.windowRef.trim().length === 0 || action.windowRef.length > 128) {
+        throw new Error("switch_window.windowRef must be a non-empty opaque reference of at most 128 characters");
       }
       return;
     default:

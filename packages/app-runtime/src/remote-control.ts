@@ -1,4 +1,4 @@
-import type { AssetId, AssetRef, JsonValue, ObservationId, RunId, RunOutcome, Viewport } from "@computer-harness/protocol";
+import type { AssetId, AssetRef, JsonValue, ObservationId, RunAssistantPreferencesSnapshot, RunId, RunOutcome, SurfaceRef, Viewport } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import type { ApplicationSession } from "./application-session.js";
 import type { RunHandle } from "./config.js";
@@ -13,10 +13,11 @@ export interface RemoteWindowCandidate {
   readonly title?: string;
 }
 
-/** Safe public labels for the explicitly selected initial desktop window. */
+/** Safe public target label and the evidence status used by the Run UI. */
 export interface RemoteWindowTargetLabel {
   readonly appName?: string;
   readonly title?: string;
+  readonly provenance?: "starting_target" | "selected_target" | "unknown_after_switch";
 }
 
 export interface RemoteWindowTargetSet {
@@ -27,9 +28,10 @@ export interface RemoteWindowTargetSet {
 export type RemoteBrowserSessionMode = "temporary" | "saved";
 
 export type RemoteRunTarget =
-  | { readonly mode: "auto" }
-  | { readonly mode: "window"; readonly targetToken: string }
-  | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string };
+  | { readonly mode: "auto"; readonly switchWindows?: boolean }
+  | { readonly mode: "desktop"; readonly switchWindows?: boolean }
+  | { readonly mode: "window"; readonly targetToken: string; readonly switchWindows?: boolean }
+  | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string; readonly switchWindows?: boolean };
 /** A bare token remains accepted for existing clients. */
 export type RemoteRunTargetInput = string | RemoteRunTarget;
 
@@ -48,10 +50,18 @@ export interface RemoteApprovalEvidence {
   readonly decisionObservationId: ObservationId;
   readonly capturedAt: string;
   readonly viewport: Readonly<Viewport>;
+  readonly surfaceRef: SurfaceRef;
 }
 
 export interface RemoteApprovalPreview {
   readonly actions: readonly RemoteApprovalActionPreview[];
+  /** Host-projected app/title label matched from the latest list_windows result; never a PID/HWND. */
+  readonly selectedWindowLabel?: {
+    readonly status: "matched" | "unavailable";
+    readonly appName?: string;
+    readonly title?: string;
+    readonly source: "latest_list_windows_inventory" | "unavailable";
+  };
   /** Exact request-bound screenshot, fetched through the authenticated run asset route. */
   readonly evidence?: RemoteApprovalEvidence;
   readonly modelDeclaredEffect?: {
@@ -143,7 +153,14 @@ export interface RemoteRunApi {
   listRuns(deviceId: string): Promise<readonly RemoteRunSnapshot[]> | readonly RemoteRunSnapshot[];
   getRun(deviceId: string, runId: string): Promise<RemoteRunSnapshot | undefined> | RemoteRunSnapshot | undefined;
   listWindowTargets(deviceId: string): Promise<RemoteWindowTargetSet>;
-  startRun(deviceId: string, commandId: string, goal: string, target: RemoteRunTargetInput): Promise<RemoteRunSnapshot>;
+  startRun(
+    deviceId: string,
+    commandId: string,
+    goal: string,
+    target: RemoteRunTargetInput,
+    assistantPreferences?: RunAssistantPreferencesSnapshot,
+    runNoticeContentEnabled?: boolean,
+  ): Promise<RemoteRunSnapshot>;
   submitCommand(deviceId: string, runId: string, command: RemoteCommand): Promise<RemoteCommandReceipt>;
   getCommandReceipt(deviceId: string, runId: string, commandId: string): Promise<RemoteCommandReceipt | undefined> | RemoteCommandReceipt | undefined;
   subscribe(deviceId: string, runId: string, afterSequence: number, listener: (event: RemoteStreamEvent) => void): RemoteSubscription;

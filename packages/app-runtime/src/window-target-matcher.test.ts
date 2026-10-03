@@ -32,4 +32,18 @@ describe("matchGoalToWindow", () => {
       match: { target },
     });
   });
+
+  it("owns the automatic titled-sibling policy while keeping titled windows ambiguous", () => {
+    const main = { pid: 10, windowId: 100, appName: "TextEdit", title: "Notes" };
+    const saveSheet = { pid: 10, windowId: 101, appName: "TextEdit", title: undefined };
+    expect(matchGoalToWindow("打开 TextEdit", [main, saveSheet])).toEqual({
+      kind: "matched",
+      match: { target: main },
+    });
+    expect(matchGoalToWindow("打开 TextEdit", [
+      main,
+      { pid: 10, windowId: 102, appName: "TextEdit", title: "Other" },
+      saveSheet,
+    ])).toEqual({ kind: "ambiguous" });
+  });
 });

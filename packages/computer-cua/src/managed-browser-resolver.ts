@@ -1,4 +1,4 @@
-import type { CuaDriverLike } from "@trycua/cua-driver";
+import type { CuaDriverLike } from "./cua-sdk-contract.js";
 import type { CuaWindowTarget } from "./window-contract.js";
 import { DomGroundingUnavailableError } from "./dom-grounding.js";
 import { managedBrowserWindowBoundsMatch, type ManagedBrowserWindowBindingHint, type ManagedBrowserWindowResolution, type ManagedBrowserWindowResolutionDiagnostic } from "./managed-browser-host.js";

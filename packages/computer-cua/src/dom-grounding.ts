@@ -129,19 +129,61 @@ export interface DomSelectOptionResult {
   readonly generation?: string;
 }
 
+export interface DomClickRequest {
+  readonly observationId: ObservationId;
+  readonly computerSessionId: ComputerSessionId;
+  readonly viewport: Viewport;
+  readonly browserTarget: ManagedBrowserTarget;
+  /** Adapter-private candidate binding; never comes from a Provider directly. */
+  readonly candidate: {
+    readonly role: string;
+    readonly name?: string;
+    readonly bbox: {
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+    };
+    /** Fresh DOM CSS frame; adapter-private and never model-facing. */
+    readonly frame?: {
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+    };
+    readonly fingerprint: string;
+  };
+}
+
+export interface DomClickResult {
+  readonly status: "completed" | "refused" | "failed";
+  readonly driverCode?: string;
+  readonly message?: string;
+  readonly tabId?: string;
+  readonly generation?: string;
+}
+
 export interface DomGroundingTransport {
   readonly kind: "managed-loopback-cdp-v1";
   /** Identity is attested at collection time; unseen navigation requires a fresh observation. */
   collect(request: DomGroundingCollectRequest, signal: AbortSignal): Promise<DomGroundingTransportResult>;
   /** Re-locates and selects one option without opening the native popup. */
   readonly selectOption?: (request: DomSelectOptionRequest, signal: AbortSignal) => Promise<DomSelectOptionResult>;
+  /** Re-locates and activates one observation-bound DOM control. */
+  readonly click?: (request: DomClickRequest, signal: AbortSignal) => Promise<DomClickResult>;
+  /** Read-only identity and page/control focus check before native keyboard delivery. */
+  readonly verifyFocus?: (request: DomClickRequest, signal: AbortSignal) => Promise<DomClickResult>;
+  /** Read-only unique candidate validation before a single native editable click. */
+  readonly validateClick?: (request: DomClickRequest, signal: AbortSignal) => Promise<DomClickResult>;
 }
 
 export interface MaterializedDomGrounding {
-  readonly catalog: GroundingCatalog;
+  readonly catalog: Omit<GroundingCatalog, "surfaceRef">;
   /** Adapter-private map used to validate delivery; refs are observation-bound. */
   readonly privateElements: ReadonlyMap<string, {
     readonly element: GroundingElement;
+    /** Raw bounded candidate name retained only for adapter-private revalidation. */
+    readonly candidateName?: string;
     readonly point: { readonly x: number; readonly y: number };
     readonly candidateFingerprint: string;
     readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
@@ -173,6 +215,7 @@ export function materializeDomGrounding(
   }
   const privateElements = new Map<string, {
     readonly element: GroundingElement;
+    readonly candidateName?: string;
     readonly point: { readonly x: number; readonly y: number };
     readonly candidateFingerprint: string;
     readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
@@ -210,6 +253,7 @@ export function materializeDomGrounding(
     const point = { x: clipped.x + clipped.width / 2, y: clipped.y + clipped.height / 2 };
     privateElements.set(elementRef, {
       element,
+      ...(typeof candidate.name === "string" ? { candidateName: candidate.name.slice(0, 160) } : {}),
       point,
       candidateFingerprint: domCandidateFingerprint(candidate),
       ...(frame === undefined ? {} : { candidateFrame: frame }),

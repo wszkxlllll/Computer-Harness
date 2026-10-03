@@ -26,6 +26,11 @@ export function mapActionIntent(action: ActionIntent, viewport: Viewport, keyboa
         "select_option requires managed-browser DOM grounding and is unavailable on OSWorld",
         "OSWORLD_SELECT_OPTION_UNSUPPORTED",
       );
+    case "switch_window":
+      throw new OsworldActionMappingError(
+        "switch_window requires an opened-window inventory and is unavailable on OSWorld",
+        "OSWORLD_WINDOW_SWITCH_UNSUPPORTED",
+      );
     case "scroll":
       if (!Number.isInteger(action.ticks) || action.ticks <= 0) {
         throw new OsworldActionMappingError("scroll.ticks must be a positive integer");

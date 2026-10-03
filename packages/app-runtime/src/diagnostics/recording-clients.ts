@@ -3,6 +3,7 @@ import { FetchGlmHttpClient, type GlmHttpClient } from "@computer-harness/provid
 import { FetchQwenHttpClient, type QwenHttpClient, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode } from "@computer-harness/provider-qwen";
 import {
   providerRequestToolProjection,
+  providerRequestRequiresStructuredContent,
   summarizeProviderResponse,
   summarizeTransportError,
   trustedProviderModel,
@@ -31,6 +32,7 @@ export class RecordingGlmHttpClient implements GlmHttpClient {
         toolNames: requestTools.toolNames,
         response: summarizeProviderResponse(response, {
           allowedToolNames: requestTools.allowedToolNames,
+          structuredContentExpected: providerRequestRequiresStructuredContent(body),
           ...(trustedModel === null ? {} : { trustedModel }),
         }),
       })}\n`, "utf8");
@@ -80,6 +82,7 @@ export class RecordingQwenHttpClient implements QwenHttpClient {
         toolNames: requestTools.toolNames,
         response: summarizeProviderResponse(response, {
           allowedToolNames: requestTools.allowedToolNames,
+          structuredContentExpected: providerRequestRequiresStructuredContent(body),
           ...(trustedModel === null ? {} : { trustedModel }),
         }),
       })}\n`, "utf8");

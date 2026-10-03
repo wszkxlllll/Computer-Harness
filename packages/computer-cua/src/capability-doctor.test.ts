@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
-import { inspectCuaCapabilities } from "./capability-doctor.js";
+import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
+import { inspectCuaCapabilities, validateCuaMetadataForSdk } from "./capability-doctor.js";
+import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
+
+installFakeCuaSdkModuleForTests();
+
+const LOCAL_SDK_VERSION = cuaSdkVersionForPlatform();
+const OTHER_SDK_VERSION = LOCAL_SDK_VERSION === "0.22.2" ? "0.32.0" : "0.22.2";
+const contractVersionFor = (version: string): string => version === "0.32.0" ? "0.8.0" : "0.7.0";
 
 function toolResult(overrides: Partial<ToolResult> = {}): ToolResult {
   return {
@@ -37,8 +45,8 @@ function fakeDriver(options: {
       if (options.hangMetadata === true) return await new Promise<never>(() => undefined);
       if (options.metadataFailure !== undefined) throw options.metadataFailure;
       return {
-        driverVersion: "0.22.2",
-        contractVersion: "0.7.0",
+        driverVersion: LOCAL_SDK_VERSION,
+        contractVersion: contractVersionFor(LOCAL_SDK_VERSION),
         toolsListSchemaVersion: "1",
         capabilityVersion: "1",
         mcpProtocolVersion: "1",
@@ -75,8 +83,8 @@ function fakeDriver(options: {
       if (name === "health_report" && options.healthFailure !== undefined) throw options.healthFailure;
       if (name === "check_permissions" && options.permissionFailure !== undefined) throw options.permissionFailure;
       if (name === "check_permissions" && options.permission !== undefined) return options.permission;
-      if (name === "health_report") return options.health ?? toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: "win32", driver_version: "0.22.2", overall: "ok", checks: [{ name: "binary_version", status: "pass" }] }) });
-      if (name === "check_permissions") return toolResult({ structuredJson: JSON.stringify({ accessibility: true, screen_recording: true, source: "cua-driver" }) });
+      if (name === "health_report") return options.health ?? toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: process.platform, driver_version: LOCAL_SDK_VERSION, overall: "ok", checks: [{ name: "binary_version", status: "pass" }] }) });
+      if (name === "check_permissions") return toolResult({ structuredJson: JSON.stringify(LOCAL_SDK_VERSION === "0.32.0" ? { x11: true, wayland: false, atspi: true } : { accessibility: true, screen_recording: true, source: "cua-driver" }) });
       return toolResult();
     },
     uniffiDestroy() { destroyCount += 1; },
@@ -90,7 +98,7 @@ describe("CUA capability doctor", () => {
     const report = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => fake.driver });
 
     expect(report.status).toBe("supported");
-    expect(report.declared.sdkVersion).toBe("0.22.2");
+    expect(report.declared.sdkVersion).toBe(LOCAL_SDK_VERSION);
     expect(report.declared.defaultObservation).toBe("desktop");
     expect(report.declared.tools.windowDiscovery).toBe("supported");
     expect(report.declared.tools.windowCapture).toBe("unknown");
@@ -126,6 +134,35 @@ describe("CUA capability doctor", () => {
     expect(report.verified.inventory).toMatchObject({ status: "unknown", reasonCode: "inventory_malformed" });
     expect(report.declared.tools).toEqual({ windowDiscovery: "unknown", windowForeground: "unknown", windowCapture: "unknown" });
     expect(report.cleanup.status).toBe("supported");
+  });
+
+  it("requires the daemon version to match the locally routed SDK in both platform directions", async () => {
+    const makeMetadata = (driverVersion: string) => ({
+      driverVersion,
+      contractVersion: contractVersionFor(driverVersion),
+      toolsListSchemaVersion: "1",
+      capabilityVersion: "1",
+      mcpProtocolVersion: "1",
+      pid: 1234,
+      embedded: false,
+    });
+
+    expect(validateCuaMetadataForSdk(makeMetadata("0.32.0"), "0.22.2")).toMatchObject({
+      status: "unknown",
+      reasonCode: "driver_version_mismatch",
+    });
+    expect(validateCuaMetadataForSdk(makeMetadata("0.22.2"), "0.32.0")).toMatchObject({
+      status: "unknown",
+      reasonCode: "driver_version_mismatch",
+    });
+
+    const fake = fakeDriver({ metadata: makeMetadata(OTHER_SDK_VERSION) });
+    const report = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => fake.driver });
+    expect(report.declared.sdkVersion).toBe(LOCAL_SDK_VERSION);
+    expect(report.verified.metadata.status).toBe("unknown");
+    expect(report.verified.metadata.reasonCode).toBe("driver_version_mismatch");
+    expect(report.status).not.toBe("supported");
+    expect(fake.calls).toEqual(["metadata", "shutdown"]);
   });
 
   it("surfaces permission errors as unknown while retaining cleanup evidence", async () => {
@@ -226,19 +263,19 @@ describe("CUA capability doctor", () => {
 
   it("does not report a contradictory or version-mismatched health result as healthy", async () => {
     const failedCheck = fakeDriver({
-      health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: "win32", driver_version: "0.22.2", overall: "ok", checks: [{ name: "binary_version", status: "fail" }] }) }),
+      health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: process.platform, driver_version: LOCAL_SDK_VERSION, overall: "ok", checks: [{ name: "binary_version", status: "fail" }] }) }),
     });
     const failedReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => failedCheck.driver });
     expect(failedReport.verified.health).toEqual({ status: "unknown", reasonCode: "health_failed" });
 
     const skippedCheck = fakeDriver({
-      health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: "win32", driver_version: "0.22.2", overall: "ok", checks: [{ name: "optional_permission", status: "skip" }] }) }),
+      health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: process.platform, driver_version: LOCAL_SDK_VERSION, overall: "ok", checks: [{ name: "optional_permission", status: "skip" }] }) }),
     });
     const skippedReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => skippedCheck.driver });
     expect(skippedReport.verified.health).toEqual({ status: "degraded", reasonCode: "health_checks_skipped" });
 
     const mismatchedVersion = fakeDriver({
-      health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: "win32", driver_version: "0.22.1", overall: "ok", checks: [{ name: "binary_version", status: "pass" }] }) }),
+      health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: process.platform, driver_version: OTHER_SDK_VERSION, overall: "ok", checks: [{ name: "binary_version", status: "pass" }] }) }),
     });
     const mismatchedReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => mismatchedVersion.driver });
     expect(mismatchedReport.verified.health).toEqual({ status: "unknown", reasonCode: "health_driver_version_mismatch" });
@@ -266,6 +303,10 @@ describe("CUA capability doctor", () => {
 
     const locked = fakeDriver({ sessionState: { desktopUnlocked: false } });
     const lockedReport = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => locked.driver });
-    expect(lockedReport.verified.session).toEqual({ status: "unknown", reasonCode: "desktop_capture_scope_unconfirmed" });
+    if (LOCAL_SDK_VERSION === "0.32.0") {
+      expect(lockedReport.verified.session).toEqual({ status: "supported" });
+    } else {
+      expect(lockedReport.verified.session).toEqual({ status: "unknown", reasonCode: "desktop_capture_scope_unconfirmed" });
+    }
   });
 });

@@ -1,16 +1,12 @@
-import {
-  CuaDriver,
-  EndSessionInput,
-  StartSessionInput,
-  type CuaDriverLike,
-} from "@trycua/cua-driver";
 import { randomUUID } from "node:crypto";
+import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import { activateWindowTarget, listWindowTargets, type CuaWindowInfo, type CuaWindowTarget } from "./window-contract.js";
 
 export interface CuaWindowDiscoveryOptions {
   readonly socketPath: string;
   readonly sessionLabel?: string;
   readonly driverFactory?: (socketPath: string) => CuaDriverLike;
+  readonly osPlatform?: NodeJS.Platform;
 }
 
 export class CuaWindowDiscoveryCleanupError extends Error {
@@ -46,7 +42,14 @@ export class CuaWindowDiscovery {
     await previousOperation;
     try {
       signal.throwIfAborted();
-      return await this.withDriver(signal, (driver, session) => listWindowTargets(driver, session, signal, undefined, onScreenOnly));
+      return await this.withDriver(signal, (driver, session) => listWindowTargets(
+        driver,
+        session,
+        signal,
+        undefined,
+        onScreenOnly,
+        this.options.osPlatform ?? process.platform,
+      ));
     } finally {
       release();
     }
@@ -67,12 +70,15 @@ export class CuaWindowDiscovery {
   private async withDriver<T>(signal: AbortSignal, operation: (driver: CuaDriverLike, session: string) => Promise<T>): Promise<T> {
     signal.throwIfAborted();
     await this.retryPendingCleanup();
-    const driver = (this.options.driverFactory ?? ((socketPath) => CuaDriver.connect(socketPath)))(this.options.socketPath);
+    const sdkModule = await loadCuaSdkModule();
+    const driver = this.options.driverFactory !== undefined
+      ? this.options.driverFactory(this.options.socketPath)
+      : sdkModule.CuaDriver.connect(this.options.socketPath);
     const session = this.options.sessionLabel ?? `computer-harness-window-picker-${randomUUID()}`;
     let value: T | undefined;
     let primaryError: unknown;
     try {
-      await driver.startSession(StartSessionInput.new({ session }), { signal });
+      await driver.startSession(sdkModule.StartSessionInput.new({ session }), { signal });
       value = await operation(driver, session);
     } catch (error) {
       primaryError = error;
@@ -101,11 +107,12 @@ export class CuaWindowDiscovery {
   private async cleanupDriver(driver: CuaDriverLike, session: string): Promise<string[]> {
     const cleanupErrors: string[] = [];
     const cleanupSignal = AbortSignal.timeout(5_000);
+    const sdkModule = await loadCuaSdkModule();
     let endResult: { active?: boolean } | undefined;
     try {
-      endResult = await driver.endSession(EndSessionInput.new({ session }), { signal: cleanupSignal }) as { active?: boolean };
+      endResult = await driver.endSession(sdkModule.EndSessionInput.new({ session }), { signal: cleanupSignal }) as { active?: boolean };
       if (endResult.active === true) {
-        endResult = await driver.endSession(EndSessionInput.new({ session }), { signal: cleanupSignal }) as { active?: boolean };
+        endResult = await driver.endSession(sdkModule.EndSessionInput.new({ session }), { signal: cleanupSignal }) as { active?: boolean };
       }
       if (endResult.active === true) cleanupErrors.push("window picker session remained active");
     } catch (error) {

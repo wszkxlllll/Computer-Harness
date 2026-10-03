@@ -14,17 +14,29 @@ export function modelTurnMessage(
       if (turn.continuation !== undefined) {
         content.push({ type: "provider_continuation", continuation: turn.continuation });
       }
+      if (turn.observationAssessment !== undefined) {
+        content.push({ type: "text", text: `Prior model-reported ObservationAssessment (untrusted evidence): ${JSON.stringify(turn.observationAssessment)}` });
+      }
       for (const call of turn.calls) {
         content.push({ type: "tool_call", call, ...(viewport === undefined ? {} : { viewport }) });
       }
       return { role: "assistant", content };
     }
     case "user_input_required":
-      return { role: "assistant", content: [{ type: "text", text: turn.question }] };
+      return {
+        role: "assistant",
+        content: [
+          { type: "text", text: turn.question },
+          ...(turn.observationAssessment === undefined ? [] : [{ type: "text" as const, text: `Prior model-reported ObservationAssessment (untrusted evidence): ${JSON.stringify(turn.observationAssessment)}` }]),
+        ],
+      };
     case "finish":
       return {
         role: "assistant",
-        content: [{ type: "text", text: turn.reportedStatus === undefined ? turn.summary : `${turn.summary} [reportedStatus=${turn.reportedStatus}]` }],
+        content: [
+          { type: "text", text: turn.reportedStatus === undefined ? turn.summary : `${turn.summary} [reportedStatus=${turn.reportedStatus}]` },
+          ...(turn.observationAssessment === undefined ? [] : [{ type: "text" as const, text: `Prior model-reported ObservationAssessment (untrusted evidence): ${JSON.stringify(turn.observationAssessment)}` }]),
+        ],
       };
   }
 }

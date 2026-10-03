@@ -11,6 +11,7 @@ import type {
   RunId,
   RuntimeEvent,
   RuntimeEventDraft,
+  SurfaceId,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -32,6 +33,7 @@ import {
 
 const runId = "event-notification-run" as RunId;
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "event-notification-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 class MemoryWriter implements RunEventWriter {
   public readonly events: RuntimeEvent[] = [];
@@ -58,7 +60,7 @@ class FakeComputer implements Computer {
 
   public async open(_options: ComputerOpenOptions, _signal: AbortSignal): Promise<ComputerSession> { return this.session; }
   public async observe(_session: ComputerSession, _observationId: ObservationId, _signal: AbortSignal): Promise<ObservationCapture> {
-    return { capturedAt: "2026-09-17T00:00:00.000Z", viewport, screenshot: { mediaType: "image/png", data: new Uint8Array([1]) } };
+    return { capturedAt: "2026-09-17T00:00:00.000Z", viewport, surfaceRef, screenshot: { mediaType: "image/png", data: new Uint8Array([1]) } };
   }
   public async execute(_session: ComputerSession, _action: ActionIntent, _signal: AbortSignal): Promise<import("@computer-harness/protocol").ActionReceipt> {
     this.executeCount += 1;

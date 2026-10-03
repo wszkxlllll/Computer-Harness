@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultComputerTools, groundingComputerTools } from "./computer-tools.js";
+import { createDefaultComputerTools, groundingComputerTools, windowSwitchTools } from "./computer-tools.js";
 import { createDefaultToolRegistry } from "./control-tools.js";
 import { restrictToolNamesForCapabilities } from "./tool-registry.js";
+
+const surfaceRef = { surfaceId: "computer-tools-desktop" as never, generation: 1, kind: "desktop" as const };
 
 describe("default Computer tools", () => {
   it("exposes one canonical definition for each V1 action", () => {
@@ -25,6 +27,60 @@ describe("default Computer tools", () => {
     });
     const scroll = tools.find((tool) => tool.name === "scroll");
     expect(scroll?.inputSchema).toMatchObject({ required: ["x", "y", "direction", "ticks"] });
+    const type = tools.find((tool) => tool.name === "type");
+    expect(type?.inputSchema).toMatchObject({
+      properties: {
+        text: { type: "string" },
+        elementRef: { type: "string", minLength: 1, maxLength: 96 },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    });
+  });
+
+  it("maps an optional current UIA elementRef into the type action without exposing driver tokens", () => {
+    const type = createDefaultComputerTools().get("type");
+    if (type?.category !== "computer") throw new Error("type tool missing");
+    const observation = {
+      id: "type-observation" as never,
+      runId: "run" as never,
+      computerSessionId: "session" as never,
+      surfaceRef,
+      capturedAt: "2026-10-02T00:00:00Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+      screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png" as const, byteLength: 1 },
+      grounding: {
+        version: "uia-catalog-v1" as const,
+        source: "uia" as const,
+        observationId: "type-observation" as never,
+        computerSessionId: "session" as never,
+        surfaceRef,
+        completeness: "complete" as const,
+        degraded: false,
+        maxElements: 16,
+        elements: [{ elementRef: "uia-current-1", role: "Document", source: "uia" as const, bbox: { x: 10, y: 10, width: 300, height: 250, coordinateSpace: "physical" as const } }],
+      },
+    };
+    const context = { runId: "run" as never, session: {} as never, signal: new AbortController().signal, observation };
+    expect(type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, context)).toEqual({
+      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+    });
+    expect(type.toAction({ text: "first\nsecond" }, context)).toEqual({
+      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+    });
+    expect(type.toAction({ text: "ordinary single line" }, { ...context, observation: undefined })).toEqual({
+      kind: "type", text: "ordinary single line",
+    });
+    expect(() => type.toAction({ text: "one line", elementRef: "uia-current-1" }, context)).toThrow(/only valid for multiline/iu);
+    expect(() => type.toAction({ text: "first\nsecond", elementRef: "dom-current-1" }, context)).toThrow(/not in the current observation/iu);
+    expect(() => type.validate({ text: "first\nsecond", elementRef: "" })).toThrow(/non-empty/iu);
+
+    const domObservation = {
+      ...observation,
+      grounding: { ...observation.grounding, source: "dom" as const, version: "grounding-catalog-v2" as const,
+        elements: [{ ...observation.grounding.elements[0]!, source: "dom" as const }] },
+    };
+    expect(() => type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, { ...context, observation: domObservation })).toThrow(/UIA_REQUIRED/iu);
   });
 
   it("validates and maps canonical arguments without provider-specific logic", () => {
@@ -79,6 +135,39 @@ describe("default Computer tools", () => {
     }
   });
 
+  it("provides one shared read-only inventory tool and one isolated Computer switch action", async () => {
+    const definitions = windowSwitchTools();
+    const list = definitions.find((definition) => definition.name === "list_windows");
+    const change = definitions.find((definition) => definition.name === "switch_window");
+    expect(list?.category).toBe("side");
+    expect(change).toMatchObject({ category: "computer", isolatedTurn: true });
+    expect(createDefaultComputerTools().get("list_windows")).toBeUndefined();
+    expect(createDefaultComputerTools().get("switch_window")).toBeUndefined();
+
+    if (list?.category !== "side" || change?.category !== "computer") throw new Error("window switch definitions missing");
+    const inventory = await list.execute({}, {
+      runId: "run" as never,
+      session: {} as never,
+      signal: new AbortController().signal,
+      listWindows: async () => [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+    });
+    expect(inventory).toEqual([{ windowRef: "opaque-1", title: "Search", isCurrent: false }]);
+    expect(() => change.validate({ windowRef: "" })).toThrow(/opaque reference/iu);
+    expect(() => change.validate({ windowRef: "opaque-1", pid: 123 })).toThrow(/only the windowRef argument/iu);
+    expect(() => change.validate({ windowRef: "opaque-1", windowId: 456 })).toThrow(/only the windowRef argument/iu);
+    expect(() => change.validate({ windowRef: "opaque-1", adapterMetadata: "unexpected" })).toThrow(/only the windowRef argument/iu);
+    expect(() => change.toAction({ windowRef: "opaque-1", pid: 123 }, {
+      runId: "run" as never,
+      session: {} as never,
+      signal: new AbortController().signal,
+    })).toThrow(/only the windowRef argument/iu);
+    expect(change.toAction({ windowRef: "opaque-1" }, {
+      runId: "run" as never,
+      session: {} as never,
+      signal: new AbortController().signal,
+    })).toEqual({ kind: "switch_window", windowRef: "opaque-1" });
+  });
+
   it("does not offer keyboard primitives when keyboard focus is not verified", () => {
     const registry = createDefaultToolRegistry();
     const names = restrictToolNamesForCapabilities(registry, { screenshot: true, pointer: true, keyboard: false, accessibility: false }, undefined);
@@ -100,6 +189,7 @@ describe("default Computer tools", () => {
         id: "observation" as never,
         runId: "run" as never,
         computerSessionId: "session" as never,
+        surfaceRef,
         capturedAt: "2026-09-20T00:00:00Z",
         viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
         screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png", byteLength: 1 },
@@ -108,6 +198,7 @@ describe("default Computer tools", () => {
           source: "uia" as const,
           observationId: "observation" as never,
           computerSessionId: "session" as never,
+          surfaceRef,
           completeness: "partial" as const,
           degraded: false,
           maxElements: 16,
@@ -128,6 +219,31 @@ describe("default Computer tools", () => {
     expect(() => definition.toAction({ elementRef: "uia-1" }, disabledContext)).toThrow(/GROUNDING_ELEMENT_DISABLED/iu);
   });
 
+  it("refuses managed-browser window containers during tool preflight", () => {
+    const definition = groundingComputerTools()[0];
+    if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
+    const observation = {
+      id: "browser-window-observation" as never,
+      runId: "run" as never,
+      computerSessionId: "session" as never,
+      capturedAt: "2026-09-29T00:00:00Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+      screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png" as const, byteLength: 1 },
+      grounding: {
+        version: "grounding-catalog-v2" as const,
+        source: "hybrid" as const,
+        observationId: "browser-window-observation" as never,
+        computerSessionId: "session" as never,
+        completeness: "partial" as const,
+        degraded: true,
+        maxElements: 16,
+        elements: [{ elementRef: "uia-window", role: "AXWindow", source: "uia" as const, bbox: { x: 0, y: 0, width: 800, height: 600, coordinateSpace: "physical" as const }, state: { enabled: false } }],
+      },
+    };
+    const context = { runId: "run" as never, session: {} as never, signal: new AbortController().signal, observation };
+    expect(() => definition.toAction({ elementRef: "uia-window" }, context)).toThrow(/MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE/iu);
+  });
+
   it("exposes select_option only for managed DOM grounding and binds exact option text", () => {
     expect(groundingComputerTools().map((tool) => tool.name)).toEqual(["click_element"]);
     const definition = groundingComputerTools({ includeSelectOption: true }).find((tool) => tool.name === "select_option");
@@ -146,6 +262,7 @@ describe("default Computer tools", () => {
       id: "dom-observation" as never,
       runId: "run" as never,
       computerSessionId: "session" as never,
+      surfaceRef,
       capturedAt: "2026-09-20T00:00:00Z",
       viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
       screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png" as const, byteLength: 1 },
@@ -154,6 +271,7 @@ describe("default Computer tools", () => {
         source: "dom" as const,
         observationId: "dom-observation" as never,
         computerSessionId: "session" as never,
+        surfaceRef,
         completeness: "complete" as const,
         degraded: false,
         maxElements: 16,
@@ -165,13 +283,14 @@ describe("default Computer tools", () => {
     expect(() => definition.toAction({ elementRef: "dom-1", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding!, source: "uia", version: "uia-catalog-v1", elements: [{ ...observation.grounding!.elements[0]!, source: "uia" }] } } })).toThrow(/DOM_REQUIRED/iu);
   });
 
-  it("fails closed when the listed native-select options are missing, duplicate, disabled, or truncated", () => {
+  it("uses exact observed option evidence even when the native-select list is truncated", () => {
     const definition = groundingComputerTools({ includeSelectOption: true }).find((tool) => tool.name === "select_option");
     if (definition === undefined || definition.category !== "computer") throw new Error("select_option tool missing");
     const observation = {
       id: "dom-options" as never,
       runId: "run" as never,
       computerSessionId: "session" as never,
+      surfaceRef,
       capturedAt: "2026-09-20T00:00:00Z",
       viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
       screenshot: { assetId: "asset" as never, relativePath: "screenshots/a.png", mediaType: "image/png" as const, byteLength: 1 },
@@ -180,6 +299,7 @@ describe("default Computer tools", () => {
         source: "dom" as const,
         observationId: "dom-options" as never,
         computerSessionId: "session" as never,
+        surfaceRef,
         completeness: "complete" as const,
         degraded: false,
         maxElements: 16,
@@ -190,7 +310,10 @@ describe("default Computer tools", () => {
     expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "09:00" }, context)).toThrow(/OPTION_MISSING/iu);
     expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, options: [{ text: "08:00", enabled: false }] }] } } })).toThrow(/OPTION_DISABLED/iu);
     expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, options: [{ text: "08:00", enabled: true }, { text: "08:00", enabled: true }] }] } } })).toThrow(/OPTION_AMBIGUOUS/iu);
-    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true }] } } })).toThrow(/OPTIONS_TRUNCATED/iu);
+    expect(definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true }] } } })).toEqual({ kind: "select_option", groundingRef: "dom-options-ref", optionText: "08:00" });
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "09:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true }] } } })).toThrow(/OPTION_MISSING/iu);
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true, options: [{ text: "08:00", enabled: true }, { text: "08:00", enabled: true }] }] } } })).toThrow(/OPTION_AMBIGUOUS/iu);
+    expect(() => definition.toAction({ elementRef: "dom-options-ref", optionText: "08:00" }, { ...context, observation: { ...observation, grounding: { ...observation.grounding, elements: [{ ...observation.grounding.elements[0]!, optionsTruncated: true, options: [{ text: "08:00", enabled: false }] }] } } })).toThrow(/OPTION_DISABLED/iu);
   });
 
 });

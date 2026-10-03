@@ -3,6 +3,7 @@ import type {
   JsonValue,
   ModelUsage,
   ModelTurn,
+  ObservationAssessment,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -17,7 +18,17 @@ import type {
   ProviderAdapter,
   PreparedProviderRequest,
 } from "@computer-harness/runtime";
-import { HARNESS_EFFECT_KEY, declaredActionEffects, encodeToolCallArguments, isActionableFinishSummary, splitActionEffectArguments } from "@computer-harness/runtime";
+import {
+  HARNESS_EFFECT_KEY,
+  declaredActionEffects,
+  encodeToolCallArguments,
+  isActionableFinishSummary,
+  OBSERVATION_ASSESSMENT_GUIDANCE,
+  observationAssessmentSchema,
+  splitActionEffectArguments,
+  splitObservationAssessment,
+  withObservationAssessmentSchema,
+} from "@computer-harness/runtime";
 
 export interface QwenImagePreprocessorInput {
   bytes: Uint8Array;
@@ -145,7 +156,7 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
     const terminateBoundary = controlNames.length > 0
       ? `\nControl boundary: each control tool (${controlNames.join(", ")}) must be the only call in its response. Never mix a control tool with any computer, planning, memory, or other call; wait for prior tool receipts and the next observation before returning a control decision.`
       : "";
-    const system = `${snapshot.system}${catalog}${envelopeInstruction}${terminateBoundary}`;
+    const system = `${snapshot.system}${catalog}${envelopeInstruction}${terminateBoundary}\n${OBSERVATION_ASSESSMENT_GUIDANCE}`;
     const presentation = await this.presentMessages(system, snapshot.messages, snapshot.tools, options.signal);
     const body: Record<string, unknown> = {
       model: this.id,
@@ -164,6 +175,7 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
         ? { enable_thinking: false, preserve_thinking: false }
         : { reasoning_effort: this.thinking, preserve_thinking: true }),
     };
+    assertInputBudget(snapshot, body);
     const frozenBody = deepFreeze(body);
     const prepared: PreparedProviderRequest = Object.freeze({
       providerId: this.id,
@@ -279,18 +291,26 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
     if (response.calls.length > 0) {
       const ids = new Set<string>();
       const mapped: MappedQwen38Call[] = [];
+      let observationAssessment: ObservationAssessment | undefined;
+      let assessmentSupplied = false;
       for (const raw of response.calls) {
         const parsed = readQwen38RawCall(raw);
         if (ids.has(parsed.id)) throw new QwenProviderError(`Qwen returned duplicate ToolCall id: ${parsed.id}`, "QWEN_DUPLICATE_TOOL_CALL");
         ids.add(parsed.id);
-        mapped.push(mapQwen38ToolCall(parsed, input, imageSpace, this.coordinateMode));
+        const assessmentParts = splitObservationAssessment(parsed.arguments);
+        if (assessmentParts.supplied) {
+          if (assessmentSupplied) observationAssessment = undefined;
+          else observationAssessment = assessmentParts.observationAssessment;
+          assessmentSupplied = true;
+        }
+        mapped.push(mapQwen38ToolCall({ ...parsed, arguments: assessmentParts.arguments }, input, imageSpace, this.coordinateMode));
       }
       const control = mapped.filter((item) => item.type !== "call");
       if (control.length > 0) {
         if (mapped.length !== 1) throw new QwenProviderError("Qwen control calls cannot be mixed with other tool calls", "QWEN_INVALID_TOOL_CALL");
         const only = control[0]!;
-        if (only.type === "finish") return { ...only, ...(usage === undefined ? {} : { usage }) };
-        return { type: "user_input_required", question: only.question, ...(usage === undefined ? {} : { usage }) };
+        if (only.type === "finish") return { ...only, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(usage === undefined ? {} : { usage }) };
+        return { type: "user_input_required", question: only.question, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(usage === undefined ? {} : { usage }) };
       }
       const calls = mapped.map((item) => {
         if (item.type !== "call") throw new QwenProviderError("Qwen control calls cannot be mixed with other tool calls", "QWEN_INVALID_TOOL_CALL");
@@ -300,6 +320,7 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
       return {
         type: "tool_calls",
         calls,
+        ...(observationAssessment === undefined ? {} : { observationAssessment }),
         ...(assistantText.length === 0 ? {} : { assistantText }),
         ...(continuation === undefined ? {} : { continuation }),
         ...(usage === undefined ? {} : { usage }),
@@ -336,23 +357,32 @@ export class Qwen38FlashAdapter implements ProviderAdapter {
       throw new QwenProviderError("Qwen strict JSON response requires a non-empty calls array", "QWEN_INVALID_RESPONSE");
     }
     const rawIds = new Set<string>();
+    let observationAssessment: ObservationAssessment | undefined;
+    let assessmentSupplied = false;
     const mapped = envelope.calls.map((item) => {
       const raw = readStrictEnvelopeCall(item);
       if (rawIds.has(raw.id)) throw new QwenProviderError(`Qwen strict JSON returned duplicate ToolCall id: ${raw.id}`, "QWEN_DUPLICATE_TOOL_CALL");
       rawIds.add(raw.id);
-      return mapQwen38ToolCall(raw, input, imageSpace, this.coordinateMode);
+      const assessmentParts = splitObservationAssessment(raw.arguments);
+      if (assessmentParts.supplied) {
+        if (assessmentSupplied) observationAssessment = undefined;
+        else observationAssessment = assessmentParts.observationAssessment;
+        assessmentSupplied = true;
+      }
+      return mapQwen38ToolCall({ ...raw, arguments: assessmentParts.arguments }, input, imageSpace, this.coordinateMode);
     });
     const controls = mapped.filter((item) => item.type !== "call");
     if (controls.length > 0) {
       if (mapped.length !== 1) throw new QwenProviderError("Qwen strict JSON control calls cannot be mixed with other calls", "QWEN_INVALID_RESPONSE");
       const only = controls[0]!;
       return only.type === "finish"
-        ? { ...only, ...(response.usage === undefined ? {} : { usage: response.usage }) }
-        : { type: "user_input_required", question: only.question, ...(response.usage === undefined ? {} : { usage: response.usage }) };
+        ? { ...only, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(response.usage === undefined ? {} : { usage: response.usage }) }
+        : { type: "user_input_required", question: only.question, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(response.usage === undefined ? {} : { usage: response.usage }) };
     }
     return {
       type: "tool_calls",
       calls: mapped.map((item) => item.type === "call" ? item.call : (() => { throw new QwenProviderError("Qwen strict JSON control calls cannot be mixed with other calls", "QWEN_INVALID_RESPONSE"); })()),
+      ...(observationAssessment === undefined ? {} : { observationAssessment }),
       ...(response.reasoningContent === undefined ? {} : {
         continuation: { providerId: this.id, kind: "reasoning_content" as const, content: response.reasoningContent },
       }),
@@ -368,6 +398,19 @@ function countImages(input: ModelInput): number {
 function estimateWireTextTokens(body: unknown): number {
   const withoutImagePayload = stripImagePayload(body);
   return Math.ceil(JSON.stringify(withoutImagePayload).length / 4);
+}
+
+function assertInputBudget(input: ModelInput, body: unknown): void {
+  const max = input.contextBudget?.maxInputTokens;
+  if (max === undefined) return;
+  const visualTokens = input.messages.reduce((total, message) => total + message.content.reduce((sum, block) => {
+    if (block.type !== "image") return sum;
+    return sum + Math.min(480, Math.ceil((block.viewport.width * block.viewport.height) / 750) + 128);
+  }, 0), 0);
+  const estimated = estimateWireTextTokens(body) + visualTokens + 32;
+  if (estimated > max && (max < 1_000 || estimated > max + 4_096)) {
+    throw new QwenProviderError(`Qwen prompt exceeds maxInputTokens (${estimated} > ${max})`, "QWEN_INPUT_TOO_LARGE", false);
+  }
 }
 
 function stripImagePayload(value: unknown, parentKey?: string): unknown {
@@ -624,7 +667,11 @@ function qwen38ResponseFormat(input: ModelInput): Record<string, unknown> {
               properties: {
                 id: { type: "string", minLength: 1 },
                 name: { type: "string", enum: input.tools.map((tool) => tool.name) },
-                arguments: { type: "object", additionalProperties: true },
+                arguments: {
+                  type: "object",
+                  properties: { observationAssessment: observationAssessmentSchema },
+                  additionalProperties: true,
+                },
               },
               required: ["id", "name", "arguments"],
               additionalProperties: false,
@@ -652,8 +699,9 @@ function qwen38ToolParameters(tool: ModelToolSpec, coordinateMode: QwenCoordinat
     && (providedSchema as Record<string, JsonValue>).properties !== null
     && !Array.isArray((providedSchema as Record<string, JsonValue>).properties);
   const schema = providedSchema === undefined || (tool.coordinate !== undefined && !hasProperties) ? qwen38FallbackSchema(tool.coordinate?.fields) : providedSchema;
-  if (tool.coordinate === undefined) return schema;
-  return addQwen38CoordinateBounds(schema, tool.coordinate.fields, coordinateMode, viewport);
+  const assessmentSchema = withObservationAssessmentSchema(schema);
+  if (tool.coordinate === undefined) return assessmentSchema;
+  return addQwen38CoordinateBounds(assessmentSchema, tool.coordinate.fields, coordinateMode, viewport);
 }
 
 function qwen38FallbackSchema(fields: readonly CoordinateField[] | undefined): JsonValue {

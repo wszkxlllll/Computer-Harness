@@ -33,7 +33,10 @@ class Client implements QwenHttpClient {
 function input(): ModelInput {
   const schemas: Record<string, JsonValue> = {
     click: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false },
-    type: { type: "object", properties: { text: { type: "string", description: "Text to type into the currently focused GUI control." } }, required: ["text"], additionalProperties: false },
+    type: { type: "object", properties: {
+      text: { type: "string", description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
+      elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA text-editor reference, used only for multiline full-value replacement. Expires when the observation or target window changes." },
+    }, required: ["text"], additionalProperties: false },
     keypress: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 1 } }, required: ["keys"], additionalProperties: false },
     hotkey: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 } }, required: ["keys"], additionalProperties: false },
     scroll: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, direction: { type: "string" }, ticks: { type: "integer" } }, required: ["x", "y", "direction", "ticks"], additionalProperties: false },
@@ -138,6 +141,20 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(String(((changedCatalog.body.messages as unknown[])[0] as Record<string, unknown>).content)).not.toContain("drag(");
     expect(first.prepared.payloadHash).not.toBe(changedCatalog.prepared.payloadHash);
 
+    const historicalAssessment = (evidence: string): ModelInput => ({
+      ...input(),
+      messages: [
+        { role: "user", content: [{ type: "text", text: "continue" }] },
+        { role: "assistant", content: [{ type: "text", text: `Prior model-reported ObservationAssessment: ${evidence}` }] },
+      ],
+    });
+    const assessedFirst = await captureStrict(historicalAssessment("no_effect on the current form"));
+    const assessedSecond = await captureStrict(historicalAssessment("unexpected_change to an error screen"));
+    expect((assessedFirst.body.messages as unknown[])[0]).toEqual((assessedSecond.body.messages as unknown[])[0]);
+    expect(assessedFirst.body.response_format).toEqual(assessedSecond.body.response_format);
+    expect(assessedFirst.body.messages).not.toEqual(assessedSecond.body.messages);
+    expect(assessedFirst.prepared.payloadHash).not.toBe(assessedSecond.prepared.payloadHash);
+
     const captureNative = async (value: ModelInput, dynamicViewport: Viewport) => {
       const client = new Client(response("terminate", { status: "success" }));
       const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels" });
@@ -209,6 +226,55 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(messages[0]).toMatchObject({ role: "system", content: expect.stringContaining("control tool (terminate, interact) must be the only call in its response") });
     expect(String(messages[0]?.content)).not.toContain("Available tools");
     expect(String(messages[0]?.content)).not.toContain("Strict output envelope");
+  });
+
+  it("extracts assessments from native and strict control calls without adding a request", async () => {
+    const observationAssessment = {
+      observationId: "observation-current",
+      actionId: "action-previous",
+      actionOutcome: "uncertain",
+      evidence: "The current view is partly obscured.",
+      progress: { kind: "blocked", summary: "Sensitive account detail" },
+    };
+    const native = new Client(response("terminate", { status: "success", text: "Observed result", observationAssessment }));
+    const nativeTurn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: native, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal });
+    expect(nativeTurn).toMatchObject({ type: "finish", summary: "Observed result", observationAssessment });
+    expect(native.postCount).toBe(1);
+    const systemText = String((native.body?.messages as Array<Record<string, unknown>>)[0]?.content);
+    expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).toContain("current screenshot");
+    expect(systemText).toContain("one-turn delay");
+    expect(systemText).toContain("not every step");
+    expect(systemText).toContain("progress.kind=blocked");
+    expect(systemText).not.toContain("observation-current");
+    expect(JSON.stringify(native.body?.tools)).not.toContain("Sensitive account detail");
+
+    const strict = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{
+      id: "strict-assessment-finish", name: "terminate", arguments: { status: "success", text: "Strict result", observationAssessment },
+    }] }) } }] });
+    const strictTurn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: strict, thinking: "disabled", outputMode: "strict_json" }).generate(input(), { signal: new AbortController().signal });
+    expect(strictTurn).toMatchObject({ type: "finish", summary: "Strict result", observationAssessment });
+    expect(strict.postCount).toBe(1);
+    const strictFormat = strict.body?.response_format as Record<string, unknown>;
+    const strictJsonSchema = strictFormat.json_schema as Record<string, unknown>;
+    const strictSchema = strictJsonSchema.schema as Record<string, unknown>;
+    const callsSchema = (strictSchema.properties as Record<string, unknown>).calls as Record<string, unknown>;
+    const itemSchema = (callsSchema.items as Record<string, unknown>).properties as Record<string, unknown>;
+    const argumentsSchema = itemSchema.arguments as Record<string, unknown>;
+    expect(Object.keys(argumentsSchema.properties as Record<string, unknown>)).toContain("observationAssessment");
+    const assessmentSchema = (argumentsSchema.properties as Record<string, unknown>).observationAssessment as Record<string, unknown>;
+    const progressSchema = (assessmentSchema.properties as Record<string, unknown>).progress as Record<string, unknown>;
+    const progressProperties = progressSchema.properties as Record<string, unknown>;
+    expect((progressProperties.kind as Record<string, unknown>).enum).toEqual(["milestone", "blocked"]);
+  });
+
+  it("drops invalid optional assessments while preserving a valid tool call", async () => {
+    const client = new Client(response("click", { x: 400, y: 300, observationAssessment: {
+      observationId: "obs", actionId: "action", actionOutcome: "certain", evidence: "visible",
+    } }));
+    const turn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal });
+    expect(turn).toMatchObject({ type: "tool_calls", calls: [{ name: "click" }] });
+    expect(turn).not.toHaveProperty("observationAssessment");
   });
 
   it("rejects a terminate control with only a status label", async () => {
@@ -430,7 +496,10 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.parallel_tool_calls).toBe(false);
     const tools = client.body?.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
     expect(tools[0]).toMatchObject({ function: { name: "click", parameters: { required: ["x", "y"], properties: { x: { maximum: 1000 }, y: { maximum: 1000 } } } } });
-    expect(tools.find((tool) => tool.function.name === "type")).toMatchObject({ function: { parameters: { required: ["text"], properties: { text: { description: "Text to type into the currently focused GUI control." } } } } });
+    expect(tools.find((tool) => tool.function.name === "type")).toMatchObject({ function: { parameters: { required: ["text"], properties: {
+      text: { description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
+      elementRef: { type: "string", minLength: 1, maxLength: 96 },
+    } } } });
     expect(tools.find((tool) => tool.function.name === "keypress")).toMatchObject({ function: { parameters: { required: ["keys"], properties: { keys: { maxItems: 1 } } } } });
   });
 

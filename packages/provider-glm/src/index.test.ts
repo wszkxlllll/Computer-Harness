@@ -69,6 +69,14 @@ function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelI
 }
 
 describe("GLM provider adapter", () => {
+  it("defers batching to the Context contract while preserving coordinate instructions", async () => {
+    const client = new Client({ choices: [{ message: { content: "ok" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await adapter.generate({ ...input(), system: "Only click→type is permitted as a batch; click_element must be alone." }, { signal: new AbortController().signal });
+    expect(JSON.stringify(client.body)).toContain("follow the Context tool-call and batching contract");
+    expect(JSON.stringify(client.body)).toContain("absent an explicit permitted batch");
+    expect(JSON.stringify(client.body)).toContain("Coordinates must be normalized to 0..1000");
+  });
   it("keeps prepared wire state private to the creating adapter", async () => {
     const client = new Client({ choices: [{ message: { content: "prepared" } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
@@ -85,6 +93,17 @@ describe("GLM provider adapter", () => {
     expect(client.postCount).toBe(postsBeforeAbort);
     const forged = Object.freeze({ ...prepared });
     await expect(adapter.generatePrepared(forged, { signal })).rejects.toMatchObject({ code: "GLM_INVALID_PREPARED_REQUEST" });
+  });
+
+  it("rejects a provider projection whose visual prompt exceeds the context budget", async () => {
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: new Client({ choices: [] }) });
+    await expect(adapter.prepare({ ...input(), contextBudget: {
+      mode: "raw",
+      estimatedInputTokens: 1,
+      maxInputTokens: 100,
+      selectedHistoryEvents: 0,
+      omittedHistoryEvents: 0,
+    } }, { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_INPUT_TOO_LARGE" });
   });
 
   it("uses an immutable input snapshot when parsing a prepared response", async () => {
@@ -131,7 +150,7 @@ describe("GLM provider adapter", () => {
         { role: "assistant" as const, content: [{ type: "provider_continuation" as const, continuation: { providerId: "test-normalized", kind: "reasoning_content" as const, content: "retain this reasoning" } }] },
       ],
     };
-    const continuation = await capture(continuationInput);
+    const continuation = await capture(continuationInput, new Uint8Array([1, 2, 3]), { name: "test-reasoning", thinking: "enabled", coordinateMode: "normalized_1000" });
     expect(continuation.prepared.estimate!.estimatedTextTokens).toBeGreaterThan(first.prepared.estimate!.estimatedTextTokens);
   });
 
@@ -163,7 +182,7 @@ describe("GLM provider adapter", () => {
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
     const turn = await adapter.generate(input(), { signal: new AbortController().signal });
     expect(turn).toEqual({ type: "tool_calls", calls: [{ id: "glm-call", name: "click", arguments: { x: 400, y: 150 } }] });
-    expect(client.body?.tools).toEqual([{ type: "function", function: { name: "click", description: "click Coordinates x,y are normalized numbers from 0 to 1000.", parameters: { type: "object" } } }]);
+    expect(client.body?.tools).toMatchObject([{ type: "function", function: { name: "click", description: "click Coordinates x,y are normalized numbers from 0 to 1000.", parameters: { type: "object", properties: { observationAssessment: { type: "object" } } } } }]);
     expect(client.body?.thinking).toEqual({ type: "disabled" });
     const messages = client.body?.messages as Array<Record<string, unknown>>;
     const userContent = messages[1]?.content as Array<Record<string, unknown>>;
@@ -171,6 +190,49 @@ describe("GLM provider adapter", () => {
     expect((imageBlock?.image_url as { url?: string } | undefined)?.url).toMatch(/^data:image\/png;base64,/);
     expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).toContain("normalized to 0..1000");
     expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).not.toContain("Coordinates are pixels in the current image viewport");
+  });
+
+  it("bounds the default live completion output", async () => {
+    const client = new Client({ choices: [{ message: { content: "done" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
+    await adapter.generate(input(), { signal: new AbortController().signal });
+    expect(client.body?.max_tokens).toBe(8192);
+  });
+
+  it.each([undefined, 16384, 131072])("bounds custom output configuration %s and snapshots it", async (budget) => {
+    const profile = { ...normalizedProfile, ...(budget === undefined ? {} : { maxOutputTokens: budget }) };
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: "done" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile, assetReader: new Reader(), httpClient: client });
+    profile.maxOutputTokens = 1;
+    await adapter.generate(input(), { signal: new AbortController().signal });
+    expect(client.body?.max_tokens).toBe(budget ?? 8192);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, 131073, Number.MAX_SAFE_INTEGER + 1])("rejects invalid output budget %s before HTTP", (budget) => {
+    const client = new Client({});
+    expect(() => new GlmAdapter({ apiKey: "key", profile: { ...normalizedProfile, maxOutputTokens: budget }, assetReader: new Reader(), httpClient: client })).toThrow(/maxOutputTokens/u);
+    expect(client.body).toBeUndefined();
+  });
+
+  it("preserves a complete long result without locally truncating its text", async () => {
+    const summary = "完整输出".repeat(2000);
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: summary } }] });
+    await expect(new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client }).generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", summary });
+  });
+
+  it("rejects length before parsing a complete-looking tool call and keeps only safe diagnostics", async () => {
+    const client = new Client({ choices: [{ finish_reason: "length", message: { content: "PRIVATE_CONTENT", reasoning_content: "PRIVATE_REASONING", tool_calls: [{ id: "partial", function: { name: "click", arguments: "{\"x\":1,\"y\":2,\"private\":\"PRIVATE_ARGS\"}" } }] } }], usage: { prompt_tokens: 100, completion_tokens: 8192, total_tokens: 8292, completion_tokens_details: { reasoning_tokens: 8000 } } });
+    const error = await new GlmAdapter({ apiKey: "PRIVATE_KEY", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client }).generate(input(), { signal: new AbortController().signal }).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "GLM_INCOMPLETE_RESPONSE", retryable: false, retryMode: "feedback" });
+    expect(String(error)).toContain('"finish_reason":"length","max_tokens":8192,"thinking":"enabled","prompt_tokens":100,"completion_tokens":8192,"total_tokens":8292,"reasoning_tokens":8000');
+    expect(String(error)).not.toMatch(/PRIVATE_CONTENT|PRIVATE_REASONING|PRIVATE_ARGS|PRIVATE_KEY/u);
+  });
+
+  it("does not log arbitrary finish reasons or malformed token counts", async () => {
+    const client = new Client({ choices: [{ finish_reason: "PRIVATE_FINISH", message: { content: "PRIVATE_BODY" } }], usage: { prompt_tokens: "PRIVATE_COUNT", completion_tokens: -1, total_tokens: Number.MAX_SAFE_INTEGER + 1, completion_tokens_details: { reasoning_tokens: "PRIVATE_REASONING_COUNT" } } });
+    const error = await new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client }).generate(input(), { signal: new AbortController().signal }).catch((failure: unknown) => failure);
+    expect(String(error)).toContain('"finish_reason":"unknown","max_tokens":8192,"thinking":"enabled"');
+    expect(String(error)).not.toMatch(/PRIVATE_|prompt_tokens|completion_tokens|total_tokens|reasoning_tokens/u);
   });
 
   it("rejects malformed, duplicate, and out-of-range provider output", async () => {
@@ -203,11 +265,93 @@ describe("GLM provider adapter", () => {
     await expect(adapter.generate(input(), { signal: controller.signal })).rejects.toThrow("cancelled");
   });
 
+  it.each(["low", "high", "max"] as const)("combines GLM effort %s with the output budget and reasoning history", async (thinking) => {
+    const client = new Client({ choices: [{ message: { content: "finished" } }] });
+    const adapter = new GlmAdapter({
+      apiKey: "key",
+      profile: { name: "glm-5.3-flash", thinking, coordinateMode: "actual_pixels", maxOutputTokens: 16384 },
+      assetReader: new Reader(),
+      httpClient: client,
+    });
+    await adapter.generate({ ...input(), messages: [...input().messages, { role: "assistant", content: [{ type: "provider_continuation", continuation: { providerId: "glm-5.3-flash", kind: "reasoning_content", content: "retained fixture reasoning" } }] }] }, { signal: new AbortController().signal });
+    expect(client.body?.thinking).toEqual({ type: "enabled" });
+    expect(client.body?.reasoning_effort).toBe(thinking);
+    expect(client.body?.max_tokens).toBe(16384);
+    expect(client.body?.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: "assistant", reasoning_content: "retained fixture reasoning" })]));
+  });
+
   it("maps control definitions from the shared tool projection", async () => {
-    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Observed control result" }) } }] } }] });
+    const observationAssessment = { observationId: "obs-current", actionId: "action-previous", actionOutcome: "expected_change", evidence: "The requested panel is visible." };
+    const client = new Client({ choices: [{ message: { tool_calls: [{ id: "finish-call", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Observed control result", observationAssessment }) } }] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: client });
-    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success", summary: "Observed control result" });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "success", summary: "Observed control result", observationAssessment });
     expect((client.body?.tools as Array<Record<string, unknown>>).map((item) => (item.function as Record<string, unknown>).name)).toContain("terminate");
+  });
+
+  it("extracts a valid assessment from an action call, drops invalid optional data, and keeps its schema stable", async () => {
+    const assessment = {
+      observationId: "observation-current",
+      actionId: "action-previous",
+      actionOutcome: "unexpected_change",
+      evidence: "The page changed to an error panel.",
+      progress: { kind: "blocked", summary: "A private code 123456 is shown" },
+    };
+    const client = new Client({ choices: [{ message: { content: "I checked the page.", tool_calls: [{
+      id: "assessed-click", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, observationAssessment: assessment }) },
+    }] } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    await expect(adapter.generate(input(), { signal: new AbortController().signal })).resolves.toMatchObject({
+      type: "tool_calls",
+      calls: [{ name: "click", arguments: { x: 400, y: 150 } }],
+      observationAssessment: assessment,
+    });
+    expect(JSON.stringify(client.body?.tools)).toContain("observationAssessment");
+    const systemText = String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content);
+    expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).toContain("current screenshot");
+    expect(systemText).toContain("one-turn delay");
+    expect(systemText).toContain("not every step");
+    expect(systemText).toContain("progress.kind=blocked");
+    expect(systemText).not.toContain("observation-current");
+    expect(JSON.stringify(client.body?.tools)).not.toContain("123456");
+    const clickTool = (client.body?.tools as Array<Record<string, unknown>>).find((tool) =>
+      (tool.function as Record<string, unknown>).name === "click");
+    const functionSchema = clickTool?.function as Record<string, unknown>;
+    const parameters = functionSchema.parameters as Record<string, unknown>;
+    const assessmentSchema = (parameters.properties as Record<string, unknown>).observationAssessment as Record<string, unknown>;
+    const progressSchema = (assessmentSchema.properties as Record<string, unknown>).progress as Record<string, unknown>;
+    const progressProperties = progressSchema.properties as Record<string, unknown>;
+    expect((progressProperties.kind as Record<string, unknown>).enum).toEqual(["milestone", "blocked"]);
+
+    const invalid = new Client({ choices: [{ message: { content: "", tool_calls: [{
+      id: "invalid-optional-assessment", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, observationAssessment: { ...assessment, actionOutcome: "confident" } }) },
+    }] } }] });
+    const invalidTurn = await new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: invalid }).generate(input(), { signal: new AbortController().signal });
+    expect(invalidTurn).toMatchObject({ type: "tool_calls", calls: [{ arguments: { x: 400, y: 150 } }] });
+    expect(invalidTurn).not.toHaveProperty("observationAssessment");
+  });
+
+  it("keeps the stable system and tool schema prefix unchanged when historical assessment content changes", async () => {
+    const capture = async (evidence: string) => {
+      const client = new Client({ choices: [{ message: { content: "done" } }] });
+      const modelInput = {
+        ...input(),
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: "continue" }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: `Prior model-reported ObservationAssessment: ${evidence}` }] },
+        ],
+      };
+      const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+      const prepared = await adapter.prepare(modelInput, { signal: new AbortController().signal });
+      await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+      return { body: client.body, prepared };
+    };
+    const first = await capture("no_effect on the current form");
+    const second = await capture("unexpected_change to an error screen");
+    expect((first.body?.messages as unknown[])[0]).toEqual((second.body?.messages as unknown[])[0]);
+    expect(first.body?.tools).toEqual(second.body?.tools);
+    expect(first.body?.messages).not.toEqual(second.body?.messages);
+    expect(first.prepared.payloadHash).not.toBe(second.prepared.payloadHash);
   });
 
   it("projects Planning and Memory activation guidance into Function tool schemas", async () => {
@@ -397,8 +541,9 @@ describe("GLM provider adapter", () => {
       });
       await expect(adapter.generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({
         code: "GLM_REQUEST_TIMEOUT",
-        retryable: true,
-        retryMode: "same_input",
+        retryable: false,
+        retryMode: "feedback",
+        message: expect.stringMatching(/phase=reading_body elapsedMs=\d+ deadlineMs=10 headersElapsedMs=\d+ httpStatus=200/u),
       });
       expect(observedSignal?.aborted).toBe(true);
     } finally {
@@ -406,7 +551,33 @@ describe("GLM provider adapter", () => {
     }
   });
 
+  it("identifies a timeout before Response headers without exposing request data", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    })));
+    try {
+      const client = new FetchGlmHttpClient({ requestTimeoutMs: 10 });
+      const error = await client.post("https://private.invalid/secret-path", { secret: "PRIVATE_BODY" }, { authorization: "PRIVATE_KEY" }, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback", message: expect.stringMatching(/phase=awaiting_headers elapsedMs=\d+ deadlineMs=10/u) });
+      expect(String(error)).not.toMatch(/secret-path|PRIVATE_BODY|PRIVATE_KEY/u);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("preserves cancellation while reading a response body", async () => {
+    const cancellation = new Error("user cancelled body");
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => ({ ok: true, status: 200, json: () => new Promise<never>((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      controller.abort(cancellation);
+    }) })));
+    try {
+      await expect(new FetchGlmHttpClient({ requestTimeoutMs: 100 }).post("https://fixture.invalid", {}, {}, controller.signal)).rejects.toBe(cancellation);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("preserves user cancellation instead of classifying it as a retryable timeout", async () => {
+    // User cancellation remains distinct from the transport deadline.
     let observedSignal: AbortSignal | undefined;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => {
       observedSignal = options.signal;

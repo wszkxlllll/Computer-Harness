@@ -139,6 +139,220 @@ test("marks missing summary and conflicting IDs without mixing raw reports", asy
   assert.equal(conflictReport.includes("must not mix"), false);
 });
 
+test("delivers a separate program evidence report when the model final reply is absent", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-tui-recovery-report-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const sessionDirectory = await makeSession(root);
+  const runDirectory = await makeRun(sessionDirectory, "run-recovery", {
+    runId: "run-recovery",
+    goal: "Compare the requested options.",
+    outcome: "budget_exhausted",
+    summary: {
+      modelSummary: null,
+      recoveryReport: {
+        schemaVersion: 1,
+        kind: "program_run_evidence",
+        runId: "run-recovery",
+        source: "committed_runtime_events_and_reducer",
+        businessResult: "not_assessed",
+        runtimeOutcome: "budget_exhausted",
+        modelReply: { status: "not_recorded", reportedStatus: "failure" },
+        notDeliveredNote: "No final model reply was recorded before the Runtime ended with budget_exhausted.",
+        latestObservation: { sourceEventId: "run-recovery-event-2", observationId: "observation-1", capturedAt: "2026-02-01T00:00:03.000Z", sourceUrl: null, sourceUrlStatus: "unknown_not_recorded" },
+        budget: { configured: { guiActions: 100, modelRequests: 100 }, observed: { guiActions: 100, modelRequests: 24 }, exhaustedKinds: ["gui_actions"], evidenceEventIds: ["budget-event"] },
+        evidenceEvents: [{ eventId: "provider-timeout-event", type: "model.request.failed", category: "timeout", code: "API_TIMEOUT", retryable: false }],
+        unknownSideEffects: { status: "none_recorded", actionIds: [] },
+        planState: { statusSource: "model_maintained_state_not_environment_verification", tasks: [{ id: "phase-1", status: "in_progress", sourceEventId: "plan-event" }] },
+        memoryState: { statusSource: "model_authored_memory_not_independently_verified", facts: [{ id: "memory-1", status: "active", updatedSequence: 3, sourceEventId: "memory-event" }], entities: [] },
+      },
+    },
+  });
+  const recoveryEvents = [
+    event("run-recovery", "run.created", 0, { goal: "Compare the requested options." }),
+    event("run-recovery", "run.started", 1),
+    event("run-recovery", "observation.created", 2, { observation: { id: "observation-1", runId: "run-recovery", computerSessionId: "session-recovery", capturedAt: "2026-02-01T00:00:03.000Z", viewport: { width: 800, height: 600, coordinateSpace: "physical" }, screenshot: { assetId: "asset-recovery", relativePath: "screenshots/recovery.png", mediaType: "image/png", byteLength: 1 } } }),
+    event("run-recovery", "model.request.started", 3, { requestId: "run-recovery-request" }),
+    event("run-recovery", "model.response.received", 4, { requestId: "run-recovery-request", turn: { type: "finish", summary: "", reportedStatus: "failure" } }),
+    event("run-recovery", "run.finished", 5, { outcome: "budget_exhausted" }),
+  ];
+  await writeFile(join(runDirectory, "trajectory.jsonl"), `${recoveryEvents.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+
+  const collected = await collectSession(sessionDirectory, { root });
+  assert.equal(collected.runs[0].reportStatus, "written");
+  assert.equal(collected.runs[0].dataQuality.status, "complete");
+  const metadata = JSON.parse(await readFile(join(runDirectory, "run-metadata.json"), "utf8"));
+  assert.deepEqual(metadata.report, {
+    status: "written",
+    source: "summary.recoveryReport",
+    modelReplyStatus: "missing_source",
+    recoveryEvidenceStatus: "written",
+  });
+  const report = await readFile(join(runDirectory, "report.md"), "utf8");
+  assert.match(report, /未产生最终回复，未导出原始回复。/u);
+  assert.match(report, /Program-generated Runtime evidence/u);
+  assert.match(report, /source URL: unknown \(not recorded\)/u);
+  assert.match(report, /Plan state references \(not environment verification\)/u);
+  assert.match(report, /Run Memory state references \(model-authored, values omitted, not independently verified\)/u);
+  assert.match(report, /partial report is not a pass/u);
+});
+
+test("accepts no current Observation after completed or ignored handoff without reviving the previous frame", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-tui-handoff-no-frame-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const sessionDirectory = await makeSession(root);
+  const scenarios = [
+    { name: "completed-cancelled", handoffEvent: "computer.window.handoff.completed", reasonCode: "foreground_mismatch", outcome: "cancelled" },
+    { name: "ignored-failed", handoffEvent: "computer.window.handoff.ignored", reasonCode: "new_window_detected", outcome: "failed" },
+  ];
+  for (const scenario of scenarios) {
+    const runId = "run-handoff-no-frame-" + scenario.name;
+    const goal = "Continue with the selected window.";
+    const runDirectory = await makeRun(sessionDirectory, "run-handoff-no-frame-" + scenario.name, {
+      runId,
+      goal,
+      outcome: scenario.outcome,
+      summary: {
+        modelSummary: null,
+        recoveryReport: {
+          schemaVersion: 1,
+          kind: "program_run_evidence",
+          runId,
+          source: "committed_runtime_events_and_reducer",
+          businessResult: "not_assessed",
+          runtimeOutcome: scenario.outcome,
+          modelReply: { status: "not_recorded", reportedStatus: null },
+          notDeliveredNote: "No final model reply was recorded before the Runtime ended with " + scenario.outcome + ".",
+          latestObservation: null,
+          budget: { configured: { guiActions: 100, modelRequests: 100 }, observed: { guiActions: 0, modelRequests: 0 }, exhaustedKinds: [], evidenceEventIds: [] },
+          evidenceEvents: [],
+          unknownSideEffects: { status: "none_recorded", actionIds: [] },
+        },
+      },
+    });
+    const handoffEvent = scenario.handoffEvent === "computer.window.handoff.completed"
+      ? event(runId, scenario.handoffEvent, 4, { target: { pid: 2345, windowId: 6789 }, session: { id: "old-session", backend: "fixture", viewport: { width: 800, height: 600, coordinateSpace: "physical" }, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false }, openedAt: at(1) } })
+      : event(runId, scenario.handoffEvent, 4, { sourceActionId: "handoff-action" });
+    const handoffEvents = [
+      event(runId, "run.created", 0, { goal }),
+      event(runId, "run.started", 1),
+      event(runId, "observation.created", 2, { observation: { id: "old-observation", runId, computerSessionId: "old-session", capturedAt: at(2), viewport: { width: 800, height: 600, coordinateSpace: "physical" }, screenshot: { assetId: "old-frame", relativePath: "screenshots/old.png", mediaType: "image/png", byteLength: 1 } } }),
+      event(runId, "computer.window.handoff.requested", 3, { sourceActionId: "handoff-action", reasonCode: scenario.reasonCode }),
+      handoffEvent,
+      event(runId, "run.finished", 5, { outcome: scenario.outcome }),
+    ];
+    await writeFile(join(runDirectory, "trajectory.jsonl"), handoffEvents.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+    const collected = await collectSession(sessionDirectory, { root });
+    const collectedRun = collected.runs.find((item) => item.runId === runId);
+    assert.equal(collectedRun?.reportStatus, "written");
+    assert.equal(collectedRun?.dataQuality.status, "complete");
+    const metadata = JSON.parse(await readFile(join(runDirectory, "run-metadata.json"), "utf8"));
+    assert.equal(metadata.report.recoveryEvidenceStatus, "written");
+    const report = await readFile(join(runDirectory, "report.md"), "utf8");
+    assert.match(report, /Latest observation: unavailable in the committed event set/u);
+    assert.doesNotMatch(report, /old-observation|old-frame/u);
+  }
+});
+
+test("does not revive the previous frame when switch_window completed without a later observation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-tui-window-switch-no-frame-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const sessionDirectory = await makeSession(root);
+  const runId = "run-window-switch-no-frame";
+  const goal = "Switch to the selected opened window.";
+  const runDirectory = await makeRun(sessionDirectory, runId, {
+    runId,
+    goal,
+    outcome: "cancelled",
+    summary: {
+      modelSummary: null,
+      recoveryReport: {
+        schemaVersion: 1,
+        kind: "program_run_evidence",
+        runId,
+        source: "committed_runtime_events_and_reducer",
+        businessResult: "not_assessed",
+        runtimeOutcome: "cancelled",
+        modelReply: { status: "not_recorded", reportedStatus: null },
+        notDeliveredNote: "No final model reply was recorded before the Runtime ended with cancelled.",
+        latestObservation: null,
+        budget: { configured: { guiActions: 100, modelRequests: 100 }, observed: { guiActions: 1, modelRequests: 1 }, exhaustedKinds: [], evidenceEventIds: [] },
+        evidenceEvents: [],
+        unknownSideEffects: { status: "none_recorded", actionIds: [] },
+      },
+    },
+  });
+  const events = [
+    event(runId, "run.created", 0, { goal }),
+    event(runId, "run.started", 1),
+    event(runId, "observation.created", 2, { observation: { id: "old-switch-observation", runId, computerSessionId: "stable-switch-session", capturedAt: at(2), viewport: { width: 800, height: 600, coordinateSpace: "physical" }, screenshot: { assetId: "old-switch-frame", relativePath: "screenshots/old.png", mediaType: "image/png", byteLength: 1 } } }),
+    event(runId, "action.execution.started", 3, { action: { actionId: "switch-action", kind: "switch_window", windowRef: "opaque-ref", basedOn: "old-switch-observation" } }),
+    event(runId, "action.execution.completed", 4, { receipt: { actionId: "switch-action", status: "completed", sessionAfter: { id: "stable-switch-session", backend: "fixture", viewport: { width: 900, height: 700, coordinateSpace: "physical" }, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false }, openedAt: at(1) } } }),
+    event(runId, "run.finished", 5, { outcome: "cancelled" }),
+  ];
+  await writeFile(join(runDirectory, "trajectory.jsonl"), events.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const collected = await collectSession(sessionDirectory, { root });
+  const collectedRun = collected.runs.find((item) => item.runId === runId);
+  assert.equal(collectedRun?.reportStatus, "written");
+  const report = await readFile(join(runDirectory, "report.md"), "utf8");
+  assert.match(report, /Latest observation: unavailable in the committed event set/u);
+  assert.doesNotMatch(report, /old-switch-observation|old-switch-frame/u);
+});
+
+test("does not revive the previous frame after a failed or unresolved switch outcome", async (t) => {
+  for (const scenario of [
+    { name: "failed-switch", terminal: true },
+    { name: "unresolved-switch", terminal: false },
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), `travel-tui-${scenario.name}-`));
+    try {
+      const sessionDirectory = await makeSession(root);
+      const runId = `run-${scenario.name}`;
+      const goal = "Switch to the selected opened window.";
+      const runDirectory = await makeRun(sessionDirectory, runId, {
+        runId,
+        goal,
+        outcome: "outcome_unknown",
+        summary: {
+          recoveryReport: {
+            schemaVersion: 1,
+            kind: "program_run_evidence",
+            runId,
+            source: "committed_runtime_events_and_reducer",
+            businessResult: "not_assessed",
+            runtimeOutcome: "outcome_unknown",
+            modelReply: { status: "not_recorded", reportedStatus: null },
+            notDeliveredNote: "No final model reply was recorded before the Runtime ended with outcome_unknown.",
+            latestObservation: null,
+            budget: { configured: { guiActions: 100, modelRequests: 100 }, observed: { guiActions: 1, modelRequests: 1 }, exhaustedKinds: [], evidenceEventIds: [] },
+            evidenceEvents: [],
+            unknownSideEffects: { status: "unknown", actionIds: ["switch-action"] },
+          },
+        },
+      });
+      const events = [
+        event(runId, "run.created", 0, { goal }),
+        event(runId, "run.started", 1),
+        event(runId, "observation.created", 2, { observation: { id: "old-switch-observation", runId, computerSessionId: "old-switch-session", capturedAt: at(2), viewport: { width: 800, height: 600, coordinateSpace: "physical" }, screenshot: { assetId: "old-switch-frame", relativePath: "screenshots/old.png", mediaType: "image/png", byteLength: 1 } } }),
+        event(runId, "action.execution.started", 3, { action: { actionId: "switch-action", kind: "switch_window", windowRef: "opaque-ref", basedOn: "old-switch-observation" } }),
+        ...(scenario.terminal ? [event(runId, "action.execution.failed", 4, { receipt: { actionId: "switch-action", status: "failed", driverCode: "WINDOW_SWITCH_OUTCOME_UNKNOWN", message: "fixture failure" } })] : []),
+        event(runId, "run.finished", scenario.terminal ? 5 : 4, { outcome: "outcome_unknown" }),
+      ];
+      await writeFile(join(runDirectory, "trajectory.jsonl"), events.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+      const collected = await collectSession(sessionDirectory, { root });
+      const collectedRun = collected.runs.find((item) => item.runId === runId);
+      assert.equal(collectedRun?.reportStatus, "written");
+      const report = await readFile(join(runDirectory, "report.md"), "utf8");
+      assert.match(report, /Latest observation: unavailable in the committed event set/u);
+      assert.doesNotMatch(report, /old-switch-observation|old-switch-frame/u);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("watch creates and removes ready marker, then performs final collection", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "travel-tui-watch-"));
   t.after(async () => rm(root, { recursive: true, force: true }));

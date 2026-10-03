@@ -2,23 +2,27 @@ import { lstat, mkdir, mkdtemp, open, realpath, rm, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type {
-  Computer,
-  ComputerSession,
-  ContextCompiler,
-  ProviderAdapter,
-  ActionPolicyDecision,
-  RunOutcome,
-  Viewport,
+import {
+  currentObservationAssessmentBinding,
+  type Computer,
+  type ComputerSession,
+  type ContextCompiler,
+  type ModelInput,
+  type ProviderAdapter,
+  type ActionPolicyDecision,
+  type RunOutcome,
+  type Viewport,
+  type MonitorPolicyMode,
 } from "@computer-harness/runtime";
-import type { AssetId, AssetRef, ComputerSessionId, ModelTurn, RunId, ToolCall, ToolCallId } from "@computer-harness/protocol";
+import type { RuntimeEvent, AssetId, AssetRef, ComputerSessionId, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId } from "@computer-harness/protocol";
 import type { WindowTargetInfo } from "./application-session.js";
 import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
 import { ApplicationSession } from "./application-session.js";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
-import { ApplicationRemoteRunApi, RemoteRunApiError } from "./remote-run-api.js";
+import { ApplicationRemoteRunApi, RemoteRunApiError, type ManagedBrowserProfileRunCoordinator } from "./remote-run-api.js";
 
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 function config(outputDir: string): ApplicationSessionConfig {
   return {
@@ -42,7 +46,12 @@ function config(outputDir: string): ApplicationSessionConfig {
   };
 }
 
-function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promise<void> = async () => undefined): Computer {
+function fixtureComputer(
+  screen: Viewport = viewport,
+  closeComputer: () => Promise<void> = async () => undefined,
+  windowInventory: readonly ComputerWindowOption[] = [],
+  switchWindowReceiptStatus: "completed" | "failed" | "refused" | "cancelled" | undefined = undefined,
+): Computer {
   let sequence = 0;
   const session: ComputerSession = {
     id: "remote-api-session" as ComputerSessionId,
@@ -58,22 +67,49 @@ function fixtureComputer(screen: Viewport = viewport, closeComputer: () => Promi
       return {
         capturedAt: "2026-09-26T00:00:0" + String(sequence) + ".000Z",
         viewport: screen,
+        surfaceRef,
         screenshot: { mediaType: "image/png" as const, data: new Uint8Array([3, 1, 4, sequence]) },
       };
     },
-    async execute(_session, action) { return { actionId: action.actionId, status: "completed" as const }; },
+    async execute(_session, action) {
+      if (action.kind === "switch_window" && switchWindowReceiptStatus !== undefined) {
+        if (switchWindowReceiptStatus === "completed") {
+          return {
+            actionId: action.actionId,
+            status: "completed" as const,
+            sessionAfter: {
+              ...session,
+            },
+          };
+        }
+        return { actionId: action.actionId, status: switchWindowReceiptStatus };
+      }
+      return { actionId: action.actionId, status: "completed" as const };
+    },
+    async listWindows() { return windowInventory; },
     async close() { await closeComputer(); },
   } as unknown as Computer;
 }
 
-function providerFor(options: { askFirst?: boolean; summary: string; turns?: readonly ModelTurn[] }): ProviderAdapter {
+function providerFor(options: {
+  failAfterTurns?: boolean;
+  askFirst?: boolean;
+  summary: string;
+  turns?: readonly ModelTurn[];
+  onModelInput?: (input: ModelInput) => void;
+  turnFactory?: (turnNumber: number, input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn | undefined;
+}, getEvents: () => readonly RuntimeEvent[]): ProviderAdapter {
   let turns = 0;
   return {
     id: "remote-api-provider",
-    async generate() {
+    async generate(input: ModelInput) {
+      options.onModelInput?.(input);
       turns += 1;
+      const generatedTurn = options.turnFactory?.(turns, input, getEvents());
+      if (generatedTurn !== undefined) return structuredClone(generatedTurn);
       const scriptedTurn = options.turns?.[turns - 1];
       if (scriptedTurn !== undefined) return structuredClone(scriptedTurn);
+      if (options.failAfterTurns === true) throw Object.assign(new Error("fixture request deadline"), { code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
       if (options.askFirst === true && turns === 1) return { type: "user_input_required", question: "Which date should I check?" };
       return { type: "finish", summary: options.summary };
     },
@@ -86,15 +122,25 @@ function createFixture(
     askFirst?: boolean;
     summary: string;
     turns?: readonly ModelTurn[];
+    failAfterTurns?: boolean;
     guardDecisions?: readonly ActionPolicyDecision[];
     screen?: Viewport;
     windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
     allWindows?: readonly WindowTargetInfo[];
+    windowDiscoveryAvailable?: boolean;
     onActivateWindow?: (target: { pid: number; windowId: number }, showWindow: (window: WindowTargetInfo) => void) => void;
     managedBrowserProfile?: { readonly profileLabel: string; readonly profileRoot: string };
+    managedBrowserProfileCoordinator?: ManagedBrowserProfileRunCoordinator;
     inspectManagedBrowserProfile?: (profileRoot: string, profileLabel: string) => Promise<{ state: "ready" | "active" | "stale" | "unknown" | "unsafe"; markers: readonly ("profile_lock" | "devtools_port")[] }>;
     readManagedBrowserStartupUrls?: () => Promise<readonly string[]>;
     closeComputer?: () => Promise<void>;
+    runNotices?: boolean;
+    runNoticeDynamicContent?: boolean;
+    onModelInput?: (input: ModelInput) => void;
+    turnFactory?: (turnNumber: number, input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn | undefined;
+    monitor?: MonitorPolicyMode;
+    windowInventory?: readonly ComputerWindowOption[];
+    switchWindowReceiptStatus?: "completed" | "failed" | "refused" | "cancelled";
   },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
@@ -117,6 +163,7 @@ function createFixture(
   );
   const sessionConfig: ApplicationSessionConfig = {
     ...baseConfig,
+    ...(options.monitor === undefined ? {} : { monitor: options.monitor }),
     computer: options.managedBrowserProfile === undefined ? baseComputer : {
       ...baseComputer,
       managedBrowserProfileMode: "persistent",
@@ -124,10 +171,11 @@ function createFixture(
       managedBrowserProfileRoot: options.managedBrowserProfile.profileRoot,
     },
   };
-  const session = new ApplicationSession({
+  let session!: ApplicationSession;
+  session = new ApplicationSession({
     config: sessionConfig,
     owner: new InProcessEnvironmentOwner(),
-    windowDiscovery: {
+    ...(options.windowDiscoveryAvailable === false ? {} : { windowDiscovery: {
       listWindows: async () => {
         windowDiscoveryCalls.push({ type: "visible" });
         return options.windowSnapshots?.[windowReadIndex++] ?? windows;
@@ -140,12 +188,12 @@ function createFixture(
         windowDiscoveryCalls.push({ type: "activate", pid: target.pid, windowId: target.windowId });
         options.onActivateWindow?.(target, (window) => { windows = [...windows.filter((item) => item.pid !== window.pid || item.windowId !== window.windowId), window]; });
       },
-    },
+    } }),
     dependencies: {
-      createProvider: () => providerFor(options),
+      createProvider: () => providerFor(options, () => session.activeRun?.controller.getEvents() ?? []),
       createComputer: async ({ config: computerConfig }) => {
         if (computerConfig.kind === "cua") createdComputerConfigs.push(computerConfig);
-        return fixtureComputer(options.screen, options.closeComputer);
+        return fixtureComputer(options.screen, options.closeComputer, options.windowInventory, options.switchWindowReceiptStatus);
       },
       ...(options.guardDecisions === undefined ? {} : {
         createActionPolicy: () => ({
@@ -162,8 +210,10 @@ function createFixture(
   const api = new ApplicationRemoteRunApi({
     session,
     capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
+    ...(options.runNotices === true ? { runNotices: { enabled: true, dynamicContentEnabled: options.runNoticeDynamicContent === true } } : {}),
     assetReaderForRun: (_runId, handle) => createFileRemoteAssetReader(resolve(handle.config.outputDir, "assets")),
     ...(options.managedBrowserProfile === undefined ? {} : { managedBrowserProfile: options.managedBrowserProfile }),
+    ...(options.managedBrowserProfileCoordinator === undefined ? {} : { managedBrowserProfileCoordinator: options.managedBrowserProfileCoordinator }),
     ...(inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile }),
     ...(options.readManagedBrowserStartupUrls === undefined ? {} : { readManagedBrowserStartupUrls: options.readManagedBrowserStartupUrls }),
     ...limits,
@@ -192,6 +242,168 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 }
 
 describe("ApplicationRemoteRunApi", () => {
+  it("keeps the public stream unchanged when RunNotice projection is disabled", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-notices-off-"));
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "Done." });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "notices-off", "Check a schedule", choices.candidates[0]!.token);
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_user", "Run did not request user input");
+      const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") events.push(event as unknown as { type: string; data?: Record<string, unknown> });
+      });
+      subscription.close();
+      expect(events.some((event) => event.data?.type === "run.notice")).toBe(false);
+      expect(events.some((event) => event.data?.type === "run.pending_request")).toBe(true);
+      const surfaceTransition = events.find((event) => event.data?.type === "run.surface_transition");
+      expect(surfaceTransition?.data).toMatchObject({ reason: "initial_observation", fromKind: null, toKind: "desktop", generation: 1 });
+      expect(JSON.stringify(surfaceTransition)).not.toContain(surfaceRef.surfaceId);
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "answer-notices-off",
+        expectedSequence: current.sequence,
+        type: "respond",
+        requestId: current.pendingRequest!.requestId,
+        text: "明天",
+      });
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes minimal safe notices, validates pending IDs, and replays them through the ordered stream", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-notices-on-"));
+    const { api, session } = createFixture(outputDir, { askFirst: true, summary: "A private itinerary summary.", runNotices: true, runNoticeDynamicContent: true });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "notices-on", "Check a schedule", choices.candidates[0]!.token);
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_user", "Run did not request user input");
+
+      const initialEvents: Array<{ sequence: number; data?: Record<string, unknown> }> = [];
+      const initialSubscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") initialEvents.push(event as unknown as { sequence: number; data?: Record<string, unknown> });
+      });
+      initialSubscription.close();
+      const startNotices = initialEvents.filter((event) => event.data?.type === "run.notice" && event.data.text === "任务已开始。");
+      expect(startNotices).toHaveLength(1);
+      expect(startNotices[0]?.data).toMatchObject({
+        kind: "progress",
+        text: "任务已开始。",
+        delivery: "polite",
+        eventSequence: 0,
+      });
+      expect(JSON.stringify(startNotices[0])).not.toContain("Check a schedule");
+      const startReplay: unknown[] = [];
+      const startReplaySubscription = api.subscribe("device-one", started.runId, startNotices[0]!.sequence - 1, (event) => startReplay.push(event));
+      startReplaySubscription.close();
+      expect(startReplay.filter((event) => JSON.stringify(event).includes(String(startNotices[0]?.data?.noticeId)))).toHaveLength(1);
+
+      const questionNotice = initialEvents.find((event) => event.data?.type === "run.notice" && event.data.kind === "question");
+      const pendingRequestId = api.getRun("device-one", started.runId)?.pendingRequest?.requestId;
+      expect(questionNotice?.data).toEqual({
+        type: "run.notice",
+        noticeId: expect.any(String),
+        kind: "question",
+        text: "我有个问题需要你回答，请查看任务。",
+        delivery: "interrupt",
+        eventSequence: expect.any(Number),
+        pendingRequestId,
+      });
+      expect(JSON.stringify(questionNotice)).not.toContain("Which date should I check?");
+      expect(JSON.stringify(questionNotice)).not.toMatch(/reason|path|modelDeclaredEffect/iu);
+
+      const questionSequence = questionNotice!.sequence;
+      const replayed: unknown[] = [];
+      const replaySubscription = api.subscribe("device-one", started.runId, questionSequence - 1, (event) => replayed.push(event));
+      replaySubscription.close();
+      expect(replayed).toHaveLength(1);
+      expect(JSON.stringify(replayed[0])).toContain('"noticeId"');
+
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "answer-notices-on",
+        expectedSequence: current.sequence,
+        type: "respond",
+        requestId: current.pendingRequest!.requestId,
+        text: "明天",
+      });
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "finished", "Run did not finish after user input");
+      const terminalEvents: Array<{ sequence: number; data?: Record<string, unknown> }> = [];
+      const terminalSubscription = api.subscribe("device-one", started.runId, questionSequence, (event) => {
+        if (event.type === "run.event") terminalEvents.push(event as unknown as { sequence: number; data?: Record<string, unknown> });
+      });
+      terminalSubscription.close();
+      const resultNotices = terminalEvents.filter((event) => event.data?.type === "run.notice" && event.data.kind === "result");
+      expect(resultNotices).toHaveLength(1);
+      expect(resultNotices[0]?.data?.text).toBe("任务已完成，可查看结果。");
+      expect(terminalEvents.some((event) => event.data?.type === "run.notice" && event.data.text === "任务已开始。")).toBe(false);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes the first validated milestone soon after run start instead of rate-limiting it", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-first-milestone-notice-"));
+    const click: ToolCall = {
+      id: "first-milestone-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "results", summary: "Open results" },
+    };
+    let bindingAtSecondTurn: ReturnType<typeof currentObservationAssessmentBinding>;
+    const { api, session } = createFixture(outputDir, {
+      summary: "The task is complete.",
+      runNotices: true,
+      runNoticeDynamicContent: true,
+      monitor: "guidance",
+      turnFactory: (turnNumber, _input, events) => {
+        if (turnNumber === 1) return { type: "tool_calls", calls: [click] };
+        bindingAtSecondTurn = currentObservationAssessmentBinding(events);
+        const binding = bindingAtSecondTurn;
+        if (binding === undefined || binding.transition !== "changed") return { type: "finish", summary: "No validated changed transition." };
+        return {
+          type: "finish",
+          summary: "The report is ready.",
+          observationAssessment: {
+            observationId: binding.observationId,
+            actionId: binding.actionId,
+            actionOutcome: "expected_change",
+            evidence: "The results page is visibly open.",
+            progress: { kind: "milestone", summary: "The results page is open." },
+          },
+        };
+      },
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "first-milestone-notice", "Open the results page", choices.candidates[0]!.token, undefined, true);
+      await session.waitForActiveRun();
+      expect(bindingAtSecondTurn?.transition).toBe("changed");
+
+      const events: Array<{ sequence: number; data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") events.push(event as unknown as { sequence: number; data?: Record<string, unknown> });
+      });
+      subscription.close();
+      const notices = events.filter((event) => event.data?.type === "run.notice");
+      const startNotice = notices.find((event) => event.data?.text === "任务已开始。");
+      const milestoneNotice = notices.find((event) => event.data?.text === "The results page is open.");
+      expect(startNotice).toBeDefined();
+      expect(milestoneNotice).toBeDefined();
+      expect(milestoneNotice?.data).not.toHaveProperty("progressSemantic");
+      expect(milestoneNotice!.sequence).toBeGreaterThan(startNotice!.sequence);
+    } finally {
+      session.activeRun?.controller.cancel("first milestone notice test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("projects the exact pending guarded click, its claimed target, and clears it when that approval resolves", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-approval-preview-"));
     const earlierCall: ToolCall = {
@@ -209,6 +421,8 @@ describe("ApplicationRemoteRunApi", () => {
     const { api, session } = createFixture(outputDir, {
       summary: "The pending click was rejected.",
       screen: { width: 900, height: 900, coordinateSpace: "physical" },
+      runNotices: true,
+      runNoticeDynamicContent: true,
       turns: [
         { type: "tool_calls", calls: [earlierCall] },
         { type: "tool_calls", calls: [pendingCall] },
@@ -220,7 +434,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const choices = await api.listWindowTargets("device-one");
-      const started = await api.startRun("device-one", "approval-preview-click", "Check the current page", choices.candidates[0]!.token);
+      const started = await api.startRun("device-one", "approval-preview-click", "Check the current page", choices.candidates[0]!.token, undefined, true);
       await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_approval", "Run did not request click approval");
 
       const snapshot = api.getRun("device-one", started.runId)!;
@@ -238,6 +452,7 @@ describe("ApplicationRemoteRunApi", () => {
           decisionObservationId: expect.any(String),
           capturedAt: expect.any(String),
           viewport: { width: 900, height: 900, coordinateSpace: "physical" },
+          surfaceRef: { surfaceId: surfaceRef.surfaceId, generation: surfaceRef.generation, kind: surfaceRef.kind },
         },
       });
       const evidence = pending.preview?.evidence;
@@ -263,6 +478,25 @@ describe("ApplicationRemoteRunApi", () => {
       expect(JSON.stringify(pendingProjection)).toContain('"evidence"');
       expect(JSON.stringify(pendingProjection)).not.toContain("旧页面");
 
+      const approvalNoticeEvent = streamedEvents.find((event) => {
+        if (typeof event !== "object" || event === null || !("type" in event) || event.type !== "run.event" || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.notice" && "kind" in data && data.kind === "approval";
+      });
+      expect(approvalNoticeEvent).toMatchObject({
+        data: {
+          type: "run.notice",
+          noticeId: expect.any(String),
+          kind: "approval",
+          text: "可能涉及对外发送或提交内容的点击操作，请核对后审批。",
+          delivery: "interrupt",
+          eventSequence: expect.any(Number),
+          pendingRequestId: pending.requestId,
+        },
+      });
+      expect(JSON.stringify(approvalNoticeEvent)).not.toContain(pending.reason);
+      expect(JSON.stringify(approvalNoticeEvent)).not.toMatch(/reason|path|policyVersion|modelRequestCount/iu);
+
       await api.submitCommand("device-one", started.runId, {
         commandId: "reject-preview-click",
         expectedSequence: snapshot.sequence,
@@ -273,6 +507,160 @@ describe("ApplicationRemoteRunApi", () => {
       expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
     } finally {
       session.activeRun?.controller.cancel("approval preview test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("completes the Host-listed switch under explicit opt-in without a separate approval", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-switch-opt-in-"));
+    const modelInputs: ModelInput[] = [];
+    const listCall: ToolCall = { id: "window-list-call" as ToolCallId, name: "list_windows", arguments: {} };
+    const switchCall: ToolCall = {
+      id: "window-switch-call" as ToolCallId,
+      name: "switch_window",
+      arguments: { windowRef: "wps-window-ref" },
+      declaredEffect: { effects: ["navigate"], target: "MODEL CLAIM ONLY", summary: "Switch to the requested app" },
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The switch completed.",
+      turns: [
+        { type: "tool_calls", calls: [listCall] },
+        { type: "tool_calls", calls: [switchCall] },
+      ],
+      onModelInput: (input) => modelInputs.push(input),
+      switchWindowReceiptStatus: "completed",
+      windowInventory: [
+        { windowRef: "fixture-current-ref", appName: "Fixture app", title: "Fixture window", isCurrent: true },
+        { windowRef: "wps-window-ref", appName: "WPS", title: "Review draft - unsaved", isCurrent: false },
+      ],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "window-switch-opt-in", "Open the listed document window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        switchWindows: true,
+      }, undefined, true);
+      await session.waitForActiveRun();
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.status).toBe("finished");
+      expect(snapshot.pendingRequest).toBeUndefined();
+      expect(snapshot.target).toMatchObject({ appName: "WPS", title: "Review draft - unsaved", provenance: "selected_target" });
+      expect(createdComputerConfigs.at(-1)).toMatchObject({ windowSwitch: "opened-windows-v1" });
+      expect(session.history.at(-1)?.outcome).toBe("succeeded");
+      expect(modelInputs.length).toBeGreaterThanOrEqual(2);
+      expect(modelInputs.every((input) => input.tools.some((tool) => tool.name === "list_windows"))).toBe(true);
+      expect(modelInputs.every((input) => input.tools.some((tool) => tool.name === "switch_window"))).toBe(true);
+      expect(modelInputs[0]?.tools).toEqual(modelInputs[1]?.tools);
+      expect(modelInputs[0]?.system).toBe(modelInputs[1]?.system);
+      expect(JSON.stringify(modelInputs[1]?.messages)).toContain("Review draft - unsaved");
+      expect(started).toBeDefined();
+
+      const events: unknown[] = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => events.push(event));
+      subscription.close();
+      expect(JSON.stringify(events)).toContain("WPS");
+      expect(JSON.stringify(events)).not.toMatch(/"pid"|"windowId"/iu);
+    } finally {
+      session.activeRun?.controller.cancel("window-switch explicit opt-in cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retain the starting target after a refused switch action has begun", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-switch-unknown-"));
+    const listCall: ToolCall = { id: "unknown-window-list-call" as ToolCallId, name: "list_windows", arguments: {} };
+    const switchCall: ToolCall = {
+      id: "unknown-window-switch-call" as ToolCallId,
+      name: "switch_window",
+      arguments: { windowRef: "wps-window-ref" },
+    };
+    const { api, session } = createFixture(outputDir, {
+      summary: "The switch could not be completed.",
+      turns: [
+        { type: "tool_calls", calls: [listCall] },
+        { type: "tool_calls", calls: [switchCall] },
+      ],
+      windowInventory: [
+        { windowRef: "fixture-current-ref", appName: "Fixture app", title: "Fixture window", isCurrent: true },
+        { windowRef: "wps-window-ref", appName: "WPS", title: "Review draft", isCurrent: false },
+      ],
+      switchWindowReceiptStatus: "refused",
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "window-switch-unknown", "Switch to the listed window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        switchWindows: true,
+      });
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "finished", "failed window switch did not terminate the Run");
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.outcome).toBe("failed");
+      expect(snapshot.target).toEqual({ provenance: "unknown_after_switch" });
+
+      const projectedEvents: Array<{ data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") projectedEvents.push(event as unknown as { data?: Record<string, unknown> });
+      });
+      subscription.close();
+      const targetEvents = projectedEvents.filter((event) => event.data?.type === "run.target");
+      expect(targetEvents.at(-1)?.data?.target).toEqual({ provenance: "unknown_after_switch" });
+      expect(JSON.stringify(targetEvents.slice(-2))).not.toContain("Fixture window");
+    } finally {
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("speaks only structured approval context and never repeats a sensitive raw reason", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-sensitive-approval-notice-"));
+    const pendingCall: ToolCall = {
+      id: "approval-sensitive-notice" as ToolCallId,
+      name: "click",
+      arguments: { x: 408, y: 667 },
+      declaredEffect: { effects: ["navigate"], target: "查询", summary: "点击查询按钮" },
+    };
+    const { api, session } = createFixture(outputDir, {
+      summary: "The request was rejected.",
+      screen: { width: 900, height: 900, coordinateSpace: "physical" },
+      runNotices: true,
+      runNoticeDynamicContent: true,
+      turns: [{ type: "tool_calls", calls: [pendingCall] }],
+      guardDecisions: [fixtureGuardDecision("require_approval", "Please enter the password hunter2.")],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "approval-sensitive-notice", "Submit the form", choices.candidates[0]!.token, undefined, true);
+      await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_approval", "Run did not request approval");
+      const pending = api.getRun("device-one", started.runId)?.pendingRequest;
+      if (pending?.kind !== "approval") throw new Error("expected an approval request");
+
+      const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
+        if (event.type === "run.event") events.push(event as unknown as { type: string; data?: Record<string, unknown> });
+      });
+      subscription.close();
+      const approvalNotice = events.find((event) => event.data?.type === "run.notice" && event.data.kind === "approval");
+      expect(approvalNotice?.data?.text).toBe("可能涉及对外发送或提交内容的点击操作，请核对后审批。");
+      expect(JSON.stringify(approvalNotice)).not.toContain("hunter2");
+      expect(JSON.stringify(approvalNotice)).not.toContain("password");
+
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "reject-sensitive-notice",
+        expectedSequence: api.getRun("device-one", started.runId)!.sequence,
+        type: "reject",
+        requestId: pending.requestId,
+      });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+    } finally {
+      session.activeRun?.controller.cancel("sensitive approval notice test cleanup");
       await session.waitForActiveRun();
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -350,7 +738,11 @@ describe("ApplicationRemoteRunApi", () => {
 
   it("preserves completed replies and authorized screenshot assets while isolating Runs by paired device", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-owner-"));
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "The itinerary is saved in Documents." });
+    const modelInputs: ModelInput[] = [];
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The itinerary is saved in Documents.",
+      onModelInput: (input) => modelInputs.push(input),
+    });
     try {
       const choices = await api.listWindowTargets("device-one");
       expect(choices.candidates).toHaveLength(1);
@@ -367,7 +759,9 @@ describe("ApplicationRemoteRunApi", () => {
       const completed = api.getRun("device-one", first.runId)!;
       expect(completed.status).toBe("finished");
       expect(completed.reply).toBe("The itinerary is saved in Documents.");
-      expect(completed.target).toEqual({ appName: "Fixture app", title: "Fixture window" });
+      expect(completed.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
+      expect(modelInputs[0]?.tools.map((tool) => tool.name)).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
+      expect(JSON.stringify(modelInputs[0])).not.toMatch(/list_windows|switch_window/iu);
       expect(JSON.stringify(completed)).not.toMatch(/pid|windowId/iu);
       expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: 42, windowId: 1001 }, windowDeliveryMode: "foreground" });
       await expect(api.startRun("device-one", "start-reuse-target", "Try the same target again", choices.candidates[0]!.token))
@@ -376,6 +770,13 @@ describe("ApplicationRemoteRunApi", () => {
         .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
       await expect(api.startRun("device-one", "start-once", "Changed goal", choices.candidates[0]!.token))
         .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await expect(api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token, undefined, true))
+        .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await expect(api.startRun("device-one", "start-once", "Find the saved itinerary", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        switchWindows: true,
+      })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
       expect(completed.latestAssetId).toBeTruthy();
       expect(JSON.stringify(completed)).not.toContain("assets/");
 
@@ -397,6 +798,207 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
+  it("projects failed Provider progress replies and preserves authorized post-action screenshots", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-provider-progress-"));
+    const { api, session } = createFixture(outputDir, {
+      summary: "must not become success",
+      failAfterTurns: true,
+      turns: [{ type: "tool_calls", calls: [{ id: "progress-click" as ToolCallId, name: "click", arguments: { x: 1, y: 2 } }] }],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "timeout-progress", "fixture click", choices.candidates[0]!.token);
+      await session.waitForActiveRun();
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.status).toBe("finished");
+      expect(snapshot.reply).toContain("已保留 1 个非等待 GUI 动作完成回执");
+      expect(snapshot.reply).toContain("任务完成未确认");
+      expect(snapshot.reply).toContain(`assetId=${snapshot.latestAssetId}`);
+      const streamed: unknown[] = [];
+      api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event)).close();
+      expect(streamed).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.event", data: expect.objectContaining({ type: "run.reply", outcome: "failed", reply: snapshot.reply }) })]));
+      const screenshot = await api.getAsset("device-one", started.runId, snapshot.latestAssetId!);
+      expect(screenshot?.mediaType).toBe("image/png");
+      expect(await api.getAsset("device-two", started.runId, snapshot.latestAssetId!)).toBeUndefined();
+      expect(streamed.filter((event) => {
+        const projected = event as { data?: { phase?: string; status?: string } };
+        return projected.data?.phase === "action" && projected.data.status === "started";
+      })).toHaveLength(1);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts an explicitly requested primary-desktop Run without window discovery or binding", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-target-"));
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, { summary: "Desktop inspected." });
+    try {
+      const run = await api.startRun("device-one", "desktop-run", "Inspect the transient popup", { mode: "desktop" });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", run.runId)?.target).toEqual({
+        appName: "Primary desktop",
+        title: "Entire foreground desktop",
+        provenance: "starting_target",
+      });
+      expect(windowDiscoveryCalls).toEqual([]);
+      expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
+      expect(createdComputerConfigs[0]?.grounding).toBe("off");
+      expect(createdComputerConfigs[0]).not.toHaveProperty("managedBrowserCompanion");
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts a desktop Run with a saved browser companion only when cross-window switching is opted in", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-switch-companion-"));
+    const profileRoot = "C:\\HarnessOwned\\managed-browser-profiles";
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot };
+    let active = false;
+    let released = 0;
+    const coordinator: ManagedBrowserProfileRunCoordinator = {
+      getDefaultSession: () => "saved",
+      async acquireForRun() {
+        if (active) throw Object.assign(new Error("profile busy"), { code: "PROFILE_BUSY" });
+        active = true;
+        return async () => { active = false; released += 1; };
+      },
+    };
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      askFirst: true,
+      summary: "The user confirmed the request.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      const run = await api.startRun("device-one", "desktop-switch-companion", "Inspect the desktop popup", {
+        mode: "desktop", switchWindows: true,
+      });
+      await waitFor(() => api.getRun("device-one", run.runId)?.status === "waiting_user", "desktop companion Run did not pause for confirmation");
+      expect(windowDiscoveryCalls).toEqual([]);
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserCompanion: true,
+        managedBrowserUrl: "about:blank",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "mobile",
+        managedBrowserProfileRoot: profileRoot,
+        windowSwitch: "opened-windows-v1",
+        grounding: "hybrid-catalog-v1",
+      });
+      expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
+      expect(session.activeRun?.config).toMatchObject({ windowSwitch: "opened-windows-v1", windowHandoff: "confirm-v1" });
+      expect(JSON.stringify(run)).not.toContain(profileRoot);
+      expect(active).toBe(true);
+      await session.submitUserInput("Continue");
+      await session.waitForActiveRun();
+      await waitFor(() => released === 1, "desktop saved-profile reservation was not released after Run cleanup");
+    } finally {
+      session.activeRun?.controller.cancel("desktop companion projection test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a desktop switch before Run allocation when the Host cannot list windows", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-switch-unsupported-"));
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Should not run.",
+      windowDiscoveryAvailable: false,
+    });
+    try {
+      await expect(api.startRun("device-one", "desktop-switch-unsupported", "Inspect the desktop popup", {
+        mode: "desktop", switchWindows: true,
+      })).rejects.toMatchObject({ code: "INVALID_TARGET" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+      expect(createdComputerConfigs).toEqual([]);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes assistant preferences per Run, fingerprints them for idempotency, and leaves no residue", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-assistant-preferences-"));
+    const modelInputs: ModelInput[] = [];
+    const { api, session } = createFixture(outputDir, {
+      summary: "Preferences remain private to the Run context.",
+      onModelInput: (input) => modelInputs.push(input),
+    });
+    const firstPreferences = {
+      version: 1 as const,
+      responseDetail: "detailed" as const,
+      stepExplanation: "more" as const,
+      preferredLanguage: "zh-CN" as const,
+      additionalGuidance: "Group findings by topic.",
+    };
+    try {
+      const firstPromise = api.startRun("device-one", "prefs-idempotency", "Summarize this page", { mode: "browser" }, firstPreferences);
+      firstPreferences.additionalGuidance = "Changed after the request started.";
+      const repeatedPromise = api.startRun("device-one", "prefs-idempotency", "Summarize this page", { mode: "browser" }, {
+        ...firstPreferences,
+        additionalGuidance: "Group findings by topic.",
+      });
+      await expect(api.startRun("device-one", "prefs-idempotency", "Summarize this page", { mode: "browser" }, {
+        version: 1,
+        responseDetail: "concise",
+        stepExplanation: "standard",
+        preferredLanguage: "en",
+        additionalGuidance: "A different preference set.",
+      })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+
+      const first = await firstPromise;
+      const repeated = await repeatedPromise;
+      expect(repeated.runId).toBe(first.runId);
+      await session.waitForActiveRun();
+      const firstInput = modelInputs[0]!;
+      const firstTrace = firstInput.contextBudget?.trace;
+      expect(firstTrace?.assistantPreferences).toMatchObject({
+        projectionVersion: 1,
+        included: true,
+        responseDetail: "detailed",
+        stepExplanation: "more",
+        preferredLanguage: "zh-CN",
+        additionalGuidancePresent: true,
+        additionalGuidanceCharacters: "Group findings by topic.".length,
+      });
+      expect(JSON.stringify(firstTrace)).not.toContain("Group findings by topic.");
+      expect(firstInput.messages.some((message) => message.role === "user" && message.content.some((block) =>
+        block.type === "text" && block.text.includes("Group findings by topic."),
+      ))).toBe(true);
+      expect(JSON.stringify(firstInput.messages)).not.toContain("Changed after the request started.");
+
+      const second = await api.startRun("device-one", "prefs-next-run", "Summarize this page", { mode: "browser" }, {
+        version: 1,
+        responseDetail: "concise",
+        stepExplanation: "standard",
+        preferredLanguage: "en",
+        additionalGuidance: "Use a short numbered list.",
+      });
+      await session.waitForActiveRun();
+      const secondInput = modelInputs[1]!;
+      expect(secondInput.contextBudget?.trace?.stablePrefixHash).toBe(firstTrace?.stablePrefixHash);
+      expect(secondInput.messages.some((message) => message.content.some((block) =>
+        block.type === "text" && block.text.includes("Use a short numbered list."),
+      ))).toBe(true);
+
+      const third = await api.startRun("device-one", "prefs-omitted", "Summarize this page", { mode: "browser" });
+      await session.waitForActiveRun();
+      const thirdInput = modelInputs[2]!;
+      expect(second.runId).not.toBe(first.runId);
+      expect(third.runId).not.toBe(second.runId);
+      expect(thirdInput.contextBudget?.trace?.assistantPreferences).toBeUndefined();
+      expect(thirdInput.contextBudget?.trace?.stablePrefixHash).toBe(firstTrace?.stablePrefixHash);
+      expect(JSON.stringify(thirdInput.messages)).not.toContain("Group findings by topic.");
+      expect(JSON.stringify(api.getRun("device-one", first.runId))).not.toContain("Group findings by topic.");
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("automatically binds a unique confident local window match and deduplicates the complete target", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-target-"));
     const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "Checked the report." });
@@ -406,7 +1008,7 @@ describe("ApplicationRemoteRunApi", () => {
         api.startRun("device-one", "auto-unique", "Open Fixture app and check the report", { mode: "auto" }),
       ]);
       expect(repeated.runId).toBe(first.runId);
-      expect(first.target).toEqual({ appName: "Fixture app", title: "Fixture window" });
+      expect(first.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
       expect(JSON.stringify(first)).not.toMatch(/pid|windowId/iu);
       await session.waitForActiveRun();
       expect(createdComputerConfigs[0]).toMatchObject({
@@ -434,7 +1036,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const run = await api.startRun("device-one", "auto-wechat-minimized", "在微信上给测试联系人发消息", { mode: "auto" });
-      expect(run.target).toEqual({ appName: "Weixin", title: "微信" });
+      expect(run.target).toEqual({ appName: "Weixin", title: "微信", provenance: "starting_target" });
       expect(windowDiscoveryCalls).toEqual([
         { type: "all" },
         { type: "visible" },
@@ -519,6 +1121,147 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
+  it("requires confirmed setup before saved browser targets or saved browser companions start", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-profile-setup-required-"));
+    const coordinator: ManagedBrowserProfileRunCoordinator = {
+      getDefaultSession: () => "saved",
+      async acquireForRun() { throw Object.assign(new Error("profile needs setup"), { code: "PROFILE_NOT_READY" }); },
+    };
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "Should not run.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      await expect(api.startRun("device-one", "saved-browser-before-setup", "Open the travel site", {
+        mode: "browser", url: "https://travel.example",
+      })).rejects.toMatchObject({ code: "MANAGED_BROWSER_SETUP_REQUIRED" });
+      await expect(api.startRun("device-one", "saved-companion-before-setup", "Open Fixture app", {
+        mode: "auto", switchWindows: true,
+      })).rejects.toMatchObject({ code: "MANAGED_BROWSER_SETUP_REQUIRED" });
+      await expect(api.startRun("device-one", "saved-desktop-before-setup", "Inspect the desktop window", {
+        mode: "desktop", switchWindows: true,
+      })).rejects.toMatchObject({ code: "MANAGED_BROWSER_SETUP_REQUIRED" });
+      expect(windowDiscoveryCalls).toEqual([]);
+      expect(createdComputerConfigs).toEqual([]);
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("projects the Host default onto saved browser and native cross-window companion Runs", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-profile-default-saved-"));
+    const profileRoot = "C:\\HarnessOwned\\managed-browser-profiles";
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot };
+    let active = false;
+    let acquired = 0;
+    let released = 0;
+    const coordinator: ManagedBrowserProfileRunCoordinator = {
+      getDefaultSession: () => "saved",
+      async acquireForRun() {
+        if (active) throw Object.assign(new Error("profile busy"), { code: "PROFILE_BUSY" });
+        active = true;
+        acquired += 1;
+        return async () => { active = false; released += 1; };
+      },
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      askFirst: true,
+      summary: "The user confirmed the request.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const companion = await api.startRun("device-one", "saved-window-companion", "Open Fixture app", {
+        mode: "window", targetToken: choices.candidates[0]!.token, switchWindows: true,
+      });
+      await waitFor(() => api.getRun("device-one", companion.runId)?.status === "waiting_user", "saved companion Run did not pause for confirmation");
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserCompanion: true,
+        managedBrowserUrl: "about:blank",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "mobile",
+        managedBrowserProfileRoot: profileRoot,
+        windowSwitch: "opened-windows-v1",
+      });
+      expect(JSON.stringify(companion)).not.toContain(profileRoot);
+      expect(active).toBe(true);
+
+      await session.submitUserInput("Continue");
+      await session.waitForActiveRun();
+      await waitFor(() => released === 1, "saved profile reservation was not released after Run cleanup");
+
+      const browser = await api.startRun("device-one", "saved-browser-default", "Open the saved travel page", {
+        mode: "browser", url: "https://travel.example",
+      });
+      expect(createdComputerConfigs[1]).toMatchObject({
+        managedBrowserUrl: "https://travel.example/",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "mobile",
+        managedBrowserProfileRoot: profileRoot,
+      });
+      expect(createdComputerConfigs[1]).not.toHaveProperty("managedBrowserCompanion");
+      expect(acquired).toBe(2);
+      session.activeRun?.controller.cancel("saved profile projection test cleanup");
+      await session.waitForActiveRun();
+      await waitFor(() => released === 2, "saved browser reservation was not released after Run cleanup");
+      expect(JSON.stringify(browser)).not.toContain(profileRoot);
+
+      const nativeChoices = await api.listWindowTargets("device-one");
+      const nativeWithoutSwitch = await api.startRun("device-one", "saved-native-no-switch", "Open Fixture app", {
+        mode: "window", targetToken: nativeChoices.candidates[0]!.token, switchWindows: false,
+      });
+      await waitFor(() => api.getRun("device-one", nativeWithoutSwitch.runId)?.status === "waiting_user", "native Run did not pause for confirmation");
+      expect(createdComputerConfigs[2]).toMatchObject({ windowSwitch: "off" });
+      expect(createdComputerConfigs[2]).not.toHaveProperty("managedBrowserCompanion");
+      expect(acquired).toBe(2);
+      expect(active).toBe(false);
+      session.activeRun?.controller.cancel("saved profile projection test cleanup");
+      await session.waitForActiveRun();
+    } finally {
+      session.activeRun?.controller.cancel("saved profile projection test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a temporary Host default without preparing or reserving the saved profile", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-profile-default-temporary-"));
+    const acquireForRun = vi.fn(async () => { throw new Error("temporary mode must not reserve the saved profile"); });
+    const coordinator: ManagedBrowserProfileRunCoordinator = { getDefaultSession: () => "temporary", acquireForRun };
+    const managedBrowserProfile = { profileLabel: "mobile", profileRoot: "C:\\HarnessOwned\\managed-browser-profiles" };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Temporary browser opened.",
+      managedBrowserProfile,
+      managedBrowserProfileCoordinator: coordinator,
+    });
+    try {
+      const browser = await api.startRun("device-one", "temporary-browser-default", "Open a temporary page", {
+        mode: "browser", url: "https://example.test",
+      });
+      expect(createdComputerConfigs[0]).toMatchObject({
+        managedBrowserUrl: "https://example.test/",
+        managedBrowserProfileMode: "ephemeral",
+        grounding: "hybrid-catalog-v1",
+      });
+      expect(createdComputerConfigs[0]).not.toHaveProperty("managedBrowserCompanion");
+      expect(acquireForRun).not.toHaveBeenCalled();
+      expect(JSON.stringify(browser)).not.toContain("C:\\\\HarnessOwned");
+      await session.waitForActiveRun();
+    } finally {
+      session.activeRun?.controller.cancel("temporary profile projection test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("opens the explicitly requested browser with the injected Host profile and redacts URL and profile path", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-managed-browser-"));
     const profileRoot = "C:\\HarnessOwned\\managed-browser-profiles";
@@ -535,7 +1278,7 @@ describe("ApplicationRemoteRunApi", () => {
         api.startRun("device-one", "browser-once", "Check my ticket", { mode: "browser", sessionMode: "saved", url }),
       ]);
       expect(repeated.runId).toBe(first.runId);
-      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "tickets.example" });
+      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "tickets.example", provenance: "starting_target" });
       expect(JSON.stringify(first)).not.toContain("token=private");
       expect(JSON.stringify(first)).not.toContain(profileRoot);
       expect(createdComputerConfigs[0]).toMatchObject({
@@ -560,6 +1303,28 @@ describe("ApplicationRemoteRunApi", () => {
     } finally {
       if (session.activeRun !== undefined) session.activeRun.controller.cancel("managed browser config test cleanup");
       await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("projects model progress through the remote event stream without provider internals", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-progress-"));
+    const { api, session } = createFixture(outputDir, { summary: "Progress was captured." });
+    try {
+      const started = await api.startRun("device-one", "progress-once", "Check the managed page", { mode: "browser", url: "https://example.test" });
+      const streamed: unknown[] = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event));
+      await session.waitForActiveRun();
+      subscription.close();
+      const progress = streamed.filter((event) => typeof event === "object" && event !== null && "type" in event && event.type === "run.event"
+        && "data" in event && typeof event.data === "object" && event.data !== null && "type" in event.data && event.data.type === "run.progress");
+      expect(progress).toEqual(expect.arrayContaining([
+        expect.objectContaining({ data: expect.objectContaining({ phase: "model", status: "started" }) }),
+        expect.objectContaining({ data: expect.objectContaining({ phase: "model", status: "completed" }) }),
+      ]));
+      expect(JSON.stringify(progress)).not.toContain("reasoning_content");
+    } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
     }
@@ -619,7 +1384,7 @@ describe("ApplicationRemoteRunApi", () => {
         api.startRun("device-one", "browser-blank", "Open a blank managed page", { mode: "browser", url: " \t " }),
       ]);
       expect(sameCommandWithEmptyUrl.runId).toBe(first.runId);
-      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(first.target).toEqual({ appName: "Harness-managed browser", title: "New tab", provenance: "starting_target" });
       expect(createdComputerConfigs[0]).toMatchObject({
         managedBrowserUrl: "about:blank",
         managedBrowserProfileMode: "ephemeral",
@@ -795,7 +1560,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const run = await api.startRun("device-one", "saved-browser", "Check the prepared travel site", { mode: "browser", sessionMode: "saved" });
-      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "travel.example" });
+      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "travel.example", provenance: "starting_target" });
       const sameCommandWithWhitespace = await api.startRun("device-one", "saved-browser", "Check the prepared travel site", { mode: "browser", sessionMode: "saved", url: " \t " });
       expect(sameCommandWithWhitespace.runId).toBe(run.runId);
       expect(createdComputerConfigs[0]).toMatchObject({
@@ -806,7 +1571,7 @@ describe("ApplicationRemoteRunApi", () => {
       });
       await session.waitForActiveRun();
       const explicitBlank = await api.startRun("device-one", "saved-browser-explicit-blank", "Open a saved blank page", { mode: "browser", sessionMode: "saved", url: "about:blank" });
-      expect(explicitBlank.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(explicitBlank.target).toEqual({ appName: "Harness-managed browser", title: "New tab", provenance: "starting_target" });
       expect(createdComputerConfigs.at(-1)).toMatchObject({ managedBrowserUrl: "about:blank", managedBrowserProfileMode: "persistent" });
     } finally {
       session.activeRun?.controller.cancel("saved browser restore test cleanup");
@@ -827,7 +1592,7 @@ describe("ApplicationRemoteRunApi", () => {
     });
     try {
       const run = await api.startRun("device-one", "saved-browser-empty", "Open the saved browser", { mode: "browser", sessionMode: "saved" });
-      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "New tab" });
+      expect(run.target).toEqual({ appName: "Harness-managed browser", title: "New tab", provenance: "starting_target" });
       expect(createdComputerConfigs[0]).toMatchObject({ managedBrowserUrl: "about:blank", managedBrowserProfileMode: "persistent" });
     } finally {
       session.activeRun?.controller.cancel("empty saved browser test cleanup");
@@ -861,6 +1626,10 @@ describe("ApplicationRemoteRunApi", () => {
       await expect(api.startRun("device-one", "browser-data-url", "Check a page", { mode: "browser", url: "data:text/html,hello" }))
         .rejects.toMatchObject({ code: "INVALID_TARGET" });
       await expect(api.startRun("device-one", "browser-javascript-url", "Check a page", { mode: "browser", url: "javascript:alert(1)" }))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "desktop-malformed-switch", "Inspect a popup", { mode: "desktop", switchWindows: "yes" } as never))
+        .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      await expect(api.startRun("device-one", "malformed-switch-flag", "Open a listed app", { mode: "auto", switchWindows: "yes" } as never))
         .rejects.toMatchObject({ code: "INVALID_TARGET" });
       expect(createdComputerConfigs).toEqual([]);
       expect(session.activeRun).toBeUndefined();

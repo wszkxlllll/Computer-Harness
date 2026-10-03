@@ -3,13 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import type { CuaDriverLike, ToolResult } from "@trycua/cua-driver";
+import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import type { ActionId, ObservationId } from "@computer-harness/protocol";
+import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { CuaDriverComputer } from "./cua-driver-computer.js";
 import { domCandidateFingerprint, type DomGroundingTransport, type DomSelectOptionRequest, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { buildManagedDomSelectOptionExpression } from "./managed-browser-host.js";
 
 const ONE_BY_ONE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+
+installFakeCuaSdkModuleForTests();
 
 function pngWithDimensions(width: number, height: number): string {
   const bytes = Buffer.from(ONE_BY_ONE_PNG);
@@ -36,7 +39,23 @@ function fixture(target: { readonly pid: number; readonly windowId: number }) {
       const input = JSON.parse(inputJson) as Record<string, unknown>;
       calls.push({ name, input });
       if (name === "list_windows") return toolResult({ structuredJson: JSON.stringify({ windows: [{ pid: target.pid, window_id: target.windowId, title: "fixture", app_name: "fixture", bounds: { x: 100, y: 120, width: 960, height: 680 } }] }) });
-      if (name === "get_window_state") return toolResult({ structuredJson: JSON.stringify({ elements_complete: true, elements: [{ role: "Document", frame: { x: 0, y: 0, width: 960, height: 680 }, enabled: true }] }) });
+      if (name === "get_window_state") return toolResult({
+        images: input.include_screenshot === true ? [{ mimeType: "image/png", dataBase64: pngWithDimensions(958, 678) }] : [],
+        structuredJson: JSON.stringify({
+          ...(input.include_screenshot === true ? {
+            pid: target.pid,
+            window_id: target.windowId,
+            window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+            screenshot_frame_valid: true,
+            screenshot_scale: 1,
+            screenshot_width: 958,
+            screenshot_height: 678,
+            screenshot_mime_type: "image/png",
+          } : {}),
+          elements_complete: true,
+          elements: [{ role: "Document", frame: { x: 0, y: 0, width: 960, height: 680 }, enabled: true }],
+        }),
+      });
       return toolResult();
     },
     uniffiDestroy() {},
@@ -44,8 +63,16 @@ function fixture(target: { readonly pid: number; readonly windowId: number }) {
   return { driver, calls };
 }
 
-function makeTransport(target: ManagedBrowserTarget, mode: "success" | "missing" | "ambiguous" | "disabled" | "generation" | "custom" | "abort" = "success") {
+type SelectOptionFixtureMode = "success" | "missing" | "ambiguous" | "disabled" | "generation" | "custom" | "abort" | "truncated" | "truncated-missing" | "truncated-ambiguous" | "truncated-disabled";
+
+function makeTransport(target: ManagedBrowserTarget, mode: SelectOptionFixtureMode = "success") {
   const requests: DomSelectOptionRequest[] = [];
+  const options = mode === "truncated-missing"
+    ? [{ text: "09:00", enabled: true }]
+    : mode === "truncated-ambiguous"
+      ? [{ text: "08:00", enabled: true }, { text: "08:00", enabled: true }]
+      : [{ text: "08:00", enabled: mode !== "truncated-disabled" && mode !== "disabled" }];
+  const optionsTruncated = mode.startsWith("truncated");
   const transport: DomGroundingTransport = {
     kind: "managed-loopback-cdp-v1",
     async collect() {
@@ -54,7 +81,7 @@ function makeTransport(target: ManagedBrowserTarget, mode: "success" | "missing"
         coordinateSpace: "physical" as const,
         tabId: target.tabId,
         generation: target.generation,
-        candidates: [{ ...(mode === "custom" ? { tagName: "div", ariaRole: "combobox" } : { tagName: "select" }), name: "Departure", frame: { x: 100, y: 100, width: 160, height: 28 }, visible: true, interactive: true, options: [{ text: "08:00", enabled: mode !== "disabled" }], optionsTruncated: false, state: { enabled: mode !== "disabled" } }],
+        candidates: [{ ...(mode === "custom" ? { tagName: "div", ariaRole: "combobox" } : { tagName: "select" }), name: "Departure", frame: { x: 100, y: 100, width: 160, height: 28 }, visible: true, interactive: true, options, optionsTruncated, state: { enabled: mode !== "disabled" } }],
       };
     },
     async selectOption(request, signal) {
@@ -73,13 +100,13 @@ function makeTransport(target: ManagedBrowserTarget, mode: "success" | "missing"
   return { transport, requests };
 }
 
-async function openFixture(mode: Parameters<typeof makeTransport>[1] = "success") {
+async function openFixture(mode: SelectOptionFixtureMode = "success") {
   const directory = await mkdtemp(join(tmpdir(), "computer-harness-select-option-"));
   const windowTarget = { pid: 1234, windowId: 5678 };
   const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "edge", profileId: "fixture", windowTarget, tabId: "tab-1", generation: "generation-1", delivery: "loopback-cdp" };
   const fake = fixture(windowTarget);
   const selected = makeTransport(browserTarget, mode);
-  const computer = new CuaDriverComputer({ socketPath: "fixture.sock", screenshotDir: directory, windowTarget, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: selected.transport, driverFactory: () => fake.driver });
+  const computer = new CuaDriverComputer({ platform: "darwin", socketPath: "fixture.sock", screenshotDir: directory, windowTarget, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: selected.transport, driverFactory: () => fake.driver });
   const session = await computer.open({}, new AbortController().signal);
   await computer.observe(session, "select-option-observation" as ObservationId, new AbortController().signal);
   return { directory, browserTarget, fake, selected, computer, session, observationId: "select-option-observation" as ObservationId };
@@ -116,6 +143,33 @@ describe("managed-browser select_option adapter", () => {
     expect(resizedResult).toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_BBOX_MISMATCH" });
   });
 
+  it("revalidates a truncated observation target against the full live option list", () => {
+    const frame = { x: 10, y: 20, width: 120, height: 28 };
+    const fingerprint = domCandidateFingerprint({ tagName: "select", ariaRole: "combobox", name: "Departure", frame });
+    const run = (options: readonly MiniElementOptions[], optionText: string) => {
+      const select = new MiniElement("select", {
+        attrs: { "aria-label": "Departure" },
+        frame,
+        children: options.map((option) => new MiniElement("option", option)),
+      });
+      const expression = buildManagedDomSelectOptionExpression({ role: "combobox", name: "Departure", frame, fingerprint, optionText });
+      const result = runInNewContext(expression, { document: new MiniDocument([select]), Element: MiniElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), Event: class { public constructor(public readonly type: string) {} } }) as { status: string; driverCode?: string };
+      return { result, select };
+    };
+    const fullOptions = Array.from({ length: 40 }, (_, index) => ({ textContent: index === 2 ? "08:00" : `option-${index}` }));
+    const selected = run(fullOptions, "08:00");
+    expect(selected.result).toEqual({ status: "completed" });
+    expect(selected.select.children[2]?.selected).toBe(true);
+
+    expect(run(Array.from({ length: 40 }, (_, index) => ({ textContent: `option-${index}` })), "08:00").result)
+      .toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_OPTION_MISSING" });
+    expect(run([...fullOptions.slice(0, 3), { textContent: "08:00" }, ...fullOptions.slice(4)], "08:00").result)
+      .toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_OPTION_AMBIGUOUS" });
+    const otherOptions = fullOptions.filter((_option, index) => index !== 2);
+    expect(run([{ textContent: "08:00", attrs: { disabled: "" } }, ...otherOptions], "08:00").result)
+      .toMatchObject({ status: "refused", driverCode: "SELECT_OPTION_OPTION_MISSING" });
+  });
+
   it("selects by exact option text through DOM delivery without a native popup click", async () => {
     const opened = await openFixture();
     try {
@@ -126,8 +180,42 @@ describe("managed-browser select_option adapter", () => {
       expect(select).toBeDefined();
       const receipt = await opened.computer.execute(opened.session, { actionId: "select-action" as ActionId, basedOn: "select-option-current" as ObservationId, kind: "select_option", groundingRef: select!.elementRef, optionText: "08:00" }, new AbortController().signal);
       expect(receipt).toMatchObject({ status: "completed" });
+      expect(opened.fake.calls.filter((call) => call.name === "get_window_state" && call.input?.include_screenshot === true).length).toBeGreaterThan(0);
       expect(opened.selected.requests[0]).toMatchObject({ optionText: "08:00", candidate: { role: "combobox", name: "Departure", fingerprint: expect.stringMatching(/^domf-/u), frame: { x: 100, y: 100 } } });
       expect(opened.fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+    } finally {
+      await opened.computer.close(opened.session);
+      await rm(opened.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a unique enabled option in the observed prefix of a truncated list", async () => {
+    const opened = await openFixture("truncated");
+    try {
+      const capture = await opened.computer.observe(opened.session, "truncated-current" as ObservationId, new AbortController().signal);
+      const select = capture.grounding?.elements.find((candidate) => candidate.source === "dom" && candidate.role === "combobox");
+      expect(select).toMatchObject({ options: [{ text: "08:00", enabled: true }], optionsTruncated: true });
+      const receipt = await opened.computer.execute(opened.session, { actionId: "truncated-action" as ActionId, basedOn: "truncated-current" as ObservationId, kind: "select_option", groundingRef: select!.elementRef, optionText: "08:00" }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "completed" });
+      expect(opened.selected.requests).toHaveLength(1);
+    } finally {
+      await opened.computer.close(opened.session);
+      await rm(opened.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["truncated-missing", "SELECT_OPTION_OPTION_MISSING"],
+    ["truncated-ambiguous", "SELECT_OPTION_OPTION_AMBIGUOUS"],
+    ["truncated-disabled", "SELECT_OPTION_OPTION_DISABLED"],
+  ] as const)("refuses %s from the observed truncated option prefix", async (mode, driverCode) => {
+    const opened = await openFixture(mode);
+    try {
+      const capture = await opened.computer.observe(opened.session, `${mode}-current` as ObservationId, new AbortController().signal);
+      const select = capture.grounding?.elements.find((candidate) => candidate.source === "dom");
+      const receipt = await opened.computer.execute(opened.session, { actionId: `${mode}-action` as ActionId, basedOn: `${mode}-current` as ObservationId, kind: "select_option", groundingRef: select!.elementRef, optionText: "08:00" }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode });
+      expect(opened.selected.requests).toHaveLength(0);
     } finally {
       await opened.computer.close(opened.session);
       await rm(opened.directory, { recursive: true, force: true });
@@ -204,7 +292,7 @@ class MiniElement {
   public readonly parentElement: MiniElement | null;
   public readonly textContent: string;
   public readonly hidden = false;
-  public readonly disabled = false;
+  public readonly disabled: boolean;
   public readonly multiple = false;
   public readonly shadowRoot: undefined;
   public selected = false;
@@ -216,6 +304,7 @@ class MiniElement {
   public constructor(localName: string, options: MiniElementOptions = {}, parentElement: MiniElement | null = null) {
     this.localName = localName;
     this.attrs = options.attrs ?? {};
+    this.disabled = Object.hasOwn(this.attrs, "disabled");
     this.textContent = options.textContent ?? "";
     this.frame = options.frame ?? { x: 0, y: 0, width: 100, height: 20 };
     this.parentElement = parentElement;

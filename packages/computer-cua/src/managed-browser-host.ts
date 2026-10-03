@@ -2,13 +2,15 @@ import { createHash, randomBytes } from "node:crypto";
 import { access, mkdir, mkdtemp, open, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
-import { CuaDriver, EndSessionInput, StartSessionInput, type CuaDriverLike } from "@trycua/cua-driver";
+import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import { validateWindowTarget, type CuaWindowTarget } from "./window-contract.js";
 import {
   DomGroundingUnavailableError,
+  type DomClickRequest,
+  type DomClickResult,
   type DomGroundingCollectRequest,
   type DomGroundingRawCandidate,
   type DomSelectOptionRequest,
@@ -24,9 +26,111 @@ const MAX_CDP_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const CDP_PROTOCOL_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const execFile = promisify(execFileCallback);
 const MANAGED_BROWSER_STARTUP_METADATA_FILE = "managed-browser-startup.json";
+const MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES = 4_096;
+const MAX_MANAGED_BROWSER_STDERR_EXCERPT_CHARS = 768;
 export const MAX_MANAGED_BROWSER_STARTUP_URLS = 8;
 
 export type ManagedBrowserProfileMode = "ephemeral" | "persistent";
+export type ManagedBrowserKind = "edge" | "chromium";
+
+export function defaultManagedBrowserKind(platform: NodeJS.Platform = process.platform): ManagedBrowserKind {
+  return platform === "win32" ? "edge" : "chromium";
+}
+
+export function managedBrowserExecutableCandidates(
+  browser: ManagedBrowserKind,
+  platform: NodeJS.Platform = process.platform,
+  userHome: string = homedir(),
+): readonly string[] {
+  if (platform === "win32") {
+    return browser === "edge"
+      ? ["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"]
+      : ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"];
+  }
+  if (platform === "darwin") {
+    return browser === "edge"
+      ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", join(userHome, "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")]
+      : [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          join(userHome, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+          join(userHome, "Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ];
+  }
+  if (platform === "linux") {
+    return browser === "edge"
+      ? ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"]
+      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+  }
+  return [];
+}
+
+export type ManagedBrowserCleanupDiagnostic = "graceful_close_failed" | "process_exit_timeout" | "profile_cleanup_failed" | "profile_lock_release_failed";
+
+export type ManagedBrowserStartupStage =
+  | "resolve_executable"
+  | "prepare_profile"
+  | "read_startup_urls"
+  | "prepare_devtools"
+  | "spawn_browser"
+  | "wait_devtools_port"
+  | "wait_cdp_endpoint"
+  | "create_startup_target"
+  | "resolve_startup_page"
+  | "discover_owned_processes"
+  | "resolve_owned_window"
+  | "register_startup_url";
+
+export interface ManagedBrowserStartupDiagnostic {
+  readonly stage: ManagedBrowserStartupStage;
+  readonly elapsedMs: number;
+  readonly processState: "not_spawned" | "child_exited" | "child_not_exited_or_unreported";
+  readonly exitCode?: number;
+  readonly signal?: string;
+  readonly devToolsPortObserved: boolean;
+  readonly cleanup: "confirmed" | "unknown";
+  /** Sanitized tail of browser stderr; never includes URLs, credentials, or filesystem paths. */
+  readonly stderrExcerpt?: string;
+}
+
+/** Stable host-local formatter; every field in the diagnostic has an operator-facing consumer. */
+export function formatManagedBrowserStartupDiagnostic(diagnostic: ManagedBrowserStartupDiagnostic): string {
+  const exit = diagnostic.exitCode === undefined ? "unknown" : String(diagnostic.exitCode);
+  const signal = diagnostic.signal === undefined ? "none" : diagnostic.signal;
+  const stderr = diagnostic.stderrExcerpt === undefined ? "none" : JSON.stringify(diagnostic.stderrExcerpt);
+  return `managed browser startup stage=${diagnostic.stage} elapsed_ms=${diagnostic.elapsedMs} process=${diagnostic.processState} exit_code=${exit} signal=${signal} devtools_port=${diagnostic.devToolsPortObserved ? "observed" : "not_observed"} cleanup=${diagnostic.cleanup} stderr=${stderr}`;
+}
+
+class ManagedBrowserStderrCapture {
+  private tail = Buffer.alloc(0);
+
+  public append(chunk: unknown): void {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    const bounded = bytes.length > MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES
+      ? bytes.subarray(bytes.length - MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES)
+      : bytes;
+    this.tail = Buffer.concat([this.tail, bounded]).subarray(-MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES);
+  }
+
+  public excerpt(): string | undefined {
+    if (this.tail.length === 0) return undefined;
+    const safe = this.tail.toString("utf8")
+      .replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|data:)[^\s"'<>)]*/giu, "<url>")
+      .replace(/\b[A-Za-z]:\\[^\r\n"'<>]*/gu, "<path>")
+      .replace(/\\\\[^\r\n"'<>]*/gu, "<path>")
+      .replace(/\b--(?:user-data-dir|profile-directory|password|token|cookie|api[-_]?key)=\S+/giu, "<redacted-argument>")
+      .replace(/\b([\w-]*(?:password|token|secret|authorization|cookie|api[-_]?key)[\w-]*)\s*[:=]\s*["']?[^,\s"']+/giu, "$1=<redacted>")
+      .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "<email>")
+      .replace(/(?:^|[\s"'(])\/(?:[^\s"'()]+\/)*[^\s"'()]+/gu, " <path>")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufffd]/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (safe.length === 0) return undefined;
+    return safe.length > MAX_MANAGED_BROWSER_STDERR_EXCERPT_CHARS
+      ? safe.slice(-MAX_MANAGED_BROWSER_STDERR_EXCERPT_CHARS)
+      : safe;
+  }
+}
 
 export interface ManagedBrowserStartupMetadata {
   readonly schemaVersion: 1;
@@ -128,7 +232,7 @@ export async function acquireManagedBrowserProfileLease(options: {
  * title/process name and never reuses a user profile.
  */
 export interface ManagedBrowserHostOptions {
-  readonly browser: "edge" | "chromium";
+  readonly browser: ManagedBrowserKind;
   readonly url: string;
   /** Ephemeral is the default; persistent is Harness-owned and explicitly labeled. */
   readonly profileMode?: ManagedBrowserProfileMode;
@@ -142,7 +246,13 @@ export interface ManagedBrowserHostOptions {
   readonly resolveOwnedWindowTarget: (browserProcessId: number, signal: AbortSignal, hint?: ManagedBrowserWindowBindingHint) => Promise<ManagedBrowserWindowResolution | undefined>;
   readonly executablePath?: string;
   readonly startupTimeoutMs?: number;
-  readonly onCleanupDiagnostic?: (kind: "graceful_close_failed" | "process_exit_timeout" | "profile_cleanup_failed" | "profile_lock_release_failed") => void;
+  readonly onCleanupDiagnostic?: (kind: ManagedBrowserCleanupDiagnostic) => void;
+  /** Host-local typed failure evidence; the payload contains no URL or filesystem path. */
+  readonly onStartupDiagnostic?: (diagnostic: ManagedBrowserStartupDiagnostic) => void;
+  /** Test seam; production uses the imported child_process.spawn. */
+  readonly spawnManagedBrowser?: (executablePath: string, args: string[], options: { stdio: ["ignore", "ignore", "pipe"]; windowsHide: false }) => ChildProcess;
+  /** Test seam for bounded cleanup after a browser child was started. */
+  readonly cleanupHooks?: ManagedBrowserCleanupHooks;
   /** Host-local redacted evidence for diagnosing a failed window binding. */
   readonly onWindowResolutionDiagnostic?: (diagnostic: ManagedBrowserWindowResolutionDiagnostic) => void;
   /** Host-local redacted page-set evidence; never contains URL or page text. */
@@ -203,27 +313,101 @@ export interface CuaBootstrapSession {
   close(): Promise<void>;
 }
 
+export class CuaBootstrapSessionError extends Error {
+  public constructor(
+    public readonly cleanupCertainty: "confirmed" | "unknown",
+    cause: unknown,
+  ) {
+    super("Cua bootstrap session lifecycle failed", { cause });
+    this.name = "CuaBootstrapSessionError";
+  }
+}
+
+const CUA_BOOTSTRAP_CLEANUP_TIMEOUT_MS = 5_000;
+
 export async function openCuaBootstrapSession(socketPath: string, label: string, signal: AbortSignal): Promise<CuaBootstrapSession> {
-  const driver = CuaDriver.connect(socketPath);
-  let started = false;
+  const sdkModule = await loadCuaSdkModule();
+  const driver = sdkModule.CuaDriver.connect(socketPath);
   try {
-    await driver.startSession(StartSessionInput.new({ session: label }), { signal });
-    started = true;
-    return {
-      driver,
-      label,
-      async close() {
-        if (started) {
-          started = false;
-          await driver.endSession(EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
-        }
-        (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
-      },
-    };
+    await driver.startSession(sdkModule.StartSessionInput.new({ session: label }), { signal });
   } catch (error) {
-    if (started) await driver.endSession(EndSessionInput.new({ session: label }), { signal: new AbortController().signal }).catch(() => undefined);
-    (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
-    throw error;
+    const cleanupErrors = await closeBootstrapDriver(driver, label, sdkModule);
+    const failures = [error, ...cleanupErrors];
+    const cause = failures.length === 1 ? error : new AggregateError(failures, "Cua bootstrap startup and cleanup failed");
+    throw new CuaBootstrapSessionError(cleanupErrors.length === 0 ? "confirmed" : "unknown", cause);
+  }
+
+  let closePromise: Promise<void> | undefined;
+  return {
+    driver,
+    label,
+    close() {
+      closePromise ??= (async () => {
+        const cleanupErrors = await closeBootstrapDriver(driver, label, sdkModule);
+        if (cleanupErrors.length > 0) {
+          const cause = cleanupErrors.length === 1
+            ? cleanupErrors[0]
+            : new AggregateError(cleanupErrors, "Cua bootstrap session cleanup failed");
+          throw new CuaBootstrapSessionError("unknown", cause);
+        }
+      })();
+      return closePromise;
+    },
+  };
+}
+
+async function closeBootstrapDriver(driver: CuaDriverLike, label: string, sdkModule: Awaited<ReturnType<typeof loadCuaSdkModule>>): Promise<unknown[]> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    await endCuaBootstrapSessionBounded(driver, label, sdkModule);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  let shutdownConfirmed = false;
+  try {
+    await runBootstrapCleanupBounded(
+      (signal) => driver.shutdown({ signal }),
+      "Cua bootstrap shutdown timed out",
+    );
+    shutdownConfirmed = true;
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  // A connected SDK object must be shut down before destroying its UniFFI
+  // handle. If shutdown did not settle, retain the handle rather than freeing
+  // memory that an in-flight native operation may still reference.
+  if (shutdownConfirmed) {
+    try {
+      (driver as unknown as { uniffiDestroy?: () => void }).uniffiDestroy?.();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  return cleanupErrors;
+}
+
+async function endCuaBootstrapSessionBounded(driver: CuaDriverLike, label: string, sdkModule: Awaited<ReturnType<typeof loadCuaSdkModule>>): Promise<void> {
+  await runBootstrapCleanupBounded(
+    (signal) => driver.endSession(sdkModule.EndSessionInput.new({ session: label }), { signal }).then(() => undefined),
+    "Cua bootstrap endSession timed out",
+  );
+}
+
+async function runBootstrapCleanupBounded<T>(operation: (signal: AbortSignal) => Promise<T>, message: string): Promise<T> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(message));
+    }, CUA_BOOTSTRAP_CLEANUP_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => operation(controller.signal)), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -243,6 +427,74 @@ export interface ManagedBrowserPageActivity {
   /** Opaque per-document marker used only to invalidate stale actions. */
   readonly navigationKey?: string;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+}
+
+export interface ManagedBrowserNavigationReadiness {
+  readonly url: string;
+  readonly readyState: "loading" | "interactive" | "complete";
+  readonly hasDocumentElement: boolean;
+  readonly hasBody: boolean;
+}
+
+export type ManagedBrowserNavigationReadinessReader = (
+  page: ManagedBrowserDevToolsPage,
+  signal: AbortSignal,
+) => Promise<ManagedBrowserNavigationReadiness | undefined>;
+
+/** Wait for the explicit startup target to become a usable document. */
+export async function waitForManagedBrowserNavigationReady(
+  page: ManagedBrowserDevToolsPage,
+  readReadiness: ManagedBrowserNavigationReadinessReader,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<ManagedBrowserNavigationReadiness | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    signal.throwIfAborted();
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const timeoutController = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const timedOut = Symbol("navigation-readiness-timeout");
+    let readiness: ManagedBrowserNavigationReadiness | undefined;
+    try {
+      const readSignal = AbortSignal.any([signal, timeoutController.signal]);
+      const readPromise = readReadiness(page, readSignal).catch((error) => {
+        if (signal.aborted) throw error;
+        return undefined;
+      });
+      const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+        timeoutId = setTimeout(() => {
+          timeoutController.abort(new Error("managed browser navigation readiness timed out"));
+          resolve(timedOut);
+        }, remainingMs);
+      });
+      const abortPromise = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(signal.reason ?? new Error("aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+      const result = await Promise.race([readPromise, timeoutPromise, abortPromise]);
+      if (result === timedOut) return undefined;
+      readiness = result;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+      if (!timeoutController.signal.aborted) timeoutController.abort(new Error("navigation readiness check completed"));
+    }
+    let isHttpUrl = false;
+    if (readiness !== undefined) {
+      try {
+        const url = new URL(readiness.url);
+        isHttpUrl = url.protocol === "http:" || url.protocol === "https:";
+      } catch { /* transient or invalid document URL */ }
+    }
+    if (readiness !== undefined && isHttpUrl
+      && (readiness.readyState === "interactive" || readiness.readyState === "complete")
+      && readiness.hasDocumentElement && readiness.hasBody) return readiness;
+    await wait(Math.min(50, Math.max(0, deadline - Date.now())), signal);
+  }
+  return undefined;
 }
 
 export type ManagedBrowserPageActivityReader = (
@@ -601,7 +853,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       inputType: element.localName === "input" ? inputType : undefined,
       canvasLike: false,
       ...(optionProjection === undefined ? {} : optionProjection),
-      state: { enabled, focused: document.activeElement === element, editable, expanded: element.getAttribute("aria-expanded") === "true", selected: element.getAttribute("aria-selected") === "true" },
+      state: { enabled, focused: document.hasFocus() && (element.getRootNode?.() ?? document).activeElement === element, editable, expanded: element.getAttribute("aria-expanded") === "true", selected: element.getAttribute("aria-selected") === "true" },
     });
   };
   const walk = (root) => {
@@ -620,6 +872,11 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       void role;
     }
   };
+  // Reserve the bounded catalog's first slots for page navigation. A large
+  // app can contain hundreds of controls before its links in DOM order;
+  // links are the primary safe navigation targets and must remain observable.
+  const priorityLinks = document.querySelectorAll('a, [role="link"]');
+  for (const element of priorityLinks) emit(element);
   walk(document);
   return {
     candidates,
@@ -701,16 +958,22 @@ export class ManagedBrowserHost {
   public async start(signal: AbortSignal): Promise<ManagedBrowserHostRecord> {
     if (this.state !== undefined) throw new DomGroundingUnavailableError("managed browser host is already running");
     signal.throwIfAborted();
-    const executablePath = await resolveManagedBrowserExecutable(this.options.browser, this.options.executablePath);
+    const startedAt = Date.now();
+    const stderrCapture = new ManagedBrowserStderrCapture();
     let profileRoot: string | undefined;
     let profileLock: FileHandle | undefined;
     let profileMode: ManagedBrowserProfileMode = this.options.profileMode ?? "ephemeral";
     let child: ChildProcess | undefined;
     let browserWebSocketDebuggerUrl: string | undefined;
+    let devToolsPortObserved = false;
+    let stage: ManagedBrowserStartupStage = "resolve_executable";
     try {
+      const executablePath = await resolveManagedBrowserExecutable(this.options.browser, this.options.executablePath);
+      stage = "prepare_profile";
       const profile = await prepareManagedBrowserProfile(this.options);
       profileRoot = profile.profileRoot;
       profileLock = profile.profileLock;
+      stage = "read_startup_urls";
       const preparedStartupUrls = profileMode === "persistent"
         ? await readManagedBrowserStartupUrls(profileRoot)
         : [];
@@ -727,16 +990,39 @@ export class ManagedBrowserHost {
         "--new-window",
         ...launchUrls,
       ];
+      stage = "prepare_devtools";
       const freshnessBoundaryMs = await prepareManagedBrowserDevToolsLaunch(profileRoot);
-      child = spawn(executablePath, args, { stdio: "ignore", windowsHide: false });
+      stage = "spawn_browser";
+      child = (this.options.spawnManagedBrowser ?? spawn)(executablePath, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: false });
+      child.stderr?.on("data", (chunk: unknown) => stderrCapture.append(chunk));
+      child.stderr?.on("error", () => undefined);
       const processId = child.pid;
       if (processId === undefined || !Number.isSafeInteger(processId) || processId <= 0) throw new DomGroundingUnavailableError("managed browser process did not expose a valid PID");
       const ownedProcessId = processId;
+      stage = "wait_devtools_port";
       const devTools = await waitForDevToolsPort(profileRoot, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal, freshnessBoundaryMs);
+      devToolsPortObserved = true;
+      stage = "wait_cdp_endpoint";
       const browserEndpoint = await waitForDevToolsBrowserEndpoint(devTools.port, child, this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, signal);
       browserWebSocketDebuggerUrl = browserEndpoint;
       const bootstrapPages = await listDevToolsPages(devTools.port, signal).catch(() => [] as ManagedBrowserDevToolsPage[]);
+      stage = "create_startup_target";
       const startupTargetId = await createManagedBrowserPage(browserEndpoint, this.options.url, signal);
+      const needsNavigationReadiness = this.options.url.startsWith("http://") || this.options.url.startsWith("https://");
+      // HTTP(S) needs a bounded redirect/DOM readiness window. Blank and data
+      // startup pages retain the original 3-second active-page selection cap.
+      const startupReadyDeadline = Date.now() + Math.min(this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, needsNavigationReadiness ? 8_000 : 3_000);
+      if (needsNavigationReadiness) {
+        const startupPage = await waitForManagedBrowserNavigationReady(
+          { id: startupTargetId, type: "page" },
+          (_page, readinessSignal) => readManagedBrowserNavigationReadiness(devTools.port, startupTargetId, readinessSignal),
+          signal,
+          Math.max(1, startupReadyDeadline - Date.now()),
+        );
+        if (startupPage === undefined) {
+          throw new DomGroundingUnavailableError("managed browser startup page did not finish navigation and expose a DOM document");
+        }
+      }
       if (launchUrls.length === 1 && launchUrls[0] === bootstrapUrl) {
         const bootstrapCandidates = bootstrapPages.filter((page) => page.type === "page" && typeof page.id === "string" && page.id !== startupTargetId && page.url === bootstrapUrl);
         // Close a lone Host-created dummy only when its identity is
@@ -746,12 +1032,13 @@ export class ManagedBrowserHost {
           await closeManagedBrowserPage(browserEndpoint, bootstrapCandidates[0]!.id as string, signal).catch(() => undefined);
         }
       }
+      stage = "resolve_startup_page";
       const startupPageSet = await waitForManagedBrowserStartupPageSet(
         devTools.port,
         browserEndpoint,
         startupTargetId,
         signal,
-        Math.min(this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, 3_000),
+        Math.max(1, startupReadyDeadline - Date.now()),
       );
       const pages = startupPageSet.pages;
       const selected = startupPageSet.selected;
@@ -769,6 +1056,7 @@ export class ManagedBrowserHost {
         // Diagnostic consumers are best-effort and must not affect startup.
       }
       const tabId = selected.page.id as string;
+      stage = "discover_owned_processes";
       const ownedProcessIds = await discoverManagedBrowserProcessIds(ownedProcessId, profileRoot, signal);
       const windowHint: ManagedBrowserWindowBindingHint = {
         browserWindowId: selected.browserWindowId,
@@ -776,6 +1064,7 @@ export class ManagedBrowserHost {
         ownedProcessIds: [...ownedProcessIds],
         ...(this.options.onWindowResolutionDiagnostic === undefined ? {} : { onDiagnostic: this.options.onWindowResolutionDiagnostic }),
       };
+      stage = "resolve_owned_window";
       const resolution = await this.options.resolveOwnedWindowTarget(ownedProcessId, signal, windowHint);
       const windowTarget = validateOwnedWindowResolution(ownedProcessId, resolution, windowHint);
       const generation = shortHash(`${ownedProcessId}:${tabId}:${selected.navigationKey ?? "unknown"}:${Date.now()}`);
@@ -789,15 +1078,58 @@ export class ManagedBrowserHost {
         delivery: "loopback-cdp",
       };
       if (profileMode === "persistent" && this.options.registerStartupUrl === true) {
+        stage = "register_startup_url";
         await registerManagedBrowserStartupUrl(profileRoot, this.options.url);
       }
       this.state = { target, processId: ownedProcessId, profileId: profile.profileId, tabId, generation, ...(selected.navigationKey === undefined ? {} : { navigationKey: selected.navigationKey }), browserWindowId: selected.browserWindowId, child, profileRoot, debuggerPort: devTools.port, browserWebSocketDebuggerUrl: browserEndpoint, profileMode, profileLock };
       return { target, processId: ownedProcessId, profileId: profile.profileId, tabId, generation, profileMode };
     } catch (error) {
-      if (signal.aborted) signal.throwIfAborted();
-      if (profileRoot !== undefined) await cleanupManagedBrowser(child, child?.pid, browserWebSocketDebuggerUrl, profileRoot, profileMode, profileLock, this.options.onCleanupDiagnostic);
-      if (error instanceof DomGroundingUnavailableError) throw error;
-      throw new DomGroundingUnavailableError("managed browser host failed to start");
+      const cleanupDiagnostics: ManagedBrowserCleanupDiagnostic[] = [];
+      let cleanupError: unknown;
+      if (profileRoot !== undefined) {
+        try {
+          await cleanupManagedBrowser(
+            child,
+            child?.pid,
+            browserWebSocketDebuggerUrl,
+            profileRoot,
+            profileMode,
+            profileLock,
+            (diagnostic) => {
+              cleanupDiagnostics.push(diagnostic);
+              try { this.options.onCleanupDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+            },
+            this.options.cleanupHooks,
+          );
+        } catch (failure) {
+          cleanupError = failure;
+        }
+      }
+      const criticalDiagnostics = criticalManagedBrowserCleanupDiagnostics(cleanupDiagnostics);
+      const cleanup = cleanupError !== undefined || criticalDiagnostics.length > 0 ? "unknown" : "confirmed";
+      const processState = child === undefined
+        ? "not_spawned"
+        : child.exitCode !== null || child.signalCode !== null
+          ? "child_exited"
+          : "child_not_exited_or_unreported";
+      const stderrExcerpt = stderrCapture.excerpt();
+      const diagnostic: ManagedBrowserStartupDiagnostic = {
+        stage,
+        elapsedMs: Math.max(0, Date.now() - startedAt),
+        processState,
+        ...(child?.exitCode === null || child?.exitCode === undefined ? {} : { exitCode: child.exitCode }),
+        ...(child?.signalCode === null || child?.signalCode === undefined ? {} : { signal: child.signalCode }),
+        devToolsPortObserved,
+        cleanup,
+        ...(stderrExcerpt === undefined ? {} : { stderrExcerpt }),
+      };
+      try { this.options.onStartupDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+      if (cleanupError !== undefined || criticalDiagnostics.length > 0) {
+        const failures = [error, ...(cleanupError === undefined ? [] : [cleanupError])];
+        if (criticalDiagnostics.length > 0) failures.push(new Error(`managed browser cleanup was not confirmed (${criticalDiagnostics.join(", ")})`));
+        throw new AggregateError(failures, "managed browser startup failed and cleanup was not confirmed", { cause: error });
+      }
+      throw error;
     }
   }
 
@@ -811,7 +1143,24 @@ export class ManagedBrowserHost {
     this.closing = true;
     const state = this.state;
     this.state = undefined;
-    await cleanupManagedBrowser(state.child, state.processId, state.browserWebSocketDebuggerUrl, state.profileRoot, state.profileMode, state.profileLock, this.options.onCleanupDiagnostic);
+    const cleanupDiagnostics: ManagedBrowserCleanupDiagnostic[] = [];
+    await cleanupManagedBrowser(
+      state.child,
+      state.processId,
+      state.browserWebSocketDebuggerUrl,
+      state.profileRoot,
+      state.profileMode,
+      state.profileLock,
+      (diagnostic) => {
+        cleanupDiagnostics.push(diagnostic);
+        try { this.options.onCleanupDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+      },
+      this.options.cleanupHooks,
+    );
+    const criticalDiagnostics = criticalManagedBrowserCleanupDiagnostics(cleanupDiagnostics);
+    if (criticalDiagnostics.length > 0) {
+      throw new Error(`managed browser cleanup was not confirmed (${criticalDiagnostics.join(", ")})`);
+    }
   }
 
   public getRecord(): ManagedBrowserHostRecord | undefined {
@@ -923,6 +1272,68 @@ export class ManagedBrowserHost {
     }
   }
 
+  /**
+   * Revalidate and activate an observation-bound DOM control in the managed
+   * tab. This avoids relying on native macOS coordinate injection for browser
+   * content while retaining the same tab/generation and bounded-candidate
+   * checks used by select_option.
+   */
+  public async click(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.evaluateClickBinding(request, signal, false);
+  }
+
+  /** Read-only gate before native keyboard input; never focuses or replays a click. */
+  public async verifyFocus(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.evaluateClickBinding(request, signal, true);
+  }
+
+  public async validateClick(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.evaluateClickBinding(request, signal, false, true);
+  }
+
+  private async evaluateClickBinding(request: DomClickRequest, signal: AbortSignal, verifyFocusOnly: boolean, validateOnly = false): Promise<DomClickResult> {
+    const state = this.state;
+    if (state === undefined) throw new DomGroundingUnavailableError("managed browser host is not running");
+    if (!sameManagedBrowserTarget(request.browserTarget, state.target)) {
+      return { status: "refused", driverCode: "DOM_CLICK_TARGET_STALE", message: "managed-browser target is stale" };
+    }
+    if (request.browserTarget.tabId !== state.tabId || request.browserTarget.generation !== state.generation) {
+      return { status: "refused", driverCode: "DOM_CLICK_GENERATION_MISMATCH", message: "managed-browser tab or page generation changed" };
+    }
+    if (!isBoundedDomClickBinding(request)) {
+      return { status: "refused", driverCode: "DOM_CLICK_BINDING_INVALID", message: "managed-browser DOM click binding is invalid" };
+    }
+    const page = await this.activePageForSelection(state, signal);
+    if (page === undefined) {
+      return { status: "refused", driverCode: "DOM_CLICK_GENERATION_MISMATCH", message: "managed-browser page was stale or ambiguous" };
+    }
+    const socket = await LoopbackWebSocket.connect(page.webSocketDebuggerUrl as string, signal);
+    try {
+      const expression = buildManagedDomClickExpression({
+        verifyFocusOnly,
+        validateOnly,
+        role: request.candidate.role,
+        ...(request.candidate.name === undefined ? {} : { name: request.candidate.name }),
+        ...(request.candidate.frame === undefined ? {} : { frame: request.candidate.frame }),
+        fingerprint: request.candidate.fingerprint,
+      });
+      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false }, signal);
+      const value = response?.result?.result?.value;
+      if (!isRecord(value) || (value.status !== "completed" && value.status !== "refused" && value.status !== "failed")) {
+        return { status: "failed", driverCode: "DOM_CLICK_EVALUATION_INVALID", message: "managed-browser DOM click evaluation returned an invalid result" };
+      }
+      return {
+        status: value.status,
+        ...(typeof value.driverCode === "string" ? { driverCode: value.driverCode } : {}),
+        ...(typeof value.message === "string" ? { message: value.message } : {}),
+        tabId: state.tabId,
+        generation: state.generation,
+      };
+    } finally {
+      socket.close();
+    }
+  }
+
   private async activePageForSelection(state: HostState, signal: AbortSignal): Promise<ManagedBrowserDevToolsPage | undefined> {
     const pages = await listDevToolsPages(state.debuggerPort, signal);
     const selected = await resolveManagedBrowserActivePageSet(
@@ -948,6 +1359,18 @@ class ManagedCdpDomGroundingTransport implements DomGroundingTransport {
   public async selectOption(request: DomSelectOptionRequest, signal: AbortSignal): Promise<DomSelectOptionResult> {
     return this.host.selectOption(request, signal);
   }
+
+  public async click(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.host.click(request, signal);
+  }
+
+  public async validateClick(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.host.validateClick(request, signal);
+  }
+
+  public async verifyFocus(request: DomClickRequest, signal: AbortSignal): Promise<DomClickResult> {
+    return this.host.verifyFocus(request, signal);
+  }
 }
 
 function sameManagedBrowserTarget(left: ManagedBrowserTarget, right: ManagedBrowserTarget): boolean {
@@ -960,6 +1383,20 @@ function sameManagedBrowserTarget(left: ManagedBrowserTarget, right: ManagedBrow
 }
 
 function isBoundedSelectCandidateBinding(request: DomSelectOptionRequest): boolean {
+  const candidate = request.candidate;
+  return /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.tabId)
+    && /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.generation)
+    && /^[A-Za-z0-9._-]{1,96}$/u.test(candidate.fingerprint)
+    && candidate.role.trim().length > 0
+    && candidate.role.length <= 64
+    && (candidate.name === undefined || candidate.name.length <= 160)
+    && candidate.bbox.width > 0
+    && candidate.bbox.height > 0
+    && [candidate.bbox.x, candidate.bbox.y, candidate.bbox.width, candidate.bbox.height].every(Number.isFinite)
+    && (candidate.frame === undefined || [candidate.frame.x, candidate.frame.y, candidate.frame.width, candidate.frame.height].every(Number.isFinite) && candidate.frame.width > 0 && candidate.frame.height > 0);
+}
+
+function isBoundedDomClickBinding(request: DomClickRequest): boolean {
   const candidate = request.candidate;
   return /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.tabId)
     && /^[A-Za-z0-9._:-]{1,128}$/u.test(request.browserTarget.generation)
@@ -1045,7 +1482,7 @@ export function buildManagedDomSelectOptionExpression(input: {
         // The page collector emits the computed public role as ariaRole,
         // including the implicit native-select combobox role.
         part(role, 64),
-        part(element.getAttribute("type"), 32),
+        part(element.localName === "input" ? (element.getAttribute("type") || "text").toLowerCase() : undefined, 32),
         part(name, 160),
       ].join("\u001f");
       let hash = 2166136261;
@@ -1122,6 +1559,191 @@ export function buildManagedDomSelectOptionExpression(input: {
       return { status: "completed" };
     } catch (_) {
       return { status: "failed", driverCode: "SELECT_OPTION_DISPATCH_FAILED", message: "DOM option selection could not be dispatched" };
+    }
+})(${encoded})`;
+}
+
+export function buildManagedDomClickExpression(input: {
+  readonly verifyFocusOnly?: boolean;
+  readonly validateOnly?: boolean;
+  readonly role: string;
+  readonly name?: string;
+  readonly frame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly fingerprint: string;
+}): string {
+  const encoded = JSON.stringify(input);
+  return String.raw`(function(target) {
+    const MAX_ELEMENTS = 512;
+    const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
+    const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
+    const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
+    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+    const boundedText = (value, max) => {
+      if (typeof value !== "string") return undefined;
+      const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+      return text.length === 0 ? undefined : text.slice(0, max);
+    };
+    const labelNodeText = (node, excluded, maxText) => {
+      const pieces = [];
+      let visited = 0;
+      const visit = (current, depth) => {
+        if (current === undefined || current === null || current === excluded || depth > 16 || visited >= 64 || pieces.length >= 8) return;
+        visited += 1;
+        if (current.nodeType === 3) {
+          const text = boundedText(current.nodeValue, maxText);
+          if (text !== undefined) pieces.push(text);
+          return;
+        }
+        const children = current.childNodes;
+        if (children !== undefined && children !== null && typeof children.length === "number") {
+          const limit = Math.min(Math.max(0, children.length), 64);
+          for (let index = 0; index < limit; index += 1) visit(children[index], depth + 1);
+          return;
+        }
+        const fallback = boundedText(current.textContent, maxText);
+        if (fallback !== undefined) pieces.push(fallback);
+      };
+      visit(node, 0);
+      return boundedText(pieces.join(" "), maxText);
+    };
+    const textFromElements = (elements, maxItems, maxText, excluded) => {
+      if (elements === undefined || elements === null || typeof elements.length !== "number") return undefined;
+      const pieces = [];
+      const limit = Math.min(Math.max(0, elements.length), maxItems);
+      for (let index = 0; index < limit; index += 1) {
+        const text = excluded === undefined
+          ? boundedText(elements[index] && elements[index].textContent, maxText)
+          : labelNodeText(elements[index], excluded, maxText);
+        if (text !== undefined) pieces.push(text);
+      }
+      return boundedText(pieces.join(" "), maxText);
+    };
+    const findById = (element, id) => {
+      const root = typeof element.getRootNode === "function" ? element.getRootNode() : undefined;
+      const owner = root !== undefined && root !== null && typeof root.getElementById === "function" ? root : document;
+      return owner.getElementById(id);
+    };
+    const ariaLabelledByText = (element) => {
+      const rawIds = boundedText(element.getAttribute("aria-labelledby"), 512);
+      if (rawIds === undefined) return undefined;
+      const references = [];
+      for (const id of rawIds.split(/\s+/g).slice(0, 8)) {
+        if (id.length > 128) continue;
+        const referenced = findById(element, id);
+        if (referenced !== null && referenced !== element) references.push(referenced);
+      }
+      return textFromElements(references, 8, 160, element);
+    };
+    const labelText = (element) => {
+      const associated = textFromElements(element.labels, 8, 160, element);
+      if (associated !== undefined) return associated;
+      const id = boundedText(element.getAttribute("id"), 128);
+      if (id === undefined) return undefined;
+      const explicit = [];
+      const labels = document.querySelectorAll("label[for]");
+      const limit = Math.min(Math.max(0, labels.length), 32);
+      for (let index = 0; index < limit; index += 1) {
+        const label = labels[index];
+        if (label && label.getAttribute("for") === id) explicit.push(label);
+      }
+      return textFromElements(explicit, 8, 160, element);
+    };
+    const nameOf = (element, role) => {
+      const candidates = [
+        element.getAttribute("aria-label"),
+        ariaLabelledByText(element),
+        labelText(element),
+        element.getAttribute("title"),
+        element.getAttribute("placeholder"),
+      ];
+      for (const candidate of candidates) {
+        const name = boundedText(candidate, 160);
+        if (name !== undefined) return name;
+      }
+      const roleName = typeof role === "string" ? role.toLowerCase() : "";
+      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+      return allowsTextName ? boundedText(element.textContent, 160) : undefined;
+    };
+    const frameOf = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none" || rect.width <= 0 || rect.height <= 0) return undefined;
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    const sameFrame = (left, right) => left !== undefined && right !== undefined
+      && Math.abs(left.x - right.x) <= 4 && Math.abs(left.y - right.y) <= 4
+      && Math.abs(left.width - right.width) <= 4 && Math.abs(left.height - right.height) <= 4;
+    const fingerprintOf = (element, role, name) => {
+      const inputType = element.localName === "input" ? (element.getAttribute("type") || "text").toLowerCase() : undefined;
+      const canonical = [normalize(role, 64), normalize(element.localName, 32), normalize(role, 64), normalize(inputType, 32), normalize(name, 160)].join("\u001f");
+      let hash = 2166136261;
+      for (let index = 0; index < canonical.length; index += 1) {
+        hash ^= canonical.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return "domf-" + (hash >>> 0).toString(16).padStart(8, "0");
+    };
+    const candidates = [];
+    const seen = new Set();
+    const walk = (root) => {
+      if (!root || candidates.length >= MAX_ELEMENTS) return;
+      const elements = root instanceof Element ? [root, ...root.querySelectorAll("*")] : [...root.querySelectorAll("*")];
+      for (const element of elements) {
+        if (seen.has(element)) continue;
+        seen.add(element);
+        const role = roleOf(element);
+        const frame = frameOf(element);
+        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || role !== "";
+        if (frame !== undefined && interactive && !["canvas", "img"].includes(element.localName)) {
+          const name = nameOf(element, role);
+          candidates.push({ element, role, name, frame, fingerprint: fingerprintOf(element, role, name) });
+        }
+        if (element.shadowRoot) walk(element.shadowRoot);
+        if (candidates.length >= MAX_ELEMENTS) break;
+      }
+    };
+    walk(document);
+    const role = normalize(target.role, 64);
+    const name = normalize(target.name, 160);
+    const roleMatches = candidates.filter((candidate) => candidate.role === role && candidate.name === name);
+    const matches = roleMatches.filter((candidate) => candidate.fingerprint === target.fingerprint && sameFrame(candidate.frame, target.frame));
+    if (matches.length === 0) {
+      if (roleMatches.some((candidate) => sameFrame(candidate.frame, target.frame))) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE", message: "DOM candidate fingerprint changed" };
+      return { status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH", message: "DOM candidate bounds changed" };
+    }
+    if (matches.length > 1) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_AMBIGUOUS", message: "DOM candidate is ambiguous" };
+    const element = matches[0].element;
+    if (element.disabled === true || element.getAttribute("aria-disabled") === "true") return { status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED", message: "managed-browser DOM control is disabled" };
+    const inputType = (element.getAttribute("type") || "text").toLowerCase();
+    const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
+    if (target.verifyFocusOnly === true) {
+      if (!editable || !document.hasFocus() || (element.getRootNode?.() ?? document).activeElement !== element) return { status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", message: "managed-browser page/control does not own keyboard focus; no keyboard input was sent" };
+      return { status: "completed", message: "managed-browser input focus verified" };
+    }
+    if (target.validateOnly === true) {
+      // Native dispatch uses the observation-bound CSS center transformed by
+      // the Adapter, rather than the potentially drifted live frame center.
+      const frame = target.frame;
+      // A clipped public bbox has a different native center from the raw
+      // CSS frame. Reject rather than validate one point and dispatch another.
+      if (frame.x < 0 || frame.y < 0 || frame.x + frame.width > window.innerWidth || frame.y + frame.height > window.innerHeight) return { status: "refused", driverCode: "DOM_CLICK_CLIPPED", message: "managed-browser control is partly outside the viewport; scroll into full view and observe again; no input sent" };
+      let hit = document.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
+      for (let depth = 0; depth < 16 && hit?.shadowRoot?.elementFromPoint; depth += 1) {
+        const child = hit.shadowRoot.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
+        if (!child || child === hit) break;
+        hit = child;
+      }
+      if (hit !== element && !element.contains?.(hit)) return { status: "refused", driverCode: "DOM_CLICK_OCCLUDED", message: "managed-browser click point is obscured; no input sent" };
+      return { status: "completed", message: "managed-browser click candidate verified; no input sent" };
+    }
+    try {
+      // Programmatic click does not perform the browser's native focus default.
+      // This assists an editable control; verifyFocus still gates later input.
+      if (editable) element.focus({ preventScroll: true });
+      element.click();
+      return { status: "completed", message: "managed-browser DOM click dispatched" };
+    } catch (_) {
+      return { status: "failed", driverCode: "DOM_CLICK_DISPATCH_FAILED", message: "managed-browser DOM click could not be dispatched" };
     }
   })(${encoded})`;
 }
@@ -1246,9 +1868,7 @@ export async function inspectManagedBrowserProcessTree(hostProcessId: number, pr
 
 async function resolveManagedBrowserExecutable(browser: ManagedBrowserHostOptions["browser"], explicitPath: string | undefined): Promise<string> {
   const candidates = explicitPath === undefined
-    ? browser === "edge"
-      ? ["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"]
-      : ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"]
+    ? managedBrowserExecutableCandidates(browser)
     : [explicitPath];
   for (const candidate of candidates) {
     try {
@@ -1351,6 +1971,9 @@ export async function cleanupManagedBrowser(
   onDiagnostic: ManagedBrowserHostOptions["onCleanupDiagnostic"],
   hooks: ManagedBrowserCleanupHooks = {},
 ): Promise<void> {
+  const report = (diagnostic: ManagedBrowserCleanupDiagnostic): void => {
+    try { onDiagnostic?.(diagnostic); } catch { /* diagnostics cannot interrupt cleanup */ }
+  };
   let processExited = true;
   const shouldManageBrowserLifecycle = child !== undefined && (
     child.exitCode === null
@@ -1364,28 +1987,48 @@ export async function cleanupManagedBrowser(
       } catch {
         gracefulRequestAccepted = false;
       }
-      if (!gracefulRequestAccepted) onDiagnostic?.("graceful_close_failed");
+      if (!gracefulRequestAccepted) report("graceful_close_failed");
     }
-    processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 5_000);
+    try {
+      processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 5_000);
+    } catch {
+      processExited = false;
+    }
     if (!processExited) {
-      await (hooks.forceTerminate ?? forceTerminateManagedBrowserTree)(child, hostProcessId, profileRoot);
-      processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 1_500);
+      try { await (hooks.forceTerminate ?? forceTerminateManagedBrowserTree)(child, hostProcessId, profileRoot); } catch { /* retain ownership and continue releasing safe resources */ }
+      try {
+        processExited = await (hooks.waitForProcessTree ?? waitForManagedBrowserProcessTree)(child, hostProcessId, profileRoot, 1_500);
+      } catch {
+        processExited = false;
+      }
     }
-    if (!processExited) onDiagnostic?.("process_exit_timeout");
+    if (!processExited) report("process_exit_timeout");
   }
   if (profileLock !== undefined) {
-    try { await profileLock.close(); } catch { onDiagnostic?.("profile_lock_release_failed"); }
-    if (processExited) {
-      try { await rm(join(profileRoot, ".computer-harness-profile.lock"), { force: true }); } catch { onDiagnostic?.("profile_lock_release_failed"); }
+    let lockHandleClosed = true;
+    try { await profileLock.close(); } catch { lockHandleClosed = false; report("profile_lock_release_failed"); }
+    if (processExited && lockHandleClosed) {
+      try { await rm(join(profileRoot, ".computer-harness-profile.lock"), { force: true }); } catch { report("profile_lock_release_failed"); }
     }
   }
   if (profileMode === "ephemeral") {
-    try {
-      await rm(profileRoot, { recursive: true, force: true });
-    } catch {
-      onDiagnostic?.("profile_cleanup_failed");
+    if (!processExited) {
+      // Do not remove a profile directory that may still be in use by a live
+      // browser. Leave the temporary data and surface an unresolved cleanup.
+      report("profile_cleanup_failed");
+    } else {
+      try {
+        await rm(profileRoot, { recursive: true, force: true });
+      } catch {
+        report("profile_cleanup_failed");
+      }
     }
   }
+}
+
+function criticalManagedBrowserCleanupDiagnostics(diagnostics: readonly ManagedBrowserCleanupDiagnostic[]): ManagedBrowserCleanupDiagnostic[] {
+  const critical = new Set<ManagedBrowserCleanupDiagnostic>(["process_exit_timeout", "profile_cleanup_failed", "profile_lock_release_failed"]);
+  return [...new Set(diagnostics.filter((diagnostic) => critical.has(diagnostic)))];
 }
 
 const MANAGED_BROWSER_GRACEFUL_CLOSE_TIMEOUT_MS = 1_000;
@@ -1422,7 +2065,7 @@ export async function closeManagedBrowserGracefully(
   }
 }
 
-interface ManagedBrowserCleanupHooks {
+export interface ManagedBrowserCleanupHooks {
   readonly closeGracefully?: typeof closeManagedBrowserGracefully;
   readonly waitForProcessTree?: typeof waitForManagedBrowserProcessTree;
   readonly forceTerminate?: typeof forceTerminateManagedBrowserTree;
@@ -1478,6 +2121,39 @@ async function listDevToolsPages(port: number, signal: AbortSignal): Promise<Man
     return Array.isArray(value) ? value.filter(isRecord) as ManagedBrowserDevToolsPage[] : [];
   } catch {
     throw new DomGroundingUnavailableError("managed browser DevTools page list was unavailable");
+  }
+}
+
+async function readManagedBrowserNavigationReadiness(
+  port: number,
+  targetId: string,
+  signal: AbortSignal,
+): Promise<ManagedBrowserNavigationReadiness | undefined> {
+  const page = (await listDevToolsPages(port, signal)).find((candidate) => candidate.id === targetId && candidate.type === "page");
+  if (page === undefined || typeof page.webSocketDebuggerUrl !== "string") return undefined;
+  let socket: LoopbackWebSocket | undefined;
+  try {
+    socket = await LoopbackWebSocket.connect(page.webSocketDebuggerUrl, signal);
+    const response = await socket.command("Runtime.evaluate", {
+      expression: "({url: location.href, readyState: document.readyState, hasDocumentElement: !!document.documentElement, hasBody: !!document.body})",
+      returnByValue: true,
+      awaitPromise: false,
+    }, signal);
+    const value = response?.result?.result?.value;
+    if (!isRecord(value) || typeof value.url !== "string"
+      || (value.readyState !== "loading" && value.readyState !== "interactive" && value.readyState !== "complete")
+      || typeof value.hasDocumentElement !== "boolean" || typeof value.hasBody !== "boolean") return undefined;
+    return {
+      url: value.url,
+      readyState: value.readyState,
+      hasDocumentElement: value.hasDocumentElement,
+      hasBody: value.hasBody,
+    };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return undefined;
+  } finally {
+    socket?.close();
   }
 }
 

@@ -1,6 +1,7 @@
 import type {
   ActionEffectDeclaration,
   DeclaredActionEffect,
+  GroundingElement,
   JsonValue,
   ModelUsage,
   RiskCategory,
@@ -38,7 +39,7 @@ export interface LayeredRiskGuardOptions {
   forbiddenShortcuts?: readonly string[];
 }
 
-const POLICY_VERSION = "layered-effects-v1";
+const POLICY_VERSION = "layered-effects-v2";
 const highRiskEffects = new Set<DeclaredActionEffect>([
   "destructive",
   "financial",
@@ -152,6 +153,14 @@ export class ProviderRiskAssessor implements RiskAssessor {
 }
 
 function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<string>): RiskRoute {
+  if (isRunScopedWindowSwitch(context)) {
+    return {
+      route: "allow",
+      categories: [],
+      reasonCode: "run_scoped_window_switch",
+      reason: "A window-binding change is governed by the Run-level switch capability and exact target/session validation, not per-switch Risk Guard approval.",
+    };
+  }
   const declarations = context.candidate.calls.map((call) => call.declaredEffect);
   if (declarations.some((item) => item === undefined)) return { route: "deny", categories: [], reasonCode: "missing_effect_declaration", reason: "A Computer call has no effect declaration." };
   for (const action of context.candidate.actions) {
@@ -183,9 +192,16 @@ function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<str
   }
   const contradiction = findContradiction(context, declarations as ActionEffectDeclaration[]);
   if (contradiction !== undefined) return { route: "semantic_review", categories: contradiction.categories, reasonCode: contradiction.code, reason: contradiction.reason };
-  const textSignal = scanDeclarationText(declarations as ActionEffectDeclaration[]);
+  const textSignal = scanDeclarationText(context, declarations as ActionEffectDeclaration[]);
   if (textSignal !== undefined) return { route: "semantic_review", categories: textSignal.categories, reasonCode: textSignal.code, reason: textSignal.reason };
   return { route: "allow", categories: [], reasonCode: "declared_low_impact", reason: "The current action declares only low-impact effects and has no escalation signal." };
+}
+
+function isRunScopedWindowSwitch(context: ActionPolicyContext): boolean {
+  return context.candidate.calls.length === 1
+    && context.candidate.calls[0]?.name === "switch_window"
+    && context.candidate.actions.length === 1
+    && context.candidate.actions[0]?.kind === "switch_window";
 }
 
 function findContradiction(context: ActionPolicyContext, declarations: ActionEffectDeclaration[]): { code: string; reason: string; categories: RiskCategory[] } | undefined {
@@ -193,28 +209,55 @@ function findContradiction(context: ActionPolicyContext, declarations: ActionEff
     const action = context.candidate.actions[index];
     const declaration = declarations[index];
     if (action === undefined || declaration === undefined) continue;
-    if (action.kind === "type" && declaration.effects.includes("observe")) return { code: "effect_action_mismatch", reason: "A typing action is declared as observation-only.", categories: [] };
+    if (action.kind === "type" && declaration.effects.includes("observe")) return { code: "effect_action_mismatch", reason: "A text-modifying action is declared as observation-only.", categories: [] };
     if (action.kind === "keypress" && action.keys.map((item) => item.toUpperCase()).includes("DELETE") && declaration.effects.includes("navigate")) return { code: "effect_action_mismatch", reason: "A delete key action is declared as navigation.", categories: ["destructive"] };
   }
   return undefined;
 }
 
-function scanDeclarationText(declarations: ActionEffectDeclaration[]): { code: string; reason: string; categories: RiskCategory[] } | undefined {
+function scanDeclarationText(context: ActionPolicyContext, declarations: ActionEffectDeclaration[]): { code: string; reason: string; categories: RiskCategory[] } | undefined {
   const matches: Array<{ pattern: RegExp; category: RiskCategory }> = [
     { pattern: /(pay|purchase|transfer|checkout|付款|支付|购买|转账|结算)/iu, category: "financial" },
     { pattern: /(send|publish|post|submit|发送|发布|提交)/iu, category: "external_commitment" },
-    { pattern: /(permanent(?:ly)? delete|erase|wipe|永久删除|彻底删除|清空)/iu, category: "destructive" },
+    { pattern: /(permanent(?:ly)? delete|delete(?:[-_ ]account)?|erase|wipe|永久删除|彻底删除|清空)/iu, category: "destructive" },
     { pattern: /(password|permission|privacy|credential|密码|权限|隐私|凭据)/iu, category: "privacy_account" },
   ];
   const categories: RiskCategory[] = [];
-  for (const declaration of declarations) {
-    for (const field of [declaration.target, declaration.summary]) {
-      const text = normalizeRiskText(field);
+  for (let index = 0; index < declarations.length; index += 1) {
+    const declaration = declarations[index];
+    if (declaration === undefined) continue;
+    const action = context.candidate.actions[index];
+    for (const [fieldIndex, field] of [declaration.target, declaration.summary].entries()) {
+      const normalized = normalizeRiskText(field);
+      // This is not a general negation parser or a declaration-based safety
+      // override. Only remove this exact terminal disclaimer from a single,
+      // observation-bound local typing action; scan the target and every
+      // remaining signal normally. Execution still revalidates native focus.
+      const text = fieldIndex === 1 && isObservedLocalTyping(context, declaration, action)
+        ? normalized.replace(/[,，]\s*不涉及提交或导航[。.]?$/u, "")
+        : normalized;
       const readOnlyPaymentHistory = declaration.effects.length === 1 && declaration.effects[0] === "navigate" && isReadOnlyPaymentHistoryField(text);
+      const readOnlyPurchasePage = action?.kind === "wait"
+        && declaration.effects.every((effect) => effect === "navigate" || effect === "observe")
+        && isReadOnlyPurchasePageField(text);
+      // Search submission is a navigation-only interaction.  It contains the
+      // ordinary word "submit" in the control label, but it does not commit
+      // an order, message, payment, or other external side effect.  Keep this
+      // exception narrow and require the task/declaration to explicitly be a
+      // search so generic submit actions still enter semantic review.
+      const readOnlySearchSubmission = isReadOnlySearchSubmission(context, declaration, action);
+      // Browser address-bar navigation uses the ordinary word "submit" for
+      // the Enter key, but it does not commit a form, order, message, or
+      // payment. Keep this exception narrower than search: it must be an
+      // Enter keypress explicitly scoped to a URL/address bar navigation.
+      const readOnlyAddressBarNavigation = isReadOnlyAddressBarNavigation(context, declaration, action);
       for (const match of matches) {
         const pattern = new RegExp(match.pattern.source, `${match.pattern.flags}g`);
         for (const result of text.matchAll(pattern)) {
           if (readOnlyPaymentHistory && match.category === "financial") continue;
+          if (readOnlyPurchasePage && match.category === "financial") continue;
+          if (readOnlySearchSubmission && match.category === "external_commitment") continue;
+          if (readOnlyAddressBarNavigation && match.category === "external_commitment") continue;
           categories.push(match.category);
         }
       }
@@ -224,8 +267,149 @@ function scanDeclarationText(declarations: ActionEffectDeclaration[]): { code: s
   return { code: "undeclared_high_impact_text", reason: "The declared target or summary contains an undeclared high-impact signal.", categories: [...new Set(categories)] };
 }
 
+function isObservedLocalTyping(
+  context: ActionPolicyContext,
+  declaration: ActionEffectDeclaration,
+  action: ActionPolicyContext["candidate"]["actions"][number] | undefined,
+): boolean {
+  if (context.candidate.calls.length !== 1 || context.candidate.actions.length !== 1) return false;
+  if (action?.kind !== "type" || /[\u0000-\u001f\u007f\u2028\u2029]/u.test(action.text)) return false;
+  if (declaration.effects.length !== 1 || declaration.effects[0] !== "local_edit") return false;
+  if (/["'`“”‘’「」『』]/u.test(declaration.summary)) return false;
+  // Do not remove the old escalation signal when common commitment words
+  // fall outside the legacy scanner's vocabulary. This limits only the new
+  // exception, without changing unrelated declarations' global routing.
+  if (/(?:\bbuy\b|下单|买入)/iu.test(`${declaration.target} ${declaration.summary}`)) return false;
+  const observation = context.candidate.decisionObservation;
+  const catalog = observation.grounding;
+  if (action.basedOn !== observation.id || observation.runId !== context.runId
+    || observation.computerSessionId !== context.candidate.session.id
+    || catalog?.observationId !== observation.id || catalog.computerSessionId !== observation.computerSessionId
+    || !hasCurrentGroundingSurface(context)
+    || catalog.version !== "grounding-catalog-v2" || (catalog.source !== "dom" && catalog.source !== "hybrid")
+    || catalog.completeness === "unknown" || catalog.degraded) return false;
+  // Runtime's hot subset is not proof of globally unique focus or of no
+  // business side effects. It is enough only for this lexical disclaimer
+  // exception; the adapter still checks full live DOM identity/page focus.
+  if (catalog.selection?.truncated === true) {
+    const selection = catalog.selection;
+    const refs = catalog.elements.map((element) => element.elementRef);
+    const counts = selection.sourceCounts;
+    const domCount = catalog.elements.filter((element) => element.source === "dom").length;
+    if (selection.strategy !== "bounded-fusion-v1"
+      || !Number.isSafeInteger(selection.candidateElementCount) || selection.candidateElementCount <= refs.length
+      || counts?.dom !== domCount || !Number.isSafeInteger(counts.uia) || (counts.uia ?? -1) < 0
+      || (counts.dom + (counts.uia ?? -1)) !== selection.candidateElementCount
+      || selection.selectedElementRefs.length !== refs.length
+      || new Set(refs).size !== refs.length || new Set(selection.selectedElementRefs).size !== refs.length
+      || selection.selectedElementRefs.some((ref) => !refs.includes(ref))) return false;
+  }
+  const focused = catalog.elements.filter((element) => element.state?.focused === true);
+  const element = focused[0];
+  return focused.length === 1 && element?.source === "dom" && element.browserRegion === "content"
+    && (element.role === "textbox" || element.role === "searchbox")
+    && element.state?.enabled === true && element.state.editable === true;
+}
+
+function isReadOnlySearchSubmission(
+  context: ActionPolicyContext,
+  declaration: ActionEffectDeclaration,
+  action: ActionPolicyContext["candidate"]["actions"][number] | undefined,
+): boolean {
+  if (declaration.effects.length !== 1 || declaration.effects[0] !== "navigate") return false;
+  if (action?.kind !== "click" && action?.kind !== "keypress") return false;
+  const target = observedNavigationTarget(context, action);
+  if (target?.source !== "dom" || target.browserRegion !== "content"
+    || !/^(?:search|搜索|查询|检索)$/iu.test(target.name?.trim() ?? "")) return false;
+  if (action.kind === "click" ? target.role !== "button" : !["textbox", "searchbox"].includes(target.role)) return false;
+  const declarationText = normalizeRiskText(`${declaration.target} ${declaration.summary}`);
+  const goalText = normalizeRiskText(context.goal);
+  if (!/(?:search|query|搜索|查询|检索)/iu.test(declarationText) || !/(?:search|query|搜索|查询|检索)/iu.test(goalText)) return false;
+  if (!/(?:submit|enter|提交|回车)/iu.test(declarationText)) return false;
+  // Keep wording that names an external commitment fail-closed even when a
+  // nearby search term is present (for example “submit the order search”).
+  if (/(?:pay|purchase|checkout|transfer|delete|erase|wipe|send|publish|post|order|application|comment|review|付款|支付|购买|结算|转账|删除|清空|发送|发布|订单|申请|评论|评价)/iu.test(declarationText)) return false;
+  return true;
+}
+
+function isReadOnlyAddressBarNavigation(
+  context: ActionPolicyContext,
+  declaration: ActionEffectDeclaration,
+  action: ActionPolicyContext["candidate"]["actions"][number] | undefined,
+): boolean {
+  if (declaration.effects.length !== 1 || declaration.effects[0] !== "navigate") return false;
+  if (action?.kind !== "keypress") return false;
+  const target = observedNavigationTarget(context, action);
+  if (target?.source !== "uia" || target.browserRegion !== "chrome"
+    || !["textbox", "searchbox"].includes(target.role)
+    || !/^(?:address(?: and search)? bar|地址栏|地址和搜索栏|网址)$/iu.test(target.name?.trim() ?? "")) return false;
+  const text = normalizeRiskText(`${declaration.target} ${declaration.summary}`);
+  if (!/(?:address\s*(?:and\s*search\s*)?bar|地址栏|网址|\burl\b)/iu.test(text)) return false;
+  if (!/(?:navigate|navigation|load|open|导航|加载|打开)/iu.test(text)) return false;
+  // If the declaration itself names a commitment or destructive URL/path,
+  // keep the normal fail-closed route even when it also mentions the URL bar.
+  if (/(?:pay|purchase|checkout|transfer|delete|erase|wipe|send|publish|post|order|application|comment|review|付款|支付|购买|结算|转账|删除|清空|发送|发布|订单|申请|评论|评价)/iu.test(text)) return false;
+  return true;
+}
+
+/** A model's target description cannot establish the actual keyboard/click target. */
+function observedNavigationTarget(
+  context: ActionPolicyContext,
+  action: ActionPolicyContext["candidate"]["actions"][number],
+): GroundingElement | undefined {
+  if (action.kind !== "click" && action.kind !== "keypress") return undefined;
+  if (context.candidate.calls.length !== 1 || context.candidate.actions.length !== 1) return undefined;
+  const observation = context.candidate.decisionObservation;
+  const catalog = observation.grounding;
+  if (action.basedOn !== observation.id || observation.runId !== context.runId
+    || observation.computerSessionId !== context.candidate.session.id
+    || catalog?.observationId !== observation.id || catalog.computerSessionId !== observation.computerSessionId
+    || catalog.version !== "grounding-catalog-v2" || catalog.completeness !== "complete"
+    || catalog.degraded || catalog.selection?.truncated || !hasCurrentGroundingSurface(context)) return undefined;
+  if (action.kind === "keypress") {
+    if (action.keys.length !== 1 || action.keys[0]?.toUpperCase() !== "ENTER") return undefined;
+    const focused = catalog.elements.filter((element) => element.state?.focused === true);
+    const target = focused.length === 1 ? focused[0] : undefined;
+    return target?.state?.enabled === true && target.state.editable === true ? target : undefined;
+  }
+  if (action.kind !== "click" || action.groundingRef === undefined) return undefined;
+  const matches = catalog.elements.filter((element) => element.elementRef === action.groundingRef);
+  const target = matches.length === 1 ? matches[0] : undefined;
+  const box = target?.bbox;
+  if (target?.state?.enabled !== true || box === undefined || box.coordinateSpace !== "physical"
+    || ![box.x, box.y, box.width, box.height, action.point.x, action.point.y].every(Number.isFinite)
+    || box.width <= 0 || box.height <= 0 || action.point.x < box.x || action.point.x > box.x + box.width
+    || action.point.y < box.y || action.point.y > box.y + box.height) return undefined;
+  return target;
+}
+
+function hasCurrentGroundingSurface(context: ActionPolicyContext): boolean {
+  const observation = context.candidate.decisionObservation;
+  const observed = observation.surfaceRef;
+  const grounded = observation.grounding?.surfaceRef;
+  return observed !== undefined && grounded !== undefined && observed.kind !== "unknown"
+    && observed.surfaceId === grounded.surfaceId && observed.generation === grounded.generation
+    && observed.kind === grounded.kind && observed.parentSurfaceId === grounded.parentSurfaceId
+    && observed.admissionSource === grounded.admissionSource;
+}
+
 function normalizeRiskText(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
+  // URLs are opaque Computer arguments, not semantic evidence. Redacting the
+  // complete URL prevents query/path tokens such as "checkout" or "pay" from
+  // being mistaken for an intended financial action while preserving ordinary
+  // declaration text for the high-impact scan.
+  return value.replace(/https?:\/\/\S+/giu, (raw) => {
+    try {
+      const parsed = new URL(raw);
+      const retainedQuery = [...parsed.searchParams.entries()]
+        .filter(([key]) => !/^(?:next|return|redirect|return_url|redirect_uri)$/iu.test(key))
+        .map(([key, item]) => `${key}=${item}`).join(" ");
+      const path = `${parsed.pathname} ${retainedQuery} ${parsed.hash}`;
+      return /(?:pay|purchase|checkout|transfer|delete|erase|wipe|submit|send|付款|支付|购买|结算|转账|删除|清空)/iu.test(path) ? path : "[url]";
+    } catch {
+      return "[url]";
+    }
+  }).replace(/\s+/gu, " ").trim();
 }
 
 /** Payment history is an explicit complete read-only field, not a generic
@@ -234,6 +418,14 @@ function isReadOnlyPaymentHistoryField(text: string): boolean {
   const subject = /^(?:(?:the|a)\s+)?(?:(?:payment|transaction|billing|purchase|pay(?:ment)?)[ _-]*(?:history|record(?:s)?|log(?:s)?)|(?:付款|支付|账单)[ _-]*(?:历史|记录|日志))[.!?。！？]?$/iu;
   const viewStatement = /^(?:view|show|inspect|browse|open|查看|浏览|查阅)\s*(?:(?:the|a)\s+)?(?:(?:payment|transaction|billing|purchase|pay(?:ment)?)[ _-]*(?:history|record(?:s)?|log(?:s)?)|(?:付款|支付|账单)[ _-]*(?:历史|记录|日志))[.!?。！？]?$/iu;
   return subject.test(text) || viewStatement.test(text);
+}
+
+/** A narrow exception for passive waits on a product page. It must not turn
+ * arbitrary purchase wording into navigation: explicit purchase/cart/checkout
+ * verbs always remain high-impact signals. */
+function isReadOnlyPurchasePageField(text: string): boolean {
+  if (/(?:点击\s*购买|购买(?:商品|这件|该商品)|加入购物(?:车|袋)|结算|付款|支付|提交|确认购买|\bbuy\b|\badd\s+to\s+cart\b|\bcheckout\b|\bpay\b|\bsubmit\b)/iu.test(text)) return false;
+  return /(?:查看|浏览|打开|进入|导航至|等待|inspect|browse|open|view|product|商品|产品|购买)\s*(?:.{0,24})(?:页面|页|page|价格|price)/iu.test(text);
 }
 
 function hasProtectedInput(context: ActionPolicyContext): boolean {
@@ -291,7 +483,7 @@ function groundingEvidenceUnavailable(context: ActionPolicyContext): boolean {
 
 function redactAction(action: ActionPolicyContext["candidate"]["actions"][number] | undefined): JsonValue {
   if (action === undefined) return null;
-  if (action.kind === "type") return { kind: "type", textLength: action.text.length };
+  if (action.kind === "type") return { kind: "type", ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }), textLength: action.text.length };
   return action as unknown as JsonValue;
 }
 

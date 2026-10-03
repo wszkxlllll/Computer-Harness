@@ -5,6 +5,7 @@ export {
   type CuaDriverFactory,
   type CuaGroundingMode,
   type CuaWindowDeliveryMode,
+  type CuaWindowSwitchMode,
 } from "./cua-driver-computer.js";
 export {
   inspectCuaCapabilities,
@@ -20,6 +21,12 @@ export {
   type CuaWindowInfo,
   type CuaWindowTarget,
 } from "./window-contract.js";
+export {
+  mergeWindowRelationshipInventory,
+  type WindowRelationshipProbe,
+  type WindowRelationshipProbeSnapshot,
+  type WindowRelationshipProbeWindow,
+} from "./window-relationship-probe.js";
 export {
   CuaWindowDiscovery,
   CuaWindowDiscoveryCleanupError,
@@ -44,8 +51,13 @@ export {
   type MaterializedDomGrounding,
 } from "./dom-grounding.js";
 export {
+  buildManagedDomClickExpression,
   MANAGED_DOM_EVALUATION_SCRIPT,
   ManagedBrowserHost,
+  defaultManagedBrowserKind,
+  managedBrowserExecutableCandidates,
+  CuaBootstrapSessionError,
+  formatManagedBrowserStartupDiagnostic,
   acquireManagedBrowserProfileLease,
   buildManagedBrowserLaunchUrls,
   clearManagedBrowserDevToolsPort,
@@ -62,6 +74,8 @@ export {
   validateOwnedWindowResolution,
   managedBrowserWindowBoundsMatch,
   type ManagedBrowserHostOptions,
+  type ManagedBrowserStartupDiagnostic,
+  type ManagedBrowserStartupStage,
   type ManagedBrowserStartupMetadata,
   type ManagedBrowserWindowBindingHint,
   type ManagedBrowserWindowResolutionDiagnostic,
@@ -71,6 +85,7 @@ export {
   type ManagedBrowserPageActivity,
   type ManagedBrowserPageActivityReader,
   type ManagedBrowserProfileMode,
+  type ManagedBrowserKind,
   type ManagedBrowserProfileLease,
   type ManagedBrowserWindowResolution,
   type CuaBootstrapSession,

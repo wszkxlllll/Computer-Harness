@@ -6,6 +6,8 @@ import type {
   ComputerSessionId,
   ObservationCapture,
   ObservationId,
+  SurfaceId,
+  SurfaceRef,
   Viewport,
 } from "@computer-harness/protocol";
 import { randomUUID } from "node:crypto";
@@ -23,6 +25,7 @@ export interface OsworldComputerOptions {
 
 interface PrivateSession {
   descriptor: ComputerSessionDescriptor;
+  surfaceRef: SurfaceRef;
   active: boolean;
   keyboardKeys?: ReadonlySet<string>;
 }
@@ -69,6 +72,7 @@ export class OsworldComputer implements Computer {
     };
     this.session = {
       descriptor,
+      surfaceRef: { surfaceId: `surface-${randomUUID()}` as SurfaceId, generation: 1, kind: "desktop" },
       active: true,
       ...(description.capabilities.keyboardKeys === undefined
         ? {}
@@ -82,11 +86,13 @@ export class OsworldComputer implements Computer {
     signal.throwIfAborted();
     const pending = this.pendingPostActionCapture;
     this.pendingPostActionCapture = undefined;
-    const result = pending?.sessionId === session.id
+    let result = pending?.sessionId === session.id
       ? pending.capture
-      : materializeCapture(await this.bridge.observe(signal));
+      : materializeCapture(await this.bridge.observe(signal), current.surfaceRef);
     if (result.viewport.width !== current.descriptor.viewport.width || result.viewport.height !== current.descriptor.viewport.height) {
+      current.surfaceRef = advanceDesktopSurfaceRef(current.surfaceRef);
       current.descriptor = { ...current.descriptor, viewport: result.viewport };
+      result = { ...result, surfaceRef: current.surfaceRef, surfaceTransitionReason: "generation_advanced" };
     }
     this.latestObservationId = observationId;
     return result;
@@ -114,9 +120,11 @@ export class OsworldComputer implements Computer {
     }
     const result = await this.bridge.execute(mapped, signal);
     if (result.status === "refused") return refused(action.actionId, result.code, result.message);
-    const postActionCapture = materializeCapture(result.postActionCapture);
+    let postActionCapture = materializeCapture(result.postActionCapture, current.surfaceRef);
     if (postActionCapture.viewport.width !== current.descriptor.viewport.width || postActionCapture.viewport.height !== current.descriptor.viewport.height) {
+      current.surfaceRef = advanceDesktopSurfaceRef(current.surfaceRef);
       current.descriptor = { ...current.descriptor, viewport: postActionCapture.viewport };
+      postActionCapture = { ...postActionCapture, surfaceRef: current.surfaceRef, surfaceTransitionReason: "generation_advanced" };
     }
     this.pendingPostActionCapture = { sessionId: session.id, capture: postActionCapture };
     return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
@@ -141,7 +149,11 @@ export class OsworldComputer implements Computer {
   }
 }
 
-function materializeCapture(capture: OsworldBridgeCapture): ObservationCapture {
+function advanceDesktopSurfaceRef(surfaceRef: SurfaceRef): SurfaceRef {
+  return { ...surfaceRef, generation: surfaceRef.generation + 1 };
+}
+
+function materializeCapture(capture: OsworldBridgeCapture, surfaceRef: SurfaceRef): ObservationCapture {
   if (capture.mediaType !== "image/png") throw new Error("OSWorld bridge returned a non-PNG screenshot");
   const data = decodeBase64(capture.dataBase64);
   const dimensions = readPngDimensions(data);
@@ -154,6 +166,7 @@ function materializeCapture(capture: OsworldBridgeCapture): ObservationCapture {
   return {
     capturedAt: capture.capturedAt,
     viewport: { width: dimensions.width, height: dimensions.height, coordinateSpace: "physical" },
+    surfaceRef,
     screenshot: { mediaType: capture.mediaType, data },
   };
 }

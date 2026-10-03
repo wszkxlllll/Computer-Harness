@@ -12,6 +12,8 @@
   "references": [
     { "path": "../../packages/protocol" },
     { "path": "../../packages/app-runtime" },
-    { "path": "../../packages/relay-connector" }
+    { "path": "../../packages/relay-connector" },
+    { "path": "../../packages/voice" },
+    { "path": "../../packages/voice-provider-qwen" }
   ]
 }

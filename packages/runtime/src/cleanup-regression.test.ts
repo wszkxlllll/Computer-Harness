@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ActionId, ActionIntent, AssetId, ComputerSessionId, EventId, ModelTurn, ObservationId, RunId, RuntimeEvent, RuntimeEventDraft, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { ActionId, ActionIntent, AssetId, ComputerSessionId, EventId, ModelTurn, ObservationId, RunId, RuntimeEvent, RuntimeEventDraft, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { DefaultRuntimePolicy, RunController, ToolRegistry, type CleanupDiagnostic, type Computer, type ComputerOpenOptions, type ComputerSession, type ContextCompiler, type IdFactory, type ModelInput, type ProviderAdapter } from "./index.js";
 import type { AssetStore, RunEventWriter } from "@computer-harness/trajectory";
 
 const runId = "cleanup-regression" as RunId;
 const sessionId = "cleanup-computer" as ComputerSessionId;
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "cleanup-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 class ScriptedProvider implements ProviderAdapter {
   public readonly id = "cleanup-regression-provider";
@@ -88,6 +89,7 @@ class ControlledComputer implements Computer {
     return {
       capturedAt: "2026-09-17T00:00:00.000Z",
       viewport,
+      surfaceRef,
       screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) },
     };
   }

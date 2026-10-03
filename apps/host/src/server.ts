@@ -3,10 +3,18 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { RemoteRunApiError, type RemoteCommand, type RemoteRunApi, type RemoteRunTarget } from "@computer-harness/app-runtime";
+import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 import type { HostRequestHandler, PairingTokenRegistration, RelayBridgeRequest } from "@computer-harness/relay-connector/protocol";
 import { resolveAllowedApiRoute } from "@computer-harness/relay-connector/routing";
+import { VOICE_INPUT_MAX_BATCH_CHUNKS, VOICE_INPUT_MAX_CHUNK_BYTES } from "@computer-harness/voice";
 import type { PairRequestView, PairedDeviceView } from "./contracts.js";
+import { ManagedBrowserProfileServiceError, type ManagedBrowserProfileController } from "./managed-browser-profile-service.js";
 import { PairingError, PairingStore, hashPairingToken } from "./pairing-store.js";
+import {
+  VoiceSessionServiceError,
+  VOICE_MAX_CHUNK_BYTES,
+} from "./voice-session-service.js";
+import type { VoiceInputCapabilities, VoiceInputSessionService } from "@computer-harness/voice";
 
 const DEFAULT_PORT = 4317;
 const JSON_BODY_LIMIT = 32 * 1024;
@@ -37,6 +45,8 @@ export interface HostServerOptions {
   readonly unregisterPairingToken?: (pairingId: string) => void;
   readonly revokeDeviceSession?: (deviceId: string) => void;
   readonly pairing?: PairingStore;
+  readonly voiceInput?: VoiceInputSessionService;
+  readonly managedBrowserProfile?: ManagedBrowserProfileController;
   readonly staticRoot?: string;
   readonly port?: number;
 }
@@ -99,9 +109,17 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       void reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
       return;
     }
+    if (error instanceof VoiceSessionServiceError) {
+      void reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      return;
+    }
+    if (error instanceof ManagedBrowserProfileServiceError) {
+      void reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      return;
+    }
     if (error instanceof RemoteRunApiError) {
       const status = error.code === "RUN_NOT_FOUND" ? 404
-        : error.code === "INVALID_COMMAND" || error.code === "INVALID_TARGET" ? 400
+        : error.code === "INVALID_COMMAND" || error.code === "INVALID_TARGET" || error.code === "INVALID_ASSISTANT_PREFERENCES" ? 400
           : error.code === "CAPACITY_REACHED" ? 429
             : error.code === "WINDOW_DISCOVERY_FAILED" ? 503
           : 409;
@@ -244,23 +262,33 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
 
   const parseRemoteRunTarget = (value: unknown): RemoteRunTarget => {
     const target = bodyObject(value);
-    const keys = Object.keys(target);
-    if (target.mode === "auto" && keys.length === 1 && keys[0] === "mode") return { mode: "auto" };
-    if (target.mode === "window" && keys.length === 2 && keys.includes("mode") && keys.includes("targetToken")) {
-      return { mode: "window", targetToken: requiredString(target, "targetToken", 128) };
+    if (Object.hasOwn(target, "switchWindows") && typeof target.switchWindows !== "boolean") {
+      throw new HostHttpError(400, "INVALID_REQUEST", "switchWindows must be a boolean.");
     }
-    if (target.mode === "browser" && keys.length === 1 && keys[0] === "mode") return { mode: "browser" };
-    if (target.mode === "browser" && keys.length === 2 && keys.includes("mode") && keys.includes("url") &&
+    const switchWindows = target.switchWindows === true;
+    const switchField = switchWindows ? { switchWindows: true as const } : {};
+    const hasTargetKeys = (expected: readonly string[]): boolean => {
+      const keys = Object.keys(target).filter((key) => key !== "switchWindows");
+      return keys.length === expected.length && keys.every((key) => expected.includes(key)) &&
+        Object.keys(target).every((key) => key === "switchWindows" || expected.includes(key));
+    };
+    if (target.mode === "auto" && hasTargetKeys(["mode"])) return { mode: "auto", ...switchField };
+    if (target.mode === "desktop" && hasTargetKeys(["mode"])) return { mode: "desktop", ...switchField };
+    if (target.mode === "window" && hasTargetKeys(["mode", "targetToken"])) {
+      return { mode: "window", targetToken: requiredString(target, "targetToken", 128), ...switchField };
+    }
+    if (target.mode === "browser" && hasTargetKeys(["mode"])) return { mode: "browser", ...switchField };
+    if (target.mode === "browser" && hasTargetKeys(["mode", "url"]) &&
         typeof target.url === "string" && target.url.length <= 2_048) {
-      return { mode: "browser", url: target.url };
+      return { mode: "browser", url: target.url, ...switchField };
     }
-    if (target.mode === "browser" && keys.length === 2 && keys.includes("mode") && keys.includes("sessionMode") &&
+    if (target.mode === "browser" && hasTargetKeys(["mode", "sessionMode"]) &&
         isBrowserSessionMode(target.sessionMode)) {
-      return { mode: "browser", sessionMode: target.sessionMode };
+      return { mode: "browser", sessionMode: target.sessionMode, ...switchField };
     }
-    if (target.mode === "browser" && keys.length === 3 && keys.includes("mode") && keys.includes("sessionMode") && keys.includes("url") &&
+    if (target.mode === "browser" && hasTargetKeys(["mode", "sessionMode", "url"]) &&
         isBrowserSessionMode(target.sessionMode) && typeof target.url === "string" && target.url.length <= 2_048) {
-      return { mode: "browser", sessionMode: target.sessionMode, url: target.url };
+      return { mode: "browser", sessionMode: target.sessionMode, url: target.url, ...switchField };
     }
     throw new HostHttpError(400, "INVALID_REQUEST", "target must contain only the fields for one supported selection mode.");
   };
@@ -391,6 +419,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     // Session issuance rotates the device credential. Any SSE stream bound to
     // the prior credential must be ended before the new one is exposed.
     closeDeviceStreams(session.deviceId);
+    await options.voiceInput?.cancelDevice(session.deviceId);
     const isBridge = bridge(request);
     if (isBridge) {
       return {
@@ -421,6 +450,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     pairing.revokeDevice(session.deviceId);
     closeSessionStreams(session.deviceId, session.sessionKey);
     closeDeviceStreams(session.deviceId);
+    await options.voiceInput?.cancelDevice(session.deviceId);
     options.revokeDeviceSession?.(session.deviceId);
     clearSessionCookie(reply, isSecureOrigin(request.headers.origin));
     return reply.code(204).send();
@@ -439,11 +469,139 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     return choices;
   });
 
+  server.get("/api/managed-browser-profile", async (request) => {
+    const session = browserSession(request, false);
+    const state = await requireManagedBrowserProfile().getState();
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.put("/api/managed-browser-profile/preference", async (request) => {
+    const session = browserSession(request, true);
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "defaultSession")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only defaultSession is accepted.");
+    }
+    const state = await requireManagedBrowserProfile().setDefaultSession(body.defaultSession);
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.post("/api/managed-browser-profile/prepare", async (request) => {
+    const session = browserSession(request, true);
+    if (Object.keys(bodyObject(request.body)).length !== 0) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Prepare does not accept request fields.");
+    }
+    const state = await requireManagedBrowserProfile().prepare();
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.post("/api/managed-browser-profile/complete", async (request) => {
+    const session = browserSession(request, true);
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "operationId")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only operationId is accepted.");
+    }
+    const state = await requireManagedBrowserProfile().complete(body.operationId);
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.post("/api/managed-browser-profile/relogin", async (request) => {
+    const session = browserSession(request, true);
+    if (Object.keys(bodyObject(request.body)).length !== 0) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Relogin does not accept request fields.");
+    }
+    const state = await requireManagedBrowserProfile().relogin();
+    revalidateBrowserSession(request, session);
+    return state;
+  });
+
+  server.get("/api/voice/capabilities", async (request) => {
+    const session = browserSession(request, false);
+    const capabilities: VoiceInputCapabilities = options.voiceInput?.capabilities()
+      ?? { available: false, unavailableReason: "not_configured" };
+    revalidateBrowserSession(request, session);
+    return capabilities;
+  });
+
+  server.post("/api/voice/sessions", async (request, reply) => {
+    const session = browserSession(request, true);
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "requestId")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only requestId is accepted.");
+    }
+    const result = await requireVoiceInput().start(session.deviceId, requiredString(body, "requestId", 128));
+    try {
+      revalidateBrowserSession(request, session);
+    } catch (error) {
+      await options.voiceInput?.cancel(session.deviceId, result.sessionId, result.eventCursor).catch(() => undefined);
+      throw error;
+    }
+    return reply.code(201).send(result);
+  });
+
+  server.post<{ Params: { sessionId: string } }>("/api/voice/sessions/:sessionId/audio", async (request) => {
+    const session = browserSession(request, true);
+    const sessionId = pathId(request, "sessionId");
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 2 || !Object.hasOwn(body, "chunks")
+      || !Object.hasOwn(body, "afterEventSequence") || !Number.isSafeInteger(body.afterEventSequence)
+      || (body.afterEventSequence as number) < 0 || !Array.isArray(body.chunks)
+      || body.chunks.length === 0 || body.chunks.length > VOICE_INPUT_MAX_BATCH_CHUNKS) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Audio batch fields are invalid.");
+    }
+    const chunks: Array<{ sequence: number; data: Uint8Array }> = [];
+    try {
+      for (const value of body.chunks) {
+        const entry = bodyRecord(value);
+        if (Object.keys(entry).length !== 2 || !Object.hasOwn(entry, "sequence") || !Object.hasOwn(entry, "audio")
+          || !Number.isSafeInteger(entry.sequence) || typeof entry.audio !== "string") {
+          throw new HostHttpError(400, "INVALID_REQUEST", "Audio batch chunk fields are invalid.");
+        }
+        chunks.push({
+          sequence: entry.sequence as number,
+          data: decodeBase64Audio(entry.audio, VOICE_MAX_CHUNK_BYTES),
+        });
+      }
+    } catch (error) {
+      for (const chunk of chunks) chunk.data.fill(0);
+      throw error;
+    }
+    let result: Awaited<ReturnType<VoiceInputSessionService["append"]>>;
+    try {
+      result = await requireVoiceInput().append(session.deviceId, sessionId, chunks, body.afterEventSequence as number);
+    } finally {
+      for (const chunk of chunks) chunk.data.fill(0);
+    }
+    revalidateBrowserSession(request, session);
+    return result;
+  });
+
+  server.post<{ Params: { sessionId: string } }>("/api/voice/sessions/:sessionId/finish", async (request) => {
+    const session = browserSession(request, true);
+    const sessionId = pathId(request, "sessionId");
+    const afterEventSequence = parseVoiceCursor(request.body);
+    const result = await requireVoiceInput().finish(session.deviceId, sessionId, afterEventSequence);
+    revalidateBrowserSession(request, session);
+    return result;
+  });
+
+  server.post<{ Params: { sessionId: string } }>("/api/voice/sessions/:sessionId/cancel", async (request) => {
+    const session = browserSession(request, true);
+    const sessionId = pathId(request, "sessionId");
+    const afterEventSequence = parseVoiceCursor(request.body);
+    const result = await requireVoiceInput().cancel(session.deviceId, sessionId, afterEventSequence);
+    revalidateBrowserSession(request, session);
+    return result;
+  });
+
   server.post("/api/runs", async (request, reply) => {
     const session = browserSession(request, true);
     const body = bodyObject(request.body);
-    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken" && key !== "target")) {
-      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, and one target selector are accepted.");
+    if (Object.keys(body).some((key) => key !== "commandId" && key !== "goal" && key !== "targetToken" && key !== "target" && key !== "assistantPreferences" && key !== "runNoticeContentEnabled")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only commandId, goal, one target selector, assistantPreferences, and runNoticeContentEnabled are accepted.");
     }
     const commandId = requiredString(body, "commandId", 128);
     const goal = requiredString(body, "goal", 20_000);
@@ -455,7 +613,19 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     const target = hasLegacyTarget
       ? requiredString(body, "targetToken", 128)
       : parseRemoteRunTarget(body.target);
-    const run = await options.api.startRun(session.deviceId, commandId, goal, target);
+    let assistantPreferences: RunAssistantPreferencesSnapshot | undefined;
+    if (Object.hasOwn(body, "assistantPreferences")) {
+      try {
+        assistantPreferences = normalizeRunAssistantPreferencesSnapshot(body.assistantPreferences);
+      } catch (error) {
+        throw new HostHttpError(400, "INVALID_ASSISTANT_PREFERENCES", error instanceof Error ? error.message : "assistantPreferences is invalid.");
+      }
+    }
+    if (Object.hasOwn(body, "runNoticeContentEnabled") && typeof body.runNoticeContentEnabled !== "boolean") {
+      throw new HostHttpError(400, "INVALID_REQUEST", "runNoticeContentEnabled must be a boolean.");
+    }
+    const runNoticeContentEnabled = body.runNoticeContentEnabled === true;
+    const run = await options.api.startRun(session.deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled);
     return reply.code(202).send({ runId: run.runId, status: run.status });
   });
 
@@ -609,9 +779,46 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       for (const bySession of activeStreams.values()) {
         for (const subscriptions of bySession.values()) for (const close of [...subscriptions]) close();
       }
+      await options.managedBrowserProfile?.close?.();
       await server.close();
+      await options.voiceInput?.close();
     },
   };
+
+  function requireVoiceInput(): VoiceInputSessionService {
+    if (options.voiceInput === undefined || !options.voiceInput.capabilities().available) {
+      throw new VoiceSessionServiceError(503, "VOICE_UNAVAILABLE", "Voice input is not configured on this computer.");
+    }
+    return options.voiceInput;
+  }
+
+  function requireManagedBrowserProfile(): ManagedBrowserProfileController {
+    if (options.managedBrowserProfile === undefined) {
+      throw new HostHttpError(503, "MANAGED_BROWSER_UNAVAILABLE", "The Host has no managed browser profile service.");
+    }
+    return options.managedBrowserProfile;
+  }
+}
+
+function parseVoiceCursor(value: unknown): number {
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  if (body === undefined || Object.keys(body).length !== 1 || !Number.isSafeInteger(body.afterEventSequence)
+    || (body.afterEventSequence as number) < 0) {
+    throw new HostHttpError(400, "INVALID_REQUEST", "Voice event cursor is invalid.");
+  }
+  return body.afterEventSequence as number;
+}
+
+function decodeBase64Audio(value: string, maxBytes: number): Uint8Array {
+  if (value.length === 0 || value.length > Math.ceil(maxBytes / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    throw new HostHttpError(400, "INVALID_AUDIO_CHUNK", "Audio chunk encoding is invalid.");
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.byteLength === 0 || bytes.byteLength > maxBytes || bytes.byteLength % 2 !== 0 || bytes.toString("base64") !== value) {
+    bytes.fill(0);
+    throw new HostHttpError(400, "INVALID_AUDIO_CHUNK", "Audio chunk encoding is invalid.");
+  }
+  return new Uint8Array(bytes);
 }
 
 function parseCommand(value: unknown): RemoteCommand {
