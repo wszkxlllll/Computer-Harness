@@ -6,7 +6,7 @@ import { RunWorkspace } from "./RunWorkspace";
 import { PreferencesProvider } from "./PreferencesContext";
 import { useRunFeed } from "./hooks/useRunFeed";
 import { useRunCommands } from "./hooks/useRunCommands";
-import type { RunSnapshot } from "./types";
+import type { ApprovalEvidence, RunSnapshot } from "./types";
 import { DEFAULT_PREFERENCES, PREFERENCES_STORAGE_KEY } from "./preferences";
 import type { VoiceCapabilities } from "./voice-capabilities";
 import type { VoiceOutputSession } from "@computer-harness/voice";
@@ -16,6 +16,9 @@ vi.mock("./hooks/useRunCommands", () => ({ useRunCommands: vi.fn() }));
 
 const refresh = vi.fn().mockResolvedValue(undefined);
 const setNotice = vi.fn();
+const parentSurfaceRef = {
+  surfaceId: "surface-1", generation: 1, kind: "native_window",
+} satisfies ApprovalEvidence["surfaceRef"];
 const commands = {
   busyCommand: undefined,
   notice: undefined,
@@ -44,6 +47,7 @@ const approval: RunSnapshot = {
     preview: {
       actions: [{ operation: "click", kind: "click", points: [{ x: 20, y: 30 }] }],
       evidence: {
+        surfaceRef: parentSurfaceRef,
         assetId: "asset-A",
         observationId: "obs-A",
         decisionObservationId: "decision-A",
@@ -332,6 +336,7 @@ describe("request-bound screenshot lifecycle", () => {
           preview: {
             actions: [{ operation: "click", kind: "click", points: [{ x: 40, y: 50 }] }],
             evidence: {
+              surfaceRef: parentSurfaceRef,
               assetId: "asset-B",
               observationId: "obs-B",
               decisionObservationId: "decision-B",

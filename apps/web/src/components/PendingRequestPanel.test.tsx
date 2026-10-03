@@ -2,6 +2,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PendingRequestPanel } from "./PendingRequestPanel";
+import type { ApprovalEvidence } from "../types";
+
+const parentSurfaceRef = {
+  surfaceId: "surface-1", generation: 1, kind: "native_window",
+} satisfies ApprovalEvidence["surfaceRef"];
 
 afterEach(() => cleanup());
 
@@ -150,6 +155,7 @@ describe("pending request panel", () => {
           preview: {
             actions: [{ operation: "keypress", kind: "keypress", keys: ["ENTER"] }],
             evidence: {
+              surfaceRef: parentSurfaceRef,
               assetId: "bound-asset",
               observationId: "obs-evidence",
               decisionObservationId: "obs-decision",
@@ -198,6 +204,7 @@ describe("pending request panel", () => {
           preview: {
             actions: [{ operation: "click", kind: "click", points: [{ x: 9, y: 12 }] }],
             evidence: {
+              surfaceRef: parentSurfaceRef,
               assetId: "missing-image",
               observationId: "obs-evidence",
               decisionObservationId: "obs-decision",
