@@ -841,6 +841,19 @@ function committedApprovalSignal(occurrence = 1) {
   };
 }
 
+function committedUserInputRequestSignal() {
+  let resolve!: (event: Extract<RuntimeEvent, { type: "user.input.requested" }>) => void;
+  const requested = new Promise<Extract<RuntimeEvent, { type: "user.input.requested" }>>((complete) => {
+    resolve = complete;
+  });
+  return {
+    requested,
+    onEventCommitted(event: RuntimeEvent): void {
+      if (event.type === "user.input.requested") resolve(event);
+    },
+  };
+}
+
 describe("RunController ExecutionSegment lifecycle", () => {
   it("marks a semantically matching main-provider click attempted before evidence advances", async () => {
     const provider = new ScriptedProvider([
@@ -3019,6 +3032,7 @@ describe("RunController Monitor online consumer", () => {
   });
 
   it("does not emit a monitor diagnostic when an approval barrier is entered", async () => {
+    const approvalSignal = committedApprovalSignal();
     const actionPolicy: ActionPolicy = {
       async evaluate() {
         return {
@@ -3039,9 +3053,11 @@ describe("RunController Monitor online consumer", () => {
     const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(), {
       actionPolicy,
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered", monitor: "guidance" },
+      onEventCommitted: approvalSignal.onEventCommitted,
     });
     const running = created.controller.start("approval monitor boundary");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_approval");
+    await approvalSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_approval");
     expect(created.controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "monitor_diagnostic")).toBe(false);
     const requestId = created.controller.getSnapshot().pendingApproval?.requestId;
     await created.controller.resolveApproval(requestId ?? "", true);
@@ -3253,6 +3269,7 @@ describe("RunController Monitor online consumer", () => {
   });
 
   it("defers Monitor help until the action, ToolResult and post-action observation are committed", async () => {
+    const inputRequestSignal = committedUserInputRequestSignal();
     const turns: ModelTurn[] = [];
     for (let index = 0; index < 8; index += 1) {
       turns.push({
@@ -3263,9 +3280,11 @@ describe("RunController Monitor online consumer", () => {
     turns.push({ type: "finish", summary: "done" });
     const created = await makeController(new ScriptedProvider(turns), new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+      onEventCommitted: inputRequestSignal.onEventCommitted,
     });
     const running = created.controller.start("monitor help boundary");
-    await waitUntil(() => created.controller.getSnapshot().status === "waiting_user");
+    await inputRequestSignal.requested;
+    expect(created.controller.getSnapshot().status).toBe("waiting_user");
     const beforeInput = created.controller.getEvents();
     const requestIndex = beforeInput.findIndex((event) => event.type === "user.input.requested");
     expect(requestIndex).toBeGreaterThan(-1);
@@ -3278,6 +3297,7 @@ describe("RunController Monitor online consumer", () => {
   });
 
   it("stops a legal Plan/Memory-before-GUI multi-call turn at the Inbox boundary", async () => {
+    const inputRequestSignal = committedUserInputRequestSignal();
     const registry = clickRegistry();
     registry.register({
       name: "remember",
@@ -3299,6 +3319,7 @@ describe("RunController Monitor online consumer", () => {
     ]), undefined, registry, new DefaultRuntimePolicy(), {
       features: { planning: "tasks-v1", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
       onEventCommitted: (event) => {
+        inputRequestSignal.onEventCommitted(event);
         if (!injected && event.type === "tool.call.completed" && event.result.callId === "plan-before-help") {
           injected = true;
           (controller as unknown as { monitorPendingHelp: { kind: "help_requested"; reason: "guidance_budget_exhausted"; fingerprint: string } }).monitorPendingHelp = {
@@ -3312,7 +3333,8 @@ describe("RunController Monitor online consumer", () => {
     controller = created.controller;
     const activeController = created.controller;
     const running = activeController.start("stop the remaining GUI call at review");
-    await waitUntil(() => activeController.getSnapshot().status === "waiting_user");
+    await inputRequestSignal.requested;
+    expect(activeController.getSnapshot().status).toBe("waiting_user");
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
     expect(activeController.getEvents().some((event) => event.type === "action.proposed" && event.callId === "gui-after-help")).toBe(false);
     expect(activeController.getEvents().some((event) => event.type === "user.input.requested")).toBe(true);
