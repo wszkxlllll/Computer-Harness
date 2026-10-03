@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { GroundingCatalog, ObservationId, ComputerSessionId } from "@computer-harness/protocol";
+import type { GroundingCatalog, ObservationId, ComputerSessionId, SurfaceId, SurfaceRef } from "@computer-harness/protocol";
 import { DeterministicGroundingSelector } from "./grounding-selector.js";
 import { groundingComputerTools } from "./computer-tools.js";
+
+const desktopSurfaceRef: SurfaceRef = { surfaceId: "selector-desktop" as SurfaceId, generation: 1, kind: "desktop" };
 
 function catalog(elements: GroundingCatalog["elements"]): GroundingCatalog {
   return {
@@ -9,6 +11,7 @@ function catalog(elements: GroundingCatalog["elements"]): GroundingCatalog {
     source: "uia",
     observationId: "observation-selector" as ObservationId,
     computerSessionId: "session-selector" as ComputerSessionId,
+    surfaceRef: desktopSurfaceRef,
     completeness: "partial",
     degraded: false,
     maxElements: 256,
@@ -22,6 +25,7 @@ function hybridCatalog(elements: GroundingCatalog["elements"]): GroundingCatalog
     source: "hybrid",
     observationId: "observation-hybrid" as ObservationId,
     computerSessionId: "session-hybrid" as ComputerSessionId,
+    surfaceRef: desktopSurfaceRef,
     completeness: "partial",
     degraded: false,
     maxElements: 256,

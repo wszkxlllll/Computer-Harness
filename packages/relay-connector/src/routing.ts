@@ -6,7 +6,7 @@ import {
 } from "@computer-harness/voice";
 import { normalizeRunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 
-export type RelayHttpMethod = "GET" | "POST" | "DELETE";
+export type RelayHttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 export type ApiResponseKind = "json" | "sse" | "asset";
 
 export interface AllowedApiRoute {
@@ -53,6 +53,15 @@ function identifyRoute(method: RelayHttpMethod, pathname: string): Omit<AllowedA
   }
 
   if (method === "GET" && pathname === "/api/windows") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "GET" && pathname === "/api/managed-browser-profile") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "PUT" && pathname === "/api/managed-browser-profile/preference") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "POST" && /^\/api\/managed-browser-profile\/(prepare|complete|relogin)$/u.test(pathname)) {
     return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
   }
   if (method === "GET" && pathname === "/api/voice/capabilities") {
@@ -114,7 +123,7 @@ function identifyRoute(method: RelayHttpMethod, pathname: string): Omit<AllowedA
 
 /** Resolve the finite browser API surface that may cross the relay. */
 export function resolveAllowedApiRoute(methodText: string, requestTarget: string): AllowedApiRoute | null {
-  if (methodText !== "GET" && methodText !== "POST" && methodText !== "DELETE") return null;
+  if (methodText !== "GET" && methodText !== "POST" && methodText !== "PUT" && methodText !== "DELETE") return null;
   if (requestTarget.length > 4096 || !requestTarget.startsWith("/")) return null;
   if (requestTarget.includes("\\") || requestTarget.includes("%") || requestTarget.includes("#")) return null;
   const rawPath = requestTarget.split("?", 1)[0] ?? "";
@@ -187,18 +196,28 @@ function isValidBrowserSessionMode(value: unknown): value is "temporary" | "save
   return value === "temporary" || value === "saved";
 }
 
+function isValidOperationId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
+}
+
+function hasOptionalSwitchWindows(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return hasExactKeys(value, keys) ||
+    (hasExactKeys(value, [...keys, "switchWindows"]) && typeof value.switchWindows === "boolean");
+}
+
 function isValidRunTarget(value: unknown): boolean {
   if (!isRecord(value) || typeof value.mode !== "string") return false;
-  if (value.mode === "auto") return hasExactKeys(value, ["mode"]);
-  if (value.mode === "desktop") return hasExactKeys(value, ["mode"]);
+  if (Object.hasOwn(value, "switchWindows") && typeof value.switchWindows !== "boolean") return false;
+  if (value.mode === "auto") return hasOptionalSwitchWindows(value, ["mode"]);
+  if (value.mode === "desktop") return hasOptionalSwitchWindows(value, ["mode"]);
   if (value.mode === "window") {
-    return hasExactKeys(value, ["mode", "targetToken"]) && isValidWindowTargetToken(value.targetToken);
+    return hasOptionalSwitchWindows(value, ["mode", "targetToken"]) && isValidWindowTargetToken(value.targetToken);
   }
   if (value.mode === "browser") {
-    if (hasExactKeys(value, ["mode"])) return true;
-    if (hasExactKeys(value, ["mode", "url"])) return isValidBrowserStartUrl(value.url);
-    if (hasExactKeys(value, ["mode", "sessionMode"])) return isValidBrowserSessionMode(value.sessionMode);
-    return hasExactKeys(value, ["mode", "sessionMode", "url"])
+    if (hasOptionalSwitchWindows(value, ["mode"])) return true;
+    if (hasOptionalSwitchWindows(value, ["mode", "url"])) return isValidBrowserStartUrl(value.url);
+    if (hasOptionalSwitchWindows(value, ["mode", "sessionMode"])) return isValidBrowserSessionMode(value.sessionMode);
+    return hasOptionalSwitchWindows(value, ["mode", "sessionMode", "url"])
       && isValidBrowserSessionMode(value.sessionMode)
       && isValidBrowserStartUrl(value.url);
   }
@@ -207,6 +226,16 @@ function isValidRunTarget(value: unknown): boolean {
 
 /** Validate the only route-specific browser start payload without accepting OS handles or paths. */
 export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject | undefined): boolean {
+  if (route.method === "PUT" && route.path === "/api/managed-browser-profile/preference") {
+    return body !== undefined && hasExactKeys(body, ["defaultSession"])
+      && (body.defaultSession === "saved" || body.defaultSession === "temporary");
+  }
+  if (route.method === "POST" && /^\/api\/managed-browser-profile\/(?:prepare|relogin)$/u.test(route.path)) {
+    return body !== undefined && Object.keys(body).length === 0;
+  }
+  if (route.method === "POST" && route.path === "/api/managed-browser-profile/complete") {
+    return body !== undefined && hasExactKeys(body, ["operationId"]) && isValidOperationId(body.operationId);
+  }
   if (route.method === "POST" && route.path === "/api/voice/sessions") {
     return body !== undefined && hasExactKeys(body, ["requestId"]) && isValidIdentifier(body.requestId);
   }

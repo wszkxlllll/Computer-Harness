@@ -10,7 +10,7 @@ import type {
 import { createHash } from "node:crypto";
 import { currentObservationAssessmentBinding, decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
 import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
-import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan } from "./projections.js";
+import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
 import { selectHistoryEvents } from "./history.js";
@@ -65,9 +65,16 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("latestObservation must match the latest observation.created event");
     }
     const latestObservation = input.latestObservation ?? latestEventObservation;
+    const capturedAt = latestObservation === undefined ? undefined : canonicalCapturedAt(latestObservation.capturedAt);
+    const observationMetadataText = latestObservation === undefined
+      ? undefined
+      : `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`;
+    const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
+    const windowSwitchStateText = formatWindowSwitchState(input.computerSession, input.windowSwitchState, latestObservation?.grounding, latestObservation?.viewport);
+    const windowSwitchStateTokens = windowSwitchStateText === undefined ? 0 : estimateTextTokens(windowSwitchStateText);
     const assessmentBinding = currentObservationAssessmentBinding(orderedEvents);
     let assessmentBindingText = assessmentBinding !== undefined && assessmentBinding.observationId === latestObservation?.id
-      ? `Current assessment reference: Observation ID ${assessmentBinding.observationId}; immediately preceding GUI action ID ${assessmentBinding.actionId}.${assessmentBinding.transition === undefined ? "" : ` Runtime Monitor transition for this exact action/Observation: ${assessmentBinding.transition}.`} If you include observationAssessment in this response, use these exact IDs.`
+      ? `Current assessment reference: Observation ID ${assessmentBinding.observationId}; immediately preceding GUI action ID ${assessmentBinding.actionId}.${assessmentBinding.transition === undefined ? "" : ` Runtime Monitor transition for this exact action/Observation: ${assessmentBinding.transition} (action diagnostic only; it does not decide what semantic state the screenshot shows).`} The current screenshot is the evidence for any progress summary. If you include observationAssessment in this response, use these exact IDs.`
       : undefined;
     const rawAssessmentBindingTokens = assessmentBindingText === undefined ? 0 : estimateTextTokens(assessmentBindingText);
     let assessmentBindingTokens = rawAssessmentBindingTokens;
@@ -141,12 +148,12 @@ export class DefaultContextCompiler implements ContextCompiler {
     if (maxInputTokens !== undefined) {
       const fixedBudget = maxInputTokens - estimatedFixedTextTokens;
       if (fixedBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
-      // Reserve budget for every authoritative user correction before
-      // considering optional response preferences or other projections.
-      if (authoritativeHistoryTokens > fixedBudget) {
-        throw new Error("Authoritative user inputs exceed maxInputTokens");
+      // Reserve budget for every authoritative user correction and the current
+      // observation's capture metadata before optional projections.
+      if (authoritativeHistoryTokens + observationMetadataTokens + windowSwitchStateTokens > fixedBudget) {
+        throw new Error("Authoritative user inputs and current observation/target metadata exceed maxInputTokens");
       }
-      let remainingAfterAuthoritative = Math.max(0, fixedBudget - authoritativeHistoryTokens);
+      let remainingAfterAuthoritative = Math.max(0, fixedBudget - authoritativeHistoryTokens - observationMetadataTokens - windowSwitchStateTokens);
       if (rawAssistantPreferencesTokens > remainingAfterAuthoritative) {
         assistantPreferencesText = undefined;
         assistantPreferencesIncluded = false;
@@ -277,10 +284,15 @@ export class DefaultContextCompiler implements ContextCompiler {
       messages.push({ role: "user", content: [{ type: "text", text: groundingText }] });
     }
 
+    if (windowSwitchStateText !== undefined) {
+      messages.push({ role: "user", content: [{ type: "text", text: windowSwitchStateText }] });
+    }
+
     if (latestObservation !== undefined) {
       messages.push({
         role: "user",
         content: [
+          ...(observationMetadataText === undefined ? [] : [{ type: "text" as const, text: observationMetadataText }]),
           ...(assessmentBindingText === undefined ? [] : [{ type: "text" as const, text: assessmentBindingText }]),
           {
             type: "image" as const,
@@ -292,7 +304,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     }
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
-    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens;
+    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
     const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
     if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
       throw new Error("Context history exceeds maxInputTokens after selection");
@@ -414,6 +426,13 @@ function estimateTextTokens(value: string): number {
   return Math.ceil(value.length / 4);
 }
 
+function canonicalCapturedAt(value: string): string | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.valueOf()) || parsed.toISOString() !== value) return undefined;
+  return value;
+}
+
 function formatAssistantPreferences(preferences: RunAssistantPreferencesSnapshot): string {
   const responseDetail = preferences.responseDetail === "concise"
     ? "Keep the final reply concise while covering every requested deliverable and relevant uncertainty."
@@ -464,7 +483,7 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
   const projected = candidates.slice(0, Math.min(catalog.maxElements, 16));
   const sourceLabel = catalog.source === "hybrid" ? "UIA+DOM" : catalog.source.toUpperCase();
   const lines = [
-    `${sourceLabel} grounding (${catalog.completeness}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
+    `${sourceLabel} grounding (${catalog.completeness}; surface=${catalog.surfaceRef.kind}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
     ...projected.map((element) => {
       const box = element.bbox === undefined
         ? "bbox=unknown"

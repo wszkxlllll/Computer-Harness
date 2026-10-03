@@ -7,6 +7,8 @@ import type {
   AssetId,
   ComputerSessionId,
   ComputerSessionDescriptor,
+  SurfaceId,
+  SurfaceRef,
   EventId,
   ObservationId,
   RunId,
@@ -30,6 +32,13 @@ const observationId = "observation-test" as ObservationId;
 const actionId = "action-test" as ActionId;
 const callId = "call-test" as ToolCallId;
 const clickActionId = "click-action-test" as ActionId;
+const desktopSurfaceRef: SurfaceRef = { surfaceId: "trajectory-desktop" as SurfaceId, generation: 1, kind: "desktop" };
+const domSurfaceRef: SurfaceRef = {
+  surfaceId: "trajectory-dom" as SurfaceId,
+  generation: 1,
+  kind: "dom",
+  parentSurfaceId: "trajectory-browser-tab" as SurfaceId,
+};
 const session: ComputerSessionDescriptor = {
   id: "computer-test" as ComputerSessionId,
   backend: "fake",
@@ -39,11 +48,19 @@ const session: ComputerSessionDescriptor = {
 };
 
 function event(sequence: number, data: RuntimeEventData): RuntimeEvent {
+  // Post-open events in these reducer fixtures use historical call-site
+  // sequence values beginning at 5. The live contract now inserts the
+  // initial Surface transition at 4 and its Observation at 5.
+  return eventAt(sequence >= 5 ? sequence + 1 : sequence, data);
+}
+
+function eventAt(sequence: number, data: RuntimeEventData): RuntimeEvent {
   return {
     eventId: `event-${sequence}` as EventId,
     runId,
     sequence,
     occurredAt: `2026-01-01T00:00:0${sequence}.000Z`,
+    schemaVersion: 2,
     ...data,
   };
 }
@@ -69,12 +86,14 @@ function runningEvents(): RuntimeEvent[] {
     runStarted(1),
     event(2, { type: "computer.open.started" }),
     event(3, { type: "computer.open.completed", session }),
-    event(4, {
+    eventAt(4, { type: "computer.surface.transitioned", from: null, to: desktopSurfaceRef, reason: "initial_observation" }),
+    eventAt(5, {
       type: "observation.created",
       observation: {
         id: observationId,
         runId,
         computerSessionId: "computer-test" as ComputerSessionId,
+        surfaceRef: desktopSurfaceRef,
         capturedAt: "2026-01-01T00:00:00.000Z",
         viewport: { width: 100, height: 100, coordinateSpace: "physical" },
         screenshot: {
@@ -87,6 +106,100 @@ function runningEvents(): RuntimeEvent[] {
     }),
   ];
 }
+
+describe("switch_window session receipt contract", () => {
+  const switchedSession: ComputerSessionDescriptor = {
+    ...session,
+    viewport: { width: 640, height: 480, coordinateSpace: "physical" },
+  };
+  const switchStarted = event(5, {
+    type: "action.execution.started",
+    action: { actionId, basedOn: observationId, kind: "switch_window", windowRef: "opaque-window-ref" },
+  });
+
+  it("updates the target viewport on the same ComputerSession and clears the old observation before recapture", () => {
+    const started = reduceRuntimeEvents([...runningEvents(), switchStarted], runId);
+    expect(started.latestObservationId).toBeUndefined();
+    expect(started.unresolvedActionKind).toBe("switch_window");
+
+    const completed = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: switchedSession },
+    });
+    const transition = reduceRuntimeEvents([...runningEvents(), switchStarted, completed], runId);
+    expect(transition.computerSession).toEqual(switchedSession);
+    expect(transition.latestObservationId).toBeUndefined();
+    expect(transition.stepCount).toBe(1);
+
+    const fresh = event(7, {
+      type: "observation.created",
+      observation: {
+        id: "observation-after-switch" as ObservationId,
+        runId,
+        computerSessionId: switchedSession.id,
+        surfaceRef: desktopSurfaceRef,
+        capturedAt: "2026-01-01T00:00:07.000Z",
+        viewport: switchedSession.viewport,
+        screenshot: { assetId: "asset-after-switch" as AssetId, relativePath: "assets/after.png", mediaType: "image/png", byteLength: 1 },
+      },
+    });
+    expect(reduceRunEvent(transition, fresh).latestObservationId).toBe("observation-after-switch");
+  });
+
+  it("clears stale observation even when switch activation fails or has unknown outcome", () => {
+    const failed = event(6, {
+      type: "action.execution.failed",
+      receipt: { actionId, status: "failed", driverCode: "WINDOW_SWITCH_OUTCOME_UNKNOWN" },
+    });
+    const snapshot = reduceRuntimeEvents([...runningEvents(), switchStarted, failed], runId);
+    expect(snapshot.computerSession).toEqual(session);
+    expect(snapshot.latestObservationId).toBeUndefined();
+    expect(snapshot.unresolvedActionId).toBeUndefined();
+  });
+
+  it("rejects missing, failed, non-switch, mismatched-action, cross-session, and cross-backend sessionAfter data", () => {
+    const missingAfter = event(6, { type: "action.execution.completed", receipt: { actionId, status: "completed" } });
+    expect(() => reduceRuntimeEvents([...runningEvents(), switchStarted, missingAfter], runId)).toThrow(/requires sessionAfter/u);
+
+    const failedWithAfter = {
+      eventId: "failed-with-session-after" as EventId,
+      runId,
+      sequence: 7,
+      occurredAt: "2026-01-01T00:00:06.000Z",
+      type: "action.execution.failed" as const,
+      receipt: { actionId, status: "failed" as const, sessionAfter: switchedSession },
+    };
+    expect(runtimeEventSchema.safeParse(failedWithAfter).success).toBe(false);
+
+    const clickStarted = event(5, {
+      type: "action.execution.started",
+      action: { actionId: clickActionId, basedOn: observationId, kind: "click", point: { x: 10, y: 20 } },
+    });
+    const clickWithAfter = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId: clickActionId, status: "completed", sessionAfter: switchedSession },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), clickStarted, clickWithAfter], runId)).toThrow(/only on a completed switch_window/u);
+
+    const mismatchedAction = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId: "another-action" as ActionId, status: "completed", sessionAfter: switchedSession },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), switchStarted, mismatchedAction], runId)).toThrow(/does not match unresolved action/u);
+
+    const wrongBackend = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, backend: "other-backend" } },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), switchStarted, wrongBackend], runId)).toThrow(/active ComputerSession backend/u);
+
+    const wrongSession = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, id: "another-session" as ComputerSessionId } },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), switchStarted, wrongSession], runId)).toThrow(/active ComputerSession identity/u);
+  });
+});
 
 function waitCompleted(sequence = 1): RuntimeEvent {
   return event(sequence, {
@@ -209,6 +322,345 @@ describe("RunSnapshot reducer", () => {
     expect(observed.latestObservationId).toBe(observationId);
   });
 
+  it("records an explicit Surface transition and consumes it with the matching Observation", () => {
+    const peerSurfaceRef: SurfaceRef = { surfaceId: "trajectory-peer" as SurfaceId, generation: 1, kind: "native_window" };
+    const events = [
+      ...runningEvents(),
+      event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: peerSurfaceRef, reason: "peer_switch" }),
+      event(6, {
+        type: "observation.created",
+        observation: {
+          id: "observation-peer" as ObservationId,
+          runId,
+          computerSessionId: session.id,
+          surfaceRef: peerSurfaceRef,
+          capturedAt: "2026-01-01T00:00:01.000Z",
+          viewport: session.viewport,
+          screenshot: { assetId: "asset-peer" as AssetId, relativePath: "assets/peer.png", mediaType: "image/png", byteLength: 1 },
+        },
+      }),
+    ];
+
+    const snapshot = reduceRuntimeEvents(events, runId);
+    expect(snapshot.activeSurfaceRef).toEqual(peerSurfaceRef);
+    expect(snapshot.pendingSurfaceTransition).toBeUndefined();
+    expect(snapshot.surfaceLineage.at(-1)).toMatchObject({
+      from: desktopSurfaceRef,
+      to: peerSurfaceRef,
+      reason: "peer_switch",
+      eventId: "event-6",
+    });
+    const finished = reduceRuntimeEvents([...events, event(7, { type: "run.finished", outcome: "succeeded" })], runId);
+    expect(finished.status).toBe("finished");
+    expect(finished.pendingSurfaceTransition).toBeUndefined();
+    expect(finished.surfaceGenerationHighWater[String(peerSurfaceRef.surfaceId)]).toBe(peerSurfaceRef.generation);
+    expect(finished.surfaceLineage).toEqual(snapshot.surfaceLineage);
+    expect(() => reduceRuntimeEvents([
+      ...runningEvents(),
+      event(5, { type: "computer.surface.transitioned", from: { ...desktopSurfaceRef, generation: 0 }, to: peerSurfaceRef, reason: "peer_switch" }),
+    ], runId)).toThrow(/from does not match the active Surface lineage/u);
+  });
+
+  it("requires decoder marking for legacy fallback and rejects a v2 Observation without its transition", () => {
+    const peer: SurfaceRef = { surfaceId: "v2-peer" as SurfaceId, generation: 1, kind: "native_window" };
+    const changedObservation = event(5, {
+      type: "observation.created",
+      observation: {
+        id: "missing-transition-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: peer,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "missing-transition-asset" as AssetId, relativePath: "assets/missing-transition.png", mediaType: "image/png", byteLength: 1 },
+      },
+    });
+    expect(changedObservation.schemaVersion).toBe(2);
+    expect(() => reduceRuntimeEvents([...runningEvents(), changedObservation], runId))
+      .toThrow(/without a preceding computer\.surface\.transitioned/u);
+
+    const active = reduceRuntimeEvents(runningEvents(), runId);
+    const unmarkedLegacyObservation = {
+      eventId: "unmarked-legacy-observation" as EventId,
+      runId,
+      sequence: 6,
+      occurredAt: "2026-01-01T00:00:06.000Z",
+      type: "observation.created" as const,
+      observation: {
+        id: "unmarked-legacy-frame" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: peer,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "unmarked-legacy-asset" as AssetId, relativePath: "assets/unmarked.png", mediaType: "image/png", byteLength: 1 },
+      },
+    };
+    expect(() => reduceRunEvent(active, unmarkedLegacyObservation)).toThrow(/without a preceding computer\.surface\.transitioned/u);
+  });
+
+  it("keeps per-Surface generations monotone across peers and rejects same-ID generation rollback", () => {
+    const peerA4: SurfaceRef = { surfaceId: "peer-a" as SurfaceId, generation: 4, kind: "native_window" };
+    const peerA1 = { ...peerA4, generation: 1 };
+    const peerB1: SurfaceRef = { surfaceId: "peer-b" as SurfaceId, generation: 1, kind: "native_window" };
+    const observation = (sequence: number, ref: SurfaceRef, id: string) => event(sequence, {
+      type: "observation.created",
+      observation: {
+        id: id as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: ref,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: `asset-${id}` as AssetId, relativePath: `assets/${id}.png`, mediaType: "image/png", byteLength: 1 },
+      },
+    });
+    const peerA = event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: peerA4, reason: "peer_switch" });
+    const peerB = event(7, { type: "computer.surface.transitioned", from: peerA4, to: peerB1, reason: "peer_switch" });
+    const peerAAgainAtOldGeneration = event(9, { type: "computer.surface.transitioned", from: peerB1, to: peerA1, reason: "peer_switch" });
+    expect(() => reduceRuntimeEvents([
+      ...runningEvents(),
+      peerA,
+      observation(6, peerA4, "peer-a-generation-4"),
+      peerB,
+      observation(8, peerB1, "peer-b-generation-1"),
+      peerAAgainAtOldGeneration,
+    ], runId)).toThrow(/generation high-water/u);
+
+    const sameIdRollback = event(7, { type: "computer.surface.transitioned", from: peerA4, to: peerA1, reason: "generation_advanced" });
+    expect(() => reduceRuntimeEvents([
+      ...runningEvents(),
+      peerA,
+      observation(6, peerA4, "peer-a-generation-4-direct"),
+      sameIdRollback,
+    ], runId)).toThrow(/generation high-water/u);
+
+    expect(() => reduceRuntimeEvents([
+      ...runningEvents(),
+      peerA,
+      observation(6, peerA4, "peer-a-generation-4-observe"),
+      observation(7, peerA1, "peer-a-generation-1-observe"),
+    ], runId)).toThrow(/without a preceding computer\.surface\.transitioned/u);
+  });
+
+  it("validates parent facts for child push/pop and permits managed DOM peers without direct parent edges", () => {
+    const parent: SurfaceRef = { surfaceId: "native-parent" as SurfaceId, generation: 1, kind: "native_window" };
+    const child: SurfaceRef = {
+      surfaceId: "overlay-child" as SurfaceId,
+      generation: 1,
+      kind: "overlay",
+      parentSurfaceId: parent.surfaceId,
+      admissionSource: "same_hwnd_overlay_root_proof",
+    };
+    const parentAfterPop: SurfaceRef = { ...parent, generation: 2 };
+    const rootSibling: SurfaceRef = { surfaceId: "unrelated-root" as SurfaceId, generation: 1, kind: "native_window" };
+    const observation = (sequence: number, ref: SurfaceRef, id: string) => event(sequence, {
+      type: "observation.created",
+      observation: {
+        id: id as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: ref,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: `asset-${id}` as AssetId, relativePath: `assets/${id}.png`, mediaType: "image/png", byteLength: 1 },
+      },
+    });
+
+    const transitionToParent = event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: parent, reason: "peer_switch" });
+    const push = event(7, { type: "computer.surface.transitioned", from: parent, to: child, reason: "child_push" });
+    const pop = event(9, { type: "computer.surface.transitioned", from: child, to: parentAfterPop, reason: "child_pop" });
+    const legalChildCycle = reduceRuntimeEvents([
+      ...runningEvents(),
+      transitionToParent,
+      observation(6, parent, "native-parent-observation"),
+      push,
+      observation(8, child, "overlay-child-observation"),
+      pop,
+      observation(10, parentAfterPop, "native-parent-restored"),
+    ], runId);
+    expect(legalChildCycle.activeSurfaceRef).toEqual(parentAfterPop);
+    expect(legalChildCycle.surfaceLineage.map((entry) => entry.reason)).toEqual(["initial_observation", "peer_switch", "child_push", "child_pop"]);
+
+    const unrelatedChildPop = event(7, { type: "computer.surface.transitioned", from: parent, to: rootSibling, reason: "child_pop" });
+    expect(() => reduceRuntimeEvents([
+      ...runningEvents(),
+      transitionToParent,
+      observation(6, parent, "parent-for-invalid-pop"),
+      unrelatedChildPop,
+    ], runId)).toThrow(/known direct child-to-parent/u);
+
+    const domA: SurfaceRef = { surfaceId: "dom-a" as SurfaceId, generation: 1, kind: "dom", parentSurfaceId: "tab-a" as SurfaceId };
+    const domB: SurfaceRef = { surfaceId: "dom-b" as SurfaceId, generation: 1, kind: "dom", parentSurfaceId: "tab-b" as SurfaceId };
+    const domPeer = event(7, { type: "computer.surface.transitioned", from: domA, to: domB, reason: "peer_switch" });
+    const domPeers = reduceRuntimeEvents([
+      ...runningEvents(),
+      event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: domA, reason: "peer_switch" }),
+      observation(6, domA, "managed-dom-a"),
+      domPeer,
+      observation(8, domB, "managed-dom-b"),
+    ], runId);
+    expect(domPeers.activeSurfaceRef).toEqual(domB);
+  });
+
+  it("persists Win32 transient admission source only on an owned native child lineage", () => {
+    const parent: SurfaceRef = { surfaceId: "win32-parent" as SurfaceId, generation: 1, kind: "native_window" };
+    const child: SurfaceRef = {
+      surfaceId: "win32-dialog-child" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: parent.surfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const events = [
+      ...runningEvents(),
+      event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: parent, reason: "peer_switch" }),
+      event(6, { type: "observation.created", observation: {
+        id: "win32-parent-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: parent,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "win32-parent-asset" as AssetId, relativePath: "assets/win32-parent.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+      event(7, { type: "computer.surface.transitioned", from: parent, to: child, reason: "child_push" }),
+      event(8, { type: "observation.created", observation: {
+        id: "win32-child-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: child,
+        capturedAt: "2026-01-01T00:00:02.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "win32-child-asset" as AssetId, relativePath: "assets/win32-child.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+      event(9, {
+        type: "action.guard.evaluated",
+        evaluatedSurfaceRef: child,
+        callIds: [callId],
+        actions: [{ actionId: "win32-guard-action" as ActionId, kind: "wait", durationMs: 0 }],
+        decision: "require_approval",
+        categories: ["external_commitment"],
+        reasonCode: "fixture_approval",
+        reason: "fixture",
+        path: "local",
+        policyVersion: "fixture-v1",
+        modelRequestCount: 0,
+      }),
+      event(10, {
+        type: "approval.requested",
+        requestId: "win32-dialog-approval",
+        callId,
+        reason: "fixture",
+        evidence: {
+          observationId: "win32-child-observation" as ObservationId,
+          decisionObservationId: "win32-child-observation" as ObservationId,
+          assetId: "win32-child-asset" as AssetId,
+          capturedAt: "2026-01-01T00:00:02.000Z",
+          viewport: session.viewport,
+          surfaceRef: child,
+        },
+      }),
+    ];
+
+    expect(reduceRuntimeEvents(events, runId).activeSurfaceRef).toEqual(child);
+    const invalidOverlay = { ...child, kind: "overlay" as const };
+    expect(() => reduceRuntimeEvents([
+      ...runningEvents(),
+      event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: parent, reason: "peer_switch" }),
+      event(6, { type: "observation.created", observation: {
+        id: "win32-invalid-parent" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: parent,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "win32-invalid-parent-asset" as AssetId, relativePath: "assets/win32-invalid-parent.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+      event(7, { type: "computer.surface.transitioned", from: parent, to: invalidOverlay, reason: "child_push" }),
+    ], runId)).toThrow(/transient child_push requires its exact adapter admission source/u);
+  });
+
+  it("binds Guard and approval evidence to the transient Surface admission source", () => {
+    const parent: SurfaceRef = { surfaceId: "admission-parent" as SurfaceId, generation: 1, kind: "native_window" };
+    const child: SurfaceRef = {
+      surfaceId: "admission-child" as SurfaceId,
+      generation: 1,
+      kind: "overlay",
+      parentSurfaceId: parent.surfaceId,
+      admissionSource: "same_hwnd_overlay_root_proof",
+    };
+    const unprovenChild: SurfaceRef = {
+      surfaceId: child.surfaceId,
+      generation: child.generation,
+      kind: child.kind,
+      parentSurfaceId: child.parentSurfaceId!,
+    };
+    const childObservationId = "admission-child-observation" as ObservationId;
+    const activeChildEvents = [
+      ...runningEvents(),
+      eventAt(6, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: parent, reason: "peer_switch" }),
+      eventAt(7, {
+        type: "observation.created",
+        observation: {
+          id: "admission-parent-observation" as ObservationId,
+          runId,
+          computerSessionId: session.id,
+          surfaceRef: parent,
+          capturedAt: "2026-01-01T00:00:01.000Z",
+          viewport: session.viewport,
+          screenshot: { assetId: "admission-parent-asset" as AssetId, relativePath: "assets/admission-parent.png", mediaType: "image/png", byteLength: 1 },
+        },
+      }),
+      eventAt(8, { type: "computer.surface.transitioned", from: parent, to: child, reason: "child_push" }),
+      eventAt(9, {
+        type: "observation.created",
+        observation: {
+          id: childObservationId,
+          runId,
+          computerSessionId: session.id,
+          surfaceRef: child,
+          capturedAt: "2026-01-01T00:00:02.000Z",
+          viewport: session.viewport,
+          screenshot: { assetId: "admission-child-asset" as AssetId, relativePath: "assets/admission-child.png", mediaType: "image/png", byteLength: 1 },
+        },
+      }),
+    ];
+    const guard = eventAt(10, {
+      type: "action.guard.evaluated",
+      evaluatedSurfaceRef: unprovenChild,
+      callIds: [callId],
+      actions: [{ actionId: "admission-guard-action" as ActionId, kind: "wait", durationMs: 0 }],
+      decision: "allow",
+      categories: [],
+      reasonCode: "fixture_allow",
+      reason: "fixture",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const approval = eventAt(10, {
+      type: "approval.requested",
+      requestId: "admission-approval",
+      callId,
+      reason: "confirm",
+      evidence: {
+        observationId: childObservationId,
+        decisionObservationId: childObservationId,
+        assetId: "admission-child-asset" as AssetId,
+        capturedAt: "2026-01-01T00:00:02.000Z",
+        viewport: session.viewport,
+        surfaceRef: unprovenChild,
+      },
+    });
+
+    expect(() => reduceRuntimeEvents([...activeChildEvents, guard], runId))
+      .toThrow(/action\.guard\.evaluated SurfaceRef does not match/u);
+    expect(() => reduceRuntimeEvents([...activeChildEvents, approval], runId))
+      .toThrow(/approval\.requested evidence SurfaceRef does not match/u);
+    expect(reduceRuntimeEvents(activeChildEvents, runId).activeSurfaceRef).toEqual(child);
+  });
+
   it("clears only a matching proactive handoff and invalidates its old observation until a fresh capture", () => {
     const sourceActionId = "proactive-action" as ActionId;
     const waiting = reduceRuntimeEvents([
@@ -234,6 +686,7 @@ describe("RunSnapshot reducer", () => {
         id: freshObservationId,
         runId,
         computerSessionId: session.id,
+        surfaceRef: desktopSurfaceRef,
         capturedAt: "2026-01-01T00:00:01.000Z",
         viewport: session.viewport,
         screenshot: { assetId: "asset-fresh" as AssetId, relativePath: "assets/fresh.png", mediaType: "image/png", byteLength: 1 },
@@ -256,7 +709,7 @@ describe("RunSnapshot reducer", () => {
     ],
   ])("clears unresolved action after %s", (_label, terminal) => {
     const snapshot = reduceRuntimeEvents(
-      [...runningEvents(), waitStarted(5), { ...terminal, sequence: 6 }],
+      [...runningEvents(), waitStarted(5), { ...terminal, sequence: 7 }],
       runId,
     );
     expect(snapshot.unresolvedActionId).toBeUndefined();
@@ -264,7 +717,7 @@ describe("RunSnapshot reducer", () => {
   });
 
   it("rejects a terminal action without a matching started action", () => {
-    expect(() => reduceRuntimeEvents([...runningEvents(), { ...waitCompleted(0), sequence: 5 }], runId)).toThrow(
+    expect(() => reduceRuntimeEvents([...runningEvents(), { ...waitCompleted(0), sequence: 6 }], runId)).toThrow(
       /without action\.execution\.started/,
     );
 
@@ -277,7 +730,7 @@ describe("RunSnapshot reducer", () => {
     });
     expect(() =>
       reduceRuntimeEvents(
-        [...runningEvents(), waitStarted(5), { ...otherAction, sequence: 6 }],
+        [...runningEvents(), waitStarted(5), { ...otherAction, sequence: 7 }],
         runId,
       ),
     ).toThrow(/does not match unresolved action/);
@@ -355,7 +808,7 @@ describe("RunSnapshot reducer", () => {
     );
     expect(waiting.status).toBe("waiting_user");
     expect(waiting.pendingUserQuestion).toBe("Where should I save it?");
-    expect(waiting.pendingUserInputRequestId).toBe("event-5");
+    expect(waiting.pendingUserInputRequestId).toBe("event-6");
 
     const resumed = reduceRuntimeEvents(
       [
@@ -409,6 +862,7 @@ describe("RunSnapshot reducer", () => {
         id: "foreign-observation" as ObservationId,
         runId: "other-run" as RunId,
         computerSessionId: "computer-test" as ComputerSessionId,
+        surfaceRef: desktopSurfaceRef,
         capturedAt: "2026-01-01T00:00:00.000Z",
         viewport: { width: 1, height: 1, coordinateSpace: "physical" },
         screenshot: {
@@ -515,8 +969,34 @@ describe("JsonlRunEventWriter", () => {
 
     const events = await readRuntimeEvents(filePath);
     expect(events.map((item) => item.sequence)).toEqual([0, 1]);
-    expect((await readFile(filePath, "utf8")).split("\n").filter(Boolean)).toHaveLength(2);
+    const serializedEvents = (await readFile(filePath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { schemaVersion?: number });
+    expect(serializedEvents).toHaveLength(2);
+    expect(serializedEvents.map((item) => item.schemaVersion)).toEqual([2, 2]);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("refuses to write replay-only unknown Surface references as new live trajectory data", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-live-surface-writer-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+    try {
+      await expect(writer.append({
+        runId,
+        type: "observation.created",
+        observation: {
+          id: observationId,
+          runId,
+          computerSessionId: session.id,
+          surfaceRef: { surfaceId: "legacy-unknown-writer" as SurfaceId, generation: 0, kind: "unknown" },
+          capturedAt: "2026-01-01T00:00:00.000Z",
+          viewport: session.viewport,
+          screenshot: { assetId: "legacy-writer-asset" as AssetId, relativePath: "assets/legacy-writer.png", mediaType: "image/png", byteLength: 1 },
+        },
+      })).rejects.toThrow("LEGACY_SURFACE_UNRESOLVED");
+    } finally {
+      await writer.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("round-trips provider continuation data through JSONL", async () => {
@@ -562,6 +1042,7 @@ describe("JsonlRunEventWriter", () => {
       id: observationId,
       runId,
       computerSessionId: session.id,
+      surfaceRef: domSurfaceRef,
       capturedAt: "2026-01-01T00:00:00.000Z",
       viewport: session.viewport,
       screenshot: { assetId: "asset-select" as AssetId, relativePath: "assets/select.png", mediaType: "image/png", byteLength: 1 },
@@ -570,6 +1051,7 @@ describe("JsonlRunEventWriter", () => {
         source: "dom",
         observationId,
         computerSessionId: session.id,
+        surfaceRef: domSurfaceRef,
         completeness: "complete",
         degraded: false,
         maxElements: 16,
@@ -728,6 +1210,7 @@ describe("readRuntimeEvents", () => {
           id: observationId,
           runId,
           computerSessionId: "computer-test" as ComputerSessionId,
+          surfaceRef: desktopSurfaceRef,
           capturedAt: "2026-01-01T00:00:00.000Z",
           viewport: { width: 1, height: 1, coordinateSpace: "physical" },
           screenshot: {
@@ -737,6 +1220,12 @@ describe("readRuntimeEvents", () => {
             byteLength: 1,
           },
         },
+      }),
+      event(0, {
+        type: "computer.surface.transitioned",
+        from: null,
+        to: desktopSurfaceRef,
+        reason: "initial_observation",
       }),
       event(0, { type: "model.request.started", providerId: "provider-test" }),
       event(0, { type: "model.response.received", turn: { type: "finish", summary: "done", reportedStatus: "failure" } }),
@@ -762,6 +1251,7 @@ describe("readRuntimeEvents", () => {
       event(0, { type: "grounding.coordinate_coverage", actionId, observationId, mapping: "containment", matchedElementRef: "element-1", inHotProjection: true, normalizedDistance: 0 }),
       event(0, {
         type: "action.guard.evaluated",
+        evaluatedSurfaceRef: desktopSurfaceRef,
         callIds: [callId],
         actions: [{ actionId: "select-action" as ActionId, basedOn: observationId, kind: "select_option", groundingRef: "dom-select-1", optionText: "08:00" }],
         decision: "allow",
@@ -822,6 +1312,197 @@ describe("readRuntimeEvents", () => {
     }
   });
 
+  it("migrates legacy Observation, Guard and approval evidence to a stable unknown Surface for replay only", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-legacy-surface-"));
+    const filePath = join(directory, "legacy.jsonl");
+    const legacyEvent = (sequence: number, data: Record<string, unknown>) => ({
+      eventId: `legacy-event-${sequence}`,
+      runId,
+      sequence,
+      occurredAt: `2026-01-01T00:00:0${sequence}.000Z`,
+      ...data,
+    });
+    const legacyObservation = (sequence: number, id: string, assetId: string) => legacyEvent(sequence, {
+      type: "observation.created",
+      observation: {
+        id,
+        runId,
+        computerSessionId: session.id,
+        capturedAt: `2026-01-01T00:00:0${sequence}.000Z`,
+        viewport: session.viewport,
+        screenshot: { assetId, relativePath: `assets/${assetId}.png`, mediaType: "image/png", byteLength: 1 },
+      },
+    });
+    const firstLegacyObservation = legacyObservation(4, "legacy-observation-1", "legacy-asset-1");
+    const firstObservationData = (firstLegacyObservation as unknown as { observation: Record<string, unknown> }).observation;
+    const legacyEvents: unknown[] = [
+      legacyEvent(0, { type: "run.created", goal: "legacy replay" }),
+      legacyEvent(1, { type: "run.started" }),
+      legacyEvent(2, { type: "computer.open.started" }),
+      legacyEvent(3, { type: "computer.open.completed", session }),
+      {
+        ...firstLegacyObservation,
+        observation: {
+          ...firstObservationData,
+          grounding: {
+            version: "grounding-catalog-v2",
+            source: "dom",
+            observationId: "legacy-observation-1",
+            computerSessionId: session.id,
+            completeness: "complete",
+            degraded: false,
+            maxElements: 1,
+            elements: [],
+          },
+        },
+      },
+      legacyObservation(5, "legacy-observation-2", "legacy-asset-2"),
+      legacyEvent(6, {
+        type: "action.guard.evaluated",
+        callIds: [callId],
+        actions: [{ actionId: "legacy-guard-action", basedOn: "legacy-observation-1", kind: "click", point: { x: 1, y: 1 } }],
+        decision: "allow",
+        categories: [],
+        reasonCode: "legacy-fixture",
+        reason: "Legacy Guard record",
+        path: "local",
+        policyVersion: "legacy-v1",
+        modelRequestCount: 0,
+      }),
+      {
+        ...legacyEvent(7, { type: "approval.requested", requestId: "legacy-approval", callId, reason: "Legacy approval" }),
+        evidence: {
+          observationId: "legacy-observation-2",
+          decisionObservationId: "legacy-observation-1",
+          assetId: "legacy-asset-2",
+          capturedAt: "2026-01-01T00:00:05.000Z",
+          viewport: session.viewport,
+        },
+      },
+    ];
+    await writeFile(filePath, `${legacyEvents.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+
+    try {
+      const events = await readRuntimeEvents(filePath);
+      const observations = events.filter((item): item is Extract<RuntimeEvent, { type: "observation.created" }> => item.type === "observation.created");
+      expect(observations).toHaveLength(2);
+      expect(observations[0]?.observation.surfaceRef).toMatchObject({ generation: 0, kind: "unknown" });
+      expect(observations[1]?.observation.surfaceRef).toEqual(observations[0]?.observation.surfaceRef);
+      expect(observations[0]?.observation.grounding?.surfaceRef).toEqual(observations[0]?.observation.surfaceRef);
+      expect(events.find((item) => item.type === "action.guard.evaluated")).toMatchObject({ evaluatedSurfaceRef: observations[0]?.observation.surfaceRef });
+      expect(events.find((item) => item.type === "approval.requested")).toMatchObject({ evidence: { surfaceRef: observations[0]?.observation.surfaceRef } });
+
+      const snapshot = reduceRuntimeEvents(events, runId);
+      expect(snapshot.activeSurfaceRef).toEqual(observations[0]?.observation.surfaceRef);
+      expect(snapshot.surfaceLineage).toHaveLength(1);
+      expect(snapshot.surfaceLineage[0]).toMatchObject({ reason: "legacy_observation", to: observations[0]?.observation.surfaceRef });
+      expect(snapshot.status).toBe("waiting_approval");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not migrate an incomplete current-version Observation into a guessed desktop", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-current-surface-schema-"));
+    const filePath = join(directory, "current.jsonl");
+    const currentVersionWithoutSurface = {
+      ...event(0, { type: "observation.created", observation: {} as never }),
+      schemaVersion: 2,
+      observation: {
+        id: observationId,
+        runId,
+        computerSessionId: session.id,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "asset-current" as AssetId, relativePath: "assets/current.png", mediaType: "image/png", byteLength: 1 },
+      },
+    };
+    await writeFile(filePath, `${JSON.stringify(currentVersionWithoutSurface)}\n`, "utf8");
+    try {
+      await expect(readRuntimeEvents(filePath)).rejects.toThrow(/surfaceRef/u);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("replays a pre-Surface JSONL switch that changed ComputerSession IDs as an unknown alias only", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-legacy-switch-alias-"));
+    const filePath = join(directory, "pre-surface-switch.jsonl");
+    const legacyTargetSession: ComputerSessionDescriptor = {
+      ...session,
+      id: "legacy-window-session" as ComputerSessionId,
+      viewport: { width: 640, height: 480, coordinateSpace: "physical" },
+    };
+    const legacyEvent = (sequence: number, data: Record<string, unknown>) => ({
+      eventId: `legacy-switch-event-${sequence}`,
+      runId,
+      sequence,
+      occurredAt: `2026-01-01T00:00:0${sequence}.000Z`,
+      ...data,
+    });
+    const legacyEvents: unknown[] = [
+      legacyEvent(0, { type: "run.created", goal: "replay an old target switch" }),
+      legacyEvent(1, { type: "run.started" }),
+      legacyEvent(2, { type: "computer.open.started" }),
+      legacyEvent(3, { type: "computer.open.completed", session }),
+      legacyEvent(4, {
+        type: "observation.created",
+        observation: {
+          id: "legacy-source-observation",
+          runId,
+          computerSessionId: session.id,
+          capturedAt: "2026-01-01T00:00:04.000Z",
+          viewport: session.viewport,
+          screenshot: { assetId: "legacy-source-asset", relativePath: "assets/legacy-source.png", mediaType: "image/png", byteLength: 1 },
+        },
+      }),
+      legacyEvent(5, {
+        type: "action.execution.started",
+        action: { actionId: "legacy-switch-action", basedOn: "legacy-source-observation", kind: "switch_window", windowRef: "legacy-target-ref" },
+      }),
+      legacyEvent(6, {
+        type: "action.execution.completed",
+        receipt: { actionId: "legacy-switch-action", status: "completed", sessionAfter: legacyTargetSession },
+      }),
+      legacyEvent(7, {
+        type: "observation.created",
+        observation: {
+          id: "legacy-target-observation",
+          runId,
+          computerSessionId: legacyTargetSession.id,
+          capturedAt: "2026-01-01T00:00:07.000Z",
+          viewport: legacyTargetSession.viewport,
+          screenshot: { assetId: "legacy-target-asset", relativePath: "assets/legacy-target.png", mediaType: "image/png", byteLength: 1 },
+        },
+      }),
+      legacyEvent(8, { type: "run.finished", outcome: "succeeded" }),
+    ];
+    await writeFile(filePath, `${legacyEvents.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+
+    try {
+      const events = await readRuntimeEvents(filePath);
+      const observations = events.filter((item): item is Extract<RuntimeEvent, { type: "observation.created" }> => item.type === "observation.created");
+      expect(observations.map((item) => item.observation.surfaceRef)).toMatchObject([
+        { generation: 0, kind: "unknown" },
+        { generation: 0, kind: "unknown" },
+      ]);
+      expect(observations[0]?.observation.surfaceRef).not.toEqual(observations[1]?.observation.surfaceRef);
+
+      const snapshot = reduceRuntimeEvents(events, runId);
+      expect(snapshot.status).toBe("finished");
+      expect(snapshot.computerSession?.id).toBe(legacyTargetSession.id);
+      expect(snapshot.legacyComputerSessionAliases).toEqual([{
+        from: session.id,
+        to: legacyTargetSession.id,
+        eventId: "legacy-switch-event-6",
+      }]);
+      expect(snapshot.activeSurfaceRef).toEqual(observations[1]?.observation.surfaceRef);
+      expect(snapshot.surfaceLineage.map((entry) => entry.reason)).toEqual(["legacy_observation", "legacy_session_alias"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects cross-field ownership and receipt mismatches at the schema boundary", () => {
     const lifecycleMemoryEvent = {
       eventId: "event-lifecycle",
@@ -845,6 +1526,7 @@ describe("readRuntimeEvents", () => {
         id: observationId,
         runId: "other-run" as RunId,
         computerSessionId: "computer-test" as ComputerSessionId,
+        surfaceRef: desktopSurfaceRef,
         capturedAt: "2026-01-01T00:00:00.000Z",
         viewport: { width: 1, height: 1, coordinateSpace: "physical" as const },
         screenshot: {
@@ -856,6 +1538,10 @@ describe("readRuntimeEvents", () => {
       },
     };
     expect(runtimeEventSchema.safeParse(observation).success).toBe(false);
+    expect(runtimeEventSchema.safeParse({
+      ...observation,
+      observation: { ...observation.observation, runId, surfaceRef: undefined },
+    }).success).toBe(false);
 
     const failedAsCompleted = {
       eventId: "event-0",
@@ -959,11 +1645,19 @@ describe("Event, Asset and Snapshot integration", () => {
     });
     await writer.append({
       runId,
+      type: "computer.surface.transitioned",
+      from: null,
+      to: desktopSurfaceRef,
+      reason: "initial_observation",
+    });
+    await writer.append({
+      runId,
       type: "observation.created",
       observation: {
         id: observationId,
         runId,
         computerSessionId: "computer-integration" as ComputerSessionId,
+        surfaceRef: desktopSurfaceRef,
         capturedAt: "2026-01-01T00:00:00.000Z",
         viewport: { width: 1, height: 1, coordinateSpace: "physical" },
         screenshot: asset,

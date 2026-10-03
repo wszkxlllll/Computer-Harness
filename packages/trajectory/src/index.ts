@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { dirname, relative as pathRelative, resolve } from "node:path";
 import { z } from "zod";
 import { reduceMemoryMutation } from "@computer-harness/protocol";
 import type {
   ActionId,
+  ActionIntent,
   AssetId,
   AssetRef,
   ComputerSessionDescriptor,
@@ -19,6 +20,9 @@ import type {
   MemoryState,
   RuntimeEvent,
   RuntimeEventDraft,
+  SurfaceId,
+  SurfaceRef,
+  SurfaceTransitionReason,
   ToolCallId,
   ModelUsage,
 } from "@computer-harness/protocol";
@@ -33,11 +37,22 @@ export interface RunSnapshot {
   guardEvaluationCount: number;
   riskModelRequestCount: number;
   latestObservationId?: ObservationId;
+  activeSurfaceRef?: SurfaceRef;
+  surfaceLineage: SurfaceLineageEntry[];
+  pendingSurfaceTransition?: SurfaceRef;
+  /** Run-lifetime high-water marks; preserved in finished snapshots for deterministic replay/audit. */
+  surfaceGenerationHighWater: Record<string, number>;
+  /** Immutable direct-parent fact per SurfaceId; never projected into Provider Context. */
+  surfaceParentsById: Record<string, string | null>;
+  /** Decoder-only compatibility aliases; they do not authorize live session reuse. */
+  legacyComputerSessionAliases: Array<{ readonly from: string; readonly to: string; readonly eventId: EventId }>;
   pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
   pendingUserInputRequestId?: EventId;
   pendingWindowHandoff?: { sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" };
   unresolvedActionId?: ActionId;
+  /** Internal reducer binding used to validate kind-specific terminal receipt data. */
+  unresolvedActionKind?: ActionIntent["kind"];
   createdAt?: string;
   computerOpenStartedAt?: string;
   computerSession?: ComputerSessionDescriptor;
@@ -51,6 +66,16 @@ export interface RunSnapshot {
   memory: MemoryState;
 }
 
+export interface SurfaceLineageEntry {
+  readonly from: SurfaceRef | null;
+  readonly to: SurfaceRef;
+  readonly reason: SurfaceTransitionReason | "legacy_observation" | "legacy_session_alias";
+  readonly eventId?: EventId;
+}
+
+/** Only objects returned by readRuntimeEvents can enter the pre-v2 replay compatibility paths. */
+const decoderMarkedLegacyEvents = new WeakSet<object>();
+
 export function initialRunSnapshot(runId: RunId): RunSnapshot {
   return {
     runId,
@@ -59,6 +84,10 @@ export function initialRunSnapshot(runId: RunId): RunSnapshot {
     modelRequestCount: 0,
     guardEvaluationCount: 0,
     riskModelRequestCount: 0,
+    surfaceLineage: [],
+    surfaceGenerationHighWater: {},
+    surfaceParentsById: {},
+    legacyComputerSessionAliases: [],
     plan: { runId, tasks: [] },
     memory: { runId, facts: [], entities: [] },
   };
@@ -75,6 +104,10 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
 
   if (event.type !== "run.created" && snapshot.createdAt === undefined) {
     throw new Error(`event ${event.type} cannot precede run.created`);
+  }
+  if (snapshot.pendingSurfaceTransition !== undefined && event.type !== "observation.created" &&
+      event.type !== "runtime.error" && event.type !== "run.finished") {
+    throw new Error("computer.surface.transitioned must be followed immediately by its matching Observation");
   }
 
   switch (event.type) {
@@ -114,8 +147,8 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       return { ...snapshot, status: "waiting_window", pendingWindowHandoff: { sourceActionId: event.sourceActionId, reasonCode: event.reasonCode } };
     case "computer.window.handoff.completed":
       if (snapshot.status !== "waiting_window" || snapshot.pendingWindowHandoff === undefined || snapshot.computerSession === undefined ||
-          snapshot.computerSession.id === event.session.id || snapshot.computerSession.backend !== event.session.backend) {
-        throw new Error("window handoff completion requires the pending Computer session");
+          snapshot.computerSession.id !== event.session.id || snapshot.computerSession.backend !== event.session.backend) {
+        throw new Error("window handoff completion must retain the active ComputerSession identity");
       }
       {
         const { pendingWindowHandoff: _pendingWindowHandoff, latestObservationId: _latestObservationId, ...rest } = snapshot;
@@ -147,11 +180,60 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
           `observation ${event.observation.id} belongs to session ${event.observation.computerSessionId}, not ${snapshot.computerSession.id}`,
         );
       }
+      {
+        const observedSurfaceRef = event.observation.surfaceRef;
+        const pendingTransition = snapshot.pendingSurfaceTransition;
+        const activeSurfaceRef = snapshot.activeSurfaceRef;
+        const changed = activeSurfaceRef === undefined || !sameSurfaceRef(activeSurfaceRef, observedSurfaceRef);
+        if (pendingTransition !== undefined) {
+          if (!sameSurfaceRef(pendingTransition, observedSurfaceRef)) {
+            throw new Error("observation surfaceRef does not match the pending computer.surface.transitioned event");
+          }
+        } else if (changed) {
+          if (!isDecoderMarkedLegacyEvent(event) || event.schemaVersion === 2) {
+            throw new Error("Observation Surface changed without a preceding computer.surface.transitioned event");
+          }
+        }
+        const tracked = trackSurfaceRef(snapshot, observedSurfaceRef);
+        const { pendingSurfaceTransition: _pendingSurfaceTransition, ...snapshotWithoutPendingSurfaceTransition } = snapshot;
+        return {
+          ...snapshotWithoutPendingSurfaceTransition,
+          status: snapshot.status === "starting" ? "running" : snapshot.status,
+          latestObservationId: event.observation.id,
+          activeSurfaceRef: observedSurfaceRef,
+          surfaceGenerationHighWater: tracked.surfaceGenerationHighWater,
+          surfaceParentsById: tracked.surfaceParentsById,
+          surfaceLineage: changed && pendingTransition === undefined
+            ? [...snapshot.surfaceLineage, { from: activeSurfaceRef ?? null, to: observedSurfaceRef, reason: "legacy_observation" }]
+            : snapshot.surfaceLineage,
+        };
+      }
+    case "computer.surface.transitioned": {
+      if (snapshot.status !== "starting" && snapshot.status !== "running") {
+        throw new Error(`computer.surface.transitioned requires an active run, got ${snapshot.status}`);
+      }
+      if (snapshot.computerSession === undefined) throw new Error("computer.surface.transitioned requires a completed computer.open");
+      if (snapshot.pendingSurfaceTransition !== undefined) throw new Error("computer.surface.transitioned is waiting for its matching Observation");
+      const expectedFrom = snapshot.activeSurfaceRef;
+      if (event.from === null ? expectedFrom !== undefined : expectedFrom === undefined || !sameSurfaceRef(event.from, expectedFrom)) {
+        throw new Error("computer.surface.transitioned.from does not match the active Surface lineage");
+      }
+      if (!isValidSurfaceTransition(event.from, event.to, event.reason)) {
+        const fromLabel = event.from === null ? "none" : `${event.from.kind}@${event.from.generation}`;
+        throw new Error(`computer.surface.transitioned contains an invalid from/to/reason combination (${event.reason}: ${fromLabel} -> ${event.to.kind}@${event.to.generation})`);
+      }
+      validateSurfaceTransition(snapshot, event.from, event.to, event.reason);
+      const fromTracking = event.from === null ? snapshot : trackSurfaceRef(snapshot, event.from);
+      const toTracking = trackSurfaceRef(fromTracking, event.to);
       return {
         ...snapshot,
-        status: snapshot.status === "starting" ? "running" : snapshot.status,
-        latestObservationId: event.observation.id,
+        activeSurfaceRef: event.to,
+        pendingSurfaceTransition: event.to,
+        surfaceGenerationHighWater: toTracking.surfaceGenerationHighWater,
+        surfaceParentsById: toTracking.surfaceParentsById,
+        surfaceLineage: [...snapshot.surfaceLineage, { from: event.from, to: event.to, reason: event.reason, eventId: event.eventId }],
       };
+    }
     case "model.request.started":
       if (snapshot.status !== "running") {
         throw new Error(`${event.type} requires running status, got ${snapshot.status}`);
@@ -183,6 +265,9 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
     case "action.guard.evaluated":
       if (snapshot.status !== "running") {
         throw new Error(`action.guard.evaluated requires running status, got ${snapshot.status}`);
+      }
+      if (snapshot.activeSurfaceRef === undefined || !sameSurfaceRef(event.evaluatedSurfaceRef, snapshot.activeSurfaceRef)) {
+        throw new Error("action.guard.evaluated SurfaceRef does not match the active Surface lineage");
       }
       if (snapshot.unresolvedActionId !== undefined || snapshot.pendingApproval !== undefined || snapshot.pendingUserQuestion !== undefined) {
         throw new Error("action.guard.evaluated is not allowed while another action or interaction is pending");
@@ -223,11 +308,14 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
           `action ${event.action.actionId} started while action ${snapshot.unresolvedActionId} is unresolved`,
         );
       }
-      return {
+      const nextSnapshot: RunSnapshot = {
         ...snapshot,
         status: "running",
         unresolvedActionId: event.action.actionId,
+        unresolvedActionKind: event.action.kind,
       };
+      if (event.action.kind === "switch_window") delete nextSnapshot.latestObservationId;
+      return nextSnapshot;
     case "action.execution.completed":
     case "action.execution.failed":
       if (snapshot.status !== "running") {
@@ -242,10 +330,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         event.type === "action.execution.failed" &&
         event.receipt.status !== "refused" &&
         event.receipt.status !== "failed" &&
-        event.receipt.status !== "cancelled"
+        event.receipt.status !== "cancelled" &&
+        event.receipt.status !== "partial"
       ) {
         throw new Error(
-          `failed action event must carry refused, failed, or cancelled receipt, got ${event.receipt.status}`,
+          `failed action event must carry refused, failed, cancelled, or partial receipt, got ${event.receipt.status}`,
         );
       }
       if (snapshot.unresolvedActionId === undefined) {
@@ -259,11 +348,62 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         );
       }
       {
-        const { unresolvedActionId: _unresolvedActionId, ...withoutUnresolvedAction } = snapshot;
+        const switchingWindow = snapshot.unresolvedActionKind === "switch_window";
+        const sessionAfter = "sessionAfter" in event.receipt ? event.receipt.sessionAfter : undefined;
+        if (event.type === "action.execution.completed" && switchingWindow && sessionAfter === undefined) {
+          throw new Error("a completed switch_window action requires sessionAfter");
+        }
+        if (sessionAfter !== undefined && (event.type !== "action.execution.completed" || !switchingWindow)) {
+          throw new Error("sessionAfter is valid only on a completed switch_window receipt");
+        }
+        let nextComputerSession = snapshot.computerSession;
+        let nextActiveSurfaceRef = snapshot.activeSurfaceRef;
+        let nextSurfaceLineage = snapshot.surfaceLineage;
+        let nextGenerationHighWater = snapshot.surfaceGenerationHighWater;
+        let nextSurfaceParents = snapshot.surfaceParentsById;
+        let nextLegacySessionAliases = snapshot.legacyComputerSessionAliases;
+        if (sessionAfter !== undefined) {
+          if (snapshot.computerSession === undefined || sessionAfter.backend !== snapshot.computerSession.backend) {
+            throw new Error("switch_window sessionAfter must retain the active ComputerSession backend");
+          }
+          if (sessionAfter.id !== snapshot.computerSession.id) {
+            if (!isDecoderMarkedLegacyEvent(event)) {
+              throw new Error("switch_window sessionAfter must retain the active ComputerSession identity");
+            }
+            const aliasSurfaceRef = legacyUnknownSurfaceRef(String(snapshot.runId), String(sessionAfter.id));
+            const aliasTracking = trackSurfaceRef(snapshot, aliasSurfaceRef);
+            nextComputerSession = sessionAfter;
+            nextActiveSurfaceRef = aliasSurfaceRef;
+            nextSurfaceLineage = [...snapshot.surfaceLineage, {
+              from: snapshot.activeSurfaceRef ?? null,
+              to: aliasSurfaceRef,
+              reason: "legacy_session_alias",
+              eventId: event.eventId,
+            }];
+            nextGenerationHighWater = aliasTracking.surfaceGenerationHighWater;
+            nextSurfaceParents = aliasTracking.surfaceParentsById;
+            nextLegacySessionAliases = [
+              ...snapshot.legacyComputerSessionAliases,
+              { from: String(snapshot.computerSession.id), to: String(sessionAfter.id), eventId: event.eventId },
+            ];
+          } else {
+            nextComputerSession = sessionAfter;
+          }
+        }
+        const withoutUnresolvedAction = { ...snapshot };
+        delete withoutUnresolvedAction.unresolvedActionId;
+        delete withoutUnresolvedAction.unresolvedActionKind;
+        if (switchingWindow) delete withoutUnresolvedAction.latestObservationId;
         return {
           ...withoutUnresolvedAction,
           status: "running",
           stepCount: snapshot.stepCount + 1,
+          ...(nextComputerSession === undefined ? {} : { computerSession: nextComputerSession }),
+          ...(nextActiveSurfaceRef === undefined ? {} : { activeSurfaceRef: nextActiveSurfaceRef }),
+          surfaceLineage: nextSurfaceLineage,
+          surfaceGenerationHighWater: nextGenerationHighWater,
+          surfaceParentsById: nextSurfaceParents,
+          legacyComputerSessionAliases: nextLegacySessionAliases,
         };
       }
     case "planning.task.updated": {
@@ -346,6 +486,9 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       if (snapshot.status !== "running") {
         throw new Error(`approval.requested requires running status, got ${snapshot.status}`);
       }
+      if (event.evidence !== undefined && (snapshot.activeSurfaceRef === undefined || !sameSurfaceRef(event.evidence.surfaceRef, snapshot.activeSurfaceRef))) {
+        throw new Error("approval.requested evidence SurfaceRef does not match the active Surface lineage");
+      }
       if (snapshot.pendingUserQuestion !== undefined || snapshot.unresolvedActionId !== undefined) {
         throw new Error("approval.requested is not allowed while another interaction is pending");
       }
@@ -421,7 +564,17 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
       ) {
         throw new Error("a succeeded run must be running with no pending interaction");
       }
-        const { pendingApproval: _pendingApproval, pendingUserQuestion: _pendingUserQuestion, pendingWindowHandoff: _pendingWindowHandoff, ...withoutPending } =
+      // Session close releases backend bindings in the Computer adapter and
+      // has no trajectory deletion event. Keep high-water/parent facts and
+      // lineage immutable for replay/audit; only an unconsumed transition is
+      // cleared when the Run becomes terminal.
+      const {
+          pendingApproval: _pendingApproval,
+          pendingUserQuestion: _pendingUserQuestion,
+          pendingWindowHandoff: _pendingWindowHandoff,
+          pendingSurfaceTransition: _pendingSurfaceTransition,
+          ...withoutPending
+        } =
         snapshot;
       return {
         ...withoutPending,
@@ -466,6 +619,9 @@ export interface RunEventWriter {
   close(): Promise<void>;
 }
 
+/** Current durable JSONL event schema. Unversioned/v1 logs use the explicit legacy reader migration. */
+export const RUNTIME_EVENT_SCHEMA_VERSION = 2 as const;
+
 export class JsonlRunEventWriter implements RunEventWriter {
   private readonly filePath: string;
   private readonly runId: RunId;
@@ -495,10 +651,12 @@ export class JsonlRunEventWriter implements RunEventWriter {
     }
     const event: RuntimeEvent = {
       ...draft,
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
       eventId: draft.eventId ?? this.idFactory.next(),
       sequence: this.nextSequence,
       occurredAt: draft.occurredAt ?? new Date().toISOString(),
     };
+    assertLiveSurfaceBindings(event);
     this.nextSequence += 1;
     let result: RuntimeEvent | undefined;
     this.queue = this.queue.then(async () => {
@@ -575,6 +733,158 @@ export function reduceRuntimeEvents(events: readonly RuntimeEvent[], runId: RunI
     expectedSequence += 1;
   }
   return snapshot;
+}
+
+function sameSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
+  return left.surfaceId === right.surfaceId && left.generation === right.generation && left.kind === right.kind &&
+    left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
+}
+
+function isDecoderMarkedLegacyEvent(event: RuntimeEvent): boolean {
+  return decoderMarkedLegacyEvents.has(event);
+}
+
+function trackSurfaceRef(
+  snapshot: Pick<RunSnapshot, "surfaceGenerationHighWater" | "surfaceParentsById">,
+  ref: SurfaceRef,
+): Pick<RunSnapshot, "surfaceGenerationHighWater" | "surfaceParentsById"> {
+  const surfaceId = String(ref.surfaceId);
+  const parentId = ref.parentSurfaceId === undefined ? null : String(ref.parentSurfaceId);
+  if (ref.parentSurfaceId === ref.surfaceId) throw new Error("Surface cannot be its own parent");
+  if (ref.kind === "unknown" && parentId !== null) throw new Error("legacy unknown Surface cannot claim a parent lineage");
+  if ((ref.kind === "browser_tab" || ref.kind === "dom" || ref.kind === "overlay") && parentId === null) {
+    throw new Error(`${ref.kind} SurfaceRef requires its registry parentSurfaceId`);
+  }
+  if (ref.kind === "desktop" && parentId !== null) throw new Error("desktop SurfaceRef cannot have a parent");
+  const knownParent = snapshot.surfaceParentsById[surfaceId];
+  if (knownParent !== undefined && knownParent !== parentId) {
+    throw new Error(`Surface ${surfaceId} changed its immutable parent lineage`);
+  }
+  const knownGeneration = snapshot.surfaceGenerationHighWater[surfaceId];
+  if (knownGeneration !== undefined && ref.generation < knownGeneration) {
+    throw new Error(`Surface ${surfaceId} generation regressed from high-water ${knownGeneration} to ${ref.generation}`);
+  }
+  const surfaceParentsById = { ...snapshot.surfaceParentsById, [surfaceId]: parentId };
+  const visited = new Set<string>([surfaceId]);
+  let ancestor = parentId;
+  while (ancestor !== null) {
+    if (visited.has(ancestor)) throw new Error("Surface parent lineage contains a cycle");
+    visited.add(ancestor);
+    ancestor = surfaceParentsById[ancestor] ?? null;
+  }
+  return {
+    surfaceParentsById,
+    surfaceGenerationHighWater: {
+      ...snapshot.surfaceGenerationHighWater,
+      [surfaceId]: Math.max(knownGeneration ?? -1, ref.generation),
+    },
+  };
+}
+
+function validateSurfaceTransition(
+  snapshot: RunSnapshot,
+  from: SurfaceRef | null,
+  to: SurfaceRef,
+  reason: SurfaceTransitionReason,
+): void {
+  const toId = String(to.surfaceId);
+  const highWater = snapshot.surfaceGenerationHighWater[toId];
+  if (from === null) {
+    if (reason !== "initial_observation" || highWater !== undefined) {
+      throw new Error("initial_observation is only valid for the first generation of the initial Surface");
+    }
+    return;
+  }
+  const fromId = String(from.surfaceId);
+  const fromHighWater = snapshot.surfaceGenerationHighWater[fromId];
+  if (fromHighWater !== undefined && from.generation < fromHighWater) {
+    throw new Error(`transition source Surface ${fromId} is below its generation high-water`);
+  }
+  if (highWater !== undefined && to.generation <= highWater) {
+    throw new Error(`transition target Surface ${toId} must advance beyond generation high-water ${highWater}`);
+  }
+
+  const childPush = to.parentSurfaceId === from.surfaceId;
+  const childPop = from.parentSurfaceId === to.surfaceId && snapshot.surfaceParentsById[fromId] === toId;
+  const directParentRelation = childPush || childPop;
+  switch (reason) {
+    case "initial_observation":
+      throw new Error("initial_observation requires a null source Surface");
+    case "generation_advanced":
+      if (from.surfaceId !== to.surfaceId || from.kind !== to.kind || from.parentSurfaceId !== to.parentSurfaceId ||
+          from.admissionSource !== to.admissionSource || to.generation <= from.generation) {
+        throw new Error("generation_advanced requires the same Surface lineage and a higher generation");
+      }
+      return;
+    case "child_push":
+      if (from.surfaceId === to.surfaceId || !childPush) {
+        throw new Error("child_push target parentSurfaceId must equal the active source SurfaceId");
+      }
+      if ((to.kind === "overlay" && to.admissionSource !== "same_hwnd_overlay_root_proof") ||
+          (to.kind === "native_window" && to.admissionSource !== "owned_transient_window_root_proof" &&
+            to.admissionSource !== "win32_relationship_probe")) {
+        throw new Error("transient child_push requires its exact adapter admission source");
+      }
+      return;
+    case "child_pop":
+      if (from.surfaceId === to.surfaceId || !childPop) {
+        throw new Error("child_pop requires a known direct child-to-parent Surface lineage");
+      }
+      if ((from.kind === "overlay" && from.admissionSource !== "same_hwnd_overlay_root_proof") ||
+          (from.kind === "native_window" && from.parentSurfaceId !== undefined &&
+            from.admissionSource !== "owned_transient_window_root_proof" && from.admissionSource !== "win32_relationship_probe")) {
+        throw new Error("transient child_pop requires its exact adapter admission source");
+      }
+      return;
+    case "peer_switch":
+      if (from.surfaceId === to.surfaceId || directParentRelation) {
+        throw new Error("peer_switch requires distinct, non-parent/child Surface peers");
+      }
+      return;
+    case "surface_changed":
+      if (from.surfaceId === to.surfaceId || directParentRelation) {
+        throw new Error("surface_changed requires distinct non-parent/child Surfaces");
+      }
+      return;
+  }
+}
+
+function isValidSurfaceTransition(
+  from: SurfaceRef | null,
+  to: SurfaceRef,
+  reason: SurfaceTransitionReason,
+): boolean {
+  if (from === null) return reason === "initial_observation";
+  if (sameSurfaceRef(from, to)) return false;
+  return true;
+}
+
+function assertLiveSurfaceRef(value: SurfaceRef | undefined, label: string): asserts value is SurfaceRef {
+  if (value === undefined || typeof value.surfaceId !== "string" || value.surfaceId.trim().length === 0 ||
+      !Number.isSafeInteger(value.generation) || value.generation < 1 || value.kind === "unknown") {
+    throw new Error(`LEGACY_SURFACE_UNRESOLVED: new trajectory event ${label} requires a live generation-bound SurfaceRef`);
+  }
+}
+
+function assertLiveSurfaceBindings(event: RuntimeEvent): void {
+  switch (event.type) {
+    case "observation.created":
+      assertLiveSurfaceRef(event.observation.surfaceRef, "observation.created");
+      if (event.observation.grounding !== undefined) assertLiveSurfaceRef(event.observation.grounding.surfaceRef, "GroundingCatalog");
+      return;
+    case "computer.surface.transitioned":
+      if (event.from !== null) assertLiveSurfaceRef(event.from, "computer.surface.transitioned.from");
+      assertLiveSurfaceRef(event.to, "computer.surface.transitioned.to");
+      return;
+    case "action.guard.evaluated":
+      assertLiveSurfaceRef(event.evaluatedSurfaceRef, "action.guard.evaluated");
+      return;
+    case "approval.requested":
+      if (event.evidence !== undefined) assertLiveSurfaceRef(event.evidence.surfaceRef, "approval.requested.evidence");
+      return;
+    default:
+      return;
+  }
 }
 
 export interface AssetStore {
@@ -683,6 +993,25 @@ const viewportSchema = z.object({
   height: z.number().int().positive(),
   coordinateSpace: z.enum(["physical", "logical", "reference"]),
 });
+const surfaceRefSchema = z.object({
+  surfaceId: nonEmptyString.max(128),
+  generation: z.number().int().nonnegative(),
+  kind: z.enum(["desktop", "native_window", "browser_tab", "dom", "overlay", "unknown"]),
+  parentSurfaceId: nonEmptyString.max(128).optional(),
+  admissionSource: z.enum(["same_hwnd_overlay_root_proof", "owned_transient_window_root_proof", "win32_relationship_probe"]).optional(),
+}).superRefine((value, context) => {
+  if (value.kind === "unknown" ? value.generation !== 0 : value.generation < 1) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["generation"], message: "only a legacy unknown Surface may use generation 0" });
+  }
+  if (value.parentSurfaceId === value.surfaceId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["parentSurfaceId"], message: "Surface cannot be its own parent" });
+  }
+  if ((value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
+      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe") &&
+        (value.kind !== "native_window" || value.parentSurfaceId === undefined))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["admissionSource"], message: "admission source does not match its transient Surface kind/parent" });
+  }
+});
 const computerSessionSchema = z.object({
   id: nonEmptyString,
   backend: nonEmptyString,
@@ -761,6 +1090,7 @@ const groundingCatalogSchema = z.object({
   source: z.enum(["uia", "dom", "hybrid"]),
   observationId: nonEmptyString,
   computerSessionId: nonEmptyString,
+  surfaceRef: surfaceRefSchema,
   completeness: z.enum(["complete", "partial", "unknown"]),
   degraded: z.boolean(),
   maxElements: z.number().int().positive().max(256),
@@ -771,6 +1101,7 @@ const observationSchema = z.object({
   id: nonEmptyString,
   runId: nonEmptyString,
   computerSessionId: nonEmptyString,
+  surfaceRef: surfaceRefSchema,
   capturedAt: nonEmptyString,
   viewport: viewportSchema,
   screenshot: assetRefSchema,
@@ -864,17 +1195,20 @@ const actionIntentSchema = z.discriminatedUnion("kind", [
     ticks: z.number().int().positive(),
   }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("switch_window"), windowRef: nonEmptyString.max(128) }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
 ]);
 const actionReceiptSchema = z.object({
   actionId: nonEmptyString,
-  status: z.enum(["completed", "refused", "failed", "cancelled"]),
+  status: z.enum(["completed", "refused", "failed", "cancelled", "partial"]),
   driverCode: nonEmptyString.optional(),
   message: z.string().optional(),
+  sessionAfter: computerSessionSchema.optional(),
 });
 const completedActionReceiptSchema = actionReceiptSchema.extend({ status: z.literal("completed") });
-const failedActionReceiptSchema = actionReceiptSchema.extend({
-  status: z.enum(["refused", "failed", "cancelled"]),
+const failedActionReceiptSchema = actionReceiptSchema.omit({ sessionAfter: true }).extend({
+  status: z.enum(["refused", "failed", "cancelled", "partial"]),
+  sessionAfter: z.never().optional(),
 });
 const planningTaskSchema = z.object({
   id: nonEmptyString,
@@ -953,6 +1287,7 @@ const actionGuardSummarySchema = z.discriminatedUnion("kind", [
   z.object({ ...actionBaseSchema, kind: z.literal("select_option"), groundingRef: nonEmptyString.max(96), optionText: nonEmptyString.max(160) }),
   z.object({ ...actionBaseSchema, kind: z.literal("scroll"), point: pointSchema, direction: z.enum(["up", "down", "left", "right"]), ticks: z.number().int().positive() }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
+  z.object({ ...actionBaseSchema, kind: z.literal("switch_window"), windowRef: nonEmptyString.max(128) }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
 ]);
 const eventBaseSchema = {
@@ -960,6 +1295,7 @@ const eventBaseSchema = {
   runId: nonEmptyString,
   sequence: z.number().int().nonnegative(),
   occurredAt: nonEmptyString,
+  schemaVersion: z.union([z.literal(1), z.literal(2)]).optional(),
 };
 const contextTraceSchema = z.object({
   compilerVersion: nonEmptyString,
@@ -1061,6 +1397,13 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),
   z.object({
     ...eventBaseSchema,
+    type: z.literal("computer.surface.transitioned"),
+    from: surfaceRefSchema.nullable(),
+    to: surfaceRefSchema,
+    reason: z.enum(["initial_observation", "peer_switch", "child_push", "child_pop", "generation_advanced", "surface_changed"]),
+  }),
+  z.object({
+    ...eventBaseSchema,
     type: z.literal("model.request.started"),
     providerId: nonEmptyString,
     requestId: nonEmptyString.optional(),
@@ -1152,6 +1495,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
   z.object({
     ...eventBaseSchema,
     type: z.literal("action.guard.evaluated"),
+    evaluatedSurfaceRef: surfaceRefSchema,
     callIds: z.array(nonEmptyString).min(1),
     actions: z.array(actionGuardSummarySchema).min(1),
     decision: z.enum(["allow", "require_approval", "deny"]),
@@ -1232,6 +1576,16 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     requestId: nonEmptyString,
     callId: nonEmptyString,
     reason: z.string(),
+    requiresVisualReview: z.boolean().optional(),
+    evidence: z.object({
+      observationId: nonEmptyString,
+      decisionObservationId: nonEmptyString,
+      assetId: nonEmptyString,
+      capturedAt: nonEmptyString,
+      viewport: viewportSchema,
+      surfaceRef: surfaceRefSchema,
+    }).optional(),
+    actions: z.array(actionGuardSummarySchema).optional(),
   }),
   z.object({
     ...eventBaseSchema,
@@ -1252,6 +1606,31 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
 ]);
 
 export const runtimeEventSchema = runtimeEventUnionSchema.superRefine((event, context) => {
+  if (event.schemaVersion === 2) {
+    const refs: Array<{ path: (string | number)[]; value: z.infer<typeof surfaceRefSchema> }> = [];
+    if (event.type === "observation.created") {
+      refs.push({ path: ["observation", "surfaceRef"], value: event.observation.surfaceRef });
+      if (event.observation.grounding !== undefined) refs.push({ path: ["observation", "grounding", "surfaceRef"], value: event.observation.grounding.surfaceRef });
+    } else if (event.type === "computer.surface.transitioned") {
+      if (event.from !== null) refs.push({ path: ["from"], value: event.from });
+      refs.push({ path: ["to"], value: event.to });
+    } else if (event.type === "action.guard.evaluated") {
+      refs.push({ path: ["evaluatedSurfaceRef"], value: event.evaluatedSurfaceRef });
+    } else if (event.type === "approval.requested" && event.evidence !== undefined) {
+      refs.push({ path: ["evidence", "surfaceRef"], value: event.evidence.surfaceRef });
+    }
+    for (const { path, value } of refs) {
+      if (value.kind === "unknown") {
+        context.addIssue({ code: z.ZodIssueCode.custom, path, message: "schemaVersion 2 cannot contain replay-only unknown SurfaceRefs" });
+      }
+      if ((value.kind === "browser_tab" || value.kind === "dom" || value.kind === "overlay") && value.parentSurfaceId === undefined) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "parentSurfaceId"], message: `${value.kind} SurfaceRef requires parentSurfaceId in schemaVersion 2` });
+      }
+      if (value.kind === "desktop" && value.parentSurfaceId !== undefined) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "parentSurfaceId"], message: "desktop SurfaceRef cannot have parentSurfaceId" });
+      }
+    }
+  }
   if (event.type === "observation.created" && event.observation.runId !== event.runId) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1281,8 +1660,106 @@ function parseRuntimeEvent(value: unknown, lineNumber: number): RuntimeEvent {
   return result.data as unknown as RuntimeEvent;
 }
 
+interface LegacySurfaceDecodeState {
+  readonly lastSessionByRun: Map<string, string>;
+  readonly sessionByObservation: Map<string, string>;
+}
+
+function legacyUnknownSurfaceRef(runId: string, sessionId: string): SurfaceRef {
+  const digest = createHash("sha256").update(`${runId}\u0000${sessionId}`).digest("hex").slice(0, 24);
+  return { surfaceId: `legacy-unknown-${digest}` as SurfaceId, generation: 0, kind: "unknown" };
+}
+
+function migrateLegacyRuntimeEvent(value: unknown, state: LegacySurfaceDecodeState, lineNumber: number): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const event = value as Record<string, unknown>;
+  const version = event.schemaVersion;
+  if (version !== undefined && (typeof version !== "number" || version < 1 || version > RUNTIME_EVENT_SCHEMA_VERSION)) {
+    throw new Error(`unsupported runtime event schema version at line ${lineNumber}`);
+  }
+  if (version === RUNTIME_EVENT_SCHEMA_VERSION) return value;
+
+  const runId = typeof event.runId === "string" ? event.runId : "unresolved-run";
+  if (event.type === "computer.open.completed" && isRecord(event.session) && typeof event.session.id === "string") {
+    state.lastSessionByRun.set(runId, event.session.id);
+  }
+  if (event.type === "observation.created" && isRecord(event.observation)) {
+    const observation = event.observation;
+    const observationId = typeof observation.id === "string" ? observation.id : undefined;
+    const sessionId = typeof observation.computerSessionId === "string"
+      ? observation.computerSessionId
+      : state.lastSessionByRun.get(runId) ?? "unresolved-session";
+    const ref = !requiresLegacyUnknownSurface(observation.surfaceRef)
+      ? observation.surfaceRef as unknown as SurfaceRef
+      : legacyUnknownSurfaceRef(runId, sessionId);
+    const grounding = isRecord(observation.grounding) &&
+      (requiresLegacyUnknownSurface(observation.grounding.surfaceRef) || !sameUntrustedSurfaceRef(observation.grounding.surfaceRef, ref))
+      ? { ...observation.grounding, surfaceRef: ref }
+      : observation.grounding;
+    const migratedObservation = {
+      ...observation,
+      surfaceRef: ref,
+      ...(grounding === undefined ? {} : { grounding }),
+    };
+    if (observationId !== undefined) {
+      const key = `${runId}\u0000${observationId}`;
+      state.sessionByObservation.set(key, sessionId);
+    }
+    state.lastSessionByRun.set(runId, sessionId);
+    return { ...event, observation: migratedObservation };
+  }
+  if (event.type === "approval.requested" && isRecord(event.evidence) && requiresLegacyUnknownSurface(event.evidence.surfaceRef)) {
+    const decisionId = typeof event.evidence.decisionObservationId === "string" ? event.evidence.decisionObservationId : undefined;
+    const sessionId = decisionId === undefined
+      ? state.lastSessionByRun.get(runId) ?? "unresolved-session"
+      : state.sessionByObservation.get(`${runId}\u0000${decisionId}`) ?? state.lastSessionByRun.get(runId) ?? "unresolved-session";
+    return {
+      ...event,
+      evidence: { ...event.evidence, surfaceRef: legacyUnknownSurfaceRef(runId, sessionId) },
+    };
+  }
+  if (event.type === "action.guard.evaluated" && requiresLegacyUnknownSurface(event.evaluatedSurfaceRef)) {
+    return {
+      ...event,
+      evaluatedSurfaceRef: legacyUnknownSurfaceRef(runId, state.lastSessionByRun.get(runId) ?? "unresolved-session"),
+    };
+  }
+  return value;
+}
+
+function requiresLegacyUnknownSurface(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.surfaceId !== "string" || value.surfaceId.trim().length === 0 ||
+      typeof value.generation !== "number" || !Number.isSafeInteger(value.generation) || typeof value.kind !== "string") return true;
+  if (value.parentSurfaceId !== undefined && (typeof value.parentSurfaceId !== "string" ||
+      value.parentSurfaceId.trim().length === 0 || value.parentSurfaceId === value.surfaceId)) return true;
+  if (value.admissionSource !== undefined && value.admissionSource !== "same_hwnd_overlay_root_proof" &&
+      value.admissionSource !== "owned_transient_window_root_proof" && value.admissionSource !== "win32_relationship_probe") return true;
+  if ((value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
+      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe") &&
+        (value.kind !== "native_window" || value.parentSurfaceId === undefined))) return true;
+  if (value.kind === "unknown") return value.generation !== 0 || value.parentSurfaceId !== undefined;
+  if (value.kind !== "desktop" && value.kind !== "native_window" && value.kind !== "browser_tab" && value.kind !== "dom" && value.kind !== "overlay") return true;
+  if (value.generation < 1) return true;
+  if ((value.kind === "browser_tab" || value.kind === "dom" || value.kind === "overlay") && value.parentSurfaceId === undefined) return true;
+  return value.kind === "desktop" && value.parentSurfaceId !== undefined;
+}
+
+function sameUntrustedSurfaceRef(value: unknown, ref: SurfaceRef): boolean {
+  return isRecord(value) && value.surfaceId === ref.surfaceId && value.generation === ref.generation &&
+    value.kind === ref.kind && value.parentSurfaceId === ref.parentSurfaceId &&
+    value.admissionSource === ref.admissionSource;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export async function readRuntimeEvents(filePath: string): Promise<RuntimeEvent[]> {
   const content = await readFile(filePath, "utf8");
+  const state: LegacySurfaceDecodeState = {
+    lastSessionByRun: new Map(),
+    sessionByObservation: new Map(),
+  };
   return content.split("\n").reduce<RuntimeEvent[]>((events, line, index) => {
     if (line.trim().length === 0) {
       return events;
@@ -1295,7 +1772,11 @@ export async function readRuntimeEvents(filePath: string): Promise<RuntimeEvent[
         `invalid JSON in runtime event at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    events.push(parseRuntimeEvent(parsed, index + 1));
+    const sourceVersion = isRecord(parsed) ? parsed.schemaVersion : undefined;
+    const migrated = migrateLegacyRuntimeEvent(parsed, state, index + 1);
+    const event = parseRuntimeEvent(migrated, index + 1);
+    if (sourceVersion === undefined || sourceVersion === 1) decoderMarkedLegacyEvents.add(event);
+    events.push(event);
     return events;
   }, []);
 }

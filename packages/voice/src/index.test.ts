@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ActionId, EventId, ObservationAssessment, ObservationId, PlanningTask, RunId, RuntimeEvent, RuntimeEventData } from "@computer-harness/protocol";
+import type { ActionId, EventId, ObservationAssessment, ObservationId, PlanningTask, RunId, RuntimeEvent, RuntimeEventData, SurfaceId } from "@computer-harness/protocol";
 import { createVoiceTranscriptState, reduceVoiceInputEvent, RunNoticeProjector, RunNoticeScheduler, transcriptText, type RunNotice } from "./index.js";
 
 const runId = "voice-run" as RunId;
+const surfaceRef = { surfaceId: "voice-test-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 function event(sequence: number, data: RuntimeEventData, currentRunId = runId): RuntimeEvent {
   return {
@@ -43,7 +44,7 @@ function proposed(sequence: number, callSequence: number, actionId: string): Run
   });
 }
 
-function actionCompleted(sequence: number, actionId: string, status: "completed" | "refused" | "failed" | "cancelled" = "completed", eventType: "action.execution.completed" | "action.execution.failed" = "action.execution.completed"): RuntimeEvent {
+function actionCompleted(sequence: number, actionId: string, status: "completed" | "refused" | "failed" | "cancelled" | "partial" = "completed", eventType: "action.execution.completed" | "action.execution.failed" = "action.execution.completed"): RuntimeEvent {
   return event(sequence, {
     type: eventType,
     receipt: { actionId: actionId as ActionId, status },
@@ -57,6 +58,7 @@ function observation(sequence: number, id: string): RuntimeEvent {
       id: id as ObservationId,
       runId,
       computerSessionId: "voice-session" as never,
+      surfaceRef,
       capturedAt: "2026-09-29T00:00:00.000Z",
       viewport: { width: 800, height: 600, coordinateSpace: "physical" },
       screenshot: { assetId: `asset-${id}` as never, relativePath: `screenshots/${id}.png`, mediaType: "image/png", byteLength: 1 },
@@ -71,7 +73,23 @@ function observationAssessmentEvent(sequence: number, assessment: ObservationAss
     : turnType === "finish"
       ? { type: "finish" as const, summary: "finished", observationAssessment }
       : { type: "user_input_required" as const, question: "Continue?", observationAssessment };
-  return event(sequence, { type: "model.response.received", turn });
+  return event(sequence, { type: "model.response.received", requestId: `request-${sequence - 1}`, decisionId: `decision-${sequence - 1}`, turn });
+}
+
+function modelRequestStarted(sequence: number, observationIncluded = true): RuntimeEvent {
+  return event(sequence, {
+    type: "model.request.started",
+    providerId: "fixture-provider",
+    requestId: `request-${sequence}`,
+    decisionId: `decision-${sequence}`,
+    contextBudget: {
+      mode: "raw",
+      estimatedInputTokens: 10,
+      selectedHistoryEvents: 1,
+      omittedHistoryEvents: 0,
+      trace: { observationIncluded } as never,
+    },
+  });
 }
 
 function assessment(overrides: Partial<ObservationAssessment> = {}): ObservationAssessment {
@@ -230,24 +248,28 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(projector.project(actionCompleted(6, "action-2"))).toBeUndefined();
   });
 
-  it("speaks a validated milestone summary only after its action and observation checks", () => {
+  it("speaks a user-level milestone only when its exact fresh observation was included in the response request", () => {
     const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     projector.project(observation(1, "observation-1"));
-    projector.project(computerTurn(2));
+    expect(projector.project(computerTurn(2, { assistantText: "我已经找到符合条件的车票。" }))).toBeUndefined();
     projector.project(proposed(3, 2, "action-1"));
     expect(projector.project(actionCompleted(4, "action-1"))).toBeUndefined();
     projector.project(observation(5, "observation-2"));
-
     const milestone = assessment({
-      evidence: "A private verification code 123456 is visible in the model summary.",
-      progress: { kind: "milestone", summary: "Search results page is open." },
+      actionOutcome: "uncertain",
+      evidence: "The screenshot shows the requested train results.",
+      progress: { kind: "milestone", summary: "已显示上海到杭州的车次结果。" },
     });
-    // Monitor-off runs have no deterministic transition, so the model annotation stays silent.
-    expect(projector.project(observationAssessmentEvent(6, milestone))).toBeUndefined();
-    projector.project(monitorTransition(7, "changed"));
+    projector.project(monitorTransition(6, "unchanged"));
+    projector.project(modelRequestStarted(7));
     const progress = projector.project(observationAssessmentEvent(8, milestone));
-    expect(progress).toMatchObject({ kind: "progress", delivery: "polite", text: "Search results page is open.", progressSemantic: "verified_milestone" });
-    expect(progress?.text).not.toContain("123456");
+    expect(progress).toMatchObject({
+      kind: "progress",
+      delivery: "polite",
+      text: "已显示上海到杭州的车次结果。",
+      progressSemantic: "observation_milestone",
+    });
+    expect(progress?.text).not.toContain("我已经找到");
 
     const sensitiveSummaryProjector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     sensitiveSummaryProjector.project(observation(1, "observation-1"));
@@ -255,11 +277,11 @@ describe("RuntimeEvent to RunNotice projection", () => {
     sensitiveSummaryProjector.project(proposed(3, 2, "action-1"));
     sensitiveSummaryProjector.project(actionCompleted(4, "action-1"));
     sensitiveSummaryProjector.project(observation(5, "observation-2"));
-    sensitiveSummaryProjector.project(monitorTransition(6, "changed"));
+    sensitiveSummaryProjector.project(modelRequestStarted(6));
     const sensitiveSummaryNotice = sensitiveSummaryProjector.project(observationAssessmentEvent(7, assessment({
       progress: { kind: "milestone", summary: "The verification code is 123456." },
     })));
-    expect(sensitiveSummaryNotice?.text).toBe("已确认一项进展，任务继续中。");
+    expect(sensitiveSummaryNotice?.text).toBe("已确认一个阶段结果。");
     expect(sensitiveSummaryNotice?.text).not.toContain("123456");
 
     const fixedProjector = new RunNoticeProjector(runId);
@@ -268,36 +290,61 @@ describe("RuntimeEvent to RunNotice projection", () => {
     fixedProjector.project(proposed(3, 2, "action-1"));
     fixedProjector.project(actionCompleted(4, "action-1"));
     fixedProjector.project(observation(5, "observation-2"));
-    fixedProjector.project(monitorTransition(6, "changed"));
+    fixedProjector.project(modelRequestStarted(6));
     expect(fixedProjector.project(observationAssessmentEvent(7, assessment({
       progress: { kind: "milestone", summary: "The report opened." },
-    })))?.text).toBe("已确认一项进展，任务继续中。");
+    })))?.text).toBe("已确认一个阶段结果。");
   });
 
-  it("rejects stale observation/action bindings and semantic conflicts", () => {
+  it("allows one-turn-later stable state despite no-effect/unchanged diagnostics and deduplicates it", () => {
     const makeProjector = (): RunNoticeProjector => {
-      const projector = new RunNoticeProjector(runId);
+      const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
       projector.project(observation(1, "observation-1"));
       projector.project(computerTurn(2));
       projector.project(proposed(3, 2, "action-1"));
       projector.project(actionCompleted(4, "action-1"));
       projector.project(observation(5, "observation-2"));
+      projector.project(monitorTransition(6, "unchanged"));
       return projector;
     };
 
-    expect(makeProjector().project(observationAssessmentEvent(6, assessment({ observationId: "observation-old" as ObservationId, progress: { kind: "milestone", summary: "stale" } })))).toBeUndefined();
-    expect(makeProjector().project(observationAssessmentEvent(6, assessment({ actionId: "action-old" as ActionId, progress: { kind: "milestone", summary: "stale" } })))).toBeUndefined();
-
-    const conflicting = makeProjector();
-    conflicting.project(monitorTransition(6, "unchanged"));
-    expect(conflicting.project(observationAssessmentEvent(7, assessment({ progress: { kind: "milestone", summary: "unchanged screen" } })))).toBeUndefined();
-
-    const unknown = makeProjector();
-    unknown.project(monitorTransition(6, "unknown"));
-    expect(unknown.project(observationAssessmentEvent(7, assessment({ progress: { kind: "milestone", summary: "unconfirmed change" } })))).toBeUndefined();
+    const projector = makeProjector();
+    const state = assessment({
+      actionOutcome: "no_effect",
+      evidence: "The current screenshot still shows the selected departure city.",
+      progress: { kind: "milestone", summary: "出发城市已确认。" },
+    });
+    projector.project(modelRequestStarted(7));
+    expect(projector.project(observationAssessmentEvent(8, state))).toMatchObject({
+      text: "出发城市已确认。",
+      progressSemantic: "observation_milestone",
+      delivery: "polite",
+    });
+    projector.project(modelRequestStarted(9));
+    expect(projector.project(observationAssessmentEvent(10, state))).toBeUndefined();
   });
 
-  it("rejects Monitor transitions sourced from a different receipt or observation event", () => {
+  it("does not use action attribution or Monitor pixel transition as semantic speech gates", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    projector.project(observation(1, "observation-1"));
+    projector.project(computerTurn(2));
+    projector.project(proposed(3, 2, "action-1"));
+    projector.project(actionCompleted(4, "action-1"));
+    projector.project(observation(5, "observation-2"));
+    projector.project(monitorTransition(6, "unknown"));
+    projector.project(modelRequestStarted(7));
+    expect(projector.project(observationAssessmentEvent(8, assessment({
+      actionId: "diagnostic-only-id" as ActionId,
+      actionOutcome: "unexpected_change",
+      progress: { kind: "milestone", summary: "当前截图显示查询结果仍在页面上。" },
+    })))).toMatchObject({
+      text: "当前截图显示查询结果仍在页面上。",
+      progressSemantic: "observation_milestone",
+      delivery: "polite",
+    });
+  });
+
+  it("rejects progress if the screenshot was absent from this request or the assessment is stale", () => {
     const makeProjector = (): RunNoticeProjector => {
       const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
       projector.project(observation(1, "observation-1"));
@@ -307,68 +354,73 @@ describe("RuntimeEvent to RunNotice projection", () => {
       projector.project(observation(5, "observation-2"));
       return projector;
     };
-    const milestone = observationAssessmentEvent(7, assessment({
+    const withoutImage = makeProjector();
+    withoutImage.project(modelRequestStarted(6, false));
+    expect(withoutImage.project(observationAssessmentEvent(7, assessment({
       progress: { kind: "milestone", summary: "The report opened." },
-    }));
+    })))).toBeUndefined();
 
-    const wrongReceipt = makeProjector();
-    wrongReceipt.project(monitorTransition(6, "changed", "event-other-receipt" as EventId, "event-5" as EventId));
-    expect(wrongReceipt.project(milestone)).toBeUndefined();
-
-    const wrongObservation = makeProjector();
-    wrongObservation.project(monitorTransition(6, "changed", "event-4" as EventId, "event-other-observation" as EventId));
-    expect(wrongObservation.project(milestone)).toBeUndefined();
+    const stale = makeProjector();
+    stale.project(modelRequestStarted(6));
+    expect(stale.project(observationAssessmentEvent(7, assessment({
+      observationId: "observation-old" as ObservationId,
+      progress: { kind: "milestone", summary: "The report opened." },
+    })))).toBeUndefined();
   });
 
-  it("never speaks Monitor conclusions and only voices an expected-change milestone", () => {
-    const projector = new RunNoticeProjector(runId);
+  it("uses progress.kind to speak concrete observed blockers at interrupt priority", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     projector.project(observation(1, "observation-1"));
     projector.project(computerTurn(2));
     projector.project(proposed(3, 2, "action-1"));
     projector.project(actionCompleted(4, "action-1"));
     projector.project(observation(5, "observation-2"));
     projector.project(monitorTransition(6, "unchanged"));
-    const unchangedBlocked = projector.project(observationAssessmentEvent(7, assessment({
-      actionOutcome: "no_effect",
-      progress: { kind: "blocked", summary: "The page did not change" },
-    }), "user_input_required"));
-    expect(unchangedBlocked).toBeUndefined();
-
-    const unknownProjector = new RunNoticeProjector(runId);
-    unknownProjector.project(observation(1, "observation-1"));
-    unknownProjector.project(computerTurn(2));
-    unknownProjector.project(proposed(3, 2, "action-1"));
-    unknownProjector.project(actionCompleted(4, "action-1"));
-    unknownProjector.project(observation(5, "observation-2"));
-    unknownProjector.project(monitorTransition(6, "unknown"));
-    expect(unknownProjector.project(observationAssessmentEvent(7, assessment({
+    projector.project(modelRequestStarted(7));
+    const blocked = projector.project(observationAssessmentEvent(8, assessment({
       actionOutcome: "uncertain",
-      progress: { kind: "blocked", summary: "The comparison is uncertain" },
-    })))).toBeUndefined();
+      progress: { kind: "blocked", summary: "当前页面提示需要重新登录。" },
+    }), "user_input_required"));
+    expect(blocked).toMatchObject({
+      kind: "progress",
+      delivery: "interrupt",
+      text: "当前页面提示需要重新登录。",
+      progressSemantic: "observation_blocker",
+    });
+  });
 
-    const changedProjector = new RunNoticeProjector(runId);
-    changedProjector.project(observation(1, "observation-1"));
-    changedProjector.project(computerTurn(2));
-    changedProjector.project(proposed(3, 2, "action-1"));
-    changedProjector.project(actionCompleted(4, "action-1"));
-    changedProjector.project(observation(5, "observation-2"));
-    changedProjector.project(monitorTransition(6, "changed"));
-    expect(changedProjector.project(observationAssessmentEvent(7, assessment({
-      actionOutcome: "unexpected_change",
-      progress: { kind: "blocked", summary: "The unexpected page is not the target" },
-    })))).toBeUndefined();
+  it("speaks a screenshot-confirmed write result and deduplicates sensitive-summary fallback", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    projector.project(observation(1, "before-write"));
+    projector.project(computerTurn(2));
+    projector.project(proposed(3, 2, "write-action"));
+    projector.project(actionCompleted(4, "write-action"));
+    projector.project(observation(5, "after-write"));
+    projector.project(modelRequestStarted(6));
+    const written = projector.project(observationAssessmentEvent(7, assessment({
+      observationId: "after-write" as ObservationId,
+      actionId: "write-action" as ActionId,
+      progress: { kind: "milestone", summary: "前三个车次及票价已显示在记事本中。" },
+    })));
+    expect(written?.text).toBe("前三个车次及票价已显示在记事本中。");
 
-    const unexpectedMilestoneProjector = new RunNoticeProjector(runId);
-    unexpectedMilestoneProjector.project(observation(1, "observation-1"));
-    unexpectedMilestoneProjector.project(computerTurn(2));
-    unexpectedMilestoneProjector.project(proposed(3, 2, "action-1"));
-    unexpectedMilestoneProjector.project(actionCompleted(4, "action-1"));
-    unexpectedMilestoneProjector.project(observation(5, "observation-2"));
-    unexpectedMilestoneProjector.project(monitorTransition(6, "changed"));
-    expect(unexpectedMilestoneProjector.project(observationAssessmentEvent(7, assessment({
-      actionOutcome: "unexpected_change",
-      progress: { kind: "milestone", summary: "The screen changed unexpectedly" },
-    })))).toBeUndefined();
+    const sensitive = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    sensitive.project(observation(1, "before"));
+    sensitive.project(computerTurn(2));
+    sensitive.project(proposed(3, 2, "action-1"));
+    sensitive.project(actionCompleted(4, "action-1"));
+    sensitive.project(observation(5, "current"));
+    sensitive.project(modelRequestStarted(6));
+    const privateState = assessment({
+      observationId: "current" as ObservationId,
+      progress: { kind: "blocked", summary: "验证码 123456 已显示" },
+    });
+    expect(sensitive.project(observationAssessmentEvent(7, privateState))).toMatchObject({
+      delivery: "interrupt",
+      text: "当前页面显示有事项需要处理。",
+    });
+    sensitive.project(modelRequestStarted(8));
+    expect(sensitive.project(observationAssessmentEvent(9, privateState))).toBeUndefined();
   });
 
   it("uses the current task map when another task becomes pending or completes", () => {
@@ -431,10 +483,10 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(dynamicProjector.project(event(4, { type: "runtime.error", category: "late", message: "late" }))).toBeUndefined();
 
     const unsuccessfulOutcomes = [
-      ["failed", "任务未能完成，请查看详情。"],
+      ["failed", "任务未能完成。"],
       ["cancelled", "任务已取消。"],
-      ["budget_exhausted", "任务达到执行上限，可查看进度。"],
-      ["outcome_unknown", "有项操作结果未确认，请查看任务。"],
+      ["budget_exhausted", "任务操作已达到上限。"],
+      ["outcome_unknown", "有项操作的结果无法确认，任务已暂停。"],
     ] as const;
     for (const [outcome, fallback] of unsuccessfulOutcomes) {
       expect(new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
@@ -461,6 +513,11 @@ describe("RuntimeEvent to RunNotice projection", () => {
     });
     expect(currentNotice?.text).toBe("可能涉及对外发送或提交内容的点击操作，请核对后审批。");
     expect(currentNotice?.text).not.toContain("This English reason");
+
+    const windowSwitchNotice = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, {
+      currentApproval: { requestId: "approval-current", voiceContext: { categories: ["external_commitment"], reasonCode: "declared_high_impact", actionKind: "switch_window" } },
+    });
+    expect(windowSwitchNotice?.text).toBe("可能涉及对外发送或提交内容的切换窗口操作，请核对后审批。");
 
     const privacy = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, {
       currentApproval: { requestId: "approval-current", voiceContext: { categories: ["privacy_account"], reasonCode: "protected_input", actionKind: "type" } },
@@ -498,8 +555,44 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(question?.pendingRequestId).toBe("event-2");
     expect(projector.project(event(3, { type: "runtime.error", category: "network", message: "secret token details" }))).toMatchObject({ kind: "error", delivery: "interrupt" });
     expect(projector.project(event(4, { type: "run.finished", outcome: "succeeded", summary: "Never read directly" }))).toMatchObject({ kind: "result", delivery: "interrupt", text: "任务已完成，可查看结果。" });
-    expect(projector.project(event(5, { type: "action.guard.evaluated", callIds: [], actions: [], decision: "allow", categories: [], reasonCode: "test", reason: "private guard reason", path: "local", policyVersion: "test", modelRequestCount: 0 }))).toBeUndefined();
+    expect(projector.project(event(5, { type: "action.guard.evaluated", evaluatedSurfaceRef: surfaceRef, callIds: [], actions: [], decision: "allow", categories: [], reasonCode: "test", reason: "private guard reason", path: "local", policyVersion: "test", modelRequestCount: 0 }))).toBeUndefined();
     expect(projector.project(actionCompleted(6, "orphan-action"))).toBeUndefined();
+  });
+
+  it("speaks controlled Chinese error categories without forwarding internal diagnostics", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    const retrying = event(1, {
+      type: "model.request.failed",
+      category: "provider",
+      code: "HTTP_429",
+      message: "secret token at E:/private/profile with coordinates 442,318",
+      retryable: true,
+    });
+    expect(projector.project(retrying)).toMatchObject({ kind: "error", text: "模型连接暂时不稳定。" });
+    expect(projector.project(event(2, {
+      type: "model.request.failed",
+      category: "provider",
+      code: "HTTP_429",
+      message: "another private provider body",
+      retryable: true,
+    }))).toBeUndefined();
+    expect(projector.project(event(3, {
+      type: "runtime.error",
+      category: "unknown_side_effect",
+      message: "Do not speak this raw error, path, or coordinate.",
+    }))).toMatchObject({ kind: "error", text: "有项操作的结果无法确认，任务已停止。" });
+    expect(projector.project(event(4, {
+      type: "runtime.error",
+      category: "partial_side_effect",
+      message: "Partial Unicode input on hwnd 12345 at E:/private/document.txt",
+    }))).toMatchObject({
+      kind: "error",
+      text: "部分内容可能已经输入，结果无法确认，任务已停止。",
+    });
+    expect(projector.project(event(5, { type: "run.finished", outcome: "outcome_unknown" }))?.text).toBe("任务结束。");
+    expect(projector.project(event(6, {
+      type: "runtime.error", category: "monitor_diagnostic", message: "private Monitor exception",
+    }))).toBeUndefined();
   });
 });
 
@@ -532,11 +625,11 @@ describe("RunNoticeScheduler", () => {
     expect(scheduler.offer(ordinaryPhase, generation)).toMatchObject({ status: "queued" });
     expect(scheduler.takeNext()?.noticeId).toBe("phase-first");
 
-    const firstMilestone = notice(5, { noticeId: "milestone-first", text: "第一步结果已经确认。", dedupeKey: "assessment:first", progressSemantic: "verified_milestone" });
+    const firstMilestone = notice(5, { noticeId: "milestone-first", text: "第一步结果已经确认。", dedupeKey: "assessment:first", progressSemantic: "observation_milestone" });
     expect(scheduler.offer(firstMilestone, generation)).toMatchObject({ status: "queued" });
     expect(scheduler.takeNext()?.noticeId).toBe("milestone-first");
 
-    const laterMilestone = notice(8, { noticeId: "milestone-later", text: "第二步结果已经确认。", dedupeKey: "assessment:later", progressSemantic: "verified_milestone" });
+    const laterMilestone = notice(8, { noticeId: "milestone-later", text: "第二步结果已经确认。", dedupeKey: "assessment:later", progressSemantic: "observation_milestone" });
     expect(scheduler.offer(laterMilestone, generation)).toMatchObject({ status: "queued" });
     expect(scheduler.takeNext()?.noticeId).toBe("milestone-later");
     expect(scheduler.offer(notice(9, { text: "再检查一处页面。", dedupeKey: "phase:later" }), generation)).toMatchObject({ status: "rate_limited" });
@@ -581,6 +674,28 @@ describe("RunNoticeScheduler", () => {
     expect(scheduler.takeNext()?.noticeId).toBe(final.noticeId);
     expect(scheduler.takeNext()).toBeUndefined();
     expect(scheduler.offer(notice(6, { kind: "error", delivery: "interrupt" }), generation)).toMatchObject({ status: "stale" });
+  });
+
+  it("prioritizes and deduplicates screenshot-grounded blockers without changing milestone delivery", () => {
+    const scheduler = new RunNoticeScheduler({ now: () => 1_000, minimumProgressIntervalMs: 60_000 });
+    const generation = scheduler.activateRun(runId);
+    const milestone = notice(1, {
+      noticeId: "observed-milestone",
+      text: "车次结果已显示。",
+      dedupeKey: "milestone:results",
+      progressSemantic: "observation_milestone",
+    });
+    scheduler.offer(milestone, generation);
+    const blocker = notice(2, {
+      noticeId: "observed-blocker",
+      text: "当前页面需要重新登录。",
+      delivery: "interrupt",
+      dedupeKey: "blocker:login-required",
+      progressSemantic: "observation_blocker",
+    });
+    expect(scheduler.offer(blocker, generation)).toEqual({ status: "queued", interruptCurrent: true });
+    expect(scheduler.takeNext()?.noticeId).toBe(blocker.noticeId);
+    expect(scheduler.offer(blocker, generation)).toMatchObject({ status: "duplicate" });
   });
 
   it("does not mark queue-full notices seen, allowing a retry after capacity becomes available", () => {

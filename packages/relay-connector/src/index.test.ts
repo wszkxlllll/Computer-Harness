@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import WebSocket, { WebSocketServer } from "ws";
@@ -10,6 +10,7 @@ interface FakeRelay {
   readonly port: number;
   readonly registrations: Map<string, number>;
   readonly server: Server;
+  send(message: Record<string, unknown>): void;
   close(): Promise<void>;
 }
 
@@ -20,6 +21,7 @@ async function startFakeRelay(port = 0): Promise<FakeRelay> {
   const server = createServer();
   const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 12 * 1024 * 1024, perMessageDeflate: false });
   const registrations = new Map<string, number>();
+  let connectedHost: WebSocket | undefined;
   let closed = false;
   server.on("upgrade", (request, socket, head) => {
     if (request.url !== "/v1/host") {
@@ -27,6 +29,10 @@ async function startFakeRelay(port = 0): Promise<FakeRelay> {
       return;
     }
     websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+      connectedHost = websocket;
+      websocket.once("close", () => {
+        if (connectedHost === websocket) connectedHost = undefined;
+      });
       websocket.on("message", (data) => {
         const message = JSON.parse(data.toString()) as Record<string, unknown>;
         if (message.type === "host.hello") {
@@ -53,6 +59,10 @@ async function startFakeRelay(port = 0): Promise<FakeRelay> {
     port: address.port,
     registrations,
     server,
+    send: (message) => {
+      if (connectedHost?.readyState !== WebSocket.OPEN) throw new Error("fake relay has no connected Host");
+      connectedHost.send(JSON.stringify(message));
+    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -92,6 +102,45 @@ afterEach(async () => {
 });
 
 describe("HostRelayConnector", () => {
+  it("accepts the authenticated managed-browser preference PUT bridge request", async () => {
+    const hostId = "connector_put_host";
+    const credential = randomBytes(32).toString("base64url");
+    const relay = await startFakeRelay();
+    const requestHandler = vi.fn(async () => ({ statusCode: 200, body: { status: "unprepared", defaultSession: "temporary" } }));
+    const connector = new HostRelayConnector({
+      relayUrl: relay.origin,
+      hostId,
+      credential,
+      allowInsecureLocalhost: true,
+      handlers: {
+        api: createRemoteApi(),
+        request: requestHandler,
+        authorizeSession: () => true,
+      },
+    });
+    activeConnectors.push(connector);
+    await connector.start();
+    relay.send({
+      type: "bridge.request",
+      requestId: "preference_put_request",
+      method: "PUT",
+      path: "/api/managed-browser-profile/preference",
+      deviceId: "phone_put",
+      sessionToken: randomBytes(32).toString("base64url"),
+      csrfToken: randomBytes(24).toString("base64url"),
+      body: { defaultSession: "temporary" },
+    });
+
+    await waitFor(() => requestHandler.mock.calls.length === 1);
+    expect(requestHandler).toHaveBeenCalledWith(expect.objectContaining({
+      type: "bridge.request",
+      requestId: "preference_put_request",
+      method: "PUT",
+      path: "/api/managed-browser-profile/preference",
+      body: { defaultSession: "temporary" },
+    }));
+  });
+
   it("reconnects and re-registers pairing token hashes without exposing raw tokens", async () => {
     const hostId = "connector_test_host";
     const credential = randomBytes(32).toString("base64url");

@@ -152,6 +152,14 @@ export class ProviderRiskAssessor implements RiskAssessor {
 }
 
 function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<string>): RiskRoute {
+  if (isRunScopedWindowSwitch(context)) {
+    return {
+      route: "allow",
+      categories: [],
+      reasonCode: "run_scoped_window_switch",
+      reason: "A window-binding change is governed by the Run-level switch capability and exact target/session validation, not per-switch Risk Guard approval.",
+    };
+  }
   const declarations = context.candidate.calls.map((call) => call.declaredEffect);
   if (declarations.some((item) => item === undefined)) return { route: "deny", categories: [], reasonCode: "missing_effect_declaration", reason: "A Computer call has no effect declaration." };
   for (const action of context.candidate.actions) {
@@ -188,12 +196,19 @@ function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<str
   return { route: "allow", categories: [], reasonCode: "declared_low_impact", reason: "The current action declares only low-impact effects and has no escalation signal." };
 }
 
+function isRunScopedWindowSwitch(context: ActionPolicyContext): boolean {
+  return context.candidate.calls.length === 1
+    && context.candidate.calls[0]?.name === "switch_window"
+    && context.candidate.actions.length === 1
+    && context.candidate.actions[0]?.kind === "switch_window";
+}
+
 function findContradiction(context: ActionPolicyContext, declarations: ActionEffectDeclaration[]): { code: string; reason: string; categories: RiskCategory[] } | undefined {
   for (let index = 0; index < context.candidate.actions.length; index += 1) {
     const action = context.candidate.actions[index];
     const declaration = declarations[index];
     if (action === undefined || declaration === undefined) continue;
-    if (action.kind === "type" && declaration.effects.includes("observe")) return { code: "effect_action_mismatch", reason: "A typing action is declared as observation-only.", categories: [] };
+    if (action.kind === "type" && declaration.effects.includes("observe")) return { code: "effect_action_mismatch", reason: "A text-modifying action is declared as observation-only.", categories: [] };
     if (action.kind === "keypress" && action.keys.map((item) => item.toUpperCase()).includes("DELETE") && declaration.effects.includes("navigate")) return { code: "effect_action_mismatch", reason: "A delete key action is declared as navigation.", categories: ["destructive"] };
   }
   return undefined;
@@ -291,7 +306,7 @@ function groundingEvidenceUnavailable(context: ActionPolicyContext): boolean {
 
 function redactAction(action: ActionPolicyContext["candidate"]["actions"][number] | undefined): JsonValue {
   if (action === undefined) return null;
-  if (action.kind === "type") return { kind: "type", textLength: action.text.length };
+  if (action.kind === "type") return { kind: "type", ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }), textLength: action.text.length };
   return action as unknown as JsonValue;
 }
 

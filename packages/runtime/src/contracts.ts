@@ -26,11 +26,13 @@ import type {
   PreparedRequestMetadata,
   RunAssistantPreferencesSnapshot,
   RunId,
+  SurfaceRef,
   RiskCategory,
   RuntimeEvent,
   GroundingBrowserRegion,
   GroundingElementSource,
   ComputerWindowCandidate,
+  ComputerWindowOption,
   ModelUsage,
   ToolCall,
   ToolCallId,
@@ -67,6 +69,10 @@ export interface Computer {
   listNewWindowHandoffCandidates?(session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]>;
   /** Optional read-only diff after a successful opted-in foreground action. */
   detectNewWindowHandoffCandidates?(session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]>;
+  /** Optional read-only inventory of opened windows. References are opaque
+   * Adapter-owned values and remain valid until the next inventory refresh,
+   * a successful switch, or Run cleanup. */
+  listWindows?(session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowOption[]>;
   /** Rebind the same host ComputerSession only after a host-confirmed handoff. */
   handoffWindow?(session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession>;
   /**
@@ -180,6 +186,15 @@ export interface ContextCompileInput {
   features?: RunFeatureConfig;
   monitorGuidance?: MonitorGuidance;
   assistantPreferences?: RunAssistantPreferencesSnapshot;
+  /** Current serializable binding and its capabilities, independent of the
+   * latest screenshot viewport. */
+  computerSession?: ComputerSessionDescriptor;
+  /** Dynamic data from the last explicit window inventory. These references
+   * are omitted after a refresh or target transition until rediscovered. */
+  windowSwitchState?: {
+    readonly currentWindow?: { readonly appName?: string; readonly title?: string };
+    readonly options?: readonly ComputerWindowOption[];
+  };
 }
 
 export interface MonitorGuidance {
@@ -261,11 +276,12 @@ export type GuiActionDraft =
   | { kind: "click"; point: Point; groundingRef?: string }
   | { kind: "double_click"; point: Point }
   | { kind: "right_click"; point: Point }
-  | { kind: "type"; text: string }
+  | { kind: "type"; text: string; groundingRef?: string }
   | { kind: "keypress"; keys: string[] }
   | { kind: "select_option"; groundingRef: string; optionText: string }
   | { kind: "scroll"; point: Point; direction: "up" | "down" | "left" | "right"; ticks: number }
   | { kind: "drag"; from: Point; to: Point }
+  | { kind: "switch_window"; windowRef: string }
   | { kind: "wait"; durationMs: number };
 
 export interface ToolExecutionContext {
@@ -274,6 +290,9 @@ export interface ToolExecutionContext {
   observation?: ObservationFrame;
   /** Authoritative internal catalog for execution; never projected to Providers. */
   rawGrounding?: import("@computer-harness/protocol").GroundingCatalog;
+  /** Runtime-owned read bridge; no Computer adapter or private handle is
+   * exposed to tool definitions or Providers. */
+  listWindows?: () => Promise<readonly ComputerWindowOption[]>;
   signal: AbortSignal;
 }
 
@@ -300,6 +319,8 @@ export interface ComputerToolDefinition extends ToolDefinitionBase {
     readonly preferredRoles: readonly string[];
     readonly preferredSources: readonly GroundingElementSource[];
   };
+  /** When true, this action must be the only ToolCall in its ModelTurn. */
+  isolatedTurn?: boolean;
   toAction: (args: JsonValue, context: ToolExecutionContext) => GuiActionDraft;
 }
 
@@ -374,6 +395,8 @@ export interface ActionPolicyContext {
   runId: RunId;
   goal: string;
   recentUserInputs: readonly string[];
+  /** Exact Surface incarnation evaluated by the Guard; opaque IDs are not prompt semantics. */
+  evaluatedSurfaceRef: SurfaceRef;
   candidate: ActionCandidateGroup;
   snapshot: RunSnapshot;
 }

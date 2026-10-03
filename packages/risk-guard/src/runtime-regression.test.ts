@@ -10,6 +10,8 @@ import type {
   RunId,
   RuntimeEvent,
   RuntimeEventDraft,
+  SurfaceId,
+  SurfaceRef,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -22,6 +24,7 @@ import { LayeredRiskGuard, ScriptedRiskAssessor } from "./index.js";
 const runId = "risk-guard-regression" as RunId;
 const sessionId = "risk-guard-computer" as ComputerSessionId;
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
+const surfaceRef: SurfaceRef = { surfaceId: "risk-guard-desktop" as SurfaceId, generation: 1, kind: "desktop" };
 
 class FakeComputer implements Computer {
   public executeCalls = 0;
@@ -45,6 +48,7 @@ class FakeComputer implements Computer {
     return {
       capturedAt: `2026-09-17T00:00:0${this.observationCount}.000Z`,
       viewport,
+      surfaceRef,
       screenshot: { mediaType: "image/png" as const, data: new Uint8Array([this.observationCount]) },
     };
   }
@@ -70,6 +74,7 @@ class GroundedFakeComputer extends FakeComputer {
       source: "uia",
       observationId,
       computerSessionId: session.id,
+      surfaceRef: capture.surfaceRef,
       completeness: "complete",
       degraded: false,
       maxElements: 256,

@@ -33,7 +33,10 @@ class Client implements QwenHttpClient {
 function input(): ModelInput {
   const schemas: Record<string, JsonValue> = {
     click: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false },
-    type: { type: "object", properties: { text: { type: "string", description: "Text to type into the currently focused GUI control." } }, required: ["text"], additionalProperties: false },
+    type: { type: "object", properties: {
+      text: { type: "string", description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
+      elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA text-editor reference, used only for multiline full-value replacement. Expires when the observation or target window changes." },
+    }, required: ["text"], additionalProperties: false },
     keypress: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 1 } }, required: ["keys"], additionalProperties: false },
     hotkey: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 } }, required: ["keys"], additionalProperties: false },
     scroll: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, direction: { type: "string" }, ticks: { type: "integer" } }, required: ["x", "y", "direction", "ticks"], additionalProperties: false },
@@ -239,6 +242,10 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(native.postCount).toBe(1);
     const systemText = String((native.body?.messages as Array<Record<string, unknown>>)[0]?.content);
     expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).toContain("current screenshot");
+    expect(systemText).toContain("one-turn delay");
+    expect(systemText).toContain("not every step");
+    expect(systemText).toContain("progress.kind=blocked");
     expect(systemText).not.toContain("observation-current");
     expect(JSON.stringify(native.body?.tools)).not.toContain("Sensitive account detail");
 
@@ -255,6 +262,10 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const itemSchema = (callsSchema.items as Record<string, unknown>).properties as Record<string, unknown>;
     const argumentsSchema = itemSchema.arguments as Record<string, unknown>;
     expect(Object.keys(argumentsSchema.properties as Record<string, unknown>)).toContain("observationAssessment");
+    const assessmentSchema = (argumentsSchema.properties as Record<string, unknown>).observationAssessment as Record<string, unknown>;
+    const progressSchema = (assessmentSchema.properties as Record<string, unknown>).progress as Record<string, unknown>;
+    const progressProperties = progressSchema.properties as Record<string, unknown>;
+    expect((progressProperties.kind as Record<string, unknown>).enum).toEqual(["milestone", "blocked"]);
   });
 
   it("drops invalid optional assessments while preserving a valid tool call", async () => {
@@ -485,7 +496,10 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.parallel_tool_calls).toBe(false);
     const tools = client.body?.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
     expect(tools[0]).toMatchObject({ function: { name: "click", parameters: { required: ["x", "y"], properties: { x: { maximum: 1000 }, y: { maximum: 1000 } } } } });
-    expect(tools.find((tool) => tool.function.name === "type")).toMatchObject({ function: { parameters: { required: ["text"], properties: { text: { description: "Text to type into the currently focused GUI control." } } } } });
+    expect(tools.find((tool) => tool.function.name === "type")).toMatchObject({ function: { parameters: { required: ["text"], properties: {
+      text: { description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
+      elementRef: { type: "string", minLength: 1, maxLength: 96 },
+    } } } });
     expect(tools.find((tool) => tool.function.name === "keypress")).toMatchObject({ function: { parameters: { required: ["keys"], properties: { keys: { maxItems: 1 } } } } });
   });
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ActionIntent, EventId, ObservationActionOutcome, ObservationTransition, RunId, RuntimeEvent, Viewport } from "@computer-harness/protocol";
+import type { ActionIntent, EventId, ObservationActionOutcome, ObservationTransition, RunId, RuntimeEvent, SurfaceRef, Viewport } from "@computer-harness/protocol";
 
 const DEFAULT_LIMITS = {
   maxObservations: 32,
@@ -79,7 +79,7 @@ interface ObservationBinding {
   eventId: EventId;
 }
 
-type ActionStatus = "proposed" | "completed" | "refused" | "failed" | "cancelled";
+type ActionStatus = "proposed" | "completed" | "refused" | "failed" | "cancelled" | "partial";
 
 interface ActionRecord {
   actionKey: string;
@@ -170,7 +170,7 @@ function onObservation(
   state: ProgressMonitorState,
   event: Extract<RuntimeEvent, { type: "observation.created" }>,
 ): ProgressMonitorUpdate {
-  const partitionKey = observationPartition(event.observation.computerSessionId, event.observation.viewport);
+  const partitionKey = observationPartition(event.observation.computerSessionId, event.observation.surfaceRef, event.observation.viewport);
   const previousPartition = state.lastObservationPartition;
   const observations = boundedMap(
     state.observations,
@@ -277,8 +277,8 @@ function onActionReceipt(
       if (refused.length >= state.limits.refusalThreshold) {
         reasons.push({ code: "repeated_refusal", eventIds: refused.map((item) => item.eventId).concat(event.eventId) });
       }
-    } else if (updated.status === "failed" || updated.status === "cancelled") {
-      const failed = trailingStatus(comparable, updated.signature, "failed", "cancelled");
+    } else if (updated.status === "failed" || updated.status === "cancelled" || updated.status === "partial") {
+      const failed = trailingStatus(comparable, updated.signature, "failed", "cancelled", "partial");
       if (failed.length >= state.limits.refusalThreshold) {
         reasons.push({ code: "repeated_failure", eventIds: failed.map((item) => item.eventId).concat(event.eventId) });
       }
@@ -320,6 +320,25 @@ function onTransition(
   }
 
   if (action.observationId !== String(event.preObservationId ?? "")) {
+    evidence.push({ kind: "action_binding_unavailable", eventIds: [event.eventId] });
+    return {
+      state: { ...state, lastTransition: undefined },
+      output: makeOutput(
+        state.limits,
+        false,
+        [],
+        [{ kind: "visual_transition_unknown", eventIds: evidenceEventIds }, ...evidence.slice(1)],
+        evidenceEventIds,
+      ),
+    };
+  }
+
+  const preObservation = event.preObservationId === undefined
+    ? undefined
+    : state.observations.get(opaqueHash(`observation:${String(event.preObservationId)}`));
+  const postObservation = state.observations.get(opaqueHash(`observation:${String(event.postObservationId)}`));
+  if (preObservation === undefined || postObservation === undefined || preObservation.partitionKey !== postObservation.partitionKey ||
+      action.partitionKey !== preObservation.partitionKey) {
     evidence.push({ kind: "action_binding_unavailable", eventIds: [event.eventId] });
     return {
       state: { ...state, lastTransition: undefined },
@@ -477,9 +496,11 @@ function normalizedAction(action: ActionIntent): unknown {
     case "drag":
       return { kind: action.kind, fromX: action.from.x, fromY: action.from.y, toX: action.to.x, toY: action.to.y };
     case "type":
-      return { kind: action.kind, text: action.text };
+      return { kind: action.kind, ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }), text: action.text };
     case "keypress":
       return { kind: action.kind, keys: [...action.keys] };
+    case "switch_window":
+      return { kind: action.kind, windowRef: action.windowRef };
     case "wait":
       return { kind: action.kind, durationMs: action.durationMs };
   }
@@ -530,8 +551,8 @@ function completedActionReasons(
   return reasons;
 }
 
-function observationPartition(sessionId: string, viewport: Viewport): string {
-  return `session:${opaqueHash(String(sessionId))}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
+function observationPartition(sessionId: string, surfaceRef: SurfaceRef, viewport: Viewport): string {
+  return `session:${opaqueHash(String(sessionId))}|surface:${opaqueHash(String(surfaceRef.surfaceId))}:${surfaceRef.generation}:${surfaceRef.kind}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
 }
 
 function makeOutput(

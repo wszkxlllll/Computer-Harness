@@ -38,7 +38,9 @@ const effectSchema: JsonValue = {
 };
 
 export function decorateToolsWithActionEffects(tools: readonly ModelToolSpec[]): ModelToolSpec[] {
-  return tools.map((tool) => tool.category === "computer" ? decorateComputerTool(tool) : structuredClone(tool));
+  return tools.map((tool) => tool.category === "computer" && tool.name !== "switch_window"
+    ? decorateComputerTool(tool)
+    : structuredClone(tool));
 }
 
 function decorateComputerTool(tool: ModelToolSpec): ModelToolSpec {

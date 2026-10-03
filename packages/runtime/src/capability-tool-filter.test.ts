@@ -2,11 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import type { ActionIntent, ComputerSessionId, ObservationId, ObservationCapture, Viewport } from "@computer-harness/protocol";
+import type { ActionIntent, ComputerSessionId, ObservationId, ObservationCapture, SurfaceId, Viewport } from "@computer-harness/protocol";
 import { FileAssetStore, JsonlRunEventWriter } from "@computer-harness/trajectory";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, type Computer, type ComputerOpenOptions, type ComputerSession, type ContextCompiler, type ModelInput, type ProviderAdapter } from "./index.js";
 
 const viewport: Viewport = { width: 1, height: 1, coordinateSpace: "physical" };
+const surfaceRef = { surfaceId: "capability-filter-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
 class KeyboardlessComputer implements Computer {
   public readonly session: ComputerSession = {
@@ -23,7 +24,7 @@ class KeyboardlessComputer implements Computer {
   public async observe(_session: ComputerSession, _observationId: ObservationId, _signal: AbortSignal): Promise<ObservationCapture> {
     this.observationCount += 1;
     const observedViewport = this.observationCount < 2 ? viewport : { width: 2, height: 2, coordinateSpace: "physical" as const };
-    return { capturedAt: "2026-09-18T00:00:00.000Z", viewport: observedViewport, screenshot: { mediaType: "image/png", data: new Uint8Array([1]) } };
+    return { capturedAt: "2026-09-18T00:00:00.000Z", viewport: observedViewport, surfaceRef, screenshot: { mediaType: "image/png", data: new Uint8Array([1]) } };
   }
   public async execute(_session: ComputerSession, action: ActionIntent, _signal: AbortSignal): Promise<import("@computer-harness/protocol").ActionReceipt> {
     return { actionId: action.actionId, status: "completed" };

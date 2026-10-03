@@ -1,14 +1,16 @@
-import type { ActionId, AssetId, ComputerSessionId, ObservationId, RunId, ToolCallId } from "@computer-harness/protocol";
+import type { ActionId, AssetId, ComputerSessionId, ObservationId, RunId, SurfaceId, ToolCallId } from "@computer-harness/protocol";
 import { describe, expect, it } from "vitest";
 import type { ActionPolicyContext, ProviderAdapter } from "@computer-harness/runtime";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
 import { LayeredRiskGuard, ProviderRiskAssessor, ScriptedRiskAssessor } from "./index.js";
 
 const runId = "risk-run" as RunId;
+const surfaceRef = { surfaceId: "risk-guard-index-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 const observation = {
   id: "observation-1" as ObservationId,
   runId,
   computerSessionId: "computer-1" as ComputerSessionId,
+  surfaceRef,
   capturedAt: "2026-09-16T00:00:00.000Z",
   viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
   screenshot: { assetId: "asset-1" as AssetId, relativePath: "screenshots/one.png", mediaType: "image/png", byteLength: 1 },
@@ -16,12 +18,12 @@ const observation = {
 const session = { id: observation.computerSessionId, backend: "fake", viewport: observation.viewport, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false }, openedAt: observation.capturedAt };
 
 function context(effect: "navigate" | "financial" | "local_edit" | "unknown", target = "Details", summary = "Open details", kind: "click" | "type" = "click", groundingRef?: string): ActionPolicyContext {
-  const call = { id: "call-1" as ToolCallId, name: groundingRef === undefined ? kind : "click_element", arguments: groundingRef === undefined ? kind === "click" ? { x: 10, y: 20 } : { text: "hello" } : { elementRef: groundingRef }, declaredEffect: { effects: [effect], target, summary } };
+  const call = { id: "call-1" as ToolCallId, name: groundingRef === undefined ? kind : kind === "click" ? "click_element" : "type", arguments: groundingRef === undefined ? kind === "click" ? { x: 10, y: 20 } : { text: "hello" } : kind === "click" ? { elementRef: groundingRef } : { elementRef: groundingRef, text: "hello" }, declaredEffect: { effects: [effect], target, summary } };
   const action = kind === "click"
     ? { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "click" as const, point: { x: 10, y: 20 }, ...(groundingRef === undefined ? {} : { groundingRef }) }
-    : { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "type" as const, text: "hello" };
+    : { actionId: "action-1" as ActionId, basedOn: observation.id, kind: "type" as const, text: "hello", ...(groundingRef === undefined ? {} : { groundingRef }) };
   const snapshot = initialRunSnapshot(runId);
-  return { runId, goal: "Inspect a product and buy it only after confirmation", recentUserInputs: [], candidate: { calls: [call], actions: [action], decisionObservation: observation, session }, snapshot };
+  return { runId, goal: "Inspect a product and buy it only after confirmation", recentUserInputs: [], evaluatedSurfaceRef: observation.surfaceRef, candidate: { calls: [call], actions: [action], decisionObservation: observation, session }, snapshot };
 }
 
 function protectedContext(
@@ -71,11 +73,60 @@ function keypressContext(effect: "unknown" | "navigate" = "unknown"): ActionPoli
   };
 }
 
+function switchWindowContext(
+  effect?: "navigate" | "financial" | "external_commitment" | "observe" | "unknown",
+  target = "Listed Browser window",
+  summary = "Switch the active window binding",
+): ActionPolicyContext {
+  const snapshot = initialRunSnapshot(runId);
+  return {
+    runId,
+    goal: "Review two already-open applications",
+    recentUserInputs: [],
+    candidate: {
+      calls: [{
+        id: "switch-call" as ToolCallId,
+        name: "switch_window",
+        arguments: { windowRef: "opaque-window-ref" },
+        ...(effect === undefined ? {} : { declaredEffect: { effects: [effect], target, summary } }),
+      }],
+      actions: [{ actionId: "switch-action" as ActionId, basedOn: observation.id, kind: "switch_window", windowRef: "opaque-window-ref" }],
+      decisionObservation: observation,
+      session,
+    },
+    snapshot,
+  };
+}
+
 describe("LayeredRiskGuard", () => {
   it("allows declared low-impact actions and requires approval for declared financial actions without a reviewer", async () => {
     const guard = new LayeredRiskGuard();
     await expect(guard.evaluate(context("navigate"), new AbortController().signal)).resolves.toMatchObject({ decision: "allow", path: "local", modelRequestCount: 0 });
     await expect(guard.evaluate(context("financial", "Confirm payment", "Pay for order"), new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "local", modelRequestCount: 0, categories: ["financial"] });
+  });
+
+  it("uses the Run-scoped switch as the approval boundary and ignores its claimed content effects", async () => {
+    const guard = new LayeredRiskGuard();
+    for (const candidate of [
+      switchWindowContext("navigate"),
+      switchWindowContext("financial", "Submit payment; password settings", "Send private information"),
+      switchWindowContext("external_commitment", "Publish this draft", "Submit the form"),
+      switchWindowContext("observe"),
+      switchWindowContext(),
+    ]) {
+      await expect(guard.evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({
+        decision: "allow",
+        path: "local",
+        reasonCode: "run_scoped_window_switch",
+        categories: [],
+        modelRequestCount: 0,
+      });
+    }
+    await expect(guard.evaluate(context("financial", "Confirm payment", "Pay for order"), new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval",
+      reasonCode: "declared_high_impact",
+      categories: ["financial"],
+    });
   });
 
   it("reviews a low-risk declaration whose target implies an undeclared commitment", async () => {
@@ -145,6 +196,18 @@ describe("LayeredRiskGuard", () => {
       },
     };
     await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown", "Details", "Open details", "click", "element-ref"), new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval",
+      path: "local",
+      reasonCode: "unknown_grounding_evidence_unavailable",
+      modelRequestCount: 0,
+    });
+    expect(reviewerCalls).toBe(0);
+  });
+
+  it("keeps grounded type target evidence visible to Guard preflight", async () => {
+    let reviewerCalls = 0;
+    const assessor = { id: "low-risk-reviewer", async classify() { reviewerCalls += 1; return { effects: ["local_edit"] as const, alignment: "aligned" as const, evidence: "Synthetic low-risk review" }; } };
+    await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown", "Document", "Replace multiline text", "type", "uia-current-ref"), new AbortController().signal)).resolves.toMatchObject({
       decision: "require_approval",
       path: "local",
       reasonCode: "unknown_grounding_evidence_unavailable",

@@ -82,6 +82,7 @@ class FakeBridge implements OsworldBridge {
     capabilities: { screenshot: true, pointer: true, keyboard: true, keyboardKeys: ["ctrl", "a", "enter", "shift", "down"] },
   };
   public observeCalls = 0;
+  public nextObserveCapture: OsworldBridgeCapture | undefined;
   public executeCalls: OsworldTypedAction[] = [];
   public nextExecuteResult: OsworldBridgeExecuteResult = { status: "completed", postActionCapture: capture(2) };
   public executeError: Error | undefined;
@@ -92,7 +93,9 @@ class FakeBridge implements OsworldBridge {
 
   public async observe(_signal: AbortSignal): Promise<OsworldBridgeCapture> {
     this.observeCalls += 1;
-    return capture(1);
+    const next = this.nextObserveCapture;
+    this.nextObserveCapture = undefined;
+    return next ?? capture(1);
   }
 
   public async execute(action: OsworldTypedAction, _signal: AbortSignal): Promise<OsworldBridgeExecuteResult> {
@@ -173,8 +176,12 @@ describe("OsworldComputer", () => {
     expect(session).toMatchObject({ id: sessionId, backend: "osworld-desktop-env", viewport, capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false } });
     const observation = await instance.observe(session, observationId("obs-1"), abortSignal);
     expect(observation).toMatchObject({ capturedAt: capture(1).capturedAt, viewport, screenshot: { mediaType: "image/png" } });
+    expect(observation.surfaceRef).toMatchObject({ kind: "desktop", generation: 1 });
     expect(observation.screenshot.data.byteLength).toBeGreaterThan(24);
     expect(bridge.observeCalls).toBe(1);
+    const repeated = await instance.observe(session, observationId("obs-2"), abortSignal);
+    expect(repeated.surfaceRef).toEqual(observation.surfaceRef);
+    expect(session.id).toBe(sessionId);
   });
 
   it("accepts whitespace keyboard keys advertised by OSWorld", async () => {
@@ -218,12 +225,26 @@ describe("OsworldComputer", () => {
     const instance = computer(bridge);
     const session = await instance.open({}, abortSignal);
     const initialId = observationId("viewport-initial");
-    await instance.observe(session, initialId, abortSignal);
+    const initial = await instance.observe(session, initialId, abortSignal);
     await expect(instance.execute(session, { actionId: actionId("resize"), basedOn: initialId, kind: "click", point: { x: 10, y: 20 } }, abortSignal)).resolves.toMatchObject({ status: "completed" });
     const resizedId = observationId("viewport-resized");
     const resized = await instance.observe(session, resizedId, abortSignal);
     expect(resized.viewport).toEqual({ width: 1024, height: 768, coordinateSpace: "physical" });
+    expect(resized.surfaceRef).toMatchObject({ surfaceId: initial.surfaceRef.surfaceId, generation: initial.surfaceRef.generation + 1, kind: "desktop" });
     await expect(instance.execute(session, { actionId: actionId("new-space"), basedOn: resizedId, kind: "click", point: { x: 1000, y: 700 } }, abortSignal)).resolves.toMatchObject({ status: "completed" });
+  });
+
+  it("advances the desktop Surface when an external observation reports a viewport change", async () => {
+    const bridge = new FakeBridge();
+    const instance = computer(bridge);
+    const session = await instance.open({}, abortSignal);
+    const initial = await instance.observe(session, observationId("external-resize-initial"), abortSignal);
+    bridge.nextObserveCapture = captureAt(1024, 768, 7);
+    const resized = await instance.observe(session, observationId("external-resize-next"), abortSignal);
+
+    expect(resized.viewport).toEqual({ width: 1024, height: 768, coordinateSpace: "physical" });
+    expect(resized.surfaceRef).toMatchObject({ surfaceId: initial.surfaceRef.surfaceId, generation: initial.surfaceRef.generation + 1, kind: "desktop" });
+    expect(resized.surfaceTransitionReason).toBe("generation_advanced");
   });
 
   it("rejects stale observations and deterministic mapping failures before bridge side effects", async () => {
@@ -300,6 +321,7 @@ describe("OsworldComputer", () => {
     expect(mapActionIntent({ ...base, kind: "scroll", point: { x: 1, y: 2 }, direction: "down", ticks: 3 }, viewport)).toEqual({ kind: "scroll", x: 1, y: 2, direction: "down", ticks: 3 });
     expect(mapActionIntent({ ...base, kind: "drag", from: { x: 1, y: 2 }, to: { x: 3, y: 4 } }, viewport)).toEqual({ kind: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4 });
     expect(mapActionIntent({ actionId: actionId("wait"), kind: "wait", durationMs: 10 }, viewport)).toEqual({ kind: "wait", durationMs: 10 });
+    expect(() => mapActionIntent({ ...base, kind: "switch_window", windowRef: "opaque-ref" }, viewport)).toThrow(/unavailable on OSWorld/iu);
   });
 
   it("rejects a key that the OSWorld description does not advertise", () => {

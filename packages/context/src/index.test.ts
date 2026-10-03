@@ -11,13 +11,16 @@ import type {
   RunId,
   RunAssistantPreferencesSnapshot,
   RuntimeEvent,
+  SurfaceId,
+  SurfaceRef,
   ToolCallId,
 } from "@computer-harness/protocol";
-import { createDefaultComputerTools } from "@computer-harness/runtime";
+import { createDefaultComputerTools, windowSwitchTools } from "@computer-harness/runtime";
 import { DefaultContextCompiler, selectMemoryForContext } from "./index.js";
 
 const runId = "run-context" as RunId;
 const sessionId = "session-context" as ComputerSessionId;
+const desktopSurfaceRef: SurfaceRef = { surfaceId: "context-desktop" as SurfaceId, generation: 1, kind: "desktop" };
 const viewport = { width: 800, height: 600, coordinateSpace: "physical" as const };
 
 function event(sequence: number, data: RuntimeEvent["type"] extends never ? never : any): RuntimeEvent {
@@ -35,6 +38,7 @@ function observation(id: string) {
     id: id as ObservationId,
     runId,
     computerSessionId: sessionId,
+    surfaceRef: desktopSurfaceRef,
     capturedAt: "2026-08-30T00:00:00.000Z",
     viewport,
     screenshot: {
@@ -75,6 +79,38 @@ describe("DefaultContextCompiler", () => {
     expect(input.messages.some((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === first.screenshot.assetId))).toBe(false);
     expect(input.contextBudget?.trace?.projectedEventIds).toContain("event-7");
     expect(input.contextBudget?.trace?.projectedEventIds).not.toContain("event-1");
+  });
+
+  it("keeps shared execution guidance in the stable prefix and passes the observation capture time as budgeted dynamic evidence", async () => {
+    const first = observation("guidance-observation-one");
+    const second = { ...observation("guidance-observation-two"), capturedAt: "2026-08-30T00:00:01.000Z" };
+    const events = [
+      event(0, { type: "run.created", goal: "open the app" }),
+      event(1, { type: "run.started" }),
+      event(2, { type: "observation.created", observation: first }),
+    ];
+    const rawCompiler = new DefaultContextCompiler(createDefaultComputerTools(), { mode: "raw", systemPrompt: "Custom stable base." });
+    const recentCompiler = new DefaultContextCompiler(createDefaultComputerTools(), { mode: "recent", systemPrompt: "Custom stable base." });
+    const raw = await rawCompiler.compile({ runId, goal: "open the app", recentEvents: events, latestObservation: first, features: { planning: "off", memory: "off", batching: "off" } }, new AbortController().signal);
+    const recent = await recentCompiler.compile({ runId, goal: "open the app", recentEvents: events.map((item) => item.type === "observation.created" ? { ...item, observation: second } : item), latestObservation: second, features: { planning: "off", memory: "off", batching: "off" } }, new AbortController().signal);
+
+    for (const input of [raw, recent]) {
+      expect(input.system).toContain("Preserve the Goal's scope and every stated condition");
+      expect(input.system).toContain("change it or report the specific evidence gap");
+      expect(input.system).toContain("never blindly replay an input");
+      expect(input.system).toContain("Custom stable base.");
+      expect(input.system).not.toContain("Planning tools are optional");
+      expect(input.system).not.toContain("Run Memory is enabled");
+    }
+    const rawObservationMessage = raw.messages.find((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === first.screenshot.assetId));
+    const rawObservationText = rawObservationMessage?.content.filter((block) => block.type === "text").map((block) => block.text).join(" ") ?? "";
+    expect(rawObservationText).toContain(`Observation ID ${first.id}`);
+    expect(rawObservationText).toContain(`capturedAt ${first.capturedAt}`);
+    expect(recent.contextBudget?.trace?.projectedEventIds).toContain("event-2");
+    expect(raw.contextBudget?.trace?.stablePrefixHash).toBe(recent.contextBudget?.trace?.stablePrefixHash);
+    expect(raw.contextBudget?.trace?.historyEstimatedTokens).toBeGreaterThan(
+      estimateEventTokens(raw.contextBudget?.trace?.selectedEventIds.flatMap((eventId) => events.filter((item) => item.eventId === eventId)) ?? []),
+    );
   });
 
   it("keeps current Observation/action assessment IDs in the dynamic observation message", async () => {
@@ -173,13 +209,22 @@ describe("DefaultContextCompiler", () => {
   });
 
   it("projects a bounded observation grounding catalog near the current image and records its budget trace", async () => {
+    const opaqueBrowserTabId = "context-private-tab-parent" as SurfaceId;
+    const domSurfaceRef: SurfaceRef = {
+      surfaceId: "context-private-dom-surface" as SurfaceId,
+      generation: 1,
+      kind: "dom",
+      parentSurfaceId: opaqueBrowserTabId,
+    };
     const latest = {
       ...observation("obs-grounding"),
+      surfaceRef: domSurfaceRef,
       grounding: {
         version: "uia-catalog-v1" as const,
         source: "uia" as const,
         observationId: "obs-grounding" as ObservationId,
         computerSessionId: sessionId,
+        surfaceRef: domSurfaceRef,
         completeness: "partial" as const,
         degraded: false,
         maxElements: 16,
@@ -201,6 +246,10 @@ describe("DefaultContextCompiler", () => {
     const grounding = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("UIA grounding")));
     expect(grounding).toBeDefined();
     expect(grounding?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("ref=uia-1") });
+    const projectedGroundingText = grounding?.content[0]?.type === "text" ? grounding.content[0].text : "";
+    expect(projectedGroundingText).toContain("surface=dom");
+    expect(projectedGroundingText).not.toContain(domSurfaceRef.surfaceId);
+    expect(projectedGroundingText).not.toContain(opaqueBrowserTabId);
     expect(input.contextBudget?.trace?.grounding).toMatchObject({ present: true, projected: true, completeness: "partial", candidateElementCount: 1, projectedElementCount: 1 });
     expect(input.contextBudget?.estimatedGroundingTokens).toBeGreaterThan(0);
     expect(input.contextBudget?.groundingIncluded).toBe(true);
@@ -214,6 +263,7 @@ describe("DefaultContextCompiler", () => {
         source: "hybrid" as const,
         observationId: "obs-hybrid-grounding" as ObservationId,
         computerSessionId: sessionId,
+        surfaceRef: desktopSurfaceRef,
         completeness: "partial" as const,
         degraded: false,
         maxElements: 16,
@@ -551,6 +601,22 @@ describe("DefaultContextCompiler", () => {
     expect(guarded.system).toContain("_harnessEffect");
     expect(guarded.tools.find((tool) => tool.category === "computer")?.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
     expect(guarded.tools.find((tool) => tool.category === "control")?.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
+
+    const windowSwitchRegistry = createDefaultComputerTools();
+    windowSwitchRegistry.registerMany(windowSwitchTools());
+    const guardedWindowSwitch = await new DefaultContextCompiler(windowSwitchRegistry).compile({
+      runId,
+      goal: "switch to a listed application",
+      recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }],
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" },
+    }, new AbortController().signal);
+    const switchTool = guardedWindowSwitch.tools.find((tool) => tool.name === "switch_window")!;
+    const clickTool = guardedWindowSwitch.tools.find((tool) => tool.name === "click")!;
+    expect(guardedWindowSwitch.system).toContain("except switch_window");
+    expect(guardedWindowSwitch.system).toContain("does not need _harnessEffect");
+    expect(switchTool.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
+    expect(switchTool.inputSchema).not.toMatchObject({ properties: expect.objectContaining({ _harnessEffect: expect.anything() }) });
+    expect(clickTool.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
   });
 
   it("keeps the completion contract aware of recalled Memory without requiring another model call", async () => {

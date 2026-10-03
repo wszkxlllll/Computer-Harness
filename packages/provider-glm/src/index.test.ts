@@ -244,8 +244,20 @@ describe("GLM provider adapter", () => {
     expect(JSON.stringify(client.body?.tools)).toContain("observationAssessment");
     const systemText = String((client.body?.messages as Array<Record<string, unknown>>)[0]?.content);
     expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).toContain("current screenshot");
+    expect(systemText).toContain("one-turn delay");
+    expect(systemText).toContain("not every step");
+    expect(systemText).toContain("progress.kind=blocked");
     expect(systemText).not.toContain("observation-current");
     expect(JSON.stringify(client.body?.tools)).not.toContain("123456");
+    const clickTool = (client.body?.tools as Array<Record<string, unknown>>).find((tool) =>
+      (tool.function as Record<string, unknown>).name === "click");
+    const functionSchema = clickTool?.function as Record<string, unknown>;
+    const parameters = functionSchema.parameters as Record<string, unknown>;
+    const assessmentSchema = (parameters.properties as Record<string, unknown>).observationAssessment as Record<string, unknown>;
+    const progressSchema = (assessmentSchema.properties as Record<string, unknown>).progress as Record<string, unknown>;
+    const progressProperties = progressSchema.properties as Record<string, unknown>;
+    expect((progressProperties.kind as Record<string, unknown>).enum).toEqual(["milestone", "blocked"]);
 
     const invalid = new Client({ choices: [{ message: { content: "", tool_calls: [{
       id: "invalid-optional-assessment", function: { name: "click", arguments: JSON.stringify({ x: 500, y: 250, observationAssessment: { ...assessment, actionOutcome: "confident" } }) },

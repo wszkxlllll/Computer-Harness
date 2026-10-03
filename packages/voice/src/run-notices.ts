@@ -1,8 +1,8 @@
-import type { ActionGuardActionSummary, ActionId, EventId, ObservationAssessment, ObservationId, PlanningTask, RiskCategory, RunId, RuntimeEvent } from "@computer-harness/protocol";
+import type { ActionGuardActionSummary, EventId, ObservationAssessment, ObservationId, PlanningTask, RiskCategory, RunId, RuntimeEvent } from "@computer-harness/protocol";
 
 export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
 export type RunNoticeDelivery = "polite" | "interrupt";
-export type RunNoticeProgressSemantic = "run_start" | "verified_milestone";
+export type RunNoticeProgressSemantic = "run_start" | "observation_milestone" | "observation_blocker";
 
 /** A transient, user-facing projection. It is not persisted as a RuntimeEvent. */
 export interface RunNotice {
@@ -41,34 +41,31 @@ export interface ApprovalNoticeVoiceContext {
 
 const MAX_NOTICE_CHARS = 320;
 const MAX_DYNAMIC_TEXT_CHARS = 240;
+const MAX_SPOKEN_MILESTONE_CHARS = 120;
+const SAFE_MILESTONE_FALLBACK = "已确认一个阶段结果。";
+const SAFE_BLOCKER_FALLBACK = "当前页面显示有事项需要处理。";
 const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu;
 
-interface AssessmentTransition {
-  readonly actionId: ActionId;
-  readonly observationId: ObservationId;
-  readonly sourceActionEventId: EventId;
-  readonly sourceObservationEventId: EventId;
-  readonly transition: "changed" | "unchanged" | "unknown";
+interface ModelObservationBinding {
+  readonly observationId?: ObservationId;
+  readonly included: boolean;
 }
 
 /**
- * Consume committed RuntimeEvents in order. Ordinary action completion is
- * silent; a milestone notice requires a current, action-bound assessment and
- * speaks its bounded summary only after explicit per-Run opt-in and filtering.
+ * Consume committed RuntimeEvents in order. Progress text is a bounded model
+ * report about the exact fresh screenshot included in that response request;
+ * action and Monitor assessments remain diagnostic and do not gate speech.
  */
 export class RunNoticeProjector {
   private lastSequence = -1;
   private readonly planTasks = new Map<string, PlanningTask>();
+  private readonly modelObservationBindings = new Map<string, ModelObservationBinding>();
   private latestObservationId: ObservationId | undefined;
-  private latestObservationEventId: EventId | undefined;
-  private observationActionId: ActionId | undefined;
-  private lastActionId: ActionId | undefined;
-  private lastActionReceiptEventId: EventId | undefined;
-  private lastActionStatus: "completed" | "refused" | "failed" | "cancelled" | undefined;
-  private readonly assessmentTransitions = new Map<ActionId, AssessmentTransition>();
   private readonly announcedAssessments = new Set<string>();
+  private readonly announcedFailureKeys = new Set<string>();
   private startNoticeProjected = false;
   private finished = false;
+  private failureNoticeProjected = false;
   private readonly dynamicContentEnabled: boolean;
 
   public constructor(private readonly runId: RunId, options: RunNoticeProjectorOptions = {}) {
@@ -88,40 +85,14 @@ export class RunNoticeProjector {
         return this.projectPlanning(event);
       case "observation.created":
         this.latestObservationId = event.observation.id;
-        this.latestObservationEventId = event.eventId;
-        this.observationActionId = this.lastActionStatus === undefined ? undefined : this.lastActionId;
         return undefined;
+      case "model.request.started":
+        return this.recordModelRequestObservation(event);
       case "model.response.received":
         return this.projectObservationAssessment(event);
-      case "action.proposed": {
+      case "action.proposed":
+        // Do not reuse the pre-action screenshot for a later progress report.
         this.latestObservationId = undefined;
-        this.latestObservationEventId = undefined;
-        this.observationActionId = undefined;
-        this.lastActionId = event.action.actionId;
-        this.lastActionReceiptEventId = undefined;
-        this.lastActionStatus = undefined;
-        return undefined;
-      }
-      case "action.execution.completed": {
-        this.recordActionReceipt(event.receipt.actionId, event.receipt.status, event.eventId);
-        return undefined;
-      }
-      case "action.execution.failed":
-        this.recordActionReceipt(event.receipt.actionId, event.receipt.status, event.eventId);
-        return undefined;
-      case "monitor.transition":
-        this.assessmentTransitions.set(event.actionId, {
-          actionId: event.actionId,
-          observationId: event.postObservationId,
-          sourceActionEventId: event.sourceActionEventId,
-          sourceObservationEventId: event.sourceObservationEventId,
-          transition: event.transition,
-        });
-        while (this.assessmentTransitions.size > 64) {
-          const first = this.assessmentTransitions.keys().next();
-          if (first.done) break;
-          this.assessmentTransitions.delete(first.value);
-        }
         return undefined;
       case "approval.requested":
         return this.projectApproval(event, context);
@@ -132,16 +103,17 @@ export class RunNoticeProjector {
         // The scheduler checks these notices against the live pending-request snapshot at dequeue time.
         return undefined;
       case "runtime.error":
+        return this.projectRuntimeError(event);
       case "model.request.failed":
-        return this.notice(event, "error", "任务遇到问题，请查看详情。", "interrupt", `error:${event.eventId}`, "fixed");
+        return this.projectModelRequestFailure(event);
       case "run.finished": {
         this.finished = true;
         this.planTasks.clear();
-        this.assessmentTransitions.clear();
+        this.modelObservationBindings.clear();
         this.announcedAssessments.clear();
         const summary = safeDynamicText(event.summary);
         const dynamic = event.outcome === "succeeded" && summary !== undefined && this.dynamicContentEnabled;
-        const text = dynamic ? summary : resultFallback(event.outcome);
+        const text = dynamic ? summary : resultFallback(event.outcome, this.failureNoticeProjected);
         return this.notice(event, "result", text, "interrupt", `result:${event.outcome}`, dynamic ? "dynamic" : "fixed");
       }
       default:
@@ -162,18 +134,17 @@ export class RunNoticeProjector {
   }
 
   private projectObservationAssessment(event: Extract<RuntimeEvent, { type: "model.response.received" }>): RunNotice | undefined {
+    const requestKey = modelRequestKey(event.requestId, event.decisionId);
+    const requestObservation = requestKey === undefined ? undefined : this.modelObservationBindings.get(requestKey);
+    if (requestKey !== undefined) this.modelObservationBindings.delete(requestKey);
     const rawAssessment: unknown = event.turn.observationAssessment;
     if (!isObservationAssessment(rawAssessment) || rawAssessment.progress === undefined
-      || rawAssessment.observationId !== this.latestObservationId
-      || rawAssessment.actionId !== this.observationActionId
-      || rawAssessment.actionId !== this.lastActionId
-      || this.lastActionStatus !== "completed") return undefined;
-    const transition = this.assessmentTransitions.get(rawAssessment.actionId);
-    if (transition === undefined || transition.observationId !== rawAssessment.observationId
-      || transition.sourceActionEventId !== this.lastActionReceiptEventId
-      || transition.sourceObservationEventId !== this.latestObservationEventId
-      || !assessmentAgreesWithTransition(rawAssessment, transition.transition)) return undefined;
-    const dedupeKey = `${rawAssessment.observationId}:${rawAssessment.actionId}:${rawAssessment.progress.kind}`;
+      || (rawAssessment.progress.kind !== "milestone" && rawAssessment.progress.kind !== "blocked")
+      || rawAssessment.observationId !== this.latestObservationId) return undefined;
+    if (requestObservation?.included !== true || requestObservation.observationId !== rawAssessment.observationId) return undefined;
+    const summary = safeDynamicText(rawAssessment.progress.summary, MAX_SPOKEN_MILESTONE_CHARS);
+    const contentKey = summary === undefined ? `fallback:${rawAssessment.progress.kind}` : `summary:${summary.toLocaleLowerCase("zh-CN")}`;
+    const dedupeKey = `${rawAssessment.progress.kind}:${contentKey}`;
     if (this.announcedAssessments.has(dedupeKey)) return undefined;
     this.announcedAssessments.add(dedupeKey);
     while (this.announcedAssessments.size > 128) {
@@ -181,18 +152,64 @@ export class RunNoticeProjector {
       if (first.done) break;
       this.announcedAssessments.delete(first.value);
     }
-    const summary = safeDynamicText(rawAssessment.progress.summary, MAX_DYNAMIC_TEXT_CHARS);
     const dynamic = summary !== undefined && this.dynamicContentEnabled;
+    const blocked = rawAssessment.progress.kind === "blocked";
     return this.notice(
       event,
       "progress",
-      dynamic ? summary : "已确认一项进展，任务继续中。",
-      "polite",
+      dynamic ? summary : blocked ? SAFE_BLOCKER_FALLBACK : SAFE_MILESTONE_FALLBACK,
+      blocked ? "interrupt" : "polite",
       `assessment:${dedupeKey}`,
       dynamic ? "dynamic" : "fixed",
       undefined,
-      "verified_milestone",
+      blocked ? "observation_blocker" : "observation_milestone",
     );
+  }
+
+  private recordModelRequestObservation(event: Extract<RuntimeEvent, { type: "model.request.started" }>): undefined {
+    const key = modelRequestKey(event.requestId, event.decisionId);
+    if (key === undefined) return undefined;
+    const included = event.contextBudget?.trace?.observationIncluded === true;
+    this.modelObservationBindings.set(key, {
+      ...(included && this.latestObservationId !== undefined ? { observationId: this.latestObservationId } : {}),
+      included,
+    });
+    while (this.modelObservationBindings.size > 32) {
+      const first = this.modelObservationBindings.keys().next();
+      if (first.done) break;
+      this.modelObservationBindings.delete(first.value);
+    }
+    return undefined;
+  }
+
+  private projectRuntimeError(event: Extract<RuntimeEvent, { type: "runtime.error" }>): RunNotice | undefined {
+    const text = runtimeErrorVoiceText(event.category);
+    if (text === undefined) return undefined;
+    const dedupeKey = `runtime-error:${event.category}`;
+    if (this.announcedFailureKeys.has(dedupeKey)) return undefined;
+    this.rememberFailureKey(dedupeKey);
+    this.failureNoticeProjected = true;
+    return this.notice(event, "error", text, "interrupt", dedupeKey, "fixed");
+  }
+
+  private projectModelRequestFailure(event: Extract<RuntimeEvent, { type: "model.request.failed" }>): RunNotice | undefined {
+    if (event.category === "cancelled") return undefined;
+    const retryable = event.retryable === true;
+    const dedupeKey = `model-error:${event.category}:${retryable ? "retryable" : "terminal"}`;
+    if (this.announcedFailureKeys.has(dedupeKey)) return undefined;
+    this.rememberFailureKey(dedupeKey);
+    const text = retryable ? "模型连接暂时不稳定。" : modelRequestFailureVoiceText(event.category);
+    if (!retryable) this.failureNoticeProjected = true;
+    return this.notice(event, "error", text, "interrupt", dedupeKey, "fixed");
+  }
+
+  private rememberFailureKey(key: string): void {
+    this.announcedFailureKeys.add(key);
+    while (this.announcedFailureKeys.size > 32) {
+      const first = this.announcedFailureKeys.values().next();
+      if (first.done) break;
+      this.announcedFailureKeys.delete(first.value);
+    }
   }
 
   private projectApproval(
@@ -213,15 +230,6 @@ export class RunNoticeProjector {
       dynamic ? "dynamic" : "fixed",
       event.requestId,
     );
-  }
-
-  private recordActionReceipt(actionId: ActionId, status: "completed" | "refused" | "failed" | "cancelled", eventId: EventId): void {
-    this.latestObservationId = undefined;
-    this.latestObservationEventId = undefined;
-    this.observationActionId = undefined;
-    this.lastActionId = actionId;
-    this.lastActionReceiptEventId = eventId;
-    this.lastActionStatus = status;
   }
 
   private projectQuestion(event: Extract<RuntimeEvent, { type: "user.input.requested" }>): RunNotice {
@@ -287,13 +295,52 @@ export function isPotentiallySensitive(text: string): boolean {
   ].some((pattern) => pattern.test(text));
 }
 
-function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>['outcome']): string {
+function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>['outcome'], failureAlreadyExplained = false): string {
   switch (outcome) {
     case "succeeded": return "任务已完成，可查看结果。";
-    case "failed": return "任务未能完成，请查看详情。";
+    case "failed": return failureAlreadyExplained ? "任务结束。" : "任务未能完成。";
     case "cancelled": return "任务已取消。";
-    case "budget_exhausted": return "任务达到执行上限，可查看进度。";
-    case "outcome_unknown": return "有项操作结果未确认，请查看任务。";
+    case "budget_exhausted": return failureAlreadyExplained ? "任务结束。" : "任务操作已达到上限。";
+    case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "有项操作的结果无法确认，任务已暂停。";
+  }
+}
+
+function runtimeErrorVoiceText(category: string): string | undefined {
+  switch (category) {
+    case "cancelled":
+    case "monitor_diagnostic":
+      return undefined;
+    case "budget":
+      return "任务操作已达到上限，暂时停止。";
+    case "unknown_side_effect":
+      return "有项操作的结果无法确认，任务已停止。";
+    case "partial_side_effect":
+      return "部分内容可能已经输入，结果无法确认，任务已停止。";
+    case "cleanup":
+      return "任务结束时有资源未能清理。";
+    case "finish_summary_invalid":
+      return "任务结果缺少必要内容，无法确认完成。";
+    case "finish_denied":
+      return "目前还不能确认任务已完成。";
+    case "planning_materialization_failed":
+      return "任务阶段状态未能保存，执行已停止。";
+    case "memory_materialization_failed":
+      return "任务记录未能保存，执行已停止。";
+    case "runtime":
+      return "任务运行遇到问题，已停止。";
+    default:
+      return "任务遇到问题，已停止。";
+  }
+}
+
+function modelRequestFailureVoiceText(category: string): string {
+  switch (category) {
+    case "provider":
+      return "模型请求失败，任务无法继续。";
+    case "cancelled":
+      return "任务已取消。";
+    default:
+      return "模型请求未能完成，任务无法继续。";
   }
 }
 
@@ -324,6 +371,7 @@ function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): str
     type: "输入操作",
     keypress: "键盘操作",
     select_option: "选择操作",
+    switch_window: "切换窗口操作",
     wait: "等待操作",
   };
   const riskLabels = categories.map((category) => categoryLabels[category]);
@@ -352,11 +400,8 @@ function isObservationAssessment(value: unknown): value is ObservationAssessment
     && typeof progress.summary === "string" && progress.summary.trim().length > 0 && progress.summary.length <= 160;
 }
 
-function assessmentAgreesWithTransition(
-  assessment: ObservationAssessment,
-  transition: "changed" | "unchanged" | "unknown",
-): boolean {
-  return assessment.progress?.kind === "milestone"
-    && transition === "changed"
-    && assessment.actionOutcome === "expected_change";
+function modelRequestKey(requestId: string | undefined, decisionId: string | undefined): string | undefined {
+  if (decisionId !== undefined && decisionId.length > 0) return `decision:${decisionId}`;
+  if (requestId !== undefined && requestId.length > 0) return `request:${requestId}`;
+  return undefined;
 }
