@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
+import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
 import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
@@ -171,6 +172,21 @@ describe("GLM provider adapter", () => {
     expect((imageBlock?.image_url as { url?: string } | undefined)?.url).toMatch(/^data:image\/png;base64,/);
     expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).toContain("normalized to 0..1000");
     expect(String((messages[0] as Record<string, unknown> | undefined)?.content)).not.toContain("Coordinates are pixels in the current image viewport");
+  });
+
+  it("projects Windows multiline append and selection semantics from the shared tool definition", async () => {
+    const client = new Client({ choices: [{ message: { content: "done" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    const typeTool = createDefaultComputerTools().modelTools().find((tool) => tool.name === "type");
+    if (typeTool === undefined) throw new Error("shared type tool is missing");
+    await adapter.generate({ ...input(), tools: [typeTool] }, { signal: new AbortController().signal });
+    const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
+    const type = tools.find((tool) => tool.function.name === "type");
+    expect(type?.function.description).toContain("appends to the end of the target's current value regardless of caret or selection");
+    expect(type?.function.parameters).toMatchObject({ properties: {
+      text: { description: expect.stringContaining("appends at its end regardless of caret or selection") },
+      elementRef: { description: expect.stringContaining("does not replace a selection") },
+    } });
   });
 
   it("rejects malformed, duplicate, and out-of-range provider output", async () => {

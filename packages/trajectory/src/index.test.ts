@@ -581,6 +581,71 @@ describe("RunSnapshot reducer", () => {
     ], runId)).toThrow(/transient child_push requires its exact adapter admission source/u);
   });
 
+  it("records a verified sibling transient as a child push under the unchanged owner root", () => {
+    const parent: SurfaceRef = { surfaceId: "sibling-owner-root" as SurfaceId, generation: 1, kind: "native_window" };
+    const oldMenu: SurfaceRef = {
+      surfaceId: "sibling-old-menu" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: parent.surfaceId,
+      admissionSource: "owned_transient_window_root_proof",
+    };
+    const newDialog: SurfaceRef = {
+      surfaceId: "sibling-new-dialog" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: parent.surfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const prefix = [
+      ...runningEvents(),
+      event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: parent, reason: "peer_switch" }),
+      event(6, { type: "observation.created", observation: {
+        id: "sibling-owner-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: parent,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "sibling-owner-asset" as AssetId, relativePath: "assets/sibling-owner.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+      event(7, { type: "computer.surface.transitioned", from: parent, to: oldMenu, reason: "child_push" }),
+      event(8, { type: "observation.created", observation: {
+        id: "sibling-menu-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: oldMenu,
+        capturedAt: "2026-01-01T00:00:02.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "sibling-menu-asset" as AssetId, relativePath: "assets/sibling-menu.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+    ];
+    const events = [
+      ...prefix,
+      event(9, { type: "computer.surface.transitioned", from: oldMenu, to: newDialog, reason: "child_push" }),
+      event(10, { type: "observation.created", observation: {
+        id: "sibling-dialog-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: newDialog,
+        capturedAt: "2026-01-01T00:00:03.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "sibling-dialog-asset" as AssetId, relativePath: "assets/sibling-dialog.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+    ];
+    expect(reduceRuntimeEvents(events, runId).activeSurfaceRef).toEqual(newDialog);
+
+    const unrelated: SurfaceRef = {
+      ...newDialog,
+      surfaceId: "sibling-unrelated-dialog" as SurfaceId,
+      parentSurfaceId: "different-owner-root" as SurfaceId,
+    };
+    expect(() => reduceRuntimeEvents([
+      ...prefix,
+      event(9, { type: "computer.surface.transitioned", from: oldMenu, to: unrelated, reason: "child_push" }),
+    ], runId)).toThrow(/child_push requires a direct active parent or a trusted sibling transient under the same parent/u);
+  });
+
   it("binds Guard and approval evidence to the transient Surface admission source", () => {
     const parent: SurfaceRef = { surfaceId: "admission-parent" as SurfaceId, generation: 1, kind: "native_window" };
     const child: SurfaceRef = {

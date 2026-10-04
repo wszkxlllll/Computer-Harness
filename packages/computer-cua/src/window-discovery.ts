@@ -1,11 +1,29 @@
 import { randomUUID } from "node:crypto";
 import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
-import { activateWindowTarget, listWindowTargets, type CuaWindowInfo, type CuaWindowTarget } from "./window-contract.js";
+import {
+  captureWindowWithRetry,
+  activateWindowTarget,
+  listWindowInventory,
+  validateWindowTarget,
+  type CuaWindowCapture,
+  type CuaWindowInfo,
+  type CuaWindowInventory,
+  type CuaWindowTarget,
+} from "./window-contract.js";
+import type { WindowRelationshipProbe } from "./window-relationship-probe.js";
+
+export interface CuaWindowPreviewCapture {
+  readonly capture: CuaWindowCapture;
+  /** Fresh post-capture metadata from the same temporary session. */
+  readonly inventory: CuaWindowInventory;
+  readonly capturedAt: string;
+}
 
 export interface CuaWindowDiscoveryOptions {
   readonly socketPath: string;
   readonly sessionLabel?: string;
   readonly driverFactory?: (socketPath: string) => CuaDriverLike;
+  readonly windowRelationshipProbe?: WindowRelationshipProbe;
 }
 
 export class CuaWindowDiscoveryCleanupError extends Error {
@@ -35,28 +53,74 @@ export class CuaWindowDiscovery {
   }
 
   public async listWindows(signal: AbortSignal, onScreenOnly = true): Promise<readonly CuaWindowInfo[]> {
-    const previousOperation = this.operationTail;
-    let release!: () => void;
-    this.operationTail = new Promise<void>((resolve) => { release = resolve; });
-    await previousOperation;
-    try {
+    return this.withSerializedOperation(async () => (await this.listInventoryOnce(signal, onScreenOnly)).windows, signal);
+  }
+
+  /**
+   * Return one read-only inventory snapshot with its completeness and source
+   * attestation intact. Consumers that make relationship-based decisions must
+   * inspect these fields from the same snapshot as the owner rows.
+   */
+  public async listInventory(signal: AbortSignal, onScreenOnly = true): Promise<CuaWindowInventory> {
+    return this.withSerializedOperation(() => this.listInventoryOnce(signal, onScreenOnly), signal);
+  }
+
+  /**
+   * Capture one exact candidate for a host picker. This read-only path uses a
+   * temporary session, checks the same PID/HWND before and after capture, and
+   * never activates, dispatches input, creates a Surface, or writes an asset.
+   */
+  public async captureWindowPreview(target: CuaWindowTarget, signal: AbortSignal): Promise<CuaWindowPreviewCapture> {
+    validateWindowTarget(target);
+    return this.withSerializedOperation(() => this.withDriver(signal, async (driver, session) => {
+      const before = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe);
+      requireExactPreviewCandidate(before, target);
+      const capture = await captureWindowWithRetry(driver, session, target, signal);
+      if (capture.binding.target.pid !== target.pid || capture.binding.target.windowId !== target.windowId) {
+        throw new Error("window preview capture did not retain the exact candidate identity");
+      }
+      if (capture.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
+        throw new Error("window preview exceeds the bounded image size");
+      }
+      const inventory = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe);
+      const after = requireExactPreviewCandidate(inventory, target);
+      const beforeCandidate = requireExactPreviewCandidate(before, target);
+      if (beforeCandidate.appName !== undefined && after.appName !== undefined &&
+          normalizeWindowLabel(beforeCandidate.appName) !== normalizeWindowLabel(after.appName)) {
+        throw new Error("window preview candidate application changed during capture");
+      }
       signal.throwIfAborted();
-      return await this.withDriver(signal, (driver, session) => listWindowTargets(driver, session, signal, undefined, onScreenOnly));
-    } finally {
-      release();
-    }
+      return { capture, inventory, capturedAt: new Date().toISOString() };
+    }), signal);
+  }
+
+  private async listInventoryOnce(signal: AbortSignal, onScreenOnly: boolean): Promise<CuaWindowInventory> {
+    signal.throwIfAborted();
+    return this.withDriver(signal, (driver, session) => listWindowInventory(
+      driver,
+      session,
+      signal,
+      undefined,
+      onScreenOnly,
+      this.options.windowRelationshipProbe,
+    ));
+  }
+
+  private withSerializedOperation<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+    const previousOperation = this.operationTail;
+    let started = false;
+    const currentOperation = previousOperation.then(() => {
+      signal.throwIfAborted();
+      started = true;
+      return operation();
+    });
+    this.operationTail = currentOperation.then(() => undefined, () => undefined);
+    return settleBeforeAbort(currentOperation, signal, () => started);
   }
 
   public async activateWindow(target: CuaWindowTarget, signal: AbortSignal): Promise<void> {
-    const previousOperation = this.operationTail;
-    let release!: () => void;
-    this.operationTail = new Promise<void>((resolve) => { release = resolve; });
-    await previousOperation;
-    try {
-      await this.withDriver(signal, (driver, session) => activateWindowTarget(driver, session, target, signal));
-    } finally {
-      release();
-    }
+    validateWindowTarget(target);
+    await this.withSerializedOperation(() => this.withDriver(signal, (driver, session) => activateWindowTarget(driver, session, target, signal)), signal);
   }
 
   private async withDriver<T>(signal: AbortSignal, operation: (driver: CuaDriverLike, session: string) => Promise<T>): Promise<T> {
@@ -125,4 +189,42 @@ export class CuaWindowDiscovery {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const MAX_WINDOW_PREVIEW_BYTES = 1_048_576;
+
+function requireExactPreviewCandidate(inventory: CuaWindowInventory, target: CuaWindowTarget): CuaWindowInfo {
+  const matches = inventory.windows.filter((window) => window.target.pid === target.pid && window.target.windowId === target.windowId);
+  if (matches.length !== 1) throw new Error("window preview candidate is missing or ambiguous in the fresh inventory");
+  return matches[0]!;
+}
+
+function normalizeWindowLabel(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase();
+}
+
+function settleBeforeAbort<T>(operation: Promise<T>, signal: AbortSignal, hasStarted: () => boolean): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("window preview was cancelled"));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+    const onAbort = (): void => {
+      if (settled || hasStarted()) return;
+      settled = true;
+      cleanup();
+      reject(signal.reason ?? new Error("window preview was cancelled"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then((value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    }, (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    });
+  });
 }

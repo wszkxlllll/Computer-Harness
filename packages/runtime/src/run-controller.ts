@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   ActionId,
   ApprovalEvidence,
+  ActionReceipt,
   ComputerWindowCandidate,
   ComputerWindowList,
   ComputerWindowOption,
@@ -2185,7 +2186,12 @@ export class RunController {
         ...executeOptions,
         ...(action.kind !== "switch_window" && this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
       });
-      receipt = normalizeActionReceiptForAction(action, rawReceipt, context.session);
+      receipt = normalizeActionReceiptForAction(
+        action,
+        rawReceipt,
+        context.session,
+        preActionFingerprint?.fingerprint.surfaceRef,
+      );
     } catch (error) {
       if (action.kind === "switch_window") {
         this.invalidateTargetAfterFailedSwitch();
@@ -2260,9 +2266,81 @@ export class RunController {
     if (receipt.status === "partial") {
       await this.commitEvent({
         type: "runtime.error",
-        category: "partial_side_effect",
-        message: receipt.message ?? "Computer action was only partially applied; inspect the current screen before continuing.",
+        category: receipt.safeRecovery === undefined && receipt.driverCode !== "ACTION_OUTCOME_UNKNOWN"
+          ? "partial_side_effect"
+          : "unknown_side_effect",
+        message: receipt.message ?? "Computer action outcome is unknown; inspect the current screen and do not repeat it automatically.",
       });
+      if (receipt.safeRecovery !== undefined) {
+        try {
+          await this.observeAndCommit(context.session, { safeRecovery: receipt.safeRecovery });
+          return;
+        } catch (error) {
+          await this.commitEvent({
+            type: "runtime.error",
+            category: "unknown_side_effect",
+            message: `Safe continuation was not confirmed by a matching fresh recovery Surface observation: ${errorMessage(error)}`,
+          });
+        }
+      }
+      if (receipt.driverCode === "ACTION_OUTCOME_UNKNOWN") {
+        // The Computer may have dispatched input before losing its foreground
+        // confirmation. Reject every suffix from that provider turn first;
+        // only a new observation/decision or an explicit Host handoff may
+        // continue. Never replay the uncertain action.
+        await beforeWindowHandoff?.();
+        const sourceSurface = this.snapshot.activeSurfaceRef;
+        let candidates: readonly ComputerWindowCandidate[] = [];
+        if (this.windowHandoff === "confirm-v1" && this.computer.handoffWindow !== undefined &&
+            this.computer.listWindowHandoffCandidates !== undefined) {
+          try {
+            candidates = this.computer.listNewWindowHandoffCandidates === undefined
+              ? this.computer.detectNewWindowHandoffCandidates === undefined
+                ? []
+                : await this.computer.detectNewWindowHandoffCandidates(context.session, this.abortController.signal)
+              : await this.computer.listNewWindowHandoffCandidates(context.session, this.abortController.signal);
+          } catch (error) {
+            this.throwIfAborted();
+            // A failed bounded diff is not evidence that the foreground or
+            // popup state is safe. The user barrier below preserves that fact.
+            await this.commitEvent({
+              type: "runtime.error",
+              category: "unknown_side_effect",
+              message: `The post-action window diff could not be verified: ${errorMessage(error)}`,
+            });
+          }
+        }
+        this.throwIfAborted();
+        if (candidates.length > 0 && this.windowHandoff === "confirm-v1" &&
+            this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined) {
+          await this.commitEvent({
+            type: "computer.window.handoff.requested",
+            sourceActionId: action.actionId,
+            reasonCode: "new_window_detected",
+          });
+          return;
+        }
+        try {
+          const fresh = await this.observeAndCommit(context.session);
+          const latestLineage = this.snapshot.surfaceLineage.at(-1);
+          const transitionReason = latestLineage !== undefined && sameSurfaceRef(latestLineage.to, fresh.surfaceRef)
+            ? latestLineage.reason
+            : undefined;
+          if (isTrustedUnknownActionSurfaceTransition(sourceSurface, fresh.surfaceRef, transitionReason)) return;
+        } catch (error) {
+          this.throwIfAborted();
+          await this.commitEvent({
+            type: "runtime.error",
+            category: "unknown_side_effect",
+            message: `The current screen could not be freshly confirmed after the unknown action: ${errorMessage(error)}`,
+          });
+        }
+        await this.commitEvent({
+          type: "user.input.requested",
+          question: "刚才的操作可能已经发送，但结果无法确认。请先检查当前屏幕，不要重复刚才的操作；确认或关闭弹窗后，告诉我下一步要做什么。",
+        });
+        return;
+      }
       await this.commitRunFinished({ outcome: "outcome_unknown" });
       return;
     }
@@ -2515,7 +2593,10 @@ export class RunController {
 
   private async observeAndCommit(
     session: ComputerSession,
-    options: { requireSessionViewportMatch?: boolean } = {},
+    options: {
+      requireSessionViewportMatch?: boolean;
+      safeRecovery?: NonNullable<Extract<ActionReceipt, { status: "partial" }>["safeRecovery"]>;
+    } = {},
   ): Promise<ObservationFrame> {
     const observationId = this.idFactory.observationId();
     const assetId = this.idFactory.assetId();
@@ -2531,6 +2612,19 @@ export class RunController {
     if (!isValidSurfaceRef(capture.surfaceRef)) {
       const code = isLegacyUnknownSurfaceRef(capture.surfaceRef) ? "LEGACY_SURFACE_UNRESOLVED" : "SURFACE_REF_INVALID";
       throw new ObservationCaptureError(new Error(`${code}: Computer capture did not identify one current, executable Surface incarnation`));
+    }
+    if (options.safeRecovery !== undefined) {
+      const expectedTransition = options.safeRecovery.kind === "transient_parent_restored"
+        ? "child_pop"
+        : options.safeRecovery.kind === "transient_owned_surface_reconciled"
+          ? "child_push"
+          : undefined;
+      if (!sameSurfaceRef(capture.surfaceRef, options.safeRecovery.surfaceRef) ||
+          (expectedTransition === undefined
+            ? capture.surfaceTransitionReason !== undefined
+            : capture.surfaceTransitionReason !== expectedTransition)) {
+        throw new ObservationCaptureError(new Error("SAFE_RECOVERY_SURFACE_MISMATCH: fresh capture did not match the verified recovery Surface and transition"));
+      }
     }
     if (capture.grounding !== undefined) {
       if (capture.grounding.observationId !== observationId || capture.grounding.computerSessionId !== session.id ||
@@ -3097,6 +3191,7 @@ function normalizeActionReceiptForAction(
   action: ActionIntent,
   value: import("@computer-harness/protocol").ActionReceipt,
   currentSession: ComputerSession,
+  executionSurfaceRef?: SurfaceRef,
 ): import("@computer-harness/protocol").ActionReceipt {
   if (typeof value !== "object" || value === null || value.actionId !== action.actionId) {
     throw new Error("Computer receipt actionId does not match the dispatched action");
@@ -3118,11 +3213,53 @@ function normalizeActionReceiptForAction(
     throw new Error("completed switch_window receipt is missing sessionAfter");
   }
 
+  const hasSafeRecovery = Object.hasOwn(value, "safeRecovery");
+  let safeRecovery: NonNullable<Extract<ActionReceipt, { status: "partial" }>["safeRecovery"]> | undefined;
+  if (hasSafeRecovery) {
+    const candidate = (value as { safeRecovery?: unknown }).safeRecovery;
+    if (value.status !== "partial" || action.kind === "switch_window" || action.kind === "wait" ||
+        executionSurfaceRef === undefined || !isValidSurfaceRef(executionSurfaceRef) ||
+        executionSurfaceRef.kind !== "native_window" || typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      throw new Error("safeRecovery is valid only for a partial ordinary GUI action on a verified native child Surface");
+    }
+    const recovery = candidate as Record<string, unknown>;
+    if (Object.keys(recovery).some((key) => key !== "kind" && key !== "surfaceRef") ||
+        !isValidSafeRecoverySurfaceRef(recovery.surfaceRef) || recovery.surfaceRef.kind !== "native_window") {
+      throw new Error("safeRecovery does not identify a valid native recovery Surface");
+    }
+    if (recovery.kind === "transient_parent_restored") {
+      if (recovery.surfaceRef.surfaceId !== executionSurfaceRef.parentSurfaceId) {
+        throw new Error("safeRecovery does not identify the exact registered parent Surface of the action observation");
+      }
+      safeRecovery = { kind: "transient_parent_restored", surfaceRef: recovery.surfaceRef };
+    } else if (recovery.kind === "transient_owned_surface_reconciled") {
+      const trustedAdmissionSource = recovery.surfaceRef.admissionSource === "owned_transient_window_root_proof" ||
+        recovery.surfaceRef.admissionSource === "win32_relationship_probe";
+      const trustedOriginalAdmissionSource = executionSurfaceRef.admissionSource === "owned_transient_window_root_proof" ||
+        executionSurfaceRef.admissionSource === "win32_relationship_probe";
+      if (executionSurfaceRef.parentSurfaceId === undefined ||
+          recovery.surfaceRef.surfaceId === executionSurfaceRef.surfaceId ||
+          recovery.surfaceRef.parentSurfaceId !== executionSurfaceRef.parentSurfaceId ||
+          !trustedAdmissionSource || !trustedOriginalAdmissionSource) {
+        throw new Error("safeRecovery does not identify a different trusted transient Surface under the same exact parent");
+      }
+      safeRecovery = { kind: "transient_owned_surface_reconciled", surfaceRef: recovery.surfaceRef };
+    } else if (recovery.kind === "native_surface_reconfirmed") {
+      if (!sameSurfaceRef(recovery.surfaceRef, executionSurfaceRef)) {
+        throw new Error("safeRecovery does not identify the exact native Surface on which the unknown action was dispatched");
+      }
+      safeRecovery = { kind: "native_surface_reconfirmed", surfaceRef: recovery.surfaceRef };
+    } else {
+      throw new Error("safeRecovery has an unsupported transient recovery kind");
+    }
+  }
+
   const base = {
     actionId: action.actionId,
     status: value.status,
     ...(value.driverCode === undefined ? {} : { driverCode: value.driverCode }),
     ...(value.message === undefined ? {} : { message: value.message }),
+    ...(safeRecovery === undefined ? {} : { safeRecovery }),
   };
   if (!hasSessionAfter) return base as import("@computer-harness/protocol").ActionReceipt;
 
@@ -3246,9 +3383,36 @@ function isLegacyUnknownSurfaceRef(value: unknown): boolean {
     (value as Record<string, unknown>).kind === "unknown";
 }
 
+function isValidSafeRecoverySurfaceRef(value: unknown): value is SurfaceRef {
+  if (!isValidSurfaceRef(value)) return false;
+  const candidate = value as unknown as Record<string, unknown>;
+  const allowedKeys = new Set(["surfaceId", "generation", "kind", "parentSurfaceId", "admissionSource"]);
+  return Object.keys(candidate).every((key) => allowedKeys.has(key)) &&
+    (candidate.parentSurfaceId === undefined ||
+      typeof candidate.parentSurfaceId === "string" && candidate.parentSurfaceId.length > 0 && candidate.parentSurfaceId.length <= 128);
+}
+
 function sameSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
   return left.surfaceId === right.surfaceId && left.generation === right.generation && left.kind === right.kind &&
     left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
+}
+
+function isTrustedUnknownActionSurfaceTransition(
+  previous: SurfaceRef | undefined,
+  next: SurfaceRef,
+  transitionReason: string | undefined,
+): boolean {
+  if (previous === undefined || previous.surfaceId === next.surfaceId || transitionReason === undefined) return false;
+  const trustedTransient = (surface: SurfaceRef) => surface.kind === "native_window" &&
+    (surface.admissionSource === "owned_transient_window_root_proof" ||
+      surface.admissionSource === "win32_relationship_probe");
+  if (transitionReason === "child_push") {
+    return trustedTransient(next) &&
+      (next.parentSurfaceId === previous.surfaceId ||
+        previous.parentSurfaceId !== undefined && next.parentSurfaceId === previous.parentSurfaceId && trustedTransient(previous));
+  }
+  return transitionReason === "child_pop" && trustedTransient(previous) &&
+    previous.parentSurfaceId === next.surfaceId && next.kind === "native_window";
 }
 
 function validateComputerWindowList(value: ComputerWindowList): ComputerWindowList {

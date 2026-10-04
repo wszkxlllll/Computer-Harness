@@ -28,10 +28,14 @@ describe("default Computer tools", () => {
     const scroll = tools.find((tool) => tool.name === "scroll");
     expect(scroll?.inputSchema).toMatchObject({ required: ["x", "y", "direction", "ticks"] });
     const type = tools.find((tool) => tool.name === "type");
+    expect(type?.description).toContain("appends to the end of the target's current value regardless of caret or selection");
+    expect(type?.description).toContain("soft-wrapped visual lines are not paragraph boundaries");
+    expect(type?.description).toContain("Windows desktop-wide CUA multiline input is not supported by this path");
+    expect(type?.description).toContain("other platforms keep their native multiline typing route");
     expect(type?.inputSchema).toMatchObject({
       properties: {
-        text: { type: "string" },
-        elementRef: { type: "string", minLength: 1, maxLength: 96 },
+        text: { type: "string", description: expect.stringContaining("appends at its end regardless of caret or selection") },
+        elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("does not replace a selection") },
       },
       required: ["text"],
       additionalProperties: false,

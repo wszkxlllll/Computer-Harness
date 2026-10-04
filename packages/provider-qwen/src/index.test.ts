@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AssetId, JsonValue, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
+import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
 import { Qwen38FlashAdapter, type QwenHttpClient } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
@@ -33,10 +34,6 @@ class Client implements QwenHttpClient {
 function input(): ModelInput {
   const schemas: Record<string, JsonValue> = {
     click: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false },
-    type: { type: "object", properties: {
-      text: { type: "string", description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
-      elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA text-editor reference, used only for multiline full-value replacement. Expires when the observation or target window changes." },
-    }, required: ["text"], additionalProperties: false },
     keypress: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 1 } }, required: ["keys"], additionalProperties: false },
     hotkey: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 } }, required: ["keys"], additionalProperties: false },
     scroll: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, direction: { type: "string" }, ticks: { type: "integer" } }, required: ["x", "y", "direction", "ticks"], additionalProperties: false },
@@ -51,6 +48,9 @@ function input(): ModelInput {
     ...(name === "drag" ? { coordinate: { fields: ["fromX", "fromY", "toX", "toY"] as const } } : {}),
     inputSchema: schemas[name]!,
   }));
+  const registeredType = createDefaultComputerTools().modelTools().find((tool) => tool.name === "type");
+  if (registeredType === undefined) throw new Error("shared type tool is missing");
+  tools.splice(1, 0, registeredType);
   tools.push(
     { name: "terminate", description: "finish", category: "control" as const, control: "finish" as const, inputSchema: { type: "object", properties: { status: { type: "string", enum: ["success", "failure"] }, text: { type: "string" } }, required: ["status", "text"], additionalProperties: false } },
     { name: "interact", description: "ask", category: "control" as const, control: "user_input_required" as const, inputSchema: { type: "object", properties: { text: { type: "string" } } } },
@@ -498,12 +498,13 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.reasoning_effort).toBe("low");
     expect(client.body?.preserve_thinking).toBe(true);
     expect(client.body?.parallel_tool_calls).toBe(false);
-    const tools = client.body?.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
+    const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
     expect(tools[0]).toMatchObject({ function: { name: "click", parameters: { required: ["x", "y"], properties: { x: { maximum: 1000 }, y: { maximum: 1000 } } } } });
     expect(tools.find((tool) => tool.function.name === "type")).toMatchObject({ function: { parameters: { required: ["text"], properties: {
-      text: { description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
-      elementRef: { type: "string", minLength: 1, maxLength: 96 },
+      text: { description: expect.stringContaining("appends at its end regardless of caret or selection") },
+      elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("does not replace a selection") },
     } } } });
+    expect(tools.find((tool) => tool.function.name === "type")?.function.description).toContain("does not replace selected text");
     expect(tools.find((tool) => tool.function.name === "keypress")).toMatchObject({ function: { parameters: { required: ["keys"], properties: { keys: { maxItems: 1 } } } } });
   });
 

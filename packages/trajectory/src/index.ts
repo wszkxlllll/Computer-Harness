@@ -805,8 +805,14 @@ function validateSurfaceTransition(
   }
 
   const childPush = to.parentSurfaceId === from.surfaceId;
+  const trustedNativeTransient = (surface: SurfaceRef): boolean => surface.kind === "native_window" &&
+    (surface.admissionSource === "owned_transient_window_root_proof" || surface.admissionSource === "win32_relationship_probe");
+  const siblingChildPush = from.kind === "native_window" && to.kind === "native_window" &&
+    from.parentSurfaceId !== undefined && from.parentSurfaceId === to.parentSurfaceId &&
+    from.surfaceId !== to.surfaceId && snapshot.surfaceParentsById[fromId] === String(from.parentSurfaceId) &&
+    trustedNativeTransient(from) && trustedNativeTransient(to);
   const childPop = from.parentSurfaceId === to.surfaceId && snapshot.surfaceParentsById[fromId] === toId;
-  const directParentRelation = childPush || childPop;
+  const directParentRelation = childPush || siblingChildPush || childPop;
   switch (reason) {
     case "initial_observation":
       throw new Error("initial_observation requires a null source Surface");
@@ -817,8 +823,8 @@ function validateSurfaceTransition(
       }
       return;
     case "child_push":
-      if (from.surfaceId === to.surfaceId || !childPush) {
-        throw new Error("child_push target parentSurfaceId must equal the active source SurfaceId");
+      if (from.surfaceId === to.surfaceId || (!childPush && !siblingChildPush)) {
+        throw new Error("child_push requires a direct active parent or a trusted sibling transient under the same parent");
       }
       if ((to.kind === "overlay" && to.admissionSource !== "same_hwnd_overlay_root_proof") ||
           (to.kind === "native_window" && to.admissionSource !== "owned_transient_window_root_proof" &&
@@ -1208,7 +1214,25 @@ const actionReceiptSchema = z.object({
 const completedActionReceiptSchema = actionReceiptSchema.extend({ status: z.literal("completed") });
 const failedActionReceiptSchema = actionReceiptSchema.omit({ sessionAfter: true }).extend({
   status: z.enum(["refused", "failed", "cancelled", "partial"]),
+  safeRecovery: z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("transient_parent_restored"),
+      surfaceRef: surfaceRefSchema,
+    }).strict(),
+    z.object({
+      kind: z.literal("transient_owned_surface_reconciled"),
+      surfaceRef: surfaceRefSchema,
+    }).strict(),
+    z.object({
+      kind: z.literal("native_surface_reconfirmed"),
+      surfaceRef: surfaceRefSchema,
+    }).strict(),
+  ]).optional(),
   sessionAfter: z.never().optional(),
+}).superRefine((receipt, context) => {
+  if (receipt.safeRecovery !== undefined && receipt.status !== "partial") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["safeRecovery"], message: "safe recovery is valid only for an unresolved partial receipt" });
+  }
 });
 const planningTaskSchema = z.object({
   id: nonEmptyString,

@@ -36,13 +36,13 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
     },
     {
       name: "type",
-      description: "Type ordinary single-line text into the currently focused GUI control. For multiline text on a CUA run, provide elementRef for a current UIA text editor, or omit it only when the current complete UIA catalog contains exactly one enabled text-editing surface. The UIA path replaces that entire field value; it is not cursor insertion and does not submit or send. Do not use elementRef for ordinary single-line typing.",
+      description: "Type ordinary single-line text into the currently focused GUI control. On window-bound Windows CUA, multiline input targets a current UIA editor: provide elementRef when available, or omit it and let the backend resolve an unambiguous current editor. This UIA path appends to the end of the target's current value regardless of caret or selection; it does not replace selected text or submit/send. Windows desktop-wide CUA multiline input is not supported by this path; other platforms keep their native multiline typing route. Compose a complete multiline block before typing; for separate range edits, verify the selection because soft-wrapped visual lines are not paragraph boundaries. Do not use elementRef for ordinary single-line typing.",
       category: "computer",
       inputSchema: {
         type: "object",
         properties: {
-          text: { type: "string", description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
-          elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA text-editor reference, used only for multiline full-value replacement. Expires when the observation or target window changes." },
+          text: { type: "string", description: "Text to type. Window-bound Windows CUA multiline input requires an unambiguous current UIA editor and appends at its end regardless of caret or selection. Windows desktop-wide scope is unsupported by this path; other platforms use their native multiline typing route." },
+          elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA editor reference for window-bound Windows CUA multiline input. The UIA route appends to the end of the current value; it does not replace a selection. Expires when the observation or target window changes." },
         },
         required: ["text"],
         additionalProperties: false,
@@ -52,7 +52,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
         const { text, elementRef } = parseTypeArguments(args);
         const multiline = /[\r\n\u0085\u2028\u2029]/u.test(text);
         if (elementRef !== undefined && !multiline) {
-          throw new Error("type.elementRef is only valid for multiline full-value replacement; omit it for single-line typing");
+          throw new Error("type.elementRef is only valid for multiline input; omit it for single-line typing");
         }
         const grounding = context.observation?.grounding;
         if (elementRef !== undefined) {

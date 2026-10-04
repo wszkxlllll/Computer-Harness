@@ -19,6 +19,7 @@ export {
   listWindowTargets,
   type WindowCaptureRetryOptions,
   type CuaWindowInfo,
+  type CuaWindowInventory,
   type CuaWindowTarget,
 } from "./window-contract.js";
 export {
@@ -30,6 +31,7 @@ export {
 export {
   CuaWindowDiscovery,
   CuaWindowDiscoveryCleanupError,
+  type CuaWindowPreviewCapture,
   type CuaWindowDiscoveryOptions,
 } from "./window-discovery.js";
 export {

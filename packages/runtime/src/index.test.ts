@@ -2982,6 +2982,425 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("continues from a freshly re-observed exact native Surface after generic foreground reconfirmation", async () => {
+    const surfaceRef: SurfaceRef = {
+      surfaceId: "unknown-native-surface" as SurfaceRef["surfaceId"],
+      generation: 3,
+      kind: "native_window",
+    };
+    class ReconfirmedForegroundComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef };
+      }
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+          safeRecovery: { kind: "native_surface_reconfirmed" as const, surfaceRef },
+        };
+      }
+    }
+    const computer = new ReconfirmedForegroundComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-reconfirmed-click"), typeCall("unknown-reconfirmed-stale-suffix")] },
+      { type: "finish", summary: "continued from the fresh native screen", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1" },
+    );
+    await expect(controller.start("continue from the confirmed current screen")).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+    expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    const events = controller.getEvents();
+    expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "partial" &&
+      event.receipt.safeRecovery?.kind === "native_surface_reconfirmed")).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "unknown-reconfirmed-stale-suffix")).toBe(true);
+    expect(events.some((event) => event.type === "computer.surface.transitioned" &&
+      event.reason === "initial_observation" && event.to.surfaceId === surfaceRef.surfaceId)).toBe(true);
+    expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not continue when the fresh observation contradicts native-surface reconfirmation", async () => {
+    const claimedSurface: SurfaceRef = {
+      surfaceId: "claimed-unknown-native-surface" as SurfaceRef["surfaceId"],
+      generation: 3,
+      kind: "native_window",
+    };
+    const actualSurface: SurfaceRef = {
+      surfaceId: "different-unknown-native-surface" as SurfaceRef["surfaceId"],
+      generation: 1,
+      kind: "native_window",
+    };
+    class MismatchedReconfirmationComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef: this.calls.filter((call) => call.startsWith("observe:")).length === 1 ? claimedSurface : actualSurface };
+      }
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+          safeRecovery: { kind: "native_surface_reconfirmed" as const, surfaceRef: claimedSurface },
+        };
+      }
+    }
+    const computer = new MismatchedReconfirmationComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-mismatched-click")] },
+      { type: "finish", summary: "must wait for user recovery", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer);
+    const running = controller.start("perform the GUI task");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(provider.inputs).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+      await controller.submitUserInput("I checked the screen; continue safely.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("holds for user input when unknown action has no owned-surface or Host-handoff proof", async () => {
+    class UnresolvedForegroundComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+        };
+      }
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push("detect-after-unknown");
+        return [] as readonly ComputerWindowCandidate[];
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return [] as readonly ComputerWindowCandidate[];
+      }
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return session;
+      }
+    }
+    const computer = new UnresolvedForegroundComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-manual-click"), typeCall("unknown-manual-stale-suffix")] },
+      { type: "finish", summary: "continued after user checked the screen", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1", windowHandoff: "confirm-v1" },
+    );
+    const running = controller.start("perform the GUI task");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(controller.getSnapshot().pendingUserQuestion).toContain("不要重复刚才的操作");
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "unknown-manual-stale-suffix")).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+      await controller.submitUserInput("I checked the screen; choose another safe action.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+      expect(provider.inputs).toHaveLength(2);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("routes a newly surfaced peer after an unknown action through the existing Host handoff gate", async () => {
+    const candidate: ComputerWindowCandidate = { pid: 902, windowId: 1902, appName: "Other window", title: "Fresh target" };
+    class UnknownActionPeerComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+        };
+      }
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push("detect-after-unknown");
+        return [candidate];
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return [candidate];
+      }
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push("handoff");
+        return session;
+      }
+    }
+    const computer = new UnknownActionPeerComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-peer-click"), typeCall("unknown-peer-stale-suffix")] },
+      { type: "finish", summary: "continued after host selected a target", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1", windowHandoff: "confirm-v1" },
+    );
+    let running: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      running = controller.start("perform the GUI task");
+      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_window");
+      expect(controller.getSnapshot().pendingWindowHandoff).toMatchObject({ reasonCode: "new_window_detected" });
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+      expect(computer.calls).toContain("detect-after-unknown");
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "unknown-peer-stale-suffix")).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested" && event.reasonCode === "new_window_detected")).toBe(true);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["parent", "owned-sibling"] as const)(
+    "continues from a partial transient receipt only after its %s recovery Surface is freshly observed",
+    async (recoveryRoute) => {
+    const childSurface: SurfaceRef = {
+      surfaceId: "recovery-child" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: "recovery-parent" as SurfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const parentSurface: SurfaceRef = {
+      surfaceId: "recovery-parent" as SurfaceId,
+      generation: 3,
+      kind: "native_window",
+      parentSurfaceId: "recovery-grandparent" as SurfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const siblingSurface: SurfaceRef = {
+      surfaceId: "recovery-sibling" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: parentSurface.surfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const recoverySurface = recoveryRoute === "parent" ? parentSurface : siblingSurface;
+    class RecoverableChildComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        const restored = this.calls.some((call) => call === "execute:click");
+        return {
+          ...capture,
+          surfaceRef: restored ? recoverySurface : childSurface,
+          ...(restored ? { surfaceTransitionReason: recoveryRoute === "parent" ? "child_pop" as const : "child_push" as const } : {}),
+        };
+      }
+
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "CUA_TRANSIENT_ACTION_OUTCOME_UNKNOWN",
+          message: "The action outcome is unknown. The transient window closed and its exact parent was freshly captured. Do not repeat this action; inspect the refreshed screen and choose the next step.",
+          safeRecovery: {
+            kind: recoveryRoute === "parent" ? "transient_parent_restored" as const : "transient_owned_surface_reconciled" as const,
+            surfaceRef: recoverySurface,
+          },
+        };
+      }
+    }
+    const computer = new RecoverableChildComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("recovery-unknown-click"), typeCall("recovery-stale-suffix")] },
+      { type: "finish", summary: "continued from the refreshed parent screen", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1" },
+    );
+
+    await expect(controller.start("complete the confirmed dialog task")).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+    expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+    expect(provider.inputs[1]?.messages.some((message) =>
+      message.content.some((block) => block.type === "tool_result" && block.result.callId === "recovery-unknown-click" &&
+        block.result.status === "failed" && block.result.error.message.includes("Do not repeat this action")),
+    )).toBe(true);
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "partial" &&
+      event.receipt.safeRecovery?.kind === (recoveryRoute === "parent" ? "transient_parent_restored" : "transient_owned_surface_reconciled"))).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "recovery-stale-suffix")).toBe(true);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+    expect(events.some((event) => event.type === "computer.surface.transitioned" &&
+      event.reason === (recoveryRoute === "parent" ? "child_pop" : "child_push") &&
+      event.to.surfaceId === recoverySurface.surfaceId)).toBe(true);
+    expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+    },
+  );
+
+  it("does not continue when a partial recovery proof mismatches the fresh Surface", async () => {
+    const childSurface: SurfaceRef = {
+      surfaceId: "mismatch-child" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: "mismatch-parent" as SurfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const claimedParent: SurfaceRef = { surfaceId: "mismatch-parent" as SurfaceId, generation: 3, kind: "native_window" };
+    const wrongParent: SurfaceRef = { surfaceId: "wrong-parent" as SurfaceId, generation: 1, kind: "native_window" };
+    class MismatchedRecoveryComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        const restored = this.calls.some((call) => call === "execute:click");
+        return {
+          ...capture,
+          surfaceRef: restored ? wrongParent : childSurface,
+          ...(restored ? { surfaceTransitionReason: "child_pop" as const } : {}),
+        };
+      }
+
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          safeRecovery: { kind: "transient_parent_restored" as const, surfaceRef: claimedParent },
+        };
+      }
+    }
+    const computer = new MismatchedRecoveryComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("mismatched-recovery-click")] },
+      { type: "finish", summary: "must not continue", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer);
+
+    await expect(controller.start("stop after unverified recovery")).resolves.toBe("outcome_unknown");
+    expect(provider.inputs).toHaveLength(1);
+    expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "outcome_unknown" });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it.each(["extra-ref-field", "wait-action", "sibling-wrong-parent", "sibling-same-surface", "sibling-untrusted-source", "sibling-untrusted-old-source"] as const)(
+    "rejects invalid safe recovery evidence for %s",
+    async (scenario) => {
+    const childSurface: SurfaceRef = {
+      surfaceId: `invalid-recovery-child-${scenario}` as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: `invalid-recovery-parent-${scenario}` as SurfaceId,
+      ...(scenario === "sibling-untrusted-old-source" ? {} : { admissionSource: "win32_relationship_probe" as const }),
+    };
+    const parentSurface: SurfaceRef = {
+      surfaceId: childSurface.parentSurfaceId!,
+      generation: 3,
+      kind: "native_window",
+    };
+    class InvalidRecoveryComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef: childSurface };
+      }
+
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        const isSiblingRecovery = scenario.startsWith("sibling-");
+        const siblingSurface: SurfaceRef = {
+          surfaceId: scenario === "sibling-same-surface" ? childSurface.surfaceId : `invalid-sibling-${scenario}` as SurfaceId,
+          generation: 1,
+          kind: "native_window",
+          parentSurfaceId: scenario === "sibling-wrong-parent" ? `wrong-parent-${scenario}` as SurfaceId : childSurface.parentSurfaceId,
+          ...(scenario === "sibling-untrusted-source" ? {} : { admissionSource: "win32_relationship_probe" as const }),
+        };
+        const surfaceRef = scenario === "extra-ref-field"
+          ? { ...parentSurface, extra: "unexpected" }
+          : isSiblingRecovery ? siblingSurface : parentSurface;
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          safeRecovery: {
+            kind: isSiblingRecovery ? "transient_owned_surface_reconciled" as const : "transient_parent_restored" as const,
+            surfaceRef,
+          },
+        } as import("@computer-harness/protocol").ActionReceipt;
+      }
+    }
+    const actionCall: ToolCall = scenario === "wait-action"
+      ? { id: "invalid-recovery-action" as ToolCallId, name: "wait", arguments: { durationMs: 10 } }
+      : clickCall("invalid-recovery-action");
+    const computer = new InvalidRecoveryComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [actionCall] },
+      { type: "finish", summary: "must not continue", reportedStatus: "success" },
+    ]);
+    const registry = scenario === "wait-action" ? waitRegistry() : clickRegistry();
+    const { controller, directory } = await makeController(provider, computer, registry);
+
+    await expect(controller.start("reject malformed safe recovery")).resolves.toBe("outcome_unknown");
+    expect(provider.inputs).toHaveLength(1);
+    expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(1);
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "action.execution.failed")).toBe(false);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "outcome_unknown" });
+    await rm(directory, { recursive: true, force: true });
+    },
+  );
+
   it("prepares once and records one-to-one decision and attempt metadata", async () => {
     const provider = new PreparedScriptedProvider("success");
     const created = await makeController(provider);

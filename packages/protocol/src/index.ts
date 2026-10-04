@@ -877,7 +877,28 @@ export type ActionReceipt =
     }
   | {
       actionId: ActionId;
-      status: "refused" | "failed" | "cancelled" | "partial";
+      status: "partial";
+      driverCode?: string;
+      message?: string;
+      /** A safe continuation hint after an unresolved action; it never means that the action completed. */
+      safeRecovery?:
+        | {
+            readonly kind: "transient_parent_restored";
+            readonly surfaceRef: SurfaceRef;
+          }
+        | {
+            readonly kind: "transient_owned_surface_reconciled";
+            readonly surfaceRef: SurfaceRef;
+          }
+        | {
+            /** The same exact native Surface is still foreground and is safe to freshly observe; the action outcome remains unknown. */
+            readonly kind: "native_surface_reconfirmed";
+            readonly surfaceRef: SurfaceRef;
+          };
+    }
+  | {
+      actionId: ActionId;
+      status: "refused" | "failed" | "cancelled";
       driverCode?: string;
       message?: string;
     };
@@ -912,9 +933,19 @@ export interface ComputerWindowIdentity {
   readonly windowId: number;
 }
 
+export type ComputerWindowCandidateRelationship =
+  | {
+      readonly kind: "owned_child";
+      readonly owner: ComputerWindowIdentity;
+      readonly rootRole?: "menu" | "popup" | "dialog";
+    }
+  | { readonly kind: "scoped_peer" };
+
 export interface ComputerWindowCandidate extends ComputerWindowIdentity {
   readonly appName?: string;
   readonly title?: string;
+  /** Exact owner relation for popup handoff, or Host allowlist scope for a peer. */
+  readonly relationship?: ComputerWindowCandidateRelationship;
 }
 
 export type RunStatus =
