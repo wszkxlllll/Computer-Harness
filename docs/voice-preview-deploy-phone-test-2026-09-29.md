@@ -1,18 +1,26 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29
-状态：隔离 Preview 与本机 Host 已于 2026-10-04 更新到窗口/中途播报修复版本，基础检查通过，可开始下一轮手机实机测试。
+状态：隔离 Preview 与本机 Host 已于 2026-10-04 更新到弹窗／输入收尾版本，基础检查通过，可开始下一轮手机实机测试；完整 WPS 保存和跨应用报告尚未放行。
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
 
 ## 部署状态
 
-- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-04-window-progress-v1`；Preview 的 `current` 符号链接已切换到该 release。此前 `2026-10-03-runtime-surface-v2` 和 `2026-10-02-cross-window-v1` 均保留，可作为回滚点。
+- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-04-popup-input-closeout-v2`，源码 `3f234c6b7acd3fc26c9de0042b4b5d77cedf7234`；Preview 的 `current` 已原子切换。此前 `popup-input-closeout-v1`、`window-progress-v1`、`2026-10-03-runtime-surface-v2` 和 `2026-10-02-cross-window-v1` 均保留回滚。
 - `computer-harness-relay-preview` 服务处于 active，只监听 loopback `8788`。Nginx 在 `8443` 提供 TLS：`https://47.108.197.221:8443`，使用现有有效 IP 证书。用户已开放 `8443`。
 - 旧入口 `https://47.108.197.221` 及旧服务、旧 `current` 均未修改，仍健康。
 - stable release 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`；本次未切换或重启 stable。
 - 公网检查结果及边界见下方 2026-10-03 更新记录。它们不代表手机麦克风或完整语音任务已经验收。
 
 ## 2026-10-04 窗口与播报修复部署
+
+### 本轮收尾更新
+
+当前源码、审查、CI 与真实任务边界见[统一收尾记录](./window-popup-regression-2026-10-04.md)。源码 `3f234c6` 本地 111 文件／1655 项通过，四组 CI 及 `ci-required` 全绿；服务器从已验证 Git commit 构建，Web asset 为 `index-D8bCuibX.js`。Preview health／asset 200，匿名任务 API 401，stable health 200。本机 Host 已对齐构建并监听 4318、连接 8443，日志／新任务目录 `runs/voice-preview-popup-closeout-20261004/`。
+
+现在在电脑打开 `http://localhost:4318/connect`，手机重新扫码，使用 `https://47.108.197.221:8443`。不需要重新配置 Node／API key，不要求重新登录已保存的网站，但网站自身登录是否过期仍以实际页面为准。没有操作桌面或重跑本轮未通过的任务；下方旧部署与测试数量是历史，不代表当前端到端放行。
+
+### 早期 window-progress-v1 部署（历史）
 
 部署 commit：`5f0efe00b6d1ca3e66320283a745f15755858f07`，分支 `codex/runtime-surface-preview-20261003`；源码 tar.gz SHA-256：`0C7BD877FF33135B4239D6486AC6C33BF91492EA5B478B956EDFC81A26D73533`。服务器保存 `.release-source`，不含本机密钥、轨迹或截图。
 
@@ -90,7 +98,7 @@
 | 本次 Preview 手机端 | `https://47.108.197.221:8443` | 新隔离部署 |
 | 旧公网服务 | `https://47.108.197.221` | 保持原状、健康 |
 
-本机当前 Host 日志：`runs/voice-preview-window-progress-20261004/host.stdout.log`、`runs/voice-preview-window-progress-20261004/host.stderr.log`。
+本机当前 Host 日志：`runs/voice-preview-popup-closeout-20261004/host.stdout.log`、`runs/voice-preview-popup-closeout-20261004/host.stderr.log`。
 
 ## TLS 尝试记录
 

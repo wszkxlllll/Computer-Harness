@@ -24,7 +24,17 @@ PR [#22](https://github.com/wszkxlllll/Computer-Harness/pull/22) 的首次 CI �
 
 本轮没有为应用增加窗口类名／控件尺寸规则，未增加模型工具或输入模式。真实任务证据仍保持分项：记事本保存通过；WPS 保存未通过；携程查询与切换通过、报告整体未通过。最终代码收尾后未重跑这些桌面任务，新追加路线的实机效果不能据单测宣称已通过。
 
-PR 与 Preview 发布证据在完成后补充。下方按时间记录历史调查；其中“尚未修复”是对应时点结论，当前实现以本节及输入路线更正为准。
+### PR、CI 与隔离部署
+
+- 分支 `codex/runtime-surface-preview-20261003` 已推送；中文 PR [#22](https://github.com/wszkxlllll/Computer-Harness/pull/22) 面向 main，无冲突，未自动合并。
+- 修复源码 `3f234c6b7acd3fc26c9de0042b4b5d77cedf7234` 的 [CI 运行](https://github.com/wszkxlllll/Computer-Harness/actions/runs/37187470662) 四组矩阵及 `ci-required` 全部通过：Windows Node 22、macOS Node 22、Linux Node 22／24。CI 是离线验证，不是 macOS/Linux 跨窗口实机通过。
+- GitHub 已解析本轮提交 author 与 committer 为 `wszkxlllll`、账号 ID `142909575`；main 队友原始提交归属保留，未改全局身份或重写历史。
+- Preview 独立 release `/opt/computer-harness-preview/releases/2026-10-04-popup-input-closeout-v2` 使用上述源码，保存 `.release-source`；frozen lockfile 安装、Relay 依赖构建、Web build、入口语法检查通过后原子切换，仅重启 Preview。旧 v1 与 window-progress-v1 留存回退。
+- 公网 Preview `https://47.108.197.221:8443` 的 health／asset `index-D8bCuibX.js` 返回 200，未配对 `/api/runs` 返回 401；旧正式入口 health 仍为 200，stable release 和服务未变。Relay 仅监听 loopback 8788。
+- 本机 Host 使用同源码构建、原 `.env.voice-preview` 与原 CUA socket，监听 4318；`/connect` 为 200，到 8443 的连接 established。日志／新任务在被忽略的 `runs/voice-preview-popup-closeout-20261004/`，没有重启 CUA、修改登录 profile 或启动新桌面任务。
+- 用户在电脑打开 `http://localhost:4318/connect`，手机重新扫码配对并访问 8443。Relay 重启后旧配对无效；手机需要在新页面确认朗读设置。此次只确认部署和连接边界，手机预览／语音及最终完整任务仍须真实体验。
+
+下方按时间记录历史调查；其中“尚未修复”是对应时点结论，当前实现以本节及输入路线更正为准。
 
 ## 新轨迹
 

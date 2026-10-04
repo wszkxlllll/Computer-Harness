@@ -12,7 +12,7 @@
 
 历史窄路径证据：[窗口与中途播报修复（2026-10-04 早期）](./window-and-progress-repair-results-2026-10-04.md)。保留记事本菜单返回、WPS 列窗切换和播报样本，不作为本轮完整任务验收。历史失败诊断见[携程→记事本轨迹](./travel-window-and-speech-diagnosis-2026-10-03.md)，用户已确认开始/取消有声音，缺的是中途播报，不是完全静音。
 
-最新 main 与三平台跨窗口验收：[三平台进度同步（2026-10-03）](./platform-cross-window-status-2026-10-03.md)。PR #21 已合并，三平台 CI 全绿；macOS/Linux 跨窗口实机仍待验收，Windows 合并前窄路径成功也不替代新 main 回归。当前 Preview/本机 Host 尚未自动更新到该整合 main。
+main 与三平台跨窗口验收：[三平台进度同步（2026-10-03）](./platform-cross-window-status-2026-10-03.md)。PR #21 已合并；本轮已吸收 main 的队友改动，PR #22 修复源码四组 CI 全绿并发布隔离 Preview。macOS/Linux 跨窗口实机仍待验收；最新部署与完整任务分项以顶部收尾入口为准。
 队友 main 整合记录：[Mac 与 Runtime Surface 兼容审查](./macos-runtime-surface-integration-2026-10-03.md)。保留整合版本、冲突取舍、离线与 Windows 实机验收边界及 main 合并结果；本轮再整合后的状态以顶部收尾入口为准。
 
 A 线三聊天协作：[修复、实机测试与远端审查入口](./a-line-three-thread-coordination-2026-10-03.md)。聊天（8）负责修复、（10）负责实机测试、（6）负责远端代码更新和审查；当前共用同一 Git 分支，提交与运行版本切换须串行协调。
