@@ -6,13 +6,17 @@
 
 ## 当前交接主线
 
-最新修复验收：[窗口与中途播报修复（2026-10-04）](./window-and-progress-repair-results-2026-10-04.md)。Windows 记事本菜单返回、WPS 列窗切换与辅助窗复测通过；真实 API 已产生可消费的 Notepad milestone，携程仍有漏报。历史失败诊断见[携程→记事本轨迹](./travel-window-and-speech-diagnosis-2026-10-03.md)，用户已确认开始/取消有声音，缺的是中途播报，不是完全静音。
+**当前修复与收尾入口**：[手机实机弹窗、输入回归与整改](./window-popup-regression-2026-10-04.md)。集中记录本轮源码收敛、完整任务结果、最终回归与部署状态。记事本写入保存已通过；WPS 保存、完整携程→记事本报告尚未通过，不能将局部探针作为完整任务放行依据。
+
+本轮独立审查：[弹窗恢复、候选刷新与输入合同审查](./popup-recovery-contract-review-2026-10-04.md)。记录代码范围、独立测试与未实测项；未知动作保留事实、不重放，恢复必须使用新观察。源码 GO 不等于真实任务成功。
+
+历史窄路径证据：[窗口与中途播报修复（2026-10-04 早期）](./window-and-progress-repair-results-2026-10-04.md)。保留记事本菜单返回、WPS 列窗切换和播报样本，不作为本轮完整任务验收。历史失败诊断见[携程→记事本轨迹](./travel-window-and-speech-diagnosis-2026-10-03.md)，用户已确认开始/取消有声音，缺的是中途播报，不是完全静音。
 
 最新 main 与三平台跨窗口验收：[三平台进度同步（2026-10-03）](./platform-cross-window-status-2026-10-03.md)。PR #21 已合并，三平台 CI 全绿；macOS/Linux 跨窗口实机仍待验收，Windows 合并前窄路径成功也不替代新 main 回归。当前 Preview/本机 Host 尚未自动更新到该整合 main。
 
 Surface Registry 与 Windows transient-child 当前交接：[Surface Registry 队友交接](./surface-registry-team-handoff-2026-10-03.md)。集中记录稳定 ComputerSession/Surface 谱系、Windows relationship probe 与权威合并、menu/dialog/overlay 准入、多行自动 element binding、跨平台队友边界和细粒度 PR 切片。最终冻结源码定向 254/254、全量 105 文件/1271 tests 通过；Notepad menu bounded runner 的 `child_push`/`child_pop` 已实机通过，Open dialog 与 WPS 独立 dialog/menu 仍为 pending。
 
-多行文本输入可靠性与 Provider 验证：[多行输入修复与 Provider 验证记录](./multiline-type-implementation-results-2026-10-03.md)。Windows CUA 原始/Adapter 多行路径已通过受控 Notepad 验证；唯一一次 GLM Run 暴露 foreground keyboard 工具未进入 outbound catalog，尚未通过 Provider 端到端多行输入。文档记录真实边界、诊断误报修复和下一次受控验证命令。
+多行输入早期调查：[多行输入修复与 Provider 验证记录](./multiline-type-implementation-results-2026-10-03.md)。保留受控诊断和当时的 Provider 问题；最新记事本完整 GLM Run、非空追加语义及平台回归以本轮收尾入口为准。
 
 多行上游 Issue/PR 开展前的调研与候选方案见[历史计划](./cua-upstream-multiline-issue-pr-plan-2026-10-03.md)；其 main SHA、batching 候选和当时的“尚未实测”只代表记录时点，不是当前 PR 状态。
 
