@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CuaBootstrapSession, ManagedBrowserProfileInspection } from "@computer-harness/computer-cua";
 import { CuaBootstrapSessionError, ManagedBrowserHost, type ManagedBrowserHostOptions } from "../../../packages/computer-cua/src/managed-browser-host.js";
@@ -18,6 +18,7 @@ import {
 } from "@computer-harness/app-runtime";
 import {
   ManagedBrowserProfileService,
+  defaultManagedBrowserProfileStatePath,
   FileManagedBrowserProfileStateStore,
   type LoadedManagedBrowserProfilePersistedState,
   type ManagedBrowserProfilePersistedState,
@@ -44,6 +45,7 @@ function fixture(options: {
   readonly environmentIdentity?: string;
   readonly profileDirectory?: "present" | "missing" | "unsafe";
   readonly useFilesystemProfileDirectory?: boolean;
+  readonly useDefaultStateStore?: boolean;
   readonly hostConstructorFailures?: number;
   readonly hostStartFailures?: number;
 } = {}) {
@@ -83,7 +85,7 @@ function fixture(options: {
     profileRoot,
     environmentOwner,
     environmentIdentity,
-    store,
+    ...(options.useDefaultStateStore ? {} : { store }),
     inspectProfile: async () => inspection,
     ...(options.useFilesystemProfileDirectory ? {} : { inspectProfileDirectory: async () => profileDirectory }),
     preparationDependencies: {
@@ -146,6 +148,18 @@ function fixture(options: {
   };
 }
 
+async function persistedStateForProfile(
+  profileRoot: string,
+  profileLabel: string,
+  defaultSession: "saved" | "temporary",
+  readyConfirmed: boolean,
+): Promise<ManagedBrowserProfilePersistedState> {
+  const rig = fixture({ profileRoot, profileLabel });
+  await rig.service.setDefaultSession(defaultSession);
+  if (rig.store.value === undefined) throw new Error("fixture did not persist profile state");
+  return { ...rig.store.value, readyConfirmed };
+}
+
 function appSessionConfig(outputDir: string): ApplicationSessionConfig {
   return {
     model: "glm-5.3-flash",
@@ -178,7 +192,125 @@ describe("managed browser profile service", () => {
       await store.save(persisted);
       expect(await store.load()).toEqual(persisted);
       expect(JSON.parse(await readFile(filePath, "utf8"))).toEqual(persisted);
+      expect(await store.saveIfAbsent({ ...persisted, defaultSession: "temporary", readyConfirmed: false })).toBe(false);
+      expect(await store.load()).toEqual(persisted);
       expect(await readdir(directory)).toEqual(["state.json"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("isolates default state files by profile identity across alternating reads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-profile-isolation-"));
+    const profileRoot = join(directory, "profiles");
+    const mobilePath = defaultManagedBrowserProfileStatePath(profileRoot, "mobile");
+    const travelPath = defaultManagedBrowserProfileStatePath(profileRoot, "travel");
+    const mobileState = await persistedStateForProfile(profileRoot, "mobile", "temporary", true);
+    const mobileStore = new FileManagedBrowserProfileStateStore(mobilePath);
+    try {
+      expect(mobilePath).not.toBe(travelPath);
+      await mobileStore.save(mobileState);
+      const mobileBefore = await readFile(mobilePath, "utf8");
+
+      const travel = fixture({ profileRoot, profileLabel: "travel", useDefaultStateStore: true });
+      await expect(travel.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
+      expect(await readFile(mobilePath, "utf8")).toBe(mobileBefore);
+
+      const mobile = fixture({ profileRoot, profileLabel: "mobile", useDefaultStateStore: true });
+      await expect(mobile.service.getState()).resolves.toMatchObject({ status: "ready", defaultSession: "temporary" });
+      await expect(travel.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
+      expect(await mobileStore.load()).toEqual(mobileState);
+      expect(await readFile(mobilePath, "utf8")).toBe(mobileBefore);
+      await expect(readFile(travelPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("copies matching legacy state once without changing the legacy file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-profile-migration-"));
+    const profileRoot = join(directory, "profiles");
+    const legacyPath = resolve(dirname(profileRoot), "managed-browser-profile-state.json");
+    const namespacePath = defaultManagedBrowserProfileStatePath(profileRoot, "mobile");
+    const legacyState = await persistedStateForProfile(profileRoot, "mobile", "temporary", true);
+    const legacyText = `${JSON.stringify(legacyState)}\n`;
+    try {
+      await writeFile(legacyPath, legacyText, { encoding: "utf8" });
+      const migrated = fixture({ profileRoot, profileLabel: "mobile", useDefaultStateStore: true });
+      await expect(migrated.service.getState()).resolves.toMatchObject({ status: "ready", defaultSession: "temporary" });
+
+      const namespaceStore = new FileManagedBrowserProfileStateStore(namespacePath);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        expect(await namespaceStore.load()).toEqual(legacyState);
+        expect(await readFile(namespacePath, "utf8")).toBe(legacyText);
+        expect(await readFile(legacyPath, "utf8")).toBe(legacyText);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves mismatched legacy state untouched and lets its matching profile migrate later", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-profile-foreign-legacy-"));
+    const profileRoot = join(directory, "profiles");
+    const legacyPath = resolve(dirname(profileRoot), "managed-browser-profile-state.json");
+    const sourceState = await persistedStateForProfile(profileRoot, "mobile", "temporary", true);
+    const legacyText = `${JSON.stringify(sourceState)}\n`;
+    try {
+      await writeFile(legacyPath, legacyText, { encoding: "utf8" });
+      const other = fixture({ profileRoot, profileLabel: "travel", useDefaultStateStore: true });
+      await expect(other.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
+      expect(await readFile(legacyPath, "utf8")).toBe(legacyText);
+      await expect(readFile(defaultManagedBrowserProfileStatePath(profileRoot, "travel"), "utf8"))
+        .rejects.toMatchObject({ code: "ENOENT" });
+
+      const owner = fixture({ profileRoot, profileLabel: "mobile", useDefaultStateStore: true });
+      await expect(owner.service.getState()).resolves.toMatchObject({ status: "ready", defaultSession: "temporary" });
+      expect(await readFile(legacyPath, "utf8")).toBe(legacyText);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not migrate identityless legacy state", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-profile-v1-legacy-"));
+    const profileRoot = join(directory, "profiles");
+    const legacyPath = resolve(dirname(profileRoot), "managed-browser-profile-state.json");
+    const legacyText = `${JSON.stringify({ version: 1, defaultSession: "temporary", readyConfirmed: true })}\n`;
+    try {
+      await writeFile(legacyPath, legacyText, { encoding: "utf8" });
+      const mobile = fixture({ profileRoot, profileLabel: "mobile", useDefaultStateStore: true });
+      await expect(mobile.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
+      expect(await readFile(legacyPath, "utf8")).toBe(legacyText);
+      await expect(readFile(defaultManagedBrowserProfileStatePath(profileRoot, "mobile"), "utf8"))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers its namespace and fails closed on a corrupt or foreign namespace", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-profile-namespace-"));
+    const profileRoot = join(directory, "profiles");
+    const identityState = await persistedStateForProfile(profileRoot, "mobile", "temporary", true);
+    const namespacePath = defaultManagedBrowserProfileStatePath(profileRoot, "mobile");
+    const namespaceStore = new FileManagedBrowserProfileStateStore(namespacePath);
+    const legacyPath = resolve(dirname(profileRoot), "managed-browser-profile-state.json");
+    const legacyText = `${JSON.stringify(identityState)}\n`;
+    try {
+      await writeFile(legacyPath, legacyText, { encoding: "utf8" });
+      await namespaceStore.save({ ...identityState, defaultSession: "saved", readyConfirmed: false });
+      const namespaced = fixture({ profileRoot, profileLabel: "mobile", useDefaultStateStore: true });
+      await expect(namespaced.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
+      expect(await readFile(legacyPath, "utf8")).toBe(legacyText);
+
+      for (const badNamespace of ["{", JSON.stringify({ ...identityState, profileIdentityHash: "b".repeat(64) })]) {
+        await writeFile(namespacePath, badNamespace, { encoding: "utf8" });
+        const corrupt = fixture({ profileRoot, profileLabel: "mobile", useDefaultStateStore: true });
+        await expect(corrupt.service.getState()).resolves.toMatchObject({ status: "cleanup_failed" });
+        expect(await readFile(namespacePath, "utf8")).toBe(badNamespace);
+        expect(await readFile(legacyPath, "utf8")).toBe(legacyText);
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -475,22 +607,20 @@ describe("managed browser profile service", () => {
     const preparation = await first.service.prepare();
     await first.service.complete(preparation.operationId);
     expect(sameRootStore.value?.readyConfirmed).toBe(true);
-    const originalLabelIdentityHash = sameRootStore.value?.profileIdentityHash;
+    const originalLabelState = { ...sameRootStore.value! };
 
     const changedLabel = fixture({ store: sameRootStore, profileLabel: "renamed" });
     await expect(changedLabel.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
-    expect(sameRootStore.value).toMatchObject({ version: 2, readyConfirmed: false });
-    expect(sameRootStore.value?.profileIdentityHash).not.toBe(originalLabelIdentityHash);
+    expect(sameRootStore.value).toEqual(originalLabelState);
 
     const changedRootStore = new MemoryStateStore();
     const originalRoot = fixture({ store: changedRootStore });
     const originalPreparation = await originalRoot.service.prepare();
     await originalRoot.service.complete(originalPreparation.operationId);
-    const originalRootIdentityHash = changedRootStore.value?.profileIdentityHash;
+    const originalRootState = { ...changedRootStore.value! };
     const changedRoot = fixture({ store: changedRootStore, profileRoot: "C:\\HarnessOwned\\other-managed-browser-profiles" });
     await expect(changedRoot.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
-    expect(changedRootStore.value).toMatchObject({ version: 2, readyConfirmed: false });
-    expect(changedRootStore.value?.profileIdentityHash).not.toBe(originalRootIdentityHash);
+    expect(changedRootStore.value).toEqual(originalRootState);
   });
 
   it("clears persisted readiness if the profile directory is removed", async () => {

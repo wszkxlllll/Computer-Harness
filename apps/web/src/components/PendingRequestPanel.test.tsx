@@ -2,13 +2,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PendingRequestPanel } from "./PendingRequestPanel";
-import type { ApprovalEvidence } from "../types";
+import type { ApprovalEvidence, PendingRequestBase } from "../types";
 
 const parentSurfaceRef = {
   surfaceId: "surface-1", generation: 1, kind: "native_window",
 } satisfies ApprovalEvidence["surfaceRef"];
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("pending request panel", () => {
   it("preserves a typed answer until the host confirms it was applied", async () => {
@@ -45,6 +45,191 @@ describe("pending request panel", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: "忽略这个新窗口，继续原目标" })).toBeNull();
+  });
+
+  it("shows trusted relation labels and requires a real preview before choosing an indistinguishable candidate", () => {
+    render(
+      <PendingRequestPanel
+        request={{
+          requestId: "window-relations",
+          kind: "window_handoff",
+          reasonCode: "foreground_mismatch",
+          candidates: [{
+            token: "dialog-token",
+            appName: "WPS Office",
+            title: "Save As",
+            previewRequired: true,
+            relationship: { kind: "owned_child", rootRole: "dialog", parentAppName: "WPS Office", parentTitle: "Report.docx" },
+          }],
+        }}
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={vi.fn()}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("当前 WPS Office · Report.docx 的对话框")).toBeDefined();
+    expect(screen.getByRole("button", { name: "查看此窗口的真实画面" })).toBeDefined();
+    expect(screen.getByText(/标签重复或不完整的候选需要先看对应的真实画面/)).toBeDefined();
+  });
+
+  it("requires reviewing a fresh candidate-bound screenshot before confirming a handoff", async () => {
+    const preview = {
+      previewToken: "P".repeat(32),
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(preview), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const candidate = { token: "C".repeat(32), appName: "Notepad.exe", title: "Untitled - Notepad", previewRequired: true };
+    const onChooseWindow = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PendingRequestPanel
+        request={{ requestId: "window-preview-4", kind: "window_handoff", reasonCode: "foreground_mismatch", candidates: [candidate] }}
+        runId="run-preview"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={onChooseWindow}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    const image = await screen.findByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
+    expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-preview/window-candidates/preview", expect.objectContaining({
+      method: "POST",
+      cache: "no-store",
+      body: JSON.stringify({ requestId: "window-preview-4", candidateToken: candidate.token }),
+    }));
+    expect(onChooseWindow).not.toHaveBeenCalled();
+
+    fireEvent.load(image);
+    fireEvent.click(await screen.findByRole("button", { name: "确认这个窗口并继续任务" }));
+    await waitFor(() => expect(onChooseWindow).toHaveBeenCalledWith(candidate, preview.previewToken));
+  });
+
+  it("removes a previously confirmed screenshot as soon as it is refreshed and keeps it unavailable after refresh failure", async () => {
+    const preview = {
+      previewToken: "T".repeat(32),
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png" as const,
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    let resolveRefresh!: (response: Response) => void;
+    const pendingRefresh = new Promise<Response>((resolve) => { resolveRefresh = resolve; });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(preview), { status: 200 }))
+      .mockReturnValueOnce(pendingRefresh);
+    vi.stubGlobal("fetch", fetchMock);
+    const candidate = { token: "F".repeat(32), appName: "Notepad.exe", title: "Untitled - Notepad", previewRequired: true };
+    render(
+      <PendingRequestPanel
+        request={{ requestId: "window-preview-refresh-proof", kind: "window_handoff", candidates: [candidate] }}
+        runId="run-preview-refresh-proof"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={vi.fn()}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    const image = await screen.findByRole("img");
+    fireEvent.load(image);
+    expect(await screen.findByRole("button", { name: "确认这个窗口并继续任务" })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新读取窗口预览" }));
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+    resolveRefresh(new Response(JSON.stringify({ error: { code: "WINDOW_PREVIEW_UNAVAILABLE" } }), { status: 503 }));
+    expect(await screen.findByRole("alert")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+  });
+
+  it("never substitutes an old candidate title for missing capture-time metadata or confirms a failed image", async () => {
+    const preview = {
+      previewToken: "R".repeat(32),
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png" as const,
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(preview), { status: 200 })));
+    render(
+      <PendingRequestPanel
+        request={{
+          requestId: "window-preview-metadata",
+          kind: "window_handoff",
+          candidates: [{ token: "M".repeat(32), appName: "Old app label", title: "Old title", previewRequired: true }],
+        }}
+        runId="run-preview-metadata"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={vi.fn()}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    expect(await screen.findByText("捕获时应用：应用名不可用")).toBeDefined();
+    expect(screen.getByText(/捕获时标题：窗口标题不可用/u)).toBeDefined();
+    expect(screen.queryByText("捕获时应用：Old app label")).toBeNull();
+    const image = screen.getByRole("img");
+    fireEvent.error(image);
+    expect(await screen.findByRole("alert")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+  });
+
+  it("clears candidate screenshots when the same request refreshes to new candidate tokens", async () => {
+    const preview = {
+      previewToken: "S".repeat(32),
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png" as const,
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(preview), { status: 200 })));
+    const request = { requestId: "window-preview-refresh", kind: "window_handoff", candidates: [{ token: "A".repeat(32), appName: "Notepad.exe", title: "Untitled - Notepad", previewRequired: true }] } satisfies PendingRequestBase;
+    const onChooseWindow = vi.fn();
+    const { rerender } = render(
+      <PendingRequestPanel request={request} runId="run-preview-refresh" onApprove={vi.fn()} onRespond={vi.fn()} onChooseWindow={onChooseWindow} onIgnoreNewWindow={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    const image = await screen.findByRole("img");
+    fireEvent.load(image);
+    expect(await screen.findByRole("button", { name: "确认这个窗口并继续任务" })).toBeDefined();
+
+    rerender(
+      <PendingRequestPanel
+        request={{ ...request, candidates: [{ ...request.candidates[0], token: "B".repeat(32) }] }}
+        runId="run-preview-refresh"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={onChooseWindow}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+    await waitFor(() => {
+      expect(screen.queryByRole("img")).toBeNull();
+      expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+    });
+    expect(onChooseWindow).not.toHaveBeenCalled();
   });
 
   it("keeps a generic guard reason actionable and shows the bound proposed action details", () => {

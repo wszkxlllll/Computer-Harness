@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot, type RunId, type RunOutcome } from "@computer-harness/protocol";
+import { normalizeRunAssistantPreferencesSnapshot, type ComputerWindowCandidateRelationship, type RunAssistantPreferencesSnapshot, type RunId, type RunOutcome } from "@computer-harness/protocol";
 import type { RunReport } from "./reporting.js";
 import { createRun } from "./run-factory.js";
 import {
@@ -19,6 +19,15 @@ export interface WindowTargetInfo {
   readonly windowId: number;
   readonly appName?: string;
   readonly title?: string;
+  readonly relationship?: ComputerWindowCandidateRelationship;
+}
+
+export interface WindowTargetPreview {
+  readonly target: WindowTargetInfo;
+  readonly capturedAt: string;
+  readonly viewport: { readonly width: number; readonly height: number };
+  readonly mediaType: "image/png";
+  readonly data: Uint8Array;
 }
 
 export interface WindowTargetDiscovery {
@@ -28,6 +37,8 @@ export interface WindowTargetDiscovery {
   listAllWindows?(signal: AbortSignal): Promise<readonly WindowTargetInfo[]>;
   /** Restore/focus one exact identity selected from a fresh inventory. */
   activateWindow?(target: ApplicationSessionWindowTarget, signal: AbortSignal): Promise<void>;
+  /** Read-only, exact-window screenshot for a Host-issued manual candidate token. */
+  captureWindowPreview?(target: ApplicationSessionWindowTarget, signal: AbortSignal): Promise<WindowTargetPreview>;
 }
 
 export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
@@ -152,6 +163,21 @@ export class ApplicationSession {
     if (this.closed) throw new Error("ApplicationSession is closed");
     if (this.active !== undefined) throw new Error("window activation is unavailable while an active Run owns the environment");
     await this.windowDiscovery.activateWindow(target, signal);
+  }
+
+  /**
+   * Read one explicitly token-bound candidate for the phone picker. This does
+   * not create a Run or Observation and does not change the active Surface.
+   * A paused window-handoff preview is allowed; the Remote API verifies the
+   * current request/candidate before and after calling this boundary.
+   */
+  public async captureWindowTargetPreview(target: ApplicationSessionWindowTarget, signal: AbortSignal): Promise<WindowTargetPreview> {
+    if (this.windowDiscovery?.captureWindowPreview === undefined) throw new Error("window preview is unavailable for this ApplicationSession");
+    if (this.closed) throw new Error("ApplicationSession is closed");
+    if (this.active !== undefined && this.active.handle.controller.getSnapshot().status !== "waiting_window") {
+      throw new Error("window preview is available only while idle or waiting for a window handoff");
+    }
+    return this.windowDiscovery.captureWindowPreview(target, signal);
   }
 
   public async startRun(
@@ -342,14 +368,20 @@ export class ApplicationSession {
       } catch (error) {
         lease.markPending(`Run cleanup/report was not confirmed: ${errorMessage(error)}`);
       }
-      const cleanupDiagnostics = report === undefined ? [] : cleanupDiagnosticsFromReport(report);
-      const safeToRelease = outcome !== "outcome_unknown" && cleanupDiagnostics.length === 0 && report !== undefined;
+      const cleanupDiagnostics = report === undefined ? undefined : cleanupDiagnosticsFromReport(report);
+      // The business outcome can remain unknown after an action receipt, even
+      // when the Computer and every other owned resource were closed and
+      // reported cleanly. Keep that outcome in the Run record, but do not turn
+      // it into a permanent desktop lock: a later Run gets a fresh Controller,
+      // Computer session, and initial observation. Only unconfirmed cleanup
+      // retains the environment lease.
+      const safeToRelease = report !== undefined && cleanupDiagnostics !== undefined && cleanupDiagnostics.length === 0;
       if (safeToRelease && lease.state === "active") {
         lease.release();
         replaceRecord(this.records, record, { outcome, ownerState: "released" });
       } else {
         if (lease.state !== "pending_cleanup") {
-          lease.markPending(outcome === "outcome_unknown" ? "Run has an unresolved/unknown external side effect" : "Run cleanup is not fully confirmed");
+          lease.markPending("Run cleanup is not fully confirmed");
         }
         replaceRecord(this.records, record, { outcome, ownerState: "pending_cleanup" });
       }
@@ -367,9 +399,9 @@ export class ApplicationSession {
   }
 }
 
-function cleanupDiagnosticsFromReport(report: RunReport): readonly unknown[] {
+function cleanupDiagnosticsFromReport(report: RunReport): readonly unknown[] | undefined {
   const diagnostics = report.summary.cleanupDiagnostics;
-  return Array.isArray(diagnostics) ? diagnostics : [];
+  return Array.isArray(diagnostics) ? diagnostics : undefined;
 }
 
 function replaceRecord(records: SessionRunRecord[], target: SessionRunRecord, patch: Partial<SessionRunRecord>): void {

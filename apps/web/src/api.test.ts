@@ -9,6 +9,8 @@ import {
   listRuns,
   listWindowTargets,
   prepareManagedBrowserLogin,
+  previewWindowHandoffCandidate,
+  previewWindowTarget,
   reloginManagedBrowser,
   setManagedBrowserDefaultSession,
   setPhoneCsrfToken,
@@ -145,7 +147,7 @@ describe("voice input Host API contract", () => {
 
 describe("explicit window-target run contract", () => {
   it("loads only the paired host's safe window labels and opaque tokens", async () => {
-    const result = { candidates: [{ token: "opaque-window-token", appName: "Browser", title: "Contacts" }], expiresAt: new Date(Date.now() + 600_000).toISOString() };
+    const result = { candidates: [{ token: "T".repeat(32), appName: "Browser", title: "Contacts" }], expiresAt: new Date(Date.now() + 600_000).toISOString() };
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(result), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -164,6 +166,75 @@ describe("explicit window-target run contract", () => {
     expect(JSON.parse(String(request.body))).toEqual({ commandId: "command-1", goal: "Compare these pages", target: { mode: "window", targetToken: "opaque-window-token" } });
     expect(request.headers).toBeInstanceOf(Headers);
     expect((request.headers as Headers).get("X-CSRF-Token")).toBe("phone-csrf");
+  });
+
+  it("previews only the requested candidate through authenticated no-store routes", async () => {
+    const preview = {
+      previewToken: "P".repeat(32),
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      capturedAt: "2026-09-26T00:00:00.000Z",
+      expiresAt: "2026-09-26T00:02:00.000Z",
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(preview), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(preview), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setPhoneCsrfToken("phone-csrf");
+
+    await expect(previewWindowTarget("T".repeat(32))).resolves.toEqual(preview);
+    await previewWindowHandoffCandidate("run-1", "action-window-1", "C".repeat(32));
+
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      "/api/windows/preview",
+      "/api/runs/run-1/window-candidates/preview",
+    ]);
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)))).toEqual([
+      { candidateToken: "T".repeat(32) },
+      { requestId: "action-window-1", candidateToken: "C".repeat(32) },
+    ]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect((init as RequestInit).cache).toBe("no-store");
+      expect(((init as RequestInit).headers as Headers).get("X-CSRF-Token")).toBe("phone-csrf");
+    }
+  });
+
+  it("requires previews for duplicate labels even if the Host omitted that marker", async () => {
+    const candidates = [
+      { token: "A".repeat(32), appName: "Editor", title: "Untitled" },
+      { token: "B".repeat(32), appName: "Editor", title: "Untitled" },
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      candidates,
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listWindowTargets()).resolves.toMatchObject({
+      candidates: [{ previewRequired: true }, { previewRequired: true }],
+    });
+  });
+
+  it("rejects preview responses containing native identities or oversized decoded image data", async () => {
+    const preview = {
+      previewToken: "P".repeat(32),
+      appName: "Editor",
+      title: "Untitled",
+      capturedAt: "2026-10-04T00:00:00.000Z",
+      expiresAt: "2026-10-04T00:02:00.000Z",
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: Buffer.alloc(1_048_577).toString("base64"),
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...preview, pid: 451, windowId: 894 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(previewWindowTarget("T".repeat(32))).rejects.toThrow("窗口预览格式无效");
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(preview), { status: 200 }));
+    await expect(previewWindowTarget("T".repeat(32))).rejects.toThrow("窗口预览格式无效");
   });
 
   it("sends only the versioned assistant preference whitelist when supplied", async () => {
@@ -272,7 +343,7 @@ describe("explicit window-target run contract", () => {
     });
     await expect(createRun("Goal", "command-5", { mode: "browser", url: "https://example.com" })).rejects.toMatchObject({
       code: "RUN_BUSY",
-      message: "电脑正在处理另一个任务。请等待当前任务结束后再开始。",
+      message: "电脑暂时无法开始新任务：现有任务尚未结束，或资源收尾尚未确认。请刷新任务列表后再试。",
     });
   });
 

@@ -19,6 +19,7 @@ import { createHostServer } from "./server.js";
 import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
+import { resolveHostWindowSelector } from "./window-selection-config.js";
 
 interface HostArguments {
   envFile: string;
@@ -39,6 +40,7 @@ async function main(): Promise<void> {
   const outputDir = resolve(args.output);
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
+  const windowSelector = resolveHostWindowSelector(process.env);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -80,6 +82,7 @@ async function main(): Promise<void> {
     runNotices: { enabled: true, dynamicContentEnabled: true },
     managedBrowserProfile,
     managedBrowserProfileCoordinator: managedBrowserProfileService,
+    ...(windowSelector === undefined ? {} : { windowSelector }),
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
   });

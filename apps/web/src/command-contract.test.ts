@@ -68,6 +68,27 @@ describe("request-bound commands", () => {
     expect(windowChoiceCommand(current, "window-7", "expired-candidate")).toBeUndefined();
   });
 
+  it("requires an unexpired UI preview proof token for a visually disambiguated candidate", () => {
+    const current = snapshot({
+      status: "waiting_window",
+      pendingRequest: {
+        requestId: "window-preview-1",
+        kind: "window_handoff",
+        reasonCode: "foreground_mismatch",
+        candidates: [{ token: "candidate-duplicate", appName: "Notepad.exe", title: "Untitled", previewRequired: true }],
+      },
+    });
+    expect(windowChoiceCommand(current, "window-preview-1", "candidate-duplicate")).toBeUndefined();
+    expect(windowChoiceCommand(current, "window-preview-1", "candidate-duplicate", "P".repeat(32))).toEqual({
+      expectedSequence: 28,
+      type: "window.confirm",
+      requestId: "window-preview-1",
+      candidateToken: "candidate-duplicate",
+      previewToken: "P".repeat(32),
+    });
+    expect(windowChoiceCommand(current, "window-preview-1", "candidate-duplicate", "short")).toBeUndefined();
+  });
+
   it("allows ignoring only a newly detected incidental window", () => {
     const newWindow = snapshot({
       status: "waiting_window",

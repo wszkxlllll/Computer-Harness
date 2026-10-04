@@ -190,7 +190,7 @@ describe("ApplicationSession", () => {
     }
   });
 
-  it("keeps the environment blocked after an unknown external side effect", async () => {
+  it("preserves an unknown outcome but releases the environment after confirmed resource cleanup", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-"));
     const owner = new InProcessEnvironmentOwner();
     const createRun = vi.fn(async (config: ResolvedRunConfig) => fakeHandle(config, "outcome_unknown"));
@@ -198,8 +198,68 @@ describe("ApplicationSession", () => {
       const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
       await session.startRun("uncertain task");
       await session.waitForActiveRun();
+      expect(session.status).toBe("idle");
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "released" });
+      expect(session.inspectEnvironment()).toBeUndefined();
+
+      await session.startRun("fresh task; never replay the previous action");
+      await session.waitForActiveRun();
+      expect(createRun).toHaveBeenCalledTimes(2);
+      expect(session.history.map((run) => run.outcome)).toEqual(["outcome_unknown", "outcome_unknown"]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the environment blocked when an unknown Run has unresolved cleanup diagnostics", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-cleanup-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "outcome_unknown");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "outcome_unknown",
+        summary: { cleanupDiagnostics: [{ operation: "computer.close", message: "close timed out", status: "timed_out" }] },
+        snapshot: {} as never,
+        events: [],
+      }));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("uncertain task with unresolved cleanup");
+      await session.waitForActiveRun();
       expect(session.status).toBe("blocked");
-      await expect(session.startRun("do not reuse")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "pending_cleanup" });
+      await expect(session.startRun("must wait for cleanup recovery")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(createRun).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat missing or malformed cleanup diagnostics as confirmed cleanup", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-missing-cleanup-report-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "outcome_unknown");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "outcome_unknown",
+        summary: {},
+        snapshot: {} as never,
+        events: [],
+      }));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("uncertain task with an incomplete cleanup report");
+      await session.waitForActiveRun();
+      expect(session.status).toBe("blocked");
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "pending_cleanup" });
+      await expect(session.startRun("must wait for confirmed cleanup")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(createRun).toHaveBeenCalledTimes(1);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

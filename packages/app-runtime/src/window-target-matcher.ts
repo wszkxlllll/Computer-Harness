@@ -12,6 +12,91 @@ export type WindowGoalMatch =
 
 const MIN_CONFIDENT_SCORE = 4;
 
+/** Strong placement syntax makes an application a target constraint; an open-title phrase alone does not. */
+export function hasExplicitApplicationIntent(goal: string): boolean {
+  return explicitApplicationHint(goal.normalize("NFKC").toLocaleLowerCase()) !== undefined;
+}
+
+/** Constrain a semantic selector to the explicitly named application when it has a lexical app-name match. */
+export function targetsForExplicitApplicationIntent(
+  goal: string,
+  targets: readonly WindowTargetInfo[],
+): readonly WindowTargetInfo[] {
+  const hint = explicitApplicationHint(goal.normalize("NFKC").toLocaleLowerCase());
+  return hint === undefined ? targets : targets.filter((target) => appNameHasExactTerm(target.appName ?? "", hint));
+}
+
+/**
+ * Initial target matching chooses an independently usable application root,
+ * not a second app candidate for a child already owned by that root. The
+ * producer only emits `owned_child` after one complete trusted inventory
+ * proves the exact owner pair and its root owner (0/0). Keep the original
+ * inventory intact for Run startup and later Surface handling.
+ */
+export function filterInitialTargetWindowCandidates(targets: readonly WindowTargetInfo[]): readonly WindowTargetInfo[] {
+  const byIdentity = new Map<string, WindowTargetInfo>();
+  const duplicateIdentities = new Set<string>();
+  for (const target of targets) {
+    const key = windowIdentityKey(target.pid, target.windowId);
+    if (byIdentity.has(key)) duplicateIdentities.add(key);
+    else byIdentity.set(key, target);
+  }
+
+  const provenChildren = new Set<WindowTargetInfo>();
+  for (const child of targets) {
+    const relationship = child.relationship;
+    if (relationship?.kind !== "owned_child") continue;
+    if (!isPositiveSafeInteger(child.pid) || !isPositiveSafeInteger(child.windowId) ||
+      !isPositiveSafeInteger(relationship.owner.pid) || !isPositiveSafeInteger(relationship.owner.windowId)) continue;
+    const childKey = windowIdentityKey(child.pid, child.windowId);
+    const ownerKey = windowIdentityKey(relationship.owner.pid, relationship.owner.windowId);
+    if (childKey === ownerKey || duplicateIdentities.has(childKey) || duplicateIdentities.has(ownerKey)) continue;
+    const owner = byIdentity.get(ownerKey);
+    // The discovery producer emits this typed relationship only after an
+    // exact owner row was proven root-owned in the same complete snapshot.
+    // Exclude the child only while that independent root remains an eligible
+    // candidate. If visibility projection hid the owner, keep the visible
+    // child available rather than emptying the initial target pool.
+    if (owner !== undefined && owner.relationship?.kind !== "owned_child") provenChildren.add(child);
+  }
+  return targets.filter((target) => !provenChildren.has(target));
+}
+
+function isPositiveSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function windowIdentityKey(pid: number, windowId: number): string {
+  return `${pid}:${windowId}`;
+}
+
+/** Withhold identical display identities; PID/HWND are not semantic evidence for a blind model choice. */
+export function filterIndistinguishableWindowTargets(
+  targets: readonly WindowTargetInfo[],
+  allowTrustedRelationshipDistinction = false,
+): readonly WindowTargetInfo[] {
+  const counts = new Map<string, number>();
+  const keys = targets.map((target) => windowDisplayIdentityKey(
+    target.appName,
+    target.title,
+    allowTrustedRelationshipDistinction ? target.relationship : undefined,
+  ));
+  for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+  return targets.filter((_, index) => counts.get(keys[index]!) === 1);
+}
+
+function windowDisplayIdentityKey(
+  appName: string | undefined,
+  title: string | undefined,
+  relationship?: WindowTargetInfo["relationship"],
+): string {
+  const normalize = (value: string | undefined) => value?.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim() ?? "";
+  const relationshipLabel = relationship?.kind === "owned_child"
+    ? `owned:${relationship.rootRole ?? "unclassified"}`
+    : relationship?.kind === "scoped_peer" ? "scoped-peer" : "unproven";
+  return `${normalize(appName)}\u0000${normalize(title)}\u0000${relationshipLabel}`;
+}
+
 const GENERIC_LATIN_TERMS = new Set([
   "account", "application", "browser", "code", "current", "default", "desktop", "document", "file",
   "home", "inbox", "list", "mail", "manager", "message", "new", "order", "orders", "page",
@@ -38,20 +123,69 @@ const HAN_IDENTITY_CONNECTORS = ["并", "然后", "中", "里", "里面", "上"]
  */
 export function matchGoalToWindow(goal: string, targets: readonly WindowTargetInfo[]): WindowGoalMatch {
   const normalizedGoal = goal.normalize("NFKC").toLocaleLowerCase();
+  const explicitHint = explicitApplicationHint(normalizedGoal);
+  const titleMatchGoal = leadingChineseAppTargetRemainder(normalizedGoal) ?? normalizedGoal;
   const goalLatinTerms = extractLatinTerms(normalizedGoal);
   const goalCompact = normalizedGoal.replace(/[\s\p{P}\p{S}]/gu, "");
 
+  if (explicitHint !== undefined) {
+    const applicationMatches = targets.filter((target) => appNameHasExactTerm(target.appName ?? "", explicitHint));
+    if (applicationMatches.length === 0) return { kind: "none" };
+    if (applicationMatches.length === 1) return { kind: "matched", match: { target: applicationMatches[0]! } };
+    const scopedGoalLatinTerms = goalLatinTerms.filter((term) => term !== explicitHint);
+    const confidentWithinApplication = applicationMatches
+      .map((target) => scoreTarget(target, normalizedGoal, titleMatchGoal, scopedGoalLatinTerms, goalCompact))
+      .filter((candidate) => candidate.score >= MIN_CONFIDENT_SCORE);
+    if (confidentWithinApplication.length === 1) {
+      return { kind: "matched", match: { target: confidentWithinApplication[0]!.target } };
+    }
+    return { kind: "ambiguous" };
+  }
+
   const confident = targets
-    .map((target) => scoreTarget(target, normalizedGoal, goalLatinTerms, goalCompact))
+    .map((target) => scoreTarget(target, normalizedGoal, titleMatchGoal, goalLatinTerms, goalCompact))
     .filter((candidate) => candidate.score >= MIN_CONFIDENT_SCORE);
   if (confident.length === 1) return { kind: "matched", match: { target: confident[0]!.target } };
   if (confident.length > 1) return { kind: "ambiguous" };
   return { kind: "none" };
 }
 
+function explicitApplicationHint(goal: string): string | undefined {
+  const chinesePrefix = chineseApplicationPlacement(goal);
+  if (chinesePrefix !== undefined) return chinesePrefix.application;
+
+  const explicitSwitchTarget = goal.match(/^switch\s+to\s+(?:the\s+)?([\p{Script=Latin}\p{Number}]+)/u)?.[1];
+  if (explicitSwitchTarget !== undefined && !GOAL_ACTION_TERMS.has(explicitSwitchTarget)) return explicitSwitchTarget;
+
+  const contextualEnglishTarget = goal.match(/\b(?:in|using)\s+(?:the\s+)?([\p{Script=Latin}\p{Number}]+)/u)?.[1];
+  if (contextualEnglishTarget !== undefined && !GOAL_ACTION_TERMS.has(contextualEnglishTarget)) return contextualEnglishTarget;
+  return undefined;
+}
+
+function leadingChineseAppTargetRemainder(goal: string): string | undefined {
+  const prefix = chineseApplicationPlacement(goal);
+  return prefix === undefined ? undefined : goal.slice(prefix.end).replace(/^(?:里面|里|中|上|内)/u, "");
+}
+
+function chineseApplicationPlacement(goal: string): { readonly application: string; readonly end: number } | undefined {
+  // Normalize common request politeness before the placement phrase while
+  // keeping the target syntax anchored at the start. In particular, "帮我在
+  // WPS里" is an app constraint; a later mention such as "从WPS复制到记事本"
+  // is not.
+  const prefix = goal.match(/^(?:(?:请|麻烦)(?:帮我)?|帮我)?(?:切换到|访问|打开|查看|检查|使用|运行|在|用)\s*[\p{Script=Latin}\p{Number}]+/u)?.[0];
+  if (prefix === undefined) return undefined;
+  const application = prefix.match(/[\p{Script=Latin}\p{Number}]+$/u)?.[0];
+  return application === undefined ? undefined : { application, end: prefix.length };
+}
+
+function appNameHasExactTerm(appName: string, term: string): boolean {
+  return extractLatinTerms(appName).includes(term);
+}
+
 function scoreTarget(
   target: WindowTargetInfo,
   normalizedGoal: string,
+  titleMatchGoal: string,
   goalLatinTerms: readonly string[],
   goalCompact: string,
 ): ScoredWindowTarget {
@@ -70,7 +204,7 @@ function scoreTarget(
   // longer extracted title identities keep the existing substring behavior
   // so user verbs before them and known suffix context after them still match.
   const matchedTitleHan = titleHanTerms.filter((term) => term.length <= 2
-    ? containsBoundedHanIdentity(normalizedGoal, term)
+    ? containsBoundedHanIdentity(titleMatchGoal, term)
     : goalCompact.includes(term));
 
   const score =

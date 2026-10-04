@@ -2,8 +2,9 @@ import { CuaWindowDiscovery, ManagedBrowserHost, formatManagedBrowserStartupDiag
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
 import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList, ObservationCapture, ObservationId } from "@computer-harness/protocol";
-import type { WindowTargetDiscovery } from "./application-session.js";
+import type { WindowTargetDiscovery, WindowTargetPreview } from "./application-session.js";
 import { createWindowsWindowRelationshipProbe } from "./windows-window-relationship-probe.js";
+import { projectWindowTargetInventory } from "./window-target-discovery.js";
 
 export type ComputerBackendConfig =
   | {
@@ -192,21 +193,37 @@ export interface ComputerFactoryDependencies {
   windowRelationshipProbe?: WindowRelationshipProbe | null;
 }
 
-export function createWindowTargetDiscovery(config: ComputerBackendConfig): WindowTargetDiscovery | undefined {
+export function createWindowTargetDiscovery(
+  config: ComputerBackendConfig,
+  dependencies: Pick<ComputerFactoryDependencies, "windowRelationshipProbe"> = {},
+): WindowTargetDiscovery | undefined {
   if (config.kind !== "cua") return undefined;
-  const discovery = new CuaWindowDiscovery({ socketPath: config.socketPath });
-  const project = (windows: Awaited<ReturnType<CuaWindowDiscovery["listWindows"]>>) => windows.map((window) => ({
-    pid: window.target.pid,
-    windowId: window.target.windowId,
-    ...(window.appName === undefined ? {} : { appName: window.appName }),
-    ...(window.title === undefined ? {} : { title: window.title }),
-  }));
+  const relationshipProbe = dependencies.windowRelationshipProbe !== undefined
+    ? dependencies.windowRelationshipProbe ?? undefined
+    : process.platform === "win32" ? createWindowsWindowRelationshipProbe() : undefined;
+  const discovery = new CuaWindowDiscovery({
+    socketPath: config.socketPath,
+    ...(relationshipProbe === undefined ? {} : { windowRelationshipProbe: relationshipProbe }),
+  });
   return {
     async listWindows(signal) {
-      return project(await discovery.listWindows(signal));
+      return projectWindowTargetInventory(await discovery.listInventory(signal, true));
     },
     async listAllWindows(signal) {
-      return project(await discovery.listWindows(signal, false));
+      return projectWindowTargetInventory(await discovery.listInventory(signal, false));
+    },
+    async captureWindowPreview(target, signal): Promise<WindowTargetPreview> {
+      const preview = await discovery.captureWindowPreview(target, signal);
+      const projectedTarget = projectWindowTargetInventory(preview.inventory).find((window) =>
+        window.pid === target.pid && window.windowId === target.windowId);
+      if (projectedTarget === undefined) throw new Error("preview target was not present in the fresh post-capture inventory");
+      return {
+        target: projectedTarget,
+        capturedAt: preview.capturedAt,
+        viewport: { width: preview.capture.viewport.width, height: preview.capture.viewport.height },
+        mediaType: "image/png",
+        data: preview.capture.data,
+      };
     },
     async activateWindow(target, signal) {
       await discovery.activateWindow(target, signal);

@@ -5,11 +5,13 @@ import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesS
 import type { AssetId, AssetRef, ComputerWindowCandidate, JsonValue, RunOutcome, RuntimeEvent } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { inspectManagedBrowserProfile, readManagedBrowserStartupUrls } from "@computer-harness/computer-cua";
-import type { ApplicationSession, ApplicationSessionRunFeatureOverrides, WindowTargetInfo } from "./application-session.js";
+import type { ApplicationSession, ApplicationSessionRunFeatureOverrides, WindowTargetInfo, WindowTargetPreview } from "./application-session.js";
 import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
 import { RunNoticeProjector, RunNoticeScheduler, type RunNoticeGeneration } from "@computer-harness/voice";
 import { approvalRequiresVisualReview, projectApprovalPreview, projectApprovalVoiceContext } from "./approval-preview.js";
+import { filterIndistinguishableWindowTargets, filterInitialTargetWindowCandidates, hasExplicitApplicationIntent, matchGoalToWindow, targetsForExplicitApplicationIntent } from "./window-target-matcher.js";
+import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 import {
   type RemoteAsset,
   type RemoteCommand,
@@ -28,21 +30,24 @@ import {
   type RemoteStreamEvent,
   type RemoteSubscription,
   type RemoteWindowTargetLabel,
+  type RemoteWindowCandidateRelationship,
+  type RemoteWindowCandidatePreview,
+  type RemoteWindowCandidate,
   type RemoteWindowTargetSet,
 } from "./remote-control.js";
-import { matchGoalToWindow } from "./window-target-matcher.js";
 
 interface ManagedRemoteRun {
   readonly handle: RunHandle;
   readonly ownerDeviceId: string;
   target: RemoteWindowTargetLabel;
+  targetIdentity?: { readonly pid: number; readonly windowId: number };
   readonly startedAt: number;
   readonly eventCapacity: number;
   readonly events: RemoteRunEvent[];
   readonly subscriptions: Map<number, (event: RemoteStreamEvent) => void>;
   readonly assets: Map<string, AssetRef>;
   readonly releaseManagedBrowserUse?: () => Promise<void>;
-  readonly candidates: Map<string, { requestId: string; candidate: ComputerWindowCandidate }>;
+  readonly candidates: Map<string, RemoteHandoffCandidate>;
   readonly windowInventory: Map<string, RemoteWindowTargetLabel>;
   readonly switchWindowRefs: Map<string, string>;
   pendingWindowInventoryCallId?: string;
@@ -58,11 +63,19 @@ interface ManagedRemoteRun {
   lastPublicStatus: RemoteRunStatus;
   pendingInputRequestId?: string;
   pendingWindowRequestId?: string;
+  windowCandidateRefresh?: WindowCandidateRefresh;
+  omittedWindowCandidateCount?: number;
   candidateFingerprint?: string;
   reply?: string;
   lifecycleError?: boolean;
   commandQueue: Promise<void>;
   abortRequested: boolean;
+}
+
+interface WindowCandidateRefresh {
+  readonly requestId: string;
+  readonly controller: AbortController;
+  settled: boolean;
 }
 
 interface StartRequest {
@@ -76,6 +89,23 @@ interface StartRequest {
 interface WindowTargetSelection extends RemoteWindowTargetLabel {
   readonly pid: number;
   readonly windowId: number;
+  readonly previewRequired?: boolean;
+  readonly relationship?: RemoteWindowCandidateRelationship;
+  readonly previewToken?: string;
+  readonly previewExpiresAt?: number;
+}
+
+interface RemoteHandoffCandidate {
+  readonly requestId: string;
+  readonly candidate: ComputerWindowCandidate;
+  readonly previewRequired: boolean;
+  readonly previewToken?: string;
+  readonly previewExpiresAt?: number;
+}
+
+interface PresentableWindowCandidate {
+  readonly candidate: ComputerWindowCandidate;
+  readonly previewRequired: boolean;
 }
 
 interface DeviceWindowCandidates {
@@ -104,6 +134,10 @@ const DEFAULT_MAX_START_REQUESTS = 4096;
 const DEFAULT_MAX_COMMANDS_PER_RUN = 1024;
 const WINDOW_TARGET_TTL_MS = 10 * 60_000;
 const WINDOW_DISCOVERY_TIMEOUT_MS = 15_000;
+const WINDOW_PREVIEW_TIMEOUT_MS = 8_000;
+const WINDOW_HANDOFF_REFRESH_TIMEOUT_MS = 15_000;
+const WINDOW_PREVIEW_PROOF_TTL_MS = 2 * 60_000;
+const MAX_WINDOW_PREVIEW_BYTES = 1_048_576;
 const MAX_WINDOW_TARGETS = 64;
 const MAX_GOAL_CHARS = 20_000;
 const MAX_REPLY_CHARS = 60_000;
@@ -163,7 +197,7 @@ export function createFileRemoteAssetReader(rootDir: string): AssetReader {
 
 export class RemoteRunApiError extends Error {
   public constructor(
-    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "INVALID_ASSISTANT_PREFERENCES" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE" | "MANAGED_BROWSER_SETUP_REQUIRED",
+    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "INVALID_ASSISTANT_PREFERENCES" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "WINDOW_PREVIEW_REQUIRED" | "WINDOW_PREVIEW_UNAVAILABLE" | "WINDOW_PREVIEW_BUSY" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE" | "MANAGED_BROWSER_SETUP_REQUIRED",
     message: string,
   ) {
     super(message);
@@ -187,6 +221,8 @@ export interface ApplicationRemoteRunApiOptions {
   readonly readManagedBrowserStartupUrls?: typeof readManagedBrowserStartupUrls;
   /** When omitted or disabled, the public remote event stream is unchanged. */
   readonly runNotices?: { readonly enabled: boolean; readonly dynamicContentEnabled?: boolean };
+  /** Optional explicit semantic selector for initial target matching; never used to perform GUI actions. */
+  readonly windowSelector?: WindowSelectionStrategy;
 }
 
 /** Adapts ApplicationSession and its committed feed into a redacted remote view. */
@@ -207,7 +243,9 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
   private readonly inspectManagedBrowserProfile: typeof inspectManagedBrowserProfile;
   private readonly readManagedBrowserStartupUrls: typeof readManagedBrowserStartupUrls;
   private readonly runNotices: ApplicationRemoteRunApiOptions["runNotices"];
+  private readonly windowSelector: ApplicationRemoteRunApiOptions["windowSelector"];
   private startInProgress = false;
+  private windowPreviewInProgress = false;
 
   public constructor(options: ApplicationRemoteRunApiOptions) {
     this.session = options.session;
@@ -223,6 +261,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     this.inspectManagedBrowserProfile = options.inspectManagedBrowserProfile ?? inspectManagedBrowserProfile;
     this.readManagedBrowserStartupUrls = options.readManagedBrowserStartupUrls ?? readManagedBrowserStartupUrls;
     this.runNotices = options.runNotices?.enabled === true ? options.runNotices : undefined;
+    this.windowSelector = options.windowSelector;
     if (this.managedBrowserProfile !== undefined &&
         (!/^[A-Za-z0-9._-]{1,64}$/u.test(this.managedBrowserProfile.profileLabel) || this.managedBrowserProfile.profileRoot.trim().length === 0)) {
       throw new Error("managed browser readiness requires a bounded profile label and explicit Host-owned profile root");
@@ -254,27 +293,160 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     } catch (error) {
       throw windowDiscoveryError(error, "The Host could not safely refresh visible desktop windows. Try again after the desktop is ready.");
     }
-    const choices = new Map<string, WindowTargetSelection>();
-    const candidates = windows.slice(0, MAX_WINDOW_TARGETS).map((window) => {
-      const token = randomBytes(24).toString("base64url");
+    const boundedWindows = windows.slice(0, MAX_WINDOW_TARGETS).map((window) => {
       const appName = boundedText(window.appName, 256);
       const title = boundedText(window.title, 512);
+      return { window, appName, title, relationship: remoteRelationshipFromTarget(window.relationship), labelKey: windowTargetLabelKey(appName, title) };
+    });
+    const labelCounts = new Map<string, number>();
+    for (const candidate of boundedWindows) labelCounts.set(candidate.labelKey, (labelCounts.get(candidate.labelKey) ?? 0) + 1);
+    const choices = new Map<string, WindowTargetSelection>();
+    const candidates = boundedWindows.map(({ window, appName, title, relationship, labelKey }) => {
+      const previewRequired = labelCounts.get(labelKey)! > 1 || appName === undefined || title === undefined;
+      const token = randomBytes(24).toString("base64url");
       const choice: WindowTargetSelection = {
         pid: window.pid,
         windowId: window.windowId,
         ...(appName === undefined ? {} : { appName }),
         ...(title === undefined ? {} : { title }),
+        previewRequired,
+        ...(relationship === undefined ? {} : { relationship }),
       };
       choices.set(token, choice);
       return {
         token,
         ...(choice.appName === undefined ? {} : { appName: choice.appName }),
         ...(choice.title === undefined ? {} : { title: choice.title }),
-      };
+        ...(choice.relationship === undefined ? {} : { relationship: choice.relationship }),
+        ...(previewRequired ? { previewRequired: true } : {}),
+      } satisfies RemoteWindowCandidate;
     });
     const expiresAt = this.now() + WINDOW_TARGET_TTL_MS;
     this.windowCandidates.set(deviceId, { expiresAt, candidates: choices });
     return { candidates, expiresAt: new Date(expiresAt).toISOString() };
+  }
+
+  public async previewWindowTarget(deviceId: string, candidateToken: string, signal?: AbortSignal): Promise<RemoteWindowCandidatePreview> {
+    this.beginWindowPreview();
+    try {
+    validateWindowTargetToken(candidateToken);
+    const targetSet = this.windowCandidates.get(deviceId);
+    if (targetSet === undefined || targetSet.expiresAt <= this.now()) {
+      this.windowCandidates.delete(deviceId);
+      throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window preview expired. Refresh the list and choose again.");
+    }
+    const candidate = targetSet.candidates.get(candidateToken);
+    if (candidate === undefined) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window preview candidate was refreshed. Refresh the list and choose again.");
+    if (candidate.previewRequired !== true) throw new RemoteRunApiError("INVALID_TARGET", "This candidate does not require a preview; select it from the refreshed window list.");
+    const captureSignal = boundedPreviewSignal(signal);
+    const preview = await this.captureWindowPreview({ pid: candidate.pid, windowId: candidate.windowId }, candidate.appName, captureSignal);
+    if (this.windowCandidates.get(deviceId) !== targetSet || targetSet.expiresAt <= this.now() ||
+        targetSet.candidates.get(candidateToken) !== candidate) {
+      throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window list changed while the preview was being captured. Refresh and preview the current candidate.");
+    }
+    const previewToken = randomBytes(24).toString("base64url");
+    const previewExpiresAt = Math.min(targetSet.expiresAt, this.now() + WINDOW_PREVIEW_PROOF_TTL_MS);
+    targetSet.candidates.set(candidateToken, { ...candidate, previewToken, previewExpiresAt });
+    return projectWindowCandidatePreview(preview, previewToken, new Date(previewExpiresAt).toISOString(), remoteRelationshipFromTarget(preview.target.relationship));
+    } finally {
+      this.windowPreviewInProgress = false;
+    }
+  }
+
+  public async previewWindowHandoffCandidate(
+    deviceId: string,
+    runId: string,
+    requestId: string,
+    candidateToken: string,
+    signal?: AbortSignal,
+  ): Promise<RemoteWindowCandidatePreview> {
+    this.beginWindowPreview();
+    try {
+    validateWindowTargetToken(candidateToken);
+    const record = this.runs.get(runId);
+    if (record === undefined || record.ownerDeviceId !== deviceId) throw new RemoteRunApiError("RUN_NOT_FOUND", "Run not found.");
+    const candidate = record.candidates.get(candidateToken);
+    if (candidate === undefined || candidate.requestId !== requestId || record.pendingWindowRequestId !== requestId ||
+        record.handle.controller.getSnapshot().status !== "waiting_window") {
+      throw new RemoteRunApiError("STALE_REQUEST", "This window candidate is no longer part of the waiting request. Refresh the task.");
+    }
+    if (candidate.previewRequired !== true) throw new RemoteRunApiError("INVALID_TARGET", "This candidate does not require a preview; use the current window request.");
+    const captureSignal = boundedPreviewSignal(signal);
+    const before = await this.listCurrentHandoffCandidate(record, candidate, requestId, captureSignal);
+    const preview = await this.captureWindowPreview({ pid: candidate.candidate.pid, windowId: candidate.candidate.windowId }, candidate.candidate.appName, captureSignal);
+    const after = await this.listCurrentHandoffCandidate(record, candidate, requestId, captureSignal);
+    if (!sameComputerCandidate(before, after)) {
+      throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window changed during preview. Refresh the task and inspect the new candidate.");
+    }
+    const current = record.candidates.get(candidateToken);
+    if (current !== candidate || record.pendingWindowRequestId !== requestId || record.handle.controller.getSnapshot().status !== "waiting_window") {
+      throw new RemoteRunApiError("STALE_REQUEST", "The waiting window request changed during preview. Refresh the task.");
+    }
+    const previewToken = randomBytes(24).toString("base64url");
+    const previewExpiresAt = this.now() + WINDOW_PREVIEW_PROOF_TTL_MS;
+    record.candidates.set(candidateToken, { ...candidate, previewToken, previewExpiresAt });
+    return projectWindowCandidatePreview(preview, previewToken, new Date(previewExpiresAt).toISOString(), projectWindowRelationship(record, after));
+    } finally {
+      this.windowPreviewInProgress = false;
+    }
+  }
+
+  private beginWindowPreview(): void {
+    if (this.windowPreviewInProgress) {
+      throw new RemoteRunApiError("WINDOW_PREVIEW_BUSY", "Another candidate preview is still being read. Wait or cancel it before starting another preview.");
+    }
+    this.windowPreviewInProgress = true;
+  }
+
+  private async captureWindowPreview(
+    target: { readonly pid: number; readonly windowId: number },
+    expectedAppName: string | undefined,
+    signal: AbortSignal,
+  ): Promise<WindowTargetPreview> {
+    let preview: WindowTargetPreview;
+    try {
+      preview = await this.session.captureWindowTargetPreview(target, signal);
+    } catch {
+      throw new RemoteRunApiError("WINDOW_PREVIEW_UNAVAILABLE", "This exact window could not be previewed safely. Restore it on the computer, refresh the list, and try again.");
+    }
+    if (preview.target.pid !== target.pid || preview.target.windowId !== target.windowId) {
+      throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The screenshot no longer belongs to the exact selected window. Refresh the list and inspect the current candidate.");
+    }
+    if (preview.mediaType !== "image/png" || preview.data.byteLength === 0 || preview.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
+      throw new RemoteRunApiError("WINDOW_PREVIEW_UNAVAILABLE", "The exact window preview is unavailable or too large. Restore or resize it on the computer, then refresh.");
+    }
+    const appName = boundedText(preview.target.appName, 256);
+    const normalizedExpectedApp = expectedAppName?.normalize("NFKC").toLocaleLowerCase();
+    const normalizedPreviewApp = appName?.normalize("NFKC").toLocaleLowerCase();
+    if (normalizedExpectedApp !== undefined && normalizedPreviewApp !== undefined && normalizedExpectedApp !== normalizedPreviewApp) {
+      throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The application behind this window changed. Refresh the list and inspect the new candidate.");
+    }
+    return preview;
+  }
+
+  private async listCurrentHandoffCandidate(
+    record: ManagedRemoteRun,
+    issued: RemoteHandoffCandidate,
+    requestId: string,
+    signal: AbortSignal,
+  ): Promise<ComputerWindowCandidate> {
+    if (record.pendingWindowRequestId !== requestId || record.handle.controller.getSnapshot().status !== "waiting_window") {
+      throw new RemoteRunApiError("STALE_REQUEST", "The window handoff request is no longer waiting.");
+    }
+    let candidates: readonly ComputerWindowCandidate[];
+    try {
+      candidates = await record.handle.controller.listWindowHandoffCandidates(signal);
+    } catch {
+      throw new RemoteRunApiError("WINDOW_PREVIEW_UNAVAILABLE", "The waiting window candidate could not be refreshed safely. Refresh the task and try again.");
+    }
+    if (record.pendingWindowRequestId !== requestId || record.handle.controller.getSnapshot().status !== "waiting_window") {
+      throw new RemoteRunApiError("STALE_REQUEST", "The window handoff request changed while it was being refreshed.");
+    }
+    const current = candidates.find((candidate) => candidate.pid === issued.candidate.pid && candidate.windowId === issued.candidate.windowId);
+    if (current === undefined || !sameComputerCandidate(issued.candidate, current)) {
+      throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The exact window is no longer a candidate for this handoff. Refresh the task and inspect the new candidates.");
+    }
+    return current;
   }
 
   public startRun(
@@ -348,7 +520,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     try {
       if (target.mode === "window") {
         validateWindowTargetToken(target.targetToken);
-        selectedTarget = this.takeWindowTarget(deviceId, target.targetToken);
+        selectedTarget = this.takeWindowTarget(deviceId, target.targetToken, target.previewToken);
       }
     } catch (error) {
       return Promise.reject(error);
@@ -448,15 +620,39 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       } catch (error) {
         throw windowDiscoveryError(error, "The Host could not safely match the goal to open windows. Refresh the list and try again.");
       }
-      if (currentWindows.length > MAX_WINDOW_TARGETS) {
+      const initialTargetCandidates = filterInitialTargetWindowCandidates(currentWindows);
+      if (initialTargetCandidates.length > MAX_WINDOW_TARGETS) {
         throw new RemoteRunApiError("WINDOW_SELECTION_REQUIRED", "Too many open windows can be matched safely. Choose a window manually.");
       }
-      const match = matchGoalToWindow(goal, currentWindows);
-      if (match.kind !== "matched") {
+      const match = matchGoalToWindow(goal, initialTargetCandidates);
+      let window = match.kind === "matched" ? match.match.target : undefined;
+      if (window === undefined && this.windowSelector !== undefined) {
+        const selectorCandidates = filterIndistinguishableWindowTargets(targetsForExplicitApplicationIntent(goal, initialTargetCandidates));
+        // An explicit Latin app constraint with no matching application is a
+        // hard abstention; semantic selection must not substitute another app.
+        if (!hasExplicitApplicationIntent(goal) || selectorCandidates.length > 0) {
+          try {
+            const decision = await this.windowSelector.select(
+              goal,
+              selectorCandidates,
+              AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS),
+              "initial",
+            );
+            if (decision.kind === "matched") {
+              // Strategies only return a suggestion. Accept it only if it is
+              // the exact candidate object from this inventory.
+              window = selectorCandidates.find((candidate) => candidate === decision.target);
+            }
+          } catch {
+            // Selection failures are a safe manual fallback, never a reason to
+            // guess another target or to prevent an explicit user selection.
+          }
+        }
+      }
+      if (window === undefined) {
         const reason = match.kind === "ambiguous" ? "More than one open window matches the goal." : "No open window confidently matches the goal.";
         throw new RemoteRunApiError("WINDOW_SELECTION_REQUIRED", `${reason} Choose a window manually.`);
       }
-      const window = match.match.target;
       const visible = await this.session.listWindowTargets(AbortSignal.timeout(WINDOW_DISCOVERY_TIMEOUT_MS));
       const visibleByHandle = visible.find((candidate) => candidate.pid === window.pid && candidate.windowId === window.windowId);
       if (visibleByHandle !== undefined && !sameWindowIdentity(visibleByHandle, window)) {
@@ -532,6 +728,18 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (command.type === "correct" && command.requestId !== undefined && currentRequest?.requestId !== command.requestId) {
       throw new RemoteRunApiError("STALE_REQUEST", "That request is no longer waiting for a correction.");
     }
+    let consumeWindowPreviewFor: string | undefined;
+    if (command.type === "window.confirm") {
+      const candidate = record.candidates.get(command.candidateToken);
+      if (candidate === undefined || candidate.requestId !== command.requestId || currentRequest?.kind !== "window_handoff") {
+        throw new RemoteRunApiError("STALE_REQUEST", "Window candidate expired; refresh the pending request.");
+      }
+      if (candidate.previewRequired && (candidate.previewToken === undefined || candidate.previewExpiresAt === undefined ||
+          candidate.previewExpiresAt <= this.now() || command.previewToken !== candidate.previewToken)) {
+        throw new RemoteRunApiError("WINDOW_PREVIEW_REQUIRED", "Preview this exact window and confirm it before continuing the task.");
+      }
+      if (candidate.previewRequired) consumeWindowPreviewFor = command.candidateToken;
+    }
 
     const acceptedAt = new Date(this.now()).toISOString();
     const acceptedReceipt: RemoteCommandReceipt = {
@@ -544,6 +752,14 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     this.publish(record, { type: "run.command_receipt", commandId: command.commandId, status: "accepted" });
     const receiptWithSequence = { ...acceptedReceipt, sequence: record.sequence };
     record.commandReceipts.set(key, { fingerprint, receipt: receiptWithSequence });
+    if (consumeWindowPreviewFor !== undefined) {
+      const candidate = record.candidates.get(consumeWindowPreviewFor);
+      if (candidate !== undefined) record.candidates.set(consumeWindowPreviewFor, {
+        requestId: candidate.requestId,
+        candidate: candidate.candidate,
+        previewRequired: candidate.previewRequired,
+      });
+    }
 
     if (command.type === "abort") {
       try {
@@ -607,7 +823,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     return { data, mediaType: safeMediaType(ref.mediaType) };
   }
 
-  private takeWindowTarget(deviceId: string, token: string): WindowTargetSelection {
+  private takeWindowTarget(deviceId: string, token: string, previewToken?: string): WindowTargetSelection {
     const set = this.windowCandidates.get(deviceId);
     if (set === undefined || set.expiresAt <= this.now()) {
       this.windowCandidates.delete(deviceId);
@@ -615,6 +831,13 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
     const choice = set.candidates.get(token);
     if (choice === undefined) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window choice was already used or refreshed. Refresh the list and choose again.");
+    if (choice.previewRequired === true && (choice.previewToken === undefined || choice.previewExpiresAt === undefined ||
+        choice.previewExpiresAt <= this.now() || previewToken !== choice.previewToken)) {
+      throw new RemoteRunApiError("WINDOW_PREVIEW_REQUIRED", "Preview this exact window and confirm it before starting the task.");
+    }
+    if (choice.previewRequired !== true && previewToken !== undefined) {
+      throw new RemoteRunApiError("INVALID_TARGET", "A preview confirmation is not valid for this window choice.");
+    }
     set.candidates.delete(token);
     return choice;
   }
@@ -642,13 +865,13 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       } catch (error) {
         throw windowDiscoveryError(error, "The Host could not verify the selected desktop window. Refresh the list and try again.");
       }
-      const stillPresent = currentWindows.some((window) =>
-        window.pid === selection.pid && window.windowId === selection.windowId &&
-        boundedText(window.appName, 256) === selection.appName && boundedText(window.title, 512) === selection.title);
-      if (!stillPresent) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The selected window changed or closed. Refresh the list and choose again.");
+      const currentTarget = currentWindows.find((window) => sameWindowIdentity(window, selection));
+      if (currentTarget === undefined) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The selected window changed or closed. Refresh the list and choose again.");
+      const currentAppName = boundedText(currentTarget.appName, 256);
+      const currentTitle = boundedText(currentTarget.title, 512);
       targetLabel = {
-        ...(selection.appName === undefined ? {} : { appName: selection.appName }),
-        ...(selection.title === undefined ? {} : { title: selection.title }),
+        ...(currentAppName === undefined ? {} : { appName: currentAppName }),
+        ...(currentTitle === undefined ? {} : { title: currentTitle }),
       };
       featureOverrides = {
         windowTarget: { pid: selection.pid, windowId: selection.windowId },
@@ -724,6 +947,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       handle,
       ownerDeviceId: deviceId,
       target: targetLabel,
+      ...(target.mode === "window" ? { targetIdentity: { pid: target.selection.pid, windowId: target.selection.windowId } } : {}),
       startedAt: this.now(),
       eventCapacity: this.eventCapacity,
       events: [],
@@ -861,6 +1085,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       // Once activation may begin, the previous target is no longer safe to
       // present as current until a successful transition identifies the new one.
       record.target = { provenance: "unknown_after_switch" };
+      delete record.targetIdentity;
       this.publish(record, { type: "run.target", target: remoteWindowTargetJson(record.target) });
     } else if (event.type === "action.execution.completed" && event.receipt.status === "completed" && event.receipt.sessionAfter !== undefined) {
       const windowRef = record.switchWindowRefs.get(event.receipt.actionId);
@@ -883,12 +1108,21 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (event.type === "user.input.requested") record.pendingInputRequestId = event.eventId;
     if (event.type === "user.input.received") delete record.pendingInputRequestId;
     if (event.type === "computer.window.handoff.requested") {
+      this.cancelWindowCandidateRefresh(record);
       record.pendingWindowRequestId = event.sourceActionId;
+      delete record.omittedWindowCandidateCount;
       delete record.candidateFingerprint;
       record.candidates.clear();
-      void this.refreshWindowCandidates(record, event.sourceActionId);
+      const refresh: WindowCandidateRefresh = {
+        requestId: event.sourceActionId,
+        controller: new AbortController(),
+        settled: false,
+      };
+      record.windowCandidateRefresh = refresh;
+      void this.refreshWindowCandidates(record, refresh);
     }
     if (event.type === "computer.window.handoff.completed") {
+      record.targetIdentity = { pid: event.target.pid, windowId: event.target.windowId };
       const selected = [...record.candidates.values()].find((entry) =>
         entry.candidate.pid === event.target.pid && entry.candidate.windowId === event.target.windowId);
       const appName = boundedText(selected?.candidate.appName, 256);
@@ -901,19 +1135,26 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       this.publish(record, { type: "run.target", target: remoteWindowTargetJson(record.target) });
     }
     if (event.type === "computer.window.handoff.completed" || event.type === "computer.window.handoff.ignored") {
+      this.cancelWindowCandidateRefresh(record);
       delete record.pendingWindowRequestId;
+      delete record.omittedWindowCandidateCount;
       delete record.candidateFingerprint;
       record.candidates.clear();
       record.windowInventory.clear();
       delete record.pendingWindowInventoryCallId;
     }
     if (event.type === "run.finished") {
+      this.cancelWindowCandidateRefresh(record);
       if (record.switchWindowRefs.size > 0) this.markTargetUnknownAfterWindowSwitch(record);
       const reply = boundedText(event.summary ?? runtime.summary, MAX_REPLY_CHARS);
       if (reply === undefined) delete record.reply;
       else record.reply = reply;
       record.windowInventory.clear();
       record.switchWindowRefs.clear();
+      record.candidates.clear();
+      delete record.pendingWindowRequestId;
+      delete record.candidateFingerprint;
+      delete record.omittedWindowCandidateCount;
       delete record.pendingWindowInventoryCallId;
       record.eventFeedSubscription?.unsubscribe();
       delete record.eventFeedSubscription;
@@ -928,7 +1169,12 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
         event.type === "user.input.requested" || event.type === "user.input.received" ||
         event.type === "computer.window.handoff.requested" || event.type === "computer.window.handoff.completed" ||
         event.type === "computer.window.handoff.ignored") {
-      this.publish(record, { type: "run.pending_request", ...(pending === undefined ? { cleared: true } : { request: publicRequest(pending) }) });
+      const waitingForWindowCandidates = event.type === "computer.window.handoff.requested" &&
+        record.windowCandidateRefresh?.requestId === event.sourceActionId && !record.windowCandidateRefresh.settled;
+      this.publish(record, {
+        type: "run.pending_request",
+        ...(waitingForWindowCandidates || pending === undefined ? { cleared: true } : { request: publicRequest(pending) }),
+      });
     }
     const projected = projectRuntimeEvent(event, record.reply);
     if (projected !== undefined) this.publish(record, projected);
@@ -989,23 +1235,64 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
   }
 
-  private async refreshWindowCandidates(record: ManagedRemoteRun, requestId: string): Promise<void> {
+  private cancelWindowCandidateRefresh(record: ManagedRemoteRun): void {
+    record.windowCandidateRefresh?.controller.abort();
+    delete record.windowCandidateRefresh;
+  }
+
+  private isCurrentWindowCandidateRefresh(record: ManagedRemoteRun, refresh: WindowCandidateRefresh): boolean {
+    const snapshot = record.handle.controller.getSnapshot();
+    return record.windowCandidateRefresh === refresh && record.pendingWindowRequestId === refresh.requestId &&
+      !refresh.controller.signal.aborted && snapshot.status === "waiting_window" &&
+      snapshot.pendingWindowHandoff?.sourceActionId === refresh.requestId;
+  }
+
+  private async refreshWindowCandidates(record: ManagedRemoteRun, refresh: WindowCandidateRefresh): Promise<void> {
+    const timeoutController = new AbortController();
+    const timeout = setTimeout(() => timeoutController.abort(new Error("window candidate refresh deadline exceeded")), WINDOW_HANDOFF_REFRESH_TIMEOUT_MS);
+    const signal = AbortSignal.any([refresh.controller.signal, timeoutController.signal]);
     try {
-      const candidates = await record.handle.controller.listWindowHandoffCandidates(new AbortController().signal);
+      const candidates = await awaitWithAbortSignal(
+        record.handle.controller.listWindowHandoffCandidates(signal),
+        signal,
+      );
+      if (!this.isCurrentWindowCandidateRefresh(record, refresh)) return;
       const snapshot = record.handle.controller.getSnapshot();
-      if (snapshot.pendingWindowHandoff?.sourceActionId !== requestId || snapshot.status !== "waiting_window") return;
       const fingerprint = JSON.stringify(candidates.map(candidateKey).sort());
-      if (fingerprint === record.candidateFingerprint) return;
+      if (fingerprint === record.candidateFingerprint) {
+        refresh.settled = true;
+        const pending = this.pendingRequest(record, snapshot);
+        if (pending !== undefined) this.publish(record, { type: "run.pending_request", request: publicRequest(pending) });
+        return;
+      }
       record.candidateFingerprint = fingerprint;
       record.candidates.clear();
-      for (const candidate of candidates.slice(0, 32)) {
+      const presentable = filterPresentableWindowCandidates(candidates);
+      const limited = presentable.slice(0, 32);
+      const omittedCandidateCount = candidates.length - limited.length;
+      if (omittedCandidateCount > 0) record.omittedWindowCandidateCount = omittedCandidateCount;
+      else delete record.omittedWindowCandidateCount;
+      for (const { candidate, previewRequired } of limited) {
         const token = randomBytes(24).toString("base64url");
-        record.candidates.set(token, { requestId, candidate: structuredClone(candidate) });
+        record.candidates.set(token, { requestId: refresh.requestId, candidate: structuredClone(candidate), previewRequired });
       }
+      refresh.settled = true;
       const pending = this.pendingRequest(record, snapshot);
       if (pending !== undefined) this.publish(record, { type: "run.pending_request", request: publicRequest(pending) });
     } catch {
-      // Keep the request pending; an unavailable picker never selects automatically.
+      if (!this.isCurrentWindowCandidateRefresh(record, refresh)) return;
+      record.candidates.clear();
+      delete record.omittedWindowCandidateCount;
+      record.candidateFingerprint = JSON.stringify([]);
+      refresh.settled = true;
+      const snapshot = record.handle.controller.getSnapshot();
+      const pending = this.pendingRequest(record, snapshot);
+      // Keep the existing window handoff contract visible so the UI can offer
+      // only its already-authorized recovery/cancel actions. Never select a
+      // candidate based on an unavailable refresh.
+      if (pending !== undefined) this.publish(record, { type: "run.pending_request", request: publicRequest(pending) });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -1032,15 +1319,20 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       return { requestId: record.pendingInputRequestId, kind: "user_input", question: boundedText(snapshot.pendingUserQuestion, 2_000) ?? "Input required." };
     }
     if (snapshot.pendingWindowHandoff !== undefined && record.pendingWindowRequestId === snapshot.pendingWindowHandoff.sourceActionId) {
+      if (record.windowCandidateRefresh?.requestId === snapshot.pendingWindowHandoff.sourceActionId &&
+          !record.windowCandidateRefresh.settled) return undefined;
       const candidates = [...record.candidates.entries()]
         .filter(([, entry]) => entry.requestId === snapshot.pendingWindowHandoff!.sourceActionId)
         .map(([token, entry]) => {
           const appName = boundedText(entry.candidate.appName, 256);
           const title = boundedText(entry.candidate.title, 512);
+          const relationship = projectWindowRelationship(record, entry.candidate);
           return {
             token,
             ...(appName === undefined ? {} : { appName }),
             ...(title === undefined ? {} : { title }),
+            ...(relationship === undefined ? {} : { relationship }),
+            ...(entry.previewRequired ? { previewRequired: true } : {}),
           };
         });
       return {
@@ -1048,6 +1340,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
         kind: "window_handoff",
         reasonCode: snapshot.pendingWindowHandoff.reasonCode,
         candidates,
+        ...(record.omittedWindowCandidateCount === undefined ? {} : { omittedCandidateCount: record.omittedWindowCandidateCount }),
       };
     }
     return undefined;
@@ -1220,10 +1513,19 @@ function publicRequest(request: RemotePendingRequest): JsonValue {
     kind: request.kind,
     requestId: request.requestId,
     reasonCode: request.reasonCode,
+    ...(request.omittedCandidateCount === undefined ? {} : { omittedCandidateCount: request.omittedCandidateCount }),
     candidates: request.candidates.map((candidate) => ({
       token: candidate.token,
       ...(candidate.appName === undefined ? {} : { appName: candidate.appName }),
       ...(candidate.title === undefined ? {} : { title: candidate.title }),
+      ...(candidate.relationship === undefined ? {} : {
+        relationship: {
+          kind: candidate.relationship.kind,
+          ...(candidate.relationship.kind === "owned_child" && candidate.relationship.rootRole !== undefined ? { rootRole: candidate.relationship.rootRole } : {}),
+          ...(candidate.relationship.kind === "owned_child" && candidate.relationship.parentAppName !== undefined ? { parentAppName: candidate.relationship.parentAppName } : {}),
+          ...(candidate.relationship.kind === "owned_child" && candidate.relationship.parentTitle !== undefined ? { parentTitle: candidate.relationship.parentTitle } : {}),
+        },
+      }),
     })),
   };
 }
@@ -1257,8 +1559,15 @@ function normalizeRemoteRunTarget(value: RemoteRunTargetInput): RemoteRunTarget 
   const switchWindows = record.switchWindows === true;
   if (record.mode === "auto" && targetHasExactKeys(record, ["mode"])) return { mode: "auto", switchWindows };
   if (record.mode === "desktop" && targetHasExactKeys(record, ["mode"])) return { mode: "desktop", switchWindows };
-  if (record.mode === "window" && targetHasExactKeys(record, ["mode", "targetToken"]) && typeof record.targetToken === "string") {
-    return { mode: "window", targetToken: record.targetToken, switchWindows };
+  if (record.mode === "window" &&
+      (targetHasExactKeys(record, ["mode", "targetToken"]) || targetHasExactKeys(record, ["mode", "targetToken", "previewToken"])) &&
+      typeof record.targetToken === "string" && (record.previewToken === undefined || isValidWindowPreviewToken(record.previewToken))) {
+    return {
+      mode: "window",
+      targetToken: record.targetToken,
+      ...(record.previewToken === undefined ? {} : { previewToken: record.previewToken }),
+      switchWindows,
+    };
   }
   if (record.mode === "browser" && targetHasExactKeys(record, ["mode"])) {
     return { mode: "browser", switchWindows };
@@ -1275,6 +1584,23 @@ function normalizeRemoteRunTarget(value: RemoteRunTargetInput): RemoteRunTarget 
     return browserTargetWithNormalizedUrl(record.sessionMode, record.url, switchWindows);
   }
   throw new RemoteRunApiError("INVALID_TARGET", "target must contain only the fields for one supported selection mode.");
+}
+
+function boundedPreviewSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(WINDOW_PREVIEW_TIMEOUT_MS);
+  return signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+}
+
+function awaitWithAbortSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new Error("operation aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([promise, aborted]).finally(() => {
+    if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  });
 }
 
 function isBrowserSessionMode(value: unknown): value is RemoteBrowserSessionMode {
@@ -1374,14 +1700,103 @@ function windowDiscoveryError(error: unknown, message: string): RemoteRunApiErro
   return new RemoteRunApiError("WINDOW_DISCOVERY_FAILED", message);
 }
 
-function sameWindowIdentity(left: WindowTargetInfo, right: WindowTargetInfo): boolean {
+function sameWindowIdentity(
+  left: { readonly pid: number; readonly windowId: number; readonly appName?: string },
+  right: { readonly pid: number; readonly windowId: number; readonly appName?: string },
+): boolean {
+  const leftAppName = boundedText(left.appName, 256)?.normalize("NFKC").toLocaleLowerCase();
+  const rightAppName = boundedText(right.appName, 256)?.normalize("NFKC").toLocaleLowerCase();
   return left.pid === right.pid && left.windowId === right.windowId &&
-    boundedText(left.appName, 256) === boundedText(right.appName, 256) &&
-    boundedText(left.title, 512) === boundedText(right.title, 512);
+    (leftAppName === undefined || rightAppName === undefined || leftAppName === rightAppName);
+}
+
+function windowTargetLabelKey(appName: string | undefined, title: string | undefined): string {
+  const normalize = (value: string | undefined) => value?.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim() ?? "";
+  return `${normalize(appName)}\u0000${normalize(title)}`;
 }
 
 function candidateKey(candidate: ComputerWindowCandidate): string {
-  return String(candidate.pid) + ":" + String(candidate.windowId) + ":" + (candidate.appName ?? "") + ":" + (candidate.title ?? "");
+  const relationship = candidate.relationship === undefined
+    ? ""
+    : candidate.relationship.kind === "owned_child"
+      ? `:owned:${candidate.relationship.owner.pid}:${candidate.relationship.owner.windowId}:${candidate.relationship.rootRole ?? ""}`
+      : ":scoped-peer";
+  return String(candidate.pid) + ":" + String(candidate.windowId) + ":" + (candidate.appName ?? "") + ":" + (candidate.title ?? "") + relationship;
+}
+
+function filterPresentableWindowCandidates(candidates: readonly ComputerWindowCandidate[]): PresentableWindowCandidate[] {
+  const bounded = candidates.map((candidate) => ({
+    candidate,
+    appName: boundedText(candidate.appName, 256),
+    title: boundedText(candidate.title, 512),
+  }));
+  const labelCounts = new Map<string, number>();
+  for (const entry of bounded) {
+    const key = windowTargetLabelKey(entry.appName, entry.title);
+    labelCounts.set(key, (labelCounts.get(key) ?? 0) + 1);
+  }
+  return bounded.map(({ candidate, appName, title }) => ({
+    candidate,
+    // Duplicate labels and incomplete labels remain manual-only, but they
+    // require a candidate-bound screenshot before the phone can use them.
+    previewRequired: labelCounts.get(windowTargetLabelKey(appName, title))! > 1 || appName === undefined || title === undefined,
+  }));
+}
+
+function projectWindowRelationship(
+  record: ManagedRemoteRun,
+  candidate: ComputerWindowCandidate,
+): RemoteWindowCandidateRelationship | undefined {
+  const relationship = candidate.relationship;
+  if (relationship === undefined) return undefined;
+  if (relationship.kind === "scoped_peer") return { kind: "scoped_peer" };
+  return {
+    kind: "owned_child",
+    ...(relationship.rootRole === undefined ? {} : { rootRole: relationship.rootRole }),
+    ...(!matchesTarget(relationship.owner, record.targetIdentity) || record.target.appName === undefined ? {} : { parentAppName: record.target.appName }),
+    ...(!matchesTarget(relationship.owner, record.targetIdentity) || record.target.title === undefined ? {} : { parentTitle: record.target.title }),
+  };
+}
+
+function remoteRelationshipFromTarget(relationship: WindowTargetInfo["relationship"]): RemoteWindowCandidateRelationship | undefined {
+  if (relationship === undefined) return undefined;
+  if (relationship.kind === "scoped_peer") return { kind: "scoped_peer" };
+  return { kind: "owned_child", ...(relationship.rootRole === undefined ? {} : { rootRole: relationship.rootRole }) };
+}
+
+function projectWindowCandidatePreview(
+  preview: WindowTargetPreview,
+  previewToken: string,
+  expiresAt: string,
+  relationship: RemoteWindowCandidateRelationship | undefined,
+): RemoteWindowCandidatePreview {
+  const appName = boundedText(preview.target.appName, 256);
+  const title = boundedText(preview.target.title, 512);
+  return {
+    previewToken,
+    expiresAt,
+    ...(appName === undefined ? {} : { appName }),
+    ...(title === undefined ? {} : { title }),
+    ...(relationship === undefined ? {} : { relationship }),
+    capturedAt: preview.capturedAt,
+    viewport: { width: preview.viewport.width, height: preview.viewport.height },
+    mediaType: "image/png",
+    dataBase64: Buffer.from(preview.data).toString("base64"),
+  };
+}
+
+function sameComputerCandidate(left: ComputerWindowCandidate, right: ComputerWindowCandidate): boolean {
+  const leftAppName = boundedText(left.appName, 256)?.normalize("NFKC").toLocaleLowerCase();
+  const rightAppName = boundedText(right.appName, 256)?.normalize("NFKC").toLocaleLowerCase();
+  return left.pid === right.pid && left.windowId === right.windowId &&
+    (leftAppName === undefined || rightAppName === undefined || leftAppName === rightAppName);
+}
+
+function matchesTarget(
+  owner: { readonly pid: number; readonly windowId: number },
+  target: { readonly pid: number; readonly windowId: number } | undefined,
+): boolean {
+  return target !== undefined && owner.pid === target.pid && owner.windowId === target.windowId;
 }
 
 function boundedText(value: string | undefined, maxChars: number): string | undefined {
@@ -1406,6 +1821,10 @@ function validateWindowTargetToken(value: string): void {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{32}$/u.test(value)) {
     throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window choice is invalid. Refresh the list and choose again.");
   }
+}
+
+function isValidWindowPreviewToken(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{32}$/u.test(value);
 }
 
 function stableJson(value: unknown): string {

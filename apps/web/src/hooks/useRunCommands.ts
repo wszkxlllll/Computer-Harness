@@ -105,16 +105,16 @@ export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptio
     return execute(`respond:${pending.requestId}:${text}`, command, "补充内容已发送，等待电脑回执。");
   }
 
-  async function chooseWindow(candidate: WindowCandidate) {
+  async function chooseWindow(candidate: WindowCandidate, previewToken?: string) {
     const pending = snapshot?.pendingRequest;
     if (!snapshot || !pending) return;
-    const command = windowChoiceCommand(snapshot, pending.requestId, candidate.token);
+    const command = windowChoiceCommand(snapshot, pending.requestId, candidate.token, previewToken);
     if (!command) {
       setNotice({ text: "这个窗口已不在当前选择列表中。正在刷新任务状态。", tone: "warning" });
       await refresh().catch(() => undefined);
       return;
     }
-    await execute(`window:${pending.requestId}:${candidate.token}`, command, "已发送窗口选择，等待电脑确认。");
+    await execute(`window:${pending.requestId}:${candidate.token}:${previewToken ?? ""}`, command, "已发送窗口选择，等待电脑确认。");
   }
 
   async function ignoreNewWindow() {

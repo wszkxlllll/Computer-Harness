@@ -28,6 +28,27 @@ function fakeApi(): RemoteRunApi {
       candidates: [{ token: targetToken, appName: "Fixture app", title: "Fixture window" }],
       expiresAt: "2026-09-26T00:10:00.000Z",
     }),
+    previewWindowTarget: async (_deviceId, candidateToken) => Object.assign({
+      previewToken: "P".repeat(32),
+      appName: "Fixture app",
+      title: "Fixture window",
+      relationship: { kind: "owned_child" as const, rootRole: "dialog" as const, parentAppName: "Fixture app", parentTitle: "Parent window" },
+      capturedAt: "2026-09-26T00:00:00.000Z",
+      expiresAt: "2026-09-26T00:02:00.000Z",
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: candidateToken === targetToken ? "iVBORw0KGgo=" : "",
+    }, { pid: 451, windowId: 894, socketPath: "private.sock" }),
+    previewWindowHandoffCandidate: async (_deviceId, _runId, requestId, candidateToken) => ({
+      previewToken: "P".repeat(32),
+      appName: "Fixture app",
+      title: "Fixture window",
+      capturedAt: "2026-09-26T00:00:00.000Z",
+      expiresAt: "2026-09-26T00:02:00.000Z",
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: requestId.length > 0 && candidateToken.length > 0 ? "iVBORw0KGgo=" : "",
+    }),
     startRun: async (_deviceId, commandId, goal, _target) => ({
       ...snapshot(),
       goal,
@@ -317,6 +338,42 @@ describe("Host HTTP boundary", () => {
       const choices = jsonResponse<{ candidates: Array<Record<string, unknown>>; expiresAt: string }>(choicesResponse);
       expect(choices.candidates).toEqual([{ token: targetToken, appName: "Fixture app", title: "Fixture window" }]);
       expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+
+      const missingPreviewCsrf = await host.server.inject({
+        method: "POST", url: "/api/windows/preview", headers: { origin: relayOrigin, cookie }, payload: { candidateToken: targetToken },
+      });
+      expect(missingPreviewCsrf.statusCode).toBe(403);
+      const malformedPreview = await host.server.inject({
+        method: "POST", url: "/api/windows/preview", headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { candidateToken: targetToken, pid: 451 },
+      });
+      expect(malformedPreview.statusCode).toBe(400);
+      expect(malformedPreview.headers["cache-control"]).toContain("no-store");
+      const windowPreview = await host.server.inject({
+        method: "POST", url: "/api/windows/preview", headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { candidateToken: targetToken },
+      });
+      expect(windowPreview.statusCode).toBe(200);
+      expect(windowPreview.headers["cache-control"]).toContain("no-store");
+      expect(jsonResponse(windowPreview)).toMatchObject({ appName: "Fixture app", title: "Fixture window", relationship: { kind: "owned_child", rootRole: "dialog", parentTitle: "Parent window" }, mediaType: "image/png", viewport: { width: 320, height: 240 } });
+      expect(JSON.stringify(windowPreview.json())).not.toMatch(/pid|windowId|socketPath/iu);
+
+      const bridgePreview = await host.relayHandler.request({
+        type: "bridge.request", requestId: "bridge-window-preview", method: "POST", path: "/api/windows/preview",
+        deviceId, sessionToken: cookie.split("=")[1], csrfToken: pairedBody.csrfToken, body: { candidateToken: targetToken },
+      });
+      expect(bridgePreview.statusCode).toBe(200);
+      expect(bridgePreview.body).toMatchObject({ appName: "Fixture app", title: "Fixture window", relationship: { kind: "owned_child", rootRole: "dialog", parentTitle: "Parent window" }, mediaType: "image/png" });
+      expect(JSON.stringify(bridgePreview.body)).not.toMatch(/pid|windowId|socketPath/iu);
+
+      const handoffPreview = await host.server.inject({
+        method: "POST", url: `/api/runs/${runId}/window-candidates/preview`,
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { requestId: "action-window-1", candidateToken: targetToken },
+      });
+      expect(handoffPreview.statusCode).toBe(200);
+      expect(handoffPreview.headers["cache-control"]).toContain("no-store");
+      expect(jsonResponse(handoffPreview)).toMatchObject({ appName: "Fixture app", title: "Fixture window", mediaType: "image/png" });
 
       const missingCsrf = await host.server.inject({
         method: "POST",

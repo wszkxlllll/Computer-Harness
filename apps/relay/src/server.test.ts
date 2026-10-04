@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import WebSocket from "ws";
 import type { RemoteRunApi } from "@computer-harness/app-runtime";
 import { hashPairingToken, HostRelayConnector, type HostToRelayMessage } from "@computer-harness/relay-connector";
+import { MAX_WINDOW_PREVIEW_RESPONSE_BYTES } from "@computer-harness/relay-connector/routing";
 import { createRelayServer } from "./server.js";
 
 interface FakeHostMessage {
@@ -189,6 +190,25 @@ describe("local outbound relay transport", () => {
     const windowChoices = { candidates: [{ token: opaqueTargetToken, appName: "Browser", title: "Travel results" }], expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() };
     host.send(bridgeResponse(windowChoicesRequest.requestId, windowChoices));
     expect(await (await windowChoicesPromise).json()).toEqual(windowChoices);
+
+    const oversizedPreviewPromise = fetch(`${origin}/api/windows/preview`, {
+      method: "POST",
+      headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
+      body: JSON.stringify({ candidateToken: opaqueTargetToken }),
+    });
+    const oversizedPreviewRequest = await host.next((message) => message.type === "bridge.request" && message.path === "/api/windows/preview");
+    host.send(bridgeResponse(oversizedPreviewRequest.requestId, {
+      previewToken: "P".repeat(32),
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "A".repeat(MAX_WINDOW_PREVIEW_RESPONSE_BYTES),
+    }));
+    const oversizedPreviewResponse = await oversizedPreviewPromise;
+    expect(oversizedPreviewResponse.status).toBe(502);
+    expect(oversizedPreviewResponse.headers.get("cache-control")).toContain("no-store");
+    expect(await oversizedPreviewResponse.json()).toEqual({ error: "invalid_host_json_response" });
 
     const sessionSnapshotPromise = fetch(`${origin}/api/session`, { headers: { Cookie: relayCookie } });
     const snapshotRequest = await host.next((message) => message.type === "bridge.request" && message.path === "/api/session");

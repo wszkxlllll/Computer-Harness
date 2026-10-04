@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { BrowserSiteChoice, RunTarget } from "../types";
-import { isValidBrowserUrl } from "../run-target";
+import { appNameMatchesHint, explicitApplicationHint, isValidBrowserUrl } from "../run-target";
 import { WindowTargetPicker, type WindowTargetPickerProps } from "./WindowTargetPicker";
 import { VoiceInputControl } from "./VoiceInputControl";
 import type { VoiceAudioCaptureAdapter } from "@computer-harness/voice";
@@ -14,6 +14,7 @@ interface GoalComposerProps {
   browserUrl: string;
   commonSiteChoices?: readonly BrowserSiteChoice[];
   onTargetModeChange: (mode: RunTarget["mode"]) => void;
+  onGoalChange?: (goal: string) => void;
   onBrowserUrlChange: (url: string) => void;
   targetPicker: WindowTargetPickerProps;
   voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
@@ -30,6 +31,7 @@ export function GoalComposer({
   browserUrl,
   commonSiteChoices = [],
   onTargetModeChange,
+  onGoalChange = () => undefined,
   onBrowserUrlChange,
   targetPicker,
   voiceCaptureAdapterFactory,
@@ -42,6 +44,10 @@ export function GoalComposer({
   const [switchWindows, setSwitchWindows] = useState(false);
   const formDisabled = disabled || busy || voiceActive;
   const parsedBrowserUrl = browserUrl.trim();
+  const selectedWindow = targetPicker.candidates.find((candidate) => candidate.token === targetPicker.selectedToken);
+  const explicitHint = explicitApplicationHint(goal);
+  const selectedWindowConflictsWithGoal = targetMode === "window" && selectedWindow !== undefined && explicitHint !== undefined &&
+    !appNameMatchesHint(selectedWindow.appName, explicitHint);
   const browserUrlValid = !parsedBrowserUrl || isValidBrowserUrl(parsedBrowserUrl);
   const browserUrlInvalid = Boolean(parsedBrowserUrl) && !isValidBrowserUrl(parsedBrowserUrl);
   const validCommonSiteChoices = commonSiteChoices.flatMap((choice) => {
@@ -56,7 +62,12 @@ export function GoalComposer({
     if (targetMode === "window") {
       const targetToken = targetPicker.selectedToken;
       if (!targetToken) return;
-      await onSubmit(value, { mode: "window", targetToken, ...(switchWindows ? { switchWindows: true } : {}) });
+      await onSubmit(value, {
+        mode: "window",
+        targetToken,
+        ...(targetPicker.selectedPreviewToken === undefined ? {} : { previewToken: targetPicker.selectedPreviewToken }),
+        ...(switchWindows ? { switchWindows: true } : {}),
+      });
       return;
     }
     if (targetMode === "browser") {
@@ -93,13 +104,17 @@ export function GoalComposer({
         name="goal"
         rows={4}
         value={goal}
-        onChange={(event) => setGoal(event.currentTarget.value)}
+        onChange={(event) => { const value = event.currentTarget.value; setGoal(value); onGoalChange(value); }}
         placeholder="写下任务内容…"
         aria-describedby={error ? "goal-help goal-error" : "goal-help"}
         disabled={formDisabled}
         required
       />
-      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} onTranscript={(text) => setGoal((current) => appendVoiceInputText(current, text))} createCaptureAdapter={voiceCaptureAdapterFactory} />
+      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} onTranscript={(text) => {
+        const next = appendVoiceInputText(goal, text);
+        setGoal(next);
+        onGoalChange(next);
+      }} createCaptureAdapter={voiceCaptureAdapterFactory} />
       {error && <p id="goal-error" className="inline-error" role="alert">{error}</p>}
       {setupRequired && <a className="setup-required-link" href="/preferences">打开浏览器与登录状态设置</a>}
 
@@ -144,7 +159,14 @@ export function GoalComposer({
         </fieldset>
       </details>
 
-      {targetMode === "window" && <WindowTargetPicker {...targetPicker} disabled={formDisabled || targetPicker.disabled} />}
+      {targetMode === "window" && <>
+        <WindowTargetPicker {...targetPicker} disabled={formDisabled || targetPicker.disabled} />
+        {selectedWindowConflictsWithGoal && (
+          <p className="field-hint" role="note">
+            任务开头提到了 {explicitHint}，但当前手选窗口是 {selectedWindow.appName || "未命名应用"}。请核对这个起始窗口是否符合任务，再开始。
+          </p>
+        )}
+      </>}
 
       {targetMode === "browser" && (
         <div className="browser-target-field">

@@ -112,9 +112,12 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
     let host: ReturnType<typeof createHostServer> | undefined;
     let connector: HostRelayConnector | undefined;
     let relayCookie: string | undefined;
-    const bridgeRequests: RelayBridgeRequest[] = [];
-    const hostStartPreferences: Array<RunAssistantPreferencesSnapshot | undefined> = [];
-    const originalFetch = globalThis.fetch;
+  const bridgeRequests: RelayBridgeRequest[] = [];
+  const hostStartPreferences: Array<RunAssistantPreferencesSnapshot | undefined> = [];
+  const originalFetch = globalThis.fetch;
+  const windowPreviewCaptures: Array<{ pid: number; windowId: number }> = [];
+  let windowPreviewRequestCache: RequestCache | undefined;
+  let windowPreviewResponseCacheControl: string | null = null;
 
     try {
       await relay.listen();
@@ -122,7 +125,26 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         config: sessionConfig(outputDir),
         owner: new InProcessEnvironmentOwner(),
         windowDiscovery: {
-          listWindows: async () => [{ pid: 451, windowId: 894, appName: "Fixture app", title: "Fixture window" }],
+          listWindows: async () => [
+            { pid: 451, windowId: 894, appName: "Fixture app", title: "Fixture window" },
+            { pid: 452, windowId: 895, appName: "Fixture app", title: "Fixture window" },
+          ],
+          captureWindowPreview: async (target) => {
+            windowPreviewCaptures.push({ pid: target.pid, windowId: target.windowId });
+            const candidate = target.pid === 451 && target.windowId === 894
+              ? { pid: 451, windowId: 894, appName: "Fixture app", title: "Fixture window" }
+              : target.pid === 452 && target.windowId === 895
+                ? { pid: 452, windowId: 895, appName: "Fixture app", title: "Fixture window" }
+                : undefined;
+            if (candidate === undefined) throw new Error("preview was not bound to a listed candidate");
+            return {
+              target: candidate,
+              capturedAt: new Date().toISOString(),
+              viewport: { width: 1, height: 1 },
+              mediaType: "image/png" as const,
+              data: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
+            };
+          },
         },
         dependencies: {
           createProvider: () => fixtureProvider(),
@@ -190,6 +212,10 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         headers.set("Origin", isLocal ? localOrigin : relayOrigin);
         if (!isLocal && relayCookie !== undefined) headers.set("Cookie", relayCookie);
         const response = await originalFetch(url, { ...init, headers });
+        if (url.pathname === "/api/windows/preview") {
+          windowPreviewRequestCache = init?.cache;
+          windowPreviewResponseCacheControl = response.headers.get("cache-control");
+        }
         if (!isLocal && method === "POST" && /\/api\/pair\/requests\/[^/]+\/session$/u.test(url.pathname) && response.ok) {
           relayCookie = response.headers.get("set-cookie")?.split(";")[0];
         }
@@ -217,8 +243,18 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       expect((await webApi.getPhoneSession()).csrfToken).toBe(phoneSession.csrfToken);
 
       const windowChoices = await webApi.listWindowTargets();
-      expect(windowChoices.candidates).toHaveLength(1);
+      expect(windowChoices.candidates).toHaveLength(2);
+      expect(windowChoices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
       expect(JSON.stringify(windowChoices)).not.toMatch(/pid|windowId/iu);
+      const selectedWindow = windowChoices.candidates[0]!;
+      const preview = await webApi.previewWindowTarget(selectedWindow.token);
+      expect(preview).toMatchObject({ appName: "Fixture app", title: "Fixture window", mediaType: "image/png", viewport: { width: 1, height: 1 } });
+      expect(JSON.stringify(preview)).not.toMatch(/pid|windowId|socketPath/iu);
+      expect(windowPreviewCaptures).toEqual([{ pid: 451, windowId: 894 }]);
+      expect(windowPreviewRequestCache).toBe("no-store");
+      expect(windowPreviewResponseCacheControl).toContain("no-store");
+      expect(windowPreviewCaptures).toHaveLength(1);
+      expect(session.activeRun).toBeUndefined();
       const assistantPreferences: RunAssistantPreferencesSnapshot = {
         version: 1,
         responseDetail: "detailed",
@@ -230,7 +266,8 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       try {
         accepted = await webApi.createRun("Complete a fixture task", "web-start-roundtrip", {
           mode: "window",
-          targetToken: windowChoices.candidates[0]!.token,
+          targetToken: selectedWindow.token,
+          previewToken: preview.previewToken,
         }, assistantPreferences, true);
       } catch (error) {
         const apiError = error as { status?: number; code?: string };
@@ -243,7 +280,7 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       expect(bridgedStart?.body).toEqual({
         commandId: "web-start-roundtrip",
         goal: "Complete a fixture task",
-        target: { mode: "window", targetToken: windowChoices.candidates[0]!.token },
+        target: { mode: "window", targetToken: selectedWindow.token, previewToken: preview.previewToken },
         assistantPreferences,
         runNoticeContentEnabled: true,
       });

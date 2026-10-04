@@ -11,7 +11,19 @@ export interface RemoteWindowCandidate {
   readonly token: string;
   readonly appName?: string;
   readonly title?: string;
+  readonly relationship?: RemoteWindowCandidateRelationship;
+  /** True means selection is blocked until this exact candidate has been previewed. */
+  readonly previewRequired?: boolean;
 }
+
+export type RemoteWindowCandidateRelationship =
+  | {
+      readonly kind: "owned_child";
+      readonly rootRole?: "menu" | "popup" | "dialog";
+      readonly parentAppName?: string;
+      readonly parentTitle?: string;
+    }
+  | { readonly kind: "scoped_peer" };
 
 /** Safe public target label and the evidence status used by the Run UI. */
 export interface RemoteWindowTargetLabel {
@@ -23,6 +35,20 @@ export interface RemoteWindowTargetLabel {
 export interface RemoteWindowTargetSet {
   readonly candidates: readonly RemoteWindowCandidate[];
   readonly expiresAt: string;
+  /** Duplicate app/title identities withheld because the phone cannot distinguish them safely. */
+  readonly omittedAmbiguousCount?: number;
+}
+
+export interface RemoteWindowCandidatePreview {
+  readonly previewToken: string;
+  readonly appName?: string;
+  readonly title?: string;
+  readonly relationship?: RemoteWindowCandidateRelationship;
+  readonly capturedAt: string;
+  readonly expiresAt: string;
+  readonly viewport: { readonly width: number; readonly height: number };
+  readonly mediaType: "image/png";
+  readonly dataBase64: string;
 }
 
 export type RemoteBrowserSessionMode = "temporary" | "saved";
@@ -30,7 +56,7 @@ export type RemoteBrowserSessionMode = "temporary" | "saved";
 export type RemoteRunTarget =
   | { readonly mode: "auto"; readonly switchWindows?: boolean }
   | { readonly mode: "desktop"; readonly switchWindows?: boolean }
-  | { readonly mode: "window"; readonly targetToken: string; readonly switchWindows?: boolean }
+  | { readonly mode: "window"; readonly targetToken: string; readonly previewToken?: string; readonly switchWindows?: boolean }
   | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string; readonly switchWindows?: boolean };
 /** A bare token remains accepted for existing clients. */
 export type RemoteRunTargetInput = string | RemoteRunTarget;
@@ -79,6 +105,7 @@ export type RemotePendingRequest =
       readonly kind: "window_handoff";
       readonly reasonCode: "foreground_mismatch" | "new_window_detected";
       readonly candidates: readonly RemoteWindowCandidate[];
+      readonly omittedCandidateCount?: number;
     };
 
 export interface RemoteRunCapabilities {
@@ -120,7 +147,7 @@ export type RemoteCommand =
   | { readonly type: "correct"; readonly commandId: string; readonly expectedSequence: number; readonly requestId?: string; readonly text: string }
   | { readonly type: "respond"; readonly commandId: string; readonly expectedSequence: number; readonly requestId: string; readonly text: string }
   | { readonly type: "approve" | "reject"; readonly commandId: string; readonly expectedSequence: number; readonly requestId: string }
-  | { readonly type: "window.confirm"; readonly commandId: string; readonly expectedSequence: number; readonly requestId: string; readonly candidateToken: string }
+  | { readonly type: "window.confirm"; readonly commandId: string; readonly expectedSequence: number; readonly requestId: string; readonly candidateToken: string; readonly previewToken?: string }
   | { readonly type: "window.ignore"; readonly commandId: string; readonly expectedSequence: number; readonly requestId: string };
 
 export interface RemoteRunEvent {
@@ -153,6 +180,8 @@ export interface RemoteRunApi {
   listRuns(deviceId: string): Promise<readonly RemoteRunSnapshot[]> | readonly RemoteRunSnapshot[];
   getRun(deviceId: string, runId: string): Promise<RemoteRunSnapshot | undefined> | RemoteRunSnapshot | undefined;
   listWindowTargets(deviceId: string): Promise<RemoteWindowTargetSet>;
+  previewWindowTarget?(deviceId: string, candidateToken: string, signal?: AbortSignal): Promise<RemoteWindowCandidatePreview>;
+  previewWindowHandoffCandidate?(deviceId: string, runId: string, requestId: string, candidateToken: string, signal?: AbortSignal): Promise<RemoteWindowCandidatePreview>;
   startRun(
     deviceId: string,
     commandId: string,

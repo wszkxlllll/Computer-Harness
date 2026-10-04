@@ -1,6 +1,6 @@
 import { emitKeypressEvents } from "node:readline";
 import type { JsonValue, RuntimeEvent, RunId, RunOutcome } from "@computer-harness/protocol";
-import { writeRunReport, type ApplicationSession, type ApplicationSessionRunFeatureOverrides, type ApplicationSessionWindowTarget, type EventFeedNotification, type RunHandle, type WindowTargetInfo } from "@computer-harness/app-runtime";
+import { filterIndistinguishableWindowTargets, filterInitialTargetWindowCandidates, targetsForExplicitApplicationIntent, writeRunReport, type ApplicationSession, type ApplicationSessionRunFeatureOverrides, type ApplicationSessionWindowTarget, type EventFeedNotification, type RunHandle, type WindowTargetInfo } from "@computer-harness/app-runtime";
 import type { RunController } from "@computer-harness/runtime";
 import type { RunSnapshot } from "@computer-harness/trajectory";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
@@ -8,7 +8,7 @@ import type { RiskGuardMode, RiskProfile } from "./config.js";
 import { sanitizeTerminalText } from "./terminal-output.js";
 import { createTuiPainter } from "./tui-painter.js";
 import { limitTuiInput, paginateTuiText, removeLastTuiGrapheme, tailTuiInput, wrapTuiText } from "./tui-text.js";
-import { matchGoalToWindow } from "./window-target-matcher.js";
+import { hasExplicitApplicationIntent, matchGoalToWindow } from "./window-target-matcher.js";
 import { resolveTuiGrounding, type TuiGroundingChoice } from "./window-grounding-policy.js";
 import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 
@@ -486,7 +486,7 @@ export async function runApplicationTui(
     activeMetadata = {
       ...activeMetadata,
       cuaWindowTarget: selectedWindowTarget,
-      cuaWindowLabel: windowDisplayLabel(candidate),
+      cuaWindowLabel: windowDisplayLabel(candidate, activeMetadata),
       cuaWindowSelectionSource: "host",
     };
     mode = "run";
@@ -540,32 +540,39 @@ export async function runApplicationTui(
     try {
       const candidates = await handle.controller.listWindowHandoffCandidates(abort.signal);
       if (abort.signal.aborted || currentHandle !== handle) return;
-      windowTargets = candidates.filter((candidate) => candidate.pid !== activeMetadata.cuaWindowTarget?.pid || candidate.windowId !== activeMetadata.cuaWindowTarget?.windowId);
-      windowMatchReason = windowTargets.length === 0 ? "No other window is visible. R refreshes; A aborts the Run." : "Select a new window. Enter confirms; Esc keeps the Run waiting.";
+      const eligibleCandidates = candidates.filter((candidate) => candidate.pid !== activeMetadata.cuaWindowTarget?.pid || candidate.windowId !== activeMetadata.cuaWindowTarget?.windowId);
+      windowTargets = [...filterIndistinguishableWindowTargets(eligibleCandidates, true)];
+      const hiddenHandoffDuplicates = eligibleCandidates.length - windowTargets.length;
+      windowMatchReason = windowTargets.length === 0
+        ? "No distinguishable other window is visible. R refreshes; A aborts the Run."
+        : `${hiddenHandoffDuplicates > 0 ? `${hiddenHandoffDuplicates} indistinguishable candidates withheld. ` : ""}Select a new window. Enter confirms; Esc keeps the Run waiting.`;
       const surfacedCandidates = await handle.controller.listNewWindowHandoffCandidates(abort.signal);
       if (abort.signal.aborted || currentHandle !== handle) return;
       const surfacedWindowTargets = surfacedCandidates.filter((candidate) =>
         windowTargets.some((visible) => visible.pid === candidate.pid && visible.windowId === candidate.windowId &&
           visible.appName === candidate.appName && visible.title === candidate.title));
-      if (options.windowSelector !== undefined && surfacedWindowTargets.length > 0) {
+      const selectorCandidates = filterIndistinguishableWindowTargets(surfacedWindowTargets);
+      if (options.windowSelector !== undefined && selectorCandidates.length > 0) {
         windowMatchReason = "Jev is comparing the paused task with windows surfaced since the last observation.";
         render();
         const decision = await options.windowSelector.select(
           handoffReason === "new_window_detected"
             ? `${currentGoal}\nA visible window appeared after the completed action. Suggest which new candidate fits this task; the host will still require manual confirmation.`
             : `${currentGoal}\nThe previous bound window is no longer the foreground target. Choose a newly opened dialog or window needed to continue this task.`,
-          surfacedWindowTargets,
+          selectorCandidates,
           abort.signal,
           "handoff",
         );
         if (abort.signal.aborted || currentHandle !== handle) return;
         if (decision.kind === "matched") {
-          const surfacedIndex = surfacedWindowTargets.findIndex((candidate) => candidate.pid === decision.target.pid && candidate.windowId === decision.target.windowId && candidate.appName === decision.target.appName && candidate.title === decision.target.title);
+          const submittedCandidate = selectorCandidates.includes(decision.target);
+          const surfacedIndex = submittedCandidate
+            ? selectorCandidates.findIndex((candidate) => candidate.pid === decision.target.pid && candidate.windowId === decision.target.windowId && candidate.appName === decision.target.appName)
+            : -1;
           const index = surfacedIndex < 0 ? -1 : windowTargets.findIndex((candidate) =>
-            candidate.pid === surfacedWindowTargets[surfacedIndex]!.pid &&
-            candidate.windowId === surfacedWindowTargets[surfacedIndex]!.windowId &&
-            candidate.appName === surfacedWindowTargets[surfacedIndex]!.appName &&
-            candidate.title === surfacedWindowTargets[surfacedIndex]!.title);
+            candidate.pid === selectorCandidates[surfacedIndex]!.pid &&
+            candidate.windowId === selectorCandidates[surfacedIndex]!.windowId &&
+            candidate.appName === selectorCandidates[surfacedIndex]!.appName);
           if (surfacedIndex < 0) {
             windowMatchReason = "Jev suggestion was not in the eligible newly surfaced candidate set; choose manually.";
           } else if (index >= 0) {
@@ -577,7 +584,7 @@ export async function runApplicationTui(
               windowMatchReason = "Automatic handoff is limited to newly surfaced windows in the bound process. Choose manually or abort.";
             } else {
               windowLoading = true;
-              windowMatchReason = `Jev selected newly surfaced ${windowDisplayLabel(candidate)} in the bound process; verifying this exact HWND.`;
+              windowMatchReason = `Jev selected newly surfaced ${windowDisplayLabel(candidate, activeMetadata)} in the bound process; verifying this exact HWND.`;
               render();
               try {
                 await applyWindowHandoff(handle, candidate);
@@ -640,71 +647,91 @@ export async function runApplicationTui(
 
     void session.listWindowTargets(abort.signal).then(async (targets) => {
       if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
-      let pickerTargets = targets;
+      let pickerTargets = filterIndistinguishableWindowTargets(targets);
+      const initialTargetCandidates = filterInitialTargetWindowCandidates(targets);
       let jevReason = "";
+      const localMatch = matchGoalToWindow(goal, initialTargetCandidates);
+      if (localMatch.kind === "matched") {
+        const selected = localMatch.match.target;
+        goalWindowDiscoveryAbort = undefined;
+        goalSubmissionPending = false;
+        managedBrowserSelected = false;
+        selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+        selectedWindowDeliveryMode = "foreground";
+        activeMetadata = {
+          ...activeMetadata,
+          cuaWindowTarget: selectedWindowTarget,
+          cuaWindowDeliveryMode: "foreground",
+          cuaWindowLabel: windowDisplayLabel(selected),
+          cuaWindowSelectionSource: "local_match",
+          managedBrowserSelected: false,
+        };
+        const label = windowDisplayLabel(selected);
+        startRunForGoal(
+          goal,
+          `Local goal/name matching selected ${label} (no model selected the window). Starting Run…`,
+          "Run started after a local goal/name match; the model did not select the window.",
+        );
+        return;
+      }
+
       if (options.windowSelector !== undefined) {
-        notice = "Asking Jev to choose from visible windows; their application names and titles are sent to TypeSafe. No GUI action yet.";
-        render();
-        const decision = await options.windowSelector.select(goal, targets, abort.signal, "initial");
-        if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
-        // The external choice can take several seconds. Refresh the exact
-        // PID/HWND candidate set before either auto-selection or manual fallback.
-        const currentTargets = await session.listWindowTargets(abort.signal);
-        if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
-        pickerTargets = currentTargets;
-        if (decision.kind === "matched") {
-          const selected = currentTargets.find((target) => target.pid === decision.target.pid && target.windowId === decision.target.windowId &&
-            target.appName === decision.target.appName && target.title === decision.target.title);
-          if (selected === undefined) {
-            jevReason = "Jev choice changed before Run start; pick a window manually.";
-          } else {
-            goalWindowDiscoveryAbort = undefined;
-            goalSubmissionPending = false;
-            managedBrowserSelected = false;
-            selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
-            selectedWindowDeliveryMode = "foreground";
-            activeMetadata = {
-              ...activeMetadata,
-              cuaWindowTarget: selectedWindowTarget,
-              cuaWindowDeliveryMode: "foreground",
-              cuaWindowLabel: windowDisplayLabel(selected),
-              cuaWindowSelectionSource: "jev",
-              managedBrowserSelected: false,
-            };
-            startRunForGoal(goal, `Jev selected ${windowDisplayLabel(selected)}; exact PID/HWND rechecked. Starting Run…`, "Run started after Jev window selection.");
-            return;
-          }
+        const selectorCandidates = filterIndistinguishableWindowTargets(targetsForExplicitApplicationIntent(goal, initialTargetCandidates));
+        if (selectorCandidates.length === 0) {
+          jevReason = hasExplicitApplicationIntent(goal)
+            ? "No open window matches the explicitly named application; choose manually. No other app will be substituted."
+            : "No distinguishable open-window candidate is available; choose manually.";
         } else {
-          jevReason = `Jev abstained (${decision.reason}); pick a window manually.`;
+          notice = "Asking Jev to choose from distinct open windows; their application names and titles are sent to TypeSafe. No GUI action yet.";
+          render();
+          const decision = await options.windowSelector.select(goal, selectorCandidates, abort.signal, "initial");
+          if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+          // The external choice can take several seconds. Refresh the exact
+          // PID/HWND candidate set before either auto-selection or manual fallback.
+          const currentTargets = await session.listWindowTargets(abort.signal);
+          if (abort.signal.aborted || exiting || generation !== goalSubmissionGeneration) return;
+          pickerTargets = filterIndistinguishableWindowTargets(currentTargets);
+          if (decision.kind === "matched") {
+            const wasSubmitted = selectorCandidates.includes(decision.target);
+            const selected = wasSubmitted
+              ? pickerTargets.find((target) => sameTargetIdentity(target, decision.target))
+              : undefined;
+            const allowedByAppHint = !hasExplicitApplicationIntent(goal) ||
+              targetsForExplicitApplicationIntent(goal, currentTargets).some((candidate) => sameTargetIdentity(candidate, decision.target));
+            if (selected === undefined) {
+              jevReason = "Jev choice changed or has an indistinguishable caption; pick a window manually.";
+            } else if (!allowedByAppHint) {
+              jevReason = "Jev choice conflicts with the explicitly named application; pick a window manually.";
+            } else {
+              goalWindowDiscoveryAbort = undefined;
+              goalSubmissionPending = false;
+              managedBrowserSelected = false;
+              selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
+              selectedWindowDeliveryMode = "foreground";
+              activeMetadata = {
+                ...activeMetadata,
+                cuaWindowTarget: selectedWindowTarget,
+                cuaWindowDeliveryMode: "foreground",
+                cuaWindowLabel: windowDisplayLabel(selected),
+                cuaWindowSelectionSource: "jev",
+                managedBrowserSelected: false,
+              };
+              startRunForGoal(goal, `Jev selected ${windowDisplayLabel(selected)}; exact PID/HWND rechecked. Starting Run…`, "Run started after Jev window selection.");
+              return;
+            }
+          } else {
+            jevReason = `Jev abstained (${decision.reason}); pick a window manually.`;
+          }
         }
       } else {
-        const result = matchGoalToWindow(goal, targets);
-        if (result.kind === "matched") {
-          const selected = result.match.target;
-          goalWindowDiscoveryAbort = undefined;
-          goalSubmissionPending = false;
-          managedBrowserSelected = false;
-          selectedWindowTarget = { pid: selected.pid, windowId: selected.windowId };
-          selectedWindowDeliveryMode = "foreground";
-          activeMetadata = {
-            ...activeMetadata,
-            cuaWindowTarget: selectedWindowTarget,
-            cuaWindowDeliveryMode: "foreground",
-            cuaWindowLabel: windowDisplayLabel(selected),
-            cuaWindowSelectionSource: "local_match",
-            managedBrowserSelected: false,
-          };
-          const label = windowDisplayLabel(selected);
-          startRunForGoal(
-            goal,
-            `Local goal/name matching selected ${label} (no model selected the window). Starting Run…`,
-            "Run started after a local goal/name match; the model did not select the window.",
-          );
-          return;
-        }
-        jevReason = result.kind === "ambiguous"
+        jevReason = localMatch.kind === "ambiguous"
           ? "Ambiguous local match; pick a window. Goal kept; no model chose it."
           : "No confident local match; pick a window. Goal kept; no model chose it.";
+      }
+
+      const hiddenDuplicateCount = targets.length - pickerTargets.length;
+      if (hiddenDuplicateCount > 0) {
+        jevReason = `${hiddenDuplicateCount} indistinguishable window label${hiddenDuplicateCount === 1 ? " was" : "s were"} withheld. ${jevReason}`;
       }
 
       goalWindowDiscoveryAbort = undefined;
@@ -2186,7 +2213,7 @@ function buildTuiWindowsFrame(
     ...(metadata.features?.grounding === "auto"
       ? [`Harness-managed browser (${isHttpUrl(metadata.managedBrowserUrl) ? new URL(metadata.managedBrowserUrl).host : "enter URL"}; DOM + UIA)`]
       : []),
-    ...targets.map(windowDisplayLabel),
+    ...targets.map((target) => windowDisplayLabel(target)),
   ];
   const safeCursor = Math.min(Math.max(cursor, 0), optionLabels.length - 1);
   const headerLines = [
@@ -2247,15 +2274,33 @@ function buildTuiHandoffFrame(
     : ["Enter confirm  R refresh  Esc wait  A abort", "Jev only suggests; your confirmation changes the target."];
   const capacity = Math.max(1, height - header.length - footer.length - 2);
   const first = Math.max(0, Math.min(cursor - Math.floor(capacity / 2), targets.length - capacity));
-  const visible = targets.slice(first, first + capacity).map((target, index) => `${first + index === cursor ? "❯" : " "} ${windowDisplayLabel(target)}`);
+  const visible = targets.slice(first, first + capacity).map((target, index) => `${first + index === cursor ? "❯" : " "} ${windowDisplayLabel(target, metadata)}`);
   const lines = [...header, loading ? "Searching visible windows…" : `Candidate ${targets.length === 0 ? 0 : cursor + 1}/${targets.length}`, ...visible, ...footer];
   return lines.slice(0, height - 1).map((line) => clipHomeLine(line, width).text).join("\n");
 }
 
-function windowDisplayLabel(target: WindowTargetInfo): string {
+function windowDisplayLabel(target: WindowTargetInfo, parent?: TuiMetadata): string {
   const app = target.appName?.trim() || "Unknown application";
   const title = target.title?.trim() || "Untitled window";
-  return `${app} — ${title} (pid=${target.pid}, window=${target.windowId})`;
+  const relationship = target.relationship;
+  let relationLabel = "";
+  if (relationship?.kind === "owned_child") {
+    const role = relationship.rootRole === "dialog" ? "dialog" : relationship.rootRole === "popup" ? "popup" : relationship.rootRole === "menu" ? "menu" : "owned window";
+    const sameCurrentParent = parent?.cuaWindowTarget?.pid === relationship.owner.pid && parent.cuaWindowTarget.windowId === relationship.owner.windowId;
+    const parentLabel = sameCurrentParent ? parent.cuaWindowLabel : undefined;
+    relationLabel = parentLabel === undefined ? ` — verified ${role}` : ` — verified ${role} for ${parentLabel}`;
+  } else if (relationship?.kind === "scoped_peer") {
+    relationLabel = " — new window in the approved app scope";
+  }
+  return `${app} — ${title}${relationLabel} (pid=${target.pid}, window=${target.windowId})`;
+}
+
+function sameTargetIdentity(left: WindowTargetInfo, right: WindowTargetInfo): boolean {
+  const normalize = (value: string | undefined) => value?.normalize("NFKC").toLocaleLowerCase();
+  const leftApp = normalize(left.appName);
+  const rightApp = normalize(right.appName);
+  return left.pid === right.pid && left.windowId === right.windowId &&
+    (leftApp === undefined || rightApp === undefined || leftApp === rightApp);
 }
 
 function uiFeatureHint(features: TuiFeatureSelection, metadata?: TuiMetadata): string {

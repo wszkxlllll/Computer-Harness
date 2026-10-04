@@ -896,7 +896,34 @@ describe("TUI renderer", () => {
     await tui;
   });
 
-  it("falls back to the live manual picker when Jev is uncertain, even if local matching is possible", async () => {
+  it("uses a confident local app match before Jev when the goal names an app", async () => {
+    const wps = { pid: 1234, windowId: 5678, appName: "WPS Office", title: "CW02.docx" };
+    const notepad = { pid: 4321, windowId: 8765, appName: "Notepad", title: "周可轩" };
+    const listWindows = vi.fn(async () => [wps, notepad]);
+    const select = vi.fn(async () => ({ kind: "matched" as const, target: notepad }));
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-jev-explicit-app-conflict/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-jev-explicit-app-conflict", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true,
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    fixture.input.emit("keypress", "在wps写入周可轩我爱你，字体大小四号，并保存", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+    expect(select).not.toHaveBeenCalled();
+    expect(listWindows).toHaveBeenCalledTimes(1);
+    const config = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(config.computer).toMatchObject({ windowTarget: { pid: wps.pid, windowId: wps.windowId } });
+    expect(config.computer).not.toMatchObject({ windowTarget: { pid: notepad.pid } });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("uses a confident local match without asking Jev", async () => {
     const target = { pid: 1234, windowId: 5678, appName: "Google Chrome", title: "New Tab" };
     const listWindows = vi.fn(async () => [target]);
     const select = vi.fn(async () => ({ kind: "abstain" as const, reason: "uncertain" as const }));
@@ -909,11 +936,97 @@ describe("TUI renderer", () => {
     }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
     fixture.input.emit("keypress", "Open Google Chrome and inspect the current page", {});
     fixture.input.emit("keypress", "", { name: "return" });
-    await waitForTui(() => fixture.outputText.join("").includes("WINDOW TARGET") && fixture.outputText.join("").includes("window=5678"));
-    expect(select).toHaveBeenCalledTimes(1);
-    expect(listWindows).toHaveBeenCalledTimes(2);
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+    expect(select).not.toHaveBeenCalled();
+    expect(listWindows).toHaveBeenCalledTimes(1);
+    const config = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(config.computer).toMatchObject({ windowTarget: { pid: target.pid, windowId: target.windowId } });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("withholds indistinguishable duplicate captions from Jev and the manual goal picker", async () => {
+    const duplicateA = { pid: 801, windowId: 8101, appName: "WPS Office", title: "Report.docx" };
+    const duplicateB = { pid: 802, windowId: 8102, appName: "WPS Office", title: "Report.docx" };
+    const listWindows = vi.fn(async () => [duplicateA, duplicateB]);
+    const select = vi.fn(async () => ({ kind: "matched" as const, target: duplicateA }));
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-jev-duplicate-labels/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-jev-duplicate-labels", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true,
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    fixture.input.emit("keypress", "Open WPS report", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("indistinguishable window labels were withheld") && fixture.outputText.join("").includes("WINDOW TARGET"));
+    expect(select).not.toHaveBeenCalled();
     expect(fixture.createRun).not.toHaveBeenCalled();
-    expect(fixture.outputText.join("")).toContain("Jev abstained (uncertain)");
+    expect(fixture.outputText.join("")).toContain("2 indistinguishable window labels were withheld");
+    expect(fixture.outputText.join("")).not.toContain("Report.docx (pid=801");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("keeps a proven owned popup for Computer use but offers its exact root to initial Jev selection", async () => {
+    const rootWindow = { pid: 701, windowId: 7101, appName: "Notepad.exe", title: "*CH-NOTEPAD - Notepad" };
+    const ownedPopup = {
+      pid: 701,
+      windowId: 7102,
+      appName: "Notepad.exe",
+      title: "Host popup",
+      relationship: { kind: "owned_child" as const, owner: { pid: rootWindow.pid, windowId: rootWindow.windowId } },
+    };
+    const listWindows = vi.fn(async () => [ownedPopup, rootWindow]);
+    const select = vi.fn(async (_goal: string, targets: readonly typeof rootWindow[]) => ({ kind: "matched" as const, target: targets[0]! }));
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-owned-initial-root/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-owned-initial-root", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true,
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    fixture.input.emit("keypress", "在记事本里写入一条记录", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.createRun.mock.calls.length === 1 && fixture.session.status === "running");
+    expect(select).toHaveBeenCalledWith("在记事本里写入一条记录", [rootWindow], expect.any(AbortSignal), "initial");
+    const config = ((fixture.createRun.mock.calls as unknown[][])[0]?.[0]) as ResolvedRunConfig;
+    expect(config.computer).toMatchObject({ windowTarget: { pid: rootWindow.pid, windowId: rootWindow.windowId } });
+    fixture.input.emit("keypress", "", { name: "a" });
+    await waitForTui(() => fixture.session.status === "idle");
+    fixture.input.emit("keypress", "", { name: "escape" });
+    fixture.input.emit("keypress", "", { name: "q" });
+    await tui;
+  });
+
+  it("retains an attested owned popup in the manual fallback inventory", async () => {
+    const rootWindow = { pid: 711, windowId: 7201, appName: "Notepad.exe", title: "Document - Notepad" };
+    const ownedPopup = {
+      pid: 711,
+      windowId: 7202,
+      appName: "Notepad.exe",
+      title: "Host popup",
+      relationship: { kind: "owned_child" as const, owner: { pid: rootWindow.pid, windowId: rootWindow.windowId } },
+    };
+    const listWindows = vi.fn(async () => [ownedPopup, rootWindow]);
+    const select = vi.fn(async () => ({ kind: "abstain" as const, reason: "uncertain" as const }));
+    const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows }, {
+      kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-owned-manual-fallback/screenshots",
+    });
+    const tui = runApplicationTui(fixture.session, {
+      provider: "glm", computer: "cua", output: "runs/tui-owned-manual-fallback", profile: "live-interactive",
+      riskGuard: "layered", windowSelectionAvailable: true,
+    }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    fixture.input.emit("keypress", "检查记事本", {});
+    fixture.input.emit("keypress", "", { name: "return" });
+    await waitForTui(() => fixture.outputText.join("").includes("WINDOW TARGET") && fixture.outputText.join("").includes("Host popup"));
+    expect(select).toHaveBeenCalledWith("检查记事本", [rootWindow], expect.any(AbortSignal), "initial");
+    expect(fixture.createRun).not.toHaveBeenCalled();
+    expect(fixture.outputText.join("")).toContain("Document - Notepad");
     fixture.input.emit("keypress", "", { name: "escape" });
     fixture.input.emit("keypress", "", { name: "q" });
     await tui;
@@ -1235,7 +1348,7 @@ describe("TUI renderer", () => {
     const target = { pid: 1234, windowId: 5678, appName: "Notepad.exe", title: "Notes - Notepad" };
     const listWindows = vi.fn<WindowTargetDiscovery["listWindows"]>()
       .mockResolvedValueOnce([target])
-      .mockResolvedValueOnce([{ ...target, title: "Different document - Notepad" }]);
+      .mockResolvedValueOnce([{ ...target, appName: "Other application" }]);
     const fixture = makePendingCorrectionFixture(async () => undefined, { listWindows }, {
       kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-jev-stale/screenshots",
     });
@@ -1244,7 +1357,7 @@ describe("TUI renderer", () => {
     }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { async select() { return { kind: "matched", target }; } } });
     fixture.input.emit("keypress", "打开记事本并查看当前内容", {});
     fixture.input.emit("keypress", "", { name: "return" });
-    await waitForTui(() => fixture.outputText.join("").includes("Jev choice changed before Run start"));
+      await waitForTui(() => fixture.outputText.join("").includes("Jev choice changed or has an indistinguishable caption"));
     expect(fixture.createRun).not.toHaveBeenCalled();
     fixture.input.emit("keypress", "", { name: "escape" });
     await waitForTui(() => fixture.outputText.join("").includes("Goal draft: 打开记事本并查看当前内容"));
