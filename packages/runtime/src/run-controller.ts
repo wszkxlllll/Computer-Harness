@@ -78,9 +78,11 @@ import { currentObservationAssessmentBinding, parseObservationAssessment } from 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
 const PROVIDER_RETRY_DELAY_CAP_MS = 5_000;
-const PROVIDER_ATTEMPT_DEADLINE_MS = 240_000;
+// Keep retry admission aligned with the live model turn budget. A late
+// network/5xx failure must not start another full-length request.
+const PROVIDER_ATTEMPT_DEADLINE_MS = 90_000;
 /** Covers the initial request, one retry and their bounded delay for the default HTTP clients. */
-const MAX_PROVIDER_RETRY_WINDOW_MS = 480_000;
+const MAX_PROVIDER_RETRY_WINDOW_MS = 120_000;
 /** Once GUI actions are exhausted, allow only a small number of model decisions for finish/plan closure. */
 const MAX_ACTION_BUDGET_CLOSE_TURNS = 2;
 const DEFAULT_CLEANUP_DEADLINE_MS = 5_000;
@@ -575,6 +577,7 @@ export class RunController {
   private async run(goal: string): Promise<RunOutcome> {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
+    let providerFailureSummary: string | undefined;
     try {
       await this.commitEvent({ type: "run.created", goal });
       this.throwIfAborted();
@@ -585,8 +588,6 @@ export class RunController {
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
       this.activeComputerSession = session;
-      const restrictedToolNames = restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, this.enabledToolNames === undefined ? undefined : [...this.enabledToolNames]);
-      this.enabledToolNames = restrictedToolNames === undefined ? undefined : new Set(restrictedToolNames);
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 
@@ -790,7 +791,8 @@ export class RunController {
                 ...details,
               });
               if (!retry) {
-                outcome = this.isAborted() ? "cancelled" : "failed";
+                outcome = this.snapshot.unresolvedActionId !== undefined ? "outcome_unknown" : this.isAborted() ? "cancelled" : "failed";
+                if (outcome === "failed") providerFailureSummary = this.providerFailureProgressSummary();
                 providerFailed = true;
                 break;
               }
@@ -914,7 +916,7 @@ export class RunController {
       }
 
       if (this.snapshot.status !== "finished") {
-        outcome = await this.commitRunFinished({ outcome });
+        outcome = await this.commitRunFinished({ outcome, ...(outcome === "failed" && providerFailureSummary !== undefined ? { summary: providerFailureSummary } : {}) });
       }
       return outcome;
     } catch (error) {
@@ -1196,6 +1198,14 @@ export class RunController {
           // Apply the same rule to the remaining calls of a paused ToolTurn;
           // already-started actions are never rolled back here.
           this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
+        }
+        if (isExplicitStopInput(command.text)) {
+          // A stop/cancel instruction entered into the human-review field is
+          // a control decision, not a new task correction. Abort immediately
+          // so the provider cannot turn it into another GUI action or a
+          // follow-up planning retry.
+          this.abortController.abort(new Error("cancelled by explicit user stop input"));
+          return { correction: true };
         }
         return { correction: true };
       case "approval_resolution":
@@ -1487,6 +1497,16 @@ export class RunController {
 
   private isToolEnabled(name: string): boolean {
     if ((name === "list_windows" || name === "switch_window") && !this.windowSwitchAvailable()) return false;
+    // Keep the Run's configured upper bound intact across window switches;
+    // only the current session and observed Surface determine availability.
+    const session = this.activeComputerSession;
+    if (session !== undefined && !restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, [name])?.includes(name)) return false;
+    if (name === "click") {
+      const surface = this.latestObservation?.surfaceRef.kind;
+      // A managed browser remains browser_tab while DOM is unavailable.
+      // Missing DOM must never restore coordinate clicking on that target.
+      if (surface === "browser_tab" || surface === "dom" || surface === "unknown") return false;
+    }
     return this.enabledToolNames === undefined || this.enabledToolNames.has(name);
   }
 
@@ -2752,6 +2772,20 @@ export class RunController {
     return { ...observation, grounding };
   }
 
+  private providerFailureProgressSummary(): string {
+    const guiIds = new Set(this.events.filter((event) => event.type === "action.execution.started" && event.action.kind !== "wait")
+      .map((event) => event.type === "action.execution.started" ? event.action.actionId : undefined));
+    const terminals = this.events.filter((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") && guiIds.has(event.receipt.actionId));
+    const count = (status: string) => terminals.filter((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") && event.receipt.status === status).length;
+    const completed = count("completed");
+    const lastTerminal = terminals.at(-1);
+    const observation = [...this.events].reverse().find((event) => event.type === "observation.created");
+    const postActionScreenshot = completed > 0 && lastTerminal !== undefined && observation?.type === "observation.created" && observation.sequence > lastTerminal.sequence
+      ? `最近动作后的截图已保存（assetId=${observation.observation.screenshot.assetId}），可供人工核对；截图内容未被此反馈验证。`
+      : completed > 0 ? "没有最近动作后的截图可供此反馈确认。" : "";
+    return `后续模型响应未完成，任务完成未确认。已保留 ${completed} 个非等待 GUI 动作完成回执，${count("refused")} 个拒绝回执，${count("failed")} 个失败回执；完成回执不等于目标已达成。${postActionScreenshot}未自动重放 GUI 动作。`;
+  }
+
   private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
     let outcome = data.outcome;
     if (this.snapshot.executionSegment?.status === "active") {
@@ -2922,7 +2956,10 @@ export class RunController {
     if (pending === undefined || this.snapshot.status !== "running" || this.monitorExecutionBarrier() !== undefined) return;
     this.monitorPendingHelp = undefined;
     try {
-      await this.commitEvent({ type: "user.input.requested", question: `Monitor requests human review (${pending.reason}); confirm the current state before continuing.` });
+      await this.commitEvent({
+        type: "user.input.requested",
+        question: "页面连续多次操作后没有出现可确认的变化，任务已暂停。请检查电脑当前画面后再补充下一步；不要重复输入网址或重复点击同一入口。若页面仍无变化，请说明“停止任务”。",
+      });
     } catch (error) {
       // A diagnostic request is best effort.  If its own event cannot be
       // committed, leave the already-completed action outcome untouched.
@@ -3566,6 +3603,12 @@ function summarizeGuardAction(action: ActionIntent): import("@computer-harness/p
   return action;
 }
 
+function isExplicitStopInput(text: string): boolean {
+  const normalized = text.normalize("NFKC").trim().replace(/[\s\u3000]+/gu, "");
+  return /^(?:停止|取消)(?:当前)?任务(?:[。.!！?？]|$)/u.test(normalized)
+    || /^(?:stop|cancel|abort)(?:task)?(?:[.!?]|$)/iu.test(normalized);
+}
+
 function isSameControlInputBatch(calls: readonly ToolCall[], entries: readonly PreflightEntry[]): boolean {
   if (entries.length !== calls.length) return false;
   const firstComputer = entries.findIndex((entry) => entry.definition?.category === "computer");
@@ -3667,4 +3710,3 @@ function addProviderRetryFeedback(
   };
   return { ...context, messages: [...context.messages, feedback] };
 }
-

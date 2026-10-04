@@ -16,6 +16,7 @@ import {
 import { HostRelayConnector } from "@computer-harness/relay-connector";
 import type { RunModel } from "@computer-harness/app-runtime";
 import { createHostServer } from "./server.js";
+import { parseGlmOutputBudget } from "./glm-output-budget.js";
 import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
@@ -28,10 +29,17 @@ interface HostArguments {
   output: string;
   port: number;
   origins: string[];
+  maxSteps: number;
+  maxModelRequests: number;
+  glmMaxOutputTokens: number;
 }
 
 const hostDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(hostDirectory, "../../..");
+const DEFAULT_MAX_STEPS = 160;
+const DEFAULT_MAX_MODEL_REQUESTS = 48;
+const MAX_CONFIGURED_STEPS = 500;
+const MAX_CONFIGURED_MODEL_REQUESTS = 256;
 
 async function main(): Promise<void> {
   const args = parseArguments(process.argv.slice(2));
@@ -41,6 +49,7 @@ async function main(): Promise<void> {
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
   const windowSelector = resolveHostWindowSelector(process.env);
+  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} requestTimeoutMs=90000\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -170,7 +179,7 @@ function parseArguments(argv: readonly string[]): HostArguments {
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index]!;
     if (item === "--help" || item === "-h") {
-      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...]\n");
+      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
       process.exit(0);
     }
     if (!item.startsWith("--")) throw new Error("Host arguments must use named options.");
@@ -191,6 +200,8 @@ function parseArguments(argv: readonly string[]): HostArguments {
   const output = one("--output");
   const model = one("--model", "glm-5.3-flash");
   const rawPort = one("--port", "4317");
+  const rawMaxSteps = one("--max-steps", String(DEFAULT_MAX_STEPS));
+  const rawMaxModelRequests = one("--max-model-requests", String(DEFAULT_MAX_MODEL_REQUESTS));
   if (envFile === undefined || socket === undefined || output === undefined) {
     throw new Error("--env-file, --socket, and --output are required.");
   }
@@ -199,7 +210,18 @@ function parseArguments(argv: readonly string[]): HostArguments {
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535.");
   const origins = values.get("--origin") ?? ["http://localhost:" + (port === 0 ? "4317" : String(port))];
   if (origins.length === 0) throw new Error("At least one --origin is required.");
-  return { envFile, socket, model, output, port, origins };
+  const maxSteps = parseBoundedPositiveInteger(rawMaxSteps, "--max-steps", MAX_CONFIGURED_STEPS);
+  const maxModelRequests = parseBoundedPositiveInteger(rawMaxModelRequests, "--max-model-requests", MAX_CONFIGURED_MODEL_REQUESTS);
+  const glmMaxOutputTokens = parseGlmOutputBudget(one("--glm-max-output-tokens"));
+  return { envFile, socket, model, output, port, origins, maxSteps, maxModelRequests, glmMaxOutputTokens };
+}
+
+function parseBoundedPositiveInteger(raw: string | undefined, option: string, maximum: number): number {
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`${option} must be a positive integer no greater than ${maximum}.`);
+  }
+  return value;
 }
 
 function createSessionConfig(
@@ -223,23 +245,30 @@ function createSessionConfig(
       managedBrowserProfileRoot: managedBrowserProfile.profileRoot,
     },
     outputDir,
-    maxSteps: 100,
-    maxModelRequests: 100,
+    maxSteps: args.maxSteps,
+    maxModelRequests: args.maxModelRequests,
     planning: true,
     memory: "facts",
     memoryRetrieval: "lexical",
     batching: "same-control-input-v1",
     contextMode: "recent",
-    contextMaxHistoryEvents: 80,
+    contextMaxHistoryEvents: 32,
+    contextMaxInputTokens: 8_000,
     riskProfile: "live-interactive",
     riskGuard: "layered",
     riskModel: "same",
     riskMaxModelRequests: 1,
     riskTimeoutMs: 15_000,
     cleanupDeadlineMs: 5_000,
+    // Keep no-progress evidence in the model context without automatically
+    // blocking a phone-driven action while the interaction path is under test.
     monitor: "shadow",
     windowHandoff: "confirm-v1",
     glmThinking: readGlmThinking(process.env.GLM_THINKING),
+    glmMaxOutputTokens: args.glmMaxOutputTokens,
+    // GLM can take longer on image-heavy turns; allow one bounded 90-second
+    // response window while keeping the runtime's single retry finite.
+    glmRequestTimeoutMs: 90_000,
     ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
@@ -264,8 +293,8 @@ function readProviderCredentials(): ProviderCredentials {
   };
 }
 
-function readGlmThinking(value: string | undefined): "disabled" | "enabled" | "low" | "high" | "max" {
-  return value === "disabled" || value === "enabled" || value === "low" || value === "high" || value === "max"
+function readGlmThinking(value: string | undefined): "enabled" | "low" | "high" | "max" {
+  return value === "enabled" || value === "low" || value === "high" || value === "max"
     ? value
     : "enabled";
 }

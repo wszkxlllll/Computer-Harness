@@ -12,6 +12,9 @@ import { buildRunReport, createRun, createRunFactory, writeRunReport, type Resol
 
 const fixtureSurfaceRef = { surfaceId: "run-factory-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
+// Check effective report defaults against current source without rebuilding dist.
+vi.mock("@computer-harness/provider-glm", () => import("../../provider-glm/src/index.js"));
+
 function config(outputDir: string): ResolvedRunConfig {
   return {
     runId: "app-runtime-test" as RunId,
@@ -446,7 +449,9 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it("assembles a fake Run without starting it, then closes Controller-owned resources once", async () => {
+  it.each([
+    [undefined, "enabled"], [16384, "low"], [8192, "high"], [8192, "max"], [8192, "disabled"],
+  ] as const)("assembles a fake Run with output budget %s and thinking %s, then closes Controller-owned resources once", async (budget, thinking) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-"));
     const calls = { provider: 0, open: 0, observe: 0, close: 0 };
     const provider: ProviderAdapter = {
@@ -457,7 +462,7 @@ describe("app-runtime RunHandle", () => {
       },
     };
     try {
-      const handle = await createRun(config(outputDir), {
+      const handle = await createRun({ ...config(outputDir), glmThinking: thinking, ...(budget === undefined ? {} : { glmMaxOutputTokens: budget }) }, {
         credentials: { glmApiKey: "must-not-be-serialized" },
         createProvider: (options) => {
           expect(options.credentials.glmApiKey).toBe("must-not-be-serialized");
@@ -482,6 +487,8 @@ describe("app-runtime RunHandle", () => {
         memoryRetrieval: "off",
         monitor: "off",
         runtimeOutcome: "succeeded",
+        glmMaxOutputTokens: budget ?? 8192,
+        glmThinking: thinking === "disabled" ? "enabled" : thinking,
       });
       expect(report.events.map((event) => event.type)).toEqual([
         "run.created",

@@ -89,9 +89,9 @@ export function GoalComposer({
   }
 
   const targetModeLabel: Record<RunTarget["mode"], string> = {
-    auto: "自动选择（推荐）",
+    auto: "自动选择",
     window: "手动选择窗口",
-    browser: "打开网站",
+    browser: "打开网站（推荐）",
     desktop: "整个桌面（高级）",
   };
 
@@ -141,7 +141,7 @@ export function GoalComposer({
           <div className="target-mode-options">
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="auto" checked={targetMode === "auto"} onChange={() => changeMode("auto")} />
-              <span className="target-mode-copy"><strong>自动选择（推荐）</strong><span>电脑会尝试匹配唯一的操作窗口。</span></span>
+              <span className="target-mode-copy"><strong>自动选择</strong><span>电脑会尝试匹配唯一窗口；网页任务建议选择浏览器模式。</span></span>
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="window" checked={targetMode === "window"} onChange={() => changeMode("window")} />
@@ -149,7 +149,7 @@ export function GoalComposer({
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="browser" checked={targetMode === "browser"} onChange={() => changeMode("browser")} />
-              <span className="target-mode-copy"><strong>打开网站</strong><span>使用电脑设置的浏览器状态；起始网址可选。</span></span>
+              <span className="target-mode-copy"><strong>打开网站（推荐）</strong><span>使用受管浏览器和基于页面元素的可验证操作；登录状态使用电脑设置，起始网址可选。</span></span>
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="desktop" checked={targetMode === "desktop"} onChange={() => changeMode("desktop")} />

@@ -62,7 +62,7 @@ function fixture(options: {
     screenshotDir: "fixture-screens",
     grounding: "off",
   });
-  const profileRoot = options.profileRoot ?? "C:\\HarnessOwned\\managed-browser-profiles";
+  const profileRoot = options.profileRoot ?? join(tmpdir(), "HarnessOwned", "managed-browser-profiles");
   const profileLabel = options.profileLabel ?? "fixture";
   const bootstrap: CuaBootstrapSession = {
     driver: {} as CuaBootstrapSession["driver"],
@@ -95,7 +95,7 @@ function fixture(options: {
         return bootstrap;
       },
       createHost: (hostOptions: ManagedBrowserPreparationHostOptions) => {
-        expect(hostOptions.browser).toBe("edge");
+        expect(hostOptions.browser).toBe(process.platform === "win32" ? "edge" : "chromium");
         expect(hostOptions.profileMode).toBe("persistent");
         expect(hostOptions.profileLabel).toBe(profileLabel);
         expect(hostOptions.persistentProfileRoot).toBe(profileRoot);
@@ -109,7 +109,7 @@ function fixture(options: {
       },
       ...(options.hostStartFailures === undefined ? {} : {
         createHost: (hostOptions: ManagedBrowserPreparationHostOptions) => {
-          expect(hostOptions.browser).toBe("edge");
+          expect(hostOptions.browser).toBe(process.platform === "win32" ? "edge" : "chromium");
           expect(hostOptions.profileMode).toBe("persistent");
           expect(hostOptions.profileLabel).toBe(profileLabel);
           expect(hostOptions.persistentProfileRoot).toBe(profileRoot);
@@ -326,7 +326,7 @@ describe("managed browser profile service", () => {
     expect(preparation.operationId).toMatch(/^[0-9a-f-]{36}$/iu);
     expect(rig.store.value?.readyConfirmed).toBe(false);
     expect(JSON.stringify(preparation)).not.toContain("fixture");
-    expect(JSON.stringify(preparation)).not.toContain("C:\\\\HarnessOwned");
+    expect(JSON.stringify(preparation)).not.toContain("HarnessOwned");
 
     const repeated = await rig.service.prepare();
     expect(repeated.operationId).toBe(preparation.operationId);
@@ -601,7 +601,7 @@ describe("managed browser profile service", () => {
     await expect(stale.service.relogin()).rejects.toMatchObject({ code: "PROFILE_STATE_UNAVAILABLE" });
   });
 
-  it("invalidates readiness when the configured profile label or root changes", async () => {
+  it("does not overwrite persisted readiness for a different configured profile identity", async () => {
     const sameRootStore = new MemoryStateStore();
     const first = fixture({ store: sameRootStore });
     const preparation = await first.service.prepare();
@@ -618,7 +618,7 @@ describe("managed browser profile service", () => {
     const originalPreparation = await originalRoot.service.prepare();
     await originalRoot.service.complete(originalPreparation.operationId);
     const originalRootState = { ...changedRootStore.value! };
-    const changedRoot = fixture({ store: changedRootStore, profileRoot: "C:\\HarnessOwned\\other-managed-browser-profiles" });
+    const changedRoot = fixture({ store: changedRootStore, profileRoot: join(tmpdir(), "HarnessOwned", "other-managed-browser-profiles") });
     await expect(changedRoot.service.getState()).resolves.toMatchObject({ status: "unprepared", defaultSession: "saved" });
     expect(changedRootStore.value).toEqual(originalRootState);
   });

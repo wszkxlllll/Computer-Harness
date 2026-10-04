@@ -26,6 +26,7 @@ import {
   validateManagedBrowserTarget,
   type DomGroundingContentRect,
   type DomGroundingTransport,
+  type DomClickRequest,
   type DomSelectOptionRequest,
   type ManagedBrowserTarget,
 } from "./dom-grounding.js";
@@ -54,6 +55,7 @@ import {
 import {
   captureWindowWithRetry,
   discoverWindow,
+  activateWindowTarget,
   listWindowInventory,
   listWindowTargets,
   sameWindowGeometry,
@@ -690,32 +692,11 @@ async function bringWindowToFrontOnce(
   target: CuaWindowTarget,
   signal: AbortSignal,
 ): Promise<void> {
-  signal.throwIfAborted();
-  const result = await driver.callTool("bring_to_front", JSON.stringify({
-    pid: target.pid,
-    window_id: target.windowId,
-    session,
-  }), { signal });
-  signal.throwIfAborted();
-  if (result.isError) {
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
-  }
-  if (result.degraded) {
-    throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
-  }
-  if (typeof result.structuredJson === "string") {
-    try {
-      const payload: unknown = JSON.parse(result.structuredJson);
-      if (payload !== null && typeof payload === "object" && !Array.isArray(payload) &&
-          "landed_on_target" in payload && payload.landed_on_target === false) {
-        throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
-      }
-    } catch (error) {
-      if (error instanceof WindowContractError) throw error;
-      // An unavailable optional result field is not focus evidence; the
-      // retained per-action foreground guard remains authoritative.
-    }
-  }
+  // Keep the foreground evidence contract in one place.  In particular, a
+  // successful `landed_on_target` flag is not enough when the daemon also
+  // reports a different actual foreground HWND: continuing would let a
+  // keyboard action land in a newly surfaced sheet or dialog.
+  await activateWindowTarget(driver, session, target, signal);
 }
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
@@ -767,6 +748,8 @@ export interface CuaDriverComputerOptions {
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
   driverFactory?: CuaDriverFactory;
+  /** Test seam for the pinned platform coordinate contract; defaults to process.platform. */
+  platform?: NodeJS.Platform;
   /** Test seam for capture retry timing; production uses bounded real delays. */
   windowCaptureRetry?: WindowCaptureRetryOptions;
 }
@@ -780,6 +763,8 @@ interface PrivateSession {
   surfaceRegistry: SurfaceRegistryState;
   /** Exact HWND geometry snapshots, keyed by Registry-owned Surface identity. */
   windowBindings: Map<string, CuaWindowBinding>;
+  /** Allow one bounded managed-browser content-rect stabilization at startup. */
+  initialObservationPending: boolean;
   /** Full visible-window baseline from the last successful target observation. */
   visibleWindowBaseline: ReadonlySet<string> | undefined;
   /** Fresh inventory immediately before an opted-in foreground GUI action. */
@@ -827,6 +812,7 @@ interface PendingDriverCleanup {
 
 interface PrivateObservation {
   sessionId: string;
+  captureSource?: "verify_state" | "get_window_state_registered" | "get_window_state_fallback";
   readonly surfaceRef: SurfaceRef;
   /**
    * The image coordinate space that the model used for this observation.
@@ -837,6 +823,14 @@ interface PrivateObservation {
   geometry?: CuaWindowGeometry;
 }
 
+interface BrowserChromeInputIntent {
+  readonly sessionId: ComputerSessionDescriptor["id"];
+  readonly surfaceRef: SurfaceRef;
+  readonly browserTarget: ManagedBrowserTarget;
+  readonly fingerprint?: string;
+  readonly invalidated: boolean;
+}
+
 interface PrivateGrounding {
   readonly catalog: Omit<GroundingCatalog, "surfaceRef">;
   /** Exact native surface and window lifecycle that produced this catalog. */
@@ -845,6 +839,8 @@ interface PrivateGrounding {
   readonly browserTarget?: ManagedBrowserTarget;
   /** Trusted physical browser content rect derived from the same observation's UIA Document. */
   readonly contentRect?: DomGroundingContentRect;
+  /** Completeness of the DOM producer, independently of the UIA catalog. */
+  readonly domComplete?: boolean;
   readonly elements: ReadonlyMap<string, PrivateGroundingElement>;
 }
 
@@ -855,6 +851,8 @@ interface BoundPrivateGrounding extends Omit<PrivateGrounding, "catalog"> {
 
 interface PrivateGroundingElement {
   readonly element: GroundingElement;
+  /** Raw private DOM name; public names may be redacted. */
+  readonly candidateName?: string;
   readonly point: { readonly x: number; readonly y: number };
   readonly candidateFingerprint?: string;
   readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
@@ -885,6 +883,8 @@ export class CuaDriverComputer implements Computer {
   private readonly observations = new Map<string, PrivateObservation>();
   private readonly groundings = new Map<string, BoundPrivateGrounding>();
   private latestObservationId: ObservationId | undefined;
+  private expectedDomInput: DomClickRequest | undefined;
+  private browserChromeInput: BrowserChromeInputIntent | undefined;
   private session: PrivateSession | undefined;
   private pendingCleanup: PendingDriverCleanup | undefined;
 
@@ -981,7 +981,7 @@ export class CuaDriverComputer implements Computer {
         }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
-        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry);
+        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, this.options.platform ?? platform ?? process.platform);
         windowBinding = capture.binding;
         viewport = capture.viewport;
         const peer = registerNativePeer(surfaceRegistry, asNativeWindowIdentity(capture.binding.target));
@@ -1027,6 +1027,7 @@ export class CuaDriverComputer implements Computer {
         active: true,
         surfaceRegistry,
         windowBindings,
+        initialObservationPending: true,
         visibleWindowBaseline: undefined,
         preActionWindowBaseline: undefined,
         newlySurfacedWindowKeys: new Set(),
@@ -1039,6 +1040,8 @@ export class CuaDriverComputer implements Computer {
         }),
         windowRefs: new Map(),
       };
+      this.expectedDomInput = undefined;
+      this.browserChromeInput = undefined;
       return descriptor;
     } catch (error) {
       const cleanupCompleted = await bestEffortCloseDriver(driver, label, this.options.cleanupWaitMs, sessionStarted);
@@ -1117,7 +1120,12 @@ export class CuaDriverComputer implements Computer {
     {
       try {
         const capture = captureAfterExistingTransient ?? await captureWindowWithRetry(
-          current.driver, current.label, captureBinding.target, signal, this.options.windowCaptureRetry,
+          current.driver,
+          current.label,
+          captureBinding.target,
+          signal,
+          this.options.windowCaptureRetry,
+          this.options.platform ?? current.platform ?? process.platform,
         );
         const liveBinding = capture.binding;
         const previousBinding = current.windowBindings.get(windowIdentityKey(liveBinding.target));
@@ -1175,6 +1183,7 @@ export class CuaDriverComputer implements Computer {
           activeBrowserTarget,
           this.options.domGroundingTransport,
           signal,
+          current.initialObservationPending,
         );
         const observedBrowserTarget = grounding?.browserTarget ?? activeBrowserTarget;
         const includeDomSurface = grounding?.browserTarget !== undefined &&
@@ -1206,6 +1215,7 @@ export class CuaDriverComputer implements Computer {
         }
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
+          captureSource: capture.source,
           surfaceRef,
           viewport: capture.viewport,
           geometry: liveBinding.bounds,
@@ -1219,10 +1229,17 @@ export class CuaDriverComputer implements Computer {
             windowBinding: liveBinding,
           };
           this.groundings.set(String(observationId), boundGrounding);
+          // A refreshed frame can contradict the pending location-bar intent.
+          // Keep the invalid intent until type refuses; never silently retarget
+          // that text to the page control which acquired focus instead.
+          if (this.browserChromeInput !== undefined && [...grounding.elements.values()].some((item) => item.element.source === "dom" && item.element.state?.focused === true)) {
+            this.browserChromeInput = { ...this.browserChromeInput, invalidated: true };
+          }
         } else if (!managedBrowserTargetForBinding(current, liveBinding)) {
           delete current.browserTarget;
         }
         this.latestObservationId = observationId;
+        current.initialObservationPending = false;
         const surfaceTransitionReason = takeSurfaceTransitionReason(current);
         const boundGrounding = grounding === undefined
           ? undefined
@@ -2594,7 +2611,7 @@ export class CuaDriverComputer implements Computer {
 
     let capture: Awaited<ReturnType<typeof captureWindowWithRetry>>;
     try {
-      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry);
+      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, this.options.platform ?? current.platform ?? process.platform);
       signal.throwIfAborted();
     } catch (error) {
       if (activationAttempted) {
@@ -2666,6 +2683,8 @@ export class CuaDriverComputer implements Computer {
   }
 
   private clearTargetObservationState(current: PrivateSession, ...surfaces: Array<SurfaceRef | undefined>): void {
+    this.expectedDomInput = undefined;
+    this.browserChromeInput = undefined;
     const surfaceIds = new Set<SurfaceRef["surfaceId"]>();
     for (const surface of surfaces) {
       if (surface === undefined) continue;
@@ -2779,6 +2798,13 @@ export class CuaDriverComputer implements Computer {
       if (executionObservationId !== this.latestObservationId) {
         return refused(action.actionId, "STALE_OBSERVATION", `action executes against stale observation ${String(executionObservationId)}`);
       }
+      if ((this.options.platform ?? current.platform ?? process.platform) === "darwin" && activeWindowBinding(current) !== undefined
+        && ["click", "double_click", "right_click", "scroll", "drag"].includes(action.kind)) {
+        const executionViewport = this.observations.get(String(executionObservationId))?.viewport;
+        if (executionViewport === undefined || executionViewport.width !== decisionObservation.viewport.width || executionViewport.height !== decisionObservation.viewport.height || executionViewport.coordinateSpace !== decisionObservation.viewport.coordinateSpace) {
+          return refused(action.actionId, "WINDOW_VIEWPORT_CHANGED", "window screenshot dimensions changed since the decision observation; observe and ground a new action; no input was sent");
+        }
+      }
       const activeRef = current.surfaceRegistry.activeSurface;
       if (activeRef === undefined || decisionObservation.surfaceRef.surfaceId !== activeRef.surfaceId ||
           decisionObservation.surfaceRef.generation !== activeRef.generation ||
@@ -2788,6 +2814,10 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "SURFACE_REF_STALE", "action Observation is not bound to the current active Surface generation");
       }
     }
+    const shortcutPlatform = this.options.platform ?? current.platform ?? process.platform;
+    const locationBarShortcut = isBrowserShortcut(action, "L", shortcutPlatform);
+    const selectAllShortcut = isBrowserShortcut(action, "A", shortcutPlatform);
+    if (action.kind !== "wait" && action.kind !== "type" && !selectAllShortcut) this.browserChromeInput = undefined;
     if (action.kind === "wait") {
       delete current.lastInspectedExistingTransientRootRef;
       await waitWithAbort(action.durationMs, signal);
@@ -2916,9 +2946,6 @@ export class CuaDriverComputer implements Computer {
       if (resolved.element.options === undefined) {
         return refused(action.actionId, "SELECT_OPTION_OPTIONS_UNAVAILABLE", "current native select did not publish its bounded options list");
       }
-      if (resolved.element.optionsTruncated === true) {
-        return refused(action.actionId, "SELECT_OPTION_OPTIONS_TRUNCATED", "current native select options list is incomplete");
-      }
       const matchingOptions = resolved.element.options.filter((option) => normalizeSelectOptionText(option.text) === normalizeSelectOptionText(action.optionText));
       if (matchingOptions.length === 0) {
         return refused(action.actionId, "SELECT_OPTION_OPTION_MISSING", "optionText is not listed in the current observation");
@@ -2979,6 +3006,162 @@ export class CuaDriverComputer implements Computer {
         throw normalizeDriverError(error, "execute");
       }
     }
+    const privateGrounding = action.groundingRef === undefined ? undefined : this.groundings.get(String(action.basedOn));
+    const resolvedGrounding = action.groundingRef === undefined ? undefined : privateGrounding?.elements.get(action.groundingRef);
+    const browserTarget = privateGrounding?.browserTarget ?? current.browserTarget;
+    const domTransport = this.options.domGroundingTransport;
+    if (action.kind === "click" && privateGrounding?.catalog.source === "hybrid"
+      && resolvedGrounding?.element.source === "uia"
+      && isManagedBrowserContainerRole(resolvedGrounding.element.role)) {
+      return refused(action.actionId, "MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE", "managed-browser window/document containers are not interactive controls");
+    }
+    // Hybrid observations intentionally expose both producers.  A model may
+    // still select the UIA copy of a browser control even when an equivalent
+    // DOM candidate is available.  Normalize that selection here, at the
+    // adapter boundary, so browser clicks remain observation-bound CDP
+    // actions.  The native coordinate path below is retained for non-browser
+    // UIA and visual controls only.
+    const domEquivalent = action.kind === "click"
+      && resolvedGrounding?.element.source === "uia"
+      && browserTarget !== undefined && privateGrounding?.domComplete === true
+      ? findEquivalentDomGrounding(privateGrounding, resolvedGrounding)
+      : undefined;
+    if (action.kind === "click" && browserTarget !== undefined && resolvedGrounding?.element.source === "uia" &&
+        resolvedGrounding.element.browserRegion !== "chrome" && domEquivalent === undefined) {
+      return refused(action.actionId, "MANAGED_BROWSER_DOM_REQUIRED", "managed-browser content requires a unique equivalent from a complete DOM observation; no native click was sent");
+    }
+    const browserGrounding = domEquivalent ?? (
+      resolvedGrounding?.element.source === "dom" ? resolvedGrounding : undefined
+    );
+    let validatedEditablePoint: { x: number; y: number } | undefined;
+    domClickDispatch: if (action.kind === "click"
+      && action.groundingRef !== undefined
+      && browserGrounding !== undefined
+      && browserTarget !== undefined
+      && domTransport?.click !== undefined
+      && browserGrounding.candidateFingerprint !== undefined
+      && browserGrounding.element.bbox !== undefined) {
+      if (browserGrounding.element.state?.enabled === false) {
+        return refused(action.actionId, "GROUNDING_ELEMENT_DISABLED", "DOM element is explicitly disabled and cannot receive a click");
+      }
+      if (browserGrounding.geometry !== undefined && decisionObservation?.geometry !== undefined && !sameWindowGeometry(browserGrounding.geometry, decisionObservation.geometry)) {
+        return refused(action.actionId, "GROUNDING_GEOMETRY_CHANGED", "DOM element reference was created for an older window geometry");
+      }
+      // For a UIA alias, first validate against the selected UIA point (the
+      // model's action binding), then require the point to land inside the
+      // equivalent DOM box. This prevents a name-only alias from redirecting
+      // an unrelated coordinate.
+      const selectedPoint = resolvedGrounding?.point ?? browserGrounding.point;
+      if (Math.abs(action.point.x - selectedPoint.x) > 0.01 || Math.abs(action.point.y - selectedPoint.y) > 0.01) {
+        return refused(action.actionId, "GROUNDING_POINT_MISMATCH", "grounding click point does not match the current DOM element bounds");
+      }
+      if (domEquivalent !== undefined && !pointInBox(action.point, browserGrounding.element.bbox)) {
+        return refused(action.actionId, "GROUNDING_DOM_ALIAS_MISMATCH", "UIA browser target does not overlap its equivalent DOM element; observe again before clicking");
+      }
+      const request: DomClickRequest = {
+        observationId: action.basedOn,
+        computerSessionId: session.id,
+        viewport: decisionObservation?.viewport ?? session.viewport,
+        browserTarget,
+        candidate: {
+          role: browserGrounding.element.role,
+          ...(browserGrounding.candidateName === undefined ? {} : { name: browserGrounding.candidateName }),
+          bbox: {
+            x: browserGrounding.element.bbox.x,
+            y: browserGrounding.element.bbox.y,
+            width: browserGrounding.element.bbox.width,
+            height: browserGrounding.element.bbox.height,
+          },
+          ...(browserGrounding.candidateFrame === undefined ? {} : { frame: browserGrounding.candidateFrame }),
+          fingerprint: browserGrounding.candidateFingerprint,
+        },
+      };
+      try {
+        this.browserChromeInput = undefined;
+        if (browserGrounding.element.state?.editable === true) {
+          if (domTransport.validateClick === undefined || domTransport.verifyFocus === undefined || this.options.windowDeliveryMode !== "foreground") {
+            return refused(action.actionId, "DOM_INPUT_FOCUS_UNAVAILABLE", "editable browser click requires verified native foreground delivery; no input was sent");
+          }
+          const validation = await domTransport.validateClick(request, signal);
+          if (validation.status !== "completed" || validation.tabId !== browserTarget.tabId || validation.generation !== browserTarget.generation) {
+            return refused(action.actionId, validation.driverCode ?? "DOM_CLICK_GENERATION_MISMATCH", validation.message ?? "editable browser click binding changed; no input was sent");
+          }
+          this.expectedDomInput = request;
+          // One native click performs the browser's actual focus default.
+          // DOM validation above is read-only; no programmatic click is sent.
+          validatedEditablePoint = browserGrounding.point;
+          break domClickDispatch;
+        }
+        const result = await domTransport.click(request, signal);
+        if (result.status === "completed" && (result.tabId !== browserTarget.tabId || result.generation !== browserTarget.generation)) {
+          return refused(action.actionId, "DOM_CLICK_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before clicking");
+        }
+        if (result.status === "completed") {
+          return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
+        }
+        if (result.status === "refused") {
+          return refused(action.actionId, result.driverCode ?? "DOM_CLICK_REFUSED", result.message ?? "managed-browser DOM click was refused");
+        }
+        return { actionId: action.actionId, status: "failed", driverCode: result.driverCode ?? "DOM_CLICK_FAILED", ...(result.message === undefined ? {} : { message: result.message }) };
+      } catch (error) {
+        const details = driverErrorDetails(error);
+        if (details.tag === "Transport") current.active = false;
+        if (details.tag === "Tool") return refused(action.actionId, details.errorCode ?? "DOM_CLICK_REFUSED", details.message);
+        throw normalizeDriverError(error, "execute");
+      }
+    }
+    // A completed page click is not proof that native typing will reach it.
+    // Preserve the expectation across observations, scrolls and waits; only
+    // an explicit location-bar shortcut may switch to browser chrome input.
+    let chromeVerifiedForAction = false;
+    if (action.kind === "type" && this.browserChromeInput !== undefined) {
+      const intent = this.browserChromeInput;
+      this.browserChromeInput = undefined;
+      const surface = current.surfaceRegistry.activeSurface;
+      const bound = intent.sessionId === session.id && surface !== undefined &&
+        intent.surfaceRef.surfaceId === surface.surfaceId && intent.surfaceRef.generation === surface.generation &&
+        isExecutableSurfaceRef(current.surfaceRegistry, intent.surfaceRef) && browserTarget !== undefined &&
+        sameBrowserInputTarget(intent.browserTarget, browserTarget);
+      const liveFingerprint = !intent.invalidated && bound && decisionObservation !== undefined
+        ? await this.readBrowserChromeFocus(current, session, action.basedOn, decisionObservation.viewport, intent.browserTarget, signal)
+        : undefined;
+      if (intent.fingerprint === undefined || liveFingerprint !== intent.fingerprint) {
+        return refused(action.actionId, "BROWSER_CHROME_FOCUS_UNCONFIRMED", "address-bar identity and focus are not positively verified; no keyboard input was sent. Observe and choose a verified target, or set the initial browser URL");
+      }
+      chromeVerifiedForAction = true;
+    }
+    let adoptedDomInput = false;
+    if (action.kind === "type" && browserTarget !== undefined && this.expectedDomInput === undefined && !chromeVerifiedForAction) {
+      const latestGrounding = this.groundings.get(String(options?.executionObservationId ?? action.basedOn));
+      const focused = [...(latestGrounding?.elements.values() ?? [])].filter((item) => item.element.source === "dom" && item.element.state?.focused === true && item.element.state.editable === true);
+      const candidate = focused.length === 1 ? focused[0] : undefined;
+      if (candidate?.candidateFingerprint === undefined || candidate.element.bbox === undefined || latestGrounding?.browserTarget === undefined) {
+        return refused(action.actionId, "DOM_INPUT_FOCUS_MISMATCH", "no unique observed editable browser control owns page focus; no keyboard input was sent. Observe again, click the current editable control, then observe before typing");
+      }
+      adoptedDomInput = true;
+      this.expectedDomInput = {
+        observationId: options?.executionObservationId ?? action.basedOn,
+        computerSessionId: session.id,
+        viewport: decisionObservation?.viewport ?? session.viewport,
+        browserTarget: latestGrounding.browserTarget,
+        candidate: { role: candidate.element.role, ...(candidate.candidateName === undefined ? {} : { name: candidate.candidateName }), bbox: candidate.element.bbox, ...(candidate.candidateFrame === undefined ? {} : { frame: candidate.candidateFrame }), fingerprint: candidate.candidateFingerprint },
+      };
+    }
+    if ((action.kind === "type" || action.kind === "keypress") && !locationBarShortcut && this.expectedDomInput !== undefined) {
+      if (domTransport?.verifyFocus === undefined) return refused(action.actionId, "DOM_INPUT_FOCUS_UNAVAILABLE", "managed-browser focus verification unavailable; no keyboard input was sent");
+      const expected = this.expectedDomInput;
+      try {
+        const result = await domTransport.verifyFocus(expected, signal);
+        if (result.status !== "completed" || result.tabId !== expected.browserTarget.tabId || result.generation !== expected.browserTarget.generation) {
+          if (adoptedDomInput) this.expectedDomInput = undefined;
+          return refused(action.actionId, result.driverCode ?? "DOM_INPUT_FOCUS_MISMATCH", "managed-browser input identity or focus changed; no keyboard input was sent. Observe again and click the current editable control before typing");
+        }
+      } catch (error) {
+        signal.throwIfAborted();
+        if (adoptedDomInput) this.expectedDomInput = undefined;
+        return refused(action.actionId, "DOM_INPUT_FOCUS_UNAVAILABLE", "managed-browser input focus could not be verified; no keyboard input was sent");
+      }
+    }
     let requestAction = action;
     if (action.groundingRef !== undefined && !isMultilineType) {
       if (action.kind !== "click") {
@@ -3000,6 +3183,7 @@ export class CuaDriverComputer implements Computer {
       }
       requestAction = { ...action, point: resolved.point };
     }
+    if (validatedEditablePoint !== undefined && requestAction.kind === "click") requestAction = { ...requestAction, point: validatedEditablePoint };
     let request: { name: string; arguments: Record<string, unknown> } | undefined;
     try {
       if (!isMultilineType) {
@@ -3009,7 +3193,7 @@ export class CuaDriverComputer implements Computer {
           actionWindowBinding,
           this.options.windowDeliveryMode,
           decisionObservation?.viewport,
-          current.platform,
+          this.options.platform ?? current.platform ?? process.platform,
         );
       }
     } catch (error) {
@@ -3062,6 +3246,14 @@ export class CuaDriverComputer implements Computer {
     if (request === undefined) throw new Error("CUA action request was not constructed");
     delete current.lastInspectedExistingTransientRootRef;
     try {
+      // Tab is permitted only after the old target's focus gate above. Drop its
+      // binding before dispatch; a fresh observation and verifyFocus must prove
+      // the next target, even if the Tab dispatch has an unknown outcome.
+      if (action.kind === "keypress" && (action.keys.length === 1 && action.keys[0]?.toUpperCase() === "TAB" || action.keys.length === 2 && action.keys.some((key) => key.toUpperCase() === "TAB") && action.keys.some((key) => key.toUpperCase() === "SHIFT"))) this.expectedDomInput = undefined;
+      if (action.kind === "click" && browserTarget !== undefined) this.browserChromeInput = undefined;
+      // A successful location-bar shortcut permits just one text dispatch.
+      // Consume before dispatch so an unknown outcome cannot reuse it.
+      if (action.kind === "type" && browserTarget !== undefined) this.browserChromeInput = undefined;
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
         const driverCode = windowRefusalCode(result.errorCode, result.text, resultProvesNoInput(result));
@@ -3104,11 +3296,26 @@ export class CuaDriverComputer implements Computer {
       if (result.degraded) {
         return { actionId: action.actionId, status: "failed", driverCode: "CUA_DEGRADED", message: result.text };
       }
+      if (locationBarShortcut && browserTarget !== undefined && decisionObservation !== undefined) {
+        this.expectedDomInput = undefined;
+        const fingerprint = await this.readBrowserChromeFocus(current, session, action.basedOn, decisionObservation.viewport, browserTarget, signal);
+        this.browserChromeInput = {
+          sessionId: session.id,
+          surfaceRef: { ...decisionObservation.surfaceRef },
+          browserTarget: { ...browserTarget, windowTarget: { ...browserTarget.windowTarget } },
+          ...(fingerprint === undefined ? {} : { fingerprint }),
+          invalidated: fingerprint === undefined,
+        };
+      } else if (action.kind === "click") this.browserChromeInput = undefined;
+      else if (action.kind === "keypress" && !selectAllShortcut) this.browserChromeInput = undefined;
       if (alternativePrimitiveForUnknownAction !== undefined && current.unknownActionReplayGuard !== undefined &&
           decisionObservation !== undefined && sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
         current.unknownActionReplayGuard.alternativeActionCompleted = true;
       }
-      return { actionId: action.actionId, status: "completed", ...(result.text ? { message: result.text } : {}) };
+      const diagnostic = currentWindowBinding !== undefined && ["click", "scroll", "drag"].includes(action.kind)
+        ? `cua-window-pixels source=${decisionObservation?.captureSource ?? "unknown"} viewport=${decisionObservation?.viewport.width}x${decisionObservation?.viewport.height} bounds=${currentWindowBinding.bounds.width}x${currentWindowBinding.bounds.height} target=${currentWindowBinding.target.pid}/${currentWindowBinding.target.windowId} delivery=${this.options.windowDeliveryMode ?? "background"} point=${JSON.stringify(Object.fromEntries(Object.entries(request.arguments).filter(([key]) => ["x", "y", "from_x", "from_y", "to_x", "to_y"].includes(key))))}`
+        : undefined;
+      return { actionId: action.actionId, status: "completed", ...((result.text || diagnostic) ? { message: [result.text, diagnostic].filter(Boolean).join("; ") } : {}) };
     } catch (error) {
       const details = driverErrorDetails(error);
       if (details.tag === "Transport") {
@@ -3156,6 +3363,34 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, driverCode, details.message);
       }
       throw normalizeDriverError(error, "execute");
+    }
+  }
+
+  private async readBrowserChromeFocus(
+    current: PrivateSession,
+    session: ComputerSessionDescriptor,
+    observationId: ObservationId,
+    viewport: Viewport,
+    browserTarget: ManagedBrowserTarget,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    const binding = activeWindowBinding(current);
+    const transport = this.options.domGroundingTransport;
+    if (binding === undefined || transport === undefined || !managedBrowserTargetForBinding(current, binding) ||
+        windowIdentityKey(binding.target) !== windowIdentityKey(browserTarget.windowTarget)) return undefined;
+    try {
+      const uia = await readGroundingCatalog(current.driver, current.label, binding, viewport, observationId, session.id, signal, true);
+      if (uia.catalog.degraded || uia.catalog.completeness !== "complete" || uia.contentRect === undefined) return undefined;
+      const focused = [...uia.elements.values()].filter((item) => item.element.state?.focused === true);
+      const candidate = focused.length === 1 ? focused[0] : undefined;
+      if (candidate?.uiaIdentityFingerprint === undefined || !isAddressBarElement(candidate.element)) return undefined;
+      const dom = await transport.collect({ observationId, computerSessionId: session.id, viewport, browserTarget }, signal);
+      if (dom.complete !== true || dom.degraded === true || dom.tabId !== browserTarget.tabId || dom.generation !== browserTarget.generation ||
+          dom.candidates.some((item) => item.state?.focused === true)) return undefined;
+      return candidate.uiaIdentityFingerprint;
+    } catch {
+      signal.throwIfAborted();
+      return undefined;
     }
   }
 
@@ -3433,19 +3668,41 @@ export class CuaDriverComputer implements Computer {
   }
 }
 
+function sameBrowserInputTarget(left: ManagedBrowserTarget, right: ManagedBrowserTarget): boolean {
+  return left.profileId === right.profileId && left.tabId === right.tabId && left.generation === right.generation &&
+    left.windowTarget.pid === right.windowTarget.pid && left.windowTarget.windowId === right.windowTarget.windowId;
+}
+
+function isAddressBarElement(element: GroundingElement): boolean {
+  // Positive browser-owned chrome semantics only. Unknown localized names or
+  // incomplete AX/UIA evidence remain unsupported, never inferred from no DOM focus.
+  const name = normalizeGroundingName(element.name);
+  return element.source === "uia" && element.browserRegion === "chrome" && element.state?.enabled !== false &&
+    element.state?.editable === true && element.state.focused === true &&
+    ["edit", "textbox", "textfield", "combobox"].includes(normalizeGroundingRole(element.role)) &&
+    ["address and search bar", "search or enter web address", "地址和搜索栏", "地址栏", "搜索或输入网址"].includes(name ?? "");
+}
+
+function isBrowserShortcut(action: ActionIntent, key: string, platform: NodeJS.Platform): boolean {
+  if (action.kind !== "keypress" || action.keys.length !== 2) return false;
+  const keys = action.keys.map((part) => part.toUpperCase());
+  const modifiers = platform === "darwin" ? ["CMD", "META"] : ["CTRL"];
+  return keys.includes(key) && keys.some((part) => modifiers.includes(part));
+}
+
 function actionRequest(
   action: Exclude<ActionIntent, { kind: "wait" } | SwitchWindowAction>,
   session: string,
   windowBinding?: CuaWindowBinding,
   configuredDeliveryMode?: CuaWindowDeliveryMode,
   decisionViewport?: Viewport,
-  platform?: PrivateSession["platform"],
+  platform: NodeJS.Platform = process.platform,
 ): { name: string; arguments: Record<string, unknown> } {
   const target = windowBinding === undefined ? PRIMARY_DESKTOP : windowActionTarget(windowBinding);
   const deliveryMode = windowBinding === undefined ? "foreground" : configuredDeliveryMode ?? "background";
   const point = (value: { x: number; y: number }) => windowBinding === undefined
     ? value
-    : mapWindowPoint(value, decisionViewport, windowBinding.bounds);
+    : mapWindowPoint(value, decisionViewport, windowBinding.bounds, platform);
   switch (action.kind) {
     case "click":
       return { name: "click", arguments: { session, target, ...point(action.point), delivery_mode: deliveryMode } };
@@ -3503,6 +3760,7 @@ async function readWindowGrounding(
   browserTarget: ManagedBrowserTarget | undefined,
   domTransport: DomGroundingTransport | undefined,
   signal: AbortSignal,
+  allowInitialHybridResampling = false,
 ): Promise<PrivateGrounding | undefined> {
   if (mode === undefined || mode === "off") return undefined;
   if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, false);
@@ -3513,20 +3771,66 @@ async function readWindowGrounding(
     // rect producer is available; never guess from window bounds/DPI.
     return emptyDomGrounding(observationId, computerSessionId);
   }
-  const uia = await readGroundingCatalog(
-    driver,
-    session,
-    binding,
-    viewport,
-    observationId,
-    computerSessionId,
-    signal,
-    browserTarget !== undefined,
-  );
+  let uia = mode === "hybrid-catalog-v1"
+    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, browserTarget !== undefined)
+    : undefined;
+  // Browser accessibility trees can expose toolbar nodes before the Document
+  // / AXWebArea record is ready. Retry only the trusted UIA producer within a
+  // 3.35-second total budget; DOM collection remains fail-closed until content
+  // origin evidence exists.
+  if (allowInitialHybridResampling && mode === "hybrid-catalog-v1" && browserTarget !== undefined && uia?.contentRect === undefined) {
+    const retryDelaysMs = [100, 250, 500, 1_000, 1_500] as const;
+    const retryDeadline = Date.now() + retryDelaysMs.reduce((total, delay) => total + delay, 0);
+    for (const delayMs of retryDelaysMs) {
+      const beforeDelayMs = retryDeadline - Date.now();
+      if (beforeDelayMs <= 0) break;
+      await waitWithAbort(Math.min(delayMs, beforeDelayMs), signal);
+      const remainingMs = retryDeadline - Date.now();
+      if (remainingMs <= 0) break;
+
+      const retryController = new AbortController();
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      let timeoutExpired = false;
+      let onAbort: (() => void) | undefined;
+      try {
+        const retrySignal = AbortSignal.any([signal, retryController.signal]);
+        const timeoutPromise = new Promise<{ readonly timedOut: true }>((resolve) => {
+          timeoutId = setTimeout(() => {
+            timeoutExpired = true;
+            retryController.abort(new Error("hybrid grounding retry budget exhausted"));
+            resolve({ timedOut: true });
+          }, remainingMs);
+        });
+        const retryPromise = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, retrySignal, true)
+          .then((value) => ({ value }), (error: unknown) => ({ error }));
+        const abortPromise = new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(signal.reason ?? new Error("hybrid grounding retry aborted"));
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+        const result = await Promise.race([retryPromise, timeoutPromise, abortPromise]);
+        if ("timedOut" in result) break;
+        if ("error" in result) {
+          if (signal.aborted) signal.throwIfAborted();
+          if (timeoutExpired || retryController.signal.aborted) break;
+          throw result.error;
+        }
+        uia = result.value;
+        if (uia.contentRect !== undefined) break;
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+        if (!retryController.signal.aborted) retryController.abort(new Error("hybrid grounding retry completed"));
+      }
+    }
+  }
+  // DOM-only has no trusted producer for the browser content origin. Keep the
+  // capability explicitly fail-closed until a future browser-native content
+  // rect producer is added; never guess from window bounds/DPI.
   if (browserTarget === undefined || domTransport === undefined) return uia;
-  // Hybrid DOM candidates require a trusted content rect from this same
-  // managed-browser observation; never guess from window bounds or DPI.
-  const dom = await readDomGroundingCatalog(domTransport, browserTarget, binding, viewport, observationId, computerSessionId, uia.contentRect, signal);
+  const dom = await readDomGroundingCatalog(domTransport, browserTarget, binding, viewport, observationId, computerSessionId, uia?.contentRect, signal);
+  if (uia === undefined) return dom;
+  if (dom === undefined) return uia;
   return mergeGroundings(uia, dom, observationId, computerSessionId);
 }
 
@@ -3623,6 +3927,7 @@ async function readDomGroundingCatalog(
     for (const [elementRef, privateElement] of materialized.privateElements) {
       elements.set(elementRef, {
         element: privateElement.element,
+        ...(privateElement.candidateName === undefined ? {} : { candidateName: privateElement.candidateName }),
         point: privateElement.point,
         candidateFingerprint: privateElement.candidateFingerprint,
         ...(privateElement.candidateFrame === undefined ? {} : { candidateFrame: privateElement.candidateFrame }),
@@ -3632,6 +3937,7 @@ async function readDomGroundingCatalog(
     }
     return {
       catalog: materialized.catalog,
+      domComplete: materialized.catalog.completeness === "complete" && !materialized.catalog.degraded,
       browserTarget: activeBrowserTarget,
       contentRect: trustedContentRect,
       elements,
@@ -3723,10 +4029,75 @@ function mergeGroundings(
       maxElements: GROUNDING_MAX_ELEMENTS,
       elements: publicElements,
     },
+    domComplete: dom.domComplete === true,
     ...(dom.browserTarget === undefined ? {} : { browserTarget: dom.browserTarget }),
     ...(dom.contentRect === undefined ? {} : { contentRect: dom.contentRect }),
     elements,
   };
+}
+
+function findEquivalentDomGrounding(
+  grounding: PrivateGrounding | undefined,
+  selected: PrivateGroundingElement | undefined,
+): PrivateGroundingElement | undefined {
+  if (grounding === undefined || selected === undefined || selected.element.bbox === undefined) return undefined;
+  const matches = [...grounding.elements.values()]
+    .filter((candidate) => candidate.element.source === "dom" && candidate.element.bbox !== undefined)
+    .filter((candidate) => equivalentBrowserCandidate(selected.element, candidate.element));
+  if (matches.length !== 1) return undefined;
+  matches.sort((left, right) => boxIntersectionOverUnion(selected.element.bbox!, right.element.bbox!) - boxIntersectionOverUnion(selected.element.bbox!, left.element.bbox!));
+  return matches[0];
+}
+
+function equivalentBrowserCandidate(left: GroundingElement, right: GroundingElement): boolean {
+  if (normalizeGroundingRole(left.role) !== normalizeGroundingRole(right.role)) return false;
+  const overlap = boxIntersectionOverUnion(left.bbox!, right.bbox!);
+  if (overlap < 0.5) return false;
+  const leftName = normalizeGroundingName(left.name);
+  const rightName = normalizeGroundingName(right.name);
+  return leftName === undefined || rightName === undefined || leftName === rightName || overlap >= 0.8;
+}
+
+function normalizeGroundingRole(value: string): string {
+  const normalized = value.normalize("NFKC").toLocaleLowerCase().replace(/[\s_-]+/gu, "");
+  const axRole = normalized.startsWith("ax") ? normalized.slice(2) : normalized;
+  switch (axRole) {
+    case "link": return "link";
+    case "button": return "button";
+    case "textfield":
+    case "searchfield": return "textbox";
+    case "webarea": return "document";
+    case "checkbox": return "checkbox";
+    case "radiobutton": return "radio";
+    case "combobox": return "combobox";
+    case "menuitem": return "menuitem";
+    default: return axRole;
+  }
+}
+
+function isManagedBrowserContainerRole(role: string): boolean {
+  const normalized = normalizeGroundingRole(role);
+  return normalized === "window" || normalized === "document";
+}
+
+function normalizeGroundingName(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.normalize("NFKC").replace(/[\s\u3000]+/gu, " ").trim().toLocaleLowerCase();
+  return normalized.length === 0 ? undefined : normalized;
+}
+
+function pointInBox(point: { readonly x: number; readonly y: number }, box: NonNullable<GroundingElement["bbox"]>): boolean {
+  return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+}
+
+function boxIntersectionOverUnion(left: NonNullable<GroundingElement["bbox"]>, right: NonNullable<GroundingElement["bbox"]>): number {
+  const x1 = Math.max(left.x, right.x);
+  const y1 = Math.max(left.y, right.y);
+  const x2 = Math.min(left.x + left.width, right.x + right.width);
+  const y2 = Math.min(left.y + left.height, right.y + right.height);
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const union = left.width * left.height + right.width * right.height - intersection;
+  return union <= 0 ? 0 : intersection / union;
 }
 
 async function readGroundingCatalog(
@@ -3796,7 +4167,13 @@ async function readGroundingCatalog(
   const elements = new Map<string, PrivateGroundingElement>();
   const publicElements = annotatedRecords.map((candidate, index) => {
     const elementRef = `uia-${groundingObservationDiscriminator(observationId)}-${index + 1}`;
-    const element: GroundingElement = { ...candidate.element, elementRef };
+    const element: GroundingElement = managedBrowserHybrid && isManagedBrowserContainerRole(candidate.element.role)
+      ? {
+          ...candidate.element,
+          elementRef,
+          state: { ...candidate.element.state, enabled: false },
+        }
+      : { ...candidate.element, elementRef };
     elements.set(elementRef, {
       element,
       point: candidate.point,
@@ -3923,7 +4300,14 @@ function trustedContentRectFromUia(
   viewport: Viewport,
 ): DomGroundingContentRect | undefined {
   const candidates = elements
-    .filter((element) => element.role.toLocaleLowerCase() === "document" && element.bbox?.coordinateSpace === "physical")
+    // Windows UIA exposes browser content as `Document`, while macOS
+    // Accessibility exposes the same trusted top-level surface as
+    // `AXWebArea`. Both records come from the exact bound browser window.
+    .filter((element) => {
+      const role = element.role.normalize("NFKC").toLocaleLowerCase().replace(/[\\s_-]+/gu, "");
+      return (role === "document" || role === "axwebarea" || role === "webarea" || role === "axdocument" || role === "documentcontrol")
+        && element.bbox?.coordinateSpace === "physical";
+    })
     .map((element) => element.bbox!)
     .filter((bbox) => bbox.width >= viewport.width * 0.5 && bbox.height >= viewport.height * 0.5)
     .filter((bbox) => bbox.x >= 0 && bbox.y >= 0 && bbox.x + bbox.width <= viewport.width + 1 && bbox.y + bbox.height <= viewport.height + 1)
@@ -4201,7 +4585,7 @@ function confirmsCuaValueWrite(value: unknown): boolean {
 }
 
 /**
- * Convert model/image-local coordinates to the CUA window-local coordinates.
+ * Validate image-local coordinates and apply the pinned platform contract.
  * The decision frame is the source of truth: an approved action may execute
  * against a later observation, but its coordinates were still produced from
  * action.basedOn. Geometry is checked by the caller before this projection.
@@ -4210,6 +4594,7 @@ function mapWindowPoint(
   point: { x: number; y: number },
   sourceViewport: Viewport | undefined,
   targetBounds: CuaWindowGeometry,
+  platform: NodeJS.Platform,
 ): { x: number; y: number } {
   if (sourceViewport === undefined) {
     throw new WindowCoordinateMappingError("WINDOW_VIEWPORT_UNKNOWN", "window action has no source observation viewport");
@@ -4227,8 +4612,13 @@ function mapWindowPoint(
     throw new WindowCoordinateMappingError("WINDOW_COORDINATE_INVALID", `window action point (${point.x}, ${point.y}) is outside source viewport ${sourceViewport.width}x${sourceViewport.height}`);
   }
   return {
-    x: clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),
-    y: clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height), targetBounds.height),
+    // CUA 0.22.2 macOS click/scroll/drag consume get_window_state PNG pixels.
+    // The driver reverses its per-window resize ratio and Retina backing
+    // scale itself. A bounds projection here would apply a second transform.
+    // Keep the historical Windows/Linux contract unchanged: Windows capture
+    // through observation-only verify_state does not refresh its resize map.
+    x: platform === "darwin" ? clampCoordinate(Math.round(point.x), sourceViewport.width) : clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),
+    y: platform === "darwin" ? clampCoordinate(Math.round(point.y), sourceViewport.height) : clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height), targetBounds.height),
   };
 }
 

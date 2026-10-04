@@ -104,6 +104,7 @@ function fixtureComputer(
 }
 
 function providerFor(options: {
+  failAfterTurns?: boolean;
   askFirst?: boolean;
   summary: string;
   turns?: readonly ModelTurn[];
@@ -120,6 +121,7 @@ function providerFor(options: {
       if (generatedTurn !== undefined) return structuredClone(generatedTurn);
       const scriptedTurn = options.turns?.[turns - 1];
       if (scriptedTurn !== undefined) return structuredClone(scriptedTurn);
+      if (options.failAfterTurns === true) throw Object.assign(new Error("fixture request deadline"), { code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
       if (options.askFirst === true && turns === 1) return { type: "user_input_required", question: "Which date should I check?" };
       return { type: "finish", summary: options.summary };
     },
@@ -132,6 +134,7 @@ function createFixture(
     askFirst?: boolean;
     summary: string;
     turns?: readonly ModelTurn[];
+    failAfterTurns?: boolean;
     guardDecisions?: readonly ActionPolicyDecision[];
     screen?: Viewport;
     windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
@@ -1268,6 +1271,38 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
+  it("projects failed Provider progress replies and preserves authorized post-action screenshots", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-provider-progress-"));
+    const { api, session } = createFixture(outputDir, {
+      summary: "must not become success",
+      failAfterTurns: true,
+      turns: [{ type: "tool_calls", calls: [{ id: "progress-click" as ToolCallId, name: "click", arguments: { x: 1, y: 2 } }] }],
+    });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "timeout-progress", "fixture click", choices.candidates[0]!.token);
+      await session.waitForActiveRun();
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.status).toBe("finished");
+      expect(snapshot.reply).toContain("已保留 1 个非等待 GUI 动作完成回执");
+      expect(snapshot.reply).toContain("任务完成未确认");
+      expect(snapshot.reply).toContain(`assetId=${snapshot.latestAssetId}`);
+      const streamed: unknown[] = [];
+      api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event)).close();
+      expect(streamed).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.event", data: expect.objectContaining({ type: "run.reply", outcome: "failed", reply: snapshot.reply }) })]));
+      const screenshot = await api.getAsset("device-one", started.runId, snapshot.latestAssetId!);
+      expect(screenshot?.mediaType).toBe("image/png");
+      expect(await api.getAsset("device-two", started.runId, snapshot.latestAssetId!)).toBeUndefined();
+      expect(streamed.filter((event) => {
+        const projected = event as { data?: { phase?: string; status?: string } };
+        return projected.data?.phase === "action" && projected.data.status === "started";
+      })).toHaveLength(1);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("starts an explicitly requested primary-desktop Run without window discovery or binding", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-target-"));
     const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, { summary: "Desktop inspected." });
@@ -2000,6 +2035,28 @@ describe("ApplicationRemoteRunApi", () => {
     } finally {
       if (session.activeRun !== undefined) session.activeRun.controller.cancel("managed browser config test cleanup");
       await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("projects model progress through the remote event stream without provider internals", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-progress-"));
+    const { api, session } = createFixture(outputDir, { summary: "Progress was captured." });
+    try {
+      const started = await api.startRun("device-one", "progress-once", "Check the managed page", { mode: "browser", url: "https://example.test" });
+      const streamed: unknown[] = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event));
+      await session.waitForActiveRun();
+      subscription.close();
+      const progress = streamed.filter((event) => typeof event === "object" && event !== null && "type" in event && event.type === "run.event"
+        && "data" in event && typeof event.data === "object" && event.data !== null && "type" in event.data && event.data.type === "run.progress");
+      expect(progress).toEqual(expect.arrayContaining([
+        expect.objectContaining({ data: expect.objectContaining({ phase: "model", status: "started" }) }),
+        expect.objectContaining({ data: expect.objectContaining({ phase: "model", status: "completed" }) }),
+      ]));
+      expect(JSON.stringify(progress)).not.toContain("reasoning_content");
+    } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
     }

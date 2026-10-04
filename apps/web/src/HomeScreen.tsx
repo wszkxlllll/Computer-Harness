@@ -34,7 +34,10 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
   const [windowSelectionGoal, setWindowSelectionGoal] = useState<string>();
   const [windowSelectionNeedsConfirmation, setWindowSelectionNeedsConfirmation] = useState(false);
   const [windowTargetsError, setWindowTargetsError] = useState<string>();
-  const [targetMode, setTargetMode] = useState<RunTarget["mode"]>("auto");
+  // Web tasks are the safest default for phone-driven work: the managed
+  // browser provides observation-bound DOM actions instead of unverified native
+  // coordinate clicks. Native windows remain available via the explicit picker.
+  const [targetMode, setTargetMode] = useState<RunTarget["mode"]>("browser");
   const [browserUrl, setBrowserUrl] = useState("");
   const [browserSetupRequired, setBrowserSetupRequired] = useState(false);
   const commandIdByTarget = useRef(new Map<string, string>());

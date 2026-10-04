@@ -187,8 +187,27 @@ describe("app-runtime provider factory", () => {
     await expect(provider.generate(clickInput(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 12, y: 34 } }] });
     expect(request?.url).toBe("https://glm.fixture/v1");
     expect(request?.headers.Authorization).toBe("Bearer fixture-glm-key");
-    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false, thinking: { type: "enabled" }, reasoning_effort: "low" });
+    expect(request?.body).toMatchObject({ model: "glm-5.3-flash", stream: false, thinking: { type: "enabled" }, reasoning_effort: "low", max_tokens: 8192 });
     expect(request?.body.tools).toMatchObject([{ type: "function", function: { name: "click" } }]);
+  });
+
+  it("sends the explicit GLM output budget and rejects invalid overrides before HTTP", async () => {
+    let maxTokens: unknown;
+    const client: ProviderHttpClient = { async post(_url, body) { maxTokens = body.max_tokens; return { choices: [{ finish_reason: "stop", message: { content: "complete" } }] }; } };
+    const options = { model: "glm-5.3-flash" as const, config: config({ glmMaxOutputTokens: 16384 }), assetReader, outputDir: "runs/glm-custom", credentials: { glmApiKey: "key" }, httpClients: { glm: client } };
+    await createProvider(options).generate(clickInput(), { signal: new AbortController().signal });
+    expect(maxTokens).toBe(16384);
+    for (const value of [0, -1, 1.5, 131073]) expect(() => createProvider({ ...options, config: config({ glmMaxOutputTokens: value }) })).toThrow(/maxOutputTokens/u);
+  });
+
+  it.each(["disabled", "enabled", "low", "high", "max"] as const)("keeps GLM %s configuration compatible across the built package boundary", async (thinking) => {
+    let wire: Record<string, unknown> | undefined;
+    const client: ProviderHttpClient = { async post(_url, body) { wire = body; return { choices: [{ finish_reason: "stop", message: { content: "complete" } }] }; } };
+    const provider = createProvider({ model: "glm-5.3-flash", config: config({ glmThinking: thinking, glmMaxOutputTokens: 16384, glmRequestTimeoutMs: 90000 }), assetReader, outputDir: "runs/glm-integration", credentials: { glmApiKey: "fixture-key" }, httpClients: { glm: client } });
+    await provider.generate(clickInput(), { signal: new AbortController().signal });
+    expect(wire).toMatchObject({ thinking: { type: "enabled" }, max_tokens: 16384 });
+    if (["low", "high", "max"].includes(thinking)) expect(wire?.reasoning_effort).toBe(thinking);
+    else expect(wire).not.toHaveProperty("reasoning_effort");
   });
 
   it("preserves Qwen native output, endpoint, thinking, and coordinate-unit schema", async () => {

@@ -134,7 +134,9 @@ export async function runOfflineSelfTest() {
         requestLimit,
       });
       verifyScenario(scenario, transport, provider, contextMode, scenarioId, fixture, requestLimit);
-      runs.push({ provider, contextMode, scenarioId, requests: transport.records.length, requestLimit, outcome: scenario.outcome });
+      runs.push({ provider, contextMode, scenarioId, requests: transport.records.length, requestLimit, outcome: scenario.outcome,
+        observedSurfaces: scenario.events.filter((event) => event.type === "observation.created").map((event) => event.observation.surfaceRef),
+      });
     }
   }
   return {
@@ -1152,7 +1154,12 @@ class SyntheticComputer {
     return {
       capturedAt: `2026-10-02T00:00:${String(this.observationCounter).padStart(2, "0")}.000Z`,
       viewport: session.viewport,
-      surfaceRef: { surfaceId: `synthetic-${this.activeTargetKey}`, generation: this.surfaceGeneration, kind: this.activeTargetKey === "desktop" ? "desktop" : "native_window" },
+      surfaceRef: {
+        surfaceId: `probe-${this.scenarioId}-${this.activeTargetKey}`,
+        generation: this.surfaceGeneration,
+        kind: this.activeTargetKey === "desktop" ? "desktop" : this.activeTargetKey === "browser" ? "browser_tab" : "native_window",
+        ...(this.activeTargetKey === "browser" ? { parentSurfaceId: `probe-${this.scenarioId}-browser-root` } : {}),
+      },
       screenshot: { mediaType: "image/png", data: new Uint8Array(screenshot) },
     };
   }
@@ -1172,6 +1179,8 @@ class SyntheticComputer {
     if (nextSession === undefined) return { actionId: action.actionId, status: "refused", driverCode: "SYNTHETIC_TARGET_MISMATCH" };
     this.switches.push({ fromTargetKey: this.activeTargetKey, targetKey, windowRef: action.windowRef, wasLatest: this.currentRefs.has(action.windowRef) });
     this.activeTargetKey = targetKey;
+    // A return to a previously observed Surface is a fresh incarnation, just
+    // as in the real adapter; old observations must not regain validity.
     this.surfaceGeneration += 1;
     this.activeSession = nextSession;
     this.currentRefs.clear();

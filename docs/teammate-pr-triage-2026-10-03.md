@@ -1,5 +1,7 @@
 # 队友 PR 与平台分支合入审查（2026-10-03）
 
+后续 Mac 整合以[跨分支兼容审查](./macos-runtime-surface-integration-2026-10-03.md)为准：下文对 `5addbdc` 的问题清单是历史快照。新整合保留完整无标题窗口身份清单，将 Mac 代理窗口过滤限定 darwin，并加入 Windows/Linux 几何反例；不以历史快照判定新版本已通过或未整改。
+
 ## 当前集成结论（2026-10-03 21:20，上海时间）
 
 PR #18、#19、#20 的有效内容已经选择性吸收到 `codex/runtime-surface-preview-20261003`，不是把三个旧 head 依次整体 merge。集成提交保留 `Co-authored-by: Yao GX <guanxiongme@gmail.com>`；原 PR 的历史仍由 GitHub 保存。

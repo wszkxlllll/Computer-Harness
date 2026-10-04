@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { formatManagedBrowserStartupDiagnostic, type CuaBootstrapSession, type ManagedBrowserHost, type ManagedBrowserHostOptions, type ManagedBrowserStartupDiagnostic, type ManagedBrowserWindowBindingHint, type ManagedBrowserWindowResolution } from "@computer-harness/computer-cua";
+import { defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, type CuaBootstrapSession, type ManagedBrowserHost, type ManagedBrowserHostOptions, type ManagedBrowserStartupDiagnostic, type ManagedBrowserWindowBindingHint, type ManagedBrowserWindowResolution } from "@computer-harness/computer-cua";
 
 export type ManagedBrowserPreparationBootstrap = CuaBootstrapSession;
 export type ManagedBrowserPreparationHost = ManagedBrowserHost;
@@ -104,7 +104,7 @@ export async function prepareManagedBrowserProfile(
     }
     const bootstrapSession = bootstrap;
     host = createHost({
-      browser: "edge",
+      browser: defaultManagedBrowserKind(),
       url: options.managedBrowserUrl,
       profileMode: "persistent",
       profileLabel: options.profileLabel,

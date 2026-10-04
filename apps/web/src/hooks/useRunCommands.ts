@@ -154,8 +154,9 @@ export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptio
   async function refreshStatus(): Promise<RunSnapshot | undefined> {
     try {
       return await refresh() || undefined;
-    } catch (caught) {
-      setNotice({ text: caught instanceof Error ? caught.message : "暂时无法刷新任务状态。", tone: "warning" });
+    } catch {
+      // The feed owns connection failures so the workspace renders one
+      // reconnect warning and clears it from one place after recovery.
       return undefined;
     }
   }

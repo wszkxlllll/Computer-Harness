@@ -24,6 +24,7 @@ export interface CuaWindowDiscoveryOptions {
   readonly sessionLabel?: string;
   readonly driverFactory?: (socketPath: string) => CuaDriverLike;
   readonly windowRelationshipProbe?: WindowRelationshipProbe;
+  readonly osPlatform?: NodeJS.Platform;
 }
 
 export class CuaWindowDiscoveryCleanupError extends Error {
@@ -72,17 +73,18 @@ export class CuaWindowDiscovery {
    */
   public async captureWindowPreview(target: CuaWindowTarget, signal: AbortSignal): Promise<CuaWindowPreviewCapture> {
     validateWindowTarget(target);
+    const osPlatform = this.options.osPlatform ?? process.platform;
     return this.withSerializedOperation(() => this.withDriver(signal, async (driver, session) => {
-      const before = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe);
+      const before = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe, osPlatform);
       requireExactPreviewCandidate(before, target);
-      const capture = await captureWindowWithRetry(driver, session, target, signal);
+      const capture = await captureWindowWithRetry(driver, session, target, signal, undefined, osPlatform);
       if (capture.binding.target.pid !== target.pid || capture.binding.target.windowId !== target.windowId) {
         throw new Error("window preview capture did not retain the exact candidate identity");
       }
       if (capture.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
         throw new Error("window preview exceeds the bounded image size");
       }
-      const inventory = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe);
+      const inventory = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe, osPlatform);
       const after = requireExactPreviewCandidate(inventory, target);
       const beforeCandidate = requireExactPreviewCandidate(before, target);
       if (beforeCandidate.appName !== undefined && after.appName !== undefined &&
@@ -103,6 +105,7 @@ export class CuaWindowDiscovery {
       undefined,
       onScreenOnly,
       this.options.windowRelationshipProbe,
+      this.options.osPlatform ?? process.platform,
     ));
   }
 

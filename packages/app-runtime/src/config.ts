@@ -87,7 +87,11 @@ export interface ResolvedRunConfig {
   qwenEndpoint?: string;
   qwenWorkspaceId?: string;
   glmThinking?: "disabled" | "enabled" | "low" | "high" | "max";
+  /** Total GLM completion/reasoning budget; defaults to 8192, bounded at 131072. */
+  glmMaxOutputTokens?: number;
   glmEndpoint?: string;
+  /** Bounded live-interactive deadline for one GLM request. */
+  glmRequestTimeoutMs?: number;
   fixtureResult?: string;
   monitor?: MonitorPolicyMode;
 }

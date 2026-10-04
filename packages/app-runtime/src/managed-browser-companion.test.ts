@@ -39,6 +39,7 @@ const WINDOWS: readonly FixtureWindow[] = [
 ];
 
 type RunStep =
+  | { readonly kind: "click"; readonly callId: string; readonly expectedEnabled: boolean }
   | { readonly kind: "list"; readonly callId: string }
   | { readonly kind: "switch"; readonly callId: string; readonly listCallId: string; readonly targetTitle: string }
   | { readonly kind: "finish" };
@@ -69,6 +70,7 @@ interface FixtureOptions {
   readonly profileLabel?: string;
   readonly profileRoot?: string;
   readonly failure?: "bootstrap" | "host" | "delegate";
+  readonly failDomCapture?: boolean;
 }
 
 interface FixtureMetrics {
@@ -138,14 +140,26 @@ function createDriver(options: { readonly failStart?: boolean; readonly failCapt
             app_name: window.appName,
             bounds: WINDOW_BOUNDS,
           }));
-        return toolResult({ structuredJson: JSON.stringify({ windows }) });
+        return toolResult({ structuredJson: JSON.stringify({ windows, complete: true }) });
       }
       if (name === "bring_to_front") {
         return toolResult({ structuredJson: JSON.stringify({ landed_on_target: true }) });
       }
       if (name === "get_window_state") {
         if (input.include_screenshot === true) {
-          return toolResult({ images: [{ mimeType: "image/png", dataBase64: pngWithDimensions(100, 100) }] });
+          return toolResult({
+            images: [{ mimeType: "image/png", dataBase64: pngWithDimensions(100, 100) }],
+            structuredJson: JSON.stringify({
+              pid: input.pid,
+              window_id: input.window_id,
+              window_bounds: WINDOW_BOUNDS,
+              screenshot_frame_valid: true,
+              screenshot_width: 100,
+              screenshot_height: 100,
+              screenshot_mime_type: "image/png",
+              screenshot_scale: 1,
+            }),
+          });
         }
         return toolResult({
           structuredJson: JSON.stringify({
@@ -192,6 +206,12 @@ function scriptedProvider(steps: readonly RunStep[], trace: ProviderTrace): Prov
       trace.toolNames.push(input.tools.map((tool) => tool.name));
       const step = steps[cursor++];
       if (step === undefined) throw new Error("fixture Provider received more turns than scripted");
+      if (step.kind === "click") {
+        expect(input.tools.some((tool) => tool.name === "click")).toBe(step.expectedEnabled);
+        // A misbehaving Provider can still request a hidden tool; Runtime must
+        // reject it without sending native input to the managed browser.
+        return { type: "tool_calls", calls: [{ id: step.callId as ToolCallId, name: "click", arguments: { x: 20, y: 20 } }] };
+      }
       if (step.kind === "finish") {
         if (pendingListCallId !== undefined) {
           trace.listedWindows.push(listedWindowsFrom(input, pendingListCallId));
@@ -233,6 +253,7 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
   const domTargets: CuaWindowTarget[] = [];
   const domTransport = createMockDomGroundingTransport((request) => {
     domTargets.push({ ...request.browserTarget.windowTarget });
+    if (options.failDomCapture === true) throw new Error("fixture DOM capture unavailable");
     return { complete: true, tabId: `fixture-tab-${domTargets.length}`, generation: `fixture-generation-${domTargets.length}`, candidates: [] };
   });
 
@@ -376,6 +397,41 @@ async function runFixture(session: ApplicationSession, windowSwitch: "off" | "op
 }
 
 describe("managed browser companion through ApplicationSession and the real tool registry", () => {
+  it.each([false, true])("restores desktop/native clicks while browser clicks stay blocked (DOM capture failure: %s)", async (failDomCapture) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-companion-surface-click-"));
+    const fixture = await createFixture(outputDir, {
+      companion: true,
+      failDomCapture,
+      steps: [
+        { kind: "click", callId: "desktop-click", expectedEnabled: true },
+        { kind: "list", callId: "desktop-list" },
+        { kind: "switch", callId: "to-browser", listCallId: "desktop-list", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "blocked-browser-click", expectedEnabled: false },
+        { kind: "list", callId: "browser-list" },
+        { kind: "switch", callId: "to-native", listCallId: "browser-list", targetTitle: "Native Editor" },
+        { kind: "click", callId: "native-click", expectedEnabled: true },
+        { kind: "list", callId: "native-list" },
+        { kind: "switch", callId: "back-to-browser", listCallId: "native-list", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "blocked-browser-click-again", expectedEnabled: false },
+        { kind: "finish" },
+      ],
+    });
+    try {
+      const { handle, outcome } = await runFixture(fixture.session, "opened-windows-v1");
+      const failures = handle.controller.getEvents().filter((event) => event.type === "runtime.error" || event.type === "action.execution.failed");
+      expect(outcome, JSON.stringify(failures)).toBe("succeeded");
+      const clicks = fixture.metrics.delegateDriver.calls.filter((call) => call.name === "click");
+      expect(clicks).toHaveLength(2);
+      expect(clicks[0]?.input).toMatchObject({ target: { kind: "desktop", display_id: "primary" } });
+      expect(clicks[1]?.input).toMatchObject({ target: { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId } });
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations.some((event) => event.type === "observation.created" && event.observation.surfaceRef.kind === (failDomCapture ? "browser_tab" : "dom"))).toBe(true);
+    } finally {
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the default CUA run on its chosen native window without starting a browser Host", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-default-"));
     const fixture = await createFixture(outputDir, { initialTarget: NATIVE_TARGET });

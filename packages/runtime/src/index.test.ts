@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { GlmProviderError } from "../../provider-glm/src/index.js";
 import type {
   ActionId,
   ActionIntent,
@@ -1615,6 +1616,7 @@ describe("RunController cancellation and unknown side effects", () => {
     const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
     expect(events.some((event) => event.type === "model.request.failed" && event.category === "cancelled" && event.message.includes("test cancellation"))).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "cancelled" });
+    expect(events.at(-1)).not.toHaveProperty("summary");
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1632,6 +1634,7 @@ describe("RunController cancellation and unknown side effects", () => {
     expect(events.some((event) => event.type === "action.execution.completed")).toBe(false);
     expect(events.some((event) => event.type === "action.execution.failed")).toBe(false);
     expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "outcome_unknown" });
+    expect(events.at(-1)).not.toHaveProperty("summary");
     const snapshot = reduceRuntimeEvents(events, runId);
     expect(snapshot.unresolvedActionId).toBeDefined();
     await rm(directory, { recursive: true, force: true });
@@ -1700,6 +1703,24 @@ describe("RunController command inbox and control semantics", () => {
     expect(events.map((event) => event.type)).toContain("user.input.requested");
     expect(events.map((event) => event.type)).toContain("user.input.received");
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("treats an explicit stop in the human-review field as cancellation", async () => {
+    let requestedResolve!: () => void;
+    const requested = new Promise<void>((resolve) => { requestedResolve = resolve; });
+    const provider = new ScriptedProvider(
+      [{ type: "user_input_required", question: "检查当前页面后再继续。" }, { type: "finish", summary: "should not be reached" }],
+      (count) => { if (count === 1) requestedResolve(); },
+    );
+    const created = await makeController(provider);
+    const running = created.controller.start("inspect the page");
+    await requested;
+    await waitUntil(() => created.controller.getSnapshot().status === "waiting_user");
+    await created.controller.submitUserInput("停止当前任务。保留最后截图，不要再操作。", created.controller.getEvents().find((event) => event.type === "user.input.requested")?.eventId);
+    await expect(running).resolves.toBe("cancelled");
+    expect(provider.inputs).toHaveLength(1);
+    expect(created.controller.getEvents().some((event) => event.type === "user.input.received")).toBe(true);
+    await rm(created.directory, { recursive: true, force: true });
   });
 
   it("supersedes a GUI ToolCall when correction arrives before action started", async () => {
@@ -2035,6 +2056,13 @@ describe("RunController command inbox and control semantics", () => {
     await expect(running).resolves.toBe("succeeded");
     expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
     expect(created.controller.getEvents().some((event) => event.type === "approval.resolved")).toBe(true);
+    const events = created.controller.getEvents();
+    const completedActionIndex = events.findIndex((event) => event.type === "action.execution.completed");
+    const postActionObservationIndex = events.findIndex((event, index) => index > completedActionIndex && event.type === "observation.created");
+    const followupModelRequestIndex = events.findIndex((event, index) => index > completedActionIndex && event.type === "model.request.started");
+    expect(completedActionIndex).toBeGreaterThanOrEqual(0);
+    expect(postActionObservationIndex).toBeGreaterThan(completedActionIndex);
+    expect(followupModelRequestIndex).toBeGreaterThan(postActionObservationIndex);
     expect(reduceRuntimeEvents(await readRuntimeEvents(join(created.directory, "trajectory.jsonl")), runId)).toEqual(created.controller.getSnapshot());
     await rm(created.directory, { recursive: true, force: true });
   });
@@ -2266,6 +2294,58 @@ describe("RunController S2-4 failure boundaries", () => {
     expect(created.controller.getEvents().filter((event) => event.type === "model.request.started")).toHaveLength(1);
     expect(created.controller.getEvents().some((event) => event.type === "model.request.failed")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it.each(["completed", "refused", "failed", "wait", "none"])("reports Provider failure after %s without replay or claiming goal success", async (scenario) => {
+    let requests = 0;
+    const computer = scenario === "refused" ? new RefusingComputer() : new FakeComputer();
+    if (scenario === "failed") computer.execute = async (_session, action) => {
+      computer.calls.push(`execute:${action.kind}`);
+      return { actionId: action.actionId, status: "failed" };
+    };
+    const provider: ProviderAdapter = { id: "timeout-provider", async generate() {
+      requests += 1;
+      if (requests === 1 && scenario !== "none") return { type: "tool_calls", calls: [scenario === "wait" ? { id: "wait-progress" as ToolCallId, name: "wait", arguments: { durationMs: 1 } } : typeCall("type-progress", "PRIVATE_INPUT_MARKER")] };
+      throw Object.assign(new Error("private provider text"), { code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+    } };
+    const created = await makeController(provider, computer, batchRegistry());
+    try {
+      await expect(created.controller.start("fixture goal")).resolves.toBe("failed");
+      const events = created.controller.getEvents();
+      const finished = events.at(-1);
+      expect(finished).toMatchObject({ type: "run.finished", outcome: "failed", summary: expect.stringContaining("任务完成未确认") });
+      if (finished?.type !== "run.finished") throw new Error("missing finish");
+      expect(finished.summary).toContain(`已保留 ${scenario === "completed" ? 1 : 0} 个非等待 GUI 动作完成回执`);
+      expect(finished.summary).toContain(`${scenario === "refused" ? 1 : 0} 个拒绝回执`);
+      expect(finished.summary).toContain(`${scenario === "failed" ? 1 : 0} 个失败回执`);
+      expect(finished.summary).not.toMatch(/PRIVATE_INPUT_MARKER|private provider text/u);
+      const observation = [...events].reverse().find((event) => event.type === "observation.created");
+      if (scenario === "completed" && observation?.type === "observation.created") expect(finished.summary).toContain(`assetId=${observation.observation.screenshot.assetId}`);
+      else expect(finished.summary).not.toContain("最近动作后的截图已保存");
+      expect(created.controller.getSnapshot().summary).toBe(finished.summary);
+      expect(requests).toBe(scenario === "none" ? 1 : 2);
+      expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(scenario === "none" ? 0 : scenario === "wait" ? 0 : 1);
+      expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(1);
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it("does not replan or replay GUI after a fast incomplete response following completed input", async () => {
+    let requests = 0;
+    const computer = new FakeComputer();
+    const provider: ProviderAdapter = { id: "glm-fast-length", async generate() {
+      requests += 1;
+      if (requests === 1) return { type: "tool_calls", calls: [typeCall("before-length", "SYNTHETIC_ONCE")] };
+      if (requests === 2) throw new GlmProviderError("GLM response ended with incomplete finish_reason: length", "GLM_INCOMPLETE_RESPONSE");
+      return { type: "tool_calls", calls: [typeCall("must-not-replay", "SYNTHETIC_ONCE")] };
+    } };
+    const created = await makeController(provider, computer, batchRegistry());
+    try {
+      await expect(created.controller.start("single input fixture")).resolves.toBe("failed");
+      expect(requests).toBe(2);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(1);
+      expect(created.controller.getEvents().find((event) => event.type === "model.request.failed")).toMatchObject({ code: "GLM_INCOMPLETE_RESPONSE", retryable: false, retryMode: "feedback" });
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", outcome: "failed", summary: expect.stringContaining("已保留 1 个非等待 GUI 动作完成回执") });
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
   });
 
   it("retries retryable Provider response errors with an explicit reason before any action", async () => {
@@ -3742,6 +3822,10 @@ describe("RunController Monitor online consumer", () => {
     const beforeInput = created.controller.getEvents();
     const requestIndex = beforeInput.findIndex((event) => event.type === "user.input.requested");
     expect(requestIndex).toBeGreaterThan(-1);
+    expect(beforeInput[requestIndex]).toMatchObject({
+      type: "user.input.requested",
+      question: expect.stringContaining("不要重复输入网址或重复点击同一入口"),
+    });
     expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "tool.call.completed" || event.type === "tool.call.failed")).toBe(true);
     expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "observation.created" && event.sequence > (beforeInput.find((candidate) => candidate.type === "action.execution.completed")?.sequence ?? -1))).toBe(true);
     expect(beforeInput.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(false);

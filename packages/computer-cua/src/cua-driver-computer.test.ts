@@ -6,9 +6,17 @@ import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
 import type { ActionId, ActionIntent, ObservationId } from "@computer-harness/protocol";
-import { CuaDriverComputer } from "./cua-driver-computer.js";
-import { createMockDomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
-import { captureWindowWithRetry, listWindowInventory, listWindowTargets } from "./window-contract.js";
+import { CuaDriverComputer as ProductionCuaDriverComputer, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
+import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
+import { captureWindow, captureWindowWithRetry as productionCaptureWindowWithRetry, listWindowInventory, listWindowTargets } from "./window-contract.js";
+
+// Historical native fixtures model Windows. Make their contract independent
+// of the machine running Vitest; macOS contract cases explicitly opt in.
+class CuaDriverComputer extends ProductionCuaDriverComputer {
+  public constructor(options: CuaDriverComputerOptions) { super({ platform: "win32", ...options }); }
+}
+
+const captureWindowWithRetry: typeof productionCaptureWindowWithRetry = (driver, session, target, signal, options, platform = "win32") => productionCaptureWindowWithRetry(driver, session, target, signal, options, platform);
 
 const ONE_BY_ONE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -55,6 +63,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let image = { ...initialImage };
   let missing = false;
   let groundingState: Record<string, unknown> | undefined;
+  let groundingStateSequence: readonly Record<string, unknown>[] | undefined;
+  let groundingStateIndex = 0;
   let abortGrounding = false;
   let captureImages: ToolResult["images"][] | undefined;
   let captureImageIndex = 0;
@@ -76,6 +86,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let foregroundRefusalCode: string | undefined;
   let activationRefusal = false;
   let activationLanded = true;
+  let activationTargetHwnd: number | undefined;
+  let activationForegroundHwnd: number | undefined;
   let groundingStateByWindowId = new Map<number, Record<string, unknown>>();
   const windowImageSizes = new Map<number, { width: number; height: number }>();
   let actionToolCallCount = 0;
@@ -123,7 +135,11 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       if (name === "bring_to_front") {
         return activationRefusal
           ? result({ isError: true, text: "fixture activation refused" })
-          : result({ structuredJson: JSON.stringify({ landed_on_target: activationLanded }) });
+          : result({ structuredJson: JSON.stringify({
+            landed_on_target: activationLanded,
+            ...(activationTargetHwnd === undefined ? {} : { target_hwnd: activationTargetHwnd }),
+            ...(activationForegroundHwnd === undefined ? {} : { now_fg_hwnd: activationForegroundHwnd }),
+          }) });
       }
       if (name === "list_windows") {
         listWindowsCallCount += 1;
@@ -183,6 +199,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         ] }) });
       }
       if (name === "get_window_state") {
+        if (input.include_screenshot === true && fallbackRefusal === undefined) return result({
+          images: fallbackImages ?? (input.max_depth === 1 && input.max_elements === 1 ? [{ mimeType: "image/png", dataBase64: pngWithDimensions(image.width, image.height) }] : []),
+          structuredJson: JSON.stringify({ pid: target.pid, window_id: target.windowId, window_bounds: bounds, screenshot_frame_valid: true, screenshot_scale: 2, screenshot_width: image.width, screenshot_height: image.height, screenshot_mime_type: "image/png" }),
+        });
         if (abortGrounding) throw Object.assign(new Error("grounding aborted"), { name: "AbortError" });
         if (fallbackRefusal !== undefined) {
           return result({
@@ -193,9 +213,12 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
           });
         }
         const windowId = typeof input.window_id === "number" ? input.window_id : undefined;
+        const state = groundingStateSequence === undefined
+          ? groundingState
+          : groundingStateSequence[Math.min(groundingStateIndex++, groundingStateSequence.length - 1)];
         return result({
           images: input.include_screenshot === true ? fallbackImages ?? [] : [],
-          structuredJson: JSON.stringify((windowId === undefined ? undefined : groundingStateByWindowId.get(windowId)) ?? groundingState ?? {}),
+          structuredJson: JSON.stringify((windowId === undefined ? undefined : groundingStateByWindowId.get(windowId)) ?? state ?? {}),
         });
       }
       if (["click", "type_text", "press_key", "hotkey", "scroll", "drag"].includes(name)) {
@@ -249,7 +272,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     calls,
     setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
     setMissing(value: boolean) { missing = value; },
-    setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; },
+    setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; groundingStateSequence = undefined; groundingStateIndex = 0; },
+    setGroundingStateSequence(values: readonly Record<string, unknown>[]) { groundingStateSequence = values; groundingStateIndex = 0; },
     setGroundingAbort(value: boolean) { abortGrounding = value; },
     setCaptureImages(value: ToolResult["images"][] | undefined) { captureImages = value; captureImageIndex = 0; },
     setFallbackImages(value: ToolResult["images"] | undefined) { fallbackImages = value; },
@@ -285,6 +309,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     },
     setActivationRefusal(value: boolean) { activationRefusal = value; },
     setActivationLanded(value: boolean) { activationLanded = value; },
+    setActivationHandles(targetHwnd: number | undefined, foregroundHwnd: number | undefined) {
+      activationTargetHwnd = targetHwnd;
+      activationForegroundHwnd = foregroundHwnd;
+    },
   };
 }
 
@@ -448,6 +476,26 @@ describe("CuaDriverComputer", () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-miss-"));
     const fake = windowDriver();
     fake.setActivationLanded(false);
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    try {
+      await expect(computer.open({}, new AbortController().signal)).rejects.toThrow(/did not land on the exact window target/u);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
+      expect(fake.calls.some((call) => call.name === "verifyState")).toBe(false);
+      expect(fake.calls.some((call) => call.name === "click" || call.name === "type_text" || call.name === "press_key")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when bring_to_front reports a different actual foreground HWND", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-foreground-mismatch-"));
+    const fake = windowDriver();
+    // The selected target reports success, but the daemon's actual foreground
+    // remains another window (the shape observed with macOS sheets).
+    fake.setActivationHandles(fake.target.windowId, fake.target.windowId + 1);
     const computer = new CuaDriverComputer({
       socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
       windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
@@ -2245,6 +2293,7 @@ describe("CuaDriverComputer", () => {
         now: () => 0,
         delay: async (milliseconds) => { retryDelays.push(milliseconds); },
       },
+      "win32",
     );
     expect(capture.viewport).toEqual({ width: 958, height: 678, coordinateSpace: "physical" });
     expect(retryDelays).toEqual([]);
@@ -4974,6 +5023,7 @@ describe("CuaDriverComputer", () => {
       ],
     });
     const computer = new CuaDriverComputer({
+      platform: "win32",
       socketPath: "test-socket",
       screenshotDir: directory,
       windowTarget: fake.target,
@@ -5275,6 +5325,127 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("resamples the same hybrid observation until its trusted content rect makes DOM grounding available", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-first-frame-ready-"));
+    const fake = windowDriver();
+    fake.setGroundingStateSequence([
+      { elements_complete: true, elements: [{ role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true }] },
+      { elements_complete: true, elements: [
+        { role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+        { role: "AXWebArea", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      ] },
+    ]);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    let collectCount = 0;
+    const transport = createMockDomGroundingTransport(() => {
+      collectCount += 1;
+      return {
+        complete: true,
+        tabId: "tab-fixture",
+        generation: "generation-1",
+        coordinateSpace: "physical",
+        candidates: [{ tagName: "select", name: "Departure", frame: { x: 200, y: 220, width: 120, height: 28 }, visible: true, interactive: true, options: [{ text: "08:00", enabled: true }], state: { enabled: true } }],
+      };
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      grounding: "hybrid-catalog-v1",
+      browserTarget,
+      domGroundingTransport: transport,
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const capture = await computer.observe(session, "hybrid-first-frame-ready" as ObservationId, new AbortController().signal);
+      expect(capture.grounding).toMatchObject({ source: "hybrid", degraded: false });
+      expect(capture.grounding?.elements.some((element) => element.source === "dom" && element.role === "combobox" && element.options?.some((option) => option.text === "08:00"))).toBe(true);
+      expect(collectCount).toBe(1);
+      expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(2);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels hybrid content-rect resampling when the observation signal aborts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-resample-abort-"));
+    const fake = windowDriver();
+    fake.setGroundingState({ elements_complete: true, elements: [{ role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true }] });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: createMockDomGroundingTransport({ tabId: "tab-fixture", generation: "generation-1", candidates: [] }), driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const controller = new AbortController();
+      const pending = computer.observe(session, "hybrid-resample-abort" as ObservationId, controller.signal);
+      setTimeout(() => controller.abort(new Error("hybrid grounding observation aborted")), 10);
+      await expect(pending).rejects.toThrow(/hybrid grounding observation aborted/iu);
+      expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps managed-browser window containers visible as context but refuses their clicks", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-container-click-"));
+    const fake = windowDriver();
+    fake.setGroundingStateSequence([
+      { elements_complete: true, elements: [
+        { role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      ] },
+      { elements_complete: true, elements: [
+        { role: "AXWindow", name: "Browser", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+        { role: "AXWebArea", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      ] },
+    ]);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: createMockDomGroundingTransport({ tabId: "tab-fixture", generation: "generation-1", candidates: [] }), driverFactory: () => fake.driver });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      const capture = await computer.observe(session, "container-click" as ObservationId, new AbortController().signal);
+      const container = capture.grounding?.elements.find((element) => element.source === "uia" && element.name === "Browser");
+      expect(container).toMatchObject({ state: { enabled: false } });
+      const receipt = await computer.execute(session, {
+        actionId: "container-click" as ActionId,
+        basedOn: "container-click" as ObservationId,
+        kind: "click",
+        point: { x: container!.bbox!.x + container!.bbox!.width / 2, y: container!.bbox!.y + container!.bbox!.height / 2 },
+        groundingRef: container!.elementRef,
+      }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("labels UIA browser regions only in managed hybrid mode using the trusted Document rect", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-region-"));
     const fake = windowDriver(
@@ -5329,7 +5500,8 @@ describe("CuaDriverComputer", () => {
         kind: "click",
         point: { x: content!.bbox!.x + content!.bbox!.width / 2, y: content!.bbox!.y + content!.bbox!.height / 2 },
         groundingRef: content!.elementRef,
-      }, new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+      }, new AbortController().signal)).resolves.toMatchObject({ status: "refused", driverCode: "MANAGED_BROWSER_DOM_REQUIRED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -5519,7 +5691,121 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+
+  it("calibrates DOM grounding from the macOS AXWebArea content rect", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-web-area-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1568, height: 1181 }, { width: 1568, height: 1181 });
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        { role: "AXWebArea", name: "Apple", frame: { x: 0, y: 114, width: 1568, height: 1067 }, enabled: true },
+      ],
+    });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    try {
+      const computer = new CuaDriverComputer({
+        socketPath: "test-socket",
+        screenshotDir: directory,
+        windowTarget: fake.target,
+        grounding: "hybrid-catalog-v1",
+        browserTarget,
+        domGroundingTransport: createMockDomGroundingTransport({
+          complete: true,
+          tabId: "tab-fixture",
+          generation: "generation-1",
+          coordinateSpace: "css",
+          viewportMetrics: { cssWidth: 1568, cssHeight: 1067, deviceScaleFactor: 1 },
+          candidates: [{ tagName: "a", name: "Mac 机型比较", frame: { x: 1045, y: 369, width: 111, height: 121 }, visible: true, interactive: true, state: { enabled: true } }],
+        }),
+        driverFactory: () => fake.driver,
+      });
+      const session = await computer.open({}, new AbortController().signal);
+      const capture = await computer.observe(session, "macos-web-area-observation" as ObservationId, new AbortController().signal);
+      expect(capture.grounding?.source).toBe("hybrid");
+      expect(capture.grounding?.degraded).toBe(false);
+      expect(capture.grounding?.elements.some((element) => element.source === "dom" && element.name === "Mac 机型比较")).toBe(true);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("delivers a DOM-grounded click through managed CDP instead of native coordinates", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-dom-click-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        { role: "Document", frame: { x: 0, y: 0, width: 1000, height: 800 }, enabled: true },
+        // Deliberately duplicate the managed DOM candidate. The selected
+        // action below uses this UIA ref to reproduce the failed real run.
+        { role: "AXLink", name: "Contact user@example.com", frame: { x: 100, y: 100, width: 120, height: 40 }, enabled: true },
+      ],
+    });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "fixture-profile",
+      windowTarget: fake.target,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      delivery: "loopback-cdp",
+    };
+    const clickRequests: unknown[] = [];
+    const transport = createMockDomGroundingTransport({
+      complete: true,
+      tabId: "tab-fixture",
+      generation: "generation-1",
+      coordinateSpace: "physical",
+      candidates: [{ tagName: "a", name: "Contact user@example.com", frame: { x: 100, y: 100, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true } }],
+    }) as DomGroundingTransport & { click: NonNullable<DomGroundingTransport["click"]> };
+    transport.click = async (request, signal) => {
+      signal.throwIfAborted();
+      clickRequests.push(request);
+      return { status: "completed", tabId: "tab-fixture", generation: "generation-1", message: "dom click fixture" };
+    };
+    try {
+      const computer = new CuaDriverComputer({
+        socketPath: "test-socket",
+        screenshotDir: directory,
+        windowTarget: fake.target,
+        grounding: "hybrid-catalog-v1",
+        browserTarget,
+        domGroundingTransport: transport,
+        driverFactory: () => fake.driver,
+      });
+      const session = await computer.open({}, new AbortController().signal);
+      const observationId = "dom-click-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, new AbortController().signal);
+      const element = capture.grounding?.elements.find((candidate) => candidate.source === "uia" && candidate.name === "Contact [redacted-email]");
+      expect(element?.bbox).toBeDefined();
+      const receipt = await computer.execute(session, {
+        kind: "click",
+        actionId: "dom-click-action" as ActionId,
+        basedOn: observationId,
+        groundingRef: element!.elementRef,
+        point: { x: element!.bbox!.x + element!.bbox!.width / 2, y: element!.bbox!.y + element!.bbox!.height / 2 },
+      }, new AbortController().signal);
+      expect(receipt).toMatchObject({ status: "completed", message: "dom click fixture" });
+      expect(clickRequests).toHaveLength(1);
+      expect(clickRequests[0]).toMatchObject({ candidate: { name: "Contact user@example.com" } });
+      expect(fake.calls.some((call) => call.name === "click")).toBe(false);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not swallow an AbortError from the UIA query", async () => {
+    // Native grounding reads retain their abort semantics.
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-grounding-abort-"));
     const fake = windowDriver();
     fake.setGroundingAbort(true);
@@ -5539,6 +5825,260 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it.each(["win32", "darwin"] as const)("scopes chrome input permission to %s shortcuts and revokes it before focus-changing dispatch", async (platform) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-focus-shortcuts-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setPlatform(platform);
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true },
+      { role: "Edit", name: "Address and search bar", frame: { x: 100, y: 10, width: 400, height: 30 }, enabled: true, focused: true, editable: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const transport = createMockDomGroundingTransport({ complete: true, tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: [] });
+    const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, platform, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "shortcut-frame" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      let id = 0;
+      const key = (keys: string[]) => computer.execute(session, { kind: "keypress", actionId: ("shortcut-" + id++) as ActionId, basedOn, keys }, signal);
+      const type = () => computer.execute(session, { kind: "type", actionId: ("text-" + id++) as ActionId, basedOn, text: "fixture" }, signal);
+      for (const modifier of ["CTRL", "CMD", "META"]) {
+        expect(await key([modifier, "L"])).toMatchObject({ status: "completed" });
+        const valid = platform === "darwin" ? modifier !== "CTRL" : modifier === "CTRL";
+        expect(await type()).toMatchObject({ status: valid ? "completed" : "refused" });
+        expect(await type()).toMatchObject({ status: "refused" });
+      }
+      const modifier = platform === "darwin" ? "CMD" : "CTRL";
+      await key([modifier, "L"]);
+      await key([modifier, "A"]);
+      expect(await type()).toMatchObject({ status: "completed" });
+      await key([modifier, "L"]);
+      await key([modifier, "F"]);
+      const sent = fake.calls.filter((call) => call.name === "type_text").length;
+      expect(await type()).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(sent);
+      await key([modifier, "L"]);
+      const originalCall = fake.driver.callTool.bind(fake.driver);
+      const shortcutTool = platform === "win32" ? "press_key" : "hotkey";
+      const dispatch = vi.spyOn(fake.driver, "callTool").mockImplementation(async (name, ...args) => {
+        if (name === shortcutTool) throw new Error("unknown shortcut outcome");
+        return originalCall(name, ...args);
+      });
+      await expect(key([modifier, "F"])).rejects.toThrow("unknown shortcut outcome");
+      dispatch.mockRestore();
+      expect(await type()).toMatchObject({ status: "refused" });
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["dom-observed", "dom-live", "uia-missing", "uia-partial", "chrome-changed"] as const)("refuses address-bar typing when positive focus evidence is %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-chrome-focus-proof-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    const document = { role: "Document", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true };
+    const address = { role: "Edit", name: "Address and search bar", frame: { x: 100, y: 10, width: 400, height: 30 }, enabled: true, focused: true, editable: true };
+    fake.setGroundingState({ elements_complete: true, elements: [document, address] });
+    let domFocused = false;
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const transport = createMockDomGroundingTransport(() => ({ complete: true, tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: [{ tagName: "input", ariaRole: "textbox", inputType: "text", name: "Page input", frame: { x: 100, y: 200, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: domFocused } }] }));
+    const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      let basedOn = "chrome-proof-before" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      expect(await computer.execute(session, { kind: "keypress", actionId: "location-shortcut" as ActionId, basedOn, keys: ["CTRL", "L"] }, signal)).toMatchObject({ status: "completed" });
+      if (scenario.startsWith("dom-")) domFocused = true;
+      if (scenario === "uia-missing") fake.setGroundingState({ elements_complete: true, elements: [document] });
+      if (scenario === "uia-partial") fake.setGroundingState({ elements_complete: false, elements: [document, address] });
+      if (scenario === "chrome-changed") fake.setGroundingState({ elements_complete: true, elements: [document, { ...address, name: "Find in page" }] });
+      await computer.execute(session, { kind: "wait", actionId: "wait-before-type" as ActionId, durationMs: 1 }, signal);
+      if (scenario === "dom-observed") {
+        basedOn = "chrome-proof-page-focus" as ObservationId;
+        await computer.observe(session, basedOn, signal);
+        // Even if focus later moves away, the observed conflict invalidated
+        // this intent; type must not adopt the page or reuse chrome permission.
+        domFocused = false;
+      }
+      expect(await computer.execute(session, { kind: "type", actionId: "refused-chrome-text" as ActionId, basedOn, text: "https://example.test/" }, signal)).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["missing", "partial", "ambiguous"] as const)("refuses native UIA content fallback when DOM equivalence is %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-dom-gate-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true },
+      { role: "Button", name: "Continue", frame: { x: 100, y: 200, width: 120, height: 40 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const domCandidate = { tagName: "button", ariaRole: "button", name: "Continue", frame: { x: 100, y: 200, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true } };
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({ complete: scenario !== "partial", tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario === "missing" ? [] : scenario === "ambiguous" ? [domCandidate, domCandidate] : [domCandidate] }),
+      click: vi.fn(async () => ({ status: "completed" as const, tabId: "tab", generation: "generation" })),
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "uia-content" as ObservationId;
+      const observation = await computer.observe(session, basedOn, signal);
+      const candidate = observation.grounding!.elements.find((item) => item.source === "uia" && item.name === "Continue")!;
+      expect(await computer.execute(session, { kind: "click", actionId: "uia-fallback" as ActionId, basedOn, groundingRef: candidate.elementRef, point: { x: 160, y: 220 } }, signal)).toMatchObject({ status: "refused", driverCode: "MANAGED_BROWSER_DOM_REQUIRED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      expect(transport.click).not.toHaveBeenCalled();
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("requires fresh verified focus after Tab and clears page/chrome bindings across peer switches", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-focus-surface-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setExtraWindow({ pid: 4321, windowId: 8765, appName: "Native", title: "Native fixture" });
+    fake.setGroundingState({ elements_complete: true, elements: [{ role: "Document", frame: { x: 0, y: 0, width: 1000, height: 800 }, enabled: true }] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    let focused: string | undefined = "A";
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({ complete: true, tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: ["A", "B"].map((name, index) => ({ tagName: "input", inputType: "text", ariaRole: "textbox", name, frame: { x: 100, y: 100 + index * 100, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: focused === name } })) }),
+      verifyFocus: vi.fn(async (request) => ({ status: focused === request.candidate.name ? "completed" as const : "refused" as const, tabId: "tab", generation: "generation", driverCode: "DOM_INPUT_FOCUS_MISMATCH" })),
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target, { pid: 4321, windowId: 8765 }], grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      let session = await computer.open({}, signal);
+      let basedOn = "focus-A" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      const type = (id: string) => computer.execute(session, { kind: "type", actionId: id as ActionId, basedOn, text: "fixture" }, signal);
+      expect(await type("bind-A")).toMatchObject({ status: "completed" });
+      expect(await computer.execute(session, { kind: "keypress", actionId: "tab-to-B" as ActionId, basedOn, keys: ["TAB"] }, signal)).toMatchObject({ status: "completed" });
+      focused = "B";
+      // The old observation still describes A and may not authorize B.
+      expect(await type("stale-after-tab")).toMatchObject({ status: "refused" });
+      basedOn = "focus-B" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      // A failed implicit focus adoption must not stick across observations.
+      expect(await type("fresh-after-tab")).toMatchObject({ status: "completed" });
+      expect(transport.verifyFocus).toHaveBeenLastCalledWith(expect.objectContaining({ candidate: expect.objectContaining({ name: "B" }) }), signal);
+      const switchTo = async (title: string) => {
+        const option = (await computer.listWindows(session, signal)).options.find((item) => item.title === title)!;
+        const receipt = await computer.execute(session, { kind: "switch_window", actionId: ("switch-" + title) as ActionId, basedOn, windowRef: option.windowRef }, signal);
+        expect(receipt.status).toBe("completed");
+        if (receipt.status !== "completed") throw new Error("fixture window switch did not complete");
+        session = receipt.sessionAfter!;
+        basedOn = ("after-" + title) as ObservationId;
+        await computer.observe(session, basedOn, signal);
+      };
+      await switchTo("Native fixture");
+      focused = undefined;
+      expect(await type("native-after-page")).toMatchObject({ status: "completed" });
+      await switchTo("Safe fixture");
+      expect(await type("browser-return-needs-focus")).toMatchObject({ status: "refused" });
+      await computer.execute(session, { kind: "keypress", actionId: "chrome-before-switch" as ActionId, basedOn, keys: ["CTRL", "L"] }, signal);
+      await switchTo("Native fixture");
+      await switchTo("Safe fixture");
+      expect(await type("chrome-permission-not-restored")).toMatchObject({ status: "refused" });
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("validates editable DOM/UIA clicks once and gates native typing across fresh observations", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-dom-focus-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", frame: { x: 0, y: 0, width: 1000, height: 800 }, enabled: true },
+      { role: "AXTextField", name: "Query", frame: { x: 100, y: 100, width: 120, height: 40 }, enabled: true, editable: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab-fixture", generation: "generation-1", delivery: "loopback-cdp" };
+    let focus = false;
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({ tabId: browserTarget.tabId, generation: browserTarget.generation, coordinateSpace: "physical", complete: true, candidates: [{ tagName: "input", ariaRole: "textbox", inputType: "text", name: "Query", frame: { x: 100, y: 100, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: focus } }] }),
+      click: vi.fn(async () => { throw new Error("editable input must never dispatch programmatic click"); }),
+      validateClick: vi.fn(async () => ({ status: "completed" as const, tabId: browserTarget.tabId, generation: browserTarget.generation })),
+      verifyFocus: vi.fn(async () => focus ? ({ status: "completed" as const, tabId: browserTarget.tabId, generation: browserTarget.generation }) : ({ status: "refused" as const, driverCode: "DOM_INPUT_FOCUS_MISMATCH" })),
+    };
+    try {
+      const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+      const signal = new AbortController().signal;
+      const session = await computer.open({}, signal);
+      let observationId = "focus-initial" as ObservationId;
+      const capture = await computer.observe(session, observationId, signal);
+      const type = (id: string) => computer.execute(session, { kind: "type", actionId: id as ActionId, basedOn: observationId, text: "query" }, signal);
+      expect(await type("unbound-type")).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      const input = capture.grounding!.elements.find((element) => element.source === "uia" && element.name === "Query")!;
+      expect(await computer.execute(session, { kind: "click", actionId: "native-focus-click" as ActionId, basedOn: observationId, groundingRef: input.elementRef, point: { x: 160, y: 120 } }, signal)).toMatchObject({ status: "completed" });
+      expect(transport.validateClick).toHaveBeenCalledTimes(1);
+      expect(transport.click).not.toHaveBeenCalled();
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      observationId = "focus-after-click" as ObservationId;
+      await computer.observe(session, observationId, signal);
+      expect(await type("page-unfocused")).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      expect(await computer.execute(session, { kind: "keypress", actionId: "escape-unfocused" as ActionId, basedOn: observationId, keys: ["ESC"] }, signal)).toMatchObject({ status: "refused" });
+      expect(await type("still-protected")).toMatchObject({ status: "refused" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      focus = true;
+      expect(await type("focused-type")).toMatchObject({ status: "completed" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      focus = false;
+      const refuseShortcut = vi.spyOn(fake.driver, "callTool").mockResolvedValueOnce(result({ isError: true, text: "location bar shortcut refused; no keyboard input was sent" }));
+      expect(await computer.execute(session, { kind: "keypress", actionId: "location-bar-refused" as ActionId, basedOn: observationId, keys: ["CTRL", "L"] }, signal)).toMatchObject({ status: "refused" });
+      refuseShortcut.mockRestore();
+      expect(await type("refused-location-keeps-binding")).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      expect(await computer.execute(session, { kind: "keypress", actionId: "location-bar" as ActionId, basedOn: observationId, keys: ["CTRL", "L"] }, signal)).toMatchObject({ status: "completed" });
+      expect(await type("explicit-location-input")).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
+      expect(await type("location-permission-consumed")).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      expect(await computer.execute(session, { kind: "keypress", actionId: "location-enter" as ActionId, basedOn: observationId, keys: ["ENTER"] }, signal)).toMatchObject({ status: "completed" });
+      expect(await type("location-mode-ended")).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+
+  it.each(["background", "validation-refusal", "inventory-failure", "unknown-click"] as const)("keeps editable browser click %s fail-closed without fallback or replay", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-dom-boundary-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({ elements_complete: true, elements: [{ role: "Document", frame: { x: 0, y: 0, width: 1000, height: 800 }, enabled: true }] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab-fixture", generation: "generation-1", delivery: "loopback-cdp" };
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({ tabId: browserTarget.tabId, generation: browserTarget.generation, coordinateSpace: "physical", complete: true, candidates: [{ tagName: "input", name: "Query", frame: { x: 100, y: 100, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: false } }] }),
+      click: vi.fn(async () => ({ status: "completed" as const })),
+      validateClick: vi.fn(async () => ({ status: scenario === "validation-refusal" ? "refused" as const : "completed" as const, driverCode: "DOM_CLICK_OCCLUDED", tabId: browserTarget.tabId, generation: browserTarget.generation })),
+      verifyFocus: vi.fn(async () => ({ status: "refused" as const, driverCode: "DOM_INPUT_FOCUS_MISMATCH" })),
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: scenario === "background" ? "background" : "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    try {
+      const signal = new AbortController().signal;
+      const session = await computer.open({}, signal);
+      const observationId = "boundary-observation" as ObservationId;
+      const capture = await computer.observe(session, observationId, signal);
+      const input = capture.grounding!.elements.find((element) => element.source === "dom" && element.name === "Query")!;
+      const originalCall = fake.driver.callTool.bind(fake.driver);
+      let attemptedClicks = 0;
+      const dispatch = vi.spyOn(fake.driver, "callTool").mockImplementation(async (name, ...args) => {
+        if (scenario === "inventory-failure" && name === "list_windows") throw new Error("inventory unavailable");
+        if (name === "click") { attemptedClicks += 1; if (scenario === "unknown-click") throw new Error("unknown native click outcome"); }
+        return originalCall(name, ...args);
+      });
+      const click = computer.execute(session, { kind: "click", actionId: "boundary-click" as ActionId, basedOn: observationId, groundingRef: input.elementRef, point: { x: 160, y: 120 } }, signal, { detectNewWindowHandoff: scenario === "inventory-failure" });
+      if (scenario === "unknown-click") {
+        await expect(click).rejects.toThrow(/unknown native click outcome/);
+        expect(await computer.execute(session, { kind: "type", actionId: "after-unknown" as ActionId, basedOn: observationId, text: "blocked" }, signal)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+        expect(transport.verifyFocus).toHaveBeenCalledTimes(1);
+      } else await expect(click).resolves.toMatchObject({ status: "refused" });
+      expect(attemptedClicks).toBe(scenario === "unknown-click" ? 1 : 0);
+      expect(transport.click).not.toHaveBeenCalled();
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      dispatch.mockRestore();
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("maps click, scroll, and drag coordinates from the image viewport to window-local bounds", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-coordinate-map-"));
     const fake = windowDriver(
@@ -5546,6 +6086,7 @@ describe("CuaDriverComputer", () => {
       { width: 1568, height: 1310 },
     );
     const computer = new CuaDriverComputer({
+      platform: "win32",
       socketPath: "test-socket",
       screenshotDir: directory,
       windowTarget: fake.target,
@@ -5612,6 +6153,7 @@ describe("CuaDriverComputer", () => {
       { width: 1568, height: 1310 },
     );
     const computer = new CuaDriverComputer({
+      platform: "win32",
       socketPath: "test-socket",
       screenshotDir: directory,
       windowTarget: fake.target,
@@ -5644,6 +6186,7 @@ describe("CuaDriverComputer", () => {
   });
 
   it("keeps foreground window delivery an explicit host choice", async () => {
+    // Host delivery choice remains independent of the platform pixel contract.
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-foreground-"));
     const fake = windowDriver();
     const computer = new CuaDriverComputer({
@@ -5671,7 +6214,86 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it.each(["foreground", "background"] as const)("sends macOS screenshot pixels without a second bounds scale in %s delivery", async (delivery) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-pixels-"));
+    const fake = windowDriver({ x: 0, y: 12, width: 1200, height: 904 }, { width: 1568, height: 1181 });
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: delivery, platform: "darwin", driverFactory: () => fake.driver });
+    try {
+      const signal = new AbortController().signal;
+      const session = await computer.open({}, signal);
+      const basedOn = "mac-pixel-observation" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      expect(await computer.execute(session, { kind: "click", actionId: "mac-pixel-click" as ActionId, basedOn, point: { x: 106, y: 216 } }, signal)).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ x: 106, y: 216, delivery_mode: delivery });
+      // The real failed Run sent (81,165) for this screenshot point. CUA owns
+      // the backing/resize conversion, so no bounds projection belongs here.
+      if (delivery === "foreground") {
+        expect(await computer.execute(session, { kind: "scroll", actionId: "mac-pixel-scroll" as ActionId, basedOn, point: { x: 1567, y: 1180 }, direction: "down", ticks: 1 }, signal)).toMatchObject({ status: "completed" });
+        expect(fake.calls.find((call) => call.name === "scroll")?.input).toMatchObject({ x: 1567, y: 1180 });
+        expect(await computer.execute(session, { kind: "drag", actionId: "mac-pixel-drag" as ActionId, basedOn, from: { x: 106, y: 216 }, to: { x: 1567, y: 1180 } }, signal)).toMatchObject({ status: "completed" });
+        expect(fake.calls.find((call) => call.name === "drag")?.input).toMatchObject({ from_x: 106, from_y: 216, to_x: 1567, to_y: 1180 });
+      }
+      expect(await computer.execute(session, { kind: "click", actionId: "mac-pixel-invalid" as ActionId, basedOn, point: { x: 1568, y: 1181 } }, signal)).toMatchObject({ status: "refused", driverCode: "WINDOW_COORDINATE_INVALID" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("refuses macOS pointer input when a fresh execution image changes the decision pixel scale", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-pixel-drift-"));
+    const fake = windowDriver({ x: 0, y: 12, width: 1200, height: 904 }, { width: 1568, height: 1181 });
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", platform: "darwin", driverFactory: () => fake.driver });
+    try {
+      const signal = new AbortController().signal;
+      const session = await computer.open({}, signal);
+      const basedOn = "mac-pixel-decision" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      fake.setBounds({ x: 0, y: 12, width: 1200, height: 904 }, { width: 800, height: 603 });
+      const executionObservationId = "mac-pixel-execution" as ObservationId;
+      await computer.observe(session, executionObservationId, signal);
+      expect(await computer.execute(session, { kind: "click", actionId: "mac-pixel-drift" as ActionId, basedOn, point: { x: 106, y: 216 } }, signal, { executionObservationId })).toMatchObject({ status: "refused", driverCode: "WINDOW_VIEWPORT_CHANGED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      expect(await computer.execute(session, { kind: "keypress", actionId: "mac-key-no-pixel-scale" as ActionId, basedOn, keys: ["ESC"] }, signal, { executionObservationId })).toMatchObject({ status: "completed" });
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["dom", "uia"] as const)("delivers a CSS-grounded editable control selected through %s in macOS PNG pixels after trusted UIA projection", async (source) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-dom-pixels-"));
+    const fake = windowDriver({ x: 0, y: 12, width: 1200, height: 904 }, { width: 1568, height: 1181 });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "AXWebArea", frame: { x: 0, y: 112, width: 1200, height: 804 }, enabled: true },
+      { role: "AXTextField", name: "Search", frame: { x: 8, y: 168, width: 147, height: 22 }, enabled: true, editable: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab-fixture", generation: "generation-1", delivery: "loopback-cdp" };
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({ tabId: browserTarget.tabId, generation: browserTarget.generation, complete: true, coordinateSpace: "css", viewportMetrics: { cssWidth: 1200, cssHeight: 804, deviceScaleFactor: 2 }, candidates: [{ tagName: "input", ariaRole: "textbox", inputType: "text", name: "Search", frame: { x: 8, y: 56, width: 147, height: 22 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: false } }] }),
+      click: vi.fn(async () => ({ status: "completed" as const })),
+      validateClick: vi.fn(async () => ({ status: "completed" as const, tabId: browserTarget.tabId, generation: browserTarget.generation })),
+      verifyFocus: vi.fn(async () => ({ status: "refused" as const, driverCode: "DOM_INPUT_FOCUS_MISMATCH" })),
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", platform: "darwin", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    try {
+      const signal = new AbortController().signal;
+      const session = await computer.open({}, signal);
+      const basedOn = "mac-dom-projected" as ObservationId;
+      const capture = await computer.observe(session, basedOn, signal);
+      const input = capture.grounding!.elements.find((element) => element.source === source && element.name === "Search")!;
+      const point = { x: input.bbox!.x + input.bbox!.width / 2, y: input.bbox!.y + input.bbox!.height / 2 };
+      expect(point.x).toBeCloseTo(106.4933, 3);
+      expect(point.y).toBeCloseTo(218.1715, 3);
+      expect(await computer.execute(session, { kind: "click", actionId: "mac-dom-input" as ActionId, basedOn, groundingRef: input.elementRef, point }, signal)).toMatchObject({ status: "completed" });
+      expect(fake.calls.find((call) => call.name === "click")?.input).toMatchObject({ x: 106, y: 218 });
+      expect(transport.validateClick).toHaveBeenCalledTimes(1);
+      expect(transport.click).not.toHaveBeenCalled();
+      expect(await computer.execute(session, { kind: "type", actionId: "mac-dom-still-guarded" as ActionId, basedOn, text: "A-LINE-FOCUS-001" }, signal)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("refuses an old window action after resize and reobserves the new image viewport", async () => {
+    // Window resize still invalidates the geometry binding before input.
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-window-"));
     const fake = windowDriver();
     const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, driverFactory: () => fake.driver });
@@ -5702,6 +6324,91 @@ describe("CuaDriverComputer", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it.each([undefined, "ax_tree_empty", "ax_window_unresolved"] as const)("registers the macOS screenshot ratio before native input and leaves it intact across UIA-only reads (AX status %s)", async (axStatus) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-registry-"));
+    const bounds = { x: 0, y: 12, width: 1200, height: 904 };
+    const fake = windowDriver(bounds, { width: 1568, height: 1181 });
+    fake.setGroundingState({ elements_complete: true, elements: [{ role: "AXWebArea", frame: { x: 0, y: 112, width: 1200, height: 804 }, enabled: true, name: "private synthetic title" }] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab-fixture", generation: "generation-1", delivery: "loopback-cdp" };
+    let ratio = 1;
+    let nativeScreen: { x: number; y: number } | undefined;
+    const order: string[] = [];
+    const originalVerify = fake.driver.verifyState.bind(fake.driver);
+    vi.spyOn(fake.driver, "verifyState").mockImplementation(async (...args) => { order.push("verify-only"); return originalVerify(...args); });
+    const originalCall = fake.driver.callTool.bind(fake.driver);
+    vi.spyOn(fake.driver, "callTool").mockImplementation(async (name, inputJson, ...args) => {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      if (name === "get_window_state") {
+        if (input.include_screenshot === true) { ratio = 2400 / 1568; order.push("registered-png"); }
+        else order.push("uia-only");
+      }
+      if (name === "click") {
+        order.push("click");
+        nativeScreen = { x: Number(input.x) * ratio / 2 + bounds.x, y: Number(input.y) * ratio / 2 + bounds.y };
+      }
+      const value = await originalCall(name, inputJson, ...args);
+      if (axStatus !== undefined && name === "get_window_state" && input.include_screenshot === true) {
+        return { ...value, degraded: true, structuredJson: JSON.stringify({ ...JSON.parse(value.structuredJson!), degraded: true, degraded_reason: `${axStatus}: synthetic AX-only degradation` }) };
+      }
+      return value;
+    });
+    try {
+      // Reproduce the old capture's missing registry state: the same PNG is
+      // delivered by verify_state, but the pinned driver does not set ratio.
+      const legacy = await captureWindow(fake.driver, "legacy-observation-only", { target: fake.target, bounds }, new AbortController().signal, "win32");
+      expect(legacy.viewport.width).toBe(1568);
+      expect(ratio).toBe(1);
+      expect(106 * ratio / 2).toBe(53); // wrong screen point before registration
+      const computer = new ProductionCuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", platform: "darwin", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: "tab-fixture", generation: "generation-1", coordinateSpace: "physical", candidates: [] }), driverFactory: () => fake.driver });
+      const signal = new AbortController().signal;
+      const session = await computer.open({}, signal);
+      const basedOn = "registered-observation" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      expect(ratio).toBe(2400 / 1568);
+      expect(order.slice(-3)).toEqual(["verify-only", "registered-png", "uia-only"]);
+      const receipt = await computer.execute(session, { kind: "click", actionId: "registered-point" as ActionId, basedOn, point: { x: 106, y: 218 } }, signal);
+      expect(receipt).toMatchObject({ status: "completed" });
+      expect(nativeScreen!.x).toBeCloseTo(81.1224, 3);
+      expect(nativeScreen!.y).toBeCloseTo(178.8367, 3);
+      expect(order.filter((entry) => entry === "click")).toHaveLength(1);
+      expect(receipt.message).toContain("source=get_window_state_registered viewport=1568x1181 bounds=1200x904 target=1234/5678 delivery=foreground");
+      expect(receipt.message).toContain('point={"x":106,"y":218}');
+      expect(receipt.message).not.toContain("private synthetic title");
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["missing-png", "refused", "identity", "reported-size", "frame-invalid", "unknown-degraded", "abort", "post-resize"] as const)("fails closed on macOS registered capture %s without returning the old verify PNG", async (failure) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-registry-refusal-"));
+    const fake = windowDriver({ x: 0, y: 12, width: 1200, height: 904 }, { width: 1568, height: 1181 });
+    const originalCall = fake.driver.callTool.bind(fake.driver);
+    const controller = new AbortController();
+    let registeredCalls = 0;
+    vi.spyOn(fake.driver, "callTool").mockImplementation(async (name, inputJson, ...args) => {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      const value = await originalCall(name, inputJson, ...args);
+      if (name !== "get_window_state" || input.include_screenshot !== true) return value;
+      registeredCalls += 1;
+      if (failure === "refused") return result({ isError: true, text: "permission denied" });
+      if (failure === "missing-png") return { ...value, images: [] };
+      if (failure === "abort") { controller.abort(new Error("registered capture cancelled")); return value; }
+      if (failure === "post-resize") { fake.setBounds({ x: 0, y: 12, width: 1201, height: 904 }, { width: 1568, height: 1181 }); return value; }
+      const metadata = JSON.parse(value.structuredJson!) as Record<string, unknown>;
+      if (failure === "unknown-degraded") return { ...value, degraded: true, structuredJson: JSON.stringify({ ...metadata, degraded: true, degraded_reason: "unknown private title must not be emitted" }) };
+      if (failure === "identity") metadata.window_id = 8765;
+      if (failure === "reported-size") metadata.screenshot_width = 1200;
+      if (failure === "frame-invalid") metadata.screenshot_frame_valid = false;
+      return { ...value, structuredJson: JSON.stringify(metadata) };
+    });
+    const computer = new ProductionCuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", platform: "darwin", driverFactory: () => fake.driver });
+    try {
+      await expect(computer.open({}, controller.signal)).rejects.toThrow();
+      expect(registeredCalls).toBe(1);
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      expect(fake.calls.filter((call) => call.name === "verifyState")).toHaveLength(1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it("dispatches verified window input primitives and never falls back when a target closes", async () => {
@@ -5902,6 +6609,7 @@ describe("CuaDriverComputer", () => {
       screenshotDir: directory,
       windowTarget: fake.target,
       windowDeliveryMode: deliveryMode,
+      platform,
       driverFactory: () => fake.driver,
     });
     try {

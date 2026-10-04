@@ -39,7 +39,13 @@ assert.deepEqual(sanitizedRecord.usage, {
   api_tokens: "[REDACTED]",
 });
 
-const report = await runOfflineSelfTest();
+const originalFetch = globalThis.fetch;
+let attemptedNetworkCalls = 0;
+let report;
+globalThis.fetch = async () => { attemptedNetworkCalls += 1; throw new Error("Offline self-test attempted a network request"); };
+try { report = await runOfflineSelfTest(); }
+finally { globalThis.fetch = originalFetch; }
+assert.equal(attemptedNetworkCalls, 0);
 assert.equal(report.status, "passed");
 assert.equal(report.networkCalls, 0);
 assert.deepEqual(report.transport, {
@@ -65,6 +71,14 @@ assert.deepEqual(report.runs.map((run) => `${run.provider}/${run.scenarioId}`), 
 assert.deepEqual(report.runs.map((run) => run.requests), [5, 3, 3, 5, 3, 3]);
 assert.deepEqual(report.runs.map((run) => run.requestLimit), [6, 4, 4, 6, 4, 4]);
 assert.ok(report.runs.every((run) => run.contextMode === "raw" && run.outcome === "succeeded"));
+for (const run of report.runs) {
+  const expectedKinds = run.scenarioId === "native_browser_return" ? ["native_window", "browser_tab", "native_window"]
+    : run.scenarioId === "browser_to_wps" ? ["browser_tab", "native_window"] : ["desktop", "native_window"];
+  assert.deepEqual(run.observedSurfaces.map((surface) => surface.kind), expectedKinds);
+  assert.deepEqual(run.observedSurfaces.map((surface) => surface.generation), expectedKinds.map((_kind, index) => index + 1));
+  assert.ok(run.observedSurfaces.filter((surface) => surface.kind === "browser_tab").every((surface) => surface.parentSurfaceId && surface.parentSurfaceId !== surface.surfaceId));
+  if (run.scenarioId === "native_browser_return") assert.equal(run.observedSurfaces[0].surfaceId, run.observedSurfaces[2].surfaceId);
+}
 for (const provider of ["glm", "qwen"]) {
   const providerRuns = report.runs.filter((run) => run.provider === provider);
   assert.equal(providerRuns.reduce((sum, run) => sum + run.requests, 0), 11);

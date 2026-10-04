@@ -1,4 +1,4 @@
-import { CuaWindowDiscovery, ManagedBrowserHost, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
 import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList, ObservationCapture, ObservationId } from "@computer-harness/protocol";
@@ -73,7 +73,12 @@ export function prepareComputerRunAssembly(
     groundingTools,
     enabledToolNames(registry) {
       if (!windowScoped || effectiveConfig.kind !== "cua") return undefined;
-      const allowedComputerTools = new Set(["click", "wait"]);
+      // Single-target managed browsers only click through grounded elements.
+      // Cross-window Runs retain the click candidate for desktop/native peers;
+      // Runtime filters it again for the current browser Surface, including
+      // when its DOM catalog is unavailable.
+      const groundedClicksOnly = managedGrounding && windowSwitch === "off";
+      const allowedComputerTools = new Set(groundedClicksOnly ? ["wait"] : ["click", "wait"]);
       if (effectiveConfig.windowDeliveryMode === "foreground") {
         allowedComputerTools.add("type");
         allowedComputerTools.add("keypress");
@@ -337,7 +342,7 @@ class ManagedBrowserComputer implements Computer {
       this.bootstrap = bootstrap;
       const createHost = this.options.createHost;
       const host = createHost({
-        browser: "edge",
+        browser: defaultManagedBrowserKind(),
         url: this.options.config.managedBrowserUrl!,
         profileMode: this.options.config.managedBrowserProfileMode ?? "ephemeral",
         ...(this.options.config.managedBrowserProfileLabel === undefined ? {} : { profileLabel: this.options.config.managedBrowserProfileLabel }),

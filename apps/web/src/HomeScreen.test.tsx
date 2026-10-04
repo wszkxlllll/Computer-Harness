@@ -54,7 +54,7 @@ describe("home run-target selection", () => {
     });
   });
 
-  it("submits the default automatic target without loading or selecting a window", async () => {
+  it("submits an explicitly selected automatic target without loading or selecting a window", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
     vi.mocked(listWindowTargets).mockReturnValue(new Promise<WindowTargetList>(() => undefined));
     renderHome();
@@ -64,8 +64,9 @@ describe("home run-target selection", () => {
     const goal = await screen.findByLabelText("想让电脑做什么？");
     const startButton = screen.getByRole("button", { name: "开始任务" });
     fireEvent.change(goal, { target: { value: "Find a window automatically" } });
+    chooseStartMode(/自动选择/);
     await screen.findByText("这里还没有任务");
-    expect(screen.getByText(/选择起点 · 自动选择（推荐）/)).toBeDefined();
+    expect(screen.getByText(/选择起点 · 自动选择/)).toBeDefined();
     openStartSelection();
     expect((screen.getByRole("radio", { name: /自动选择/ }) as HTMLInputElement).checked).toBe(true);
     expect(screen.queryByRole("radio", { name: /Browser.*Contacts/ })).toBeNull();
@@ -108,7 +109,7 @@ describe("home run-target selection", () => {
   });
 
   it.each([
-    ["auto", /自动选择（推荐）/, { mode: "auto" }],
+    ["auto", /自动选择/, { mode: "auto" }],
     ["window", /手动选择窗口/, { mode: "window", targetToken: "opaque-a" }],
     ["browser", /打开网站/, { mode: "browser" }],
     ["desktop", /整个桌面（高级）/, { mode: "desktop" }],
@@ -124,7 +125,7 @@ describe("home run-target selection", () => {
     expect(screen.getByText(/应用名和标题会发送给当前模型/)).toBeDefined();
     fireEvent.click(switchInput);
 
-    if (_name !== "auto") chooseStartMode(modeLabel);
+    chooseStartMode(modeLabel);
     if (_name === "window") fireEvent.click(await screen.findByRole("radio", { name: /Browser.*Contacts/ }));
 
     await screen.findByText("这里还没有任务");
@@ -161,7 +162,7 @@ describe("home run-target selection", () => {
     await screen.findByText("这里还没有任务");
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 
-    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Summarize this page", expect.any(String), { mode: "auto" }, {
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith("Summarize this page", expect.any(String), { mode: "browser" }, {
       version: 1,
       responseDetail: "detailed",
       stepExplanation: "more",
@@ -422,6 +423,7 @@ describe("home run-target selection", () => {
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: "Keep this goal after choosing a window" } });
+    chooseStartMode(/自动选择/);
     await screen.findByText("这里还没有任务");
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 
