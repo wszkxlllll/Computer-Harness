@@ -18,7 +18,9 @@
 
 已合入 `origin/main` 的 `961a098`，保留队友 macOS 焦点／DOM 指纹、浏览器和 Provider 改动。合并后补齐 DOM click/select 成功动作的恢复标记，只有不同 GUI 动作完成且 fresh observe 后才解除旧未知 primitive 防护；修正两个旧能力测试的裸数组／固定引用夹具，生产窗口引用校验没有放宽。
 
-最终业务源码 commit：`c484879f7b0691418a4776b4ee5686b8813abc48`。协调者独立执行根 `tsc -b`、CUA spike no-emit、Web production build、111 个 Vitest 文件／1654 项全部通过、built CLI help；附加 13 个脚本入口汇总 70 通过／1 项因 Windows 符号链接能力跳过。Sol 最终源码审查 GO，独立相关集成测试 56 项通过；Luna 实施，Sol 集中复核，不以作者测试代替独立结果。
+首次冻结业务源码 commit：`c484879f7b0691418a4776b4ee5686b8813abc48`。协调者独立执行根 `tsc -b`、CUA spike no-emit、Web production build、111 个 Vitest 文件／1654 项全部通过、built CLI help；附加 13 个脚本入口汇总 70 通过／1 项因 Windows 符号链接能力跳过。Sol 最终源码审查 GO，独立相关集成测试 56 项通过；Luna 实施，Sol 集中复核，不以作者测试代替独立结果。
+
+PR [#22](https://github.com/wszkxlllll/Computer-Harness/pull/22) 的首次 CI 中 Windows、Linux Node 22／24 通过，macOS 失败。已读失败日志：三个内部 transient capture 没传目标平台，帮助函数错误使用宿主平台；另有 Windows 预览模拟未固定平台。修复统一已有“显式配置 → CUA 会话 → 宿主”来源，补齐所有截图调用；仅测试使用 Windows fixture，真实 macOS 默认及生产校验不变，无新包 API／options／协议。独立窄审 3 项通过；协调者修复后再次根构建及全量回归，111 文件／1655 项全部通过。实际 macOS CI 重跑未返回前，不宣布可以合入。
 
 本轮没有为应用增加窗口类名／控件尺寸规则，未增加模型工具或输入模式。真实任务证据仍保持分项：记事本保存通过；WPS 保存未通过；携程查询与切换通过、报告整体未通过。最终代码收尾后未重跑这些桌面任务，新追加路线的实机效果不能据单测宣称已通过。
 

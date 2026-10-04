@@ -805,6 +805,17 @@ interface PrivateSession {
   unknownActionReconfirmedSurfaceRef?: SurfaceRef;
 }
 
+/** Resolve platform-specific capture behavior from the explicit override, the
+ * detected CUA session, then the host fallback. `hostPlatform` supports stable
+ * unit coverage without mutating process.platform. */
+export function resolveCapturePlatform(
+  configuredPlatform: NodeJS.Platform | undefined,
+  sessionPlatform: NodeJS.Platform | undefined,
+  hostPlatform: NodeJS.Platform = process.platform,
+): NodeJS.Platform {
+  return configuredPlatform ?? sessionPlatform ?? hostPlatform;
+}
+
 interface PendingDriverCleanup {
   label: string;
   driver: CuaDriverLike;
@@ -981,7 +992,7 @@ export class CuaDriverComputer implements Computer {
         }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
-        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, this.options.platform ?? platform ?? process.platform);
+        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, platform));
         windowBinding = capture.binding;
         viewport = capture.viewport;
         const peer = registerNativePeer(surfaceRegistry, asNativeWindowIdentity(capture.binding.target));
@@ -1125,7 +1136,7 @@ export class CuaDriverComputer implements Computer {
           captureBinding.target,
           signal,
           this.options.windowCaptureRetry,
-          this.options.platform ?? current.platform ?? process.platform,
+          resolveCapturePlatform(this.options.platform, current.platform),
         );
         const liveBinding = capture.binding;
         const previousBinding = current.windowBindings.get(windowIdentityKey(liveBinding.target));
@@ -1517,6 +1528,7 @@ export class CuaDriverComputer implements Computer {
         candidate.target,
         signal,
         this.options.windowCaptureRetry,
+        resolveCapturePlatform(this.options.platform, current.platform),
       );
       signal.throwIfAborted();
     } catch (error) {
@@ -1701,6 +1713,7 @@ export class CuaDriverComputer implements Computer {
       firstProof.parentTarget,
       signal,
       this.options.windowCaptureRetry,
+      resolveCapturePlatform(this.options.platform, current.platform),
     );
     if (!sameWindowGeometry(firstParentCapture.binding.bounds, firstProof.parentBounds)) return undefined;
     const currentInventory = await this.readCompleteWin32Inventory(current, signal);
@@ -1915,7 +1928,12 @@ export class CuaDriverComputer implements Computer {
     let capture: CuaWindowCapture;
     try {
       capture = await captureWindowWithRetry(
-        current.driver, current.label, candidate.target, signal, this.options.windowCaptureRetry,
+        current.driver,
+        current.label,
+        candidate.target,
+        signal,
+        this.options.windowCaptureRetry,
+        resolveCapturePlatform(this.options.platform, current.platform),
       );
       signal.throwIfAborted();
     } catch (error) {
@@ -2611,7 +2629,7 @@ export class CuaDriverComputer implements Computer {
 
     let capture: Awaited<ReturnType<typeof captureWindowWithRetry>>;
     try {
-      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, this.options.platform ?? current.platform ?? process.platform);
+      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, current.platform));
       signal.throwIfAborted();
     } catch (error) {
       if (activationAttempted) {

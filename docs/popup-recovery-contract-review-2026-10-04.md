@@ -16,7 +16,13 @@ Status: final source/integration GO for fb4d7bb plus the scoped DOM replay-guard
 
 本次独立离线验证：集成 pattern 45/45（CUA 31、Remote 9、Pending UI 5）；共享 selector/Host factory/CLI reexport 与本地 Host HTTP→真实 Relay WSS 测试 11/11，合计 56 个不同相关 case 通过。修正后另按 root 要求重跑 DOM 两分支加原 wait/failed guard 三项，3/3；该三项已经包含在 56 项内，不重复计数。packages/computer-cua 的 tsc --noEmit exit 0，git diff --check 无新增空白问题。root 的 fresh 全量 build/tests 此时另行执行，未把其未返回结果写成通过。本地 HTTP/WSS 是 mock 窗口与设备夹具，不等于真实配对手机或原生桌面操作。
 
-root 后续反馈 fresh compile 通过，首次全量 1652 passed、2 failed；两项为 main capability-tool-filter 测试的旧 windowRef 与最新列表不一致，另有作者核查处理中，本审没有进入该第三文件，也没有为测试放宽生产验证。此结果不是最终全量通过，最终回归结论待 root 的再跑结果。
+root 最终独立执行结果：fresh tsc-b 与 spike noEmit 通过，Vitest 111 文件、1654 项全部通过，built CLI --help 通过；13 个 Node script suites 合计 70 passed、1 个 Windows symlink skip。此前两个 main capability-tool-filter 测试已改为正常 ComputerWindowList 夹具，未放宽生产验证。本审没有进入该第三文件，这些全量结果明确归属 root，不能计为本审独立执行，也不等于真实桌面或手机验收。
+
+### macOS CI 平台夹具修正窄审
+
+root 随后读取 macOS CI 的 11 项失败日志，作者只改 CUA driver source/test 与 window-discovery test 三文件。本次只读窄审 GO：统一 capture 平台 resolver 按 configured → detected session → host 解析，补齐 initial child、parent restoration、sibling 三处 nested capture 的平台参数，原 Mac 正常 capture 路由未被强写为 Windows。resolver 仅源码文件导出供直接单测使用，未新增 package index export、options 或协议，也未放松身份、关系、foreground、capture 或 unknown 验证。WindowsFixtureDiscovery 只限定 Windows 测试默认值，显式 darwin/linux fixture 仍使用生产类；生产 discovery 的默认宿主平台没有修改。
+
+本审独立仅三个必要 case 3/3 通过：session platform 优先于不同 host、already-open owned Menu 的 Windows capture、macOS inventory 正常路由。未改业务文件、未 build、未 GUI/API 或 spawn；真实 macOS CI 再跑尚未返回，不声称 CI 已修复通过。文档 UTF-8 读回验证后冻结，真实任务缺口仍按下段保留。
 
 明确未实测边界：本轮没有实际 macOS/Linux SDK 多行端效果，没有验证原生邻窗 token 拒绝及 pre-read-default 覆盖风险，没有真实手机触摸/PNG 解码质量/网络取消体验，也没有重跑完整 WPS 与携程→记事本跨应用保存。真实任务结果只认 root 留存的 receipt、截图、输出文件及 cleanup 证据，不由本源码 GO 补造。
 

@@ -6,7 +6,7 @@ import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
 import type { ActionId, ActionIntent, ObservationId } from "@computer-harness/protocol";
-import { CuaDriverComputer as ProductionCuaDriverComputer, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
+import { CuaDriverComputer as ProductionCuaDriverComputer, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
 import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { captureWindow, captureWindowWithRetry as productionCaptureWindowWithRetry, listWindowInventory, listWindowTargets } from "./window-contract.js";
 
@@ -393,6 +393,12 @@ function fakeDriver() {
 }
 
 describe("CuaDriverComputer", () => {
+  it("uses the active CUA session platform ahead of a different host fallback", () => {
+    expect(resolveCapturePlatform(undefined, "win32", "darwin")).toBe("win32");
+    expect(resolveCapturePlatform(undefined, "darwin", "win32")).toBe("darwin");
+    expect(resolveCapturePlatform(undefined, undefined, "darwin")).toBe("darwin");
+  });
+
   it("activates the exact HWND once before fresh capture and never reactivates before an action", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-"));
     const fake = windowDriver();
@@ -2689,7 +2695,13 @@ describe("CuaDriverComputer", () => {
         return { ...snapshot, foregroundPid: fake.target.pid, foregroundWindowId: fake.target.windowId };
       },
     };
-    const computer = new CuaDriverComputer({
+    const verifyRequests: Array<{ readonly windowId: bigint; readonly includeScreenshot: boolean }> = [];
+    const verifyState = fake.driver.verifyState.bind(fake.driver);
+    fake.driver.verifyState = async (input, options) => {
+      verifyRequests.push({ windowId: input.windowId, includeScreenshot: input.includeScreenshot });
+      return verifyState(input, options);
+    };
+    const computer = new ProductionCuaDriverComputer({
       socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
       windowDeliveryMode: "foreground", grounding: "off", windowRelationshipProbe: parentForegroundProbe,
       driverFactory: () => fake.driver,
@@ -2704,6 +2716,7 @@ describe("CuaDriverComputer", () => {
       expect(opened.surfaceRef).toMatchObject({ kind: "native_window", parentSurfaceId: expect.any(String) });
       expect(opened.grounding).toBeUndefined();
       expect(session.capabilities.accessibility).toBe(false);
+      expect(verifyRequests.find((request) => request.windowId === BigInt(menu.windowId))).toMatchObject({ includeScreenshot: true });
       expect(fake.calls.filter((call) => call.name === "get_accessibility_tree")).toHaveLength(0);
       expect(fake.calls.filter((call) => call.name === "verifyState" && call.input?.window_id === menu.windowId)).toHaveLength(1);
       expect(fake.calls.filter((call) => call.name === "get_window_state" && call.input?.window_id === menu.windowId))

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
-import { CuaWindowDiscovery } from "./window-discovery.js";
+import { CuaWindowDiscovery as ProductionCuaWindowDiscovery, type CuaWindowDiscoveryOptions } from "./window-discovery.js";
 
 installFakeCuaSdkModuleForTests();
 
@@ -25,6 +25,10 @@ function minimalPngBase64(width = 320, height = 240): string {
   return Buffer.from(data).toString("base64");
 }
 
+class WindowsFixtureDiscovery extends ProductionCuaWindowDiscovery {
+  public constructor(options: CuaWindowDiscoveryOptions) { super({ osPlatform: "win32", ...options }); }
+}
+
 describe("CuaWindowDiscovery", () => {
   it("lists host windows through a temporary read-only session and cleans it up", async () => {
     const calls: string[] = [];
@@ -38,7 +42,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([{
       target: { pid: 1234, windowId: 5678 },
       bounds: { x: 1, y: 2, width: 3, height: 4 },
@@ -64,7 +68,7 @@ describe("CuaWindowDiscovery", () => {
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
     let probeCalls = 0;
-    const discovery = new CuaWindowDiscovery({
+    const discovery = new WindowsFixtureDiscovery({
       socketPath: "fixture",
       driverFactory: () => driver,
       windowRelationshipProbe: {
@@ -157,7 +161,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
     const preview = await discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal);
 
@@ -200,7 +204,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
     await expect(discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal))
       .resolves.toMatchObject({ inventory: { complete: false }, capture: { binding: { target: { pid: 1234, windowId: 5678 } } } });
@@ -235,7 +239,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
     await expect(discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal))
       .rejects.toThrow("candidate is missing or ambiguous");
@@ -274,7 +278,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     const controller = new AbortController();
     const preview = discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, controller.signal);
     await started;
@@ -320,7 +324,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
     await expect(discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal))
       .rejects.toThrow("bounded image size");
@@ -342,7 +346,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() {},
       uniffiDestroy() {},
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({
+    const discovery = new WindowsFixtureDiscovery({
       socketPath: "fixture",
       driverFactory: () => driver,
       osPlatform: "win32",
@@ -409,7 +413,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() {},
       uniffiDestroy() {},
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver, osPlatform: "darwin" });
+    const discovery = new ProductionCuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver, osPlatform: "darwin" });
 
     await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([
       {
@@ -509,7 +513,7 @@ describe("CuaWindowDiscovery", () => {
         async shutdown() {},
         uniffiDestroy() {},
       } as unknown as CuaDriverLike;
-      const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver, osPlatform });
+      const discovery = new ProductionCuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver, osPlatform });
 
       await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([
         {
@@ -542,7 +546,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push({ tool: "shutdown" }); },
       uniffiDestroy() { calls.push({ tool: "destroy" }); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
     await expect(discovery.listWindows(new AbortController().signal, false)).resolves.toMatchObject([
       { target: { pid: 102_140, windowId: 33_296_778 }, title: "微信" },
@@ -578,7 +582,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() {},
       uniffiDestroy() {},
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     await expect(discovery.activateWindow({ pid: 123, windowId: 10 }, new AbortController().signal)).resolves.toBeUndefined();
   });
 
@@ -594,7 +598,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     await expect(discovery.activateWindow({ pid: 123, windowId: 10 }, new AbortController().signal))
       .rejects.toMatchObject({ name: "WindowContractError", code: "WINDOW_ACTIVATION_REFUSED" });
     expect(calls).toEqual(["startSession", "bring_to_front", "endSession", "shutdown", "destroy"]);
@@ -623,7 +627,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() {},
       uniffiDestroy() {},
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     await expect(discovery.activateWindow({ pid: 123, windowId: 11 }, new AbortController().signal))
       .rejects.toMatchObject({
         name: "WindowContractError",
@@ -640,7 +644,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     await expect(discovery.listWindows(new AbortController().signal)).rejects.toMatchObject({
       name: "CuaWindowDiscoveryCleanupError",
       cleanupErrors: ["endSession: session status unavailable"],
@@ -665,7 +669,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     await expect(discovery.listWindows(new AbortController().signal)).rejects.toMatchObject({ name: "CuaWindowDiscoveryCleanupError" });
     expect(calls).not.toContain("destroy");
     await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([]);
@@ -696,7 +700,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push(`${name}:shutdown`); },
       uniffiDestroy() { calls.push(`${name}:destroy`); },
     } as unknown as CuaDriverLike);
-    const discovery = new CuaWindowDiscovery({
+    const discovery = new WindowsFixtureDiscovery({
       socketPath: "fixture",
       driverFactory: () => {
         factoryCalls += 1;
@@ -743,7 +747,7 @@ describe("CuaWindowDiscovery", () => {
       async shutdown() { calls.push("shutdown"); },
       uniffiDestroy() { calls.push("destroy"); },
     } as unknown as CuaDriverLike;
-    const discovery = new CuaWindowDiscovery({ socketPath: "fixture", driverFactory: () => { factoryCalls += 1; return driver; } });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => { factoryCalls += 1; return driver; } });
     const first = discovery.listWindows(new AbortController().signal);
     await firstEndStartedPromise;
     const controller = new AbortController();
