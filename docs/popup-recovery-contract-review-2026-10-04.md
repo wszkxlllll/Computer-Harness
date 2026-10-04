@@ -1,6 +1,24 @@
 # Transient-parent recovery contract review
 
-Status: conditional GO for implementation; no implementation or live GUI approval is implied by this planning review.
+Status: final source/integration GO for fb4d7bb plus the scoped DOM replay-guard correction below; this is not an end-to-end desktop or phone acceptance result. Earlier sections retain the historical planning and incremental review record.
+
+## 最终合并集成审查（2026-10-04）
+
+审查基线为 origin/main..fb4d7bb，main 961a098 已合并，另包含本次授权的 CUA source/test 两文件最小修正。结论 GO，无剩余本审已发现的 P0/P1；放行源码集成与 root 后续 fresh build/full tests/真实验收，不宣称历史窄测试等于整体端到端成功。此次未 build dist、未操作 GUI、未调用模型或外部 API、未 spawn reviewer、未 commit/push；既有未跟踪文件未删除或修改。
+
+合并边界检查：main 的 Mac focus、浏览器 chrome fingerprint、editable DOM 原生 click 后 focus verification、平台坐标/截图选择及 defaultManagedBrowserKind 均保留；shared Jev 仅 app-runtime 一份实现，CLI reexport，Host 显式 opt-in factory 与 CLI 消费同策略，应用约束和候选唯一性不因语义 selector 放宽。Windows one-base-key chord 仍一次 press_key dispatch，无出错 fallback；Darwin/Linux multiline 仍旧 type_text 路由，Windows private UIA on-demand 保持 Observation/session/Surface/geometry/token 精确绑定、查询 deadline/Abort、不发布私有证据到公开 catalog。
+
+非空 Windows multiline 最终契约已取代前文历史 empty-value guard：删除 preValueEmpty 字段链和空值准入条件，只发送新 chunk，不在 Harness 读取文本后拼接；依赖 pinned CUA 0.22.2 ValuePattern 的 CurrentValue + chunk 逻辑末尾追加和同目标 read-back，不是光标插入或选区替换。已确认响应才 completed，明确 no-input 才 refused，发送后无可信 read-back 或 error 保持 partial 不重发。上游 CurrentValue 读取失败的 unwrap_or_default 风险必须保留，Harness 没有保证旧文本读取成功或绝对无损追加；本次未实测该失败分支，也未改剪贴板或绕行粘贴。
+
+弱 owner/z-order/unknown popup 仍是 Registry 外 candidate，继续已验证 parent 不等于证明 child 消失或输入已获许可；正向 root 或 exact foreground+owner 的强 child 继续走 fresh capture/关系重验。parent/sibling/native reconfirmation 的 typed proof 都有 Runtime 消费者及匹配 fresh observation，unknown receipt 不变 completed，旧 batch 后缀不重放。无法确认进入真正 user barrier，peer 走 Host 原确认 gate。Remote handoff 刷新等待时 status 仍 waiting_window/abort，候选 settled 后才公开；超时/失败复用现有恢复合同，旧 request/终态结果取消。paired preview 的 Host cookie/CSRF/捕获后重新鉴权、HTTP→Relay route allowlist/bytes/no-store、exact candidate pre/post 验证和图片 load 后确认保留；不能把早期未刷新列表当最终零候选过滤。
+
+发现并已按 root 的两文件授权修复一个合并联动 P1：main 保留的 managed DOM click/select_option completed 提前 return 原先没有更新本轮私有 unknown replay guard，导致真正完成不同 GUI 动作并 fresh observe 后仍过严锁住原 primitive。现在仅这两个已通过 tab/generation 验证的 completed 分支置同 Surface 的 alternativeActionCompleted，实际解除仍在 fresh observe；wait、refused、failed、partial/unknown 不解锁，没有增加字段或取消原焦点检查。新增两个集成 case 先产生 native unknown、再完成不同 DOM 动作，确认未 fresh 仍拒绝、fresh 后才允许原 primitive。测试 mock 用新对象构造只读 transport，不修改生产 readonly 契约或 any 绕过。
+
+本次独立离线验证：集成 pattern 45/45（CUA 31、Remote 9、Pending UI 5）；共享 selector/Host factory/CLI reexport 与本地 Host HTTP→真实 Relay WSS 测试 11/11，合计 56 个不同相关 case 通过。修正后另按 root 要求重跑 DOM 两分支加原 wait/failed guard 三项，3/3；该三项已经包含在 56 项内，不重复计数。packages/computer-cua 的 tsc --noEmit exit 0，git diff --check 无新增空白问题。root 的 fresh 全量 build/tests 此时另行执行，未把其未返回结果写成通过。本地 HTTP/WSS 是 mock 窗口与设备夹具，不等于真实配对手机或原生桌面操作。
+
+root 后续反馈 fresh compile 通过，首次全量 1652 passed、2 failed；两项为 main capability-tool-filter 测试的旧 windowRef 与最新列表不一致，另有作者核查处理中，本审没有进入该第三文件，也没有为测试放宽生产验证。此结果不是最终全量通过，最终回归结论待 root 的再跑结果。
+
+明确未实测边界：本轮没有实际 macOS/Linux SDK 多行端效果，没有验证原生邻窗 token 拒绝及 pre-read-default 覆盖风险，没有真实手机触摸/PNG 解码质量/网络取消体验，也没有重跑完整 WPS 与携程→记事本跨应用保存。真实任务结果只认 root 留存的 receipt、截图、输出文件及 cleanup 证据，不由本源码 GO 补造。
 
 ## Minimal contract
 
