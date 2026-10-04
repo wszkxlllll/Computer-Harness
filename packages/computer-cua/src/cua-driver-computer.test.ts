@@ -5804,6 +5804,67 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it.each(["click", "select_option"] as const)("clears the unknown-action guard only after a completed managed DOM %s and fresh observe", async (alternativeKind) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-dom-unknown-guard-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", frame: { x: 0, y: 0, width: 1000, height: 800 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "chromium", profileId: "fixture-profile", windowTarget: fake.target,
+      tabId: "tab-fixture", generation: "generation-1", delivery: "loopback-cdp",
+    };
+    const transport = createMockDomGroundingTransport({
+      complete: true, tabId: "tab-fixture", generation: "generation-1", coordinateSpace: "physical",
+      candidates: [{
+        tagName: alternativeKind === "click" ? "a" : "select", name: "Alternative", frame: { x: 100, y: 100, width: 120, height: 40 },
+        visible: true, interactive: true, state: { enabled: true },
+        ...(alternativeKind === "select_option" ? { options: [{ text: "Choice", enabled: true }] } : {}),
+      }],
+    });
+    const actionTransport: DomGroundingTransport = {
+      ...transport,
+      click: async () => ({ status: "completed", tabId: "tab-fixture", generation: "generation-1" }),
+      selectOption: async () => ({ status: "completed", tabId: "tab-fixture", generation: "generation-1" }),
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory,
+      windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1",
+      browserTarget, domGroundingTransport: actionTransport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const initialId = "dom-guard-initial" as ObservationId;
+      await computer.observe(session, initialId, signal);
+      fake.setForegroundRefusal(true, "foreground_unavailable: foreground changed after dispatch; input outcome unknown");
+      expect(await computer.execute(session, {
+        actionId: "dom-guard-unknown" as ActionId, basedOn: initialId, kind: "click", point: { x: 10, y: 20 },
+      }, signal)).toMatchObject({ status: "partial", driverCode: "ACTION_OUTCOME_UNKNOWN" });
+      fake.setForegroundRefusal(false);
+      const alternativeId = "dom-guard-alternative" as ObservationId;
+      const fresh = await computer.observe(session, alternativeId, signal);
+      const element = fresh.grounding!.elements.find((item) => item.source === "dom" && item.name === "Alternative")!;
+      const receipt = await computer.execute(session, alternativeKind === "click" ? {
+        actionId: "dom-guard-alternative-action" as ActionId, basedOn: alternativeId, kind: "click",
+        groundingRef: element.elementRef, point: { x: 160, y: 120 },
+      } : {
+        actionId: "dom-guard-alternative-action" as ActionId, basedOn: alternativeId, kind: "select_option",
+        groundingRef: element.elementRef, optionText: "Choice",
+      }, signal);
+      expect(receipt).toMatchObject({ status: "completed" });
+      expect(await computer.execute(session, {
+        actionId: "dom-guard-before-fresh" as ActionId, basedOn: alternativeId, kind: "click", point: { x: 10, y: 20 },
+      }, signal)).toMatchObject({ status: "refused", driverCode: "ACTION_OUTCOME_UNKNOWN_RETRY_BLOCKED" });
+      const finalId = "dom-guard-final" as ObservationId;
+      await computer.observe(session, finalId, signal);
+      expect(await computer.execute(session, {
+        actionId: "dom-guard-after-fresh" as ActionId, basedOn: finalId, kind: "click", point: { x: 10, y: 20 },
+      }, signal)).toMatchObject({ status: "completed" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not swallow an AbortError from the UIA query", async () => {
     // Native grounding reads retain their abort semantics.
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-grounding-abort-"));

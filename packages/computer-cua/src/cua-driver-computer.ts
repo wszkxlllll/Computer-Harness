@@ -2993,6 +2993,10 @@ export class CuaDriverComputer implements Computer {
           return refused(action.actionId, "SELECT_OPTION_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before selecting");
         }
         if (result.status === "completed") {
+          if (alternativePrimitiveForUnknownAction !== undefined && current.unknownActionReplayGuard !== undefined &&
+              decisionObservation !== undefined && sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
+            current.unknownActionReplayGuard.alternativeActionCompleted = true;
+          }
           return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
         }
         if (result.status === "refused") {
@@ -3097,6 +3101,10 @@ export class CuaDriverComputer implements Computer {
           return refused(action.actionId, "DOM_CLICK_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before clicking");
         }
         if (result.status === "completed") {
+          if (alternativePrimitiveForUnknownAction !== undefined && current.unknownActionReplayGuard !== undefined &&
+              decisionObservation !== undefined && sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
+            current.unknownActionReplayGuard.alternativeActionCompleted = true;
+          }
           return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
         }
         if (result.status === "refused") {
