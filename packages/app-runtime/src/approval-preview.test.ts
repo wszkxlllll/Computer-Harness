@@ -15,6 +15,22 @@ function event(sequence: number, data: Record<string, unknown>): RuntimeEvent {
 }
 
 describe("projectApprovalPreview", () => {
+  it.each(["visible", "sensitive", "stale", "unlisted", "truncated", "unknown-ref", "duplicate", "legacy", "control-chars"])("projects exact select parameters with %s evidence conservatively", (scenario) => {
+    const option = scenario === "sensitive" ? "token=PRIVATE_SECRET" : scenario === "control-chars" ? "Observed\nvariant" : "Observed model variant";
+    const evidence = { assetId: "approval-asset", observationId: "approval-observation", decisionObservationId: "decision", capturedAt: "2026-09-26T00:00:00.000Z", viewport: { width: 800, height: 600, coordinateSpace: "physical" }, surfaceRef };
+    const baseObservation = { runId: "approval-preview-test", computerSessionId: "session", surfaceRef, capturedAt: evidence.capturedAt, viewport: evidence.viewport, screenshot: { assetId: "decision-asset", relativePath: "fixture.png", mediaType: "image/png", byteLength: 1 } };
+    const events = [
+      event(1, { type: "observation.created", observation: { ...baseObservation, id: "decision", grounding: { version: scenario === "legacy" ? "uia-catalog-v1" : "grounding-catalog-v2", source: "hybrid", observationId: "decision", computerSessionId: "session", surfaceRef, completeness: "partial", degraded: false, maxElements: 16, elements: [{ elementRef: "dom-ref", role: "combobox", source: "dom", name: "Compare variant", state: { enabled: true }, optionsTruncated: scenario === "truncated", options: Array.from({ length: scenario === "duplicate" ? 2 : 1 }, () => ({ text: scenario === "unlisted" ? "Other" : option, enabled: true })) }] } } }),
+      event(2, { type: "tool.call.received", call: { id: "select-call", name: "select_option", arguments: { elementRef: "PRIVATE_RAW_ARGUMENT", optionText: "PRIVATE_RAW_ARGUMENT" }, declaredEffect: { effects: ["unknown"], target: "Model claim", summary: "Unverified" } } }),
+      event(3, { type: "observation.created", observation: { ...baseObservation, id: evidence.observationId, screenshot: { ...baseObservation.screenshot, assetId: evidence.assetId } } }),
+      event(4, { type: "approval.requested", requestId: "select-approval", callId: "select-call", reason: "Review", evidence, actions: [{ actionId: "select-action", kind: "select_option", basedOn: scenario === "stale" ? "missing" : "decision", surfaceRef, groundingRef: scenario === "unknown-ref" ? "PRIVATE_REF" : "dom-ref", optionText: option }] }),
+    ];
+    const preview = projectApprovalPreview(events, "select-approval", "select-call" as ToolCallId)!;
+    expect(preview.actions[0]).toMatchObject({ operation: "select_option", kind: "select_option", optionCharacterCount: [...option].length, optionTextStatus: scenario === "visible" ? "visible" : "redacted" });
+    if (scenario === "visible") expect(preview.actions[0]).toMatchObject({ groundingRef: "dom-ref", optionText: option });
+    else expect(preview.actions[0]).not.toHaveProperty("optionText");
+    expect(JSON.stringify(preview)).not.toMatch(/PRIVATE_SECRET|PRIVATE_RAW_ARGUMENT|PRIVATE_REF/);
+  });
   it("uses an authoritative discriminator and fails closed for legacy or contradictory approvals", () => {
     const nonComputer = event(1, {
       type: "approval.requested",

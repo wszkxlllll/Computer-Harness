@@ -1150,6 +1150,7 @@ function projectRuntimeEvent(event: RuntimeEvent, reply: string | undefined): Re
             selectedHistoryEvents: event.contextBudget.selectedHistoryEvents,
             omittedHistoryEvents: event.contextBudget.omittedHistoryEvents,
             ...(event.contextBudget.maxInputTokens === undefined ? {} : { maxInputTokens: event.contextBudget.maxInputTokens }),
+            ...(event.contextBudget.maxWireInputTokens === undefined ? {} : { maxWireInputTokens: event.contextBudget.maxWireInputTokens }),
           },
         }),
       };
@@ -1242,6 +1243,10 @@ function publicRequest(request: RemotePendingRequest): JsonValue {
           ...(action.points === undefined ? {} : { points: action.points.map((point) => ({ x: point.x, y: point.y })) }),
           ...(action.keys === undefined ? {} : { keys: [...action.keys] }),
           ...(action.typedCharacterCount === undefined ? {} : { typedCharacterCount: action.typedCharacterCount }),
+          ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }),
+          ...(action.optionText === undefined ? {} : { optionText: action.optionText }),
+          ...(action.optionCharacterCount === undefined ? {} : { optionCharacterCount: action.optionCharacterCount }),
+          ...(action.optionTextStatus === undefined ? {} : { optionTextStatus: action.optionTextStatus }),
         })),
         ...(request.preview.selectedWindowLabel === undefined ? {} : {
           selectedWindowLabel: {

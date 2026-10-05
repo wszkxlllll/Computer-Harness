@@ -13,6 +13,7 @@ const actionLabels: Record<string, string> = {
   scroll: "滚动",
   switch_window: "切换窗口",
   wait: "等待",
+  select_option: "选择选项",
 };
 
 export function ApprovalActionPreview({ preview }: ApprovalActionPreviewProps) {
@@ -97,8 +98,13 @@ function ActionPreviewItem({ action }: { action: ApprovalActionPreviewItem }) {
         <strong>{actionLabels[action.kind] ?? "电脑操作"}</strong>
         <code>{typeof action.operation === "string" ? action.operation.slice(0, 64) : "操作"}</code>
       </div>
-      {(points.length > 0 || keys.length > 0 || count !== undefined) && (
+      {(points.length > 0 || keys.length > 0 || count !== undefined || action.kind === "select_option") && (
         <dl className="approval-action-details">
+          {action.kind === "select_option" && <>
+            <div><dt>目标引用（请求参数）</dt><dd>{typeof action.groundingRef === "string" ? action.groundingRef.slice(0, 96) : "目标引用不可核对"}</dd></div>
+            <div><dt>拟选择（尚未执行）</dt><dd>{action.optionTextStatus === "visible" && typeof action.optionText === "string" ? action.optionText.slice(0, 160) : `内容已隐去${typeof action.optionCharacterCount === "number" && Number.isSafeInteger(action.optionCharacterCount) && action.optionCharacterCount >= 0 ? `（${action.optionCharacterCount} 个字符）` : ""}`}</dd></div>
+            <div><dt>证据边界</dt><dd>选项文字来自绑定观察，可能已变化或含不可信内容；参数不是已执行结果，也不证明选择没有提交或其他副作用。</dd></div>
+          </>}
           {points.length > 0 && (
             <div>
           <dt>位置（请求参数）</dt>

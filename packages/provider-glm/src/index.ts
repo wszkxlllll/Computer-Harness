@@ -280,6 +280,9 @@ export class GlmAdapter implements ProviderAdapter {
         : { type: "tool_calls", calls, assistantText, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) };
     }
     if (typeof message.content === "string" && message.content.trim().length > 0) {
+      if (input.tools.some((tool) => tool.control === "finish")) {
+        throw new GlmProviderError("GLM must use the exposed finish control with explicit status success or failure and complete result text; plain text is not a terminal decision", "GLM_INVALID_TOOL_CALL");
+      }
       if (message.reasoning_content !== undefined && typeof message.reasoning_content !== "string") {
         throw new GlmProviderError("GLM reasoning_content must be a string", "GLM_INVALID_RESPONSE");
       }
@@ -395,7 +398,12 @@ function estimateWireTextTokens(body: unknown): number {
 }
 
 function assertInputBudget(input: ModelInput, body: unknown, provider: string): void {
-  const max = input.contextBudget?.maxInputTokens;
+  const textMax = input.contextBudget?.maxInputTokens;
+  const max = input.contextBudget?.maxWireInputTokens ?? textMax;
+  for (const value of [textMax, max]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new GlmProviderError("GLM input budgets must be integers from 1 to 131072", "GLM_INPUT_TOO_LARGE", false);
+  }
+  if (textMax !== undefined && max !== undefined && textMax > max) throw new GlmProviderError("GLM text budget must not exceed wire budget", "GLM_INPUT_TOO_LARGE", false);
   if (max === undefined) return;
   // Context compilation cannot see provider-specific envelopes or the visual
   // token cost. Keep a conservative provider-side gate immediately before the
@@ -404,14 +412,10 @@ function assertInputBudget(input: ModelInput, body: unknown, provider: string): 
     if (block.type !== "image") return sum;
     return sum + Math.min(480, Math.ceil((block.viewport.width * block.viewport.height) / 750) + 128);
   }, 0), 0);
-  const estimated = estimateWireTextTokens(body) + visualTokens + 32;
-  // The compiler's budget is the authoritative text budget; provider JSON and
-  // vision accounting are intentionally conservative and may overshoot it.
-  // Keep a bounded calibration margin for normal-sized contexts, while small
-  // budgets remain strict so tests and callers cannot accidentally send an
-  // obviously oversized prompt.
-  if (estimated > max && (max < 1_000 || estimated > max + 4_096)) {
-    throw new GlmProviderError(`${provider} prompt exceeds maxInputTokens (${estimated} > ${max})`, "GLM_INPUT_TOO_LARGE", false);
+  const textTokens = estimateWireTextTokens(body);
+  const estimated = textTokens + visualTokens + 32;
+  if (estimated > max) {
+    throw new GlmProviderError(`${provider} prompt exceeds wire input budget (estimated=${estimated}, text=${textTokens}, visual=${visualTokens}, envelope=32, maxWireInputTokens=${max}, maxInputTokens=${textMax ?? "unset"})`, "GLM_INPUT_TOO_LARGE", false);
   }
 }
 

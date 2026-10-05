@@ -32,6 +32,10 @@ import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
+  for (const value of [input.contextMaxInputTokens, input.contextMaxWireInputTokens]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
+  }
+  if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) throw new Error("Context text budget must not exceed wire budget");
   const runId = input.runId ?? generatedRunId();
   const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
@@ -197,6 +201,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       features,
       ...(contextMemoryRecall === undefined ? {} : { memoryRecall: contextMemoryRecall }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
+      ...(config.contextMaxWireInputTokens === undefined ? {} : { maxWireInputTokens: config.contextMaxWireInputTokens }),
     });
     const contextCompiler = projectModuleContext(baseContextCompiler, runId, planningModule, memoryModule);
     const enabledToolNames = computerAssembly.enabledToolNames(tools);

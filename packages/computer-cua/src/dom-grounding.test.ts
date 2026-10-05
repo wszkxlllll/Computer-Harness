@@ -19,6 +19,10 @@ const request: DomGroundingCollectRequest = {
 };
 
 describe("managed DOM grounding transport gate", () => {
+  it("keeps checked false/mixed distinct from selection and omits unknown toggle state", () => {
+    const result = materializeDomGrounding(request, { complete: true, candidates: [true, false, "mixed", "invalid", undefined].map((checked, index) => ({ tagName: "input", inputType: "checkbox", name: `Toggle ${index}`, frame: { x: 100, y: 100 + index * 25, width: 20, height: 20 }, visible: true, interactive: true, state: { checked, selected: false } })) });
+    expect(result.catalog.elements.map((element) => element.state)).toEqual([{ checked: true, selected: false }, { checked: false, selected: false }, { checked: "mixed", selected: false }, { selected: false }, { selected: false }]);
+  });
   it("materializes visible controls, point/neighbor hits and custom tabindex divs without exposing backend tokens", () => {
     const materialized = materializeDomGrounding(request, {
       complete: true,

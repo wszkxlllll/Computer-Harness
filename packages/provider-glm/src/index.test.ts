@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
-import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
+import { defaultControlTools, decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
@@ -52,11 +52,53 @@ function inputWithControls(): ModelInput {
     ...input(),
     tools: [
       ...input().tools,
-      { name: "terminate", description: "finish", category: "control", control: "finish", inputSchema: { type: "object" } },
-      { name: "interact", description: "ask", category: "control", control: "user_input_required", inputSchema: { type: "object" } },
+      ...defaultControlTools().map(({ name, description, category, control, inputSchema }) => ({ name, description, category, control, inputSchema })),
     ],
   };
 }
+
+describe("GLM exposed finish contract", () => {
+  it("keeps incomplete-response rejection ahead of bare-text contract validation", async () => {
+    const adapter = new GlmAdapter({ apiKey: "fixture", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: new Client({ choices: [{ finish_reason: "length", message: { content: "Text that appears complete" } }] }) });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_INCOMPLETE_RESPONSE", retryable: false });
+  });
+
+  it("preserves explanatory text alongside a real Computer tool call", async () => {
+    const adapter = new GlmAdapter({ apiKey: "fixture", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "Explanatory action note", tool_calls: [{ id: "actual-click", function: { name: "click", arguments: JSON.stringify({ x: 20, y: 30 }) } }] } }] }) });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", assistantText: "Explanatory action note", calls: [{ name: "click" }] });
+  });
+
+  it.each([[], null])("keeps malformed tool_calls=%j rejected rather than treating it as legacy text", async (tool_calls) => {
+    const adapter = new GlmAdapter({ apiKey: "fixture", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: new Client({ choices: [{ finish_reason: "stop", message: { content: "Task complete", tool_calls } }] }) });
+    await expect(adapter.generate(inputWithControls(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_INVALID_RESPONSE" });
+  });
+
+  it.each(["finish", "renamed-finish", "name-only", "interact-only", "none"])("uses actual control metadata for bare content with %s", async (contract) => {
+    const text = "PRIVATE_BARE_RESULT: task complete, waiting for approval, no operation performed";
+    const controls = inputWithControls().tools.filter((tool) => tool.category === "control");
+    const tools = contract === "finish" ? controls : contract === "renamed-finish" ? controls.filter((tool) => tool.control === "finish").map((tool) => ({ ...tool, name: "custom_finish" }))
+      : contract === "name-only" ? [{ name: "terminate", category: "computer" as const, description: "Name is not a control contract", inputSchema: { type: "object" } }]
+      : contract === "interact-only" ? controls.filter((tool) => tool.control === "user_input_required") : [];
+    const adapter = new GlmAdapter({ apiKey: "fixture", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: new Client({ choices: [{ finish_reason: "stop", message: { content: text } }] }) });
+    const request = adapter.generate({ ...input(), tools }, { signal: new AbortController().signal });
+    if (contract === "finish" || contract === "renamed-finish") {
+      const error = await request.catch((value: unknown) => value);
+      expect(error).toMatchObject({ code: "GLM_INVALID_TOOL_CALL", retryable: true, retryMode: "feedback" });
+      expect(JSON.stringify(error)).not.toContain("PRIVATE_BARE_RESULT");
+      expect((error as Error).message).not.toContain(text);
+    } else await expect(request).resolves.toMatchObject({ type: "finish", summary: text });
+  });
+
+  it.each([true, false])("keeps the prepared finish contract immutable when initially exposed=%s", async (exposed) => {
+    const tools = exposed ? [...inputWithControls().tools] : [...input().tools];
+    const adapter = new GlmAdapter({ apiKey: "fixture", profile: "glm-5.3-flash", assetReader: new Reader(), httpClient: new Client({ choices: [{ finish_reason: "stop", message: { content: "Legacy text result" } }] }) });
+    const prepared = await adapter.prepare({ ...input(), tools }, { signal: new AbortController().signal });
+    tools.splice(0, tools.length, ...(exposed ? input().tools : inputWithControls().tools));
+    const response = adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+    if (exposed) await expect(response).rejects.toMatchObject({ code: "GLM_INVALID_TOOL_CALL" });
+    else await expect(response).resolves.toMatchObject({ type: "finish", summary: "Legacy text result" });
+  });
+});
 
 function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelInput {
   return {
@@ -69,6 +111,21 @@ function dynamicInput(planAndMemory: string, dynamicViewport = viewport): ModelI
 }
 
 describe("GLM provider adapter", () => {
+  it("enforces the explicit wire cap at the exact boundary, falling back strictly to text when absent", async () => {
+    const client = new Client({ choices: [{ message: { content: "ok" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    const signal = new AbortController().signal;
+    const estimate = (await adapter.prepare(input(), { signal })).estimate!.estimatedTextTokens! + 480 + 32;
+    const budget = { mode: "raw" as const, estimatedInputTokens: 1, selectedHistoryEvents: 0, omittedHistoryEvents: 0, maxInputTokens: 1, maxWireInputTokens: estimate };
+    const textBudget = { mode: "raw" as const, estimatedInputTokens: 1, selectedHistoryEvents: 0, omittedHistoryEvents: 0 };
+    await expect(adapter.prepare({ ...input(), contextBudget: budget }, { signal })).resolves.toBeDefined();
+    await expect(adapter.prepare({ ...input(), contextBudget: { ...budget, maxWireInputTokens: estimate - 1 } }, { signal })).rejects.toThrow(`maxWireInputTokens=${estimate - 1}`);
+    await expect(adapter.prepare({ ...input(), contextBudget: { ...textBudget, maxInputTokens: estimate } }, { signal })).resolves.toBeDefined();
+    await expect(adapter.prepare({ ...input(), contextBudget: { ...textBudget, maxInputTokens: estimate - 1 } }, { signal })).rejects.toThrow("wire input budget");
+    for (const value of [0, -1, 1.5, NaN, 131073, Number.MAX_SAFE_INTEGER + 1]) await expect(adapter.prepare({ ...input(), contextBudget: { ...budget, maxWireInputTokens: value } }, { signal })).rejects.toThrow("input budgets");
+    await expect(adapter.prepare({ ...input(), contextBudget: { ...budget, maxInputTokens: estimate + 1 } }, { signal })).rejects.toThrow("text budget");
+    expect(client.postCount).toBe(0);
+  });
   it("defers batching to the Context contract while preserving coordinate instructions", async () => {
     const client = new Client({ choices: [{ message: { content: "ok" } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });

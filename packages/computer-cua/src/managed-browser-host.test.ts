@@ -7,10 +7,61 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { runInNewContext } from "node:vm";
-import { domCandidateFingerprint, type DomGroundingRawCandidate } from "./dom-grounding.js";
+import { domCandidateFingerprint, materializeDomGrounding, type DomGroundingRawCandidate } from "./dom-grounding.js";
 import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
+  it("reads live native and ARIA checked state through materialization, trajectory, Context and GLM wire", async () => {
+    const cases = [
+      syntheticElement("input", { attrs: { type: "checkbox", "aria-label": "Native true", "aria-selected": "false", "aria-checked": "false" }, checked: true }),
+      syntheticElement("input", { attrs: { type: "radio", "aria-label": "Native false" }, checked: false, indeterminate: true }),
+      syntheticElement("input", { attrs: { type: "checkbox", "aria-label": "Native mixed" }, checked: false, indeterminate: true }),
+      syntheticElement("div", { attrs: { role: "switch", "aria-label": "ARIA true", "aria-checked": "true" } }),
+      syntheticElement("div", { attrs: { role: "checkbox", "aria-label": "ARIA mixed", "aria-checked": "mixed" } }),
+      syntheticElement("div", { attrs: { role: "checkbox", "aria-label": "ARIA invalid", "aria-checked": "invalid" } }),
+      syntheticElement("div", { attrs: { role: "button", "aria-label": "Unsupported", "aria-checked": "true" } }),
+      syntheticElement("div", { attrs: { role: "radio", "aria-label": "ARIA radio mixed", "aria-checked": "mixed" } }),
+      syntheticElement("div", { attrs: { role: "switch", "aria-label": "ARIA switch mixed", "aria-checked": "mixed" } }),
+      syntheticElement("div", { attrs: { role: "menuitemradio", "aria-label": "ARIA menu radio mixed", "aria-checked": "mixed", tabindex: "0" }, tabIndex: 0 }),
+    ];
+    const page = new SyntheticDocument(cases);
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } }) as SyntheticEvaluation;
+    const state = (name: string) => evaluation.candidates.find((candidate) => candidate.name === name)?.state;
+    expect(state("Native true")).toMatchObject({ checked: true, selected: false });
+    expect(state("Native false")).toMatchObject({ checked: false });
+    expect(state("Native false")).not.toHaveProperty("selected");
+    expect(state("Native mixed")).toMatchObject({ checked: "mixed" });
+    expect(state("ARIA true")).toMatchObject({ checked: true });
+    expect(state("ARIA mixed")).toMatchObject({ checked: "mixed" });
+    expect(state("ARIA invalid")).not.toHaveProperty("checked");
+    expect(state("Unsupported")).not.toHaveProperty("checked");
+    for (const name of ["ARIA radio mixed", "ARIA switch mixed", "ARIA menu radio mixed"]) expect(state(name)).toMatchObject({ checked: false });
+    const catalog = materializeDomGrounding({ observationId: "checked-observation" as never, computerSessionId: "checked-session" as never, viewport: { width: 1000, height: 800, coordinateSpace: "physical" }, browserTarget: { kind: "managed-chromium", browser: "edge", profileId: "checked-profile", windowTarget: { pid: 123, windowId: 456 }, tabId: "checked-tab", generation: "checked-generation", delivery: "loopback-cdp" } }, { candidates: evaluation.candidates as readonly DomGroundingRawCandidate[], complete: true }).catalog;
+    const surfaceRef = { surfaceId: "checked-surface", generation: 1, kind: "desktop" };
+    const observation = { id: "checked-observation", runId: "checked-run", computerSessionId: "checked-session", surfaceRef, capturedAt: "2026-10-04T00:00:00.000Z", viewport: { width: 1000, height: 800, coordinateSpace: "physical" }, screenshot: { assetId: "checked-asset", relativePath: "screenshots/checked.png", mediaType: "image/png", byteLength: 1 }, grounding: { ...catalog, surfaceRef } };
+    const trajectorySource = "../../trajectory/src/index.js";
+    const contextSource = "../../context/src/compiler.js";
+    const runtimeSource = "../../runtime/src/control-tools.js";
+    const glmSource = "../../provider-glm/src/index.js";
+    const { runtimeEventSchema } = await import(trajectorySource);
+    const persisted = runtimeEventSchema.parse({ eventId: "checked-event", runId: "checked-run", sequence: 0, occurredAt: observation.capturedAt, type: "observation.created", observation });
+    expect(persisted.observation.grounding.elements.find((element: { name?: string }) => element.name === "Native false").state.checked).toBe(false);
+    expect(runtimeEventSchema.safeParse({ ...persisted, observation: { ...persisted.observation, grounding: { ...persisted.observation.grounding, elements: [{ ...persisted.observation.grounding.elements[0], state: { checked: "invalid" } }] } } }).success).toBe(false);
+    const { DefaultContextCompiler } = await import(contextSource);
+    const { createDefaultToolRegistry } = await import(runtimeSource);
+    const compiled = await new DefaultContextCompiler(createDefaultToolRegistry()).compile({ runId: "checked-run", goal: "Inspect toggle states", recentEvents: [persisted], latestObservation: persisted.observation }, new AbortController().signal);
+    expect(JSON.stringify(compiled.messages)).toContain("checked=mixed");
+    const { GlmAdapter } = await import(glmSource);
+    let wire = "";
+    await new GlmAdapter({ apiKey: "fixture", profile: { name: "glm-5.3-flash", thinking: "low", coordinateMode: "actual_pixels" }, assetReader: { async read() { return new Uint8Array([1]); } }, httpClient: { async post(_url: string, body: unknown) { wire = JSON.stringify(body); return { choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ id: "checked-fixture-finish", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "The synthetic live checked-state observation was projected for inspection without additional GUI input." }) } }] } }] }; } } }).generate(compiled, { signal: new AbortController().signal });
+    expect(wire).toContain("checked=false");
+    expect(wire).toContain("checked=true");
+    expect(wire).toContain("checked=mixed");
+    expect(wire).toContain("selected=false");
+    cases[0]!.checked = false;
+    const updated = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } }) as SyntheticEvaluation;
+    expect(updated.candidates.find((candidate) => candidate.name === "Native true")?.state).toMatchObject({ checked: false });
+  });
   it("selects a platform browser and bounded executable candidates", () => {
     expect(defaultManagedBrowserKind("win32")).toBe("edge");
     expect(defaultManagedBrowserKind("darwin")).toBe("chromium");
@@ -167,15 +218,15 @@ describe("managed browser host pilot", () => {
     const binding = { role: "textbox", name: "Query", frame: candidate.frame as { x: number; y: number; width: number; height: number }, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate) };
     expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
     expect(page.activeElement).toBe(input);
-    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "completed" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "completed", focusEvidence: { editable: true, pageHasFocus: true, activeElementMatches: true } });
     page.focused = false; // Chrome address bar owns focus, activeElement is retained.
     expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]?.state).toMatchObject({ focused: false });
     input.clicked = false;
-    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", focusEvidence: { editable: true, pageHasFocus: false, activeElementMatches: true } });
     expect(input.clicked).toBe(false);
     page.focused = true;
     page.activeElement = null;
-    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, verifyFocusOnly: true }), context)).toMatchObject({ status: "refused", focusEvidence: { editable: true, pageHasFocus: true, activeElementMatches: false } });
     expect(runInNewContext(buildManagedDomClickExpression({ ...binding, fingerprint: "domf-00000000" }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE" });
     const replacement = syntheticElement("input", { attrs: { "aria-label": "Query", type: type === "SEARCH" ? "text" : "search" } });
     expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: new SyntheticDocument([replacement]) })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE" });
@@ -280,6 +331,25 @@ describe("managed browser host pilot", () => {
     expect(await transport.verifyFocus!(request, signal)).toMatchObject({ status: "refused" });
     expect(validate).toHaveBeenCalledWith(request, signal);
     expect(verify).toHaveBeenCalledWith(request, signal);
+  });
+
+  it("projects only current boolean focus evidence through real host and transport gates", async () => {
+    const host = new ManagedBrowserHost({ browser: "chromium", url: "about:blank", resolveOwnedWindowTarget: async () => undefined });
+    const target = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", delivery: "loopback-cdp", windowTarget: { pid: 1, windowId: 2 }, tabId: "tab", generation: "generation" } as const;
+    (host as unknown as { state: object }).state = { target, tabId: target.tabId, generation: target.generation };
+    const page = vi.spyOn(host as unknown as { activePageForSelection(): Promise<object> }, "activePageForSelection").mockResolvedValue({ webSocketDebuggerUrl: "ws://127.0.0.1/fixture" });
+    const command = vi.fn(async () => ({ result: { result: { value: { status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", focusEvidence: { pageHasFocus: false, activeElementMatches: true, editable: "private-value", value: "private-value" } } } } }));
+    const socket = vi.spyOn(LoopbackWebSocket, "connect").mockResolvedValue({ command, close() {} } as never);
+    const request = { browserTarget: target, candidate: { role: "textbox", bbox: { x: 10, y: 10, width: 100, height: 20 }, frame: { x: 10, y: 10, width: 100, height: 20 }, fingerprint: "domf-12345678" } } as Parameters<ManagedBrowserHost["verifyFocus"]>[0];
+    try {
+      const result = await host.createTransport().verifyFocus!(request, new AbortController().signal);
+      expect(result.focusEvidence).toEqual({ pageHasFocus: false, activeElementMatches: true });
+      expect(JSON.stringify(result)).not.toContain("private-value");
+      const stale = await host.createTransport().verifyFocus!({ ...request, browserTarget: { ...target, generation: "stale" } }, new AbortController().signal);
+      expect(stale).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_GENERATION_MISMATCH" });
+      expect(stale).not.toHaveProperty("focusEvidence");
+      expect(command).toHaveBeenCalledTimes(1);
+    } finally { socket.mockRestore(); page.mockRestore(); }
   });
 
   it("cleans an already-spawned browser and ephemeral profile when startup is aborted", async () => {
@@ -810,6 +880,8 @@ describe("managed browser host pilot", () => {
 });
 
 interface SyntheticElementOptions {
+  readonly checked?: boolean;
+  readonly indeterminate?: boolean;
   readonly attrs?: Readonly<Record<string, string>>;
   readonly children?: readonly SyntheticElement[];
   readonly labels?: readonly SyntheticElement[];
@@ -833,6 +905,8 @@ interface SyntheticEvaluation {
 }
 
 class SyntheticElement {
+  public checked: boolean | undefined;
+  public indeterminate: boolean | undefined;
   public onFocus: (() => void) | undefined;
   public readonly localName: string;
   public readonly children: readonly SyntheticElement[];
@@ -848,6 +922,8 @@ class SyntheticElement {
   private readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 
   public constructor(localName: string, options: SyntheticElementOptions = {}) {
+    this.checked = options.checked;
+    this.indeterminate = options.indeterminate;
     this.localName = localName;
     this.attrs = options.attrs ?? {};
     this.children = options.children ?? [];

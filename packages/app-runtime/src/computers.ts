@@ -306,6 +306,11 @@ interface ManagedBrowserComputerOptions {
 }
 
 class ManagedBrowserComputer implements Computer {
+  public declare listWindows?: NonNullable<Computer["listWindows"]>;
+  public declare listWindowHandoffCandidates?: NonNullable<Computer["listWindowHandoffCandidates"]>;
+  public declare listNewWindowHandoffCandidates?: NonNullable<Computer["listNewWindowHandoffCandidates"]>;
+  public declare detectNewWindowHandoffCandidates?: NonNullable<Computer["detectNewWindowHandoffCandidates"]>;
+  public declare handoffWindow?: NonNullable<Computer["handoffWindow"]>;
   private bootstrap: CuaBootstrapSession | undefined;
   private host: ManagedBrowserHost | undefined;
   private delegate: Computer | undefined;
@@ -314,7 +319,17 @@ class ManagedBrowserComputer implements Computer {
   private openAttempted = false;
   private readonly hostCleanupDiagnostics: string[] = [];
 
-  public constructor(private readonly options: ManagedBrowserComputerOptions) {}
+  public constructor(private readonly options: ManagedBrowserComputerOptions) {
+    // Optional method declarations model absence under exactOptionalPropertyTypes;
+    // runtime getters keep availability tied to the live authorization/lifecycle.
+    Object.defineProperties(this, {
+      listWindows: { get: () => this.listWindowsCapability },
+      listWindowHandoffCandidates: { get: () => this.listWindowHandoffCandidatesCapability },
+      listNewWindowHandoffCandidates: { get: () => this.listNewWindowHandoffCandidatesCapability },
+      detectNewWindowHandoffCandidates: { get: () => this.detectNewWindowHandoffCandidatesCapability },
+      handoffWindow: { get: () => this.handoffWindowCapability },
+    });
+  }
 
   public async open(openOptions: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
     if (this.openAttempted || this.closing !== undefined) throw new Error("managed browser Computer lifecycle has already been used");
@@ -388,40 +403,68 @@ class ManagedBrowserComputer implements Computer {
 
   public async execute(session: ComputerSessionDescriptor, action: ActionIntent, signal: AbortSignal, options?: ComputerExecuteOptions): Promise<ActionReceipt> {
     if (this.delegate === undefined) throw new Error("managed browser Computer is not open");
+    if (action.kind === "switch_window" && this.options.config.windowSwitch !== "opened-windows-v1") {
+      signal.throwIfAborted();
+      return { actionId: action.actionId, status: "refused", driverCode: "WINDOW_SWITCH_DISABLED", message: "cross-window switching is not enabled for this Run; no input was sent" };
+    }
     // Preserve the adapter's opaque windowRef and sessionAfter without
     // resolving or rewriting a target in this lifecycle wrapper.
     return this.delegate.execute(session, action, signal, options);
   }
 
-  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowOption[]> {
-    if (this.delegate?.listWindows === undefined) throw new Error("managed browser Computer has no opened-window inventory");
-    return this.delegate.listWindows(session, signal);
+  /** Optional methods are execution capabilities, not merely callable stubs.
+   * Single-target managed browsers must not advertise cross-window operations.
+   * Recheck lifecycle/authorization on invocation so cached callbacks expire. */
+  private windowCapabilityDelegate(): Computer | undefined {
+    return this.options.config.windowSwitch === "opened-windows-v1" && this.opened !== undefined && this.closing === undefined ? this.delegate : undefined;
   }
 
-  public async listWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
-    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
-    if (this.delegate?.listWindowHandoffCandidates === undefined) throw new Error("managed browser Computer has no window handoff picker");
-    return this.delegate.listWindowHandoffCandidates(session, signal);
+  private get listWindowsCapability(): Computer["listWindows"] {
+    // createRun checks authorized list support before open. Declare that
+    // capability for opt-in only; invoking it still requires a ready delegate.
+    if (this.options.config.windowSwitch !== "opened-windows-v1" || this.closing !== undefined
+      || (this.openAttempted && this.windowCapabilityDelegate()?.listWindows === undefined)) return undefined;
+    return (session, signal) => {
+      const delegate = this.windowCapabilityDelegate();
+      if (delegate?.listWindows === undefined) throw new Error("managed browser window inventory capability is unavailable");
+      return delegate.listWindows(session, signal);
+    };
   }
 
-  public async listNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
-    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
-    if (this.delegate?.listNewWindowHandoffCandidates === undefined) throw new Error("managed browser Computer has no new-window handoff picker");
-    return this.delegate.listNewWindowHandoffCandidates(session, signal);
+  private get listWindowHandoffCandidatesCapability(): Computer["listWindowHandoffCandidates"] {
+    if (this.windowCapabilityDelegate()?.listWindowHandoffCandidates === undefined) return undefined;
+    return (session, signal) => {
+      const delegate = this.windowCapabilityDelegate();
+      if (delegate?.listWindowHandoffCandidates === undefined) throw new Error("managed browser window handoff capability is unavailable");
+      return delegate.listWindowHandoffCandidates(session, signal);
+    };
   }
 
-  public async detectNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
-    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
-    if (this.delegate?.detectNewWindowHandoffCandidates === undefined) throw new Error("managed browser Computer cannot detect new-window handoff candidates");
-    return this.delegate.detectNewWindowHandoffCandidates(session, signal);
+  private get listNewWindowHandoffCandidatesCapability(): Computer["listNewWindowHandoffCandidates"] {
+    if (this.windowCapabilityDelegate()?.listNewWindowHandoffCandidates === undefined) return undefined;
+    return (session, signal) => {
+      const delegate = this.windowCapabilityDelegate();
+      if (delegate?.listNewWindowHandoffCandidates === undefined) throw new Error("managed browser new-window picker capability is unavailable");
+      return delegate.listNewWindowHandoffCandidates(session, signal);
+    };
   }
 
-  public async handoffWindow(session: ComputerSessionDescriptor, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
-    if (this.options.config.windowSwitch !== "opened-windows-v1") throw new Error("managed browser window handoff requires the explicit window-switch opt-in");
-    if (this.delegate?.handoffWindow === undefined) throw new Error("managed browser Computer cannot hand off to a window");
-    // The CUA delegate validates candidates against the current native binding;
-    // this wrapper keeps the Harness-owned browser Host alive until Run cleanup.
-    return this.delegate.handoffWindow(session, candidate, signal);
+  private get detectNewWindowHandoffCandidatesCapability(): Computer["detectNewWindowHandoffCandidates"] {
+    if (this.windowCapabilityDelegate()?.detectNewWindowHandoffCandidates === undefined) return undefined;
+    return (session, signal) => {
+      const delegate = this.windowCapabilityDelegate();
+      if (delegate?.detectNewWindowHandoffCandidates === undefined) throw new Error("managed browser new-window detection capability is unavailable");
+      return delegate.detectNewWindowHandoffCandidates(session, signal);
+    };
+  }
+
+  private get handoffWindowCapability(): Computer["handoffWindow"] {
+    if (this.windowCapabilityDelegate()?.handoffWindow === undefined) return undefined;
+    return (session, candidate, signal) => {
+      const delegate = this.windowCapabilityDelegate();
+      if (delegate?.handoffWindow === undefined) throw new Error("managed browser window handoff capability is unavailable");
+      return delegate.handoffWindow(session, candidate, signal);
+    };
   }
 
   public async close(session: ComputerSessionDescriptor): Promise<void> {

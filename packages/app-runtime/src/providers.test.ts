@@ -84,6 +84,14 @@ function clickInputWithImage(): ModelInput {
 }
 
 describe("app-runtime provider factory", () => {
+  it("rejects invalid explicit input budgets before any HTTP", () => {
+    let posts = 0;
+    const client: ProviderHttpClient = { async post() { posts += 1; return {}; } };
+    for (const overrides of [{ contextMaxWireInputTokens: 0 }, { contextMaxWireInputTokens: 131073 }, { contextMaxWireInputTokens: 1.5 }, { contextMaxInputTokens: 100, contextMaxWireInputTokens: 99 }]) {
+      expect(() => createProvider({ model: "glm-5.3-flash", config: config(overrides), assetReader, outputDir: "unused", credentials: { glmApiKey: "fixture" }, httpClients: { glm: client } })).toThrow(/budget/u);
+    }
+    expect(posts).toBe(0);
+  });
   it("requires injected credentials without reading the environment", () => {
     expect(() => createProvider({ model: "glm-5.3-flash", config: config(), assetReader, outputDir: "runs/glm", credentials: {} })).toThrow(/ZHIPUAI_API_KEY/iu);
     expect(() => createProvider({ model: "qwen3.8-flash", config: config({ model: "qwen3.8-flash" }), assetReader, outputDir: "runs/qwen", credentials: {} })).toThrow(/DASHSCOPE_API_KEY/iu);
@@ -111,7 +119,7 @@ describe("app-runtime provider factory", () => {
       recentEvents: [],
       assistantPreferences: preferences,
     }, new AbortController().signal);
-    const glmFinish: Record<string, unknown> = { choices: [{ message: { content: "Summary ready." } }] };
+    const glmFinish: Record<string, unknown> = { choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ id: "glm-pref-finish", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Summary ready." }) } }] } }] };
     const qwenClick: Record<string, unknown> = {
       choices: [{
         finish_reason: "tool_calls",

@@ -42,6 +42,10 @@ export interface RemoteApprovalActionPreview {
   readonly points?: readonly { readonly x: number; readonly y: number }[];
   readonly keys?: readonly string[];
   readonly typedCharacterCount?: number;
+  readonly groundingRef?: string;
+  readonly optionText?: string;
+  readonly optionCharacterCount?: number;
+  readonly optionTextStatus?: "visible" | "redacted";
 }
 
 export interface RemoteApprovalEvidence {

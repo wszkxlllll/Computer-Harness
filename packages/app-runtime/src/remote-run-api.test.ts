@@ -13,16 +13,25 @@ import {
   type RunOutcome,
   type Viewport,
   type MonitorPolicyMode,
+  type ToolRegistry,
 } from "@computer-harness/runtime";
 import type { RuntimeEvent, AssetId, AssetRef, ComputerSessionId, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId } from "@computer-harness/protocol";
 import type { WindowTargetInfo } from "./application-session.js";
 import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
 import { ApplicationSession } from "./application-session.js";
+import { readRuntimeEvents } from "@computer-harness/trajectory";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
 import { ApplicationRemoteRunApi, RemoteRunApiError, type ManagedBrowserProfileRunCoordinator } from "./remote-run-api.js";
 
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
 const surfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
+
+// Execute the current real controller, not the older shared dist, without rebuilding it.
+vi.mock("@computer-harness/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@computer-harness/runtime")>();
+  const { RunController } = await import("../../runtime/src/run-controller.js");
+  return { ...actual, RunController };
+});
 
 function config(outputDir: string): ApplicationSessionConfig {
   return {
@@ -93,6 +102,7 @@ function fixtureComputer(
 
 function providerFor(options: {
   failAfterTurns?: boolean;
+  failPrepareAfterTurns?: boolean;
   askFirst?: boolean;
   summary: string;
   turns?: readonly ModelTurn[];
@@ -100,8 +110,20 @@ function providerFor(options: {
   turnFactory?: (turnNumber: number, input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn | undefined;
 }, getEvents: () => readonly RuntimeEvent[]): ProviderAdapter {
   let turns = 0;
-  return {
+  let preparedInput: ModelInput | undefined;
+  const provider: ProviderAdapter = {
     id: "remote-api-provider",
+    ...(options.failPrepareAfterTurns === true ? {
+      async prepare(input: ModelInput) {
+        if (turns >= (options.turns?.length ?? 0)) throw Object.assign(new Error("fixture local input budget exceeded"), { code: "GLM_INPUT_TOO_LARGE", retryable: false });
+        preparedInput = input;
+        return Object.freeze({ providerId: "remote-api-provider", payloadHash: "fixture-prepared" });
+      },
+      async generatePrepared() {
+        if (preparedInput === undefined) throw new Error("missing prepared fixture input");
+        return provider.generate(preparedInput, { signal: new AbortController().signal });
+      },
+    } : {}),
     async generate(input: ModelInput) {
       options.onModelInput?.(input);
       turns += 1;
@@ -113,7 +135,8 @@ function providerFor(options: {
       if (options.askFirst === true && turns === 1) return { type: "user_input_required", question: "Which date should I check?" };
       return { type: "finish", summary: options.summary };
     },
-  } as unknown as ProviderAdapter;
+  };
+  return provider;
 }
 
 function createFixture(
@@ -123,6 +146,10 @@ function createFixture(
     summary: string;
     turns?: readonly ModelTurn[];
     failAfterTurns?: boolean;
+    failPrepareAfterTurns?: boolean;
+    maxModelRequests?: number;
+    providerOverride?: ProviderAdapter;
+    contextCompilerFactory?: (tools: ToolRegistry) => ContextCompiler;
     guardDecisions?: readonly ActionPolicyDecision[];
     screen?: Viewport;
     windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
@@ -134,6 +161,8 @@ function createFixture(
     inspectManagedBrowserProfile?: (profileRoot: string, profileLabel: string) => Promise<{ state: "ready" | "active" | "stale" | "unknown" | "unsafe"; markers: readonly ("profile_lock" | "devtools_port")[] }>;
     readManagedBrowserStartupUrls?: () => Promise<readonly string[]>;
     closeComputer?: () => Promise<void>;
+    openComputerError?: Error;
+    nativeSelectFixture?: boolean;
     runNotices?: boolean;
     runNoticeDynamicContent?: boolean;
     onModelInput?: (input: ModelInput) => void;
@@ -163,6 +192,7 @@ function createFixture(
   );
   const sessionConfig: ApplicationSessionConfig = {
     ...baseConfig,
+    ...(options.maxModelRequests === undefined ? {} : { maxModelRequests: options.maxModelRequests }),
     ...(options.monitor === undefined ? {} : { monitor: options.monitor }),
     computer: options.managedBrowserProfile === undefined ? baseComputer : {
       ...baseComputer,
@@ -190,10 +220,20 @@ function createFixture(
       },
     } }),
     dependencies: {
-      createProvider: () => providerFor(options, () => session.activeRun?.controller.getEvents() ?? []),
+      createProvider: () => options.providerOverride ?? providerFor(options, () => session.activeRun?.controller.getEvents() ?? []),
+      ...(options.contextCompilerFactory === undefined ? {} : { createContextCompiler: options.contextCompilerFactory }),
       createComputer: async ({ config: computerConfig }) => {
         if (computerConfig.kind === "cua") createdComputerConfigs.push(computerConfig);
-        return fixtureComputer(options.screen, options.closeComputer, options.windowInventory, options.switchWindowReceiptStatus);
+        const computer = fixtureComputer(options.screen, options.closeComputer, options.windowInventory, options.switchWindowReceiptStatus);
+        if (options.nativeSelectFixture) {
+          const observe = computer.observe.bind(computer);
+          computer.observe = async (activeSession, observationId, signal) => {
+            const capture = await observe(activeSession, observationId, signal);
+            return { ...capture, grounding: { version: "grounding-catalog-v2", source: "hybrid", observationId, computerSessionId: activeSession.id, surfaceRef: capture.surfaceRef, completeness: "partial", degraded: false, maxElements: 16, elements: [{ elementRef: "dom-select", role: "combobox", source: "dom", browserRegion: "content", name: "Compare variant", bbox: { x: 1, y: 1, width: 3, height: 3, coordinateSpace: "physical" }, state: { enabled: true }, options: [{ text: "Observed variant", enabled: true }] }] } };
+          };
+        }
+        if (options.openComputerError !== undefined) computer.open = async () => { throw options.openComputerError; };
+        return computer;
       },
       ...(options.guardDecisions === undefined ? {} : {
         createActionPolicy: () => ({
@@ -798,11 +838,91 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
-  it("projects failed Provider progress replies and preserves authorized post-action screenshots", async () => {
+  it("projects the guarded native-select parameters through snapshot and SSE without dispatch before approval", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-select-preview-"));
+    const { api, session } = createFixture(outputDir, { summary: "Selection receipt only", nativeSelectFixture: true, guardDecisions: [fixtureGuardDecision("require_approval", "Unknown selection effect")], turns: [{ type: "tool_calls", calls: [{ id: "select-preview" as ToolCallId, name: "select_option", arguments: { elementRef: "dom-select", optionText: "Observed variant" }, declaredEffect: { effects: ["unknown"], target: "Compare", summary: "Unverified change" } }] }] });
+    try {
+      const started = await api.startRun("device-one", "native-select-preview", "Inspect all fields", { mode: "browser", url: "https://example.test" });
+      await waitFor(() => session.activeRun?.controller.getSnapshot().status === "waiting_approval", "selection did not request approval");
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot.pendingRequest).toMatchObject({ preview: { actions: [{ kind: "select_option", groundingRef: "dom-select", optionText: "Observed variant", optionTextStatus: "visible" }] } });
+      expect(session.activeRun!.controller.getEvents().some((event) => event.type === "action.execution.started")).toBe(false);
+      const streamed: RemoteEventEnvelope[] = [];
+      api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event)).close();
+      expect(JSON.stringify(streamed)).toContain('"optionText":"Observed variant"');
+      expect(JSON.stringify(streamed)).toContain('"groundingRef":"dom-select"');
+    } finally { session.activeRun?.controller.cancel("preview test cleanup"); await session.waitForActiveRun(); await session.close(); await rm(outputDir, { recursive: true, force: true }); }
+  });
+
+  it("projects a safe typed activation startup failure to snapshot and SSE without a screenshot or model", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-startup-failure-"));
+    let requests = 0;
+    const { api, session } = createFixture(outputDir, { summary: "must not become success", openComputerError: Object.assign(new Error("PRIVATE_TITLE_URL_BODY"), { code: "WINDOW_ACTIVATION_UNCONFIRMED", startupStage: "window_activation" }), onModelInput: () => { requests += 1; } });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "startup-failure", "fixture", choices.candidates[0]!.token);
+      await session.waitForActiveRun();
+      const snapshot = api.getRun("device-one", started.runId)!;
+      expect(snapshot).toMatchObject({ outcome: "failed", reply: expect.stringContaining("窗口启动未通过精确前台身份确认") });
+      expect(snapshot.reply).toContain("可能已尝试激活或改变窗口状态");
+      expect(snapshot.latestAssetId).toBeUndefined();
+      expect(requests).toBe(0);
+      const streamed: RemoteEventEnvelope[] = [];
+      const subscription = api.subscribe("device-one", started.runId, 0, (event) => { streamed.push(event); });
+      subscription.close();
+      expect(streamed).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.event", data: expect.objectContaining({ type: "run.reply", outcome: "failed", reply: snapshot.reply }) })]));
+      expect(JSON.stringify(snapshot) + JSON.stringify(streamed)).not.toContain("PRIVATE_TITLE_URL_BODY");
+    } finally { await session.close(); await rm(outputDir, { recursive: true, force: true }); }
+  });
+
+  it.each(["bare-success", "bare-waiting", "bare-feedback", "success", "failure"])("projects real GLM %s terminal contract outcomes without false-success UI data", async (scenario) => {
+    const contextSource = "../../context/src/index.js";
+    const providerSource = "../../provider-glm/src/index.js";
+    const { DefaultContextCompiler } = await import(contextSource);
+    const { GlmAdapter } = await import(providerSource);
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-real-glm-finish-"));
+    let requests = 0;
+    const bare = scenario.startsWith("bare-");
+    const provider = new GlmAdapter({ apiKey: "fixture", profile: "glm-5.3-flash", assetReader: { async read() { return new Uint8Array([1]); } }, httpClient: { async post(_url: string, body: Record<string, unknown>) {
+      requests += 1;
+      if (bare && requests < (scenario === "bare-feedback" ? 2 : 3)) return { choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ id: `wait-${requests}`, function: { name: "wait", arguments: JSON.stringify({ durationMs: 1 }) } }] } }] };
+      expect((body.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name)).toContain("terminate");
+      const plain = bare && !(scenario === "bare-feedback" && requests === 3);
+      return { choices: [{ finish_reason: plain ? "stop" : "tool_calls", message: plain ? { content: scenario === "bare-success" ? "PRIVATE_BARE_RESULT task complete" : "PRIVATE_BARE_RESULT selection not performed, waiting for approval" } : { tool_calls: [{ id: "explicit-finish", function: { name: "terminate", arguments: JSON.stringify({ status: scenario === "bare-feedback" ? "failure" : scenario, text: "任务完成未确认；当前只有已有观察，尚未执行选择或创建审批请求。" }) } }] } }] };
+    } } });
+    const { api, session } = createFixture(outputDir, { summary: "must not infer completion", maxModelRequests: 3, providerOverride: provider, contextCompilerFactory: (tools) => new DefaultContextCompiler(tools, { features: { planning: "off", memory: "off", batching: "off" } }) });
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "strict-finish-contract", "Inspect existing evidence; do not infer that an approval or selection was executed", choices.candidates[0]!.token);
+      await session.waitForActiveRun();
+      const snapshot = api.getRun("device-one", started.runId)!;
+      const expected = scenario === "bare-feedback" ? "failed" : bare ? "budget_exhausted" : scenario === "success" ? "succeeded" : "failed";
+      expect(snapshot).toMatchObject({ status: "finished", outcome: expected });
+      expect(snapshot.pendingRequest).toBeUndefined();
+      expect(requests).toBe(bare ? 3 : 1);
+      const streamed: RemoteEventEnvelope[] = [];
+      api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event)).close();
+      expect(streamed).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.event", data: expect.objectContaining({ type: "run.reply", outcome: expected, reply: snapshot.reply }) })]));
+      const events = await readRuntimeEvents(join(session.history.at(-1)!.outputDir, "trajectory.jsonl"));
+      expect(events.some((event) => event.type === "approval.requested")).toBe(false);
+      expect(events.filter((event) => event.type === "action.execution.started" && event.action.kind !== "wait")).toHaveLength(0);
+      if (bare) {
+        expect(snapshot.reply).toContain("任务完成未确认");
+        expect(events.find((event) => event.type === "model.request.failed")).toMatchObject({ code: "GLM_INVALID_TOOL_CALL" });
+        expect(JSON.stringify(snapshot) + JSON.stringify(streamed)).not.toContain("PRIVATE_BARE_RESULT");
+      }
+    } finally { await session.close(); await rm(outputDir, { recursive: true, force: true }); }
+  });
+
+  it.each(["request", "prepare-budget", "request-budget"] as const)("projects incomplete %s progress replies and preserves authorized post-action screenshots", async (stage) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-provider-progress-"));
+    let requests = 0;
     const { api, session } = createFixture(outputDir, {
       summary: "must not become success",
-      failAfterTurns: true,
+      failAfterTurns: stage === "request",
+      failPrepareAfterTurns: stage === "prepare-budget",
+      maxModelRequests: stage === "request-budget" ? 1 : 4,
+      onModelInput: () => { requests += 1; },
       turns: [{ type: "tool_calls", calls: [{ id: "progress-click" as ToolCallId, name: "click", arguments: { x: 1, y: 2 } }] }],
     });
     try {
@@ -814,9 +934,19 @@ describe("ApplicationRemoteRunApi", () => {
       expect(snapshot.reply).toContain("已保留 1 个非等待 GUI 动作完成回执");
       expect(snapshot.reply).toContain("任务完成未确认");
       expect(snapshot.reply).toContain(`assetId=${snapshot.latestAssetId}`);
+      if (stage === "prepare-budget") {
+        expect(snapshot.reply).toContain("输入预算检查未通过，该请求未发送");
+        expect(snapshot.reply).not.toContain("后续模型响应未完成");
+        expect(requests).toBe(1);
+      }
+      if (stage === "request-budget") {
+        expect(snapshot.reply).toContain("运行预算已达到上限，任务完成未确认");
+        expect(snapshot.reply).toContain("业务信息和未知项仍需另行核对");
+        expect(requests).toBe(1);
+      }
       const streamed: unknown[] = [];
       api.subscribe("device-one", started.runId, 0, (event) => streamed.push(event)).close();
-      expect(streamed).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.event", data: expect.objectContaining({ type: "run.reply", outcome: "failed", reply: snapshot.reply }) })]));
+      expect(streamed).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.event", data: expect.objectContaining({ type: "run.reply", outcome: stage === "request-budget" ? "budget_exhausted" : "failed", reply: snapshot.reply }) })]));
       const screenshot = await api.getAsset("device-one", started.runId, snapshot.latestAssetId!);
       expect(screenshot?.mediaType).toBe("image/png");
       expect(await api.getAsset("device-two", started.runId, snapshot.latestAssetId!)).toBeUndefined();

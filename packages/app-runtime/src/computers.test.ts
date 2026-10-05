@@ -1,8 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDefaultToolRegistry, type Computer } from "@computer-harness/runtime";
-import type { ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowOption } from "@computer-harness/protocol";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createDefaultToolRegistry, type Computer, type ComputerExecuteOptions } from "@computer-harness/runtime";
+import type { ActionId, ActionIntent, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowOption, ObservationId, SurfaceId, ToolCallId } from "@computer-harness/protocol";
 import { defaultManagedBrowserKind, type DomGroundingTransport, type ManagedBrowserHost, type ManagedBrowserHostOptions, type ManagedBrowserTarget, type CuaBootstrapSession } from "@computer-harness/computer-cua";
 import { createComputer, prepareComputerRunAssembly } from "./computers.js";
+import { createRun } from "./run-factory.js";
+
+// Use the real current Controller across the package boundary, not old dist.
+vi.mock("@computer-harness/runtime", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@computer-harness/runtime")>(),
+  RunController: (await import("../../runtime/src/run-controller.js")).RunController,
+}));
 
 const managedTarget: ManagedBrowserTarget = {
   kind: "managed-chromium",
@@ -13,6 +23,8 @@ const managedTarget: ManagedBrowserTarget = {
   generation: "generation-test",
   delivery: "loopback-cdp",
 };
+
+const managedSurfaceRef = { surfaceId: "managed-test-tab" as SurfaceId, parentSurfaceId: "managed-test-window" as SurfaceId, generation: 1, kind: "browser_tab" as const };
 
 const managedSession: ComputerSessionDescriptor = {
   id: "managed-session",
@@ -151,6 +163,8 @@ describe("prepareComputerRunAssembly", () => {
 });
 
 function managedFixture(options: {
+  runtime?: boolean;
+  unknownExecution?: boolean;
   failStart?: boolean;
   abortDelegateOpen?: boolean;
   failDelegateOpen?: boolean;
@@ -160,6 +174,7 @@ function managedFixture(options: {
   failBootstrapClose?: boolean;
   cleanupDiagnosticOnClose?: Parameters<NonNullable<ManagedBrowserHostOptions["onCleanupDiagnostic"]>>[0];
 } = {}) {
+  const execution: { observations: number; actions: ActionIntent[]; options: (ComputerExecuteOptions | undefined)[] } = { observations: 0, actions: [], options: [] };
   const calls: { bootstrapOpen: number; bootstrapClose: number; hostConstruct: number; hostStart: number; hostClose: number; delegateConstruct: number; delegateOpen: number; delegateClose: number; delegateDispose: number; delegateListWindows: number; delegateListHandoffCandidates: number; delegateListNewHandoffCandidates: number; delegateDetectNewHandoffCandidates: number; delegateHandoff: number; delegateCloseSessionId?: string; delegateHandoffCandidate?: ComputerWindowCandidate; delegateWindowDeliveryMode?: unknown; delegateOptions?: Record<string, unknown>; hostOptions?: ManagedBrowserHostOptions } = { bootstrapOpen: 0, bootstrapClose: 0, hostConstruct: 0, hostStart: 0, hostClose: 0, delegateConstruct: 0, delegateOpen: 0, delegateClose: 0, delegateDispose: 0, delegateListWindows: 0, delegateListHandoffCandidates: 0, delegateListNewHandoffCandidates: 0, delegateDetectNewHandoffCandidates: 0, delegateHandoff: 0 };
   const transport = {} as DomGroundingTransport;
   const host = {
@@ -200,8 +215,19 @@ function managedFixture(options: {
       if (options.failDelegateOpen === true) throw new Error("fixture delegate open failed");
       return managedSession;
     }
-    public async observe() { throw new Error("not used"); }
-    public async execute() { throw new Error("not used"); }
+    public async observe(session: ComputerSessionDescriptor, observationId: ObservationId) {
+      if (!options.runtime) throw new Error("not used");
+      execution.observations += 1;
+      return { capturedAt: "2026-10-03T00:00:00.000Z", viewport: session.viewport, surfaceRef: managedSurfaceRef, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1, 2, 3]) }, grounding: { version: "grounding-catalog-v2" as const, source: "hybrid" as const, observationId, computerSessionId: session.id, surfaceRef: managedSurfaceRef, completeness: "complete" as const, degraded: false, maxElements: 256, elements: [{ elementRef: "search-ref", role: "textbox", name: "Search", source: "dom" as const, browserRegion: "content" as const, bbox: { x: 10, y: 20, width: 100, height: 24 }, state: { enabled: true, editable: true, focused: true } }] } };
+    }
+    public async execute(_session: ComputerSessionDescriptor, action: ActionIntent, signal: AbortSignal, executeOptions?: ComputerExecuteOptions) {
+      if (!options.runtime) throw new Error("not used");
+      signal.throwIfAborted();
+      execution.actions.push(action);
+      execution.options.push(executeOptions);
+      if (options.unknownExecution) throw new Error("fixture unknown input outcome");
+      return { actionId: action.actionId, status: "completed" as const };
+    }
     public async close(session: ComputerSessionDescriptor) {
       calls.delegateClose += 1;
       calls.delegateCloseSessionId = session.id;
@@ -214,17 +240,104 @@ function managedFixture(options: {
     public async listWindows() { calls.delegateListWindows += 1; return managedWindowInventory; }
     public async listWindowHandoffCandidates() { calls.delegateListHandoffCandidates += 1; return [nativeWindowCandidate]; }
     public async listNewWindowHandoffCandidates() { calls.delegateListNewHandoffCandidates += 1; return [nativeWindowCandidate]; }
-    public async detectNewWindowHandoffCandidates() { calls.delegateDetectNewHandoffCandidates += 1; return [nativeWindowCandidate]; }
+    public async detectNewWindowHandoffCandidates() { calls.delegateDetectNewHandoffCandidates += 1; return options.runtime ? [] : [nativeWindowCandidate]; }
     public async handoffWindow(_session: ComputerSessionDescriptor, candidate: ComputerWindowCandidate) {
       calls.delegateHandoff += 1;
       calls.delegateHandoffCandidate = structuredClone(candidate);
       return nativeSessionAfterHandoff;
     }
   }
-  return { calls, createHost, openBootstrap, Delegate, signal: new AbortController().signal };
+  return { calls, execution, createHost, openBootstrap, Delegate, signal: new AbortController().signal };
 }
 
 describe("createComputer", () => {
+  it.each(["different-focused-process", "target-focused-global-conflict"])("preserves typed exact activation refusal through real CUA, managed wrapper and Runtime with %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-activation-startup-"));
+    const source = "../../computer-cua/src/cua-driver-computer.js";
+    const support = "../../computer-cua/src/cua-sdk-test-support.js";
+    const { CuaDriverComputer } = await import(source);
+    (await import(support)).installFakeCuaSdkModuleForTests();
+    const fixture = managedFixture();
+    const driverCalls: string[] = [];
+    const driver = {
+      async startSession() { driverCalls.push("startSession"); return { active: true }; },
+      async endSession() { driverCalls.push("endSession"); return { active: false }; },
+      async shutdown() { driverCalls.push("shutdown"); }, uniffiDestroy() {},
+      async callTool(name: string) {
+        driverCalls.push(name);
+        const targetFocused = scenario === "target-focused-global-conflict";
+        const structured = name === "health_report" ? { platform: "darwin" } : { status: "partial", pid: managedTarget.windowTarget.pid, window_id: managedTarget.windowTarget.windowId, request_accepted: true, process_activated: targetFocused, exact_window_effect: { verified: false, target_visible_ordinary: true }, observed: { front_process_matches_target: targetFocused, focused_window_id: targetFocused ? managedTarget.windowTarget.windowId : 999, frontmost_ordinary_window_id: 999, workspace_frontmost_pid: targetFocused ? managedTarget.windowTarget.pid : 888, ...(targetFocused ? { frontmost_pid: managedTarget.windowTarget.pid } : {}) }, title: "PRIVATE_TITLE", path: "PRIVATE_PATH" };
+        return { isError: name === "bring_to_front", text: "PRIVATE_DRIVER_TEXT", images: [], degraded: false, rawJson: "{}", structuredJson: JSON.stringify(structured) };
+      },
+    };
+    class Delegate extends CuaDriverComputer { constructor(options: Record<string, unknown>) { super({ ...options, driverFactory: () => driver }); } }
+    const config = { kind: "cua" as const, socketPath: "fixture.sock", screenshotDir: directory, grounding: "hybrid-catalog-v1" as const, managedBrowserUrl: "about:blank", windowDeliveryMode: "foreground" as const, windowSwitch: "off" as const };
+    const host = fixture.createHost({} as ManagedBrowserHostOptions);
+    host.createTransport = () => ({ kind: "managed-loopback-cdp-v1", async collect() { throw new Error("must not collect before activation confirmation"); } });
+    const computer = await createComputer(config, { createManagedBrowserHost: () => host, openCuaBootstrapSession: fixture.openBootstrap, importCuaComputer: async () => ({ CuaDriverComputer: Delegate }) });
+    let modelCalls = 0;
+    const handle = await createRun({ goal: "fixture startup", model: "glm-5.3-flash", computer: config, grounding: "hybrid-catalog-v1", windowSwitch: "off", windowHandoff: "off", outputDir: directory, maxSteps: 3, maxModelRequests: 3, planning: false, memory: "off", batching: "off", contextMode: "raw", contextMaxHistoryEvents: 8, riskProfile: "experiment", riskGuard: "off", riskModel: "off", riskMaxModelRequests: 0, riskTimeoutMs: 100, cleanupDeadlineMs: 100 }, { createComputer: async () => computer, createProvider: () => ({ id: "fixture", async generate() { modelCalls += 1; throw new Error("must not reach model"); } }) });
+    try {
+      expect(await handle.start()).toBe("failed");
+      const events = handle.controller.getEvents();
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed", summary: expect.stringContaining("窗口启动未通过精确前台身份确认") });
+      expect(events.some((event) => event.type === "computer.open.completed" || event.type === "observation.created" || event.type === "action.execution.started" || event.type === "model.request.started")).toBe(false);
+      expect(modelCalls).toBe(0);
+      expect(driverCalls).toEqual(["startSession", "health_report", "bring_to_front", "endSession", "shutdown"]);
+      const error = events.find((event) => event.type === "runtime.error");
+      expect(error).toMatchObject({ message: expect.stringContaining('"requestAccepted":true') });
+      if (scenario === "target-focused-global-conflict") {
+        expect(error).toMatchObject({ message: expect.stringContaining(`AX focused_window_id=${managedTarget.windowTarget.windowId}`) });
+        expect(error).toMatchObject({ message: expect.stringContaining("independent frontmost_ordinary_window_id=999") });
+      }
+      expect(JSON.stringify(events)).not.toMatch(/PRIVATE_TITLE|PRIVATE_PATH|PRIVATE_DRIVER_TEXT/);
+    } finally { await handle.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+  it.each([["off", "completed"], ["opened-windows-v1", "completed"], ["off", "unknown"], ["opened-windows-v1", "unknown"], ["opened-windows-v1", "missing-detector"]] as const)("runs the real managed wrapper through Runtime with windowSwitch %s and %s", async (mode, scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-handoff-contract-"));
+    const fixture = managedFixture({ runtime: true, unknownExecution: scenario === "unknown" });
+    if (scenario === "missing-detector") Object.defineProperty(fixture.Delegate.prototype, "detectNewWindowHandoffCandidates", { value: undefined });
+    const config = { kind: "cua" as const, socketPath: "fixture.sock", screenshotDir: directory, grounding: "hybrid-catalog-v1" as const, managedBrowserUrl: "about:blank", windowDeliveryMode: "foreground" as const, windowSwitch: mode };
+    const computer = await createComputer(config, { createManagedBrowserHost: fixture.createHost, openCuaBootstrapSession: fixture.openBootstrap, importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }) });
+    expect(computer.detectNewWindowHandoffCandidates).toBeUndefined();
+    let turns = 0;
+    const handle = await createRun({ goal: "fixture single Search click", model: "glm-5.3-flash", computer: config, grounding: "hybrid-catalog-v1", windowSwitch: mode, windowHandoff: "confirm-v1", outputDir: directory, maxSteps: 3, maxModelRequests: 3, planning: false, memory: "off", batching: "off", contextMode: "raw", contextMaxHistoryEvents: 8, riskProfile: "experiment", riskGuard: "off", riskModel: "off", riskMaxModelRequests: 0, riskTimeoutMs: 100, cleanupDeadlineMs: 100 }, {
+      createComputer: async () => computer,
+      createProvider: () => ({ id: "fixture", async generate() { turns += 1; return turns === 1 ? { type: "tool_calls", calls: [{ id: "one-click" as ToolCallId, name: "click_element", arguments: { elementRef: "search-ref" } }] } : { type: "finish", summary: "fixture finished" }; } }),
+    });
+    try {
+      const outcome = await handle.start();
+      expect(outcome).toBe(scenario === "unknown" ? "outcome_unknown" : "succeeded");
+      expect(fixture.execution.actions).toHaveLength(1);
+      expect(fixture.execution.actions[0]?.kind).toBe("click");
+      expect(fixture.execution.observations).toBe(scenario === "unknown" ? 1 : 2);
+      expect(fixture.execution.options[0]?.detectNewWindowHandoff).toBe(mode === "off" || scenario === "missing-detector" ? undefined : true);
+      expect(fixture.calls.delegateDetectNewHandoffCandidates).toBe(mode === "off" || scenario === "unknown" || scenario === "missing-detector" ? 0 : 1);
+      expect(turns).toBe(scenario === "unknown" ? 1 : 2);
+      expect(fixture.calls.delegateHandoff).toBe(0);
+      expect(fixture.calls.delegateListHandoffCandidates).toBe(0);
+      expect(fixture.calls.delegateListNewHandoffCandidates).toBe(0);
+      expect(handle.controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      expect(computer.handoffWindow).toBeUndefined();
+      expect(computer.listWindows).toBeUndefined();
+    } finally { await handle.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("does not expose single-target window capabilities and refuses an unauthorized direct switch", async () => {
+    const fixture = managedFixture({ runtime: true });
+    const computer = await createComputer({ kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", grounding: "hybrid-catalog-v1", managedBrowserUrl: "about:blank", windowSwitch: "off" }, { createManagedBrowserHost: fixture.createHost, openCuaBootstrapSession: fixture.openBootstrap, importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }) });
+    const session = await computer.open({}, fixture.signal);
+    try {
+      expect(computer.listWindows).toBeUndefined();
+      expect(computer.listWindowHandoffCandidates).toBeUndefined();
+      expect(computer.listNewWindowHandoffCandidates).toBeUndefined();
+      expect(computer.detectNewWindowHandoffCandidates).toBeUndefined();
+      expect(computer.handoffWindow).toBeUndefined();
+      await expect(computer.execute(session, { actionId: "unauthorized" as ActionId, kind: "switch_window", windowRef: "fixture-wps-ref" }, fixture.signal)).resolves.toMatchObject({ status: "refused", driverCode: "WINDOW_SWITCH_DISABLED" });
+      expect(fixture.execution.actions).toHaveLength(0);
+      expect(fixture.calls.delegateHandoff).toBe(0);
+    } finally { await computer.close(session); }
+  });
   it("does not resolve the CUA module for the OSWorld backend", async () => {
     const importCuaComputer = vi.fn(async () => {
       throw new Error("native binding should not be loaded");
@@ -552,7 +665,12 @@ describe("createComputer", () => {
         importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
       },
     );
+    const preOpenList = computer.listWindows;
+    expect(preOpenList).toBeDefined();
+    await expect(async () => preOpenList!(managedSession, fixture.signal)).rejects.toThrow(/capability is unavailable/u);
+    expect(fixture.calls.delegateListWindows).toBe(0);
     const browserSession = await computer.open({}, fixture.signal);
+    const cachedDetector = computer.detectNewWindowHandoffCandidates;
 
     await expect(computer.listWindows?.(browserSession, fixture.signal)).resolves.toEqual(managedWindowInventory);
     await expect(computer.listWindowHandoffCandidates?.(browserSession, fixture.signal)).resolves.toEqual([nativeWindowCandidate]);
@@ -573,6 +691,10 @@ describe("createComputer", () => {
     });
 
     await computer.close(nativeSession!);
+    expect(computer.detectNewWindowHandoffCandidates).toBeUndefined();
+    expect(computer.listWindows).toBeUndefined();
+    await expect(async () => cachedDetector!(browserSession, fixture.signal)).rejects.toThrow(/capability is unavailable/u);
+    expect(fixture.calls.delegateDetectNewHandoffCandidates).toBe(1);
     expect(fixture.calls).toMatchObject({
       delegateClose: 1,
       delegateCloseSessionId: nativeSessionAfterHandoff.id,

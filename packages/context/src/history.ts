@@ -34,6 +34,17 @@ export function findOldestEvictableHistoryGroup(events: readonly RuntimeEvent[])
   return [];
 }
 
+/** Preserve the full model turn that caused the latest dispatched non-wait GUI action. */
+export function latestGuiHistoryGroup(events: readonly RuntimeEvent[]): RuntimeEvent[] {
+  const execution = [...events].reverse().find((event) => event.type === "action.execution.started" && event.action.kind !== "wait");
+  if (execution?.type !== "action.execution.started") return [];
+  const proposed = events.find((event) => event.type === "action.proposed" && event.action.actionId === execution.action.actionId);
+  if (proposed?.type !== "action.proposed") return [];
+  const response = events.find((event) => event.type === "model.response.received" && event.turn.type === "tool_calls" && event.turn.calls.some((call) => call.id === proposed.callId));
+  if (response?.type !== "model.response.received" || response.turn.type !== "tool_calls") return [];
+  return [response, ...historyEventsForCalls(events, response.turn.calls.map((call) => call.id))];
+}
+
 function historyEventsForCalls(events: readonly RuntimeEvent[], callIds: readonly ToolCallId[]): RuntimeEvent[] {
   const callIdSet = new Set(callIds);
   const actionIds = new Set<string>();

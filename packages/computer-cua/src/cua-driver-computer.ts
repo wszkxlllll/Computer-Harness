@@ -55,6 +55,8 @@ import {
   discoverWindow,
   activateWindowTarget,
   listWindowInventory,
+  windowInventoryEvidence,
+  windowInventoryFailureEvidence,
   listWindowTargets,
   sameWindowGeometry,
   validateWindowTarget,
@@ -69,6 +71,7 @@ import {
 } from "./window-contract.js";
 import { assessOwnedTransientWindowAdmission } from "./transient-window-admission.js";
 import type { WindowRelationshipProbe } from "./window-relationship-probe.js";
+import { assertTopologySuccessor, MacosTopologyError, readMacosTargetTopology, topologyEvidence, type MacosTargetTopology, type MacosTopologyOverlay } from "./macos-target-topology.js";
 import { projectExactWindowRoot as exactWindowRoot } from "./window-root-projection.js";
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
@@ -602,12 +605,17 @@ interface PrivateSession {
   visibleWindowBaseline: ReadonlySet<string> | undefined;
   /** Fresh inventory immediately before an opted-in foreground GUI action. */
   preActionWindowBaseline: {
+    readonly targetTopology?: MacosTargetTopology;
+    readonly inventoryEvidence: string;
     readonly targetKeys: ReadonlySet<string>;
     readonly complete: boolean;
     readonly truncated: boolean;
     readonly parentSurfaceRef: SurfaceRef;
     readonly parentBinding: CuaWindowBinding;
   } | undefined;
+  /** Separate target-scoped evidence, never global inventory completeness. */
+  macosLastTopology?: MacosTargetTopology;
+  macosActiveOverlay?: MacosTopologyOverlay;
   /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
   newlySurfacedWindowKeys: ReadonlySet<string>;
   /** Candidate snapshot produced by the immediately preceding list call. */
@@ -1077,6 +1085,131 @@ export class CuaDriverComputer implements Computer {
     }
   }
 
+  private usesMacosTopology(current: PrivateSession): boolean {
+    return (this.options.platform ?? current.platform ?? process.platform) === "darwin";
+  }
+
+  private async readMacosTopology(current: PrivateSession, target: CuaWindowTarget, signal: AbortSignal): Promise<MacosTargetTopology> {
+    let topology: MacosTargetTopology;
+    try { topology = await readMacosTargetTopology(current.driver, target, signal); }
+    catch (error) {
+      signal.throwIfAborted();
+      // Unknown/error producer evidence may represent a root kind change even
+      // with the same retained object and CGID. Never preserve executable refs
+      // merely because the query did not reach the successor comparison.
+      this.invalidateMacosSurface(current);
+      throw error;
+    }
+    const previous = current.macosLastTopology;
+    if (previous !== undefined && previous.target.pid === target.pid && previous.target.windowId === target.windowId) {
+      try { assertTopologySuccessor(previous, topology); } catch (error) {
+        this.invalidateMacosSurface(current);
+        throw error;
+      }
+    }
+    current.macosLastTopology = topology;
+    return topology;
+  }
+
+  private sameMacosOverlay(left: MacosTopologyOverlay, right: MacosTopologyOverlay): boolean {
+    return left.identityToken === right.identityToken && left.kind === right.kind && left.pid === right.pid && left.window_id === right.window_id &&
+      left.parent_window_id === right.parent_window_id && left.path === right.path &&
+      sameWindowGeometry(left.frame, right.frame);
+  }
+
+  private invalidateMacosSurface(current: PrivateSession): void {
+    const ref = current.surfaceRegistry.activeSurface;
+    if (ref === undefined) return;
+    const advanced = advanceSurfaceGeneration(current.surfaceRegistry, ref);
+    const unknownRef = advanced.decision === "applied" ? advanced.value : ref;
+    if (advanced.decision === "applied") {
+      current.surfaceRegistry = advanced.state;
+      noteSurfaceTransition(current, "generation_advanced");
+    }
+    const unknown = markSurfaceUnknown(current.surfaceRegistry, unknownRef);
+    if (unknown.decision === "applied") current.surfaceRegistry = unknown.state;
+    current.windowRefs.clear();
+    this.clearTargetObservationState(current, ref);
+  }
+
+  private async reconcileMacosOverlay(current: PrivateSession, topology: MacosTargetTopology, signal: AbortSignal): Promise<void> {
+    const overlay = current.macosActiveOverlay;
+    const ref = current.surfaceRegistry.activeSurface;
+    if (overlay === undefined || ref === undefined) return;
+    if (topology.overlays.length === 1 && this.sameMacosOverlay(overlay, topology.overlays[0]!)) return;
+    if (topology.overlays.length !== 0) {
+      this.invalidateMacosSurface(current);
+      throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS overlay closure changed ambiguously; prior Surface references are invalid");
+    }
+    const child = current.surfaceRegistry.surfaces.get(ref.surfaceId);
+    const parent = child?.parentSurfaceId === undefined ? undefined : currentSurfaceRef(current.surfaceRegistry, child.parentSurfaceId);
+    if (parent === undefined) throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS overlay parent is unavailable");
+    const binding = await discoverWindow(current.driver, current.label, topology.target, signal);
+    const targetRow = topology.rows.find((row) => row.pid === topology.target.pid && row.window_id === topology.target.windowId)!;
+    if (!sameWindowGeometry(binding.bounds, targetRow.bounds)) {
+      this.invalidateMacosSurface(current);
+      throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS parent geometry changed during overlay absence verification");
+    }
+    const popped = popChild(current.surfaceRegistry, ref, { parent, parentRevalidated: true, childAbsent: true });
+    if (popped.decision !== "applied") throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS overlay pop was not admitted");
+    current.surfaceRegistry = popped.state;
+    delete current.macosActiveOverlay;
+    current.windowRefs.clear();
+    noteSurfaceTransition(current, "child_pop");
+    this.clearTargetObservationState(current, ref);
+  }
+
+  private async detectMacosTopologyChange(current: PrivateSession, baseline: MacosTargetTopology, parentRef: SurfaceRef, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    current.newHandoffCandidates = [];
+    current.newlySurfacedWindowKeys = new Set();
+    current.proactiveHandoffCandidatesReady = false;
+    try {
+      if (!sameSurfaceRef(parentRef, current.surfaceRegistry.activeSurface) || !isExecutableSurfaceRef(current.surfaceRegistry, parentRef)) {
+        throw new MacosTopologyError("stale");
+      }
+      const topology = await this.readMacosTopology(current, baseline.target, signal);
+      assertTopologySuccessor(baseline, topology);
+      const priorTarget = baseline.rows.find((row) => row.pid === baseline.target.pid && row.window_id === baseline.target.windowId)!;
+      const targetRow = topology.rows.find((row) => row.pid === baseline.target.pid && row.window_id === baseline.target.windowId)!;
+      if (!sameWindowGeometry(priorTarget.bounds, targetRow.bounds) ||
+          JSON.stringify(priorTarget.space_ids) !== JSON.stringify(targetRow.space_ids) ||
+          priorTarget.current_space_id !== targetRow.current_space_id) throw new MacosTopologyError("changed");
+      const oldIds = new Map(baseline.rows.map((row) => [row.window_id, row.pid]));
+      const surfaced = topology.rows.filter((row) => !oldIds.has(row.window_id));
+      if (topology.rows.some((row) => oldIds.has(row.window_id) && oldIds.get(row.window_id) !== row.pid)) throw new MacosTopologyError("changed");
+      // No same-PID or geometry-based ownership. Separate CG children and
+      // cross-process panels require a separately supported explicit route.
+      if (surfaced.length !== 0) throw new WindowContractError("WINDOW_TOPOLOGY_UNKNOWN", "macOS newly visible window ownership/interaction route is unsupported; completed action is not replayed");
+      if (current.macosActiveOverlay !== undefined) {
+        await this.reconcileMacosOverlay(current, topology, signal);
+        return [];
+      }
+      if (topology.overlays.length === 0) return [];
+      const overlay = topology.overlays[0]!;
+      if (topology.overlays.length !== 1 || overlay.window_id !== baseline.target.windowId || overlay.kind === "dialog") {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS dialog or multiple closure roots require manual handling; no automatic child ownership is inferred");
+      }
+      const pushed = pushChild(current.surfaceRegistry, parentRef, {
+        kind: "overlay", owner: { pid: baseline.target.pid, hwnd: baseline.target.windowId },
+        nativeWindow: { pid: overlay.pid, hwnd: overlay.window_id }, visible: overlay.visible,
+        rootSemanticsVerified: true, interactionPolicy: "modal", rootRole: overlay.kind,
+        treeComplete: true, geometryVerified: overlay.geometryVerified,
+      });
+      if (pushed.decision !== "applied") throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS target-bound overlay Surface was not admitted");
+      current.surfaceRegistry = pushed.state;
+      current.macosActiveOverlay = overlay;
+      current.windowRefs.clear();
+      noteSurfaceTransition(current, "child_push");
+      this.clearTargetObservationState(current, parentRef);
+      return [];
+    } catch (error) {
+      signal.throwIfAborted();
+      this.invalidateMacosSurface(current);
+      if (error instanceof WindowContractError) throw error;
+      throw new WindowContractError("WINDOW_TOPOLOGY_UNKNOWN", "macOS post-action target topology is unknown; the completed action is not replayed");
+    }
+  }
+
   private async reconcileActiveTransientChild(current: PrivateSession, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     const ref = current.surfaceRegistry.activeSurface;
@@ -1092,6 +1225,13 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "transient Surface parent identity is unavailable");
     }
     const parentTarget = asCuaWindowTarget(parentNative);
+    if (this.usesMacosTopology(current)) {
+      if (child.kind !== "overlay" || current.macosActiveOverlay === undefined) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS native child topology is unsupported; no global ownership proof is inferred");
+      }
+      await this.reconcileMacosOverlay(current, await this.readMacosTopology(current, parentTarget, signal), signal);
+      return;
+    }
     let childAbsent = false;
     if (child.kind === "overlay") {
       const verification = await verifySameHwndOverlay(current.driver, current.label, parentTarget, signal);
@@ -1287,6 +1427,9 @@ export class CuaDriverComputer implements Computer {
     // Consume the one-shot pre-action authorization before any asynchronous
     // reconciliation or inventory/proof call; uncertain outcomes are not replayable.
     current.preActionWindowBaseline = undefined;
+    if (baseline?.targetTopology !== undefined) {
+      return this.detectMacosTopologyChange(current, baseline.targetTopology, baseline.parentSurfaceRef, signal);
+    }
     await this.reconcileActiveTransientChild(current, signal);
     if (baseline !== undefined && sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
         baseline.parentSurfaceRef.parentSurfaceId !== undefined &&
@@ -1326,7 +1469,13 @@ export class CuaDriverComputer implements Computer {
       readonly potentialOwnedTransientChild?: CuaWindowInfo;
     }> => {
       signal.throwIfAborted();
-      const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+      let inventory: CuaWindowInventory;
+      try {
+        inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+      } catch (error) {
+        signal.throwIfAborted();
+        throw new WindowContractError("WINDOW_INVENTORY_UNKNOWN", `post-action window inventory failed; baseline=${baseline.inventoryEvidence}; currentFailure=${windowInventoryFailureEvidence(error)}; the completed action is not replayed`);
+      }
       signal.throwIfAborted();
       const surfaced = inventory.windows.filter((window) => !baseline.targetKeys.has(windowIdentityKey(window.target)));
       // Peer authorization must not bypass owned-child classification. A
@@ -1374,7 +1523,7 @@ export class CuaDriverComputer implements Computer {
     const surfaced = inventory.surfaced;
     const exactInventoryForAutoPush = baseline.complete && inventory.complete;
     if (!exactInventoryForAutoPush && surfaced.length === 0) {
-      throw new WindowContractError("WINDOW_INVENTORY_UNKNOWN", "window inventory was incomplete or truncated; popup state requires manual handling");
+      throw new WindowContractError("WINDOW_INVENTORY_UNKNOWN", `window inventory was incomplete or truncated; popup state requires manual handling; baseline=${baseline.inventoryEvidence}; current=${windowInventoryEvidence(inventory.sourceInventory)}; the completed action is not replayed`);
     }
     let pushedChild = false;
     const supportsTransientUia = this.options.grounding === "uia-catalog-v1" || this.options.grounding === "hybrid-catalog-v1";
@@ -1861,6 +2010,14 @@ export class CuaDriverComputer implements Computer {
       }
     }
     const isMultilineType = action.kind === "type" && hasLineBreak(action.text);
+    const inputPlatform = this.options.platform ?? current.platform;
+    const isWindowsMultilineType = isMultilineType && inputPlatform === "win32";
+    if (isMultilineType && inputPlatform !== "win32" && inputPlatform !== "darwin") {
+      return refused(action.actionId, "MULTILINE_PLATFORM_UNSUPPORTED", "multiline input requires a supported Windows UIA or macOS native route; no text was sent");
+    }
+    if (isMultilineType && inputPlatform === "darwin" && (actionWindowBinding === undefined || this.options.windowDeliveryMode !== "foreground")) {
+      return refused(action.actionId, "MULTILINE_WINDOW_REQUIRED", "macOS multiline typing requires an exact bound window in foreground delivery; no text was sent");
+    }
     if (action.kind === "select_option") {
     const privateGrounding = this.groundings.get(String(action.basedOn));
     const resolved = privateGrounding?.elements.get(action.groundingRef);
@@ -2076,7 +2233,7 @@ export class CuaDriverComputer implements Computer {
       const focused = [...(latestGrounding?.elements.values() ?? [])].filter((item) => item.element.source === "dom" && item.element.state?.focused === true && item.element.state.editable === true);
       const candidate = focused.length === 1 ? focused[0] : undefined;
       if (candidate?.candidateFingerprint === undefined || candidate.element.bbox === undefined || latestGrounding?.browserTarget === undefined) {
-        return refused(action.actionId, "DOM_INPUT_FOCUS_MISMATCH", "no unique observed editable browser control owns page focus; no keyboard input was sent. Observe again, click the current editable control, then observe before typing");
+        return refused(action.actionId, "DOM_INPUT_FOCUS_MISMATCH", "no unique observed editable browser control owns page focus; no keyboard input was sent. Recovery guidance does not authorize repeating a completed click or violating user limits. If correction or another click is forbidden, stop and report failure; otherwise obtain fresh evidence before choosing a permitted recovery.");
       }
       adoptedDomInput = true;
       this.expectedDomInput = {
@@ -2094,7 +2251,12 @@ export class CuaDriverComputer implements Computer {
         const result = await domTransport.verifyFocus(expected, signal);
         if (result.status !== "completed" || result.tabId !== expected.browserTarget.tabId || result.generation !== expected.browserTarget.generation) {
           if (adoptedDomInput) this.expectedDomInput = undefined;
-          return refused(action.actionId, result.driverCode ?? "DOM_INPUT_FOCUS_MISMATCH", "managed-browser input identity or focus changed; no keyboard input was sent. Observe again and click the current editable control before typing");
+          const evidence = result.tabId === expected.browserTarget.tabId && result.generation === expected.browserTarget.generation
+            ? ["pageHasFocus", "activeElementMatches", "editable"].flatMap((key) => {
+              const value = result.focusEvidence?.[key as keyof NonNullable<typeof result.focusEvidence>];
+              return typeof value === "boolean" ? [`${key}=${value}`] : [];
+            }).join(", ") : "";
+          return refused(action.actionId, result.driverCode ?? "DOM_INPUT_FOCUS_MISMATCH", `managed-browser input identity or focus changed; no keyboard input was sent.${evidence === "" ? "" : ` Current focus check: ${evidence}.`} Recovery guidance does not authorize repeating a completed click or violating user limits. If correction or another click is forbidden, stop and report failure; otherwise obtain fresh evidence before choosing a permitted recovery.`);
         }
       } catch (error) {
         signal.throwIfAborted();
@@ -2103,7 +2265,7 @@ export class CuaDriverComputer implements Computer {
       }
     }
     let requestAction = action;
-    if (action.groundingRef !== undefined && !(action.kind === "type" && hasLineBreak(action.text))) {
+    if (action.groundingRef !== undefined && !isWindowsMultilineType) {
       if (action.kind !== "click") {
         return refused(action.actionId, "GROUNDING_ACTION_UNSUPPORTED", "grounding references are only valid for click actions");
       }
@@ -2126,7 +2288,7 @@ export class CuaDriverComputer implements Computer {
     if (validatedEditablePoint !== undefined && requestAction.kind === "click") requestAction = { ...requestAction, point: validatedEditablePoint };
     let request: { name: string; arguments: Record<string, unknown> } | undefined;
     try {
-      if (!isMultilineType) {
+      if (!isWindowsMultilineType) {
         request = actionRequest(
           requestAction,
           current.label,
@@ -2144,34 +2306,71 @@ export class CuaDriverComputer implements Computer {
     }
     const currentWindowBinding = activeWindowBinding(current);
     if (options?.detectNewWindowHandoff === true && currentWindowBinding !== undefined && this.options.windowDeliveryMode === "foreground") {
+      current.preActionWindowBaseline = undefined;
+      current.visibleWindowBaseline = undefined;
+      current.proactiveHandoffCandidatesReady = false;
+      current.newHandoffCandidates = [];
+      current.newlySurfacedWindowKeys = new Set();
       const parentSurfaceRef = current.surfaceRegistry.activeSurface;
       if (parentSurfaceRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, parentSurfaceRef) ||
           !isExecutableSurfaceRef(current.surfaceRegistry, parentSurfaceRef)) {
         return refused(action.actionId, "SURFACE_REF_STALE", "pre-action window inventory has no current executable parent Surface; no input was sent");
       }
       try {
+        if (this.usesMacosTopology(current)) {
+          const previousTopology = current.macosLastTopology;
+          const topology = await this.readMacosTopology(current, currentWindowBinding.target, signal);
+          const targetRow = topology.rows.find((row) => row.pid === currentWindowBinding.target.pid && row.window_id === currentWindowBinding.target.windowId)!;
+          const previousRow = previousTopology?.target.pid === topology.target.pid && previousTopology.target.windowId === topology.target.windowId
+            ? previousTopology.rows.find((row) => row.pid === topology.target.pid && row.window_id === topology.target.windowId)
+            : undefined;
+          if (!sameWindowGeometry(targetRow.bounds, currentWindowBinding.bounds) ||
+              previousRow !== undefined && (JSON.stringify(previousRow.space_ids) !== JSON.stringify(targetRow.space_ids) ||
+                previousRow.current_space_id !== targetRow.current_space_id)) {
+            this.invalidateMacosSurface(current);
+            return refused(action.actionId, "WINDOW_TOPOLOGY_UNKNOWN", "macOS target geometry or Space changed before action; no input was sent");
+          }
+          const activeOverlay = current.macosActiveOverlay;
+          if (activeOverlay === undefined ? topology.overlays.length !== 0 :
+              topology.overlays.length !== 1 || !this.sameMacosOverlay(activeOverlay, topology.overlays[0]!)) {
+            this.invalidateMacosSurface(current);
+            return refused(action.actionId, "WINDOW_TOPOLOGY_UNKNOWN", "macOS target interaction topology changed before action; no input was sent");
+          }
+          current.preActionWindowBaseline = {
+            targetTopology: topology, inventoryEvidence: topologyEvidence(topology),
+            targetKeys: new Set(topology.rows.map((row) => windowIdentityKey({ pid: row.pid, windowId: row.window_id }))),
+            complete: false, truncated: false, parentSurfaceRef: { ...parentSurfaceRef },
+            parentBinding: { target: { ...currentWindowBinding.target }, bounds: { ...currentWindowBinding.bounds } },
+          };
+        } else {
         const visibleInventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
         signal.throwIfAborted();
         const visibleKeys = new Set(visibleInventory.windows.map((window) => windowIdentityKey(window.target)));
+        if (!visibleInventory.complete || visibleInventory.truncated === true) {
+          return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", `visible-window inventory has no complete topology attestation; no input was sent; baseline=${windowInventoryEvidence(visibleInventory)}`);
+        }
         if (!visibleKeys.has(windowIdentityKey(currentWindowBinding.target))) {
           return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "bound target was missing from visible-window inventory; no input was sent");
         }
         current.preActionWindowBaseline = {
+          inventoryEvidence: windowInventoryEvidence(visibleInventory),
           targetKeys: visibleKeys,
           complete: visibleInventory.complete,
-          truncated: visibleInventory.truncated === true,
+          truncated: false,
           parentSurfaceRef: { ...parentSurfaceRef },
           parentBinding: { target: { ...currentWindowBinding.target }, bounds: { ...currentWindowBinding.bounds } },
         };
         current.visibleWindowBaseline = visibleKeys;
         current.newlySurfacedWindowKeys = new Set();
         current.newHandoffCandidates = [];
+        }
       } catch (error) {
         signal.throwIfAborted();
-        return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "visible-window inventory failed before action; no input was sent");
+        if (error instanceof MacosTopologyError) return refused(action.actionId, error.code, error.message + "; no input was sent; phase=preflight");
+        return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", `visible-window inventory failed before action; no input was sent; phase=preflight; failure=${windowInventoryFailureEvidence(error)}`);
       }
     }
-    if (action.kind === "type" && hasLineBreak(action.text)) {
+    if (action.kind === "type" && isWindowsMultilineType) {
       // Multiline uses the same fresh pre-action inventory baseline as every
       // opted-in foreground action. Its completed receipt returns through the
       // normal Runtime post-action handoff diff before the next observation.
@@ -3187,16 +3386,18 @@ function groundingState(item: Record<string, unknown>): GroundingElement["state"
   const focused = booleanField(item, "focused") ?? booleanField(item, "is_focused");
   const editable = booleanField(item, "editable") ?? booleanField(item, "is_editable");
   const expanded = booleanField(item, "expanded") ?? booleanField(item, "is_expanded");
-  const selected = booleanField(item, "selected") ?? booleanField(item, "checked") ?? booleanField(item, "is_selected");
+  const selected = booleanField(item, "selected") ?? booleanField(item, "is_selected");
+  const checked = item.checked === "mixed" ? "mixed" as const : booleanField(item, "checked");
   const value = item.value;
   const valuePresent = value !== undefined && value !== null && (typeof value !== "string" || value.length > 0);
-  if (enabled === undefined && focused === undefined && editable === undefined && expanded === undefined && selected === undefined && !valuePresent) return undefined;
+  if (enabled === undefined && focused === undefined && editable === undefined && expanded === undefined && selected === undefined && checked === undefined && !valuePresent) return undefined;
   return {
     ...(enabled === undefined ? {} : { enabled }),
     ...(focused === undefined ? {} : { focused }),
     ...(editable === undefined ? {} : { editable }),
     ...(expanded === undefined ? {} : { expanded }),
     ...(selected === undefined ? {} : { selected }),
+    ...(checked === undefined ? {} : { checked }),
     ...(valuePresent ? { valuePresent: true } : {}),
   };
 }
@@ -3402,7 +3603,11 @@ function driverErrorDetails(error: unknown): DriverErrorDetails {
 
 function normalizeDriverError(error: unknown, operation: string): Error {
   const details = driverErrorDetails(error);
-  return new Error(`CUA ${operation} failed${details.errorCode ? ` [${details.errorCode}]` : ""}: ${details.message}`);
+  const normalized = new Error(`CUA ${operation} failed${details.errorCode ? ` [${details.errorCode}]` : ""}: ${details.message}`);
+  if (operation === "open" && error instanceof WindowContractError && ["WINDOW_ACTIVATION_UNCONFIRMED", "WINDOW_ACTIVATION_REFUSED", "WINDOW_ACTIVATION_UNKNOWN"].includes(error.code)) {
+    return Object.assign(normalized, { code: error.code, startupStage: "window_activation" as const });
+  }
+  return normalized;
 }
 
 async function bestEffortCloseDriver(driver: CuaDriverLike, label: string, waitMs: number, sessionStarted: boolean): Promise<boolean> {
