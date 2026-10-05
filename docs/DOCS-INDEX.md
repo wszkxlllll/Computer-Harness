@@ -6,7 +6,7 @@
 
 ## 当前交接主线
 
-A 线本轮 PR 交付：[2026-10-05 阶段修复推送说明](./a-line-pr-delivery-2026-10-05.md)。独立分支交付 Runtime/GLM/手机反馈与 Mac CUA 可复现源码补丁；完整离线、Web 构建和原生重放通过，Draft 保留生产输入/保存/T2/T3 及 Windows 真机门槛，本轮不审查合并 PR22/23。
+A 线本轮 PR 交付：[Draft PR24](https://github.com/wszkxlllll/Computer-Harness/pull/24)、[2026-10-05 阶段修复推送说明](./a-line-pr-delivery-2026-10-05.md)。独立分支交付 Runtime/GLM/手机反馈与 Mac CUA 可复现源码补丁；完整离线、Web 构建和原生重放通过，Draft 保留生产输入/保存/T2/T3 及 Windows 真机门槛，本轮不审查合并 PR22/23。
 
 累计进度与交付核对：[A 线累计测试、CUA 完善及（6）交付](./review-thread-delivery-status-2026-10-05.md)。基础链路已打通，T1 完整原题一次成功但独立重复未通过；当前在补 T2 原生窗口与保存链路，最新只读绑定/截图/释放通过，完整 T2/T3、剩余控制和真人验收未完成。CUA 专项区分浏览器实机、Mac 多行源码合同、隔离原生观察会话及未完成生产/保存桥；团队事件数量不等于完成任务数量，远端状态单列。
 
