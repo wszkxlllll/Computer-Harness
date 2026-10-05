@@ -554,6 +554,8 @@ export interface GroundingElementState {
   readonly editable?: boolean;
   readonly expanded?: boolean;
   readonly selected?: boolean;
+  /** Toggle state, independent of selection; absent means unknown/not applicable. */
+  readonly checked?: boolean | "mixed";
   /** Only whether a value exists; the value itself is never exposed here. */
   readonly valuePresent?: boolean;
 }
@@ -1064,7 +1066,7 @@ export type RuntimeEventData =
       to: SurfaceRef;
       reason: SurfaceTransitionReason;
     }
-  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
+  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; maxWireInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
       type: "model.request.failed";

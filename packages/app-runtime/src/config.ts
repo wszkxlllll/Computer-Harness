@@ -67,6 +67,7 @@ export interface ResolvedRunConfig {
   contextMode: "raw" | "recent";
   contextMaxHistoryEvents: number;
   contextMaxInputTokens?: number;
+  contextMaxWireInputTokens?: number;
   /** Frozen, provider-neutral answer preferences for this Run only. */
   assistantPreferences?: RunAssistantPreferencesSnapshot;
   riskProfile: "experiment" | "live-interactive";

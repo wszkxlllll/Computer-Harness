@@ -13,6 +13,12 @@ afterEach(() => {
 });
 
 describe("run result panel", () => {
+  it.each(["budget_exhausted", "failed"])("never labels the %s structured outcome completed based on reply text", (outcome) => {
+    render(<ResultPanel reply="模型之前声称 task complete / 等待审批，但任务完成未确认。" outcome={outcome} />);
+    expect(screen.queryByText("已完成", { exact: true })).toBeNull();
+    expect(screen.getByText(outcome === "failed" ? "未完成" : "结果待核实", { exact: true })).toBeDefined();
+  });
+
   it("offers the full reply only when the collapsed panel actually clips it", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
       configurable: true,

@@ -133,6 +133,7 @@ export interface ContextBudgetReport {
   omittedHistoryEvents: number;
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  maxWireInputTokens?: number;
   estimatedMemoryTokens?: number;
   memoryMaxTokens?: number;
   estimatedMonitorGuidanceTokens?: number;
@@ -179,6 +180,8 @@ export interface ContextCompileInput {
   plan?: PlanState;
   executionSegment?: ExecutionSegment;
   recentEvents: readonly RuntimeEvent[];
+  /** Optional exact policy-owned allowance before this request. No inferred custom-policy limits. */
+  requestBudget?: { readonly remaining: number; readonly limit: number };
   context?: ContextOptions;
   enabledCategories?: readonly ToolCategory[];
   enabledToolNames?: readonly string[];
@@ -207,6 +210,8 @@ export interface ContextOptions {
   maxHistoryEvents?: number;
   /** Approximate text/tool budget; image cost is reported by the Provider when available. */
   maxInputTokens?: number;
+  /** Explicit Provider wire estimate cap, including envelopes and image allowance. */
+  maxWireInputTokens?: number;
   /** Soft cap for memory text inside the Context fixed blocks. */
   memoryMaxTokens?: number;
 }
@@ -367,6 +372,8 @@ export interface FinishDecision {
 }
 
 export interface RuntimePolicy {
+  /** Optional read-only exact allowance; caps >=3 reserve their last existing request for finish. */
+  modelRequestBudget?(snapshot: RunSnapshot): { readonly remaining: number; readonly limit: number };
   evaluateToolCall(context: PolicyContext): Promise<ToolPolicyDecision>;
   checkBudget(snapshot: RunSnapshot): BudgetDecision;
   checkActionBudget(snapshot: RunSnapshot): BudgetDecision;
@@ -430,4 +437,3 @@ export interface IdFactory {
   assetId(): AssetId;
   actionId(): ActionId;
 }
-

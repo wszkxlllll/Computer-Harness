@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { CuaWindowDiscovery } from "./window-discovery.js";
+import { activateWindowTarget, WindowContractError } from "./window-contract.js";
 
 installFakeCuaSdkModuleForTests();
 
@@ -17,6 +18,53 @@ function result(overrides: Partial<ToolResult> = {}): ToolResult {
 }
 
 describe("CuaWindowDiscovery", () => {
+  it.each([
+    { isError: true, focused: 69034, frontmost: 69095 },
+    { isError: false, focused: 69034, frontmost: 69095 },
+    { isError: true, focused: 69095, frontmost: 69034 },
+    { isError: false, focused: 69095, frontmost: 69034 },
+  ])("reports AX focused=$focused and global frontmost=$frontmost without relaxing exact activation when isError=$isError", async ({ isError, focused, frontmost }) => {
+    const calls: string[] = [];
+    const driver = { async callTool(name: string) {
+      calls.push(name);
+      return result({ isError, structuredJson: JSON.stringify({ status: "partial", pid: 52546, window_id: 69034, exact_window_effect: { verified: false, target_visible_ordinary: true }, observed: { focused_window_id: focused, frontmost_ordinary_window_id: frontmost, front_process_matches_target: true, frontmost_pid: 52546, workspace_frontmost_pid: 52546 }, title: "PRIVATE_WINDOW_TITLE" }) });
+    } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "fixture", { pid: 52546, windowId: 69034 }, new AbortController().signal).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: "WINDOW_ACTIVATION_UNCONFIRMED", activationDiagnostic: { focusedWindowId: focused, frontmostOrdinaryWindowId: frontmost, exactVerified: false, frontProcessMatchesTarget: true } });
+    expect((error as Error).message).toContain(`AX focused_window_id=${focused}`);
+    expect((error as Error).message).toContain(`independent frontmost_ordinary_window_id=${frontmost}`);
+    expect((error as Error).message).not.toContain("observed foreground window_id=69034");
+    expect((error as Error).message).not.toContain("PRIVATE_WINDOW_TITLE");
+    expect(calls).toEqual(["bring_to_front"]);
+  });
+
+  it("omits unavailable AX evidence rather than assigning the independent foreground ID to it", async () => {
+    const driver = { async callTool() { return result({ isError: true, structuredJson: JSON.stringify({ exact_window_effect: { verified: false }, observed: { frontmost_ordinary_window_id: 69095 } }) }); } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "fixture", { pid: 52546, windowId: 69034 }, new AbortController().signal).catch((value: unknown) => value);
+    expect((error as Error).message).toContain("independent frontmost_ordinary_window_id=69095");
+    expect((error as Error).message).not.toContain("AX focused_window_id");
+    expect(error).toMatchObject({ code: "WINDOW_ACTIVATION_UNCONFIRMED" });
+    expect((error as WindowContractError).activationDiagnostic).not.toHaveProperty("focusedWindowId");
+  });
+
+  it.each([
+    { isError: true, degraded: false, structured: { status: "partial", pid: 123, window_id: 11, request_accepted: true, exact_window_effect: { verified: false, target_visible_ordinary: true }, observed: { front_process_matches_target: false, focused_window_id: 10, frontmost_ordinary_window_id: 10, workspace_frontmost_pid: 456 } }, code: "WINDOW_ACTIVATION_UNCONFIRMED" },
+    { isError: false, degraded: false, structured: { status: "activated", pid: 123, window_id: 11, observed: { focused_window_id: 10 }, exact_window_effect: { verified: false } }, code: "WINDOW_ACTIVATION_UNCONFIRMED" },
+    { isError: false, degraded: true, structured: { status: "activated", window_id: 11 }, code: "WINDOW_ACTIVATION_UNKNOWN" },
+    { isError: false, degraded: false, structured: { status: "PRIVATE_STATUS", pid: "PRIVATE_PID", request_accepted: "PRIVATE_BOOL", observed: { focused_window_id: "PRIVATE_WINDOW" } }, code: "WINDOW_ACTIVATION_REFUSED" },
+  ])("keeps activation $code single-attempt with only safe structured evidence", async ({ isError, degraded, structured, code }) => {
+    const calls: string[] = [];
+    const driver = { async callTool(name: string) { calls.push(name); return result({ isError, degraded, text: "PRIVATE_TITLE_BODY", structuredJson: JSON.stringify({ ...structured, title: "PRIVATE_TITLE_BODY" }) }); } } as unknown as CuaDriverLike;
+    let caught: unknown;
+    try { await activateWindowTarget(driver, "fixture", { pid: 123, windowId: 11 }, new AbortController().signal); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(WindowContractError);
+    expect(caught).toMatchObject({ code, activationDiagnostic: { requestedPid: 123, requestedWindowId: 11, isError, degraded, elapsedMs: expect.any(Number) } });
+    expect((caught as WindowContractError).message).not.toContain("PRIVATE");
+    expect(JSON.stringify((caught as WindowContractError).activationDiagnostic)).not.toContain("PRIVATE");
+    if (structured.status === "partial") expect(caught).toMatchObject({ activationDiagnostic: { status: "partial", requestAccepted: true, frontProcessMatchesTarget: false, focusedWindowId: 10, workspaceFrontmostPid: 456 } });
+    if (structured.status === "PRIVATE_STATUS") expect((caught as WindowContractError).activationDiagnostic).not.toHaveProperty("status");
+    expect(calls).toEqual(["bring_to_front"]);
+  });
   it("lists host windows through a temporary read-only session and cleans it up", async () => {
     const calls: string[] = [];
     const driver = {

@@ -36,13 +36,13 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
     },
     {
       name: "type",
-      description: "Type ordinary single-line text into the currently focused GUI control. For multiline text on a CUA run, provide elementRef for a current UIA text editor, or omit it only when the current complete UIA catalog contains exactly one enabled text-editing surface. The UIA path replaces that entire field value; it is not cursor insertion and does not submit or send. Do not use elementRef for ordinary single-line typing.",
+      description: "Type text into the currently focused GUI control. On Windows CUA, multiline text uses the verified UIA full-value replacement route: provide a current UIA text-editor elementRef, or omit it only when the adapter can safely resolve one editor from a complete current catalog. On macOS CUA, omit elementRef; text including line breaks is sent unchanged in one native type_text call to the current focus. Line breaks may have application-specific effects; do not assume they cannot submit. Other multiline CUA platform routes are unsupported. Do not use elementRef for single-line typing.",
       category: "computer",
       inputSchema: {
         type: "object",
         properties: {
-          text: { type: "string", description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
-          elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA text-editor reference, used only for multiline full-value replacement. Expires when the observation or target window changes." },
+          text: { type: "string", description: "Text to type unchanged. Windows CUA multiline uses its safely grounded UIA replacement route; macOS sends the original text once to current focus." },
+          elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current Windows CUA UIA text-editor reference, only for multiline full-value replacement. Not supported by macOS native typing; omit there. Expires when the observation or target window changes." },
         },
         required: ["text"],
         additionalProperties: false,
@@ -70,12 +70,9 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
           }
           return { kind: "type", text, groundingRef: elementRef };
         }
-        if (multiline && grounding !== undefined && grounding.completeness === "complete" &&
-            (grounding.source === "uia" || grounding.source === "hybrid")) {
-          const candidates = grounding.elements.filter((element) => element.source === "uia" && isTextEditingRole(element.role) &&
-            element.state?.enabled !== false && element.state?.editable !== false);
-          if (candidates.length === 1) return { kind: "type", text, groundingRef: candidates[0]!.elementRef };
-        }
+        // The execution context does not attest a platform. Do not invent a
+        // UIA ref for macOS focus typing; Windows performs its own safe exact-
+        // one editor resolution inside the verified replacement path.
         return { kind: "type", text };
       },
     },
@@ -287,7 +284,7 @@ export function groundingComputerTools(options: GroundingComputerToolsOptions = 
 function selectOptionTool(): ComputerToolDefinition {
   return {
     name: "select_option",
-    description: "Select one exact visible enabled option by optionText copied from the current observation's native HTML select options list (reported as combobox). ARIA comboboxes are not supported; never guess text or use an index/value. Use only after a fresh observation; this does not open the native popup.",
+    description: "Select one exact visible enabled option by optionText copied from the current observation's native HTML select options list (reported as combobox). ARIA comboboxes are not supported; never guess text or use an index/value. Use only after a fresh observation; this does not open the native popup. Declare the immediate effect accurately: changing an observed task-scoped comparison/filter value is local_edit; a known view/navigation change is navigate. This is not blanket permission: auto-submit, purchase, payment, permission/security changes or sensitive disclosure require their actual high-impact effects; use unknown when the outcome cannot be established.",
     category: "computer",
     groundingHint: {
       preferredRoles: ["select", "combobox"],
@@ -473,10 +470,6 @@ function parseTypeArguments(value: JsonValue): { text: string; elementRef?: stri
     throw new Error("type.elementRef must be a non-empty string of at most 96 characters");
   }
   return { text: object.text, elementRef };
-}
-
-function isTextEditingRole(role: string): boolean {
-  return ["document", "edit", "textbox", "textarea", "textedit", "texteditor"].includes(normalizeGroundingRole(role));
 }
 
 function parseEmptyObject(value: JsonValue, name: string): void {

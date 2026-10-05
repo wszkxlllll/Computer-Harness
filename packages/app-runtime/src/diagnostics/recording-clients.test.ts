@@ -52,6 +52,32 @@ function expectForwarded(request: ForwardedRequest | undefined, url: string, bod
 }
 
 describe("recording client diagnostic paths", () => {
+  it.each([false, true])("records bounded actual GLM wire settings on failure=%s without content", async (failure) => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-glm-wire-"));
+    const path = join(directory, "exchanges.jsonl");
+    const fake = new FakeGlmHttpClient({}, failure ? new Error("private-error") : undefined);
+    const recorder = new RecordingGlmHttpClient(path, fake);
+    const body = { model: "glm-5.3-flash", thinking: { type: "enabled" }, reasoning_effort: "low", max_tokens: 8192, tools: [{ type: "function", function: { name: "type" } }], messages: [{ role: "user", content: [{ type: "text", text: "private-text" }, { type: "image_url", image_url: { url: "private-image" } }] }], reasoning_content: "private-reasoning" };
+    const result = recorder.post("https://private-endpoint.invalid", body, { Authorization: "private-key" }, new AbortController().signal);
+    if (failure) await expect(result).rejects.toThrow("private-error");
+    else await result;
+    const record = await readRecord(path);
+    expect(record.requestConfiguration).toEqual({ thinkingType: "enabled", reasoningEffort: "low", maxTokens: 8192, messageCount: 1, imageCount: 1, toolCount: 1 });
+    expect(record.toolNames).toEqual(["type"]);
+    expect(fake.calls).toBe(1);
+    expect(JSON.stringify(record)).not.toMatch(/private-/u);
+  });
+
+  it.each([undefined, "private-effort"])("distinguishes omitted from unknown effort %s without echoing values", async (effort) => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-glm-invalid-wire-"));
+    const path = join(directory, "exchanges.jsonl");
+    const recorder = new RecordingGlmHttpClient(path, new FakeGlmHttpClient({}));
+    await recorder.post("unused", { reasoning_effort: effort, thinking: { type: "private-type" }, max_tokens: "private-budget", messages: "private-message" }, {}, new AbortController().signal);
+    const record = await readRecord(path);
+    expect(record.requestConfiguration).toEqual({ thinkingType: null, reasoningEffort: effort === undefined ? "server_default" : "unknown", maxTokens: null, messageCount: 0, imageCount: 0, toolCount: 0 });
+    expect(JSON.stringify(record)).not.toMatch(/private-/u);
+  });
+
   it("writes a safe GLM native multi-call projection through the recorder", async () => {
     const typedText = "typed-private-value";
     const response = {

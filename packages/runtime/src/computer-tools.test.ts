@@ -66,8 +66,13 @@ describe("default Computer tools", () => {
       kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
     });
     expect(type.toAction({ text: "first\nsecond" }, context)).toEqual({
-      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+      kind: "type", text: "first\nsecond",
     });
+    for (const text of ["first\nsecond", "first\r\nsecond", "first\nsecond\n"]) {
+      expect(type.toAction({ text }, context)).toEqual({ kind: "type", text });
+    }
+    expect(type.description).toContain("On macOS CUA, omit elementRef");
+    expect(type.description).toContain("do not assume they cannot submit");
     expect(type.toAction({ text: "ordinary single line" }, { ...context, observation: undefined })).toEqual({
       kind: "type", text: "ordinary single line",
     });
@@ -256,6 +261,9 @@ describe("default Computer tools", () => {
       additionalProperties: false,
     });
     if (definition === undefined || definition.category !== "computer") throw new Error("select_option tool missing");
+    expect(definition.description).toContain("task-scoped comparison/filter value is local_edit");
+    expect(definition.description).toContain("purchase, payment, permission/security changes");
+    expect(definition.description).toContain("use unknown");
     expect(() => definition.validate({ elementRef: "dom-1", optionText: "  " })).toThrow(/non-empty/iu);
     expect(() => definition.validate({ elementRef: "dom-1", optionText: "x".repeat(161) })).toThrow(/160/iu);
     const observation = {

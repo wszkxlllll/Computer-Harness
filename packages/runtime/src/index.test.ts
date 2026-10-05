@@ -1144,6 +1144,8 @@ describe("RunController S2-2 happy path", () => {
     const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 2));
     await expect(controller.start("do not loop")).resolves.toBe("budget_exhausted");
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, stepCount: 0, outcome: "budget_exhausted" });
+    expect(controller.getSnapshot().summary).toContain("运行预算已达到上限，任务完成未确认");
+    expect(controller.getSnapshot().summary).toContain("已保留 0 个非等待 GUI 动作完成回执");
   });
 
   it("allows a closing model turn after the last GUI action budget is consumed", async () => {
@@ -1176,6 +1178,33 @@ describe("RunController S2-2 happy path", () => {
     expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(4);
     expect(events.some((event) => event.type === "runtime.error" && event.category === "budget" && event.message.includes("closing decision limit"))).toBe(true);
     expect(provider.inputs).toHaveLength(4);
+    expect(controller.getSnapshot().summary).toContain("已保留 1 个非等待 GUI 动作完成回执");
+    expect(controller.getSnapshot().summary).toContain("不是已核实的采集成果");
+  });
+
+  it("retains a deterministic budget result when retry would exceed the request cap", async () => {
+    let requests = 0;
+    const provider: ProviderAdapter = { id: "budget-retry", async generate() { requests += 1; throw Object.assign(new Error("synthetic transient"), { retryable: true, retryMode: "same_input", code: "GLM_NETWORK_ERROR" }); } };
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 1));
+    try {
+      await expect(created.controller.start("synthetic fixture")).resolves.toBe("budget_exhausted");
+      expect(requests).toBe(1);
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+      expect(created.controller.getSnapshot().summary).toContain("运行预算已达到上限，任务完成未确认");
+      expect(created.controller.getSnapshot().summary).not.toContain("synthetic transient");
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it("reports budget exhaustion before the first model request without claiming GUI progress", async () => {
+    const provider = new ScriptedProvider([{ type: "finish", summary: "must not be requested" }]);
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 0));
+    try {
+      await expect(created.controller.start("synthetic fixture")).resolves.toBe("budget_exhausted");
+      expect(provider.inputs).toHaveLength(0);
+      expect(created.controller.getSnapshot().summary).toContain("已保留 0 个非等待 GUI 动作完成回执");
+      expect(created.controller.getSnapshot().summary).not.toContain("最近动作后的截图已保存");
+      expect(created.controller.getEvents().filter((event) => event.type === "action.execution.started")).toHaveLength(0);
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
   });
 
   it("returns ToolResult for a non-computer tool without creating an ActionIntent", async () => {
@@ -2261,6 +2290,155 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it.each(["success", "failure", "missing-status", "invalid-status", "missing-text", "status-label", "mixed-controls", "bare-success", "bare-waiting"])("passes the strict final %s contract through real Context and GLM without a fourth request", async (scenario) => {
+    const contextSource = "../../context/src/index.js";
+    const providerSource = "../../provider-glm/src/index.js";
+    const { DefaultContextCompiler } = await import(contextSource);
+    const { GlmAdapter } = await import(providerSource);
+    const { createDefaultToolRegistry } = await import("./control-tools.js");
+    const registry = createDefaultToolRegistry();
+    const wires: Array<Record<string, unknown>> = [];
+    const provider = new GlmAdapter({ apiKey: "fixture", profile: { name: "glm-5.3-flash", coordinateMode: "actual_pixels", thinking: "low" }, assetReader: { async read() { return new Uint8Array([1]); } }, httpClient: { async post(_url: string, body: Record<string, unknown>) {
+      wires.push(body);
+      const last = wires.length === 3;
+      if (last && scenario.startsWith("bare-")) return { choices: [{ finish_reason: "stop", message: { content: scenario === "bare-success" ? "PRIVATE_BARE_RESULT: the task is complete" : "PRIVATE_BARE_RESULT: the selection has not been executed, waiting for approval" } }] };
+      const resultText = "Only earlier click receipts exist; all requested variants and missing fields remain unverified.";
+      const finishArgs = scenario === "success" ? { status: "success", text: "Two click actions have completion receipts and their post-action screenshots are retained." }
+        : scenario === "missing-status" ? { text: resultText }
+        : scenario === "invalid-status" ? { status: "PRIVATE_INVALID_STATUS", text: resultText }
+        : scenario === "missing-text" ? { status: "failure" }
+        : scenario === "status-label" ? { status: "success", text: "done" }
+        : { status: "failure", text: resultText };
+      const calls = [{ id: `wire-call-${wires.length}`, type: "function", function: { name: last ? "terminate" : "click", arguments: JSON.stringify(last ? finishArgs : { x: 40, y: 50 }) } }];
+      if (last && scenario === "mixed-controls") calls.push({ id: "mixed-extra-call", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 40, y: 50 }) } });
+      return { choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: calls } }] };
+    } } });
+    const created = await makeController(provider, new FakeComputer(), registry, new DefaultRuntimePolicy(100, 3), { contextCompiler: new DefaultContextCompiler(registry) });
+    try {
+      const valid = scenario === "success" || scenario === "failure";
+      expect(await created.controller.start("Perform two clicks then report the receipts; preserve unknown fields")).toBe(scenario === "success" ? "succeeded" : scenario === "failure" ? "failed" : "budget_exhausted");
+      expect(wires).toHaveLength(3);
+      expect(JSON.stringify(wires[2])).toContain("1 of 3 requests remain");
+      expect((wires[2]!.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name)).toEqual(["terminate"]);
+      const terminalSchema = (wires[2]!.tools as Array<{ function: { parameters: Record<string, unknown> } }>)[0]!.function.parameters;
+      expect(terminalSchema.required).toEqual(expect.arrayContaining(["status", "text"]));
+      expect(JSON.stringify(terminalSchema)).toContain('"enum":["success","failure"]');
+      expect(JSON.stringify(wires[2])).toContain("Never omit either status or text");
+      expect(JSON.stringify(wires[2])).not.toContain('"success"|"failure"');
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(2);
+      const events = created.controller.getEvents();
+      expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(3);
+      expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(valid ? 0 : 1);
+      if (!valid) {
+        const rejected = events.find((event) => event.type === "model.request.failed");
+        expect(rejected).toMatchObject({ code: "GLM_INVALID_TOOL_CALL", retryable: true });
+        expect(JSON.stringify(rejected)).not.toContain("PRIVATE_INVALID_STATUS");
+        expect(JSON.stringify(rejected)).not.toContain("PRIVATE_BARE_RESULT");
+      }
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: scenario === "success" ? "succeeded" : scenario === "failure" ? "failed" : "budget_exhausted", summary: expect.any(String) });
+      if (scenario === "failure") expect(events.at(-1)).toMatchObject({ summary: expect.stringContaining("missing fields remain unverified") });
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["success", "failure", "legacy-text"])("permits an honest %s result without requiring a GUI action", async (scenario) => {
+    const contextSource = "../../context/src/index.js";
+    const providerSource = "../../provider-glm/src/index.js";
+    const { DefaultContextCompiler } = await import(contextSource);
+    const { GlmAdapter } = await import(providerSource);
+    const { createDefaultToolRegistry } = await import("./control-tools.js");
+    const registry = scenario === "legacy-text" ? clickRegistry() : createDefaultToolRegistry();
+    let requests = 0;
+    const summary = "The existing screenshot was inspected; no new GUI input was required for this response.";
+    const provider = new GlmAdapter({ apiKey: "fixture", profile: "glm-5.3-flash", assetReader: { async read() { return new Uint8Array([1]); } }, httpClient: { async post() {
+      requests += 1;
+      return { choices: [{ finish_reason: scenario === "legacy-text" ? "stop" : "tool_calls", message: scenario === "legacy-text" ? { content: summary } : { tool_calls: [{ id: "readonly-finish", function: { name: "terminate", arguments: JSON.stringify({ status: scenario, text: summary }) } }] } }] };
+    } } });
+    const created = await makeController(provider, new FakeComputer(), registry, new DefaultRuntimePolicy(100, 3), { contextCompiler: new DefaultContextCompiler(registry) });
+    try {
+      expect(await created.controller.start("Inspect the existing screenshot and report whether the requested information is available")).toBe(scenario === "failure" ? "failed" : "succeeded");
+      expect(requests).toBe(1);
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(0);
+      expect(created.controller.getEvents().some((event) => event.type === "approval.requested")).toBe(false);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", summary });
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it.each([null, { limit: 3, remaining: -1 }, { limit: 3, remaining: 99 }])("ignores malformed custom budget metadata %j without guessing closing", async (budget) => {
+    const base = new DefaultRuntimePolicy(100, 3);
+    const policy = { checkBudget: (snapshot: Parameters<RuntimePolicy["checkBudget"]>[0]) => base.checkBudget(snapshot), checkActionBudget: (snapshot: Parameters<RuntimePolicy["checkBudget"]>[0]) => base.checkActionBudget(snapshot), canFinish: (snapshot: Parameters<RuntimePolicy["checkBudget"]>[0]) => base.canFinish(snapshot), evaluateToolCall: (context: Parameters<RuntimePolicy["evaluateToolCall"]>[0]) => base.evaluateToolCall(context), modelRequestBudget: () => budget } as RuntimePolicy;
+    let requests = 0;
+    const created = await makeController({ id: "fixture", async generate() { requests += 1; return { type: "tool_calls", calls: [clickCall(`custom-${requests}`)] }; } }, new FakeComputer(), clickRegistry(), policy);
+    try { expect(await created.controller.start("Custom policy")).toBe("budget_exhausted"); expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(3); }
+    finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["ordinary", "same-input-retry"])("rejects the whole final-request tool group with %s and no extra request", async (scenario) => {
+    let requests = 0;
+    let sideWrites = 0;
+    const registry = clickRegistry();
+    registry.register({ name: "memory_write", category: "side", description: "Fixture memory", inputSchema: { type: "object" }, validate() {}, async execute() { sideWrites += 1; return {}; } });
+    const provider: ProviderAdapter = { id: "fixture", async generate() {
+      requests += 1;
+      if (requests === 1 || scenario === "ordinary" && requests === 2) return { type: "tool_calls", calls: [clickCall(`early-${requests}`)] };
+      if (requests === 2) throw Object.assign(new Error("fixture network failure"), { retryable: true, retryMode: "same_input" });
+      return { type: "tool_calls", calls: [{ id: "closing-memory" as ToolCallId, name: "memory_write", arguments: {} }, clickCall("closing-click")] };
+    } };
+    const created = await makeController(provider, new FakeComputer(), registry, new DefaultRuntimePolicy(100, 3));
+    try {
+      expect(await created.controller.start("Keep original full goal")).toBe("budget_exhausted");
+      expect(requests).toBe(3);
+      expect(sideWrites).toBe(0);
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(scenario === "ordinary" ? 2 : 1);
+      const rejected = created.controller.getEvents().filter((event) => event.type === "tool.call.rejected");
+      expect(rejected.map((event) => event.type === "tool.call.rejected" ? event.callId : "")).toEqual(["closing-memory", "closing-click"]);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", outcome: "budget_exhausted", summary: expect.stringContaining("业务信息和未知项仍需另行核对") });
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it.each([1, 2, 3])("preserves limit %s single-action/custom-policy semantics without inferred closing", async (limit) => {
+    const base = new DefaultRuntimePolicy(100, limit);
+    const policy: RuntimePolicy = limit === 3 ? { checkBudget: (snapshot) => base.checkBudget(snapshot), checkActionBudget: (snapshot) => base.checkActionBudget(snapshot), canFinish: (snapshot) => base.canFinish(snapshot), evaluateToolCall: (context) => base.evaluateToolCall(context) } : base;
+    let requests = 0;
+    const created = await makeController({ id: "fixture", async generate() { requests += 1; return { type: "tool_calls", calls: [clickCall(`allowed-${requests}`)] }; } }, new FakeComputer(), clickRegistry(), policy);
+    try {
+      expect(await created.controller.start("Single operations")).toBe("budget_exhausted");
+      expect(requests).toBe(limit);
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(limit);
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it("does not apply a startup failure summary after Computer open completed", async () => {
+    const computer = new FakeComputer();
+    computer.observe = async () => { throw Object.assign(new Error("PRIVATE_OBSERVE_ERROR"), { code: "WINDOW_ACTIVATION_UNCONFIRMED", startupStage: "window_activation" }); };
+    const created = await makeController({ id: "fixture", async generate() { throw new Error("must not reach model"); } }, computer);
+    try {
+      expect(await created.controller.start("fixture observe failure")).toBe("failed");
+      expect(created.controller.getEvents().some((event) => event.type === "computer.open.completed")).toBe(true);
+      expect(created.controller.getEvents().find((event) => event.type === "run.finished")).not.toHaveProperty("summary");
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["typed", "unknown", "cancelled"])("reports startup %s without private error echo or assuming no activation", async (scenario) => {
+    const computer = new FakeComputer();
+    const provider: ProviderAdapter = { id: "fixture", async generate() { throw new Error("must not request model"); } };
+    const created = await makeController(provider, computer);
+    computer.open = async () => {
+      if (scenario === "cancelled") created.controller.cancel();
+      throw scenario === "typed" ? new AggregateError([], "PRIVATE_ERROR", { cause: Object.assign(new Error("PRIVATE_TITLE"), { code: "WINDOW_ACTIVATION_UNCONFIRMED", startupStage: "window_activation" }) }) : Object.assign(new Error("PRIVATE_ERROR"), { code: { toString() { throw new Error("must not stringify"); } }, startupStage: "window_activation" });
+    };
+    try {
+      expect(await created.controller.start("fixture startup")).toBe(scenario === "cancelled" ? "cancelled" : "failed");
+      const finished = created.controller.getEvents().find((event) => event.type === "run.finished");
+      if (scenario === "cancelled") expect(finished).not.toHaveProperty("summary");
+      else {
+        expect(finished).toMatchObject({ summary: expect.stringContaining(scenario === "typed" ? "窗口启动未通过精确前台身份确认" : "Computer 启动未完成") });
+        if (finished?.type !== "run.finished") throw new Error("missing finish");
+        expect(finished.summary).toContain("可能已尝试激活或改变窗口状态");
+        expect(finished.summary).not.toContain("PRIVATE");
+      }
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
   it.each(["completed", "refused", "failed", "wait", "none"])("reports Provider failure after %s without replay or claiming goal success", async (scenario) => {
     let requests = 0;
     const computer = scenario === "refused" ? new RefusingComputer() : new FakeComputer();
@@ -3097,7 +3275,52 @@ describe("RunController S2-4 failure boundaries", () => {
     const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
     expect(events.some((event) => event.type === "model.request.started")).toBe(false);
     expect(events.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed", summary: expect.stringContaining("本地模型请求准备未完成，未发出该请求") });
     await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("preserves completed GUI progress after local preparation fails, without a new request or replay", async () => {
+    let preparations = 0;
+    let requests = 0;
+    const computer = new FakeComputer();
+    const provider: ProviderAdapter = { id: "local-prepare-failure", async generate() { throw new Error("unused"); },
+      async prepare() { if (++preparations > 1) throw new GlmProviderError("GLM prompt exceeds wire input budget", "GLM_INPUT_TOO_LARGE", false); return Object.freeze({ providerId: "local-prepare-failure", payloadHash: "fixture" }); },
+      async generatePrepared() { requests += 1; return { type: "tool_calls", calls: [typeCall("local-before-failure", "PRIVATE_INPUT_MARKER")] }; },
+    };
+    const created = await makeController(provider, computer, batchRegistry());
+    try {
+      await expect(created.controller.start("fixture")).resolves.toBe("failed");
+      expect(requests).toBe(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(1);
+      const events = created.controller.getEvents();
+      expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed", summary: expect.stringContaining("输入预算检查未通过，该请求未发送") });
+      const finished = events.at(-1);
+      if (finished?.type !== "run.finished") throw new Error("missing finish");
+      expect(finished.summary).toContain("已保留 1 个非等待 GUI 动作完成回执");
+      expect(finished.summary).toContain("最近动作后的截图已保存");
+      expect(finished.summary).not.toContain("PRIVATE_INPUT_MARKER");
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it("runs the real compiler and GLM preparation, then preserves one GUI result when pinned history exceeds text budget", async () => {
+    const contextSource = "../../context/src/compiler.js";
+    const glmSource = "../../provider-glm/src/index.js";
+    const { DefaultContextCompiler } = await import(contextSource);
+    const { GlmAdapter } = await import(glmSource);
+    const registry = batchRegistry();
+    const computer = new FakeComputer();
+    let posts = 0;
+    const provider = new GlmAdapter({ apiKey: "fixture", profile: { name: "glm-5.3-flash", thinking: "low", coordinateMode: "actual_pixels" }, assetReader: { async read() { return new Uint8Array([1]); } }, httpClient: { async post() { posts += 1; return { choices: [{ finish_reason: "tool_calls", message: { reasoning_content: "SYNTHETIC_CONTINUATION ".repeat(4000), tool_calls: [{ id: "real-source-type", type: "function", function: { name: "type", arguments: JSON.stringify({ text: "SYNTHETIC_ONCE" }) } }] } }] }; } } });
+    const contextCompiler = new DefaultContextCompiler(registry, { mode: "recent", maxHistoryEvents: 1, maxInputTokens: 16384, maxWireInputTokens: 24576 });
+    const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), { contextCompiler });
+    try {
+      await expect(created.controller.start("synthetic fixture")).resolves.toBe("failed");
+      expect(posts).toBe(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(1);
+      expect(created.controller.getEvents().filter((event) => event.type === "model.request.started")).toHaveLength(1);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", outcome: "failed", summary: expect.stringContaining("输入预算检查未通过，该请求未发送") });
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
   });
 });
 

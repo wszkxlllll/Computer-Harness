@@ -47,6 +47,38 @@ export interface CuaWindowInventory {
   readonly source?: "cua_inventory" | "win32_relationship_probe";
   readonly foregroundPid?: number;
   readonly foregroundWindowId?: number;
+  readonly diagnostic?: {
+    readonly rawComplete: "true" | "false" | "missing" | "invalid";
+    readonly rawTruncated: "true" | "false" | "missing" | "invalid";
+    readonly rawDegraded: "true" | "false" | "missing" | "invalid";
+    readonly rawWindowCount: number;
+    readonly rawValidWindowCount: number;
+    readonly rawUniqueWindowCount: number;
+    readonly parsedWindowCount: number;
+    readonly uniqueWindowCount: number;
+    readonly probe: "not_configured" | "not_needed" | "read_failed" | "merged_complete" | "merged_incomplete";
+  };
+}
+
+/** Fixed metadata only: no labels, window contents, probe errors or raw JSON. */
+export function windowInventoryEvidence(inventory: CuaWindowInventory): string {
+  return JSON.stringify({
+    complete: inventory.complete,
+    attestation: inventory.completeAttestation ?? "unknown",
+    source: inventory.source ?? "unknown",
+    ...(inventory.diagnostic === undefined ? {} : {
+      rawComplete: inventory.diagnostic.rawComplete, rawTruncated: inventory.diagnostic.rawTruncated,
+      rawDegraded: inventory.diagnostic.rawDegraded, rawWindowCount: inventory.diagnostic.rawWindowCount,
+      rawValidWindowCount: inventory.diagnostic.rawValidWindowCount, rawUniqueWindowCount: inventory.diagnostic.rawUniqueWindowCount,
+      parsedWindowCount: inventory.diagnostic.parsedWindowCount, uniqueWindowCount: inventory.diagnostic.uniqueWindowCount,
+      probe: inventory.diagnostic.probe,
+    }),
+  });
+}
+
+export function windowInventoryFailureEvidence(error: unknown): string {
+  const code = error instanceof WindowContractError && ["WINDOW_TARGET_REFUSED", "WINDOW_TARGET_UNKNOWN", "WINDOW_TARGET_SCHEMA", "WINDOW_TARGET_NOT_FOUND"].includes(error.code) ? error.code : "unknown";
+  return JSON.stringify({ source: "cua_inventory", reason: code });
 }
 
 export interface CuaWindowCapture {
@@ -67,10 +99,30 @@ export interface WindowCaptureRetryOptions {
 }
 
 export class WindowContractError extends Error {
-  public constructor(public readonly code: string, message: string) {
-    super(message);
+  public constructor(public readonly code: string, message: string, public readonly activationDiagnostic?: WindowActivationDiagnostic) {
+    super(message + (activationDiagnostic === undefined ? "" : `; activation evidence=${JSON.stringify(activationDiagnostic)}`));
     this.name = "WindowContractError";
   }
+}
+
+export interface WindowActivationDiagnostic {
+  readonly elapsedMs: number;
+  readonly requestedPid: number;
+  readonly requestedWindowId: number;
+  readonly isError?: boolean;
+  readonly degraded?: boolean;
+  readonly status?: "activated" | "partial" | "failed";
+  readonly returnedPid?: number;
+  readonly returnedWindowId?: number;
+  readonly focusedWindowId?: number;
+  readonly frontmostOrdinaryWindowId?: number;
+  readonly frontmostPid?: number;
+  readonly workspaceFrontmostPid?: number;
+  readonly requestAccepted?: boolean;
+  readonly processActivated?: boolean;
+  readonly frontProcessMatchesTarget?: boolean;
+  readonly exactVerified?: boolean;
+  readonly targetVisibleOrdinary?: boolean;
 }
 
 export function validateWindowTarget(target: CuaWindowTarget): void {
@@ -136,17 +188,28 @@ export async function listWindowInventory(
   const windows = parseWindows(result, osPlatform);
   const rawWindows = value?.windows;
   const truncated = value?.truncated === true;
-  const negativeCompletenessEvidence = value?.complete === false || truncated;
+  const flag = (key: string): "true" | "false" | "missing" | "invalid" => value === undefined || !Object.hasOwn(value, key) ? "missing" : value[key] === true ? "true" : value[key] === false ? "false" : "invalid";
+  const rawComplete = flag("complete"), rawTruncated = flag("truncated"), rawDegraded = flag("degraded");
+  const rawIdentities = Array.isArray(rawWindows) ? rawWindows.flatMap((row) => {
+    if (!isRecord(row)) return [];
+    const rowPid = positiveSafeInteger(row.pid), rowWindowId = positiveSafeInteger(row.window_id);
+    return rowPid === undefined || rowWindowId === undefined || parseGeometry(row.bounds) === undefined ? [] : [`${rowPid}:${rowWindowId}`];
+  }) : [];
+  const rawValidWindowCount = rawIdentities.length, rawUniqueWindowCount = new Set(rawIdentities).size;
+  const uniqueWindowCount = new Set(windows.map((window) => `${window.target.pid}:${window.target.windowId}`)).size;
+  const invalidEvidence = rawComplete === "invalid" || rawTruncated === "invalid" || rawDegraded === "invalid" || uniqueWindowCount !== windows.length || rawUniqueWindowCount !== rawValidWindowCount || (Array.isArray(rawWindows) && rawValidWindowCount !== rawWindows.length);
+  const negativeCompletenessEvidence = value?.complete === false || truncated || invalidEvidence;
   const completeAttestation = negativeCompletenessEvidence
     ? "negative"
     : value !== undefined && Object.hasOwn(value, "complete") ? "explicit" : "missing";
-  const complete = value?.complete === true && !truncated && value.degraded !== true &&
+  const complete = value?.complete === true && !truncated && !invalidEvidence && value.degraded !== true &&
     Array.isArray(rawWindows) && rawWindows.length === windows.length;
   const inventory: CuaWindowInventory = {
     windows,
     complete,
     completeAttestation,
     source: "cua_inventory",
+    diagnostic: { rawComplete, rawTruncated, rawDegraded, rawWindowCount: Array.isArray(rawWindows) ? rawWindows.length : 0, rawValidWindowCount, rawUniqueWindowCount, parsedWindowCount: windows.length, uniqueWindowCount, probe: relationshipProbe === undefined ? "not_configured" : "not_needed" },
     ...(truncated ? { truncated: true } : {}),
     ...(positiveSafeInteger(value?.foreground_pid ?? value?.foregroundPid) === undefined
       ? {}
@@ -159,10 +222,11 @@ export async function listWindowInventory(
   try {
     const probe = await relationshipProbe.read(signal);
     signal.throwIfAborted();
-    return mergeWindowRelationshipInventory(inventory, probe, onScreenOnly);
+    const merged = mergeWindowRelationshipInventory(inventory, probe, onScreenOnly);
+    return { ...merged, diagnostic: { ...inventory.diagnostic!, probe: merged.complete ? "merged_complete" : "merged_incomplete" } };
   } catch {
     signal.throwIfAborted();
-    return { ...inventory, complete: false };
+    return { ...inventory, complete: false, diagnostic: { ...inventory.diagnostic!, probe: "read_failed" } };
   }
 }
 
@@ -479,6 +543,7 @@ export async function activateWindowTarget(
 ): Promise<void> {
   validateWindowTarget(target);
   signal.throwIfAborted();
+  const startedAt = Date.now();
   const result = await driver.callTool("bring_to_front", JSON.stringify({
     pid: target.pid,
     window_id: target.windowId,
@@ -486,25 +551,44 @@ export async function activateWindowTarget(
   }), { signal });
   signal.throwIfAborted();
   const structured = parseStructured(result.structuredJson);
+  const observedEvidence = isRecord(structured?.observed) ? structured.observed : undefined;
+  const exactEvidence = isRecord(structured?.exact_window_effect) ? structured.exact_window_effect : undefined;
+  const numeric = (key: string, value: unknown) => {
+    const handle = parseWindowHandle(value);
+    return handle === undefined ? {} : { [key]: Number(handle) };
+  };
+  const boolean = (key: string, value: unknown) => typeof value === "boolean" ? { [key]: value } : {};
+  const diagnostic: WindowActivationDiagnostic = {
+    elapsedMs: Math.max(0, Date.now() - startedAt), requestedPid: target.pid, requestedWindowId: target.windowId,
+    ...boolean("isError", result.isError), ...boolean("degraded", result.degraded),
+    ...(structured?.status === "activated" || structured?.status === "partial" || structured?.status === "failed" ? { status: structured.status } : {}),
+    ...numeric("returnedPid", structured?.pid), ...numeric("returnedWindowId", structured?.window_id ?? structured?.target_hwnd),
+    ...numeric("focusedWindowId", observedEvidence?.focused_window_id ?? structured?.now_fg_hwnd),
+    ...numeric("frontmostOrdinaryWindowId", observedEvidence?.frontmost_ordinary_window_id),
+    ...numeric("frontmostPid", observedEvidence?.frontmost_pid), ...numeric("workspaceFrontmostPid", observedEvidence?.workspace_frontmost_pid),
+    ...boolean("requestAccepted", structured?.request_accepted), ...boolean("processActivated", structured?.process_activated),
+    ...boolean("frontProcessMatchesTarget", observedEvidence?.front_process_matches_target),
+    ...boolean("exactVerified", exactEvidence?.verified), ...boolean("targetVisibleOrdinary", exactEvidence?.target_visible_ordinary),
+  };
+  const activationError = (code: string, message: string) => new WindowContractError(code, message, diagnostic);
   if (result.isError) {
-    // A macOS sheet can be enumerated as a distinct HWND, yet Cocoa/AX may
-    // keep the parent document focused after bring_to_front. Preserve that
-    // distinction for callers: the candidate was found, but its independent
-    // foreground identity was not confirmed, so no capture/input may follow.
+    // Negative or conflicting AX/WindowServer evidence does not establish
+    // exact foreground identity or the conflicting window's type/owner.
+    // Preserve the refusal; no capture or input may follow.
     const observedFocusedHandle = parseWindowHandle(isRecord(structured?.observed) ? structured.observed.focused_window_id : undefined);
     const observedFrontmostHandle = parseWindowHandle(isRecord(structured?.observed) ? structured.observed.frontmost_ordinary_window_id : undefined);
     const exactWindowEffect = isRecord(structured?.exact_window_effect) ? structured.exact_window_effect : undefined;
     if (observedFocusedHandle !== undefined && observedFocusedHandle !== String(target.windowId) ||
         observedFrontmostHandle !== undefined && observedFrontmostHandle !== String(target.windowId) ||
         exactWindowEffect?.verified === false) {
-      throw new WindowContractError(
+      throw activationError(
         "WINDOW_ACTIVATION_UNCONFIRMED",
         activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
       );
     }
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
+    throw activationError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
   }
-  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
+  if (result.degraded) throw activationError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
   const landed = structured?.landed_on_target;
   const targetHandle = parseWindowHandle(structured?.target_hwnd);
   const foregroundHandle = parseWindowHandle(structured?.now_fg_hwnd);
@@ -536,12 +620,12 @@ export async function activateWindowTarget(
     if (observedFocusedHandle !== undefined && observedFocusedHandle !== expectedHandle ||
         observedFrontmostHandle !== undefined && observedFrontmostHandle !== expectedHandle ||
         exactWindowEffect?.verified === false) {
-      throw new WindowContractError(
+      throw activationError(
         "WINDOW_ACTIVATION_UNCONFIRMED",
         activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
       );
     }
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
+    throw activationError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
   }
 }
 
@@ -550,9 +634,9 @@ function activationUnconfirmedMessage(
   observedFocusedHandle: string | undefined,
   observedFrontmostHandle: string | undefined,
 ): string {
-  const observed = observedFocusedHandle ?? observedFrontmostHandle;
-  return `CUA bring_to_front found exact target pid=${target.pid}, window_id=${target.windowId}, but independent foreground focus was not confirmed` +
-    (observed === undefined ? "" : ` (observed foreground window_id=${observed})`) +
+  return `CUA bring_to_front requested exact target pid=${target.pid}, window_id=${target.windowId}, but independent foreground focus was not confirmed` +
+    (observedFocusedHandle === undefined ? "" : `; AX focused_window_id=${observedFocusedHandle}`) +
+    (observedFrontmostHandle === undefined ? "" : `; independent frontmost_ordinary_window_id=${observedFrontmostHandle}`) +
     "; no capture or input was sent";
 }
 

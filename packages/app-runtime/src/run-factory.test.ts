@@ -567,7 +567,8 @@ describe("app-runtime RunHandle", () => {
     ];
     try {
       await writeFile(join(outputDir, "trajectory.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
-      const report = await buildRunReport({ ...config(outputDir), runId, planning: true, memory: "facts" }, runId, [], []);
+      const report = await buildRunReport({ ...config(outputDir), runId, planning: true, memory: "facts", contextMaxInputTokens: 16384, contextMaxWireInputTokens: 24576 }, runId, [], []);
+      expect(report.summary).toMatchObject({ contextMaxInputTokens: 16384, contextMaxWireInputTokens: 24576 });
       expect(report.summary).toMatchObject({ runtimeOutcome: "budget_exhausted", modelSummary: null });
       expect(report.summary.recoveryReport).toMatchObject({
         businessResult: "not_assessed",

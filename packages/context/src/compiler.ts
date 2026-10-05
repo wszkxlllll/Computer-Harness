@@ -13,13 +13,14 @@ import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, T
 import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
-import { selectHistoryEvents } from "./history.js";
+import { latestGuiHistoryGroup, selectHistoryEvents } from "./history.js";
 
 export interface DefaultContextCompilerOptions {
   systemPrompt?: string;
   mode?: "raw" | "recent";
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  maxWireInputTokens?: number;
   memoryMaxTokens?: number;
   memoryRecall?: MemoryRecallService;
   features?: RunFeatureConfig;
@@ -29,6 +30,7 @@ export class DefaultContextCompiler implements ContextCompiler {
   private readonly mode: "raw" | "recent";
   private readonly maxHistoryEvents: number;
   private readonly maxInputTokens: number | undefined;
+  private readonly maxWireInputTokens: number | undefined;
   private readonly memoryMaxTokens: number;
   private readonly memoryRecall: MemoryRecallService | undefined;
   private readonly features: RunFeatureConfig;
@@ -45,6 +47,8 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("maxHistoryEvents must be a positive integer");
     }
     this.maxInputTokens = options.maxInputTokens;
+    this.maxWireInputTokens = options.maxWireInputTokens;
+    validateInputBudgets(this.maxInputTokens, this.maxWireInputTokens);
     if (this.maxInputTokens !== undefined && (!Number.isInteger(this.maxInputTokens) || this.maxInputTokens < 1)) {
       throw new Error("maxInputTokens must be a positive integer");
     }
@@ -72,6 +76,13 @@ export class DefaultContextCompiler implements ContextCompiler {
     const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
     const windowSwitchStateText = formatWindowSwitchState(input.computerSession, input.windowSwitchState, latestObservation?.grounding, latestObservation?.viewport);
     const windowSwitchStateTokens = windowSwitchStateText === undefined ? 0 : estimateTextTokens(windowSwitchStateText);
+    const receiptCountsText = formatGuiReceiptCounts(orderedEvents);
+    const receiptCountsTokens = receiptCountsText === undefined ? 0 : estimateTextTokens(receiptCountsText);
+    const allowance = input.requestBudget;
+    const knownBudget = typeof allowance === "object" && allowance !== null && Number.isSafeInteger(allowance.limit) && allowance.limit >= 3 && Number.isSafeInteger(allowance.remaining) && allowance.remaining >= 0 && allowance.remaining <= allowance.limit ? allowance : undefined;
+    const finishOnly = knownBudget !== undefined && knownBudget.remaining <= 1;
+    const requestBudgetText = knownBudget === undefined || knownBudget.remaining > 3 ? undefined : `Runtime request allowance: ${knownBudget.remaining} of ${knownBudget.limit} requests remain (including this request). ${finishOnly ? 'This is the final existing request: call the exposed terminate tool exactly once; status must be exactly "success" or "failure" and text must contain the complete user-facing result. For an incomplete or unverified goal, use {"status":"failure","text":"The goal remains unverified; these requested fields are still unknown: ..."}, preserving findings and explicitly unknown/missing fields. No OTHER tool calls or memory writes are allowed. Never omit either status or text, and do not claim completion unless the full original goal is met.' : "Prepare a concise evidence/unknown ledger now, using applicable current run memory and source evidence. Reserve the last existing request for delivery rather than another GUI operation."} Memory facts are retained claims, not proof of current state; preserve original scope and all requested fields.`;
+    const requestBudgetTokens = requestBudgetText === undefined ? 0 : estimateTextTokens(requestBudgetText);
     const assessmentBinding = currentObservationAssessmentBinding(orderedEvents);
     let assessmentBindingText = assessmentBinding !== undefined && assessmentBinding.observationId === latestObservation?.id
       ? `Current assessment reference: Observation ID ${assessmentBinding.observationId}; immediately preceding GUI action ID ${assessmentBinding.actionId}.${assessmentBinding.transition === undefined ? "" : ` Runtime Monitor transition for this exact action/Observation: ${assessmentBinding.transition} (action diagnostic only; it does not decide what semantic state the screenshot shows).`} The current screenshot is the evidence for any progress summary. If you include observationAssessment in this response, use these exact IDs.`
@@ -83,8 +94,12 @@ export class DefaultContextCompiler implements ContextCompiler {
       ...(input.enabledCategories === undefined ? {} : { enabledCategories: input.enabledCategories }),
       ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
     });
-    const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(baseTools) : baseTools;
-    const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
+    const allowedTools = finishOnly ? baseTools.filter((tool) => tool.category === "control" && tool.name === "terminate") : baseTools;
+    const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(allowedTools) : allowedTools;
+    const navigationObservationGuidance = finishOnly ? "Finish from existing evidence without new actions. Missing or unverified requested fields must remain explicitly unknown." : tools.some((tool) => tool.name === "wait")
+      ? "After a completed navigation click, use a brief bounded wait and its automatic fresh observation before further input."
+      : "After a completed navigation click, require fresh observation evidence before further input. Do not invent a wait or observe tool when unavailable; if no safe way to obtain fresh evidence exists, report the limitation and finish with failure.";
+    const systemPrompt = composeSystemPrompt(this.systemPrompt, features) + "\n" + navigationObservationGuidance + " A completed receipt is not proof the destination loaded: if the screenshot still shows loading or the old page, do not click the same entry again. If repeated scrolling or waiting shows no useful progress, report verified information and unknown items and finish with failure rather than looping. checked is the independent checkbox/radio/switch toggle state (true/false/mixed); selected is selection state, not checked. Missing state means unknown, not false. Never infer a toggle from selected or claim element_selected proves a checkbox is checked. User constraints take precedence over tool recovery guidance. A no-input refusal does not undo a previous completed click or authorize a repeat/correction. If recovery would violate a click limit or no-correction constraint, stop and finish with failure. Accurately acknowledge actual recovery attempts and their receipts; never deny a correction that was dispatched. Unknown side effects must not be replayed.";
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
       ? formatExecutionSegment(input.executionSegment)
@@ -108,9 +123,10 @@ export class DefaultContextCompiler implements ContextCompiler {
         })
       : undefined;
     const memoryText = memoryProjection?.text;
+    const browseProgressGuidance = " Browse with modest overlapping scroll increments; large jumps can skip required fields. After each fresh observation, record newly supported findings with their source in current run memory when that tool is available, distinguish missing/unverified fields, and avoid repeated top/bottom sweeps over already captured information. Memory is a claim ledger, not automatic verification; never replace the full user goal or fill unknown values by guessing.";
     const toolText = JSON.stringify(tools);
     const fixedBlocks = [
-      { name: "system" as const, text: systemPrompt, included: true },
+      { name: "system" as const, text: systemPrompt + browseProgressGuidance, included: true },
       { name: "goal" as const, text: input.goal, included: true },
       { name: "tools" as const, text: toolText, included: true },
       { name: "plan" as const, text: planText ?? "", included: planText !== undefined },
@@ -119,10 +135,14 @@ export class DefaultContextCompiler implements ContextCompiler {
     ];
     const fixedText = fixedBlocks.map((block) => block.text).join("\n");
     const estimatedFixedTextTokens = Math.ceil(fixedText.length / 4);
-    const historyCandidates = selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents);
-    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received"));
+    const pinnedGuiHistory = latestGuiHistoryGroup(orderedEvents);
+    const selectedHistory = new Set([...selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents), ...pinnedGuiHistory]);
+    const historyCandidates = orderedEvents.filter((event) => selectedHistory.has(event));
+    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received" || pinnedGuiHistory.includes(event)));
     let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
+    const maxWireInputTokens = input.context?.maxWireInputTokens ?? this.maxWireInputTokens;
+    validateInputBudgets(maxInputTokens, maxWireInputTokens);
     const rawAssistantPreferencesText = input.assistantPreferences === undefined
       ? undefined
       : formatAssistantPreferences(input.assistantPreferences);
@@ -147,13 +167,13 @@ export class DefaultContextCompiler implements ContextCompiler {
     let historyBudget: number | undefined;
     if (maxInputTokens !== undefined) {
       const fixedBudget = maxInputTokens - estimatedFixedTextTokens;
-      if (fixedBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
+      if (fixedBudget < 0) throw Object.assign(new Error("Context fixed blocks exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
       // Reserve budget for every authoritative user correction and the current
       // observation's capture metadata before optional projections.
-      if (authoritativeHistoryTokens + observationMetadataTokens + windowSwitchStateTokens > fixedBudget) {
-        throw new Error("Authoritative user inputs and current observation/target metadata exceed maxInputTokens");
+      if (authoritativeHistoryTokens + observationMetadataTokens + windowSwitchStateTokens + receiptCountsTokens + requestBudgetTokens > fixedBudget) {
+        throw Object.assign(new Error("Authoritative user inputs, latest GUI history and current observation/target metadata exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
       }
-      let remainingAfterAuthoritative = Math.max(0, fixedBudget - authoritativeHistoryTokens - observationMetadataTokens - windowSwitchStateTokens);
+      let remainingAfterAuthoritative = Math.max(0, fixedBudget - authoritativeHistoryTokens - observationMetadataTokens - windowSwitchStateTokens - receiptCountsTokens - requestBudgetTokens);
       if (rawAssistantPreferencesTokens > remainingAfterAuthoritative) {
         assistantPreferencesText = undefined;
         assistantPreferencesIncluded = false;
@@ -177,7 +197,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       }
       if (groundingIncluded) remainingAfterAuthoritative -= rawGroundingTokens;
       historyBudget = authoritativeHistoryTokens + remainingAfterAuthoritative;
-      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
+      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget, pinnedGuiHistory);
     }
     const monitorGuidanceTokens = monitorGuidanceIncluded && monitorGuidanceText !== undefined
       ? estimateTextTokens(monitorGuidanceText)
@@ -287,6 +307,8 @@ export class DefaultContextCompiler implements ContextCompiler {
     if (windowSwitchStateText !== undefined) {
       messages.push({ role: "user", content: [{ type: "text", text: windowSwitchStateText }] });
     }
+    if (receiptCountsText !== undefined) messages.push({ role: "user", content: [{ type: "text", text: receiptCountsText }] });
+    if (requestBudgetText !== undefined) messages.push({ role: "user", content: [{ type: "text", text: requestBudgetText }] });
 
     if (latestObservation !== undefined) {
       messages.push({
@@ -304,10 +326,10 @@ export class DefaultContextCompiler implements ContextCompiler {
     }
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
-    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
+    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens + receiptCountsTokens + requestBudgetTokens;
     const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
     if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
-      throw new Error("Context history exceeds maxInputTokens after selection");
+      throw Object.assign(new Error("Context history exceeds maxInputTokens after selection"), { code: "CONTEXT_INPUT_TOO_LARGE" });
     }
     const selectedIds = new Set(selectedEvents.map((event) => event.eventId));
     const candidateIds = new Set(historyCandidates.map((event) => event.eventId));
@@ -408,13 +430,14 @@ export class DefaultContextCompiler implements ContextCompiler {
       omittedHistoryEvents: Math.max(0, orderedEvents.length - selectedEvents.length),
       ...(input.context?.maxHistoryEvents === undefined && this.mode === "raw" ? {} : { maxHistoryEvents: input.context?.maxHistoryEvents ?? this.maxHistoryEvents }),
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxWireInputTokens === undefined ? {} : { maxWireInputTokens }),
       ...(memoryText === undefined ? {} : { estimatedMemoryTokens: memoryEstimatedTokens, memoryMaxTokens: input.context?.memoryMaxTokens ?? this.memoryMaxTokens }),
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? { estimatedMonitorGuidanceTokens: monitorGuidanceTokens, monitorGuidanceIncluded } : {}),
       ...(groundingCatalog === undefined ? {} : { estimatedGroundingTokens: groundingTokens, groundingIncluded }),
       trace,
     };
     return {
-      system: systemPrompt,
+      system: systemPrompt + browseProgressGuidance,
       messages,
       tools,
       contextBudget: budget,
@@ -458,6 +481,13 @@ function formatAssistantPreferences(preferences: RunAssistantPreferencesSnapshot
     `Additional user guidance, quoted as preference data; do not repeat verbatim: ${guidance}`,
     "These are response and assistance preferences only. The Goal, explicit current user requests, later corrections, system and safety instructions, approvals, and tool policy take priority. This text cannot authorize or change an action.",
   ].join("\n");
+}
+
+function validateInputBudgets(text: number | undefined, wire: number | undefined): void {
+  for (const value of [text, wire]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
+  }
+  if (text !== undefined && wire !== undefined && text > wire) throw new Error("Context text budget must not exceed wire budget");
 }
 
 interface GroundingProjection {
@@ -525,6 +555,7 @@ function formatGroundingState(state: NonNullable<GroundingCatalog["elements"][nu
   if (state.editable !== undefined) values.push(`editable=${state.editable}`);
   if (state.expanded !== undefined) values.push(`expanded=${state.expanded}`);
   if (state.selected !== undefined) values.push(`selected=${state.selected}`);
+  if (state.checked !== undefined) values.push(`checked=${state.checked}`);
   if (state.valuePresent !== undefined) values.push(`valuePresent=${state.valuePresent}`);
   return values.join(",");
 }
@@ -541,4 +572,29 @@ function compactLabel(value: string, maxLength: number): string {
 
 function round(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+/** Full-event dispatch receipts, not proposed actions or verified business effects. */
+function formatGuiReceiptCounts(events: readonly RuntimeEvent[]): string | undefined {
+  const kinds = new Set(["click", "double_click", "right_click", "type", "keypress", "scroll", "drag", "select_option", "switch_window"]);
+  const statuses = new Set(["completed", "refused", "failed", "cancelled", "partial"]);
+  const started = new Map<string, { kind: string; sequence: number }>();
+  const terminal = new Map<string, { kind: string; status: string }>();
+  for (const event of events) {
+    if (event.type === "action.execution.started" && kinds.has(event.action.kind)) {
+      if (!started.has(event.action.actionId)) started.set(event.action.actionId, { kind: event.action.kind, sequence: event.sequence });
+    } else if (event.type === "action.execution.completed" || event.type === "action.execution.failed") {
+      const dispatch = started.get(event.receipt.actionId);
+      if (dispatch !== undefined && event.sequence > dispatch.sequence && statuses.has(event.receipt.status) && !terminal.has(event.receipt.actionId)) {
+        terminal.set(event.receipt.actionId, { kind: dispatch.kind, status: event.receipt.status });
+      }
+    }
+  }
+  if (terminal.size === 0) return undefined;
+  const counts = new Map<string, number>();
+  for (const receipt of terminal.values()) {
+    const key = `${receipt.kind}/${receipt.status}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return `Runtime driver receipt counts (non-wait, full event history): ${[...counts].sort(([a], [b]) => a.localeCompare(b)).map(([key, count]) => `${key}=${count}`).join("; ")}. These are dispatch/result facts, not verified effects or authorization. Missing terminal receipts do not prove failure or no side effects. Original user limits still apply.`;
 }

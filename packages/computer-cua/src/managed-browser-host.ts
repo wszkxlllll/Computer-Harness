@@ -853,7 +853,14 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       inputType: element.localName === "input" ? inputType : undefined,
       canvasLike: false,
       ...(optionProjection === undefined ? {} : optionProjection),
-      state: { enabled, focused: document.hasFocus() && (element.getRootNode?.() ?? document).activeElement === element, editable, expanded: element.getAttribute("aria-expanded") === "true", selected: element.getAttribute("aria-selected") === "true" },
+      state: { enabled, focused: document.hasFocus() && (element.getRootNode?.() ?? document).activeElement === element, editable,
+        ...(element.getAttribute("aria-expanded") === "true" || element.getAttribute("aria-expanded") === "false" ? { expanded: element.getAttribute("aria-expanded") === "true" } : {}),
+        ...(element.getAttribute("aria-selected") === "true" || element.getAttribute("aria-selected") === "false" ? { selected: element.getAttribute("aria-selected") === "true" } : element.localName === "option" && typeof element.selected === "boolean" ? { selected: element.selected } : {}),
+        ...(element.localName === "input" && (inputType === "checkbox" || inputType === "radio")
+          ? (inputType === "checkbox" && element.indeterminate === true ? { checked: "mixed" } : typeof element.checked === "boolean" ? { checked: element.checked } : {})
+          : ["checkbox", "menuitemcheckbox", "option", "radio", "menuitemradio", "switch", "treeitem"].includes(role) && ["true", "false", "mixed"].includes(element.getAttribute("aria-checked"))
+            ? { checked: element.getAttribute("aria-checked") === "mixed" ? (["radio", "menuitemradio", "switch"].includes(role) ? false : "mixed") : element.getAttribute("aria-checked") === "true" } : {}),
+      },
     });
   };
   const walk = (root) => {
@@ -1324,6 +1331,11 @@ export class ManagedBrowserHost {
       }
       return {
         status: value.status,
+        ...(verifyFocusOnly && isRecord(value.focusEvidence) ? { focusEvidence: {
+          ...(typeof value.focusEvidence.pageHasFocus === "boolean" ? { pageHasFocus: value.focusEvidence.pageHasFocus } : {}),
+          ...(typeof value.focusEvidence.activeElementMatches === "boolean" ? { activeElementMatches: value.focusEvidence.activeElementMatches } : {}),
+          ...(typeof value.focusEvidence.editable === "boolean" ? { editable: value.focusEvidence.editable } : {}),
+        } } : {}),
         ...(typeof value.driverCode === "string" ? { driverCode: value.driverCode } : {}),
         ...(typeof value.message === "string" ? { message: value.message } : {}),
         tabId: state.tabId,
@@ -1717,8 +1729,9 @@ export function buildManagedDomClickExpression(input: {
     const inputType = (element.getAttribute("type") || "text").toLowerCase();
     const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
     if (target.verifyFocusOnly === true) {
-      if (!editable || !document.hasFocus() || (element.getRootNode?.() ?? document).activeElement !== element) return { status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", message: "managed-browser page/control does not own keyboard focus; no keyboard input was sent" };
-      return { status: "completed", message: "managed-browser input focus verified" };
+      const focusEvidence = { editable, pageHasFocus: document.hasFocus(), activeElementMatches: (element.getRootNode?.() ?? document).activeElement === element };
+      if (!focusEvidence.editable || !focusEvidence.pageHasFocus || !focusEvidence.activeElementMatches) return { status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", message: "managed-browser page/control does not own keyboard focus; no keyboard input was sent", focusEvidence };
+      return { status: "completed", message: "managed-browser input focus verified", focusEvidence };
     }
     if (target.validateOnly === true) {
       // Native dispatch uses the observation-bound CSS center transformed by

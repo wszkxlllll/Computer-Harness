@@ -1047,6 +1047,7 @@ const groundingElementStateSchema = z.object({
   editable: z.boolean().optional(),
   expanded: z.boolean().optional(),
   selected: z.boolean().optional(),
+  checked: z.union([z.boolean(), z.literal("mixed")]).optional(),
   valuePresent: z.boolean().optional(),
 });
 const groundingOptionSchema = z.object({

@@ -562,6 +562,21 @@ export class RunController {
     return this.windowSwitch === "opened-windows-v1" && this.computer.listWindows !== undefined;
   }
 
+  private newWindowHandoffAvailable(): boolean {
+    return this.windowHandoff === "confirm-v1" && this.computer.handoffWindow !== undefined
+      && this.computer.listWindowHandoffCandidates !== undefined && this.computer.detectNewWindowHandoffCandidates !== undefined;
+  }
+
+  private requestBudget(): { remaining: number; limit: number } | undefined {
+    const budget = this.policy.modelRequestBudget?.(this.snapshot);
+    return typeof budget === "object" && budget !== null && Number.isSafeInteger(budget.limit) && budget.limit > 0 && Number.isSafeInteger(budget.remaining) && budget.remaining >= 0 && budget.remaining <= budget.limit ? budget : undefined;
+  }
+
+  private finalRequestConsumed(): boolean {
+    const budget = this.requestBudget();
+    return budget !== undefined && budget.limit >= 3 && budget.remaining === 0;
+  }
+
   private modelEnabledToolNames(): string[] {
     const names = this.enabledToolNames === undefined
       ? this.toolRegistry.list().map((definition) => definition.name)
@@ -573,6 +588,8 @@ export class RunController {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
     let providerFailureSummary: string | undefined;
+    let localRequestPreparation = false;
+    let computerOpening = false;
     try {
       await this.commitEvent({ type: "run.created", goal });
       this.throwIfAborted();
@@ -581,7 +598,9 @@ export class RunController {
       if (cleanupPendingComputers.has(this.computer)) {
         throw new Error("Computer instance has unresolved cleanup from an earlier Run");
       }
+      computerOpening = true;
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
+      computerOpening = false;
       this.activeComputerSession = session;
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
@@ -669,11 +688,14 @@ export class RunController {
                 ...(this.latestWindowOptions === undefined ? {} : { options: this.latestWindowOptions }),
               }
             : undefined;
+          localRequestPreparation = true;
+          const requestBudget = this.requestBudget();
           const context = await this.contextCompiler.compile(
             {
               runId: this.runId,
               goal,
               recentEvents: this.events,
+              ...(requestBudget === undefined ? {} : { requestBudget }),
               enabledCategories: [...this.enabledCategories],
               enabledToolNames: this.modelEnabledToolNames(),
               ...(this.planningEnabled ? { plan: this.snapshot.plan } : {}),
@@ -753,6 +775,7 @@ export class RunController {
                   ...requestContext.contextBudget,
                   trace: { ...requestContext.contextBudget.trace, preparedRequest },
                 };
+            localRequestPreparation = false;
             await this.commitEvent({
               type: "model.request.started",
               providerId: this.provider.id,
@@ -801,7 +824,9 @@ export class RunController {
               if (providerErrorDetails(error).retryMode !== "same_input") {
                 requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
                 if (canPrepareProvider) {
+                  localRequestPreparation = true;
                   prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+                  localRequestPreparation = false;
                   const afterRetryPrepare = await this.drainCommands();
                   if ((this.snapshot.status as string) === "paused" || afterRetryPrepare.correction) {
                     if (afterRetryPrepare.correction) await this.refreshAfterUserInput(session);
@@ -893,6 +918,10 @@ export class RunController {
           break;
         }
         if (turn.type === "user_input_required") {
+          if (this.finalRequestConsumed()) {
+            outcome = await this.commitRunFinished({ outcome: "budget_exhausted" });
+            break;
+          }
           await this.commitEvent({ type: "user.input.requested", question: turn.question });
           continue;
         }
@@ -937,7 +966,8 @@ export class RunController {
           });
           outcome = "failed";
         }
-        outcome = await this.commitRunFinished({ outcome });
+        const budgetBlocked = typeof error === "object" && error !== null && "code" in error && (error.code === "GLM_INPUT_TOO_LARGE" || error.code === "CONTEXT_INPUT_TOO_LARGE");
+        outcome = await this.commitRunFinished({ outcome, ...(outcome !== "failed" ? {} : computerOpening ? { summary: startupFailureSummary(error) } : localRequestPreparation ? { summary: this.providerFailureProgressSummary(budgetBlocked ? "输入预算检查未通过，该请求未发送，任务完成未确认。" : "本地模型请求准备未完成，未发出该请求，任务完成未确认。") } : {}) });
       }
       return outcome;
     } finally {
@@ -1441,6 +1471,12 @@ export class RunController {
   }
 
   private async executeApprovedCall(pending: PendingApproval): Promise<void> {
+    this.throwIfAborted();
+    if (this.finalRequestConsumed()) {
+      await this.rejectToolCall(pending.call.id, "last model request is reserved for finish; no approved tool was executed");
+      await this.commitRunFinished({ outcome: "budget_exhausted" });
+      return;
+    }
     let context = this.toolExecutionContext(pending.session);
     if (pending.definition.category === "computer") {
       const observation = this.latestObservation;
@@ -1725,6 +1761,16 @@ export class RunController {
     }
 
     const preflight: PreflightEntry[] = [];
+    this.throwIfAborted();
+    if (this.finalRequestConsumed()) {
+      for (const call of calls) {
+        this.callStates.set(call.id, "received");
+        await this.commitEvent({ type: "tool.call.received", call });
+        await this.rejectToolCall(call.id, "last model request is reserved for finish; no tool group was executed");
+      }
+      await this.commitRunFinished({ outcome: "budget_exhausted" });
+      return { correction: false };
+    }
     for (const call of calls) {
       const definition = this.toolRegistry.getForAudience(call.name, this.toolAudience);
       if (definition === undefined) {
@@ -1931,6 +1977,12 @@ export class RunController {
   }
 
   private async executePendingEntries(pendingTurn: PendingToolTurn): Promise<CommandEffects> {
+    this.throwIfAborted();
+    if (this.finalRequestConsumed()) {
+      await this.rejectPendingEntries(pendingTurn.entries, pendingTurn.nextIndex, "last model request is reserved for finish; no pending tool group was executed");
+      await this.commitRunFinished({ outcome: "budget_exhausted" });
+      return { correction: false };
+    }
     for (let index = pendingTurn.nextIndex; index < pendingTurn.entries.length; index += 1) {
       const entry = pendingTurn.entries[index];
       if (entry === undefined || entry.rejection !== undefined || entry.definition === undefined) {
@@ -2191,7 +2243,7 @@ export class RunController {
       const executeOptions: ComputerExecuteOptions = executionObservationId === undefined ? {} : { executionObservationId };
       const rawReceipt = await this.computer.execute(context.session, action, this.abortController.signal, {
         ...executeOptions,
-        ...(action.kind !== "switch_window" && this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
+        ...(action.kind !== "switch_window" && this.newWindowHandoffAvailable() ? { detectNewWindowHandoff: true } : {}),
       });
       receipt = normalizeActionReceiptForAction(action, rawReceipt, context.session);
     } catch (error) {
@@ -2292,8 +2344,7 @@ export class RunController {
       await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "foreground_mismatch" });
       return;
     }
-    if (receipt.status === "completed" && action.kind !== "wait" && this.windowHandoff === "confirm-v1" &&
-        this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined &&
+    if (receipt.status === "completed" && action.kind !== "wait" && this.newWindowHandoffAvailable() &&
         this.computer.detectNewWindowHandoffCandidates !== undefined) {
       // Action and ToolCall receipts are durable before this read-only diff.
       // A discovered window pauses the run; the completed action is never replayed.
@@ -2653,7 +2704,7 @@ export class RunController {
     return { ...observation, grounding };
   }
 
-  private providerFailureProgressSummary(): string {
+  private providerFailureProgressSummary(prefix = "后续模型响应未完成，任务完成未确认。"): string {
     const guiIds = new Set(this.events.filter((event) => event.type === "action.execution.started" && event.action.kind !== "wait")
       .map((event) => event.type === "action.execution.started" ? event.action.actionId : undefined));
     const terminals = this.events.filter((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") && guiIds.has(event.receipt.actionId));
@@ -2664,11 +2715,14 @@ export class RunController {
     const postActionScreenshot = completed > 0 && lastTerminal !== undefined && observation?.type === "observation.created" && observation.sequence > lastTerminal.sequence
       ? `最近动作后的截图已保存（assetId=${observation.observation.screenshot.assetId}），可供人工核对；截图内容未被此反馈验证。`
       : completed > 0 ? "没有最近动作后的截图可供此反馈确认。" : "";
-    return `后续模型响应未完成，任务完成未确认。已保留 ${completed} 个非等待 GUI 动作完成回执，${count("refused")} 个拒绝回执，${count("failed")} 个失败回执；完成回执不等于目标已达成。${postActionScreenshot}未自动重放 GUI 动作。`;
+    return `${prefix}已保留 ${completed} 个非等待 GUI 动作完成回执，${count("refused")} 个拒绝回执，${count("failed")} 个失败回执；完成回执不等于目标已达成。${postActionScreenshot}未自动重放 GUI 动作。`;
   }
 
   private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
     let outcome = data.outcome;
+    const summary = data.summary ?? (outcome === "budget_exhausted"
+      ? this.providerFailureProgressSummary("运行预算已达到上限，任务完成未确认。业务信息和未知项仍需另行核对，以下仅为执行回执，不是已核实的采集成果。")
+      : undefined);
     if (this.snapshot.executionSegment?.status === "active") {
       await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: this.snapshot.executionSegment.id, reason: "run_finished" } });
     }
@@ -2685,7 +2739,7 @@ export class RunController {
     await this.commitEvent({
       type: "run.finished",
       outcome,
-      ...(data.summary === undefined ? {} : { summary: data.summary }),
+      ...(summary === undefined ? {} : { summary }),
       ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
     });
     this.groundingCandidates.clear();
@@ -3384,6 +3438,16 @@ function groundingBoxesOverlap(
   const intersection = overlapWidth * overlapHeight;
   const union = left.width * left.height + right.width * right.height - intersection;
   return union <= 0 ? 0 : intersection / union;
+}
+
+function startupFailureSummary(error: unknown): string {
+  let current = error;
+  let activationFailure = false;
+  for (let depth = 0; depth < 3 && typeof current === "object" && current !== null; depth += 1) {
+    if ("startupStage" in current && current.startupStage === "window_activation" && "code" in current && typeof current.code === "string" && ["WINDOW_ACTIVATION_UNCONFIRMED", "WINDOW_ACTIVATION_REFUSED", "WINDOW_ACTIVATION_UNKNOWN"].includes(current.code)) activationFailure = true;
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return (activationFailure ? "窗口启动未通过精确前台身份确认。" : "Computer 启动未完成。") + "启动过程可能已尝试激活或改变窗口状态；本轮尚未进入模型请求和业务 GUI 操作阶段，未形成首张运行观察截图，任务未完成。请核对目标窗口和启动环境后再决定是否开始新运行；系统不会自动重试激活或重放操作。";
 }
 
 function errorMessage(error: unknown): string {

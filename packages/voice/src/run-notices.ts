@@ -66,6 +66,7 @@ export class RunNoticeProjector {
   private startNoticeProjected = false;
   private finished = false;
   private failureNoticeProjected = false;
+  private pendingModelFailure = false;
   private readonly dynamicContentEnabled: boolean;
 
   public constructor(private readonly runId: RunId, options: RunNoticeProjectorOptions = {}) {
@@ -89,6 +90,11 @@ export class RunNoticeProjector {
       case "model.request.started":
         return this.recordModelRequestObservation(event);
       case "model.response.received":
+        if (this.pendingModelFailure) {
+          this.pendingModelFailure = false;
+          for (const key of this.announcedFailureKeys) if (key.startsWith("model-error:")) this.announcedFailureKeys.delete(key);
+          return this.projectObservationAssessment(event) ?? this.notice(event, "progress", "模型已返回有效响应，后续完成情况仍需核对。", "polite", "model-response-recovered", "fixed");
+        }
         return this.projectObservationAssessment(event);
       case "action.proposed":
         // Do not reuse the pre-action screenshot for a later progress report.
@@ -195,10 +201,12 @@ export class RunNoticeProjector {
   private projectModelRequestFailure(event: Extract<RuntimeEvent, { type: "model.request.failed" }>): RunNotice | undefined {
     if (event.category === "cancelled") return undefined;
     const retryable = event.retryable === true;
-    const dedupeKey = `model-error:${event.category}:${retryable ? "retryable" : "terminal"}`;
+    const failureKind = modelFailureKind(event.code);
+    const dedupeKey = `model-error:${event.category}:${failureKind}:${retryable ? "retryable" : "terminal"}`;
     if (this.announcedFailureKeys.has(dedupeKey)) return undefined;
     this.rememberFailureKey(dedupeKey);
-    const text = retryable ? "模型连接暂时不稳定。" : modelRequestFailureVoiceText(event.category);
+    const text = modelRequestFailureVoiceText(event.category, failureKind);
+    this.pendingModelFailure = true;
     if (!retryable) this.failureNoticeProjected = true;
     return this.notice(event, "error", text, "interrupt", dedupeKey, "fixed");
   }
@@ -300,7 +308,7 @@ function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>
     case "succeeded": return "任务已完成，可查看结果。";
     case "failed": return failureAlreadyExplained ? "任务结束。" : "任务未能完成。";
     case "cancelled": return "任务已取消。";
-    case "budget_exhausted": return failureAlreadyExplained ? "任务结束。" : "任务操作已达到上限。";
+    case "budget_exhausted": return "任务请求或操作已达到上限，任务完成尚未确认。";
     case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "有项操作的结果无法确认，任务已暂停。";
   }
 }
@@ -333,10 +341,27 @@ function runtimeErrorVoiceText(category: string): string | undefined {
   }
 }
 
-function modelRequestFailureVoiceText(category: string): string {
+function modelFailureKind(code: string | undefined): "contract" | "incomplete" | "timeout" | "network" | "service" | "other" {
+  if (typeof code !== "string") return "other";
+  if (/^(GLM|QWEN)_(INVALID_TOOL_CALL|INVALID_RESPONSE|DUPLICATE_TOOL_CALL|UNAVAILABLE_TOOL|EMPTY_RESPONSE)$/u.test(code)) return "contract";
+  if (code === "GLM_INCOMPLETE_RESPONSE" || code === "QWEN_INCOMPLETE_RESPONSE") return "incomplete";
+  if (code === "GLM_REQUEST_TIMEOUT" || code === "QWEN_REQUEST_TIMEOUT") return "timeout";
+  if (code === "GLM_NETWORK_ERROR" || code === "QWEN_NETWORK_ERROR") return "network";
+  if (/^(GLM|QWEN)_HTTP_(429|5\d\d)$/u.test(code) || code === "HTTP_429") return "service";
+  return "other";
+}
+
+function modelRequestFailureVoiceText(category: string, kind: ReturnType<typeof modelFailureKind>): string {
+  if (category === "provider") {
+    if (kind === "contract") return "模型返回的格式或工具参数不符合约定，未执行该响应中的操作。";
+    if (kind === "incomplete") return "模型响应未完整结束，未执行该响应中的操作。";
+    if (kind === "timeout") return "模型请求等待超时，任务完成尚未确认。";
+    if (kind === "network") return "模型请求发生网络错误，任务完成尚未确认。";
+    if (kind === "service") return "模型服务暂时无法处理请求，请查看任务状态。";
+  }
   switch (category) {
     case "provider":
-      return "模型请求失败，任务无法继续。";
+      return "模型请求未能完成，请查看任务状态。";
     case "cancelled":
       return "任务已取消。";
     default:

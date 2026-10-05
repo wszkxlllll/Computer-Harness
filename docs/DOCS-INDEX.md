@@ -6,6 +6,16 @@
 
 ## 当前交接主线
 
+A 线本轮 PR 交付：[Draft PR24](https://github.com/wszkxlllll/Computer-Harness/pull/24)、[2026-10-05 阶段修复推送说明](./a-line-pr-delivery-2026-10-05.md)。独立分支交付 Runtime/GLM/手机反馈与 Mac CUA 可复现源码补丁；完整离线、Web 构建和原生重放通过，Draft 保留生产输入/保存/T2/T3 及 Windows 真机门槛，本轮不审查合并 PR22/23。
+
+累计进度与交付核对：[A 线累计测试、CUA 完善及（6）交付](./review-thread-delivery-status-2026-10-05.md)。基础链路已打通，T1 完整原题一次成功但独立重复未通过；当前在补 T2 原生窗口与保存链路，最新只读绑定/截图/释放通过，完整 T2/T3、剩余控制和真人验收未完成。CUA 专项区分浏览器实机、Mac 多行源码合同、隔离原生观察会话及未完成生产/保存桥；团队事件数量不等于完成任务数量，远端状态单列。
+
+远端 PR 22 对照计划：[PR 22 与本地修复的修改建议和执行计划](./pr22-local-integration-review-plan-2026-10-04.md)。固定远端 head 对照本地未提交修复，记录窗口证据分歧、多行追加风险、平台路由及分批整合验收；dot 原始问题列表尚待取得，不能当作已逐条复核 dot 结论。
+
+Mac 补齐执行入口：[跨窗口与弹窗能力补齐计划](./macos-window-popup-execution-plan-2026-10-03.md)。六阶段覆盖版本基线、只读 probe、跨窗操作、菜单与 sheet、中文多行与保存、手机端到端；区分离线、无模型实机和主模型验收，承接 F014/T023，不把最终 API 超时误判为输入失败。
+
+最新跨平台专项：[跨窗口与弹窗 probe 复审](./cross-platform-window-popup-review-2026-10-03.md)。整合版 335 项定向离线回归通过；显式切窗已实现，但 Mac/Linux 缺等价弹窗关系 probe、Windows companion 默认不注入，完整实机链路和 Mac 原生多行输入仍有边界。
+
 当前跨分支整合：[Mac 与 Runtime Surface 兼容审查](./macos-runtime-surface-integration-2026-10-03.md)。记录整合版本、冲突取舍、离线与 Windows 实机验收边界、推送及 main 合并结果。
 
 A 线三聊天协作：[修复、实机测试与远端审查入口](./a-line-three-thread-coordination-2026-10-03.md)。聊天（8）负责修复、（10）负责实机测试、（6）负责远端代码更新和审查；当前共用同一 Git 分支，提交与运行版本切换须串行协调。

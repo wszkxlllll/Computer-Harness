@@ -14,6 +14,10 @@
 `codex/a-line-macos-compat-20260928`，文件修改会立即互相可见，未获得隔离工作树。
 本文件使用仓库相对路径；实际源码位置以 `git rev-parse --show-toplevel` 为准。
 
+2026-10-05 阶段交付更新：用户要求（6）先完成 A 线推送和独立 PR。已读取（8）idle 及（10）T0578 terminal/released/暂停交接，在源码不变且保持 dirty 改动的情况下从 main `961a0982` 建立 `codex/a-line-cua-provider-hardening-20261005`。本批共享 checkout 现在处于该新分支；旧分支名仅保留作历史证据。两方已收到仅 Git 交付同步、不启动修复/实机工作的消息。具体范围和验证见 [本轮交付](./a-line-pr-delivery-2026-10-05.md)；后续恢复必须重新核对分支、源码、构建和运行版本，不能沿用旧版本身份。
+
+阶段成果已推送为 `e11bcfa` 并创建 [Draft PR24](https://github.com/wszkxlllll/Computer-Harness/pull/24)，本轮不合并 main 或组员 PR。交付方全量1663 Vitest/71 TAP、typecheck、Web build、CLI smoke 通过；原生15源/8镜像独立重放通过。构建产物已按当前源码重建，但未启动服务/桌面、未部署公网或替换原生驱动；历史 T0578 只读实机证据保持原版本含义。恢复时仍由（10）核对并统一安排实际运行。
+
 ## 信息流与同步时机
 
 1. （10）发现问题后记录问题编号、复现步骤、任务目标、实际运行版本及 Run 路径，通过用户已授权的聊天消息把证据交给（8），并让（6）能从共享记录核对。

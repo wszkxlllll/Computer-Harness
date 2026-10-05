@@ -485,7 +485,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
     const unsuccessfulOutcomes = [
       ["failed", "任务未能完成。"],
       ["cancelled", "任务已取消。"],
-      ["budget_exhausted", "任务操作已达到上限。"],
+      ["budget_exhausted", "任务请求或操作已达到上限，任务完成尚未确认。"],
       ["outcome_unknown", "有项操作的结果无法确认，任务已暂停。"],
     ] as const;
     for (const [outcome, fallback] of unsuccessfulOutcomes) {
@@ -559,6 +559,32 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(projector.project(actionCompleted(6, "orphan-action"))).toBeUndefined();
   });
 
+  it.each([
+    ["GLM_INVALID_TOOL_CALL", "模型返回的格式或工具参数不符合约定，未执行该响应中的操作。"],
+    ["QWEN_INVALID_RESPONSE", "模型返回的格式或工具参数不符合约定，未执行该响应中的操作。"],
+    ["GLM_INCOMPLETE_RESPONSE", "模型响应未完整结束，未执行该响应中的操作。"],
+    ["GLM_REQUEST_TIMEOUT", "模型请求等待超时，任务完成尚未确认。"],
+    ["GLM_NETWORK_ERROR", "模型请求发生网络错误，任务完成尚未确认。"],
+    ["GLM_HTTP_503", "模型服务暂时无法处理请求，请查看任务状态。"],
+    [undefined, "模型请求未能完成，请查看任务状态。"],
+    ["PRIVATE_UNKNOWN_CODE", "模型请求未能完成，请查看任务状态。"],
+  ])("classifies structured Provider failure %s without guessing from private text or retryability", (code, expected) => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    const failure = projector.project(event(1, { type: "model.request.failed", category: "provider", ...(code === undefined ? {} : { code }), retryable: true, message: "PRIVATE_RAW_RESPONSE and secret tool arguments" }));
+    expect(failure).toMatchObject({ kind: "error", text: expected });
+    expect(JSON.stringify(failure)).not.toMatch(/PRIVATE_|secret/u);
+    expect(projector.project(computerTurn(2))).toMatchObject({ kind: "progress", text: "模型已返回有效响应，后续完成情况仍需核对。" });
+    expect(projector.project(event(3, { type: "model.request.failed", category: "provider", ...(code === undefined ? {} : { code }), retryable: true, message: "PRIVATE_SECOND" }))).toMatchObject({ kind: "error", text: expected });
+    expect(projector.project(event(4, { type: "run.finished", outcome: "budget_exhausted" }))).toMatchObject({ kind: "result", text: "任务请求或操作已达到上限，任务完成尚未确认。" });
+    expect(projector.project(computerTurn(5))).toBeUndefined();
+  });
+
+  it("does not project a cancelled request as a Provider connection failure", () => {
+    const projector = new RunNoticeProjector(runId);
+    expect(projector.project(event(1, { type: "model.request.failed", category: "cancelled", code: "GLM_REQUEST_TIMEOUT", retryable: true, message: "PRIVATE_CANCELLED" }))).toBeUndefined();
+    expect(projector.project(event(2, { type: "run.finished", outcome: "cancelled" }))).toMatchObject({ text: "任务已取消。" });
+  });
+
   it("speaks controlled Chinese error categories without forwarding internal diagnostics", () => {
     const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     const retrying = event(1, {
@@ -568,7 +594,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
       message: "secret token at E:/private/profile with coordinates 442,318",
       retryable: true,
     });
-    expect(projector.project(retrying)).toMatchObject({ kind: "error", text: "模型连接暂时不稳定。" });
+    expect(projector.project(retrying)).toMatchObject({ kind: "error", text: "模型服务暂时无法处理请求，请查看任务状态。" });
     expect(projector.project(event(2, {
       type: "model.request.failed",
       category: "provider",

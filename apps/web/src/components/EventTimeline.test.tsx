@@ -19,15 +19,15 @@ describe("mobile event timeline", () => {
     expect(screen.getByText("任务需要你检查当前画面")).toBeDefined();
   });
 
-  it("does not promise recovery for a non-retryable model failure", () => {
+  it.each([true, false])("does not infer recovery from retryable=%s", (retryable) => {
     render(<EventTimeline events={[{
       runId: "run",
       sequence: 1,
       type: "run.progress",
-      data: { phase: "model", status: "failed", retryable: false },
+      data: { phase: "model", status: "failed", retryable },
     }]} />);
 
-    expect(screen.getByText("模型请求失败，任务可能结束")).toBeDefined();
+    expect(screen.getByText("模型请求失败，请查看任务当前状态")).toBeDefined();
     expect(screen.queryByText("模型请求失败，系统正在处理")).toBeNull();
   });
 });

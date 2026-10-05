@@ -57,6 +57,7 @@ export interface DomGroundingRawCandidate {
     readonly editable?: unknown;
     readonly expanded?: unknown;
     readonly selected?: unknown;
+    readonly checked?: unknown;
     readonly valuePresent?: unknown;
   };
 }
@@ -161,6 +162,8 @@ export interface DomClickResult {
   readonly message?: string;
   readonly tabId?: string;
   readonly generation?: string;
+  /** Current read-only focus check only; no control names or values. */
+  readonly focusEvidence?: { readonly pageHasFocus?: boolean; readonly activeElementMatches?: boolean; readonly editable?: boolean };
 }
 
 export interface DomGroundingTransport {
@@ -424,6 +427,7 @@ function publicState(value: DomGroundingRawCandidate["state"]): GroundingElement
     ...(typeof value.editable === "boolean" ? { editable: value.editable } : {}),
     ...(typeof value.expanded === "boolean" ? { expanded: value.expanded } : {}),
     ...(typeof value.selected === "boolean" ? { selected: value.selected } : {}),
+    ...(typeof value.checked === "boolean" || value.checked === "mixed" ? { checked: value.checked } : {}),
     ...(value.valuePresent === true ? { valuePresent: true } : {}),
   } satisfies GroundingElementState;
   return Object.keys(state).length === 0 ? undefined : state;

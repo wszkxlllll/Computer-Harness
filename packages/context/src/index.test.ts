@@ -15,7 +15,7 @@ import type {
   SurfaceRef,
   ToolCallId,
 } from "@computer-harness/protocol";
-import { createDefaultComputerTools, windowSwitchTools } from "@computer-harness/runtime";
+import { createDefaultComputerTools, createDefaultToolRegistry, groundingComputerTools, windowSwitchTools } from "@computer-harness/runtime";
 import { DefaultContextCompiler, selectMemoryForContext } from "./index.js";
 
 const runId = "run-context" as RunId;
@@ -51,6 +51,112 @@ function observation(id: string) {
 }
 
 describe("DefaultContextCompiler", () => {
+  it.each([3, 20])("reserves the last existing request of limit %s for honest finish only", async (limit) => {
+    const compiler = new DefaultContextCompiler(createDefaultToolRegistry());
+    const closing = await compiler.compile({ runId, goal: "Preserve all requested variants and fields", recentEvents: [], requestBudget: { limit, remaining: 1 } }, new AbortController().signal);
+    expect(closing.tools.map((tool) => tool.name)).toEqual(["terminate"]);
+    expect(JSON.stringify(closing.messages)).toContain("No OTHER tool calls or memory writes");
+    expect(JSON.stringify(closing.messages)).toContain("Never omit either status or text");
+    expect(JSON.stringify(closing.messages)).toContain(`1 of ${limit} requests remain`);
+    expect(closing.messages[0]).toMatchObject({ content: [{ type: "text", text: "Preserve all requested variants and fields" }] });
+    expect(closing.system).toContain("modest overlapping scroll increments");
+    const preparing = await compiler.compile({ runId, goal: "Preserve all requested variants and fields", recentEvents: [], requestBudget: { limit, remaining: 2 } }, new AbortController().signal);
+    expect(preparing.tools.some((tool) => tool.name === "scroll")).toBe(true);
+    expect(JSON.stringify(preparing.messages)).toContain("evidence/unknown ledger");
+    for (const smallLimit of [1, 2]) {
+      const small = await compiler.compile({ runId, goal: "One operation", recentEvents: [], requestBudget: { limit: smallLimit, remaining: 1 } }, new AbortController().signal);
+      expect(small.tools.some((tool) => tool.category === "computer")).toBe(true);
+    }
+  });
+  it("retains full-history driver receipt counts without sensitive action data or recovery authority", async () => {
+    const click = { actionId: "first" as ActionId, kind: "click", basedOn: "before", point: { x: 10, y: 10 } };
+    const type = { actionId: "input" as ActionId, kind: "type", basedOn: "before", text: "private-typed-value" };
+    const events = [
+      event(1, { type: "action.execution.started", action: click }),
+      event(2, { type: "action.execution.completed", receipt: { actionId: "first", status: "completed", message: "private-label" } }),
+      event(3, { type: "action.execution.completed", receipt: { actionId: "first", status: "completed" } }),
+      event(4, { type: "action.execution.started", action: type }),
+      event(5, { type: "action.execution.failed", receipt: { actionId: "input", status: "refused" } }),
+      event(6, { type: "action.execution.started", action: { ...click, actionId: "recovery" } }),
+      event(7, { type: "action.execution.completed", receipt: { actionId: "recovery", status: "completed" } }),
+      event(8, { type: "action.execution.completed", receipt: { actionId: "never-dispatched", status: "completed" } }),
+      event(9, { type: "action.execution.started", action: { actionId: "wait", kind: "wait", durationMs: 1 } }),
+      event(10, { type: "action.execution.completed", receipt: { actionId: "wait", status: "completed" } }),
+      event(11, { type: "action.execution.started", action: { ...click, actionId: "unknown-side-effect" } }),
+      event(12, { type: "model.response.received", turn: { type: "finish", outcome: "failed", summary: "later" } }),
+    ];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { mode: "recent", maxHistoryEvents: 1 });
+    const compiled = await compiler.compile({ runId, goal: "Each control once; no correction", recentEvents: events }, new AbortController().signal);
+    const counts = compiled.messages.flatMap((message) => message.content).find((part) => part.type === "text" && part.text.startsWith("Runtime driver receipt counts"));
+    expect(counts).toMatchObject({ type: "text", text: expect.stringContaining("click/completed=2; type/refused=1") });
+    expect(JSON.stringify(counts)).not.toMatch(/private-|never-dispatched|unknown-side-effect/);
+    expect(compiled.messages[0]).toMatchObject({ content: [{ type: "text", text: "Each control once; no correction" }] });
+    expect(compiled.system).toContain("User constraints take precedence over tool recovery guidance");
+    expect(compiled.system).toContain("never deny a correction that was dispatched");
+    const noReceipts = await compiler.compile({ runId, goal: "Each control once; no correction", recentEvents: [] }, new AbortController().signal);
+    expect(compiled.contextBudget!.estimatedHistoryTextTokens).toBeGreaterThan(noReceipts.contextBudget!.estimatedHistoryTextTokens!);
+    await expect(compiler.compile({ runId, goal: "Each control once; no correction", recentEvents: events, context: { maxInputTokens: noReceipts.contextBudget!.estimatedInputTokens + 1 } }, new AbortController().signal)).rejects.toMatchObject({ code: "CONTEXT_INPUT_TOO_LARGE" });
+  });
+  it("guides bounded navigation observation and distinguishes toggle state without adding tools", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const compiled = await compiler.compile({ runId, goal: "synthetic read-only inspection", recentEvents: [] }, new AbortController().signal);
+    expect(compiled.system).toContain("use a brief bounded wait and its automatic fresh observation");
+    expect(compiled.system).toContain("do not click the same entry again");
+    expect(compiled.system).toContain("finish with failure rather than looping");
+    expect(compiled.system).toContain("selected is selection state, not checked");
+    expect(compiled.tools.some((tool) => tool.name === "observe")).toBe(false);
+    const withoutWait = await compiler.compile({ runId, goal: "synthetic read-only inspection", recentEvents: [], enabledToolNames: ["click"] }, new AbortController().signal);
+    expect(withoutWait.system).not.toContain("use a brief bounded wait");
+    expect(withoutWait.system).toContain("Do not invent a wait or observe tool when unavailable");
+  });
+  it("pins the latest GUI turn across recent selection and prepares a bounded real GLM projection", async () => {
+    const planningSource = "../../planning/src/index.js";
+    const memorySource = "../../memory/src/index.js";
+    const { createPlanningTools } = await import(planningSource);
+    const { createMemoryTools } = await import(memorySource);
+    const registry = createDefaultToolRegistry();
+    registry.registerMany(groundingComputerTools({ includeSelectOption: true }));
+    registry.registerMany(createPlanningTools({} as never));
+    registry.registerMany(createMemoryTools({} as never, "facts"));
+    const tools = registry.modelTools("main");
+    const before = observation("budget-before");
+    const latest = { ...observation("budget-latest"), grounding: { version: "grounding-catalog-v2" as const, source: "hybrid" as const, surfaceRef: desktopSurfaceRef, observationId: "budget-latest" as ObservationId, computerSessionId: sessionId, completeness: "partial" as const, degraded: false, maxElements: 16, elements: Array.from({ length: 16 }, (_, index) => ({ elementRef: `budget-element-${index}`, role: "textbox", source: "dom" as const, name: `Synthetic field ${index}`, bbox: { coordinateSpace: "physical" as const, x: 20, y: 30 + index * 10, width: 100, height: 20 }, state: { enabled: true, editable: true, focused: index === 0 } })) } };
+    const call = { id: "budget-type" as ToolCallId, name: "type", arguments: { text: "synthetic-once" } };
+    const sibling = { id: "budget-sibling" as ToolCallId, name: "task_list", arguments: {} };
+    const action = { actionId: "budget-action" as ActionId, basedOn: before.id, kind: "type" as const, text: "synthetic-once" };
+    const events = [event(0, { type: "user.input.received", text: "Preserve this correction" }),
+      event(1, { type: "model.response.received", turn: { type: "tool_calls", calls: [call, sibling], continuation: { providerId: "glm-5.3-flash", kind: "reasoning_content", content: "synthetic continuation ".repeat(700) } } }),
+      event(2, { type: "action.proposed", callId: call.id, action }), event(3, { type: "action.execution.started", action }),
+      event(4, { type: "action.execution.completed", receipt: { actionId: action.actionId, status: "completed" } }),
+      event(5, { type: "tool.call.completed", result: { callId: call.id, status: "completed", output: { completed: true } } }),
+      event(6, { type: "tool.call.rejected", callId: sibling.id, reason: "synthetic rejected sibling" }),
+      event(7, { type: "model.response.received", turn: { type: "tool_calls", calls: [{ id: "later-read" as ToolCallId, name: "task_list", arguments: {} }] } }),
+      event(8, { type: "observation.created", observation: latest })];
+    const compiler = new DefaultContextCompiler(registry, { mode: "recent", maxHistoryEvents: 1, maxInputTokens: 16384, maxWireInputTokens: 24576, features: { planning: "tasks-v1", memory: "facts-v1", batching: "same-control-input-v1", riskGuard: "layered" } });
+    const compiled = await compiler.compile({ runId, goal: "Synthetic fixture", recentEvents: events, latestObservation: latest }, new AbortController().signal);
+    expect(tools).toHaveLength(18);
+    expect(compiled.contextBudget).toMatchObject({ maxInputTokens: 16384, maxWireInputTokens: 24576 });
+    expect(JSON.stringify(compiled.messages)).toContain("Preserve this correction");
+    expect(JSON.stringify(compiled.messages)).toContain("synthetic-once");
+    expect(JSON.stringify(compiled.messages)).toContain("synthetic rejected sibling");
+    expect(compiled.contextBudget?.trace?.selectedEventIds).toContain("event-1");
+    let posts = 0;
+    let wire = "";
+    // Load the real current source without adding a cross-package TypeScript build input.
+    const providerSource = "../../provider-glm/src/index.js";
+    const { GlmAdapter } = await import(providerSource);
+    const adapter = new GlmAdapter({ apiKey: "fixture", profile: { name: "glm-5.3-flash", thinking: "low", coordinateMode: "actual_pixels" }, assetReader: { async read() { return new Uint8Array([1]); } }, httpClient: { async post(_url: string, body: unknown) { posts += 1; wire = JSON.stringify(body); return { choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ id: "budget-fixture-finish", function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "Synthetic requested fields remain unverified; this fixture records budget behavior only." }) } }] } }] }; } } });
+    const prepared = await adapter.prepare(compiled, { signal: new AbortController().signal });
+    expect(prepared.estimate.estimatedTextTokens + 480 + 32).toBeGreaterThan(12096);
+    await expect(adapter.prepare({ ...compiled, contextBudget: { ...compiled.contextBudget, maxInputTokens: 8000, maxWireInputTokens: 12096 } }, { signal: new AbortController().signal })).rejects.toThrow("wire input budget");
+    expect(posts).toBe(0);
+    await adapter.generatePrepared(prepared, { signal: new AbortController().signal });
+    expect(posts).toBe(1);
+    expect(wire).toContain("Runtime driver receipt counts (non-wait, full event history): type/completed=1");
+    expect(wire).toContain("not verified effects or authorization");
+    const tooSmall = new DefaultContextCompiler(registry, { mode: "recent", maxHistoryEvents: 1, maxInputTokens: 8000, maxWireInputTokens: 24576, features: { planning: "tasks-v1", memory: "facts-v1", batching: "same-control-input-v1", riskGuard: "layered" } });
+    await expect(tooSmall.compile({ runId, goal: "Synthetic fixture", recentEvents: events, latestObservation: latest }, new AbortController().signal)).rejects.toThrow(/Authoritative user inputs/);
+  });
   it("projects assistant ToolCall before its matching result and appends only the latest image", async () => {
     const first = observation("obs-1");
     const latest = observation("obs-2");
@@ -571,7 +677,8 @@ describe("DefaultContextCompiler", () => {
     const off = await compiler.compile({ runId, goal: "baseline", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off" } }, new AbortController().signal);
     expect(off.system).not.toContain("Planning tools");
     expect(off.system).not.toContain("Run Memory");
-    expect(off.system).toContain("finish.summary is the user-facing answer");
+    expect(off.system).toContain("call it exactly once with both required arguments");
+    expect(off.system).toContain('status must be exactly "success" or "failure"');
     expect(off.system).toContain("Do not return only a status");
     expect(off.system).not.toContain("recalled Run Memory");
     expect(off.system).toContain("at most one Computer tool call");

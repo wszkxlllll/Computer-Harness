@@ -392,7 +392,241 @@ function fakeDriver() {
   return { driver, calls };
 }
 
+function macosTopologyDriver() {
+  const fake = windowDriver();
+  fake.setPlatform("darwin");
+  fake.setWindowInventoryComplete(false); // Never upgrade the ordinary inventory.
+  const original = fake.driver.callTool.bind(fake.driver);
+  const state = { rootToken: "00000000-0000-0000-0000-000000000003", overlayToken: "00000000-0000-0000-0000-000000000004", rootSubrole: "AXStandardWindow", nativeRootError: false, menu: false, unsupported: false, unknown: false, x: 100, sequence: 0 };
+  const capability = { schema_version: 2, producer_version: "harness-topology-v2", source_commit: "d114f35fec05ecd37bf529e5587be86852205b64", scope: "target-ax-closure-cg-all-layers-v1", read_only: true, global_topology_complete: false, identity_lifecycle: "bounded-observation", max_rows: 4096, max_nodes: 2048, max_elapsed_ms: 6000, max_queries: 32768 };
+  fake.driver.callTool = async (name, args, ...rest) => {
+    if (name.startsWith("get_target_window_topology")) {
+      const input = JSON.parse(args) as Record<string, unknown>;
+      fake.calls.push({ name, input });
+      if (state.unsupported) return result({ isError: true, text: "unknown tool" });
+      if (name.endsWith("_capabilities")) return result({ structuredJson: JSON.stringify(capability) });
+      const rows = [{ pid: fake.target.pid, window_id: fake.target.windowId, layer: 0, z_index: 1, bounds: { x: state.x, y: 120, width: 960, height: 680 }, space_ids: [1], current_space_id: 1 }];
+      const cg = { status: "success", raw_count: 1, retained_count: 1, skipped_count: 0, duplicate_count: 0, rows };
+      return result({ isError: state.nativeRootError, text: state.nativeRootError ? "Target topology unknown." : "ok", structuredJson: JSON.stringify({ ...capability, target: { pid: fake.target.pid, window_id: fake.target.windowId }, request_nonce: input.request_nonce, session_epoch: "00000000-0000-0000-0000-000000000002", sequence: ++state.sequence, started_unix_ms: Date.now(), elapsed_ms: 10, status: state.unknown || state.nativeRootError ? "unknown" : "verified", cg_enumeration_complete: true, target_closure_complete: !state.nativeRootError, stable: true, cg_before: cg, cg_after: cg, reason_code: state.nativeRootError ? "ax_unknown" : "verified", ax: state.nativeRootError ? { status: "error", reason_code: "ax_root_dialog_unsupported", target_resolved: false, closure_complete: false, query_count: 20, node_count: 0, skipped_count: 0, truncated: false, unassociated_menu_present: null, overlays: [] } : { status: "success", target_resolved: true, closure_complete: true, query_count: 20, node_count: 4, skipped_count: 0, truncated: false, root_role: "AXWindow", root_subrole: state.rootSubrole, root_query_status: "success", root_classification: "ordinary", unassociated_menu_present: false, target_identity_token: state.rootToken, overlays: state.menu ? [{ kind: "menu", pid: fake.target.pid, window_id: fake.target.windowId, parent_window_id: fake.target.windowId, path: "target/children.0", identity_token: state.overlayToken, visible: true, geometry_verified: true, visibility_source: "consistent_both", frame: { x: 120, y: 140, width: 200, height: 200 } }] : [] } }) });
+    }
+    return original(name, args, ...rest);
+  };
+  return { ...fake, state };
+}
+
+describe("production Darwin target topology integration", () => {
+  it.each(["desktop", "background"] as const)("does not extend Mac multiline to %s input", async (mode) => {
+    const directory = await mkdtemp(join(tmpdir(), "cua-mac-multiline-scope-"));
+    const fake = mode === "desktop" ? fakeDriver() : windowDriver();
+    const computer = new ProductionCuaDriverComputer({ platform: "darwin", socketPath: "fixture", screenshotDir: directory, grounding: "off", ...(mode === "background" ? { windowTarget: { pid: 1234, windowId: 5678 }, windowDeliveryMode: "background" as const } : {}), driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "multiline-scope" as ObservationId, signal);
+      expect(await computer.execute(session, { actionId: "multiline-scope-action" as ActionId, basedOn: "multiline-scope" as ObservationId, kind: "type", text: "one\ntwo" }, signal)).toMatchObject({ status: "refused", driverCode: mode === "desktop" ? "MULTILINE_WINDOW_REQUIRED" : "WINDOW_INPUT_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+  async function fixture(run: (computer: ProductionCuaDriverComputer, fake: ReturnType<typeof macosTopologyDriver>, session: Awaited<ReturnType<ProductionCuaDriverComputer["open"]>>, signal: AbortSignal) => Promise<void>) {
+    const directory = await mkdtemp(join(tmpdir(), "cua-topology-integration-"));
+    const fake = macosTopologyDriver();
+    const computer = new ProductionCuaDriverComputer({ platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try { const session = await computer.open({}, signal); await computer.observe(session, "topology-before" as ObservationId, signal); await run(computer, fake, session, signal); await computer.close(session); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  }
+  const click = { actionId: "topology-action" as ActionId, basedOn: "topology-before" as ObservationId, kind: "click" as const, point: { x: 10, y: 20 } };
+  it.each(["first\nsecond", "first\r\nsecond", "first\nsecond\n"])("sends original macOS multiline text once: %j", async (text) => fixture(async (computer, fake, session, signal) => {
+    const receipt = await computer.execute(session, { actionId: "mac-multiline" as ActionId, basedOn: "topology-before" as ObservationId, kind: "type", text }, signal, { detectNewWindowHandoff: true });
+    expect(receipt).toMatchObject({ status: "completed" });
+    expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+    const input = fake.calls.filter((call) => call.name === "type_text");
+    expect(input).toHaveLength(1);
+    expect(input[0]?.input).toMatchObject({ text, delivery_mode: "foreground", target: { pid: fake.target.pid, window_id: fake.target.windowId } });
+    expect(input[0]?.input).not.toHaveProperty("element_token");
+    expect(fake.calls.filter((call) => ["press_key", "hotkey"].includes(call.name))).toHaveLength(0);
+    expect(fake.calls.filter((call) => call.name === "get_target_window_topology")).toHaveLength(2);
+  }));
+  it("refuses an explicit macOS multiline groundingRef without discarding it", async () => fixture(async (computer, fake, session, signal) => {
+    expect(await computer.execute(session, { actionId: "mac-explicit-ref" as ActionId, basedOn: "topology-before" as ObservationId, kind: "type", text: "one\ntwo", groundingRef: "explicit-ref" }, signal)).toMatchObject({ status: "refused", driverCode: "GROUNDING_ACTION_UNSUPPORTED" });
+    expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+  }));
+  it("keeps multiline foreground refusal before text and post failure single-shot", async () => fixture(async (computer, fake, session, signal) => {
+    const action = { actionId: "mac-multiline-guards" as ActionId, basedOn: "topology-before" as ObservationId, kind: "type" as const, text: "one\ntwo\n" };
+    fake.setTypeTextResult({ isError: true, errorCode: "foreground_unavailable", text: "foreground unavailable; no keyboard input was sent" });
+    expect(await computer.execute(session, action, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+    fake.setTypeTextResult(undefined);
+    expect(await computer.execute(session, action, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+    fake.state.unknown = true;
+    await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toThrow("completed action is not replayed");
+    expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(2);
+  }));
+  it("invalidates Mac multiline refs on unsupported preflight before any text", async () => fixture(async (computer, fake, session, signal) => {
+    fake.state.unsupported = true;
+    const action = { actionId: "unsupported-multiline" as ActionId, basedOn: "topology-before" as ObservationId, kind: "type" as const, text: "one\ntwo" };
+    expect(await computer.execute(session, action, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "refused" });
+    expect(await computer.execute(session, action, signal)).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+  }));
+  it("does not retry a thrown unknown macOS multiline dispatch", async () => fixture(async (computer, fake, session, signal) => {
+    fake.setTypeTextThrownError(new Error("fixture unknown transport outcome"));
+    await expect(computer.execute(session, { actionId: "mac-multiline-unknown" as ActionId, basedOn: "topology-before" as ObservationId, kind: "type", text: "one\ntwo" }, signal, { detectNewWindowHandoff: true })).rejects.toThrow("unknown transport outcome");
+    expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+    expect(fake.calls.filter((call) => ["press_key", "hotkey"].includes(call.name))).toHaveLength(0);
+  }));
+  it("consumes the scoped producer pre/post without claiming global completeness", async () => fixture(async (computer, fake, session, signal) => {
+    expect(await computer.execute(session, click, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+    expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+    await computer.observe(session, "topology-after" as ObservationId, signal);
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.name === "get_target_window_topology")).toHaveLength(2);
+  }));
+  it.each(["unsupported", "unknown", "geometry"] as const)("refuses %s preflight with zero input and no stock fallback", async (mode) => fixture(async (computer, fake, session, signal) => {
+    if (mode === "geometry") fake.state.x++; else fake.state[mode] = true;
+    expect(await computer.execute(session, click, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+    await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toThrow("Surface is not executable");
+  }));
+  it("preserves a completed receipt when post sampling becomes unknown and never replays", async () => fixture(async (computer, fake, session, signal) => {
+    expect(await computer.execute(session, click, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+    fake.state.unknown = true;
+    await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toThrow("completed action is not replayed");
+    expect(await computer.execute(session, { ...click, actionId: "stale" as ActionId }, signal)).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+  }));
+  it("invalidates old refs on root object replacement even when later input omits detection", async () => fixture(async (computer, fake, session, signal) => {
+    expect(await computer.execute(session, click, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+    await computer.detectNewWindowHandoffCandidates(session, signal);
+    await computer.observe(session, "replacement-before" as ObservationId, signal);
+    fake.state.rootToken = "00000000-0000-0000-0000-000000000006";
+    expect(await computer.execute(session, { ...click, basedOn: "replacement-before" as ObservationId }, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "refused" });
+    expect(await computer.execute(session, { ...click, basedOn: "replacement-before" as ObservationId }, signal)).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+  }));
+  it.each(["native-unknown-error", "verified-dialog"] as const)("invalidates old refs on same-object same-CGID root subrole change (%s)", async (mode) => fixture(async (computer, fake, session, signal) => {
+    expect(await computer.execute(session, click, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+    await computer.detectNewWindowHandoffCandidates(session, signal);
+    await computer.observe(session, "ordinary-root" as ObservationId, signal);
+    const token = fake.state.rootToken;
+    fake.state.rootSubrole = "AXDialog";
+    fake.state.nativeRootError = mode === "native-unknown-error";
+    expect(await computer.execute(session, { ...click, basedOn: "ordinary-root" as ObservationId }, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "refused" });
+    expect(fake.state.rootToken).toBe(token);
+    expect(await computer.execute(session, { ...click, basedOn: "ordinary-root" as ObservationId }, signal)).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+  }));
+  it("keeps the completed action single-shot when the same root becomes a native unknown dialog after dispatch", async () => fixture(async (computer, fake, session, signal) => {
+    expect(await computer.execute(session, click, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+    fake.state.rootSubrole = "AXDialog"; fake.state.nativeRootError = true;
+    await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toThrow("completed action is not replayed");
+    expect(await computer.execute(session, click, signal)).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+  }));
+  it("pushes a proven same-CGID menu and pops only after fresh strict absence", async () => fixture(async (computer, fake, session, signal) => {
+    const before = await computer.observe(session, "topology-before" as ObservationId, signal);
+    expect(await computer.execute(session, click, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+    fake.state.menu = true;
+    await computer.detectNewWindowHandoffCandidates(session, signal);
+    const child = await computer.observe(session, "menu-observed" as ObservationId, signal);
+    expect(child.surfaceRef?.surfaceId).not.toBe(before.surfaceRef?.surfaceId);
+    expect(await computer.execute(session, click, signal)).toMatchObject({ status: "refused" });
+    fake.state.menu = false;
+    const parent = await computer.observe(session, "parent-return" as ObservationId, signal);
+    expect(parent.surfaceRef?.surfaceId).toBe(before.surfaceRef?.surfaceId);
+    expect(parent.surfaceRef?.generation).toBeGreaterThan(before.surfaceRef!.generation);
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+  }));
+  it("does not preserve Surface refs when a same-path same-frame menu is replaced", async () => fixture(async (computer, fake, session, signal) => {
+    await computer.execute(session, click, signal, { detectNewWindowHandoff: true }); fake.state.menu = true;
+    await computer.detectNewWindowHandoffCandidates(session, signal);
+    await computer.observe(session, "old-menu" as ObservationId, signal);
+    fake.state.overlayToken = "00000000-0000-0000-0000-000000000007";
+    await expect(computer.observe(session, "new-menu" as ObservationId, signal)).rejects.toThrow("closure changed");
+    expect(await computer.execute(session, { ...click, basedOn: "old-menu" as ObservationId }, signal)).toMatchObject({ status: "refused" });
+    expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+  }));
+});
+
 describe("CuaDriverComputer", () => {
+  it.each(["click", "keypress", "type", "multiline"] as const)("refuses %s before input when the official Mac ordinary inventory has no topology attestation", async (kind) => {
+    const directory = await mkdtemp(join(tmpdir(), "cua-mac-inventory-preflight-"));
+    const fake = windowDriver();
+    const originalCall = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (...args) => args[0] === "list_windows" ? result({ structuredJson: JSON.stringify({ current_space_id: 1, windows: [{ pid: fake.target.pid, window_id: fake.target.windowId, layer: 0, z_index: 1, bounds: { x: 100, y: 120, width: 960, height: 680 }, is_on_screen: true, space_ids: [1], current_space_id: 1, on_current_space: true, title: "PRIVATE_TITLE" }] }) }) : originalCall(...args);
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "mac-inventory-before" as ObservationId, signal);
+      const action = { actionId: "mac-inventory-action" as ActionId, basedOn: "mac-inventory-before" as ObservationId, ...(kind === "click" ? { kind: "click" as const, point: { x: 10, y: 20 } } : kind === "keypress" ? { kind: "keypress" as const, keys: ["SHIFT", "CMD", "T"] } : { kind: "type" as const, text: kind === "multiline" ? "one\ntwo" : "one" }) };
+      const receipt = await computer.execute(session, action, signal, { detectNewWindowHandoff: true });
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_INVENTORY_UNKNOWN" });
+      expect(receipt.message).toContain("no input was sent");
+      expect(receipt.message).toContain('"rawComplete":"missing"');
+      expect(receipt.message).not.toContain("PRIVATE_TITLE");
+      expect(fake.calls.filter((call) => ["click", "type_text", "press_key"].includes(call.name))).toHaveLength(0);
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    { complete: true, truncated: "true" },
+    { complete: true, degraded: "true" },
+    { complete: "true" },
+    { duplicate: true },
+    { invalidRow: true },
+  ])("does not let a complete probe wash malformed or duplicate raw inventory evidence: %j", async (shape) => {
+    const row = { pid: 41, window_id: 101, bounds: { x: 0, y: 0, width: 800, height: 600 } };
+    const { duplicate, invalidRow, ...flags } = shape;
+    const driver = { async callTool() { return result({ structuredJson: JSON.stringify({ ...flags, windows: [row, ...(duplicate ? [row] : []), ...(invalidRow ? [{}] : [])] }) }); } } as unknown as CuaDriverLike;
+    const probe = { async read() { return { source: "win32_relationship_probe" as const, complete: true, windows: [{ pid: 41, windowId: 101, ownerPid: 0, ownerWindowId: 0, bounds: row.bounds, zIndex: 1, isOnScreen: true, minimized: false, windowClass: "Notepad" }], foregroundPid: 41, foregroundWindowId: 101 }; } };
+    const inventory = await listWindowInventory(driver, "fixture", new AbortController().signal, undefined, true, probe, "win32");
+    expect(inventory).toMatchObject({ complete: false, completeAttestation: "negative", diagnostic: { probe: "merged_incomplete" } });
+    if (duplicate) expect(inventory.diagnostic).toMatchObject({ rawWindowCount: 2, rawValidWindowCount: 2, rawUniqueWindowCount: 1 });
+  });
+
+  it("keeps a completed action single-shot when current inventory later loses completeness", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cua-current-inventory-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "inventory-before" as ObservationId, signal);
+      expect(await computer.execute(session, { actionId: "inventory-click" as ActionId, basedOn: "inventory-before" as ObservationId, kind: "click", point: { x: 10, y: 20 } }, signal, { detectNewWindowHandoff: true })).toMatchObject({ status: "completed" });
+      fake.setWindowInventoryComplete(false);
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toThrow('"rawComplete":"false"');
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("observes UIA checked independently without treating it as selected", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-checked-"));
+    const fake = windowDriver();
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "CheckBox", name: "True", frame: { x: 120, y: 160, width: 30, height: 30 }, checked: true, selected: false },
+      { role: "RadioButton", name: "False", frame: { x: 160, y: 160, width: 30, height: 30 }, checked: false },
+      { role: "CheckBox", name: "Mixed", frame: { x: 200, y: 160, width: 30, height: 30 }, checked: "mixed", selected: true },
+      { role: "CheckBox", name: "Unknown", frame: { x: 240, y: 160, width: 30, height: 30 }, checked: "invalid" },
+    ] });
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
+    try {
+      const signal = new AbortController().signal;
+      const session = await computer.open({}, signal);
+      const capture = await computer.observe(session, "uia-checked" as ObservationId, signal);
+      const state = (name: string) => capture.grounding?.elements.find((element) => element.name === name)?.state;
+      expect(state("True")).toMatchObject({ checked: true, selected: false });
+      expect(state("False")).toMatchObject({ checked: false });
+      expect(state("False")).not.toHaveProperty("selected");
+      expect(state("Mixed")).toMatchObject({ checked: "mixed", selected: true });
+      expect(state("Unknown")?.checked).toBeUndefined();
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("activates the exact HWND once before fresh capture and never reactivates before an action", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-"));
     const fake = windowDriver();
@@ -1398,7 +1632,6 @@ describe("CuaDriverComputer", () => {
     try {
       const session = await computer.open({}, signal);
       const before = await computer.observe(session, "truncated-popup-before" as ObservationId, signal);
-      fake.setWindowInventoryComplete(false);
       fake.setExtraWindowAfterClick({ ...popup, ownerPid: 0, ownerWindowId: 0 });
       const receipt = await computer.execute(session, {
         actionId: "truncated-popup-open" as ActionId,
@@ -1406,6 +1639,7 @@ describe("CuaDriverComputer", () => {
         kind: "click", point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
       expect(receipt.status).toBe("completed");
+      fake.setWindowInventoryComplete(false);
       expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([popup]);
       expect(fake.calls.some((call) => call.name === "get_accessibility_tree")).toBe(false);
       const stillParent = await computer.observe(session, "truncated-popup-still-parent" as ObservationId, signal);
@@ -2093,7 +2327,7 @@ describe("CuaDriverComputer", () => {
         const currentDialog = fake.getExtraWindow();
         return {
           source: "win32_relationship_probe" as const,
-          complete: false,
+          complete: currentDialog === undefined,
           windows: [
             { pid: fake.target.pid, windowId: fake.target.windowId, ownerPid: 0, ownerWindowId: 0, zIndex: 1, isOnScreen: true, minimized: false, bounds: parentBounds, windowClass: "Notepad" },
             ...(currentDialog === undefined ? [] : [{
@@ -4336,7 +4570,7 @@ describe("CuaDriverComputer", () => {
       collect: async () => ({ tabId: browserTarget.tabId, generation: browserTarget.generation, coordinateSpace: "physical", complete: true, candidates: [{ tagName: "input", ariaRole: "textbox", inputType: "text", name: "Query", frame: { x: 100, y: 100, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: focus } }] }),
       click: vi.fn(async () => { throw new Error("editable input must never dispatch programmatic click"); }),
       validateClick: vi.fn(async () => ({ status: "completed" as const, tabId: browserTarget.tabId, generation: browserTarget.generation })),
-      verifyFocus: vi.fn(async () => focus ? ({ status: "completed" as const, tabId: browserTarget.tabId, generation: browserTarget.generation }) : ({ status: "refused" as const, driverCode: "DOM_INPUT_FOCUS_MISMATCH" })),
+      verifyFocus: vi.fn(async () => focus ? ({ status: "completed" as const, tabId: browserTarget.tabId, generation: browserTarget.generation }) : ({ status: "refused" as const, driverCode: "DOM_INPUT_FOCUS_MISMATCH", tabId: browserTarget.tabId, generation: browserTarget.generation, focusEvidence: { pageHasFocus: false, activeElementMatches: true, editable: true } })),
     };
     try {
       const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
@@ -4353,7 +4587,12 @@ describe("CuaDriverComputer", () => {
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
       observationId = "focus-after-click" as ObservationId;
       await computer.observe(session, observationId, signal);
-      expect(await type("page-unfocused")).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      const refusedInput = await type("page-unfocused");
+      expect(refusedInput).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      expect(refusedInput.message).toContain("pageHasFocus=false, activeElementMatches=true, editable=true");
+      expect(refusedInput.message).toContain("does not authorize repeating a completed click");
+      expect(refusedInput.message).not.toContain("Observe again and click");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
       expect(await computer.execute(session, { kind: "keypress", actionId: "escape-unfocused" as ActionId, basedOn: observationId, keys: ["ESC"] }, signal)).toMatchObject({ status: "refused" });
       expect(await type("still-protected")).toMatchObject({ status: "refused" });
       expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);

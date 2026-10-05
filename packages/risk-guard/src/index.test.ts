@@ -136,6 +136,20 @@ function switchWindowContext(
 }
 
 describe("LayeredRiskGuard", () => {
+  it.each([
+    { effect: "unknown" as const, target: "Comparison variant", summary: "Choose the listed variant" },
+    { effect: "local_edit" as const, target: "Payment account", summary: "Choose a payment account" },
+    { effect: "local_edit" as const, target: "Security permission", summary: "Grant administrator permission" },
+  ])("does not blanket-allow select_option with $target and a zero semantic review budget", async ({ effect, target, summary }) => {
+    const candidate = context(effect, target, summary);
+    candidate.candidate.calls = [{ id: "select-call" as ToolCallId, name: "select_option", arguments: { elementRef: "dom-select", optionText: "Listed choice" }, declaredEffect: { effects: [effect], target, summary } }];
+    candidate.candidate.actions = [{ actionId: "select-action" as ActionId, basedOn: observation.id, kind: "select_option", groundingRef: "dom-select", optionText: "Listed choice" }];
+    const guard = new LayeredRiskGuard({ assessor: new ScriptedRiskAssessor({ effects: ["local_edit"], alignment: "aligned", evidence: "Synthetic low-risk claim" }), maxModelRequests: 0 });
+    const decision = await guard.evaluate(candidate, new AbortController().signal);
+    expect(decision).toMatchObject({ decision: "require_approval", modelRequestCount: 0 });
+    if (effect === "unknown") expect(decision).toMatchObject({ reasonCode: "unknown_grounding_evidence_unavailable" });
+  });
+
   function focusedTyping(summary = "向当前聚焦的 Search 输入框逐字输入指定文本，不涉及提交或导航"): ActionPolicyContext {
     const candidate = context("local_edit", "Search 输入框", summary, "type");
     candidate.candidate.decisionObservation = {
