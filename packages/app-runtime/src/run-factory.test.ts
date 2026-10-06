@@ -114,6 +114,18 @@ function recoveryReportBaseEvents(runId: RunId): RuntimeEvent[] {
 }
 
 describe("app-runtime RunHandle", () => {
+  it("rejects an invalid resolved GLM timeout before creating Run resources", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-glm-timeout-config-gate-"));
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    try {
+      await expect(createRun({ ...config(outputDir), glmRequestTimeoutMs: 240001 }, { createProvider })).rejects.toThrow(/request timeout/u);
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("records a real Runtime→GLM→recorder→Fetch exchange against its Run request", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-exchange-"));
     const runId = "runtime-http-correlation" as RunId;
@@ -161,7 +173,7 @@ describe("app-runtime RunHandle", () => {
         attempt: 1,
         payloadHash: started.preparedRequest?.payloadHash,
         httpEvidence: { source: "fetch", stages: [
-          { stage: "fetch_invoked", phase: "awaiting_headers" },
+          { stage: "fetch_invoked", phase: "awaiting_headers", deadlineMs: 90000, serializedBodyBytes: expect.any(Number), requestConfiguration: { stream: false, thinking: "enabled", reasoningEffort: "server_default", maxTokens: 8192, messageCount: expect.any(Number), toolCount: expect.any(Number), imageCount: 1 } },
           { stage: "headers_received", phase: "reading_body", httpStatus: 200 },
           { stage: "body_received", phase: "complete", outcome: "success", httpStatus: 200 },
         ] },
@@ -174,6 +186,64 @@ describe("app-runtime RunHandle", () => {
       await handle.close();
     } finally {
       vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses one explicit GLM timeout for Fetch evidence and Runtime retry reserve", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-explicit-timeout-"));
+    const runId = "runtime-glm-explicit-timeout" as RunId;
+    const fetchMock = vi.fn(async () => { throw new Error("synthetic network failure"); });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        runId,
+        glmRequestTimeoutMs: 120_000,
+        maxModelRequests: 3,
+      }, {
+        credentials: { glmApiKey: "synthetic-secret-token" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const records = (await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim().split(/\r?\n/u).map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        runId,
+        correlation: "complete",
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", deadlineMs: 120_000, serializedBodyBytes: expect.any(Number) },
+          { stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers" },
+        ] },
+      });
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["glm-5.3-flash", "qwen3.8-flash"] as const)("does not apply the default GLM retry reserve to injected %s providers", async (model) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-injected-provider-timeout-"));
+    let calls = 0;
+    const injectedProvider: ProviderAdapter = {
+      id: `injected-${model}`,
+      async generate() {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error("synthetic retryable provider error"), { retryable: true, retryMode: "same_input" });
+        return { type: "finish", summary: "The injected fixture completed successfully." };
+      },
+    };
+    try {
+      const handle = await createRun({ ...config(outputDir), model, glmRequestTimeoutMs: 120_000, maxModelRequests: 3 }, {
+        createProvider: () => injectedProvider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(calls).toBe(2);
+      await handle.close();
+    } finally {
       await rm(outputDir, { recursive: true, force: true });
     }
   });

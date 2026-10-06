@@ -112,6 +112,13 @@ describe("app-runtime provider factory", () => {
     expect(posts).toBe(0);
   });
 
+  it("rejects invalid resolved GLM request deadlines before constructing a Provider", async () => {
+    for (const glmRequestTimeoutMs of [0, 999, 1000.5, 240001, Number.NaN]) {
+      expect(() => createProvider({ model: "glm-5.3-flash", config: config({ glmRequestTimeoutMs }), assetReader, outputDir: "unused", credentials: { glmApiKey: "fixture" } })).toThrow(/request timeout/u);
+    }
+    expect((await createProvider({ model: "glm-5.3-flash", config: config({ glmRequestTimeoutMs: 120000 }), assetReader, outputDir: "unused", credentials: { glmApiKey: "fixture" } })).id).toBe("glm-5.3-flash");
+  });
+
   it("sends one identical shared Context preference projection to GLM and Qwen", async () => {
     const guidance = "Group findings by topic.";
     const preferences: RunAssistantPreferencesSnapshot = {

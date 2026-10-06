@@ -52,6 +52,92 @@ function expectForwarded(request: ForwardedRequest | undefined, url: string, bod
 }
 
 describe("recording client diagnostic paths", () => {
+  it("persists only valid transport configuration fields on success and failure without changing outcomes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-glm-recorder-safe-transport-"));
+    const successPath = join(directory, "success.jsonl");
+    const failurePath = join(directory, "failure.jsonl");
+    const response = { choices: [] };
+    const originalFailure = new Error("private transport failure");
+    const evidenceWithUnknowns = {
+      stage: "fetch_invoked",
+      outcome: "pending",
+      phase: "awaiting_headers",
+      elapsedMs: 12,
+      deadlineMs: 120_000,
+      serializedBodyBytes: 4096,
+      abortSource: "run_cancelled",
+      requestConfiguration: {
+        stream: false,
+        thinking: "enabled",
+        reasoningEffort: "high",
+        maxTokens: 8192,
+        messageCount: 2,
+        toolCount: 3,
+        imageCount: 1,
+        privateSetting: "PRIVATE_NESTED_MARKER",
+      },
+      url: "PRIVATE_URL_MARKER",
+      body: "PRIVATE_BODY_MARKER",
+      authorization: "PRIVATE_AUTH_MARKER",
+    } as unknown as GlmTransportEvidence;
+    const successInner: GlmHttpClient = {
+      async post(_url, _body, _headers, _signal, diagnostics) {
+        diagnostics?.onTransportEvidence?.(evidenceWithUnknowns);
+        return response;
+      },
+    };
+    const successRecorder = new RecordingGlmHttpClient(successPath, successInner);
+    const callbackFailure = new Error("PRIVATE_CALLBACK_MARKER");
+    await expect(successRecorder.post("private-url", {}, {}, new AbortController().signal, {
+      payloadHash: "a".repeat(64),
+      onTransportEvidence: () => { throw callbackFailure; },
+    })).resolves.toBe(response);
+
+    const failedInner: GlmHttpClient = {
+      async post(_url, _body, _headers, _signal, diagnostics) {
+        diagnostics?.onTransportEvidence?.({
+          ...evidenceWithUnknowns,
+          stage: "body_failed",
+          outcome: "timeout",
+          phase: "reading_body",
+          elapsedMs: 120_012,
+          httpStatus: 200,
+          deadlineMs: 0,
+          serializedBodyBytes: -1,
+          abortSource: "network_error",
+          requestConfiguration: { stream: false, messageCount: "PRIVATE_INVALID_COUNT" },
+        } as unknown as GlmTransportEvidence);
+        throw originalFailure;
+      },
+    };
+    const failureRecorder = new RecordingGlmHttpClient(failurePath, failedInner);
+    await expect(failureRecorder.post("private-url", {}, {}, new AbortController().signal, { payloadHash: "b".repeat(64) })).rejects.toBe(originalFailure);
+
+    const successRecord = await readRecord(successPath);
+    const failureRecord = await readRecord(failurePath);
+    expect(successRecord.httpEvidence).toEqual({ source: "fetch", stages: [{
+      stage: "fetch_invoked",
+      outcome: "pending",
+      phase: "awaiting_headers",
+      elapsedMs: 12,
+      deadlineMs: 120_000,
+      serializedBodyBytes: 4096,
+      abortSource: "run_cancelled",
+      requestConfiguration: { stream: false, thinking: "enabled", reasoningEffort: "high", maxTokens: 8192, messageCount: 2, toolCount: 3, imageCount: 1 },
+    }] });
+    expect(failureRecord.httpEvidence).toEqual({ source: "fetch", stages: [{
+      stage: "body_failed",
+      outcome: "timeout",
+      phase: "reading_body",
+      elapsedMs: 120_012,
+      httpStatus: 200,
+    }] });
+    const serialized = JSON.stringify([successRecord, failureRecord]);
+    for (const marker of ["PRIVATE_NESTED_MARKER", "PRIVATE_URL_MARKER", "PRIVATE_BODY_MARKER", "PRIVATE_AUTH_MARKER", "PRIVATE_CALLBACK_MARKER", "PRIVATE_INVALID_COUNT"]) {
+      expect(serialized).not.toContain(marker);
+    }
+  });
+
   it("keeps concurrent ordinals local, marks fake evidence unknown, and isolates logging failures", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-glm-recorder-boundaries-"));
     const path = join(directory, "provider-exchanges.jsonl");

@@ -16,7 +16,7 @@ import {
 import { HostRelayConnector } from "@computer-harness/relay-connector";
 import type { RunModel } from "@computer-harness/app-runtime";
 import { createHostServer } from "./server.js";
-import { glmReasoningEffort, parseGlmInputBudgets, parseGlmOutputBudget, readGlmThinking } from "./glm-output-budget.js";
+import { glmReasoningEffort, parseGlmInputBudgets, parseGlmOutputBudget, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
   const windowSelector = resolveHostWindowSelector(process.env);
-  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=90000\n`);
+  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=${config.glmRequestTimeoutMs} requestTimeoutSource=${process.env.GLM_REQUEST_TIMEOUT_MS === undefined ? "default" : "environment"} endpointSource=${config.glmEndpoint === undefined ? "default" : "environment"}\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -266,9 +266,7 @@ function createSessionConfig(
     windowHandoff: "confirm-v1",
     glmThinking: readGlmThinking(process.env.GLM_THINKING),
     glmMaxOutputTokens: args.glmMaxOutputTokens,
-    // GLM can take longer on image-heavy turns; allow one bounded 90-second
-    // response window while keeping the runtime's single retry finite.
-    glmRequestTimeoutMs: 90_000,
+    glmRequestTimeoutMs: parseGlmRequestTimeoutMs(process.env.GLM_REQUEST_TIMEOUT_MS),
     ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),

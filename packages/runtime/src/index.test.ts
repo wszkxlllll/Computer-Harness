@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { GlmProviderError } from "../../provider-glm/src/index.js";
 import type {
   ActionId,
@@ -784,6 +784,7 @@ async function makeController(
     features?: RunFeatureConfig;
     windowHandoff?: "off" | "confirm-v1";
     windowSwitch?: "off" | "opened-windows-v1";
+    providerAttemptReserveMs?: number;
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -815,6 +816,7 @@ async function makeController(
     ...(overrides.enabledToolNames === undefined ? {} : { enabledToolNames: overrides.enabledToolNames }),
     ...(overrides.windowHandoff === undefined ? {} : { windowHandoff: overrides.windowHandoff }),
     ...(overrides.windowSwitch === undefined ? {} : { windowSwitch: overrides.windowSwitch }),
+    ...(overrides.providerAttemptReserveMs === undefined ? {} : { providerAttemptReserveMs: overrides.providerAttemptReserveMs }),
   });
   return { controller, computer: activeComputer, directory };
 }
@@ -1179,6 +1181,34 @@ describe("RunController S2-2 happy path", () => {
     const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 2));
     await expect(controller.start("do not loop")).resolves.toBe("budget_exhausted");
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, stepCount: 0, outcome: "budget_exhausted" });
+  });
+
+  it("admits retry only when the remaining retry window strictly exceeds delay plus configured reserve", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const boundaryProvider = new PreparedScriptedProvider("same_input_retry");
+      const boundary = await makeController(boundaryProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
+        providerAttemptReserveMs: 119_500,
+      });
+      await expect(boundary.controller.start("boundary must not admit retry")).resolves.toBe("failed");
+      expect(boundaryProvider.generateCalls).toBe(1);
+      expect(boundary.controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, outcome: "failed" });
+      await rm(boundary.directory, { recursive: true, force: true });
+
+      const admittedProvider = new PreparedScriptedProvider("same_input_retry");
+      const admitted = await makeController(admittedProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
+        providerAttemptReserveMs: 119_499,
+      });
+      const running = admitted.controller.start("one millisecond of reserve headroom admits retry");
+      await waitUntil(() => admittedProvider.generateCalls === 1);
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(running).resolves.toBe("succeeded");
+      expect(admittedProvider.generateCalls).toBe(2);
+      expect(admitted.controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, outcome: "succeeded" });
+      await rm(admitted.directory, { recursive: true, force: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("blocks GUI dispatch from tool calls returned by the final reserved request", async () => {

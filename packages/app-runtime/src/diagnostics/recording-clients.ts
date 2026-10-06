@@ -123,6 +123,32 @@ function projectTransportEvidence(value: GlmTransportEvidence): Record<string, u
     phase: value.phase,
     elapsedMs: value.elapsedMs,
     ...(value.httpStatus === undefined ? {} : { httpStatus: value.httpStatus }),
+    ...(Number.isSafeInteger(value.deadlineMs) && value.deadlineMs! > 0 && value.deadlineMs! <= 240_000 ? { deadlineMs: value.deadlineMs } : {}),
+    ...(Number.isSafeInteger(value.serializedBodyBytes) && value.serializedBodyBytes! >= 0 && value.serializedBodyBytes! <= 512 * 1024 * 1024 ? { serializedBodyBytes: value.serializedBodyBytes } : {}),
+    ...(value.abortSource === "local_request_timeout" || value.abortSource === "run_cancelled" ? { abortSource: value.abortSource } : {}),
+    ...(isSafeGlmRequestConfiguration(value.requestConfiguration) ? { requestConfiguration: projectGlmRequestConfiguration(value.requestConfiguration) } : {}),
+  };
+}
+
+function isSafeGlmRequestConfiguration(value: unknown): value is NonNullable<GlmTransportEvidence["requestConfiguration"]> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (record.stream === undefined || record.stream === false)
+    && (record.thinking === undefined || record.thinking === "disabled" || record.thinking === "enabled")
+    && (record.reasoningEffort === undefined || record.reasoningEffort === "low" || record.reasoningEffort === "high" || record.reasoningEffort === "max" || record.reasoningEffort === "server_default")
+    && (record.maxTokens === undefined || (Number.isSafeInteger(record.maxTokens) && (record.maxTokens as number) >= 1 && (record.maxTokens as number) <= 131_072))
+    && [record.messageCount, record.toolCount, record.imageCount].every((count) => count === undefined || (typeof count === "number" && Number.isSafeInteger(count) && count >= 0 && count <= 100_000));
+}
+
+function projectGlmRequestConfiguration(value: NonNullable<GlmTransportEvidence["requestConfiguration"]>): Record<string, unknown> {
+  return {
+    ...(value.stream === undefined ? {} : { stream: value.stream }),
+    ...(value.thinking === undefined ? {} : { thinking: value.thinking }),
+    ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }),
+    ...(value.maxTokens === undefined ? {} : { maxTokens: value.maxTokens }),
+    ...(value.messageCount === undefined ? {} : { messageCount: value.messageCount }),
+    ...(value.toolCount === undefined ? {} : { toolCount: value.toolCount }),
+    ...(value.imageCount === undefined ? {} : { imageCount: value.imageCount }),
   };
 }
 

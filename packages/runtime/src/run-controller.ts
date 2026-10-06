@@ -78,9 +78,9 @@ import { currentObservationAssessmentBinding, parseObservationAssessment } from 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
 const PROVIDER_RETRY_DELAY_CAP_MS = 5_000;
-// Keep retry admission aligned with the live model turn budget. A late
-// network/5xx failure must not start another full-length request.
-const PROVIDER_ATTEMPT_DEADLINE_MS = 90_000;
+// Retry admission only reserves enough window for one configured Provider
+// attempt; this is not a Runtime-side cancellation deadline.
+const DEFAULT_PROVIDER_ATTEMPT_RESERVE_MS = 90_000;
 /** Covers the initial request, one retry and their bounded delay for the default HTTP clients. */
 const MAX_PROVIDER_RETRY_WINDOW_MS = 120_000;
 /** Once GUI actions are exhausted, allow only a small number of model decisions for finish/plan closure. */
@@ -94,6 +94,8 @@ export interface RunControllerDependencies {
   contextCompiler: ContextCompiler;
   toolRegistry: ToolRegistry;
   policy: RuntimePolicy;
+  /** Retry-window admission reserve only; the HTTP client owns the actual request timer. */
+  providerAttemptReserveMs?: number;
   /** Optional action-level policy. Omitted preserves the pre-Guard baseline. */
   actionPolicy?: ActionPolicy;
   eventWriter: RunEventWriter;
@@ -327,6 +329,7 @@ export class RunController {
   private readonly contextCompiler: ContextCompiler;
   private readonly toolRegistry: ToolRegistry;
   private readonly policy: RuntimePolicy;
+  private readonly providerAttemptReserveMs: number;
   private readonly actionPolicy: ActionPolicy | undefined;
   private readonly eventWriter: RunEventWriter;
   private readonly assetStore: AssetStore;
@@ -397,6 +400,10 @@ export class RunController {
     this.contextCompiler = dependencies.contextCompiler;
     this.toolRegistry = dependencies.toolRegistry;
     this.policy = dependencies.policy;
+    this.providerAttemptReserveMs = dependencies.providerAttemptReserveMs ?? DEFAULT_PROVIDER_ATTEMPT_RESERVE_MS;
+    if (!Number.isSafeInteger(this.providerAttemptReserveMs) || this.providerAttemptReserveMs <= 0) {
+      throw new Error("providerAttemptReserveMs must be a positive safe integer");
+    }
     this.actionPolicy = dependencies.actionPolicy;
     this.eventWriter = dependencies.eventWriter;
     this.assetStore = dependencies.assetStore;
@@ -798,7 +805,7 @@ export class RunController {
               const retry = !this.isAborted()
                 && details.retryable === true
                 && retryCount < MAX_PROVIDER_RETRIES
-                && retryWindowRemaining > retryDelayMs + PROVIDER_ATTEMPT_DEADLINE_MS;
+                && retryWindowRemaining > retryDelayMs + this.providerAttemptReserveMs;
               await this.commitEvent({
                 type: "model.request.failed",
                 category: this.isAborted() ? "cancelled" : "provider",

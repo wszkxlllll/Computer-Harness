@@ -59,12 +59,26 @@ export interface GlmHttpClient {
 
 export type GlmTransportStage = "fetch_invoked" | "headers_received" | "body_received" | "fetch_failed" | "body_failed";
 export type GlmTransportOutcome = "pending" | "success" | "http_error" | "network_error" | "timeout" | "cancelled";
+export type GlmAbortSource = "local_request_timeout" | "run_cancelled";
+export interface GlmRequestConfiguration {
+  readonly stream?: false;
+  readonly thinking?: "disabled" | "enabled";
+  readonly reasoningEffort?: "low" | "high" | "max" | "server_default";
+  readonly maxTokens?: number;
+  readonly messageCount?: number;
+  readonly toolCount?: number;
+  readonly imageCount?: number;
+}
 export interface GlmTransportEvidence {
   readonly stage: GlmTransportStage;
   readonly outcome: GlmTransportOutcome;
   readonly phase: "before_fetch" | "awaiting_headers" | "reading_body" | "complete";
   readonly elapsedMs: number;
   readonly httpStatus?: number;
+  readonly deadlineMs?: number;
+  readonly serializedBodyBytes?: number;
+  readonly abortSource?: GlmAbortSource;
+  readonly requestConfiguration?: GlmRequestConfiguration;
 }
 export interface GlmHttpDiagnostics {
   readonly runId?: string;
@@ -339,12 +353,22 @@ export class FetchGlmHttpClient implements GlmHttpClient {
   ): Promise<unknown> {
     const requestController = new AbortController();
     const startedAt = Date.now();
-    let timedOut = false;
+    let firstAbortSource: GlmAbortSource | undefined;
+    let firstAbortReason: unknown;
+    const recordFirstAbort = (source: GlmAbortSource, reason: unknown): void => {
+      if (firstAbortSource !== undefined) return;
+      firstAbortSource = source;
+      firstAbortReason = reason;
+    };
     const timeout = setTimeout(() => {
-      timedOut = true;
-      requestController.abort(new Error(`GLM request deadline exceeded after ${this.requestTimeoutMs}ms`));
+      const reason = new Error(`GLM request deadline exceeded after ${this.requestTimeoutMs}ms`);
+      recordFirstAbort("local_request_timeout", reason);
+      requestController.abort(reason);
     }, this.requestTimeoutMs);
-    const abortRequest = () => requestController.abort(signal.reason);
+    const abortRequest = () => {
+      recordFirstAbort("run_cancelled", signal.reason);
+      requestController.abort(signal.reason);
+    };
     if (signal.aborted) {
       abortRequest();
     } else {
@@ -356,21 +380,32 @@ export class FetchGlmHttpClient implements GlmHttpClient {
     try {
       signal.throwIfAborted();
       let response: Response;
+      const serializedBody = JSON.stringify(body);
+      const serializedBodyBytes = new TextEncoder().encode(serializedBody).byteLength;
+      const requestConfiguration = safeRequestConfiguration(serializedBody);
       try {
-        emit({ stage: "fetch_invoked", outcome: "pending", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
+        emit({
+          stage: "fetch_invoked",
+          outcome: "pending",
+          phase: "awaiting_headers",
+          elapsedMs: Date.now() - startedAt,
+          deadlineMs: this.requestTimeoutMs,
+          serializedBodyBytes,
+          ...(requestConfiguration === undefined ? {} : { requestConfiguration }),
+        });
         response = await fetch(url, {
           method: "POST",
           headers,
-          body: JSON.stringify(body),
+          body: serializedBody,
           signal: requestController.signal,
         });
       } catch (error) {
-        if (signal.aborted) {
-          emit({ stage: "fetch_failed", outcome: "cancelled", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
-          throw signal.reason ?? error;
+        if (firstAbortSource === "run_cancelled") {
+          emit({ stage: "fetch_failed", outcome: "cancelled", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
+          throw firstAbortReason ?? error;
         }
-        if (timedOut) {
-          emit({ stage: "fetch_failed", outcome: "timeout", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
+        if (firstAbortSource === "local_request_timeout") {
+          emit({ stage: "fetch_failed", outcome: "timeout", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
           throw new GlmProviderError(
             `GLM request timed out after ${this.requestTimeoutMs}ms (phase=awaiting_headers elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs})`,
             "GLM_REQUEST_TIMEOUT",
@@ -382,7 +417,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
             "feedback",
           );
         }
-        emit({ stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
+        emit({ stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt, deadlineMs: this.requestTimeoutMs });
         throw new GlmProviderError(
           `GLM network request failed (${networkDiagnostic(error)})`,
           "GLM_NETWORK_ERROR",
@@ -393,12 +428,12 @@ export class FetchGlmHttpClient implements GlmHttpClient {
       const headersElapsedMs = Date.now() - startedAt;
       emit({ stage: "headers_received", outcome: response.ok ? "pending" : "http_error", phase: "reading_body", elapsedMs: headersElapsedMs, httpStatus: response.status });
       const payload = await response.json().catch((error: unknown) => {
-        if (signal.aborted) {
-          emit({ stage: "body_failed", outcome: "cancelled", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
-          throw signal.reason ?? error;
+        if (firstAbortSource === "run_cancelled") {
+          emit({ stage: "body_failed", outcome: "cancelled", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
+          throw firstAbortReason ?? signal.reason ?? error;
         }
-        if (timedOut) {
-          emit({ stage: "body_failed", outcome: "timeout", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
+        if (firstAbortSource === "local_request_timeout") {
+          emit({ stage: "body_failed", outcome: "timeout", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
           throw new GlmProviderError(
             `GLM response body timed out after ${this.requestTimeoutMs}ms (phase=reading_body elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs} headersElapsedMs=${headersElapsedMs} httpStatus=${response.status})`,
             "GLM_REQUEST_TIMEOUT",
@@ -406,7 +441,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
             "feedback",
           );
         }
-        emit({ stage: "body_failed", outcome: "network_error", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
+        emit({ stage: "body_failed", outcome: "network_error", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status, deadlineMs: this.requestTimeoutMs });
         throw new GlmProviderError(
           `GLM response body could not be read (${networkDiagnostic(error)})`,
           "GLM_NETWORK_ERROR",
@@ -464,6 +499,35 @@ function assertInputBudget(input: ModelInput, body: unknown, provider: string): 
   const textTokens = estimateWireTextTokens(body);
   const estimated = textTokens + visualTokens + 32;
   if (estimated > max) throw new GlmProviderError(`${provider} prompt exceeds wire input budget (estimated=${estimated}, text=${textTokens}, visual=${visualTokens}, envelope=32, maxWireInputTokens=${max}, maxInputTokens=${textMax ?? "unset"})`, "GLM_INPUT_TOO_LARGE", false);
+}
+
+function safeRequestConfiguration(serializedBody: string): GlmRequestConfiguration | undefined {
+  try {
+    const body: unknown = JSON.parse(serializedBody);
+    if (!isRecord(body)) return undefined;
+    const thinking = isRecord(body.thinking) ? body.thinking.type : undefined;
+    const reasoningEffort = body.reasoning_effort;
+    const maxTokens = body.max_tokens;
+    return {
+      ...(body.stream === false ? { stream: false as const } : {}),
+      ...(thinking === "disabled" || thinking === "enabled" ? { thinking } : {}),
+      ...(reasoningEffort === "low" || reasoningEffort === "high" || reasoningEffort === "max"
+        ? { reasoningEffort }
+        : reasoningEffort === undefined ? { reasoningEffort: "server_default" as const } : {}),
+      ...(Number.isSafeInteger(maxTokens) && (maxTokens as number) >= 1 ? { maxTokens: maxTokens as number } : {}),
+      ...(Array.isArray(body.messages) ? { messageCount: body.messages.length } : {}),
+      ...(Array.isArray(body.tools) ? { toolCount: body.tools.length } : {}),
+      imageCount: countWireImages(body.messages),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function countWireImages(value: unknown): number {
+  if (Array.isArray(value)) return value.reduce((total, item) => total + countWireImages(item), 0);
+  if (!isRecord(value)) return 0;
+  return (value.type === "image_url" ? 1 : 0) + Object.values(value).reduce<number>((total, item) => total + countWireImages(item), 0);
 }
 
 function stripImagePayload(value: unknown, parentKey?: string): unknown {

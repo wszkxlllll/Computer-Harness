@@ -678,6 +678,84 @@ describe("GLM provider adapter", () => {
     }
   });
 
+  it("records whitelisted effective settings and UTF-8 bytes from the exact serialized Fetch body", async () => {
+    const originalFetch = globalThis.fetch;
+    const evidence: GlmTransportEvidence[] = [];
+    let sentBody = "";
+    const body: Record<string, unknown> = {
+      model: "glm-5.3-flash",
+      stream: false,
+      thinking: { type: "enabled" },
+      max_tokens: 4096,
+      tools: [{ type: "function" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "中文😀" }, { type: "image_url", image_url: { url: "data:image/png;base64,PRIVATE_IMAGE" } }] }],
+    };
+    Object.defineProperty(body, "privateGetter", { enumerable: false, get() { throw new Error("PRIVATE_GETTER"); } });
+    Object.defineProperty(body, "toJSON", { enumerable: false, value: () => ({ ...body, reasoning_effort: "PRIVATE_UNKNOWN_EFFORT", privateSecret: "PRIVATE_TOJSON_MARKER" }) });
+    try {
+      globalThis.fetch = vi.fn(async (_url: string, options: { body: string }) => {
+        sentBody = options.body;
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }) as unknown as typeof fetch;
+      await expect(new FetchGlmHttpClient().post("https://fixture.invalid", body, {}, new AbortController().signal, {
+        payloadHash: "a".repeat(64),
+        onTransportEvidence: (item) => { evidence.push(item); },
+      })).resolves.toEqual({ ok: true });
+      expect(evidence[0]).toMatchObject({
+        stage: "fetch_invoked",
+        deadlineMs: 240000,
+        serializedBodyBytes: new TextEncoder().encode(sentBody).byteLength,
+        requestConfiguration: { stream: false, thinking: "enabled", maxTokens: 4096, messageCount: 1, toolCount: 1, imageCount: 1 },
+      });
+      const serializedEvidence = JSON.stringify(evidence);
+      expect(serializedEvidence).not.toContain("PRIVATE_IMAGE");
+      expect(serializedEvidence).not.toContain("PRIVATE_GETTER");
+      expect(serializedEvidence).not.toContain("PRIVATE_UNKNOWN_EFFORT");
+      expect(serializedEvidence).not.toContain("PRIVATE_TOJSON_MARKER");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("locks the first cancellation source when Run cancellation races the local timeout", async () => {
+    const originalFetch = globalThis.fetch;
+    const evidence: GlmTransportEvidence[] = [];
+    try {
+      const runController = new AbortController();
+      const cancellation = new Error("Run cancelled after local deadline fired");
+      globalThis.fetch = vi.fn(async (_url: string, options: { signal: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          runController.abort(cancellation);
+          reject(options.signal.reason);
+        }, { once: true });
+      })) as unknown as typeof fetch;
+      const timeoutFirst = new FetchGlmHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, runController.signal, {
+        payloadHash: "a".repeat(64),
+        onTransportEvidence: (item) => { evidence.push(item); },
+      });
+      await expect(timeoutFirst).rejects.toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false });
+      expect(evidence.at(-1)).toMatchObject({ outcome: "timeout", abortSource: "local_request_timeout" });
+
+      const runEvidence: GlmTransportEvidence[] = [];
+      const cancelledController = new AbortController();
+      globalThis.fetch = vi.fn(async (_url: string, options: { signal: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          setTimeout(() => reject(options.signal.reason), 25);
+        }, { once: true });
+      })) as unknown as typeof fetch;
+      const request = new FetchGlmHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, cancelledController.signal, {
+        payloadHash: "b".repeat(64),
+        onTransportEvidence: (item) => { runEvidence.push(item); },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      cancelledController.abort(cancellation);
+      await expect(request).rejects.toBe(cancellation);
+      expect(runEvidence.at(-1)).toMatchObject({ outcome: "cancelled", abortSource: "run_cancelled" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("preserves cancellation while reading a response body", async () => {
     const cancellation = new Error("user cancelled body");
     const controller = new AbortController();

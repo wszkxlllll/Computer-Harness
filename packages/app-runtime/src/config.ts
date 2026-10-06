@@ -23,6 +23,15 @@ import type { RunReport } from "./reporting.js";
 import type { RunEventFeed } from "./event-feed.js";
 
 export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash";
+export const DEFAULT_GLM_REQUEST_TIMEOUT_MS = 90_000;
+export const MIN_GLM_REQUEST_TIMEOUT_MS = 1_000;
+export const MAX_GLM_REQUEST_TIMEOUT_MS = 240_000;
+
+export function validateGlmRequestTimeoutMs(value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < MIN_GLM_REQUEST_TIMEOUT_MS || value > MAX_GLM_REQUEST_TIMEOUT_MS)) {
+    throw new Error(`GLM request timeout must be an integer from ${MIN_GLM_REQUEST_TIMEOUT_MS} to ${MAX_GLM_REQUEST_TIMEOUT_MS} milliseconds`);
+  }
+}
 export type AppRuntimeRiskModel = "off" | "same" | AppRuntimeModel;
 /** Explicit adapter identity for a Provider supplied by the application. */
 export interface ExternalProviderDescriptor {

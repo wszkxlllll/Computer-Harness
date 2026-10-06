@@ -29,13 +29,14 @@ import { createComputer, prepareComputerRunAssembly } from "./computers.js";
 import { createProvider } from "./providers.js";
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
-import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
+import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunDependencies, type RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
   for (const value of [input.contextMaxInputTokens, input.contextMaxWireInputTokens]) {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
   }
   if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) throw new Error("Context text budget must not exceed wire budget");
+  if (input.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(input.glmRequestTimeoutMs);
   const runId = input.runId ?? generatedRunId();
   const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
@@ -212,6 +213,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       contextCompiler,
       toolRegistry: tools,
       policy: dependencies.createPolicy?.(factoryConfig) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
+      ...(dependencies.createProvider === undefined && config.model === "glm-5.3-flash" ? {
+        providerAttemptReserveMs: config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS,
+      } : {}),
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,
       assetStore,
