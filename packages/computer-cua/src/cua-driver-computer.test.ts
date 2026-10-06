@@ -6827,7 +6827,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("canonicalizes LF/CRLF multiline to one CR and trusts only same-call CUA value readback", async () => {
+  it("refuses Windows UIA multiline LF and CRLF before any input primitive", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-uia-"));
     const fake = windowDriver();
     fake.setTypeTextResult({ structuredJson: JSON.stringify({ effect: "confirmed", evidence: [{ kind: "value_readback" }] }) });
@@ -6855,21 +6855,11 @@ describe("CuaDriverComputer", () => {
           text,
           ...(elementRef === undefined ? {} : { groundingRef: elementRef }),
         }, signal);
-        expect(receipt).toMatchObject({ status: "completed" });
-        expect(receipt.message).toContain("same-target read-back");
+        expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
         expect(JSON.stringify(receipt)).not.toContain("private-token-");
-        const operation = fake.calls.filter((call) => call.name === "type_text").at(-1);
-        expect(operation?.input).toMatchObject({
-          session: session.id,
-          pid: fake.target.pid,
-          window_id: fake.target.windowId,
-          element_token: `private-token-${index}`,
-          snapshot_id: preSnapshotId,
-          text: text.replace(/\r\n|\r|\n/gu, "\r"),
-          delivery_mode: "background",
-        });
       }
       expect(fake.calls.filter((call) => call.name === "get_window_state" && call.input?.include_screenshot === false)).toHaveLength(2);
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       expect(fake.calls.filter((call) => call.name === "press_key")).toHaveLength(0);
       await computer.close(session);
     } finally {
@@ -6877,7 +6867,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("auto-binds exactly one current Document surface even without focused/editable state", async () => {
+  it("does not auto-bind a Windows UIA Document for multiline input", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-auto-"));
     const fake = windowDriver();
     fake.setTypeTextResult({ structuredJson: JSON.stringify({ effect: "confirmed", evidence: [{ kind: "value_readback" }] }) });
@@ -6896,21 +6886,15 @@ describe("CuaDriverComputer", () => {
         kind: "type",
         text: "第一行 123\n第二行 456",
       }, signal);
-      expect(receipt.status).toBe("completed");
-      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({
-        element_token: "private-document-token",
-        snapshot_id: "s00000001",
-        text: "第一行 123\r第二行 456",
-        delivery_mode: "background",
-      });
-      expect(fake.calls.some((call) => call.name === "press_key")).toBe(false);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
 
-  it("privately resolves default-off multiline input against only the exact current window", async () => {
+  it("refuses default-off Windows UIA multiline after exact-window private grounding", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-private-off-"));
     const fake = windowDriver();
     fake.setTypeTextResult({ structuredJson: JSON.stringify({ effect: "confirmed", evidence: [{ kind: "value_readback" }] }) });
@@ -6935,7 +6919,7 @@ describe("CuaDriverComputer", () => {
         kind: "type",
         text: "first\nsecond",
       }, signal);
-      expect(receipt).toMatchObject({ status: "completed" });
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
       expect(JSON.stringify(capture)).not.toContain("exact-window-token");
       expect(fake.calls.filter((call) => call.name === "get_window_state")).toHaveLength(1);
       expect(fake.calls.find((call) => call.name === "get_window_state")?.input).toMatchObject({
@@ -6945,14 +6929,7 @@ describe("CuaDriverComputer", () => {
         max_depth: 16,
         max_elements: 256,
       });
-      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({
-        pid: fake.target.pid,
-        window_id: fake.target.windowId,
-        element_token: "exact-window-token",
-        snapshot_id: "s00000111",
-        text: "first\rsecond",
-        delivery_mode: "background",
-      });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       expect(JSON.stringify(receipt)).not.toContain("exact-window-token");
       await computer.close(session);
     } finally {
@@ -7156,7 +7133,12 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it.each(["darwin", "linux"])("preserves the native multiline type_text route on %s", async (platform) => {
+  it.each([
+    { platform: "darwin", text: "first\nsecond" },
+    { platform: "darwin", text: "first\r\nsecond" },
+    { platform: "linux", text: "first\nsecond" },
+    { platform: "linux", text: "first\r\nsecond" },
+  ])("preserves the existing non-Windows multiline type_text route on $platform", async ({ platform, text }) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-platform-"));
     const fake = windowDriver();
     fake.setPlatform(platform);
@@ -7172,14 +7154,18 @@ describe("CuaDriverComputer", () => {
         actionId: "multiline-platform-native" as ActionId,
         basedOn: "multiline-platform-observation" as ObservationId,
         kind: "type",
-        text: "first\nsecond",
+        text,
       }, signal);
       expect(receipt).toMatchObject({ status: "completed" });
-      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({
+      const typeCalls = fake.calls.filter((call) => call.name === "type_text");
+      expect(typeCalls).toHaveLength(1);
+      expect(typeCalls[0]?.input).toEqual({
+        session: session.id,
         target: { kind: "window", pid: fake.target.pid, window_id: fake.target.windowId },
-        text: "first\nsecond",
+        text,
         delivery_mode: "foreground",
       });
+      expect(fake.calls.filter((call) => call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -7216,7 +7202,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("appends multiline text to a non-empty UIA target and requires same-target readback", async () => {
+  it("blocks Windows UIA multiline append even when the old value is visible", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-nonempty-"));
     const fake = windowDriver();
     fake.setTypeTextResult({ structuredJson: JSON.stringify({ effect: "confirmed", evidence: [{ kind: "value_readback" }] }) });
@@ -7236,17 +7222,8 @@ describe("CuaDriverComputer", () => {
         ...(ref === undefined ? {} : { groundingRef: ref }),
         text: "first\nsecond",
       }, signal);
-      expect(receipt).toMatchObject({ status: "completed" });
-      expect(receipt.message).toContain("same-target read-back");
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
-      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({
-        pid: fake.target.pid,
-        window_id: fake.target.windowId,
-        element_token: "nonempty-token",
-        text: "first\rsecond",
-        delivery_mode: "background",
-      });
-      expect(fake.calls.some((call) => call.name === "press_key")).toBe(false);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -7295,8 +7272,8 @@ describe("CuaDriverComputer", () => {
         kind: "type",
         text: "first\nsecond",
       }, signal);
-      expect(receipt).toMatchObject({ status: "partial", driverCode: "MULTILINE_TYPE_UNCONFIRMED" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
       expect(fake.calls.some((call) => call.name === "press_key")).toBe(false);
       await computer.close(session);
     } finally {
@@ -7322,8 +7299,8 @@ describe("CuaDriverComputer", () => {
         kind: "type",
         text: "first\nsecond",
       }, signal);
-      expect(receipt).toMatchObject({ status: "refused", driverCode: "MULTILINE_TYPE_REFUSED" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
       expect(fake.calls.some((call) => call.name === "press_key")).toBe(false);
       await computer.close(session);
     } finally {
@@ -7349,8 +7326,8 @@ describe("CuaDriverComputer", () => {
         kind: "type",
         text: "first\nsecond",
       }, signal);
-      expect(receipt).toMatchObject({ status: "partial", driverCode: "MULTILINE_TYPE_UNCONFIRMED" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
       expect(fake.calls.some((call) => call.name === "press_key")).toBe(false);
       await computer.close(session);
     } finally {
@@ -7358,7 +7335,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("allows an explicit token-bound target in a partial catalog but refuses partial-catalog auto binding", async () => {
+  it("refuses explicit and automatic Windows multiline even with grounding evidence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-identity-"));
     const fake = windowDriver();
     const expected = "first\nsecond";
@@ -7381,9 +7358,8 @@ describe("CuaDriverComputer", () => {
         text: expected,
         ...(ref === undefined ? {} : { groundingRef: ref }),
       }, signal);
-      expect(receipt).toMatchObject({ status: "completed" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
-      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({ element_token: "target-token", text: "first\rsecond" });
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
 
       fake.setGroundingState({ snapshot_id: "s00000003", elements_complete: false, elements: [
         { role: "Document", name: "Body", frame: { x: 140, y: 160, width: 700, height: 420 }, element_token: "target-token-2" },
@@ -7396,7 +7372,7 @@ describe("CuaDriverComputer", () => {
         text: expected,
       }, signal);
       expect(autoRefused).toMatchObject({ status: "refused", driverCode: "MULTILINE_GROUNDING_INCOMPLETE" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -7431,7 +7407,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("routes an explicitly selected editor among multiple complete-catalog text surfaces", async () => {
+  it("does not route an explicitly selected Windows editor among multiple UIA surfaces", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-selected-"));
     const fake = windowDriver();
     const expected = "selected 123\nbody 456";
@@ -7454,16 +7430,16 @@ describe("CuaDriverComputer", () => {
         text: expected,
         ...(ref === undefined ? {} : { groundingRef: ref }),
       }, signal);
-      expect(receipt).toMatchObject({ status: "completed" });
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
       expect(fake.calls.filter((call) => call.name === "get_window_state" && call.input?.include_screenshot === false)).toHaveLength(1);
-      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({ element_token: "body-token", text: "selected 123\rbody 456" });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
 
-  it("keeps the shared pre-action window baseline for the Runtime post-action handoff diff", async () => {
+  it("does not synthesize a handoff after refusing Windows multiline input", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-handoff-"));
     const fake = windowDriver();
     fake.setTypeTextResult({ structuredJson: JSON.stringify({ effect: "confirmed", evidence: [{ kind: "value_readback" }] }) });
@@ -7486,13 +7462,8 @@ describe("CuaDriverComputer", () => {
         kind: "type",
         text: "first\nsecond",
       }, signal, { detectNewWindowHandoff: true });
-      expect(receipt.status).toBe("completed");
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).resolves.toEqual([{
-        pid: candidate.pid,
-        windowId: candidate.windowId,
-        appName: candidate.appName,
-        title: candidate.title,
-      }]);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -7527,7 +7498,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("keeps completed-action inventory failure visible to the shared post-action handoff consumer", async () => {
+  it("does not enter a post-action handoff path after Windows multiline refusal", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-inventory-after-"));
     const fake = windowDriver();
     fake.setTypeTextResult({ structuredJson: JSON.stringify({ effect: "confirmed", evidence: [{ kind: "value_readback" }] }) });
@@ -7545,9 +7516,8 @@ describe("CuaDriverComputer", () => {
         kind: "type",
         text: "first\nsecond",
       }, signal, { detectNewWindowHandoff: true });
-      expect(receipt.status).toBe("completed");
-      fake.failListWindowsOnCall(fake.getListWindowsCallCount() + 1);
-      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toMatchObject({ code: "WINDOW_TARGET_REFUSED" });
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -7575,7 +7545,7 @@ describe("CuaDriverComputer", () => {
         text: "first\nsecond",
         ...(ref === undefined ? {} : { groundingRef: ref }),
       }, signal);
-      expect(receipt).toMatchObject({ status: "partial", driverCode: "MULTILINE_TYPE_UNCONFIRMED" });
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
       expect(JSON.stringify(receipt)).not.toContain(token);
       await computer.close(session);
     } finally {
@@ -7611,7 +7581,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("keeps single-line type on the existing foreground path and reports uncertain multiline as partial once", async () => {
+  it("keeps single-line window input foreground and refuses later Windows UIA multiline", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-multiline-result-"));
     const fake = windowDriver();
     const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
@@ -7620,18 +7590,53 @@ describe("CuaDriverComputer", () => {
       const session = await computer.open({}, signal);
       await computer.observe(session, "single-line-before-multiline" as ObservationId, signal);
       expect(await computer.execute(session, { actionId: "single-line-type" as ActionId, basedOn: "single-line-before-multiline" as ObservationId, kind: "type", text: "single line 123" }, signal)).toMatchObject({ status: "completed" });
-      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({ text: "single line 123", delivery_mode: "foreground" });
+      const singleLineCall = fake.calls.find((call) => call.name === "type_text");
+      expect(singleLineCall?.input).toEqual({
+        session: session.id,
+        target: { kind: "window", pid: fake.target.pid, window_id: fake.target.windowId },
+        text: "single line 123",
+        delivery_mode: "foreground",
+      });
 
       fake.setGroundingState({ snapshot_id: "s00000001", elements_complete: true, elements: [
         { role: "Document", frame: { x: 140, y: 160, width: 700, height: 420 }, element_token: "uncertain-token" },
       ] });
       await computer.observe(session, "uncertain-multiline-observation" as ObservationId, signal);
       const partial = await computer.execute(session, { actionId: "uncertain-multiline" as ActionId, basedOn: "uncertain-multiline-observation" as ObservationId, kind: "type", text: "first\nsecond" }, signal);
-      expect(partial).toMatchObject({ status: "partial", driverCode: "MULTILINE_TYPE_UNCONFIRMED" });
+      expect(partial).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
       expect(fake.calls.filter((call) => call.name === "press_key")).toHaveLength(0);
       const noReplay = await computer.execute(session, { actionId: "multiline-no-replay" as ActionId, basedOn: "uncertain-multiline-observation" as ObservationId, kind: "type", text: "first\nsecond" }, signal);
-      expect(noReplay).toMatchObject({ status: "refused", driverCode: "OBSERVATION_NOT_FOUND" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(2);
+      expect(noReplay).toMatchObject({ status: "refused", driverCode: "WINDOWS_UIA_MULTILINE_DISABLED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not admit an explicit Windows UIA single-line type target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-singleline-uia-refuse-"));
+    const fake = windowDriver();
+    fake.setGroundingState({ snapshot_id: "s00000001", elements_complete: true, elements: [
+      { role: "Document", frame: { x: 140, y: 160, width: 700, height: 420 }, element_token: "singleline-uia-token" },
+    ] });
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const capture = await computer.observe(session, "singleline-uia-before" as ObservationId, signal);
+      const groundingRef = capture.grounding?.elements[0]?.elementRef;
+      expect(groundingRef).toBeDefined();
+      const receipt = await computer.execute(session, {
+        actionId: "singleline-uia-refused" as ActionId,
+        basedOn: "singleline-uia-before" as ObservationId,
+        kind: "type",
+        text: "single line",
+        ...(groundingRef === undefined ? {} : { groundingRef }),
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "GROUNDING_ACTION_UNSUPPORTED" });
+      expect(fake.calls.filter((call) => call.name === "type_text" || call.name === "press_key" || call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

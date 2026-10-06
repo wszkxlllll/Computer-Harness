@@ -3258,9 +3258,8 @@ export class CuaDriverComputer implements Computer {
       }
     }
     if (isMultilineType) {
-      // Multiline uses the same fresh pre-action inventory baseline as every
-      // opted-in foreground action. Its completed receipt returns through the
-      // normal Runtime post-action handoff diff before the next observation.
+      // Preserve normal Surface/window preflight, then fail closed in the
+      // Windows UIA route before any input primitive is dispatched.
       const receipt = await this.executeMultilineType(current, session, action, decisionObservation, actionWindowBinding, signal);
       if (receipt.status === "completed" && alternativePrimitiveForUnknownAction !== undefined &&
           current.unknownActionReplayGuard !== undefined && decisionObservation !== undefined &&
@@ -3557,6 +3556,18 @@ export class CuaDriverComputer implements Computer {
     }
     if (/[\u0085\u2028\u2029]/u.test(action.text)) {
       return refused(action.actionId, "MULTILINE_SEPARATOR_UNSUPPORTED", "multiline UIA input supports CR/LF line endings only; no text was sent");
+    }
+
+    // CUA 0.22.2's Windows UIA multiline writer may substitute an unreadable
+    // old value with an empty string before SetValue. Until a trustworthy
+    // no-write failure signal exists, never dispatch this element-token route.
+    // This is a refusal before any input primitive; do not fall back to keys.
+    if (current.platform === "win32") {
+      return refused(
+        action.actionId,
+        "WINDOWS_UIA_MULTILINE_DISABLED",
+        "Windows UIA multiline input is disabled until the driver can prove old-value reads before writing; no text was sent",
+      );
     }
 
     signal.throwIfAborted();
