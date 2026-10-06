@@ -13,13 +13,14 @@ import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, T
 import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
-import { selectHistoryEvents } from "./history.js";
+import { latestGuiHistoryGroup, selectHistoryEvents } from "./history.js";
 
 export interface DefaultContextCompilerOptions {
   systemPrompt?: string;
   mode?: "raw" | "recent";
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  maxWireInputTokens?: number;
   memoryMaxTokens?: number;
   memoryRecall?: MemoryRecallService;
   features?: RunFeatureConfig;
@@ -29,6 +30,7 @@ export class DefaultContextCompiler implements ContextCompiler {
   private readonly mode: "raw" | "recent";
   private readonly maxHistoryEvents: number;
   private readonly maxInputTokens: number | undefined;
+  private readonly maxWireInputTokens: number | undefined;
   private readonly memoryMaxTokens: number;
   private readonly memoryRecall: MemoryRecallService | undefined;
   private readonly features: RunFeatureConfig;
@@ -45,6 +47,8 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("maxHistoryEvents must be a positive integer");
     }
     this.maxInputTokens = options.maxInputTokens;
+    this.maxWireInputTokens = options.maxWireInputTokens;
+    validateInputBudgets(this.maxInputTokens, this.maxWireInputTokens);
     if (this.maxInputTokens !== undefined && (!Number.isInteger(this.maxInputTokens) || this.maxInputTokens < 1)) {
       throw new Error("maxInputTokens must be a positive integer");
     }
@@ -79,11 +83,19 @@ export class DefaultContextCompiler implements ContextCompiler {
     const rawAssessmentBindingTokens = assessmentBindingText === undefined ? 0 : estimateTextTokens(assessmentBindingText);
     let assessmentBindingTokens = rawAssessmentBindingTokens;
     const features = input.features ?? this.features;
+    const allowance = input.requestBudget;
+    const knownBudget = typeof allowance === "object" && allowance !== null && Number.isSafeInteger(allowance.limit) && allowance.limit >= 3 && Number.isSafeInteger(allowance.remaining) && allowance.remaining >= 0 && allowance.remaining <= allowance.limit ? allowance : undefined;
+    const finishOnly = knownBudget?.remaining === 1;
+    const requestBudgetText = knownBudget === undefined || knownBudget.remaining > 2 ? "" : finishOnly
+      ? `This is the final model request. Call the exposed terminate tool exactly once with status success or failure and the complete user-facing result text. Use failure for every incomplete or unverified goal, preserve findings, and state requested fields that remain unknown. No other tool calls or memory writes are allowed. Do not claim completion unless the original goal is fully supported by evidence.`
+      : `Only ${knownBudget.remaining} model requests remain including this one. Prepare a concise evidence and unknown ledger now, preserving original scope and all requested fields; reserve the last request to terminate with the complete result.`;
+    const requestBudgetMessageText = requestBudgetText.length === 0 ? "" : `Runtime request budget: ${requestBudgetText}`;
     const baseTools = this.tools.modelTools("main", {
       ...(input.enabledCategories === undefined ? {} : { enabledCategories: input.enabledCategories }),
       ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
     });
-    const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(baseTools) : baseTools;
+    const allowedTools = finishOnly ? baseTools.filter((tool) => tool.category === "control" && tool.name === "terminate") : baseTools;
+    const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(allowedTools) : allowedTools;
     const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
@@ -116,13 +128,18 @@ export class DefaultContextCompiler implements ContextCompiler {
       { name: "plan" as const, text: planText ?? "", included: planText !== undefined },
       { name: "execution_segment" as const, text: executionSegmentText ?? "", included: executionSegmentText !== undefined },
       { name: "memory" as const, text: memoryText ?? "", included: memoryText !== undefined && memoryText.length > 0 },
+      { name: "request_budget" as const, text: requestBudgetMessageText, included: requestBudgetMessageText.length > 0 },
     ];
     const fixedText = fixedBlocks.map((block) => block.text).join("\n");
     const estimatedFixedTextTokens = Math.ceil(fixedText.length / 4);
-    const historyCandidates = selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents);
-    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received"));
+    const pinnedGuiHistory = latestGuiHistoryGroup(orderedEvents);
+    const selectedHistory = new Set([...selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents), ...pinnedGuiHistory]);
+    const historyCandidates = orderedEvents.filter((event) => selectedHistory.has(event));
+    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received" || pinnedGuiHistory.includes(event)));
     let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
+    const maxWireInputTokens = input.context?.maxWireInputTokens ?? this.maxWireInputTokens;
+    validateInputBudgets(maxInputTokens, maxWireInputTokens);
     const rawAssistantPreferencesText = input.assistantPreferences === undefined
       ? undefined
       : formatAssistantPreferences(input.assistantPreferences);
@@ -147,11 +164,11 @@ export class DefaultContextCompiler implements ContextCompiler {
     let historyBudget: number | undefined;
     if (maxInputTokens !== undefined) {
       const fixedBudget = maxInputTokens - estimatedFixedTextTokens;
-      if (fixedBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
+      if (fixedBudget < 0) throw Object.assign(new Error("Context fixed blocks exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
       // Reserve budget for every authoritative user correction and the current
       // observation's capture metadata before optional projections.
       if (authoritativeHistoryTokens + observationMetadataTokens + windowSwitchStateTokens > fixedBudget) {
-        throw new Error("Authoritative user inputs and current observation/target metadata exceed maxInputTokens");
+        throw Object.assign(new Error("Authoritative user inputs, latest GUI history and current observation/target metadata exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
       }
       let remainingAfterAuthoritative = Math.max(0, fixedBudget - authoritativeHistoryTokens - observationMetadataTokens - windowSwitchStateTokens);
       if (rawAssistantPreferencesTokens > remainingAfterAuthoritative) {
@@ -177,7 +194,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       }
       if (groundingIncluded) remainingAfterAuthoritative -= rawGroundingTokens;
       historyBudget = authoritativeHistoryTokens + remainingAfterAuthoritative;
-      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
+      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget, pinnedGuiHistory);
     }
     const monitorGuidanceTokens = monitorGuidanceIncluded && monitorGuidanceText !== undefined
       ? estimateTextTokens(monitorGuidanceText)
@@ -186,6 +203,9 @@ export class DefaultContextCompiler implements ContextCompiler {
     const messages: ModelMessage[] = [
       { role: "user", content: [{ type: "text", text: input.goal }] },
     ];
+    if (requestBudgetMessageText.length > 0) {
+      messages.push({ role: "user", content: [{ type: "text", text: requestBudgetMessageText }] });
+    }
     if (assistantPreferencesText !== undefined && assistantPreferencesIncluded) {
       messages.push({ role: "user", content: [{ type: "text", text: assistantPreferencesText }] });
     }
@@ -307,7 +327,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
     const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
     if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
-      throw new Error("Context history exceeds maxInputTokens after selection");
+      throw Object.assign(new Error("Context history exceeds maxInputTokens after selection"), { code: "CONTEXT_INPUT_TOO_LARGE" });
     }
     const selectedIds = new Set(selectedEvents.map((event) => event.eventId));
     const candidateIds = new Set(historyCandidates.map((event) => event.eventId));
@@ -327,7 +347,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       compilerVersion: "context-v2-rft4",
       runId: input.runId,
       stablePrefixHash: createHash("sha256").update(JSON.stringify({ system: systemPrompt, tools })).digest("hex"),
-      fixedBlocks: fixedBlocks.map((block) => ({ name: block.name, estimatedTokens: estimateTextTokens(block.text), included: block.included })),
+      fixedBlocks: fixedBlocks.filter((block) => block.name !== "request_budget").map((block) => ({ name: block.name, estimatedTokens: estimateTextTokens(block.text), included: block.included })),
       selectedEventIds: selectedEvents.map((event) => event.eventId),
       projectedEventIds,
       discardedEvents,
@@ -408,6 +428,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       omittedHistoryEvents: Math.max(0, orderedEvents.length - selectedEvents.length),
       ...(input.context?.maxHistoryEvents === undefined && this.mode === "raw" ? {} : { maxHistoryEvents: input.context?.maxHistoryEvents ?? this.maxHistoryEvents }),
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxWireInputTokens === undefined ? {} : { maxWireInputTokens }),
       ...(memoryText === undefined ? {} : { estimatedMemoryTokens: memoryEstimatedTokens, memoryMaxTokens: input.context?.memoryMaxTokens ?? this.memoryMaxTokens }),
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? { estimatedMonitorGuidanceTokens: monitorGuidanceTokens, monitorGuidanceIncluded } : {}),
       ...(groundingCatalog === undefined ? {} : { estimatedGroundingTokens: groundingTokens, groundingIncluded }),
@@ -420,6 +441,11 @@ export class DefaultContextCompiler implements ContextCompiler {
       contextBudget: budget,
     };
   }
+}
+
+function validateInputBudgets(text: number | undefined, wire: number | undefined): void {
+  for (const value of [text, wire]) if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
+  if (text !== undefined && wire !== undefined && text > wire) throw new Error("Context text budget must not exceed wire budget");
 }
 
 function estimateTextTokens(value: string): number {

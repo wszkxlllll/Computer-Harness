@@ -1181,6 +1181,21 @@ describe("RunController S2-2 happy path", () => {
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, stepCount: 0, outcome: "budget_exhausted" });
   });
 
+  it("blocks GUI dispatch from tool calls returned by the final reserved request", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("final-gate-1")] },
+      { type: "tool_calls", calls: [clickCall("final-gate-2")] },
+      { type: "tool_calls", calls: [clickCall("final-gate-3")] },
+    ]);
+    const { controller, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3));
+    await expect(controller.start("use the final response budget safely")).resolves.toBe("budget_exhausted");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(3);
+    expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(2);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "final-gate-3" && event.reason.includes("model request budget is exhausted"))).toBe(true);
+    expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 3, stepCount: 2, outcome: "budget_exhausted" });
+  });
+
   it("allows a closing model turn after the last GUI action budget is consumed", async () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [clickCall("last-action")] },

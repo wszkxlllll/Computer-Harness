@@ -12,7 +12,7 @@ export function defaultControlTools(): readonly ControlToolDefinition[] {
   return [
     {
       name: "terminate",
-      description: "Finish the task and report whether the user's goal is complete. A successful tool receipt is not proof of completion.",
+      description: "Call exactly once to finish, with both required arguments: status must be success or failure, and text must be the complete user-facing result. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion.",
       category: "control",
       control: "finish",
       inputSchema: {

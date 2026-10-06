@@ -114,6 +114,97 @@ function recoveryReportBaseEvents(runId: RunId): RuntimeEvent[] {
 }
 
 describe("app-runtime RunHandle", () => {
+  it("records a real Runtime→GLM→recorder→Fetch exchange against its Run request", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-exchange-"));
+    const runId = "runtime-http-correlation" as RunId;
+    const fetchResponse = {
+      choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{
+        id: "synthetic-terminate",
+        type: "function",
+        function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "The requested result remains unverified; no GUI result was supplied." }) },
+      }] } }],
+    };
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => fetchResponse }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        runId,
+        maxModelRequests: 3,
+        contextMaxInputTokens: 16384,
+        contextMaxWireInputTokens: 24576,
+      }, {
+        credentials: { glmApiKey: "synthetic-secret-token" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      const report = await handle.report();
+      const started = report.events.find((event) => event.type === "model.request.started");
+      expect(started?.type).toBe("model.request.started");
+      if (started?.type !== "model.request.started") throw new Error("model request start event was missing");
+      const exchanges = (await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim().split(/\r?\n/u).map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(started).toMatchObject({
+        requestId: expect.any(String),
+        decisionId: expect.any(String),
+        attempt: 1,
+        preparedRequest: { payloadHash: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+        contextBudget: { maxInputTokens: 16384, maxWireInputTokens: 24576 },
+      });
+      expect(exchanges).toHaveLength(1);
+      expect(exchanges[0]).toMatchObject({
+        provider: "glm",
+        correlation: "complete",
+        runId,
+        requestId: started.requestId,
+        decisionId: started.decisionId,
+        attempt: 1,
+        payloadHash: started.preparedRequest?.payloadHash,
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", phase: "awaiting_headers" },
+          { stage: "headers_received", phase: "reading_body", httpStatus: 200 },
+          { stage: "body_received", phase: "complete", outcome: "success", httpStatus: 200 },
+        ] },
+        preparedEstimate: { estimatedTextTokens: expect.any(Number), estimatedVisualTokens: expect.any(Number), estimatedEnvelopeTokens: 32, estimatedTotalTokens: expect.any(Number), imageCount: 1, estimationMethod: "provider_projection" },
+      });
+      const serialized = JSON.stringify(exchanges);
+      expect(serialized).not.toContain("synthetic-secret-token");
+      expect(serialized).not.toContain("open.bigmodel.cn");
+      expect(serialized).not.toContain("requested result remains unverified");
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an undersized wire budget before the first real HTTP call", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-wire-reject-"));
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ choices: [] }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        goal: `Inspect this synthetic request without losing its content: ${"x".repeat(40000)}`,
+        runId: "runtime-http-wire-reject" as RunId,
+        maxModelRequests: 3,
+        contextMaxInputTokens: 8000,
+        contextMaxWireInputTokens: 8000,
+      }, {
+        credentials: { glmApiKey: "synthetic-secret-token" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      expect(fetchMock).not.toHaveBeenCalled();
+      const report = await handle.report();
+      expect(report.events.some((event) => event.type === "model.request.started")).toBe(false);
+      expect(report.events).toContainEqual(expect.objectContaining({ type: "runtime.error", category: "budget" }));
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("passes the frozen Run preference snapshot to Context but not provider factories", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-assistant-preferences-"));
     const preferences = {

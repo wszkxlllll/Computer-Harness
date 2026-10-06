@@ -2,7 +2,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { GlmHttpClient } from "@computer-harness/provider-glm";
+import type { GlmHttpClient, GlmHttpDiagnostics, GlmTransportEvidence } from "@computer-harness/provider-glm";
 import type { QwenHttpClient } from "@computer-harness/provider-qwen";
 import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./recording-clients.js";
 
@@ -52,6 +52,44 @@ function expectForwarded(request: ForwardedRequest | undefined, url: string, bod
 }
 
 describe("recording client diagnostic paths", () => {
+  it("keeps concurrent ordinals local, marks fake evidence unknown, and isolates logging failures", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-glm-recorder-boundaries-"));
+    const path = join(directory, "provider-exchanges.jsonl");
+    const response = { choices: [{ message: { content: "PRIVATE_RESPONSE" } }] };
+    const pending: Array<(value: unknown) => void> = [];
+    const inner: GlmHttpClient = {
+      post(_url, _body, _headers, _signal, diagnostics) {
+        if (_url === "malicious" || diagnostics?.payloadHash === "b".repeat(64)) {
+          diagnostics.onTransportEvidence?.(null as unknown as GlmTransportEvidence);
+          diagnostics.onTransportEvidence?.({ stage: "PRIVATE_STAGE", outcome: "success", phase: "complete", elapsedMs: 1, httpStatus: 200, headers: "PRIVATE_HEADER" } as unknown as GlmTransportEvidence);
+          return Promise.resolve(response);
+        }
+        return new Promise((resolve) => pending.push(resolve));
+      },
+    };
+    const recorder = new RecordingGlmHttpClient(path, inner);
+    const signal = new AbortController().signal;
+    const diag = (requestId: string, payloadHash = "a".repeat(64), onTransportEvidence?: (item: GlmTransportEvidence) => void, estimate?: GlmHttpDiagnostics["estimate"]): GlmHttpDiagnostics => ({ runId: "run-test", requestId, decisionId: "decision-test", attempt: 1, payloadHash, onTransportEvidence, estimate });
+    const first = recorder.post("PRIVATE_URL", { model: "glm-5.3-flash" }, { Authorization: "PRIVATE_AUTH" }, signal, diag("first"));
+    const second = recorder.post("PRIVATE_URL", { model: "glm-5.3-flash" }, { Authorization: "PRIVATE_AUTH" }, signal, diag("second"));
+    pending[1]?.(response);
+    await second;
+    pending[0]?.(response);
+    await first;
+    await expect(recorder.post("malicious", { model: "glm-5.3-flash" }, {}, signal, diag("malicious", "b".repeat(64), () => { throw new Error("PRIVATE_CALLBACK"); }, { estimatedTextTokens: 1, imageCount: 0, estimationMethod: "PRIVATE_METHOD" as "provider_projection" }))).resolves.toBe(response);
+    await expect(recorder.post("malicious", { model: "glm-5.3-flash" }, {}, signal, null as unknown as GlmHttpDiagnostics)).resolves.toBe(response);
+    const records = (await readFile(path, "utf8")).trim().split(/\r?\n/u).map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.slice(0, 2).map((record) => [record.request, record.requestId])).toEqual([[2, "second"], [1, "first"]]);
+    expect(records.slice(0, 2).every((record) => JSON.stringify(record.httpEvidence) === JSON.stringify({ source: "unavailable", stages: [] }))).toBe(true);
+    expect(records[2]?.httpEvidence).toEqual({ source: "unavailable", stages: [] });
+    expect(records[2]).not.toHaveProperty("preparedEstimate");
+    const serialized = JSON.stringify(records);
+    expect(serialized).not.toMatch(/PRIVATE_(?:STAGE|HEADER|URL|AUTH|RESPONSE|CALLBACK)/u);
+    await expect(new RecordingGlmHttpClient(join(directory, "missing", "record.jsonl"), { async post() { return response; } }).post("x", {}, {}, signal, diag("persist-success"))).resolves.toBe(response);
+    const failure = new Error("PRIVATE_ORIGINAL_ERROR");
+    await expect(new RecordingGlmHttpClient(join(directory, "missing", "error.jsonl"), { async post() { throw failure; } }).post("x", {}, {}, signal, diag("persist-failure"))).rejects.toBe(failure);
+  });
+
   it("writes a safe GLM native multi-call projection through the recorder", async () => {
     const typedText = "typed-private-value";
     const response = {

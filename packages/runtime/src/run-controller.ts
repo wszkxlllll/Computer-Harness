@@ -574,10 +574,21 @@ export class RunController {
     return names.filter((name) => this.isToolEnabled(name));
   }
 
+  private requestBudget(): { remaining: number; limit: number } | undefined {
+    const budget = this.policy.modelRequestBudget?.(this.snapshot);
+    return typeof budget === "object" && budget !== null && Number.isSafeInteger(budget.limit) && budget.limit >= 3 && Number.isSafeInteger(budget.remaining) && budget.remaining >= 0 && budget.remaining <= budget.limit ? budget : undefined;
+  }
+
+  private finalRequestConsumed(): boolean {
+    const budget = this.requestBudget();
+    return budget !== undefined && budget.remaining === 0;
+  }
+
   private async run(goal: string): Promise<RunOutcome> {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
     let providerFailureSummary: string | undefined;
+    let localRequestPreparation = false;
     try {
       await this.commitEvent({ type: "run.created", goal });
       this.throwIfAborted();
@@ -675,11 +686,14 @@ export class RunController {
                 ...(this.latestWindowListStatus === undefined ? {} : this.latestWindowListStatus),
               }
             : undefined;
+          const requestBudget = this.requestBudget();
+          localRequestPreparation = true;
           const context = await this.contextCompiler.compile(
             {
               runId: this.runId,
               goal,
               recentEvents: this.events,
+              ...(requestBudget === undefined ? {} : { requestBudget }),
               enabledCategories: [...this.enabledCategories],
               enabledToolNames: this.modelEnabledToolNames(),
               ...(this.planningEnabled ? { plan: this.snapshot.plan } : {}),
@@ -694,6 +708,7 @@ export class RunController {
             },
             this.abortController.signal,
           );
+          localRequestPreparation = false;
           this.throwIfAborted();
           // A user correction may arrive while the compiler is awaiting
           // assets or assembling a long context.  Do not send that stale
@@ -717,7 +732,9 @@ export class RunController {
           const retryWindowStartedAt = Date.now();
           let closeTurnConsumed = false;
           if (canPrepareProvider) {
+            localRequestPreparation = true;
             prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+            localRequestPreparation = false;
             // Preparation may read assets or otherwise await provider-local
             // work.  Re-check the command barrier before any network attempt.
             const afterPrepare = await this.drainCommands();
@@ -748,6 +765,7 @@ export class RunController {
             }
             const attempt = retryCount + 1;
             const requestId = this.idFactory.eventId();
+            const providerRequestContext = { runId: this.runId, requestId, decisionId, attempt };
             requestIdForResponse = requestId;
             const preparedRequest = prepared === undefined ? undefined : {
               payloadHash: prepared.payloadHash,
@@ -770,8 +788,8 @@ export class RunController {
             });
             try {
               turn = prepared !== undefined && generatePrepared !== undefined
-                ? await generatePrepared(prepared, { signal: this.abortController.signal })
-                : await this.provider.generate(requestContext, { signal: this.abortController.signal });
+                ? await generatePrepared(prepared, { signal: this.abortController.signal, requestContext: providerRequestContext })
+                : await this.provider.generate(requestContext, { signal: this.abortController.signal, requestContext: providerRequestContext });
             } catch (error) {
               const details = providerErrorDetails(error);
               const nextRetryCount = retryCount + 1;
@@ -807,7 +825,9 @@ export class RunController {
               if (providerErrorDetails(error).retryMode !== "same_input") {
                 requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
                 if (canPrepareProvider) {
+                  localRequestPreparation = true;
                   prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+                  localRequestPreparation = false;
                   const afterRetryPrepare = await this.drainCommands();
                   if ((this.snapshot.status as string) === "paused" || afterRetryPrepare.correction) {
                     if (afterRetryPrepare.correction) await this.refreshAfterUserInput(session);
@@ -899,6 +919,10 @@ export class RunController {
           break;
         }
         if (turn.type === "user_input_required") {
+          if (this.finalRequestConsumed()) {
+            outcome = await this.commitRunFinished({ outcome: "budget_exhausted" });
+            break;
+          }
           await this.commitEvent({ type: "user.input.requested", question: turn.question });
           continue;
         }
@@ -936,14 +960,16 @@ export class RunController {
           });
           outcome = "outcome_unknown";
         } else {
+          const budgetBlocked = typeof error === "object" && error !== null && "code" in error && (error.code === "GLM_INPUT_TOO_LARGE" || error.code === "CONTEXT_INPUT_TOO_LARGE");
           await this.commitEvent({
             type: "runtime.error",
-            category: "runtime",
+            category: localRequestPreparation && budgetBlocked ? "budget" : "runtime",
             message: errorMessage(error),
           });
           outcome = "failed";
         }
-        outcome = await this.commitRunFinished({ outcome });
+        const budgetBlocked = typeof error === "object" && error !== null && "code" in error && (error.code === "GLM_INPUT_TOO_LARGE" || error.code === "CONTEXT_INPUT_TOO_LARGE");
+        outcome = await this.commitRunFinished({ outcome, ...(localRequestPreparation ? { summary: this.providerFailureProgressSummary(budgetBlocked ? "输入预算检查未通过，该请求未发送，任务完成未确认。" : "本地模型请求准备未完成，该请求未发送，任务完成未确认。") } : {}) });
       }
       return outcome;
     } finally {
@@ -1452,6 +1478,10 @@ export class RunController {
   }
 
   private async executeApprovedCall(pending: PendingApproval): Promise<void> {
+    if (this.finalRequestConsumed()) {
+      await this.rejectToolCall(pending.call.id, "model request budget is exhausted; approved action was not dispatched");
+      return;
+    }
     let context = this.toolExecutionContext(pending.session);
     if (pending.definition.category === "computer") {
       const observation = this.latestObservation;
@@ -1726,6 +1756,11 @@ export class RunController {
     if (calls.length === 0) {
       throw new Error("model returned an empty tool_calls turn");
     }
+    if (this.finalRequestConsumed()) {
+      await this.commitEvent({ type: "runtime.error", category: "budget", message: "the final reserved model request was consumed without a valid terminate decision; no returned tool call was executed" });
+      for (const call of calls) await this.rejectToolCall(call.id, "model request budget is exhausted; no tool calls can be dispatched");
+      return { correction: false };
+    }
     const ids = new Set<ToolCallId>();
     for (const call of calls) {
       if (call.id.trim().length === 0) {
@@ -1951,6 +1986,10 @@ export class RunController {
       }
       const context = this.toolExecutionContext(pendingTurn.session);
       this.throwIfAborted();
+      if (this.finalRequestConsumed()) {
+        await this.rejectPendingEntries(pendingTurn.entries, index, "model request budget is exhausted; no remaining tool calls can be dispatched");
+        return { correction: false };
+      }
       if (entry.definition.category === "computer") {
         if (pendingTurn.batch) {
           const actionBudget = this.policy.checkActionBudget(this.snapshot);
@@ -2772,7 +2811,7 @@ export class RunController {
     return { ...observation, grounding };
   }
 
-  private providerFailureProgressSummary(): string {
+  private providerFailureProgressSummary(prefix = "后续模型响应未完成，任务完成未确认。"): string {
     const guiIds = new Set(this.events.filter((event) => event.type === "action.execution.started" && event.action.kind !== "wait")
       .map((event) => event.type === "action.execution.started" ? event.action.actionId : undefined));
     const terminals = this.events.filter((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") && guiIds.has(event.receipt.actionId));
@@ -2783,11 +2822,14 @@ export class RunController {
     const postActionScreenshot = completed > 0 && lastTerminal !== undefined && observation?.type === "observation.created" && observation.sequence > lastTerminal.sequence
       ? `最近动作后的截图已保存（assetId=${observation.observation.screenshot.assetId}），可供人工核对；截图内容未被此反馈验证。`
       : completed > 0 ? "没有最近动作后的截图可供此反馈确认。" : "";
-    return `后续模型响应未完成，任务完成未确认。已保留 ${completed} 个非等待 GUI 动作完成回执，${count("refused")} 个拒绝回执，${count("failed")} 个失败回执；完成回执不等于目标已达成。${postActionScreenshot}未自动重放 GUI 动作。`;
+    return `${prefix}已保留 ${completed} 个非等待 GUI 动作完成回执，${count("refused")} 个拒绝回执，${count("failed")} 个失败回执；完成回执不等于目标已达成。${postActionScreenshot}未自动重放 GUI 动作。`;
   }
 
   private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
     let outcome = data.outcome;
+    const summary = data.summary ?? (outcome === "budget_exhausted"
+      ? "运行预算已达到上限，任务完成未确认。已保留的执行回执不等于目标已核实；请对照原要求检查缺失结果。"
+      : undefined);
     if (this.snapshot.executionSegment?.status === "active") {
       await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: this.snapshot.executionSegment.id, reason: "run_finished" } });
     }
@@ -2804,7 +2846,7 @@ export class RunController {
     await this.commitEvent({
       type: "run.finished",
       outcome,
-      ...(data.summary === undefined ? {} : { summary: data.summary }),
+      ...(summary === undefined ? {} : { summary }),
       ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
     });
     this.groundingCandidates.clear();

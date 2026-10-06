@@ -16,6 +16,7 @@ import type {
   ModelMessage,
   ModelToolSpec,
   ProviderAdapter,
+  ProviderRequestContext,
   PreparedProviderRequest,
   ControlKind,
   CoordinateField,
@@ -53,7 +54,26 @@ export const glmProfiles: Readonly<Record<GlmProfileName, GlmProfile>> = {
 };
 
 export interface GlmHttpClient {
-  post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown>;
+  post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal, diagnostics?: GlmHttpDiagnostics): Promise<unknown>;
+}
+
+export type GlmTransportStage = "fetch_invoked" | "headers_received" | "body_received" | "fetch_failed" | "body_failed";
+export type GlmTransportOutcome = "pending" | "success" | "http_error" | "network_error" | "timeout" | "cancelled";
+export interface GlmTransportEvidence {
+  readonly stage: GlmTransportStage;
+  readonly outcome: GlmTransportOutcome;
+  readonly phase: "before_fetch" | "awaiting_headers" | "reading_body" | "complete";
+  readonly elapsedMs: number;
+  readonly httpStatus?: number;
+}
+export interface GlmHttpDiagnostics {
+  readonly runId?: string;
+  readonly requestId?: string;
+  readonly decisionId?: string;
+  readonly attempt?: number;
+  readonly payloadHash: string;
+  readonly estimate?: PreparedProviderRequest["estimate"];
+  readonly onTransportEvidence?: (evidence: GlmTransportEvidence) => void;
 }
 
 export type GlmRetryMode = "same_input" | "feedback";
@@ -108,12 +128,12 @@ export class GlmAdapter implements ProviderAdapter {
     this.httpClient = options.httpClient ?? new FetchGlmHttpClient();
   }
 
-  public async generate(input: ModelInput, options: { signal: AbortSignal }): Promise<ModelTurn> {
+  public async generate(input: ModelInput, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<ModelTurn> {
     const prepared = await this.prepare(input, options);
     return this.generatePrepared(prepared, options);
   }
 
-  public async prepare(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest> {
+  public async prepare(input: ModelInput, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<PreparedProviderRequest> {
     options.signal.throwIfAborted();
     const snapshot = structuredClone(input);
     const body = {
@@ -134,6 +154,9 @@ export class GlmAdapter implements ProviderAdapter {
       payloadHash: createHash("sha256").update(JSON.stringify(frozenBody)).digest("hex"),
       estimate: Object.freeze({
         estimatedTextTokens: estimateWireTextTokens(frozenBody),
+        estimatedVisualTokens: estimateVisualTokens(snapshot),
+        estimatedEnvelopeTokens: 32,
+        estimatedTotalTokens: estimateWireTextTokens(frozenBody) + estimateVisualTokens(snapshot) + 32,
         imageCount: countImages(snapshot),
         estimationMethod: "provider_projection",
       } as const),
@@ -142,7 +165,7 @@ export class GlmAdapter implements ProviderAdapter {
     return prepared;
   }
 
-  public async generatePrepared(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn> {
+  public async generatePrepared(prepared: PreparedProviderRequest, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<ModelTurn> {
     options.signal.throwIfAborted();
     if (prepared.providerId !== this.id || !Object.isFrozen(prepared)) {
       throw new GlmProviderError("GLM prepared request metadata is invalid", "GLM_INVALID_PREPARED_REQUEST");
@@ -156,6 +179,11 @@ export class GlmAdapter implements ProviderAdapter {
       state.body,
       { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
       options.signal,
+      {
+        ...(options.requestContext ?? {}),
+        payloadHash: prepared.payloadHash,
+        ...(prepared.estimate === undefined ? {} : { estimate: prepared.estimate }),
+      },
     );
     options.signal.throwIfAborted();
     return this.parseResponse(response, state.input);
@@ -280,6 +308,9 @@ export class GlmAdapter implements ProviderAdapter {
         : { type: "tool_calls", calls, assistantText, ...(observationAssessment === undefined ? {} : { observationAssessment }), ...(continuation === undefined ? {} : { continuation }), ...(usage === undefined ? {} : { usage }) };
     }
     if (typeof message.content === "string" && message.content.trim().length > 0) {
+      if (input.tools.some((tool) => tool.control === "finish")) {
+        throw new GlmProviderError("GLM must use the exposed terminate control with explicit status success or failure and complete result text; plain text is not a terminal decision", "GLM_INVALID_TOOL_CALL");
+      }
       if (message.reasoning_content !== undefined && typeof message.reasoning_content !== "string") {
         throw new GlmProviderError("GLM reasoning_content must be a string", "GLM_INVALID_RESPONSE");
       }
@@ -304,6 +335,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
     body: Record<string, unknown>,
     headers: Readonly<Record<string, string>>,
     signal: AbortSignal,
+    diagnostics?: GlmHttpDiagnostics,
   ): Promise<unknown> {
     const requestController = new AbortController();
     const startedAt = Date.now();
@@ -318,9 +350,14 @@ export class FetchGlmHttpClient implements GlmHttpClient {
     } else {
       signal.addEventListener("abort", abortRequest, { once: true });
     }
+    const emit = (evidence: GlmTransportEvidence): void => {
+      try { diagnostics?.onTransportEvidence?.(evidence); } catch { /* diagnostics cannot affect transport */ }
+    };
     try {
+      signal.throwIfAborted();
       let response: Response;
       try {
+        emit({ stage: "fetch_invoked", outcome: "pending", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
         response = await fetch(url, {
           method: "POST",
           headers,
@@ -328,8 +365,12 @@ export class FetchGlmHttpClient implements GlmHttpClient {
           signal: requestController.signal,
         });
       } catch (error) {
-        if (signal.aborted) throw signal.reason ?? error;
+        if (signal.aborted) {
+          emit({ stage: "fetch_failed", outcome: "cancelled", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
+          throw signal.reason ?? error;
+        }
         if (timedOut) {
+          emit({ stage: "fetch_failed", outcome: "timeout", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
           throw new GlmProviderError(
             `GLM request timed out after ${this.requestTimeoutMs}ms (phase=awaiting_headers elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs})`,
             "GLM_REQUEST_TIMEOUT",
@@ -341,6 +382,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
             "feedback",
           );
         }
+        emit({ stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt });
         throw new GlmProviderError(
           `GLM network request failed (${networkDiagnostic(error)})`,
           "GLM_NETWORK_ERROR",
@@ -349,9 +391,14 @@ export class FetchGlmHttpClient implements GlmHttpClient {
         );
       }
       const headersElapsedMs = Date.now() - startedAt;
+      emit({ stage: "headers_received", outcome: response.ok ? "pending" : "http_error", phase: "reading_body", elapsedMs: headersElapsedMs, httpStatus: response.status });
       const payload = await response.json().catch((error: unknown) => {
-        if (signal.aborted) throw signal.reason ?? error;
+        if (signal.aborted) {
+          emit({ stage: "body_failed", outcome: "cancelled", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
+          throw signal.reason ?? error;
+        }
         if (timedOut) {
+          emit({ stage: "body_failed", outcome: "timeout", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
           throw new GlmProviderError(
             `GLM response body timed out after ${this.requestTimeoutMs}ms (phase=reading_body elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs} headersElapsedMs=${headersElapsedMs} httpStatus=${response.status})`,
             "GLM_REQUEST_TIMEOUT",
@@ -359,6 +406,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
             "feedback",
           );
         }
+        emit({ stage: "body_failed", outcome: "network_error", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
         throw new GlmProviderError(
           `GLM response body could not be read (${networkDiagnostic(error)})`,
           "GLM_NETWORK_ERROR",
@@ -366,6 +414,7 @@ export class FetchGlmHttpClient implements GlmHttpClient {
           "same_input",
         );
       }) as unknown;
+      emit({ stage: "body_received", outcome: response.ok ? "success" : "http_error", phase: "complete", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
       if (!response.ok) {
         const code = readErrorCode(payload);
         const providerMessage = readErrorMessage(payload);
@@ -389,30 +438,32 @@ function countImages(input: ModelInput): number {
   return input.messages.reduce((total, message) => total + message.content.filter((block) => block.type === "image").length, 0);
 }
 
+function estimateVisualTokens(input: ModelInput): number {
+  return input.messages.reduce((total, message) => total + message.content.reduce((sum, block) => block.type !== "image"
+    ? sum
+    : sum + Math.min(480, Math.ceil((block.viewport.width * block.viewport.height) / 750) + 128), 0), 0);
+}
+
 function estimateWireTextTokens(body: unknown): number {
   const withoutImagePayload = stripImagePayload(body);
   return Math.ceil(JSON.stringify(withoutImagePayload).length / 4);
 }
 
 function assertInputBudget(input: ModelInput, body: unknown, provider: string): void {
-  const max = input.contextBudget?.maxInputTokens;
+  const textMax = input.contextBudget?.maxInputTokens;
+  const max = input.contextBudget?.maxWireInputTokens ?? textMax;
+  for (const value of [textMax, max]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new GlmProviderError("GLM input budgets must be integers from 1 to 131072", "GLM_INPUT_TOO_LARGE", false);
+  }
+  if (textMax !== undefined && max !== undefined && textMax > max) throw new GlmProviderError("GLM text budget must not exceed wire budget", "GLM_INPUT_TOO_LARGE", false);
   if (max === undefined) return;
   // Context compilation cannot see provider-specific envelopes or the visual
   // token cost. Keep a conservative provider-side gate immediately before the
   // network call so an oversized image/schema prompt is never sent.
-  const visualTokens = input.messages.reduce((total, message) => total + message.content.reduce((sum, block) => {
-    if (block.type !== "image") return sum;
-    return sum + Math.min(480, Math.ceil((block.viewport.width * block.viewport.height) / 750) + 128);
-  }, 0), 0);
-  const estimated = estimateWireTextTokens(body) + visualTokens + 32;
-  // The compiler's budget is the authoritative text budget; provider JSON and
-  // vision accounting are intentionally conservative and may overshoot it.
-  // Keep a bounded calibration margin for normal-sized contexts, while small
-  // budgets remain strict so tests and callers cannot accidentally send an
-  // obviously oversized prompt.
-  if (estimated > max && (max < 1_000 || estimated > max + 4_096)) {
-    throw new GlmProviderError(`${provider} prompt exceeds maxInputTokens (${estimated} > ${max})`, "GLM_INPUT_TOO_LARGE", false);
-  }
+  const visualTokens = estimateVisualTokens(input);
+  const textTokens = estimateWireTextTokens(body);
+  const estimated = textTokens + visualTokens + 32;
+  if (estimated > max) throw new GlmProviderError(`${provider} prompt exceeds wire input budget (estimated=${estimated}, text=${textTokens}, visual=${visualTokens}, envelope=32, maxWireInputTokens=${max}, maxInputTokens=${textMax ?? "unset"})`, "GLM_INPUT_TOO_LARGE", false);
 }
 
 function stripImagePayload(value: unknown, parentKey?: string): unknown {

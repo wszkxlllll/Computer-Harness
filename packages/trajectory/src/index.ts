@@ -1400,6 +1400,9 @@ const contextTraceSchema = z.object({
     payloadHash: nonEmptyString,
     estimate: z.object({
       estimatedTextTokens: z.number().int().nonnegative(),
+      estimatedVisualTokens: z.number().int().nonnegative().optional(),
+      estimatedEnvelopeTokens: z.number().int().nonnegative().optional(),
+      estimatedTotalTokens: z.number().int().nonnegative().optional(),
       imageCount: z.number().int().nonnegative(),
       estimationMethod: z.enum(["context_report", "provider_projection"]),
     }).optional(),
@@ -1437,6 +1440,9 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       payloadHash: nonEmptyString,
       estimate: z.object({
         estimatedTextTokens: z.number().int().nonnegative(),
+        estimatedVisualTokens: z.number().int().nonnegative().optional(),
+        estimatedEnvelopeTokens: z.number().int().nonnegative().optional(),
+        estimatedTotalTokens: z.number().int().nonnegative().optional(),
         imageCount: z.number().int().nonnegative(),
         estimationMethod: z.enum(["context_report", "provider_projection"]),
       }).optional(),
@@ -1452,6 +1458,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       omittedHistoryEvents: z.number().int().nonnegative(),
       maxHistoryEvents: z.number().int().positive().optional(),
       maxInputTokens: z.number().int().positive().optional(),
+      maxWireInputTokens: z.number().int().positive().optional(),
       estimatedMemoryTokens: z.number().int().nonnegative().optional(),
       memoryMaxTokens: z.number().int().positive().optional(),
       estimatedMonitorGuidanceTokens: z.number().int().nonnegative().optional(),

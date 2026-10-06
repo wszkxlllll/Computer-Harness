@@ -113,6 +113,8 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 
 ## 历史证据
 
+当前三线执行入口：[统一六批计划](./three-track-execution-plan-2026-10-06.md)、[隔离整合取舍](./three-track-integration-decisions-2026-10-06.md)、[预算与HTTP关联交付](./a-line-sync/fixes/F-20261006-002.md)。原A线独立队列停用，历史证据保留；新版离线通过不等于已经部署或实机通过。
+
 - [2026-09-26 首页改版前存档](./history/2026-09-26-readme-before-refresh.md)：保留旧首页的参数与阶段记录，当前使用入口以根 README 和专题指南为准。
 - [2026-09-26 交接收敛归档与迁移索引](./history/2026-09-26-handoff-convergence/README.md)：记录旧阶段文档和一次性实验脚本的原路径、新路径、归档理由与恢复方式。
 - [2026-09-17 路线整合归档](./history/2026-09-17-roadmap-consolidation/README.md)：旧设计、审计、实验结论及外部审计包。

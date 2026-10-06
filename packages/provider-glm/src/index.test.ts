@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
-import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile } from "./index.js";
+import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile, type GlmTransportEvidence } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 3 };
@@ -610,11 +610,72 @@ describe("GLM provider adapter", () => {
     })));
     try {
       const client = new FetchGlmHttpClient({ requestTimeoutMs: 10 });
-      const error = await client.post("https://private.invalid/secret-path", { secret: "PRIVATE_BODY" }, { authorization: "PRIVATE_KEY" }, new AbortController().signal).catch((failure: unknown) => failure);
+      const evidence: GlmTransportEvidence[] = [];
+      const error = await client.post("https://private.invalid/secret-path", { secret: "PRIVATE_BODY" }, { authorization: "PRIVATE_KEY" }, new AbortController().signal, { payloadHash: "a".repeat(64), onTransportEvidence: (item) => { evidence.push(item); } }).catch((failure: unknown) => failure);
       expect(error).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback", message: expect.stringMatching(/phase=awaiting_headers elapsedMs=\d+ deadlineMs=10/u) });
       expect(String(error)).not.toMatch(/secret-path|PRIVATE_BODY|PRIVATE_KEY/u);
       expect(fetch).toHaveBeenCalledTimes(1);
+      expect(evidence).toMatchObject([
+        { stage: "fetch_invoked", phase: "awaiting_headers", outcome: "pending" },
+        { stage: "fetch_failed", phase: "awaiting_headers", outcome: "timeout" },
+      ]);
+      expect(evidence.some((item) => "httpStatus" in item)).toBe(false);
     } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("retains the received HTTP status when response-body reading times out", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: { signal: AbortSignal }) => ({ ok: true, status: 200, json: () => new Promise<never>((_resolve, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })) })));
+    const evidence: GlmTransportEvidence[] = [];
+    try {
+      const error = await new FetchGlmHttpClient({ requestTimeoutMs: 10 }).post(
+        "https://fixture.invalid",
+        {},
+        {},
+        new AbortController().signal,
+        { payloadHash: "a".repeat(64), onTransportEvidence: (item) => { evidence.push(item); } },
+      ).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false, message: expect.stringMatching(/httpStatus=200/u) });
+      expect(evidence).toMatchObject([
+        { stage: "fetch_invoked", phase: "awaiting_headers" },
+        { stage: "headers_received", phase: "reading_body", httpStatus: 200 },
+        { stage: "body_failed", phase: "reading_body", outcome: "timeout", httpStatus: 200 },
+      ]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("does not invoke Fetch or emit transport evidence for pre-cancelled requests", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled before fetch"));
+    const evidence: GlmTransportEvidence[] = [];
+    try {
+      await expect(new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, controller.signal, { payloadHash: "a".repeat(64), onTransportEvidence: (item) => { evidence.push(item); } })).rejects.toThrow("cancelled before fetch");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(evidence).toEqual([]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("isolates throwing evidence callbacks and retains an HTTP error status when JSON parsing fails", async () => {
+    const originalFetch = globalThis.fetch;
+    const evidence: GlmTransportEvidence[] = [];
+    try {
+      globalThis.fetch = vi.fn(async () => ({ ok: true, status: 201, json: async () => ({ ok: true }) })) as unknown as typeof fetch;
+      await expect(new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, new AbortController().signal, {
+        payloadHash: "a".repeat(64),
+        onTransportEvidence() { throw new Error("PRIVATE_CALLBACK"); },
+      })).resolves.toEqual({ ok: true });
+
+      globalThis.fetch = vi.fn(async () => ({ ok: false, status: 503, json: async () => { throw new Error("PRIVATE_BODY"); } })) as unknown as typeof fetch;
+      await expect(new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, new AbortController().signal, {
+        payloadHash: "a".repeat(64),
+        onTransportEvidence: (item) => { evidence.push(item); },
+      })).rejects.toMatchObject({ code: "GLM_NETWORK_ERROR", retryable: true });
+      expect(evidence.at(-1)).toMatchObject({ stage: "body_failed", phase: "reading_body", httpStatus: 503 });
+      expect(JSON.stringify(evidence)).not.toContain("PRIVATE");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("preserves cancellation while reading a response body", async () => {

@@ -1443,6 +1443,7 @@ function projectRuntimeEvent(event: RuntimeEvent, reply: string | undefined): Re
             selectedHistoryEvents: event.contextBudget.selectedHistoryEvents,
             omittedHistoryEvents: event.contextBudget.omittedHistoryEvents,
             ...(event.contextBudget.maxInputTokens === undefined ? {} : { maxInputTokens: event.contextBudget.maxInputTokens }),
+            ...(event.contextBudget.maxWireInputTokens === undefined ? {} : { maxWireInputTokens: event.contextBudget.maxWireInputTokens }),
           },
         }),
       };

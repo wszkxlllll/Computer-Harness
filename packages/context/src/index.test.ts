@@ -15,7 +15,7 @@ import type {
   SurfaceRef,
   ToolCallId,
 } from "@computer-harness/protocol";
-import { createDefaultComputerTools, windowSwitchTools } from "@computer-harness/runtime";
+import { createDefaultComputerTools, createDefaultToolRegistry, windowSwitchTools } from "@computer-harness/runtime";
 import { DefaultContextCompiler, selectMemoryForContext } from "./index.js";
 
 const runId = "run-context" as RunId;
@@ -51,6 +51,35 @@ function observation(id: string) {
 }
 
 describe("DefaultContextCompiler", () => {
+  it("keeps the system prefix stable while fully budgeting dynamic request guidance and retaining final-only tools", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultToolRegistry());
+    const goal = "complete all requested fields without guessing";
+    const compileWithBudget = (remaining: number) => compiler.compile({
+      runId,
+      goal,
+      recentEvents: [],
+      requestBudget: { remaining, limit: 3 },
+    }, new AbortController().signal);
+    const ordinary = await compileWithBudget(3);
+    const constrained = await compileWithBudget(2);
+    const final = await compileWithBudget(1);
+    expect(constrained.system).toBe(ordinary.system);
+    expect(constrained.messages[1]).toMatchObject({ role: "user", content: [{ type: "text", text: expect.stringContaining("Runtime request budget: Only 2 model requests remain including this one.") }] });
+    expect(constrained.contextBudget?.estimatedFixedTextTokens).toBe(Math.ceil([
+      constrained.system,
+      goal,
+      JSON.stringify(constrained.tools),
+      "",
+      "",
+      "",
+      constrained.messages[1]?.content[0]?.type === "text" ? constrained.messages[1].content[0].text : "",
+    ].join("\n").length / 4));
+    expect(final.system).toBe(ordinary.system);
+    expect(final.tools.map((tool) => tool.name)).toEqual(["terminate"]);
+    expect(JSON.stringify(final.messages)).toContain("This is the final model request");
+    expect(JSON.stringify(final.messages)).toContain("complete user-facing result text");
+  });
+
   it("projects assistant ToolCall before its matching result and appends only the latest image", async () => {
     const first = observation("obs-1");
     const latest = observation("obs-2");

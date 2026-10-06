@@ -16,7 +16,7 @@ import {
 import { HostRelayConnector } from "@computer-harness/relay-connector";
 import type { RunModel } from "@computer-harness/app-runtime";
 import { createHostServer } from "./server.js";
-import { parseGlmOutputBudget } from "./glm-output-budget.js";
+import { glmReasoningEffort, parseGlmInputBudgets, parseGlmOutputBudget, readGlmThinking } from "./glm-output-budget.js";
 import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
   const windowSelector = resolveHostWindowSelector(process.env);
-  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} requestTimeoutMs=90000\n`);
+  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=90000\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -253,7 +253,7 @@ function createSessionConfig(
     batching: "same-control-input-v1",
     contextMode: "recent",
     contextMaxHistoryEvents: 32,
-    contextMaxInputTokens: 8_000,
+    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : parseGlmInputBudgets(process.env.GLM_MAX_INPUT_TOKENS, process.env.GLM_MAX_WIRE_INPUT_TOKENS)),
     riskProfile: "live-interactive",
     riskGuard: "layered",
     riskModel: "same",
@@ -291,12 +291,6 @@ function readProviderCredentials(): ProviderCredentials {
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
-}
-
-function readGlmThinking(value: string | undefined): "enabled" | "low" | "high" | "max" {
-  return value === "enabled" || value === "low" || value === "high" || value === "max"
-    ? value
-    : "enabled";
 }
 
 async function loadEnvFile(path: string): Promise<void> {

@@ -134,6 +134,7 @@ export interface ContextBudgetReport {
   omittedHistoryEvents: number;
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  maxWireInputTokens?: number;
   estimatedMemoryTokens?: number;
   memoryMaxTokens?: number;
   estimatedMonitorGuidanceTokens?: number;
@@ -157,12 +158,20 @@ export interface ProviderAdapter {
   readonly id: string;
   generate(
     input: ModelInput,
-    options: { signal: AbortSignal },
+    options: { signal: AbortSignal; requestContext?: ProviderRequestContext },
   ): Promise<ModelTurn>;
-  prepare?(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest>;
-  generatePrepared?(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn>;
+  prepare?(input: ModelInput, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<PreparedProviderRequest>;
+  generatePrepared?(prepared: PreparedProviderRequest, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<ModelTurn>;
   /** Optional Run-owned resource cleanup, called after the Run completes. */
   close?(): Promise<void>;
+}
+
+/** Per-attempt identifiers for safe, non-wire diagnostics only. */
+export interface ProviderRequestContext {
+  readonly runId: string;
+  readonly requestId: string;
+  readonly decisionId: string;
+  readonly attempt: number;
 }
 
 /** Provider-owned wire preparation metadata. The actual request body stays in
@@ -180,6 +189,8 @@ export interface ContextCompileInput {
   plan?: PlanState;
   executionSegment?: ExecutionSegment;
   recentEvents: readonly RuntimeEvent[];
+  /** Exact policy-owned allowance for the request being compiled. */
+  requestBudget?: { readonly remaining: number; readonly limit: number };
   context?: ContextOptions;
   enabledCategories?: readonly ToolCategory[];
   enabledToolNames?: readonly string[];
@@ -210,6 +221,8 @@ export interface ContextOptions {
   maxHistoryEvents?: number;
   /** Approximate text/tool budget; image cost is reported by the Provider when available. */
   maxInputTokens?: number;
+  /** Provider-projected wire cap, including payload envelope and image allowance. */
+  maxWireInputTokens?: number;
   /** Soft cap for memory text inside the Context fixed blocks. */
   memoryMaxTokens?: number;
 }
@@ -370,6 +383,8 @@ export interface FinishDecision {
 }
 
 export interface RuntimePolicy {
+  /** Exact remaining request allowance when the policy can attest it. */
+  modelRequestBudget?(snapshot: RunSnapshot): { readonly remaining: number; readonly limit: number };
   evaluateToolCall(context: PolicyContext): Promise<ToolPolicyDecision>;
   checkBudget(snapshot: RunSnapshot): BudgetDecision;
   checkActionBudget(snapshot: RunSnapshot): BudgetDecision;
@@ -433,4 +448,3 @@ export interface IdFactory {
   assetId(): AssetId;
   actionId(): ActionId;
 }
-

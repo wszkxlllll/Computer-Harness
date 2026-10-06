@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import type { AssetRef, RunAssistantPreferencesSnapshot, RunId } from "@computer-harness/protocol";
+import type { AssetRef, RunAssistantPreferencesSnapshot, RunId, RuntimeEvent, ObservationFrame } from "@computer-harness/protocol";
 import { createDefaultToolRegistry, type ModelInput } from "@computer-harness/runtime";
 import { createProvider, type ProviderHttpClient, type ResolvedRunConfig } from "./index.js";
 
@@ -96,6 +96,22 @@ describe("app-runtime provider factory", () => {
     expect(qwen.id).toBe("qwen3.8-flash");
   });
 
+  it("rejects invalid resolved GLM input budgets before creating or calling HTTP", () => {
+    let posts = 0;
+    const client: ProviderHttpClient = { async post() { posts += 1; return {}; } };
+    for (const overrides of [
+      { contextMaxInputTokens: 0 },
+      { contextMaxInputTokens: 1.5 },
+      { contextMaxInputTokens: 16384, contextMaxWireInputTokens: 0 },
+      { contextMaxWireInputTokens: 131073 },
+      { contextMaxWireInputTokens: 1.5 },
+      { contextMaxInputTokens: 100, contextMaxWireInputTokens: 99 },
+    ]) {
+      expect(() => createProvider({ model: "glm-5.3-flash", config: config(overrides), assetReader, outputDir: "unused", credentials: { glmApiKey: "fixture" }, httpClients: { glm: client } })).toThrow(/budget/u);
+    }
+    expect(posts).toBe(0);
+  });
+
   it("sends one identical shared Context preference projection to GLM and Qwen", async () => {
     const guidance = "Group findings by topic.";
     const preferences: RunAssistantPreferencesSnapshot = {
@@ -111,7 +127,7 @@ describe("app-runtime provider factory", () => {
       recentEvents: [],
       assistantPreferences: preferences,
     }, new AbortController().signal);
-    const glmFinish: Record<string, unknown> = { choices: [{ message: { content: "Summary ready." } }] };
+    const glmFinish: Record<string, unknown> = { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "glm-pref-terminate", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "Summary ready." }) } }] } }] };
     const qwenClick: Record<string, unknown> = {
       choices: [{
         finish_reason: "tool_calls",
@@ -161,6 +177,58 @@ describe("app-runtime provider factory", () => {
     expect(qwenRequest.split(guidance)).toHaveLength(2);
     expect(glmRequest).not.toContain("assistantPreferences");
     expect(qwenRequest).not.toContain("assistantPreferences");
+  });
+
+  it("keeps the complete goal and latest GUI history under one calibrated GLM wire budget", async () => {
+    const runId = "full-budget-history" as RunId;
+    const latest = {
+      id: "full-budget-observation",
+      runId,
+      computerSessionId: "full-budget-session",
+      surfaceRef: { surfaceId: "full-budget-surface", generation: 1, kind: "desktop" },
+      capturedAt: "2026-10-06T00:00:00.000Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" },
+      screenshot: { assetId: "full-budget-asset", relativePath: "screenshots/full-budget.png", mediaType: "image/png", byteLength: 1 },
+    } as unknown as ObservationFrame;
+    const call = { id: "full-budget-call", name: "type", arguments: { text: "PINNED_GUI_TEXT" } };
+    const action = { actionId: "full-budget-action", basedOn: latest.id, kind: "type", text: "PINNED_GUI_TEXT" };
+    const at = (sequence: number, data: Record<string, unknown>) => ({ eventId: `full-budget-event-${sequence}`, runId, sequence, occurredAt: "2026-10-06T00:00:00.000Z", ...data });
+    const recentEvents = [
+      at(1, { type: "model.response.received", turn: { type: "tool_calls", calls: [call] } }),
+      at(2, { type: "tool.call.received", call }),
+      at(3, { type: "action.proposed", callId: call.id, action }),
+      at(4, { type: "action.execution.started", action }),
+      at(5, { type: "action.execution.completed", receipt: { actionId: action.actionId, status: "completed" } }),
+      at(6, { type: "tool.call.completed", result: { callId: call.id, status: "completed", output: { receipt: "PINNED_GUI_RECEIPT" } } }),
+      at(7, { type: "observation.created", observation: latest }),
+    ] as unknown as RuntimeEvent[];
+    const goal = `FULL_TASK_BEGIN ${"Keep every condition, date and value. ".repeat(700)} FULL_TASK_END`;
+    const compiler = new DefaultContextCompiler(createDefaultToolRegistry(), { mode: "recent", maxHistoryEvents: 1, maxInputTokens: 16384, maxWireInputTokens: 24576 });
+    const compiled = await compiler.compile({ runId, goal, recentEvents, latestObservation: latest }, new AbortController().signal);
+    let posts = 0;
+    let sentBody = "";
+    const provider = createProvider({
+      model: "glm-5.3-flash",
+      config: config({ contextMaxInputTokens: 16384, contextMaxWireInputTokens: 24576 }),
+      assetReader,
+      outputDir: "runs/full-budget-history",
+      credentials: { glmApiKey: "fixture-glm-key" },
+      httpClients: { glm: { async post(_url, body) { posts += 1; sentBody = JSON.stringify(body); return { choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ id: "budget-terminate", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "The requested result remains unverified in this fixture." }) } }] } }] }; } } },
+    });
+    const signal = new AbortController().signal;
+    const oldWireInput = { ...compiled, contextBudget: { ...compiled.contextBudget!, maxInputTokens: 8000, maxWireInputTokens: 12096 } };
+    await expect(provider.prepare!(oldWireInput, { signal })).rejects.toMatchObject({ code: "GLM_INPUT_TOO_LARGE", message: expect.stringMatching(/wire input budget \(estimated=\d+/u) });
+    expect(posts).toBe(0);
+    const prepared = await provider.prepare!(compiled, { signal });
+    expect(prepared.estimate).toMatchObject({ estimatedTextTokens: expect.any(Number), estimatedVisualTokens: expect.any(Number), estimatedEnvelopeTokens: 32, estimatedTotalTokens: expect.any(Number), imageCount: 1 });
+    expect(prepared.estimate!.estimatedTotalTokens).toBeGreaterThan(12096);
+    expect(prepared.estimate!.estimatedTotalTokens).toBeLessThanOrEqual(24576);
+    expect(prepared.estimate!.estimatedTotalTokens).toBe(prepared.estimate!.estimatedTextTokens + prepared.estimate!.estimatedVisualTokens! + prepared.estimate!.estimatedEnvelopeTokens!);
+    await provider.generatePrepared!(prepared, { signal });
+    expect(posts).toBe(1);
+    expect(sentBody).toContain(goal);
+    expect(sentBody).toContain("PINNED_GUI_TEXT");
+    expect(sentBody).toContain("PINNED_GUI_RECEIPT");
   });
 
   it("preserves GLM request endpoint, thinking mode, and canonical tool projection", async () => {
