@@ -85,6 +85,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let foregroundRefusalMessage = "foreground_unavailable: Windows did not activate exact target HWND 0x162e (actual foreground HWND 0x223d); no mouse input was sent";
   let foregroundRefusalCode: string | undefined;
   let activationRefusal = false;
+  let activationToolResult: Partial<ToolResult> | undefined;
   let activationLanded = true;
   let activationTargetHwnd: number | undefined;
   let activationForegroundHwnd: number | undefined;
@@ -133,6 +134,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       calls.push({ name, input });
       if (name === "health_report") return result({ structuredJson: JSON.stringify({ schema_version: "1", platform, driver_version: cuaSdkVersionForPlatform() }) });
       if (name === "bring_to_front") {
+        if (activationToolResult !== undefined) return result(activationToolResult);
         return activationRefusal
           ? result({ isError: true, text: "fixture activation refused" })
           : result({ structuredJson: JSON.stringify({
@@ -308,6 +310,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       foregroundRefusalCode = errorCode;
     },
     setActivationRefusal(value: boolean) { activationRefusal = value; },
+    setActivationToolResult(value: Partial<ToolResult> | undefined) { activationToolResult = value; },
     setActivationLanded(value: boolean) { activationLanded = value; },
     setActivationHandles(targetHwnd: number | undefined, foregroundHwnd: number | undefined) {
       activationTargetHwnd = targetHwnd;
@@ -473,6 +476,47 @@ describe("CuaDriverComputer", () => {
       expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
       expect(fake.calls.some((call) => call.name === "verifyState")).toBe(false);
       expect(fake.calls.some((call) => call.name === "click" || call.name === "type_text" || call.name === "press_key")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces only safe activation field relations through open failure and still performs no capture/input", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-diagnostic-"));
+    const fake = windowDriver();
+    fake.setActivationToolResult({
+      isError: true,
+      text: "PRIVATE_DRIVER_RESULT_TEXT",
+      structuredJson: JSON.stringify({
+        status: "partial",
+        window_id: fake.target.windowId,
+        exact_window_effect: { verified: true, private_detail: "PRIVATE_EFFECT_TEXT" },
+        observed: {
+          focused_window_id: fake.target.windowId,
+          frontmost_ordinary_window_id: fake.target.windowId + 9,
+          front_process_matches_target: true,
+          title: "PRIVATE_WINDOW_TITLE",
+        },
+        private_top_level: "PRIVATE_STRUCTURED_FIELD",
+      }),
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    try {
+      const error = await computer.open({}, new AbortController().signal).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({
+        message: expect.stringContaining(`frontmost=mismatch:${fake.target.windowId + 9}`),
+      });
+      const message = (error as Error).message;
+      for (const privateValue of ["PRIVATE_DRIVER_RESULT_TEXT", "PRIVATE_EFFECT_TEXT", "PRIVATE_WINDOW_TITLE", "PRIVATE_STRUCTURED_FIELD"]) {
+        expect(message).not.toContain(privateValue);
+      }
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
+      expect(fake.calls.some((call) => call.name === "verifyState" || call.name === "get_window_state")).toBe(false);
+      expect(fake.calls.some((call) => ["click", "type_text", "press_key"].includes(call.name))).toBe(false);
+      expect(fake.calls.map((call) => call.name)).toContain("endSession");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

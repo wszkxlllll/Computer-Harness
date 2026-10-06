@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { CuaWindowDiscovery as ProductionCuaWindowDiscovery, type CuaWindowDiscoveryOptions } from "./window-discovery.js";
+import { activateWindowTarget } from "./window-contract.js";
 
 installFakeCuaSdkModuleForTests();
 
@@ -30,6 +31,86 @@ class WindowsFixtureDiscovery extends ProductionCuaWindowDiscovery {
 }
 
 describe("CuaWindowDiscovery", () => {
+  it.each([
+    {
+      label: "same focused ID but a different frontmost ID",
+      structured: { status: "partial", window_id: 1312, exact_window_effect: { verified: true }, observed: { focused_window_id: 1312, frontmost_ordinary_window_id: 999, front_process_matches_target: true } },
+      expectedCode: "WINDOW_ACTIVATION_UNCONFIRMED",
+      expectedEvidence: "frontmost=mismatch:999",
+    },
+    {
+      label: "matching IDs but exact effect is false",
+      structured: { status: "partial", window_id: 1312, exact_window_effect: { verified: false }, observed: { focused_window_id: 1312, frontmost_ordinary_window_id: 1312, front_process_matches_target: true } },
+      expectedCode: "WINDOW_ACTIVATION_UNCONFIRMED",
+      expectedEvidence: "exact_verified=false",
+    },
+    {
+      label: "front process is explicitly false",
+      structured: { status: "activated", window_id: 1312, exact_window_effect: { verified: true }, observed: { focused_window_id: 1312, frontmost_ordinary_window_id: 1312, front_process_matches_target: false } },
+      expectedCode: "WINDOW_ACTIVATION_REFUSED",
+      expectedEvidence: "front_process=false",
+    },
+    {
+      label: "front process is missing",
+      structured: { status: "activated", window_id: 1312, exact_window_effect: { verified: true }, observed: { focused_window_id: 1312, frontmost_ordinary_window_id: 1312 } },
+      expectedCode: "WINDOW_ACTIVATION_REFUSED",
+      expectedEvidence: "front_process=missing",
+    },
+    {
+      label: "front process has an invalid type without exposing it",
+      structured: { status: "activated", window_id: 1312, exact_window_effect: { verified: true }, observed: { focused_window_id: 1312, frontmost_ordinary_window_id: 1312, front_process_matches_target: "PRIVATE_DRIVER_FIELD" } },
+      expectedCode: "WINDOW_ACTIVATION_REFUSED",
+      expectedEvidence: "front_process=invalid",
+    },
+  ])("reports bounded activation evidence when $label", async ({ structured, expectedCode, expectedEvidence }) => {
+    const driver = { async callTool() { return result({ isError: structured.status === "partial", structuredJson: JSON.stringify(structured) }); } } as unknown as CuaDriverLike;
+    await expect(activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal))
+      .rejects.toMatchObject({ code: expectedCode, message: expect.stringContaining(expectedEvidence) });
+  });
+
+  it("maps malformed status, null nested objects and unknown fields to enums without leaking raw values", async () => {
+    const driver = { async callTool() { return result({
+      degraded: false,
+      structuredJson: JSON.stringify({ status: "PRIVATE_UNKNOWN_STATUS", window_id: "PRIVATE_HANDLE", observed: null, exact_window_effect: "PRIVATE_EFFECT" }),
+    }); } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "WINDOW_ACTIVATION_REFUSED",
+      message: expect.stringContaining("status=invalid window_id=invalid focused=invalid frontmost=invalid front_process=invalid exact_effect=invalid exact_verified=invalid"),
+    });
+    expect((error as Error).message).not.toMatch(/PRIVATE_/u);
+  });
+
+  it("distinguishes missing nested evidence from present-but-invalid containers", async () => {
+    const target = { pid: 42, windowId: 1312 };
+    const absent = { async callTool() { return result({ structuredJson: JSON.stringify({ landed_on_target: false }) }); } } as unknown as CuaDriverLike;
+    const absentError = await activateWindowTarget(absent, "private-session", target, new AbortController().signal).catch((caught: unknown) => caught);
+    expect((absentError as Error).message).toContain("focused=missing frontmost=missing front_process=missing exact_effect=missing exact_verified=missing");
+
+    const malformed = { async callTool() { return result({ structuredJson: JSON.stringify({ landed_on_target: false, observed: [], exact_window_effect: null }) }); } } as unknown as CuaDriverLike;
+    const malformedError = await activateWindowTarget(malformed, "private-session", target, new AbortController().signal).catch((caught: unknown) => caught);
+    expect((malformedError as Error).message).toContain("focused=invalid frontmost=invalid front_process=invalid exact_effect=invalid exact_verified=invalid");
+  });
+
+  it("does not coerce malformed ToolResult booleans in the diagnostic summary", async () => {
+    const driver = { async callTool() {
+      return result({ isError: "PRIVATE_TRUTHY" as unknown as boolean, degraded: "PRIVATE_DEGRADED" as unknown as boolean }) as unknown as ToolResult;
+    } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
+    expect((error as Error).message).toContain("is_error=invalid degraded=invalid");
+    expect((error as Error).message).not.toMatch(/PRIVATE_/u);
+  });
+
+  it("keeps the legacy exact landing success path and rejects it if another exact ID conflicts", async () => {
+    const target = { pid: 42, windowId: 1312 };
+    const success = { async callTool() { return result({ structuredJson: JSON.stringify({ landed_on_target: true, target_hwnd: "0x520", now_fg_hwnd: 1312 }) }); } } as unknown as CuaDriverLike;
+    await expect(activateWindowTarget(success, "private-session", target, new AbortController().signal)).resolves.toBeUndefined();
+
+    const conflict = { async callTool() { return result({ structuredJson: JSON.stringify({ landed_on_target: true, target_hwnd: target.windowId, now_fg_hwnd: target.windowId + 1 }) }); } } as unknown as CuaDriverLike;
+    await expect(activateWindowTarget(conflict, "private-session", target, new AbortController().signal))
+      .rejects.toMatchObject({ code: "WINDOW_ACTIVATION_REFUSED", message: expect.stringContaining("now_fg_hwnd=mismatch:1313") });
+  });
+
   it("lists host windows through a temporary read-only session and cleans it up", async () => {
     const calls: string[] = [];
     const driver = {
