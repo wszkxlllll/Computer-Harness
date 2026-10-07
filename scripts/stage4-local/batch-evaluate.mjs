@@ -35,7 +35,7 @@ const EVALUATOR_PATH = resolve(REPO_ROOT, "scripts/stage4-local/evaluate-traject
 // CLI parsing
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const args = { runsRoot: "runs", manifests: "eval/candidates", smoke: false };
+  const args = { "runs-root": "runs", manifests: "eval/candidates", smoke: false };
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     if (!key.startsWith("--")) continue;
@@ -85,6 +85,7 @@ async function findTrajectories(root) {
 }
 
 async function findManifests(root) {
+  if ((await stat(resolve(root))).isFile()) return [resolve(root)];
   const results = [];
   async function walk(dir) {
     let entries;
@@ -175,7 +176,7 @@ function runEvaluatorOnce(trajectoryPath, manifestPath, familyId, variantId, out
       "--family", familyId,
       "--output", outputPath,
     ];
-    if (variantId !== null) args.push("--variant", variantId);
+    if (variantId != null) args.push("--variant", variantId);
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -205,14 +206,14 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const startedAt = new Date();
 
-  const runsRoot = resolve(args.runsRoot);
+  const runsRoot = resolve(args["runs-root"]);
   const manifestsRoot = resolve(args.manifests);
   const outputDir = args["output-dir"]
     ? resolve(args["output-dir"])
     : resolve(REPO_ROOT, "..", `batch-eval-${startedAt.toISOString().slice(0, 19).replace(/[:T]/g, "")}`);
   await mkdir(outputDir, { recursive: true });
 
-  console.error(`batch-evaluate: runs=${args.runsRoot} manifests=${args.manifests} out=${relative(process.cwd(), outputDir)}`);
+  console.error(`batch-evaluate: runs=${args["runs-root"]} manifests=${args.manifests} out=${relative(process.cwd(), outputDir)}`);
   if (args.smoke) console.error("（冒烟模式：结果仅演练口径，不代表业务评估）");
 
   // 1. 发现文件
@@ -294,7 +295,7 @@ async function main() {
         );
         await mkdir(dirname(outputPath), { recursive: true });
 
-        const run = await runEvaluatorOnce(trajPath, manifestPath, familyId, variantId ?? undefined, outputPath);
+        const run = await runEvaluatorOnce(trajPath, manifestPath, familyId, variantId, outputPath);
         if (!run.ok) {
           results.push({
             trajectory: trajRel, manifestId, familyId, variantId, status: "evaluation_error",
@@ -330,7 +331,9 @@ async function main() {
           verdict: detail.verdict,
           success: detail.success,
           scores: detail.scores,
-          manualReviewCount: (detail.reviewNotes ?? []).filter((n) => n.includes("⚠️") || n.includes("⛔")).length,
+          manualReviewCount: detail.humanReview?.pendingChecks?.length ?? 0,
+          evidenceDeficiencyCount: detail.deficiencies?.length ?? 0,
+          humanReviewStatus: detail.humanReview?.status ?? "pending",
           reason: detail.reason,
           detailPath: relative(outputDir, outputPath),
         });
@@ -343,14 +346,14 @@ async function main() {
   const assessed = results.filter((r) => r.status === "assessed");
   const exercised = results.filter((r) => r.status === "exercise_only");
   const byVerdict = (list) => {
-    const counts = { success: 0, partial: 0, nearMiss: 0 };
+    const counts = { success: 0, partial: 0, nearMiss: 0, inconclusive: 0 };
     for (const r of list) if (counts[r.verdict] !== undefined) counts[r.verdict]++;
     return counts;
   };
 
   const summary = {
     schemaVersion: 1,
-    tool: "batch-evaluate-v1",
+    tool: "batch-evaluate-v2",
     startedAt: startedAt.toISOString(),
     finishedAt: new Date().toISOString(),
     smokeMode: args.smoke,
@@ -382,11 +385,8 @@ async function main() {
     [
       r.trajectory, r.manifestId ?? "", r.familyId ?? "", r.variantId ?? "",
       r.status, r.verdict ?? "", r.success ?? "",
-      r.scores ? r.scores.completion.toFixed(2) : "",
-      r.scores ? r.scores.infoAccuracy.toFixed(2) : "",
-      r.scores ? r.scores.errorPrevention.toFixed(2) : "",
-      r.scores ? r.scores.crossAppCorrectness.toFixed(2) : "",
-      r.scores ? r.scores.safetyCompliance.toFixed(2) : "",
+      ...["completion", "infoAccuracy", "errorPrevention", "crossAppCorrectness", "safetyCompliance"]
+        .map((name) => typeof r.scores?.[name] === "number" ? r.scores[name].toFixed(2) : ""),
       r.manualReviewCount ?? "", r.runtimeOutcome ?? "",
     ].map((v) => `"${String(v).replaceAll('"', '""')}"`).join(",")
   );
@@ -403,10 +403,10 @@ async function main() {
     "",
     "## 判定分布",
     "",
-    `| 状态 | success | partial | nearMiss |`,
-    `|---|---|---|---|`,
-    `| assessed | ${summary.verdictDistribution.assessed.success} | ${summary.verdictDistribution.assessed.partial} | ${summary.verdictDistribution.assessed.nearMiss} |`,
-    `| exercise_only（演练） | ${summary.verdictDistribution.exerciseOnly.success} | ${summary.verdictDistribution.exerciseOnly.partial} | ${summary.verdictDistribution.exerciseOnly.nearMiss} |`,
+    `| 状态 | success | partial | nearMiss | inconclusive |`,
+    `|---|---|---|---|---|`,
+    `| assessed | ${summary.verdictDistribution.assessed.success} | ${summary.verdictDistribution.assessed.partial} | ${summary.verdictDistribution.assessed.nearMiss} | ${summary.verdictDistribution.assessed.inconclusive} |`,
+    `| exercise_only（演练） | ${summary.verdictDistribution.exerciseOnly.success} | ${summary.verdictDistribution.exerciseOnly.partial} | ${summary.verdictDistribution.exerciseOnly.nearMiss} | ${summary.verdictDistribution.exerciseOnly.inconclusive} |`,
     "",
   ];
   if (summary.caveat) {
@@ -415,7 +415,7 @@ async function main() {
   if (assessed.length > 0) {
     reportLines.push("## assessed 明细", "", "| 轨迹 | family/variant | verdict | 安全分 | 复核项数 |", "|---|---|---|---|---|");
     for (const r of assessed) {
-      reportLines.push(`| ${r.trajectory} | ${r.familyId}${r.variantId ? "/" + r.variantId : ""} | ${r.verdict} | ${r.scores.safetyCompliance} | ${r.manualReviewCount} |`);
+      reportLines.push(`| ${r.trajectory} | ${r.familyId}${r.variantId ? "/" + r.variantId : ""} | ${r.verdict} | ${r.scores?.safetyCompliance ?? "未知"} | ${r.manualReviewCount} |`);
     }
     reportLines.push("");
   }
