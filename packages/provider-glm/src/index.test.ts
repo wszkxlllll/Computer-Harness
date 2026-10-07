@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { performance } from "node:perf_hooks";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
@@ -793,5 +794,128 @@ describe("GLM provider adapter", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("FetchGlmHttpClient independent settlement boundary", () => {
+  const flush = async (): Promise<void> => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+
+  it.each(["headers", "body"] as const)("settles the total deadline when %s never cooperates", async (phase) => {
+    vi.useFakeTimers();
+    const evidence: GlmTransportEvidence[] = [];
+    const fetchMock = vi.fn(async () => phase === "headers" ? new Promise<never>(() => {})
+      : { ok: true, status: 200, json: () => new Promise<never>(() => {}) });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = new FetchGlmHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, new AbortController().signal,
+        { payloadHash: "a".repeat(64), onTransportEvidence: item => { evidence.push(item); } }).catch((error: unknown) => error);
+      await flush(); await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+      expect(evidence.at(-1)).toMatchObject({ stage: phase === "headers" ? "fetch_failed" : "body_failed", outcome: "timeout" });
+      expect(fetchMock).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it.each(["headers", "body"] as const)("rejects delayed %s success after expiry and consumes late rejection", async (phase) => {
+    vi.useFakeTimers();
+    const evidence: GlmTransportEvidence[] = [];
+    let resolveLate: (value: unknown) => void = () => {};
+    let rejectLate: (reason: unknown) => void = () => {};
+    const late = new Promise<unknown>((resolve, reject) => { resolveLate = resolve; rejectLate = reject; });
+    const fetchMock = vi.fn(async () => phase === "headers" ? late : { ok: true, status: 200, json: () => late });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = new FetchGlmHttpClient({ requestTimeoutMs: 5 }).post("https://fixture.invalid", {}, {}, new AbortController().signal,
+        { payloadHash: "a".repeat(64), onTransportEvidence: item => { evidence.push(item); } }).catch((error: unknown) => error);
+      await flush(); await vi.advanceTimersByTimeAsync(5);
+      expect(await result).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false });
+      const count = evidence.length;
+      resolveLate(phase === "headers" ? { ok: true, status: 200, json: async () => ({ late: true }) } : { late: true });
+      rejectLate(new Error("late ignored rejection")); await flush();
+      expect(evidence).toHaveLength(count); expect(evidence.some(item => item.outcome === "success")).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it("preserves the exact first Run reason while a body ignores Abort forever", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const reason = { type: "user_cancelled_fixture" };
+    const evidence: GlmTransportEvidence[] = [];
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: () => new Promise<never>(() => {}) })));
+    try {
+      const result = new FetchGlmHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, controller.signal,
+        { payloadHash: "a".repeat(64), onTransportEvidence: item => { evidence.push(item); } }).catch((error: unknown) => error);
+      await flush(); controller.abort(reason); expect(await result).toBe(reason);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(evidence.at(-1)).toMatchObject({ outcome: "cancelled", abortSource: "run_cancelled" });
+      expect(evidence.some(item => item.outcome === "success" || item.outcome === "timeout")).toBe(false);
+      expect(remove).toHaveBeenCalledWith("abort", expect.any(Function)); expect(vi.getTimerCount()).toBe(0);
+    } finally { remove.mockRestore(); vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it("does not dispatch after serialization or diagnostics synchronously cancel the Run", async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    try {
+      const controller = new AbortController(); const reason = new Error("serialization cancelled");
+      const body = { toJSON() { controller.abort(reason); return {}; } };
+      await expect(new FetchGlmHttpClient().post("https://fixture.invalid", body, {}, controller.signal)).rejects.toBe(reason);
+      const second = new AbortController(); const secondReason = new Error("callback cancelled");
+      await expect(new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, second.signal,
+        { payloadHash: "a".repeat(64), onTransportEvidence(item) { if (item.stage === "fetch_invoked") second.abort(secondReason); } })).rejects.toBe(secondReason);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each(["serialization", "headers", "body"] as const)("rejects logical expiry in %s before the timer callback can run", async (phase) => {
+    vi.useFakeTimers(); let monotonic = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+    const fetchMock = vi.fn(async () => {
+      if (phase === "headers") monotonic = 35;
+      return { ok: true, status: 200, json: async () => { if (phase === "body") monotonic = 35; return { late: true }; } };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const body = phase === "serialization" ? { toJSON() { monotonic = 35; return {}; } } : {};
+    const evidence: GlmTransportEvidence[] = [];
+    try {
+      await expect(new FetchGlmHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", body, {}, new AbortController().signal,
+        { payloadHash: "a".repeat(64), onTransportEvidence: item => { evidence.push(item); } })).rejects.toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false });
+      expect(fetchMock).toHaveBeenCalledTimes(phase === "serialization" ? 0 : 1);
+      expect(evidence.some(item => item.outcome === "success")).toBe(false); expect(vi.getTimerCount()).toBe(0);
+    } finally { now.mockRestore(); vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it("consumes a promise that rejects only after the request has timed out", async () => {
+    vi.useFakeTimers(); let rejectLate: (reason: unknown) => void = () => {};
+    vi.stubGlobal("fetch", vi.fn(() => new Promise((_resolve, reject) => { rejectLate = reject; })));
+    try {
+      const result = new FetchGlmHttpClient({ requestTimeoutMs: 5 }).post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5); expect(await result).toMatchObject({ code: "GLM_REQUEST_TIMEOUT" });
+      rejectLate(new Error("ignored late provider rejection")); await flush();
+      expect(fetch).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it.each(["cancelled", "timeout"] as const)("rejects %s observed in the completed-body callback while preserving its receipt", async (outcome) => {
+    vi.useFakeTimers(); let monotonic = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+    const controller = new AbortController(); const reason = new Error("cancelled after body receipt");
+    const evidence: GlmTransportEvidence[] = [];
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ complete: true }) })));
+    try {
+      const result = new FetchGlmHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, controller.signal,
+        { payloadHash: "a".repeat(64), onTransportEvidence(item) {
+          evidence.push(item);
+          if (item.stage === "body_received") {
+            if (outcome === "cancelled") controller.abort(reason); else monotonic = 11;
+          }
+        } });
+      if (outcome === "cancelled") await expect(result).rejects.toBe(reason);
+      else await expect(result).rejects.toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false });
+      expect(evidence.some(item => item.stage === "body_received" && item.outcome === "success")).toBe(true);
+      expect(evidence.at(-1)).toMatchObject({ stage: "body_failed", outcome });
+      expect(fetch).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { now.mockRestore(); vi.useRealTimers(); vi.unstubAllGlobals(); }
   });
 });

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type {
   JsonValue,
   ModelUsage,
@@ -351,23 +352,32 @@ export class FetchGlmHttpClient implements GlmHttpClient {
     signal: AbortSignal,
     diagnostics?: GlmHttpDiagnostics,
   ): Promise<unknown> {
+    signal.throwIfAborted();
     const requestController = new AbortController();
-    const startedAt = Date.now();
+    const startedAt = performance.now();
+    const deadlineAt = startedAt + this.requestTimeoutMs;
+    const elapsedMs = (): number => Math.max(0, Math.floor(performance.now() - startedAt));
     let firstAbortSource: GlmAbortSource | undefined;
     let firstAbortReason: unknown;
+    let rejectAbort: (reason: unknown) => void = () => {};
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    // Cancellation may happen synchronously during serialization or a fetch callback.
+    // Keep the losing abort promise observed even before the first transport race.
+    void aborted.catch(() => {});
     const recordFirstAbort = (source: GlmAbortSource, reason: unknown): void => {
       if (firstAbortSource !== undefined) return;
       firstAbortSource = source;
       firstAbortReason = reason;
+      rejectAbort(reason);
+      requestController.abort(reason);
     };
-    const timeout = setTimeout(() => {
+    const expireRequest = (): void => {
       const reason = new Error(`GLM request deadline exceeded after ${this.requestTimeoutMs}ms`);
       recordFirstAbort("local_request_timeout", reason);
-      requestController.abort(reason);
-    }, this.requestTimeoutMs);
+    };
+    const timeout = setTimeout(expireRequest, this.requestTimeoutMs);
     const abortRequest = () => {
       recordFirstAbort("run_cancelled", signal.reason);
-      requestController.abort(signal.reason);
     };
     if (signal.aborted) {
       abortRequest();
@@ -377,79 +387,55 @@ export class FetchGlmHttpClient implements GlmHttpClient {
     const emit = (evidence: GlmTransportEvidence): void => {
       try { diagnostics?.onTransportEvidence?.(evidence); } catch { /* diagnostics cannot affect transport */ }
     };
+    const checkActive = (): void => {
+      if (firstAbortSource === undefined && performance.now() >= deadlineAt) expireRequest();
+      if (firstAbortSource !== undefined) throw firstAbortReason;
+    };
+    const awaitActive = async <T>(operation: () => Promise<T>): Promise<T> => {
+      checkActive();
+      const result = await Promise.race([operation(), aborted]);
+      // A non-cooperative promise can settle after a blocked/delayed timer.
+      // Logical expiry or the first cancellation still prevents late success.
+      checkActive();
+      return result;
+    };
+    let phase: "before_fetch" | "awaiting_headers" | "reading_body" = "before_fetch";
+    let response: Response | undefined;
+    let headersElapsedMs: number | undefined;
     try {
-      signal.throwIfAborted();
-      let response: Response;
+      checkActive();
       const serializedBody = JSON.stringify(body);
+      checkActive();
       const serializedBodyBytes = new TextEncoder().encode(serializedBody).byteLength;
       const requestConfiguration = safeRequestConfiguration(serializedBody);
-      try {
-        emit({
-          stage: "fetch_invoked",
-          outcome: "pending",
-          phase: "awaiting_headers",
-          elapsedMs: Date.now() - startedAt,
-          deadlineMs: this.requestTimeoutMs,
-          serializedBodyBytes,
-          ...(requestConfiguration === undefined ? {} : { requestConfiguration }),
-        });
-        response = await fetch(url, {
+      checkActive();
+      emit({
+        stage: "fetch_invoked",
+        outcome: "pending",
+        phase: "awaiting_headers",
+        elapsedMs: elapsedMs(),
+        deadlineMs: this.requestTimeoutMs,
+        serializedBodyBytes,
+        ...(requestConfiguration === undefined ? {} : { requestConfiguration }),
+      });
+      // A diagnostics hook may have requested Run cancellation before dispatch.
+      checkActive();
+      phase = "awaiting_headers";
+      response = await awaitActive(() => fetch(url, {
           method: "POST",
           headers,
           body: serializedBody,
           signal: requestController.signal,
-        });
-      } catch (error) {
-        if (firstAbortSource === "run_cancelled") {
-          emit({ stage: "fetch_failed", outcome: "cancelled", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
-          throw firstAbortReason ?? error;
-        }
-        if (firstAbortSource === "local_request_timeout") {
-          emit({ stage: "fetch_failed", outcome: "timeout", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
-          throw new GlmProviderError(
-            `GLM request timed out after ${this.requestTimeoutMs}ms (phase=awaiting_headers elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs})`,
-            "GLM_REQUEST_TIMEOUT",
-            // A timeout leaves the outcome of the remote request unknown. Do
-            // not replay a potentially large image/tool prompt automatically:
-            // callers must observe/restart explicitly instead of issuing a
-            // second identical request that may duplicate provider work.
-            false,
-            "feedback",
-          );
-        }
-        emit({ stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers", elapsedMs: Date.now() - startedAt, deadlineMs: this.requestTimeoutMs });
-        throw new GlmProviderError(
-          `GLM network request failed (${networkDiagnostic(error)})`,
-          "GLM_NETWORK_ERROR",
-          true,
-          "same_input",
-        );
-      }
-      const headersElapsedMs = Date.now() - startedAt;
+      }));
+      headersElapsedMs = elapsedMs();
+      phase = "reading_body";
       emit({ stage: "headers_received", outcome: response.ok ? "pending" : "http_error", phase: "reading_body", elapsedMs: headersElapsedMs, httpStatus: response.status });
-      const payload = await response.json().catch((error: unknown) => {
-        if (firstAbortSource === "run_cancelled") {
-          emit({ stage: "body_failed", outcome: "cancelled", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
-          throw firstAbortReason ?? signal.reason ?? error;
-        }
-        if (firstAbortSource === "local_request_timeout") {
-          emit({ stage: "body_failed", outcome: "timeout", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status, deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource });
-          throw new GlmProviderError(
-            `GLM response body timed out after ${this.requestTimeoutMs}ms (phase=reading_body elapsedMs=${Date.now() - startedAt} deadlineMs=${this.requestTimeoutMs} headersElapsedMs=${headersElapsedMs} httpStatus=${response.status})`,
-            "GLM_REQUEST_TIMEOUT",
-            false,
-            "feedback",
-          );
-        }
-        emit({ stage: "body_failed", outcome: "network_error", phase: "reading_body", elapsedMs: Date.now() - startedAt, httpStatus: response.status, deadlineMs: this.requestTimeoutMs });
-        throw new GlmProviderError(
-          `GLM response body could not be read (${networkDiagnostic(error)})`,
-          "GLM_NETWORK_ERROR",
-          true,
-          "same_input",
-        );
-      }) as unknown;
-      emit({ stage: "body_received", outcome: response.ok ? "success" : "http_error", phase: "complete", elapsedMs: Date.now() - startedAt, httpStatus: response.status });
+      const receivedResponse = response;
+      const payload = await awaitActive(() => receivedResponse.json()) as unknown;
+      emit({ stage: "body_received", outcome: response.ok ? "success" : "http_error", phase: "complete", elapsedMs: elapsedMs(), httpStatus: response.status });
+      // Preserve the completed HTTP receipt, but do not return a usable result
+      // if cancellation or logical expiry occurred during its callback.
+      checkActive();
       if (!response.ok) {
         const code = readErrorCode(payload);
         const providerMessage = readErrorMessage(payload);
@@ -462,6 +448,32 @@ export class FetchGlmHttpClient implements GlmHttpClient {
         );
       }
       return payload;
+    } catch (error) {
+      // Also check logical expiry after a rejection, before classifying a network failure.
+      if (firstAbortSource === undefined && performance.now() >= deadlineAt) expireRequest();
+      const stage = phase === "reading_body" ? "body_failed" : "fetch_failed";
+      const status = response === undefined ? {} : { httpStatus: response.status };
+      if (firstAbortSource === "run_cancelled") {
+        emit({ stage, outcome: "cancelled", phase, elapsedMs: elapsedMs(), deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource, ...status });
+        throw firstAbortReason;
+      }
+      if (firstAbortSource === "local_request_timeout") {
+        emit({ stage, outcome: "timeout", phase, elapsedMs: elapsedMs(), deadlineMs: this.requestTimeoutMs, abortSource: firstAbortSource, ...status });
+        throw new GlmProviderError(
+          `GLM ${phase === "reading_body" ? "response body" : "request"} timed out after ${this.requestTimeoutMs}ms (phase=${phase} elapsedMs=${elapsedMs()} deadlineMs=${this.requestTimeoutMs}${response === undefined ? "" : ` headersElapsedMs=${headersElapsedMs} httpStatus=${response.status}`})`,
+          "GLM_REQUEST_TIMEOUT",
+          // Local settlement cannot prove the remote request stopped. Never replay it automatically.
+          false,
+          "feedback",
+        );
+      }
+      if (error instanceof GlmProviderError) throw error;
+      if (phase === "before_fetch") throw error;
+      emit({ stage, outcome: "network_error", phase, elapsedMs: elapsedMs(), deadlineMs: this.requestTimeoutMs, ...status });
+      throw new GlmProviderError(
+        `GLM ${phase === "reading_body" ? "response body could not be read" : "network request failed"} (${networkDiagnostic(error)})`,
+        "GLM_NETWORK_ERROR", true, "same_input",
+      );
     } finally {
       clearTimeout(timeout);
       signal.removeEventListener("abort", abortRequest);
