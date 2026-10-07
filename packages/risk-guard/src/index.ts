@@ -64,39 +64,93 @@ export class LayeredRiskGuard implements ActionPolicy {
 
   public async evaluate(context: ActionPolicyContext, signal: AbortSignal): Promise<ActionPolicyDecision> {
     signal.throwIfAborted();
-    const route = routeCandidate(context, this.forbiddenShortcuts);
-    if (route.route !== "semantic_review") return localDecision(route);
-    if (this.options.assessor === undefined) {
-      return fallbackDecision(
+    const finish = (build: () => ActionPolicyDecision): ActionPolicyDecision => {
+      signal.throwIfAborted();
+      try { return build(); } finally { signal.throwIfAborted(); }
+    };
+    let route: RiskRoute;
+    try { route = routeCandidate(context, this.forbiddenShortcuts); }
+    finally { signal.throwIfAborted(); }
+    if (route.route !== "semantic_review") return finish(() => localDecision(route));
+    let assessor: RiskAssessor | undefined;
+    try { assessor = this.options.assessor; } finally { signal.throwIfAborted(); }
+    if (assessor === undefined) {
+      return finish(() => fallbackDecision(
         route.categories,
         "semantic_review_unavailable",
         `Risk semantics are unclear and no reviewer is configured. Trigger: ${route.reason}`,
-      );
+      ));
     }
     if (this.modelRequests >= this.maxModelRequests) {
-      return fallbackDecision(
+      return finish(() => fallbackDecision(
         route.categories,
         "risk_model_budget_exhausted",
         `Risk semantics are unclear and the review budget is exhausted. Trigger: ${route.reason}`,
-      );
+      ));
     }
     this.modelRequests += 1;
-    const started = Date.now();
-    const timeout = AbortSignal.timeout(this.timeoutMs);
-    const combined = AbortSignal.any([signal, timeout]);
-    try {
-      const assessment = await this.options.assessor.classify(context, combined);
+    const started = performance.now();
+    const deadline = started + this.timeoutMs;
+    const controller = new AbortController();
+    const timeoutError = new Error("Risk semantic review timed out");
+    let timedOut = false;
+    let rejectInterruption!: (reason: unknown) => void;
+    const interruption = new Promise<never>((_resolve, reject) => { rejectInterruption = reject; });
+    // Attach immediately: a synchronous abort/getter can precede the race itself.
+    void interruption.catch(() => undefined);
+    const onRunAbort = (): void => {
+      rejectInterruption(signal.reason);
+      controller.abort(signal.reason);
+    };
+    const onTimeout = (): void => {
+      if (timedOut) return;
+      timedOut = true; // Lock local timeout before abort callback reentry.
+      rejectInterruption(timeoutError);
+      controller.abort(timeoutError);
+    };
+    const checkActive = (): void => {
       signal.throwIfAborted();
-      return assessmentDecision(assessment, this.options.assessor.id, Date.now() - started);
+      if (performance.now() >= deadline) onTimeout();
+      // Run cancellation triggered by timeout's abort callback takes precedence.
+      signal.throwIfAborted();
+      if (timedOut) throw timeoutError;
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      signal.addEventListener("abort", onRunAbort, { once: true });
+      if (signal.aborted) onRunAbort();
+      timer = setTimeout(onTimeout, this.timeoutMs);
+      checkActive();
+      const classify = assessor.classify;
+      checkActive();
+      const promise = Promise.resolve(classify.call(assessor, context, controller.signal));
+      const raced = Promise.race([promise, interruption]);
+      // Handle late resolve/reject even if post-call validation throws before await.
+      void raced.catch(() => undefined);
+      checkActive();
+      const assessment = await raced;
+      checkActive();
+      const decision = assessmentDecision(assessment, assessor.id, performance.now() - started);
+      checkActive();
+      return decision;
     } catch (error) {
       signal.throwIfAborted();
-      return fallbackDecision(
+      let summary: string;
+      try { summary = shortError(error); } catch { summary = "review error unavailable"; }
+      signal.throwIfAborted();
+      return finish(() => fallbackDecision(
         route.categories,
         "risk_model_failed",
-        `Risk semantics remain unclear because review failed: ${shortError(error)}. Trigger: ${route.reason}`,
-        Date.now() - started,
+        `Risk semantics remain unclear because review failed: ${summary}. Trigger: ${route.reason}`,
+        performance.now() - started,
         1,
-      );
+      ));
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener("abort", onRunAbort);
+      // Cleanup can synchronously reenter caller code; cancellation still owns
+      // any result that has not yet settled, including the fallback path.
+      signal.throwIfAborted();
     }
   }
 }

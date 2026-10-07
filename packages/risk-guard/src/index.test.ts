@@ -1,8 +1,9 @@
 import type { ActionId, AssetId, ComputerSessionId, ObservationId, RunId, SurfaceId, ToolCallId } from "@computer-harness/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ActionPolicyContext, ProviderAdapter } from "@computer-harness/runtime";
 import { initialRunSnapshot } from "@computer-harness/trajectory";
 import { LayeredRiskGuard, ProviderRiskAssessor, ScriptedRiskAssessor } from "./index.js";
+import type { SemanticRiskAssessment } from "./index.js";
 
 const runId = "risk-run" as RunId;
 const surfaceRef = { surfaceId: "risk-guard-index-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
@@ -486,6 +487,102 @@ describe("LayeredRiskGuard", () => {
       reasonCode: "risk_model_budget_exhausted",
       modelRequestCount: 0,
     });
+  });
+
+  it("bounds a never-settling reviewer without cooperation", async () => {
+    const classify = vi.fn(() => new Promise<never>(() => undefined));
+    const guard = new LayeredRiskGuard({ timeoutMs: 5, assessor: { id: "fake", classify } });
+    await expect(guard.evaluate(context("unknown"), new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval", path: "fallback", reasonCode: "risk_model_failed", modelRequestCount: 1,
+    });
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(classify.mock.calls[0]?.length).toBe(2);
+  });
+
+  it.each([null, 0, { synthetic: "original reason" }])("preserves a pre-cancelled Run reason %s without classifying", async (reason) => {
+    const run = new AbortController();
+    run.abort(reason);
+    const classify = vi.fn();
+    await expect(new LayeredRiskGuard({ assessor: { id: "fake", classify } }).evaluate(context("unknown"), run.signal)).rejects.toBe(reason);
+    expect(classify).not.toHaveBeenCalled();
+  });
+
+  it("settles Run cancellation while the reviewer remains pending", async () => {
+    const run = new AbortController();
+    const reason = { synthetic: "cancel" };
+    let internal: AbortSignal | undefined;
+    const guard = new LayeredRiskGuard({ assessor: { id: "fake", classify(_input, signal) {
+      internal = signal;
+      return new Promise<never>(() => undefined);
+    } } });
+    const result = guard.evaluate(context("unknown"), run.signal);
+    run.abort(reason);
+    await expect(result).rejects.toBe(reason);
+    expect(internal?.aborted).toBe(true);
+  });
+
+  it("gives Run cancellation precedence over timeout abort callback reentry", async () => {
+    const run = new AbortController();
+    const reason = { synthetic: "timeout reentry" };
+    const guard = new LayeredRiskGuard({ timeoutMs: 5, assessor: { id: "fake", classify(_input, signal) {
+      signal.addEventListener("abort", () => run.abort(reason), { once: true });
+      return new Promise<never>(() => undefined);
+    } } });
+    await expect(guard.evaluate(context("unknown"), run.signal)).rejects.toBe(reason);
+  });
+
+  it.each(["sync", "await"] as const)("rejects a %s result past the monotonic deadline before timer delivery", async (phase) => {
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      const guard = new LayeredRiskGuard({ timeoutMs: 10, assessor: { id: "fake", classify() {
+        const assessment: SemanticRiskAssessment = { effects: ["local_edit"], alignment: "aligned", evidence: "Synthetic" };
+        if (phase === "sync") { now = 11; return Promise.resolve(assessment); }
+        return Promise.resolve().then(() => { now = 11; return assessment; });
+      } } });
+      await expect(guard.evaluate(context("unknown"), new AbortController().signal)).resolves.toMatchObject({ reasonCode: "risk_model_failed", decision: "require_approval" });
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each(["resolve", "reject"] as const)("observes late reviewer %s without another classification", async (settlement) => {
+    let resolve!: (value: { effects: ["local_edit"]; alignment: "aligned"; evidence: string }) => void;
+    let reject!: (reason: unknown) => void;
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", listener);
+    const classify = vi.fn(() => new Promise<{ effects: ["local_edit"]; alignment: "aligned"; evidence: string }>((yes, no) => { resolve = yes; reject = no; }));
+    try {
+      const result = await new LayeredRiskGuard({ timeoutMs: 5, assessor: { id: "fake", classify } }).evaluate(context("unknown"), new AbortController().signal);
+      if (settlement === "resolve") resolve({ effects: ["local_edit"], alignment: "aligned", evidence: "Synthetic late" });
+      else reject(new Error("Synthetic late rejection"));
+      await new Promise<void>((done) => setTimeout(done, 0));
+      expect(result).toMatchObject({ decision: "require_approval", reasonCode: "risk_model_failed" });
+      expect(classify).toHaveBeenCalledTimes(1);
+      expect(unhandled).toEqual([]);
+    } finally { process.removeListener("unhandledRejection", listener); }
+  });
+
+  it("checks Run cancellation caused by assessment getters", async () => {
+    const run = new AbortController();
+    const reason = { synthetic: "assessment getter" };
+    const assessor = { id: "fake", async classify() {
+      return { get effects(): ["local_edit"] { run.abort(reason); return ["local_edit"]; }, alignment: "aligned" as const, evidence: "Synthetic" };
+    } };
+    await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown"), run.signal)).rejects.toBe(reason);
+  });
+
+  it.each([false, true])("checks Run cancellation after cleanup of a failed=%s review", async (failed) => {
+    const run = new AbortController();
+    const reason = { synthetic: "cleanup" };
+    const original = run.signal.removeEventListener.bind(run.signal);
+    const removal = vi.spyOn(run.signal, "removeEventListener").mockImplementation((...args) => { original(...args); run.abort(reason); });
+    const clear = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const assessor = new ScriptedRiskAssessor(failed ? new Error("Synthetic") : { effects: ["local_edit"], alignment: "aligned", evidence: "Synthetic" });
+      await expect(new LayeredRiskGuard({ assessor }).evaluate(context("unknown"), run.signal)).rejects.toBe(reason);
+      expect(removal).toHaveBeenCalledTimes(1);
+      expect(clear).toHaveBeenCalledTimes(1);
+    } finally { removal.mockRestore(); clear.mockRestore(); }
   });
 
   it("does not let view/draft words suppress a mixed payment signal", async () => {
