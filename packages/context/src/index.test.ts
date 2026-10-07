@@ -1162,6 +1162,57 @@ describe("DefaultContextCompiler", () => {
     expect(budgetedText).not.toContain(operationGuidance.text);
   });
 
+  it("includes long operation guidance intact or omits it atomically when the budget is tight", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { features: { planning: "off", memory: "off", batching: "off" } });
+    const recentEvents = [event(0, { type: "user.input.received", text: "Keep the current task in scope." })];
+    const guidanceText = `${"g".repeat(405)}complete-guidance-tail`;
+    const operationGuidance = {
+      id: "text_document_save",
+      fingerprint: "long-operation-guidance-v1",
+      text: guidanceText,
+    };
+    const base = await compiler.compile({ runId, goal: "Continue the current task.", recentEvents }, new AbortController().signal);
+    const included = await compiler.compile({
+      runId,
+      goal: "Continue the current task.",
+      recentEvents,
+      operationGuidance,
+    }, new AbortController().signal);
+    const includedText = included.messages.flatMap((message) =>
+      message.content.flatMap((block) => block.type === "text" ? [block.text] : []),
+    ).join("\n");
+    expect(includedText).toContain(guidanceText);
+    expect(includedText).toContain("complete-guidance-tail");
+    expect(included.contextBudget?.trace?.operationGuidance).toEqual({
+      id: operationGuidance.id,
+      fingerprint: operationGuidance.fingerprint,
+      included: true,
+    });
+    expect(included.contextBudget?.trace?.stablePrefixHash).toBe(base.contextBudget?.trace?.stablePrefixHash);
+
+    const formattedGuidance = `Current task operation note (advisory only; the Goal and existing permissions remain authoritative):\n${guidanceText}`;
+    const guidanceCharacters = [...formattedGuidance].length;
+    const budgeted = await compiler.compile({
+      runId,
+      goal: "Continue the current task.",
+      recentEvents,
+      operationGuidance,
+      context: { maxInputTokens: base.contextBudget!.estimatedInputTokens + guidanceCharacters - 1 },
+    }, new AbortController().signal);
+    const budgetedText = budgeted.messages.flatMap((message) =>
+      message.content.flatMap((block) => block.type === "text" ? [block.text] : []),
+    ).join("\n");
+    expect(budgeted.contextBudget?.trace?.operationGuidance).toEqual({
+      id: operationGuidance.id,
+      fingerprint: operationGuidance.fingerprint,
+      included: false,
+      omittedReason: "budget",
+    });
+    expect(budgetedText).not.toContain("complete-guidance-tail");
+    expect(budgetedText).not.toContain("g".repeat(100));
+    expect(budgeted.contextBudget?.trace?.stablePrefixHash).toBe(base.contextBudget?.trace?.stablePrefixHash);
+  });
+
   it("uses the injected recall ranking in the actual ModelInput without treating tool results as user corrections", async () => {
     const queries: Array<{ originalGoal: string; latestUserCorrections?: readonly string[] }> = [];
     const recall = {

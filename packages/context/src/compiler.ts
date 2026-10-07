@@ -316,7 +316,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     }
     const operationGuidanceText = input.operationGuidance === undefined
       ? undefined
-      : formatOperationGuidance(input.operationGuidance.text.slice(0, 400));
+      : formatOperationGuidance(input.operationGuidance.text);
     const rawOperationGuidanceTokens = operationGuidanceText === undefined ? 0 : [...operationGuidanceText].length;
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
