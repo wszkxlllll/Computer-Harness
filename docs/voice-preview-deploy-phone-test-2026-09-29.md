@@ -6,6 +6,15 @@
 
 ## 2026-10-07 Preview 部署与 Windows 输入候选
 
+### 同日后续更新：仅本机Host（已完成）
+
+本机Host随后更新为源码`d840000c90651fd21a6d34173435e68cb5a5e205`，包含Context完整操作指导投影及大图候选预览缩略图。服务器Relay/Web仍是下方`a9464d4`的release／asset，没有改协议或前端，不因本机代码提交就宣称服务器全部切到新commit。候选CUA二进制／pipe／home／profile保持不变，未重启driver。
+
+- 全仓Vitest1817/1817通过，预览定向102/102、两个包noEmit及实际Node24.19.0根`tsc -b`通过；Sol独立审查放行。输入／查询真实任务仍是更新前用户Run验收，不把离线缩图测试写成新实机整题通过。
+- 构建与重启前后物理桌面owner均unowned；只核验并重启精确Preview Host，未停止默认CUA或服务器。新Host`/connect`、`/api/local/session`均200，Relay连接建立；本次没有业务Run、桌面输入或模型API调用。env修改时间不变，登录profile未操作。
+- Host入口hash可能不变，但本次记录了新`app-runtime/dist/window-preview-image.js`（`01798F…C46F3F5`）、`remote-run-api.js`（`1F5F69…A7D561`）和`context/dist/compiler.js`（`3C563F…66F0F27`）及完整本机指纹，避免用旧入口hash误认依赖未更新。私有state中保存新sourceRevision和构建hash；沿用旧launcher目录名称不代表旧源码。
+- 手机需重新打开电脑`http://localhost:4318/connect`扫码配对。大图捕获成功时会在Host端有界缩为预览PNG，最终仍≤2MiB；模型截图／坐标不变。离线合成图9,834,668字节（2048×1200）→1,550,797字节（819×480），651ms；真实capture失败不在此修复承诺中。
+
 ### 服务器 Relay/Web（已部署）
 
 - PR22 源码 commit `a9464d4023a0d1cc807d38cb69f483e237a2ff96` 已 push；GitHub 核验 author 与 committer 均解析为账号 ID `142909575`。部署包来自该 commit 的 clean archive：SHA-256 `CD889A783D6EFA3143C0901FAAEB56895626E618DC79476B434F45ABD5ADA01E`。归档审计为 759 项，未包含 `.env*`、`.harness.local.*`、`runs/`、`.tools/`、profile、截图/图片、key 文件、`node_modules/` 或 `dist/`。
