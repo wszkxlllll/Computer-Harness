@@ -10,6 +10,7 @@ import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
 import { RunNoticeProjector, RunNoticeScheduler, type RunNoticeGeneration } from "@computer-harness/voice";
 import { approvalRequiresVisualReview, projectApprovalPreview, projectApprovalVoiceContext } from "./approval-preview.js";
+import { normalizeWindowPreviewPng, WindowPreviewImageError } from "./window-preview-image.js";
 import { filterIndistinguishableWindowTargets, filterInitialTargetWindowCandidates, hasExplicitApplicationIntent, matchGoalToWindow, targetsForExplicitApplicationIntent } from "./window-target-matcher.js";
 import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 import {
@@ -409,9 +410,6 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (preview.target.pid !== target.pid || preview.target.windowId !== target.windowId) {
       throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The screenshot no longer belongs to the exact selected window. Refresh the list and inspect the current candidate.");
     }
-    if (preview.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
-      throw new RemoteRunApiError("WINDOW_PREVIEW_IMAGE_TOO_LARGE", "The exact window preview exceeds the safe image transfer limit. Resize the window and refresh before trying again.");
-    }
     if (preview.mediaType !== "image/png" || preview.data.byteLength === 0) {
       throw new RemoteRunApiError("WINDOW_PREVIEW_CAPTURE_FAILED", "The exact window preview did not contain a usable image. Restore the window, refresh, and try again.");
     }
@@ -421,7 +419,22 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (normalizedExpectedApp !== undefined && normalizedPreviewApp !== undefined && normalizedExpectedApp !== normalizedPreviewApp) {
       throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The application behind this window changed. Refresh the list and inspect the new candidate.");
     }
-    return preview;
+    try {
+      const normalized = normalizeWindowPreviewPng(preview.data, preview.viewport, signal);
+      if (normalized.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
+        throw new RemoteRunApiError("WINDOW_PREVIEW_IMAGE_TOO_LARGE", "The exact window preview exceeds the safe image transfer limit after bounded thumbnail reduction. Resize the window and refresh before trying again.");
+      }
+      return { ...preview, data: normalized.data, viewport: normalized.viewport };
+    } catch (error) {
+      if (error instanceof RemoteRunApiError) throw error;
+      if (error instanceof WindowPreviewImageError) {
+        if (error.code === "WINDOW_PREVIEW_IMAGE_TOO_LARGE") {
+          throw new RemoteRunApiError(error.code, "The exact window preview exceeds the safe image transfer limit after bounded thumbnail reduction. Resize the window and refresh before trying again.");
+        }
+        throw new RemoteRunApiError(error.code, "The exact window preview is not a usable PNG. Refresh the window list and retry its preview.");
+      }
+      throw error;
+    }
   }
 
   private async listCurrentHandoffCandidate(

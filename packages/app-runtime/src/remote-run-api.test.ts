@@ -1,5 +1,6 @@
 import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -25,6 +26,58 @@ import { ApplicationRemoteRunApi, RemoteRunApiError, type ManagedBrowserProfileR
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
 const surfaceRef: SurfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" };
 const nativeWindowSurfaceRef: SurfaceRef = { surfaceId: "remote-run-api-native-window" as SurfaceId, generation: 1, kind: "native_window" };
+
+interface FixturePngRaster {
+  readonly width: number;
+  readonly height: number;
+  readonly data: Buffer;
+}
+
+interface FixturePngModule {
+  readonly PNG: {
+    readonly sync: {
+      read(data: Buffer): FixturePngRaster;
+      write(image: FixturePngRaster, options?: { readonly deflateLevel?: number }): Buffer;
+    };
+  };
+}
+
+const pngjs = createRequire(import.meta.url)("pngjs") as FixturePngModule;
+
+function createNoisyPng(width: number, height: number): Buffer {
+  const data = Buffer.allocUnsafe(width * height * 4);
+  let state = 0x7191a5d3;
+  for (let index = 0; index < data.length; index += 1) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    data[index] = state & 0xff;
+  }
+  return pngjs.PNG.sync.write({ width, height, data }, { deflateLevel: 1 });
+}
+
+function createPngAtByteLength(width: number, height: number, byteLength: number): Buffer {
+  const base = pngjs.PNG.sync.write({ width, height, data: Buffer.alloc(width * height * 4, 0x7f) });
+  const ancillaryDataLength = byteLength - base.byteLength - 12;
+  if (ancillaryDataLength < 8) throw new Error("PNG fixture target size is too small for one text chunk");
+  const chunk = Buffer.alloc(ancillaryDataLength + 12, 0x41);
+  chunk.writeUInt32BE(ancillaryDataLength, 0);
+  chunk.write("tEXt", 4, "ascii");
+  chunk.write("Comment\0", 8, "ascii");
+  const crcOffset = 8 + ancillaryDataLength;
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, crcOffset)), crcOffset);
+  const endChunkOffset = base.byteLength - 12;
+  return Buffer.concat([base.subarray(0, endChunkOffset), chunk, base.subarray(endChunkOffset)]);
+}
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffff_ffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) === 0 ? 0 : 0xedb8_8320);
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
+}
 
 function config(outputDir: string): ApplicationSessionConfig {
   return {
@@ -439,7 +492,7 @@ describe("ApplicationRemoteRunApi", () => {
         capturedAt: "2026-10-04T00:00:00.000Z",
         viewport: { width: 320, height: 240 },
         mediaType: "image/png",
-        data: new Uint8Array(MAX_WINDOW_PREVIEW_BYTES),
+        data: createPngAtByteLength(320, 240, MAX_WINDOW_PREVIEW_BYTES),
       },
     });
     setWindows([first, { ...first, pid: 722, windowId: 7221 }]);
@@ -447,7 +500,59 @@ describe("ApplicationRemoteRunApi", () => {
       const choices = await api.listWindowTargets("device-one");
       const preview = await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
       expect(preview.previewToken).toMatch(/^[A-Za-z0-9_-]{32}$/u);
-      expect(Buffer.from(preview.dataBase64, "base64")).toHaveLength(MAX_WINDOW_PREVIEW_BYTES);
+      const image = Buffer.from(preview.dataBase64, "base64");
+      expect(image).toHaveLength(MAX_WINDOW_PREVIEW_BYTES);
+      expect(pngjs.PNG.sync.read(image)).toMatchObject({ width: preview.viewport.width, height: preview.viewport.height });
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes an oversized same-title preview while keeping the proof bound to its exact candidate", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-thumbnail-"));
+    const first = { pid: 721, windowId: 7211, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const second = { pid: 722, windowId: 7221, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const source = createNoisyPng(2_048, 1_200);
+    expect(source.byteLength).toBeGreaterThan(MAX_WINDOW_PREVIEW_BYTES);
+    const { api, session, windowPreviewCalls, createdComputerConfigs, setWindows } = createFixture(outputDir, {
+      summary: "The selected window task completed.",
+      windowPreviewOverride: {
+        target: first,
+        capturedAt: "2026-10-06T00:00:00.000Z",
+        viewport: { width: 2_048, height: 1_200 },
+        mediaType: "image/png",
+        data: source,
+      },
+    });
+    setWindows([first, second]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      expect(choices.candidates).toHaveLength(2);
+      expect(choices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
+      const preview = await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
+      const thumbnail = Buffer.from(preview.dataBase64, "base64");
+      const decoded = pngjs.PNG.sync.read(thumbnail);
+
+      expect(windowPreviewCalls).toEqual([{ pid: first.pid, windowId: first.windowId }]);
+      expect(thumbnail.byteLength).toBeLessThanOrEqual(MAX_WINDOW_PREVIEW_BYTES);
+      expect(preview.viewport).toEqual({ width: decoded.width, height: decoded.height });
+      expect(preview.viewport.width).toBeLessThan(2_048);
+      expect(preview.viewport.height).toBeLessThan(1_200);
+      await expect(api.startRun("device-one", "thumbnail-wrong-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        previewToken: "X".repeat(32),
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+
+      const run = await api.startRun("device-one", "thumbnail-exact-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        previewToken: preview.previewToken,
+      });
+      expect(run.target).toMatchObject({ appName: first.appName, title: first.title, provenance: "starting_target" });
+      await session.waitForActiveRun();
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: first.pid, windowId: first.windowId } });
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -513,8 +618,14 @@ describe("ApplicationRemoteRunApi", () => {
 
   it("binds handoff previews and confirmation proofs to the current Run request and exact candidate", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-preview-"));
-    const root = { pid: 710, windowId: 7101, appName: "WPS Office", title: "Budget.docx" };
-    const first = { pid: 711, windowId: 7111, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const root = { pid: 710, windowId: 7101, appName: "Notepad.exe", title: "Notes - Notepad" };
+    const first: ComputerWindowCandidate = {
+      pid: 711,
+      windowId: 7111,
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      relationship: { kind: "owned_child", owner: { pid: root.pid, windowId: root.windowId }, rootRole: "dialog" },
+    };
     const second = { pid: 712, windowId: 7121, appName: "Notepad.exe", title: "Untitled - Notepad" };
     const click: ToolCall = {
       id: "handoff-preview-click" as ToolCallId,
@@ -526,6 +637,13 @@ describe("ApplicationRemoteRunApi", () => {
       summary: "The selected dialog task completed.",
       windowHandoff: "confirm-v1",
       windowHandoffCandidates: [first, second],
+      windowPreviewOverride: {
+        target: first,
+        capturedAt: "2026-10-06T00:00:00.000Z",
+        viewport: { width: 2_048, height: 1_200 },
+        mediaType: "image/png",
+        data: createNoisyPng(2_048, 1_200),
+      },
       turnFactory: (turnNumber) => turnNumber === 1 ? { type: "tool_calls", calls: [click] } : { type: "finish", summary: "The selected dialog task completed." },
       executeAction: (action) => ({
         actionId: action.actionId,
@@ -564,8 +682,13 @@ describe("ApplicationRemoteRunApi", () => {
         previewToken: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/u),
         appName: "Notepad.exe",
         title: "Untitled - Notepad",
+        relationship: { kind: "owned_child", rootRole: "dialog" },
         mediaType: "image/png",
       });
+      const previewBytes = Buffer.from(preview.dataBase64, "base64");
+      const decodedPreview = pngjs.PNG.sync.read(previewBytes);
+      expect(previewBytes.byteLength).toBeLessThanOrEqual(MAX_WINDOW_PREVIEW_BYTES);
+      expect(preview.viewport).toEqual({ width: decodedPreview.width, height: decodedPreview.height });
       expect(windowPreviewCalls).toEqual([{ pid: first.pid, windowId: first.windowId }]);
       expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: root.pid, windowId: root.windowId } });
       expect(JSON.stringify(api.getRun("device-one", started.runId)?.pendingRequest)).not.toContain(preview.previewToken);
@@ -995,12 +1118,12 @@ describe("ApplicationRemoteRunApi", () => {
       mediaType: "image/png",
       data: new Uint8Array([137, 80, 78, 71]),
     }) },
-    { label: "an oversized image", code: "WINDOW_PREVIEW_IMAGE_TOO_LARGE", makePreview: (first: WindowTargetInfo): WindowTargetPreview => ({
+    { label: "a source image above the internal cap", code: "WINDOW_PREVIEW_IMAGE_TOO_LARGE", makePreview: (first: WindowTargetInfo): WindowTargetPreview => ({
       target: first,
       capturedAt: "2026-10-04T00:00:00.000Z",
       viewport: { width: 8, height: 8 },
       mediaType: "image/png",
-      data: new Uint8Array(MAX_WINDOW_PREVIEW_BYTES + 1),
+      data: new Uint8Array(16 * 1024 * 1024 + 1),
     }) },
   ])("refuses a candidate preview with $label without granting a reusable proof", async ({ makePreview, code }) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-invalid-window-preview-"));

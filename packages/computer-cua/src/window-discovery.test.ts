@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { CuaWindowDiscovery as ProductionCuaWindowDiscovery, type CuaWindowDiscoveryOptions } from "./window-discovery.js";
@@ -10,6 +9,7 @@ const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+const MAX_WINDOW_PREVIEW_SOURCE_BYTES = 16 * 1024 * 1024;
 
 function result(overrides: Partial<ToolResult> = {}): ToolResult {
   return {
@@ -418,9 +418,10 @@ describe("CuaWindowDiscovery", () => {
   });
 
   it.each([
-    { byteLength: MAX_WINDOW_PREVIEW_BYTES, expectedCode: undefined },
-    { byteLength: MAX_WINDOW_PREVIEW_BYTES + 1, expectedCode: "WINDOW_PREVIEW_IMAGE_TOO_LARGE" },
-  ])("enforces the exact $byteLength-byte CUA preview boundary and closes the temporary session", async ({ byteLength, expectedCode }) => {
+    { byteLength: 2 * 1024 * 1024 + 1, expectedCode: undefined },
+    { byteLength: MAX_WINDOW_PREVIEW_SOURCE_BYTES, expectedCode: undefined },
+    { byteLength: MAX_WINDOW_PREVIEW_SOURCE_BYTES + 1, expectedCode: "WINDOW_PREVIEW_IMAGE_TOO_LARGE" },
+  ])("enforces the bounded $byteLength-byte raw CUA preview source and closes the temporary session", async ({ byteLength, expectedCode }) => {
     const calls: string[] = [];
     const captureImage = new Uint8Array(byteLength);
     captureImage.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
@@ -457,7 +458,7 @@ describe("CuaWindowDiscovery", () => {
       await expect(preview).rejects.toMatchObject({ name: "WindowContractError", code: expectedCode });
     } else {
       const captured = await preview;
-      expect(captured.capture.data.byteLength).toBe(MAX_WINDOW_PREVIEW_BYTES);
+      expect(captured.capture.data.byteLength).toBe(byteLength);
       expect(captured.capture.binding.target).toEqual({ pid: 1234, windowId: 5678 });
     }
     expect(calls).toContain("endSession");

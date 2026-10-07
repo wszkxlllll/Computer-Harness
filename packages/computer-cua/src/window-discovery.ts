@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
 import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import {
   captureWindowWithRetry,
@@ -16,6 +15,9 @@ import {
 } from "./window-contract.js";
 import { captureVisibleWindowRegion } from "./windows-visible-window-capture.js";
 import type { WindowRelationshipProbe } from "./window-relationship-probe.js";
+
+/** Bounded source size for preview-only PNG normalization in app-runtime. */
+const MAX_WINDOW_PREVIEW_SOURCE_BYTES = 16 * 1024 * 1024;
 
 export interface CuaWindowPreviewCapture {
   readonly capture: CuaWindowCapture;
@@ -89,13 +91,13 @@ export class CuaWindowDiscovery {
           isLocalWindowsNamedPipeSocket(this.options.socketPath) ? captureVisibleWindowRegion : undefined);
       const captureOptions: WindowCaptureRetryOptions | undefined = foregroundVisibleCapture === undefined
         ? undefined
-        : { foregroundVisibleCapture, foregroundVisibleCaptureMaxBytes: MAX_WINDOW_PREVIEW_BYTES };
+        : { foregroundVisibleCapture, foregroundVisibleCaptureMaxBytes: MAX_WINDOW_PREVIEW_SOURCE_BYTES };
       const capture = await captureWindowWithRetry(driver, session, target, signal, captureOptions, osPlatform);
       if (capture.binding.target.pid !== target.pid || capture.binding.target.windowId !== target.windowId) {
         throw new Error("window preview capture did not retain the exact candidate identity");
       }
-      if (capture.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
-        throw new WindowContractError("WINDOW_PREVIEW_IMAGE_TOO_LARGE", "window preview exceeds the bounded image size");
+      if (capture.data.byteLength > MAX_WINDOW_PREVIEW_SOURCE_BYTES) {
+        throw new WindowContractError("WINDOW_PREVIEW_IMAGE_TOO_LARGE", "window preview source exceeds the bounded normalization size");
       }
       const inventory = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe, osPlatform);
       const after = requireExactPreviewCandidate(inventory, target);
