@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { CuaWindowDiscovery as ProductionCuaWindowDiscovery, type CuaWindowDiscoveryOptions } from "./window-discovery.js";
 import { activateWindowTarget } from "./window-contract.js";
+import { loadCuaSdkModule, setCuaSdkModuleLoaderForTests } from "./cua-sdk-platform.js";
 
 installFakeCuaSdkModuleForTests();
 
@@ -848,5 +849,145 @@ describe("CuaWindowDiscovery", () => {
     await queuedPreview.catch(() => undefined);
     expect(factoryCalls).toBe(1);
     expect(calls).toEqual(["startSession", "list_windows", "endSession", "shutdown", "destroy"]);
+  });
+});
+
+describe("discovery safe lifecycle snapshot", () => {
+  afterEach(() => installFakeCuaSdkModuleForTests());
+  function driverFixture(changes: Record<string, unknown> = {}): CuaDriverLike {
+    return {
+      async startSession() { return { active: true, revived: false }; },
+      async callTool() { return result({ structuredJson: JSON.stringify({ windows: [] }) }); },
+      async endSession() { return { active: false }; },
+      async shutdown() {}, uniffiDestroy() {}, ...changes,
+    } as unknown as CuaDriverLike;
+  }
+  it("retains the same driver/session after unexpected destroy throw", async () => {
+    const original = { synthetic: "destroy" }, driver = driverFixture({ uniffiDestroy() { throw original; } });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", sessionLabel: "synthetic-session", driverFactory: () => driver });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(original);
+    expect((discovery as unknown as { pendingCleanup?: { driver: CuaDriverLike; session: string } }).pendingCleanup)
+      .toEqual({ driver, session: "synthetic-session" });
+    expect(discovery.getLifecycleSnapshot()).toMatchObject({ cleanup: "unconfirmed", pendingCleanup: true, destroy: "failed", cleanupErrorKind: "destroy_failed", primaryFailed: false });
+  });
+  it("retains the same driver/session after unexpected cleanup loader throw", async () => {
+    const original = { synthetic: "cleanup-load" };
+    const driver = driverFixture({ async callTool() { setCuaSdkModuleLoaderForTests(async () => { throw original; }); return result({ structuredJson: JSON.stringify({ windows: [] }) }); } });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", sessionLabel: "synthetic-session", driverFactory: () => driver });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(original);
+    expect((discovery as unknown as { pendingCleanup?: { driver: CuaDriverLike; session: string } }).pendingCleanup)
+      .toEqual({ driver, session: "synthetic-session" });
+    expect(discovery.getLifecycleSnapshot()).toMatchObject({ cleanup: "unconfirmed", pendingCleanup: true, cleanupLoadSDK: "failed", endSessionAttempts: 0, cleanupErrorKind: "cleanup_load_sdk_failed" });
+  });
+  it("observes fixed successful stages without extra calls and returns immutable scalar copies", async () => {
+    const calls: string[] = [], driver = driverFixture({
+      async startSession() { calls.push("start"); },
+      async callTool() { calls.push("operation"); return result({ structuredJson: JSON.stringify({ windows: [] }) }); },
+      async endSession() { calls.push("end"); return { active: false }; },
+      async shutdown() { calls.push("shutdown"); }, uniffiDestroy() { calls.push("destroy"); },
+    });
+    installFakeCuaSdkModuleForTests(() => { calls.push("connect"); return driver; });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "PRIVATE_SOCKET", sessionLabel: "PRIVATE_SESSION" });
+    const idle = discovery.getLifecycleSnapshot(); expect(idle.phase).toBe("idle");
+    await discovery.listWindows(new AbortController().signal);
+    const snapshot = discovery.getLifecycleSnapshot();
+    expect(snapshot).toMatchObject({ sequence: 1, phase: "complete", complete: true, outcome: "succeeded", primaryFailed: false, cleanup: "confirmed", pendingCleanup: false,
+      loadSDK: "succeeded", connect: "succeeded", start: "succeeded", operation: "succeeded", cleanupLoadSDK: "succeeded", endSession: "succeeded", shutdown: "succeeded", destroy: "succeeded", endSessionAttempts: 1, cleanupAttempts: 1 });
+    expect(calls).toEqual(["connect", "start", "operation", "end", "shutdown", "destroy"]);
+    expect(Object.isFrozen(snapshot)).toBe(true); expect(() => { (snapshot as unknown as { phase: string }).phase = "changed"; }).toThrow();
+    expect(snapshot).not.toBe(discovery.getLifecycleSnapshot()); expect(idle.phase).toBe("idle");
+    expect(Object.values(snapshot).every((v) => ["string", "number", "boolean"].includes(typeof v))).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_"); expect(calls).toHaveLength(6);
+  });
+  it("load failure remains outside driver cleanup with original thrown identity", async () => {
+    const original = Object.assign(new Error("PRIVATE_PATH"), { code: "ERR_DLOPEN_FAILED" }); let factory = 0;
+    setCuaSdkModuleLoaderForTests(async () => { throw original; });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => { factory++; return driverFixture(); } });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(original);
+    expect(factory).toBe(0); expect(discovery.getLifecycleSnapshot()).toMatchObject({ outcome: "failed_cleanup_not_started", loadSDK: "failed", connect: "not_started", start: "not_started", cleanup: "not_started", pendingCleanup: false, primaryFailed: true, primaryExceptionKind: "dlopen" });
+  });
+  it("connect failure has zero start/cleanup and does not inspect hostile error getters", async () => {
+    let getters = 0;
+    const original = Object.defineProperties({}, { message: { get() { getters++; throw new Error("PRIVATE"); } }, name: { get() { getters++; throw 0; } }, code: { get() { getters++; throw 0; } }, tag: { get() { getters++; throw 0; } } });
+    installFakeCuaSdkModuleForTests(() => { throw original; });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture" });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(original);
+    expect(getters).toBe(0); expect(discovery.getLifecycleSnapshot()).toMatchObject({ connect: "failed", start: "not_started", cleanup: "not_started", primaryExceptionKind: "unknown", pendingCleanup: false });
+  });
+  it.each(["start", "operation"] as const)("%s primary failure and confirmed cleanup retain original throw", async (stage) => {
+    const original = { tag: "Protocol", inner: { reason: "PRIVATE_ROW" } }, calls: string[] = [];
+    const driver = driverFixture({
+      async startSession() { calls.push("start"); if (stage === "start") throw original; },
+      async callTool() { calls.push("operation"); throw original; },
+      async endSession() { calls.push("end"); return { active: false }; }, async shutdown() { calls.push("shutdown"); }, uniffiDestroy() { calls.push("destroy"); },
+    });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(original);
+    const snapshot = discovery.getLifecycleSnapshot();
+    expect(snapshot).toMatchObject({ outcome: "failed_cleanup_confirmed", primaryFailed: true, primaryExceptionKind: "protocol", cleanup: "confirmed", pendingCleanup: false });
+    expect(snapshot[stage]).toBe("failed"); expect(calls).toEqual(stage === "start" ? ["start", "end", "shutdown", "destroy"] : ["start", "operation", "end", "shutdown", "destroy"]);
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_");
+  });
+  it.each(["end", "active", "shutdown"])("%s cleanup failure exposes actual pending without destroy", async (stage) => {
+    const calls: string[] = [], driver = driverFixture({
+      async endSession() { calls.push("end"); if (stage === "end") throw Object.assign(new Error("PRIVATE_END"), { tag: "Transport" }); return { active: stage === "active" }; },
+      async shutdown() { calls.push("shutdown"); if (stage === "shutdown") throw new Error("PRIVATE_SHUTDOWN"); }, uniffiDestroy() { calls.push("destroy"); },
+    });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toMatchObject({ name: "CuaWindowDiscoveryCleanupError" });
+    const snapshot = discovery.getLifecycleSnapshot(); expect(snapshot).toMatchObject({ outcome: "failed_cleanup_unconfirmed", cleanup: "unconfirmed", pendingCleanup: true, primaryFailed: false, destroy: "not_started", endSessionAttempts: stage === "active" ? 2 : 1 });
+    expect(calls).toEqual(stage === "active" ? ["end", "end", "shutdown"] : ["end", "shutdown"]);
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_");
+  });
+  it.each([
+    { error: new DOMException("PRIVATE", "AbortError"), kind: "abort" },
+    { error: new DOMException("PRIVATE", "TimeoutError"), kind: "timeout" },
+    { error: new TypeError("PRIVATE"), kind: "type_error" },
+    { error: Object.assign(new Error("PRIVATE"), { code: "ERR_MODULE_NOT_FOUND" }), kind: "module_not_found" },
+    { error: { tag: "Transport", inner: "PRIVATE" }, kind: "transport" },
+    { error: { code: "PRIVATE_UNKNOWN", name: "PRIVATE_UNKNOWN" }, kind: "unknown" },
+    { error: new Proxy({}, { getOwnPropertyDescriptor() { throw new Error("PRIVATE_PROXY"); }, getPrototypeOf() { throw 0; } }), kind: "unknown" },
+  ])("maps closed exception kind $kind without raw evidence", async ({ error, kind }) => {
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => { throw error; } });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(error);
+    expect(discovery.getLifecycleSnapshot().primaryExceptionKind).toBe(kind); expect(JSON.stringify(discovery.getLifecycleSnapshot())).not.toContain("PRIVATE");
+  });
+  it("keeps in-flight cleanup truthful through a queued abort and late completion", async () => {
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; }), started = new Promise<void>((resolve) => { entered = resolve; }); let factories = 0;
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => { factories++; return driverFixture({ async endSession() { entered(); await gate; return { active: false }; } }); } });
+    const first = discovery.listWindows(new AbortController().signal); await started;
+    const before = discovery.getLifecycleSnapshot(); expect(before).toMatchObject({ phase: "endSession", complete: false, cleanup: "unconfirmed", pendingCleanup: false });
+    const controller = new AbortController(), next = discovery.listWindows(controller.signal); controller.abort(new Error("queued cancelled"));
+    await expect(next).rejects.toThrow("queued cancelled"); expect(factories).toBe(1); expect(discovery.getLifecycleSnapshot()).toEqual(before);
+    release(); await first; expect(discovery.getLifecycleSnapshot()).toMatchObject({ complete: true, cleanup: "confirmed", pendingCleanup: false }); expect(before.complete).toBe(false);
+  });
+  it("retries only the retained owner before opening the next driver after destroy failure", async () => {
+    let destroys = 0, factories = 0;
+    const original = { marker: "destroy" }, driver = driverFixture({ uniffiDestroy() { if (++destroys === 1) throw original; } });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => { factories++; return driver; } });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(original); expect(factories).toBe(1);
+    await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([]);
+    expect(factories).toBe(2); expect(destroys).toBe(3); expect(discovery.getLifecycleSnapshot()).toMatchObject({ cleanup: "confirmed", pendingCleanup: false, cleanupAttempts: 2, sequence: 2 });
+  });
+  it("pre-abort does not load/connect or change the idle snapshot", async () => {
+    let calls = 0; setCuaSdkModuleLoaderForTests(async () => { calls++; throw new Error("unexpected"); });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture" }), controller = new AbortController();
+    controller.abort(new Error("cancelled")); const before = discovery.getLifecycleSnapshot();
+    await expect(discovery.listWindows(controller.signal)).rejects.toThrow("cancelled");
+    expect(calls).toBe(0); expect(discovery.getLifecycleSnapshot()).toEqual(before);
+  });
+  it("cleanup retry followed by connect failure does not claim new-driver cleanup", async () => {
+    const original = { stage: "connect" }; let destroys = 0, factories = 0;
+    const driver = driverFixture({ uniffiDestroy() { if (++destroys === 1) throw 0; } });
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => { if (++factories === 2) throw original; return driver; } });
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(0);
+    await expect(discovery.listWindows(new AbortController().signal)).rejects.toBe(original);
+    expect(discovery.getLifecycleSnapshot()).toMatchObject({ connect: "failed", cleanup: "not_started", pendingCleanup: false, outcome: "failed_cleanup_not_started", cleanupAttempts: 1 });
+  });
+  it("does not claim the optional destroy method was called when absent", async () => {
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driverFixture({ uniffiDestroy: undefined }) });
+    await expect(discovery.listWindows(new AbortController().signal)).resolves.toEqual([]);
+    expect(discovery.getLifecycleSnapshot()).toMatchObject({ cleanup: "confirmed", destroy: "not_available", pendingCleanup: false });
   });
 });
