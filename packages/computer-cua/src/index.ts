@@ -3,6 +3,7 @@ export {
   mergeGroundingElements,
   type CuaDriverComputerOptions,
   type CuaDriverFactory,
+  type CuaMultilineTypeProfile,
   type CuaGroundingMode,
   type CuaWindowDeliveryMode,
   type CuaWindowSwitchMode,

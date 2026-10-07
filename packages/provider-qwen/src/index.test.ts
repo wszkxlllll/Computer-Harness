@@ -88,6 +88,42 @@ function withoutControls(value: ModelInput): ModelInput {
   return { ...value, tools: value.tools.filter((tool) => tool.control === undefined) };
 }
 
+function qwenStrictCatalog(client: Client): string {
+  const systemMessage = (client.body?.messages as Array<Record<string, unknown>> | undefined)
+    ?.find((message) => message.role === "system");
+  const system = typeof systemMessage?.content === "string" ? systemMessage.content : "";
+  const start = system.indexOf("Available tools (semantic guidance; Runtime validates exact arguments):");
+  const end = system.indexOf("\nStrict output envelope", start);
+  if (start < 0 || end < 0) throw new Error("Qwen strict catalog was not present in the serialized system message");
+  return system.slice(start, end);
+}
+
+function replaceTypePresentation(
+  value: ModelInput,
+  description: string,
+  propertyDescriptions: Readonly<Record<"text" | "elementRef", string>>,
+): ModelInput {
+  return {
+    ...value,
+    tools: value.tools.map((tool) => {
+      if (tool.name !== "type") return tool;
+      const schema = tool.inputSchema as { properties: Record<string, JsonValue> };
+      return {
+        ...tool,
+        description,
+        inputSchema: {
+          ...tool.inputSchema as Record<string, JsonValue>,
+          properties: {
+            ...schema.properties,
+            text: { ...schema.properties.text as Record<string, JsonValue>, description: propertyDescriptions.text },
+            elementRef: { ...schema.properties.elementRef as Record<string, JsonValue>, description: propertyDescriptions.elementRef },
+          },
+        },
+      };
+    }),
+  };
+}
+
 describe("Qwen3.8-Flash provider adapter", () => {
   it("keeps prepared wire state private to the creating adapter", async () => {
     const client = new Client(response("terminate", { status: "success", text: "prepared" }));
@@ -318,6 +354,58 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(String(systemMessage?.content)).toContain("Available tools");
     expect(String(systemMessage?.content)).toContain("click(x:number[0,1000], y:number[0,1000])");
     expect(String(systemMessage?.content)).toContain("every response must be one JSON object with a non-empty calls array");
+    const typeTool = input().tools.find((tool) => tool.name === "type");
+    if (typeTool === undefined) throw new Error("shared type tool is missing");
+    const typeSchema = typeTool.inputSchema as { properties: Record<string, JsonValue> };
+    const typeProperties = typeSchema.properties;
+    const typeLine = qwenStrictCatalog(client).split("\n").find((line) => line.startsWith("- type("));
+    expect(typeLine).toContain(typeTool.description.replace(/\s+/gu, " ").trim());
+    expect(typeLine).toContain(`description=${JSON.stringify(String((typeProperties.text as Record<string, JsonValue>).description).replace(/\s+/gu, " ").trim())}`);
+    expect(typeLine).toContain(`description=${JSON.stringify(String((typeProperties.elementRef as Record<string, JsonValue>).description).replace(/\s+/gu, " ").trim())}`);
+  });
+
+  it("serializes full host-profile type semantics in the final Qwen strict catalog", async () => {
+    const profileDescription = "Type text into the currently focused GUI control. In the host-enabled Windows foreground-caret-v1 profile, multiline text without elementRef follows ordinary foreground typing, intended to insert at the current caret or replace the current selection; driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send in controls where Enter has that meaning; check the intended control before typing. An explicit current UIA elementRef uses the separate append-to-end route regardless of caret or selection; that route does not automatically submit or send. Do not use elementRef for single-line text.";
+    const profileProperties = {
+      text: "Text to type. With the host-enabled Windows foreground-caret-v1 profile, omit elementRef for multiline typing; ordinary foreground input is intended to insert at the current caret or replace the current selection, but driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send depending on the current control.",
+      elementRef: "Optional current UIA editable reference for the explicit multiline append-to-end route. It appends regardless of caret or selection; omit it to use ordinary foreground caret typing when that host profile is enabled.",
+    } as const;
+    const modelInput = replaceTypePresentation(input(), profileDescription, profileProperties);
+    const client = new Client(strictFinishResponse());
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled" });
+    await adapter.generate(modelInput, { signal: new AbortController().signal });
+
+    const catalog = qwenStrictCatalog(client);
+    const typeLine = catalog.split("\n").find((line) => line.startsWith("- type("));
+    expect(typeLine).toContain(profileDescription);
+    expect(typeLine).toContain(`description=${JSON.stringify(profileProperties.text)}`);
+    expect(typeLine).toContain(`description=${JSON.stringify(profileProperties.elementRef)}`);
+    expect(typeLine).toContain("intended to insert at the current caret or replace the current selection");
+    expect(typeLine).toContain("driver completion does not verify the resulting content");
+    expect(typeLine).toContain("append-to-end route");
+    const nativeClient = new Client(response("terminate", { status: "success", text: "profile schema" }));
+    const nativeAdapter = new Qwen38FlashAdapter({
+      apiKey: "key",
+      assetReader: reader,
+      httpClient: nativeClient,
+      thinking: "disabled",
+      outputMode: "native_tools",
+    });
+    await nativeAdapter.generate(modelInput, { signal: new AbortController().signal });
+    const nativeType = (nativeClient.body?.tools as Array<{ function: { name: string; description: string; parameters: { properties: Record<string, { description?: string }> } } }>)
+      .find((tool) => tool.function.name === "type")?.function;
+    expect(nativeType?.description).toBe(profileDescription);
+    expect(nativeType?.parameters.properties.text?.description).toBe(profileProperties.text);
+    expect(nativeType?.parameters.properties.elementRef?.description).toBe(profileProperties.elementRef);
+  });
+
+  it("rejects the complete catalog through the existing Qwen input budget instead of truncating it", async () => {
+    const modelInput: ModelInput = {
+      ...input(),
+      contextBudget: { mode: "raw", estimatedInputTokens: 0, selectedHistoryEvents: 0, omittedHistoryEvents: 0, maxInputTokens: 999 },
+    };
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: new Client(strictFinishResponse()), thinking: "disabled" });
+    await expect(adapter.prepare(modelInput, { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INPUT_TOO_LARGE" });
   });
 
   it("keeps click_element in the shared strict schema and parses its opaque ref", async () => {
@@ -501,7 +589,7 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
     expect(tools[0]).toMatchObject({ function: { name: "click", parameters: { required: ["x", "y"], properties: { x: { maximum: 1000 }, y: { maximum: 1000 } } } } });
     expect(tools.find((tool) => tool.function.name === "type")).toMatchObject({ function: { parameters: { required: ["text"], properties: {
-      text: { description: expect.stringContaining("appends at its end regardless of caret or selection") },
+      text: { description: expect.stringContaining("appends at the end regardless of caret or selection") },
       elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("does not replace a selection") },
     } } } });
     expect(tools.find((tool) => tool.function.name === "type")?.function.description).toContain("does not replace selected text");

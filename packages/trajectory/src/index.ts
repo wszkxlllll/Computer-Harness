@@ -1227,6 +1227,10 @@ const failedActionReceiptSchema = actionReceiptSchema.omit({ sessionAfter: true 
       kind: z.literal("native_surface_reconfirmed"),
       surfaceRef: surfaceRefSchema,
     }).strict(),
+    z.object({
+      kind: z.literal("desktop_surface_reconfirmed"),
+      surfaceRef: surfaceRefSchema,
+    }).strict(),
   ]).optional(),
   sessionAfter: z.never().optional(),
 }).superRefine((receipt, context) => {
@@ -1394,6 +1398,12 @@ const contextTraceSchema = z.object({
     additionalGuidanceSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   }).optional(),
   observationIncluded: z.boolean(),
+  operationGuidance: z.object({
+    id: nonEmptyString,
+    fingerprint: nonEmptyString,
+    included: z.boolean(),
+    omittedReason: z.literal("budget").optional(),
+  }).optional(),
   monitorGuidanceIncluded: z.boolean().optional(),
   monitorGuidanceOmittedReason: z.literal("budget").optional(),
   preparedRequest: z.object({
@@ -1452,6 +1462,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       omittedHistoryEvents: z.number().int().nonnegative(),
       maxHistoryEvents: z.number().int().positive().optional(),
       maxInputTokens: z.number().int().positive().optional(),
+      maxWireInputTokens: z.number().int().positive().max(131072).optional(),
       estimatedMemoryTokens: z.number().int().nonnegative().optional(),
       memoryMaxTokens: z.number().int().positive().optional(),
       estimatedMonitorGuidanceTokens: z.number().int().nonnegative().optional(),

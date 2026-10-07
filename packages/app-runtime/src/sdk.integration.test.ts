@@ -474,7 +474,9 @@ describe("public app-runtime SDK assembly", () => {
       expect(lifecycle).toEqual(["computer.dispose:sdk-mock-computer", "provider.close"]);
       expect(diagnostics).toEqual([{ operation: "provider.close", message: cleanupError.message }]);
       expect((await run.report()).summary.cleanupDiagnostics).toEqual(diagnostics);
-      await run.close();
+      await expect(run.close()).rejects.toThrow(/provider\.close/iu);
+      expect((await run.report()).summary.cleanupDiagnostics).toEqual(diagnostics);
+      expect(lifecycle.filter((entry) => entry === "computer.dispose:sdk-mock-computer")).toHaveLength(1);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

@@ -29,17 +29,25 @@ describe("default Computer tools", () => {
     expect(scroll?.inputSchema).toMatchObject({ required: ["x", "y", "direction", "ticks"] });
     const type = tools.find((tool) => tool.name === "type");
     expect(type?.description).toContain("appends to the end of the target's current value regardless of caret or selection");
+    expect(type?.description).toContain("prefer a current UIA editable elementRef");
+    expect(type?.description).toContain("complete and identifies one unambiguous editable UIA control");
+    expect(type?.description).toContain("partial catalog may be refused rather than guessed");
     expect(type?.description).toContain("soft-wrapped visual lines are not paragraph boundaries");
     expect(type?.description).toContain("Windows desktop-wide CUA multiline input is not supported by this path");
-    expect(type?.description).toContain("other platforms keep their native multiline typing route");
+    expect(type?.description).toContain("only when the target is confirmed to accept line breaks and the Goal calls for them");
+    expect(type?.description).toContain("Enter is a real key event and can submit/send");
+    expect(type?.description).toContain("Other platforms keep their native multiline typing route");
+    expect(type?.description).not.toContain("let the backend resolve an unambiguous current editor");
     expect(type?.inputSchema).toMatchObject({
       properties: {
-        text: { type: "string", description: expect.stringContaining("appends at its end regardless of caret or selection") },
+        text: { type: "string", description: expect.stringContaining("partial evidence may be refused") },
         elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("does not replace a selection") },
       },
       required: ["text"],
       additionalProperties: false,
     });
+    expect(JSON.stringify(type?.inputSchema)).toContain("only when the target is confirmed to support line breaks and the Goal requires them");
+    expect(JSON.stringify(type?.inputSchema)).toContain("Enter is a real key event and may submit/send in search or message controls");
   });
 
   it("maps an optional current UIA elementRef into the type action without exposing driver tokens", () => {
@@ -70,7 +78,11 @@ describe("default Computer tools", () => {
       kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
     });
     expect(type.toAction({ text: "first\nsecond" }, context)).toEqual({
-      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+      kind: "type", text: "first\nsecond",
+    });
+    const partialObservation = { ...observation, grounding: { ...observation.grounding, completeness: "partial" as const } };
+    expect(type.toAction({ text: "first\nsecond" }, { ...context, observation: partialObservation })).toEqual({
+      kind: "type", text: "first\nsecond",
     });
     expect(type.toAction({ text: "ordinary single line" }, { ...context, observation: undefined })).toEqual({
       kind: "type", text: "ordinary single line",
@@ -145,6 +157,11 @@ describe("default Computer tools", () => {
     const change = definitions.find((definition) => definition.name === "switch_window");
     expect(list?.category).toBe("side");
     expect(change).toMatchObject({ category: "computer", isolatedTurn: true });
+    expect(change?.category === "computer" ? change.description : "").toContain("Desktop capture/input stays full");
+    expect(change?.category === "computer" ? change.description : "").toContain("native-window scope rebinds");
+    expect(change?.category === "computer" ? change.description : "").toContain("Already foreground: no-op");
+    expect(change?.category === "computer" ? change.description : "").toContain("Sole call this turn");
+    expect(change?.category === "computer" ? change.description : "").toContain("reobserve before next action");
     expect(createDefaultComputerTools().get("list_windows")).toBeUndefined();
     expect(createDefaultComputerTools().get("switch_window")).toBeUndefined();
 
@@ -193,6 +210,11 @@ describe("default Computer tools", () => {
     const definition = groundingComputerTools()[0];
     expect(definition?.name).toBe("click_element");
     if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
+    expect(definition.description).toContain("UIA or DOM grounding catalog");
+    expect(definition.description).toContain("not proof that the point is semantically clickable");
+    expect(definition.description).toContain("catalog is bounded");
+    expect(definition.description).toContain("do not retry the same target with another reference");
+    expect(JSON.stringify(definition.inputSchema)).toContain("UIA or DOM grounding catalog");
     const context = {
       runId: "run" as never,
       session: {} as never,

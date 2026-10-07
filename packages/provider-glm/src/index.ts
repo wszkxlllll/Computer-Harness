@@ -395,7 +395,17 @@ function estimateWireTextTokens(body: unknown): number {
 }
 
 function assertInputBudget(input: ModelInput, body: unknown, provider: string): void {
-  const max = input.contextBudget?.maxInputTokens;
+  const textMax = input.contextBudget?.maxInputTokens;
+  const maxWireInputTokens = input.contextBudget?.maxWireInputTokens;
+  const max = maxWireInputTokens ?? textMax;
+  for (const value of [textMax, maxWireInputTokens]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) {
+      throw new GlmProviderError("GLM input budgets must be integers from 1 to 131072", "GLM_INPUT_TOO_LARGE", false);
+    }
+  }
+  if (textMax !== undefined && maxWireInputTokens !== undefined && textMax > maxWireInputTokens) {
+    throw new GlmProviderError("GLM text budget must not exceed wire budget", "GLM_INPUT_TOO_LARGE", false);
+  }
   if (max === undefined) return;
   // Context compilation cannot see provider-specific envelopes or the visual
   // token cost. Keep a conservative provider-side gate immediately before the
@@ -404,14 +414,13 @@ function assertInputBudget(input: ModelInput, body: unknown, provider: string): 
     if (block.type !== "image") return sum;
     return sum + Math.min(480, Math.ceil((block.viewport.width * block.viewport.height) / 750) + 128);
   }, 0), 0);
-  const estimated = estimateWireTextTokens(body) + visualTokens + 32;
-  // The compiler's budget is the authoritative text budget; provider JSON and
-  // vision accounting are intentionally conservative and may overshoot it.
-  // Keep a bounded calibration margin for normal-sized contexts, while small
-  // budgets remain strict so tests and callers cannot accidentally send an
-  // obviously oversized prompt.
-  if (estimated > max && (max < 1_000 || estimated > max + 4_096)) {
-    throw new GlmProviderError(`${provider} prompt exceeds maxInputTokens (${estimated} > ${max})`, "GLM_INPUT_TOO_LARGE", false);
+  const textTokens = estimateWireTextTokens(body);
+  const estimated = textTokens + visualTokens + 32;
+  const exceedsBudget = maxWireInputTokens === undefined
+    ? estimated > max && (max < 1_000 || estimated > max + 4_096)
+    : estimated > max;
+  if (exceedsBudget) {
+    throw new GlmProviderError(`${provider} prompt exceeds wire input budget (estimated=${estimated}, text=${textTokens}, visual=${visualTokens}, envelope=32, maxWireInputTokens=${maxWireInputTokens ?? "unset"}, maxInputTokens=${textMax ?? "unset"}, effectiveLimit=${max})`, "GLM_INPUT_TOO_LARGE", false);
   }
 }
 

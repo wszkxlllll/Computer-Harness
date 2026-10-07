@@ -203,7 +203,7 @@ describe("GLM provider adapter", () => {
     const type = tools.find((tool) => tool.function.name === "type");
     expect(type?.function.description).toContain("appends to the end of the target's current value regardless of caret or selection");
     expect(type?.function.parameters).toMatchObject({ properties: {
-      text: { description: expect.stringContaining("appends at its end regardless of caret or selection") },
+      text: { description: expect.stringContaining("appends at the end regardless of caret or selection") },
       elementRef: { description: expect.stringContaining("does not replace a selection") },
     } });
   });

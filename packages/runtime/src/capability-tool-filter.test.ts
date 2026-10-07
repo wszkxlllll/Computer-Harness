@@ -47,7 +47,7 @@ class CapturingContextCompiler implements ContextCompiler {
 }
 
 describe("RunController capability tool filtering", () => {
-  it.each(["browser_tab", "dom"] as const)("filters raw click on %s and refreshes capabilities after switches", async (browserKind) => {
+  it.each(["browser_tab", "dom"] as const)("keeps guarded raw click available on %s and refreshes capabilities after switches", async (browserKind) => {
     const directory = await mkdtemp(join(tmpdir(), "harness-surface-capabilities-"));
     const registry = createDefaultToolRegistry();
     registry.registerMany(windowSwitchTools());
@@ -103,17 +103,15 @@ describe("RunController capability tool filtering", () => {
       provider: { id: "surface-fixture", async generate(input) {
         requests += 1;
         const names = input.tools.map((tool) => tool.name);
-        if (requests <= 2 || requests >= 6) expect(names).toContain("click");
-        else expect(names).not.toContain("click");
+        expect(names).toContain("click");
         if (requests <= 2) expect(names).not.toContain("type");
         else expect(names).toContain("type");
-        if (requests === 7) return { type: "finish", summary: "Checked native and managed tools." };
-        const call = requests === 1 || requests === 4 ? { name: "list_windows", arguments: {} }
-          : requests === 2 || requests === 5
+        if (requests === 4) return { type: "finish", summary: "Checked native and managed tools." };
+        const call = requests === 1 ? { name: "list_windows", arguments: {} }
+          : requests === 2
             ? (() => {
-                const destination = requests === 2 ? "managed" : "native";
-                const option = latestWindowOptions.find((candidate) => candidate.surface === destination && !candidate.isCurrent);
-                if (option === undefined) throw new Error(`no fresh listed window for ${destination}`);
+                const option = latestWindowOptions.find((candidate) => candidate.surface === "managed" && !candidate.isCurrent);
+                if (option === undefined) throw new Error("no fresh listed window for managed surface");
                 return { name: "switch_window", arguments: { windowRef: option.windowRef } };
               })()
             : { name: "click", arguments: { x: 0, y: 0 } };
@@ -123,8 +121,60 @@ describe("RunController capability tool filtering", () => {
     try {
       const outcome = await controller.start("Check tool availability across surfaces");
       expect(outcome, JSON.stringify(controller.getEvents().filter((event) => event.type === "runtime.error" || event.type === "model.request.failed" || event.type === "tool.call.rejected"))).toBe("succeeded");
-      expect(executed).toEqual(["switch_window", "switch_window", "click"]);
-      expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(1);
+      expect(executed).toEqual(["switch_window", "click"]);
+      expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("keeps raw click unavailable and refuses forced clicks on an unknown Surface", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-unknown-surface-click-"));
+    const session: ComputerSession = {
+      id: "unknown-surface-window" as ComputerSessionId,
+      backend: "fixture-window",
+      viewport,
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-09-18T00:00:00.000Z",
+    };
+    const registry = createDefaultToolRegistry();
+    const compiler = new CapturingContextCompiler(registry);
+    const executed: string[] = [];
+    const computer: Computer = {
+      async open() { return session; },
+      async observe() {
+        return { capturedAt: "2026-09-18T00:00:00.000Z", viewport,
+          surfaceRef: { surfaceId: "unknown-surface" as SurfaceId, generation: 1, kind: "unknown" as const },
+          screenshot: { mediaType: "image/png", data: new Uint8Array([1]) } };
+      },
+      async execute(_session, action) {
+        executed.push(action.kind);
+        return { actionId: action.actionId, status: "completed" };
+      },
+      async close() {},
+    };
+    let requests = 0;
+    const controller = new RunController({
+      runId: "unknown-surface-click" as never,
+      provider: { id: "unknown-surface-fixture", async generate(input) {
+        requests += 1;
+        expect(input.tools.map((tool) => tool.name)).not.toContain("click");
+        return { type: "tool_calls", calls: [{ id: "forced-unknown-click" as never, name: "click", arguments: { x: 0, y: 0 } }] };
+      } },
+      computer,
+      contextCompiler: compiler,
+      toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(),
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), "unknown-surface-click" as never),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      features: { planning: "off", memory: "off", batching: "off" },
+    });
+    try {
+      const outcome = await controller.start("Keep an unknown Surface safe");
+      expect(outcome).toBe("failed");
+      expect(requests).toBe(0);
+      expect(executed).toEqual([]);
+      const runtimeError = controller.getEvents().find((event) => event.type === "runtime.error");
+      expect(runtimeError?.message).toContain("LEGACY_SURFACE_UNRESOLVED");
+      expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

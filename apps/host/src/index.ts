@@ -9,30 +9,16 @@ import {
   defaultEnvironmentOwner,
   environmentIdentityForConfig,
   resolveManagedBrowserProfileConfig,
-  type ApplicationSessionConfig,
   type ProviderCredentials,
-  type ResolvedRunConfig,
 } from "@computer-harness/app-runtime";
 import { HostRelayConnector } from "@computer-harness/relay-connector";
-import type { RunModel } from "@computer-harness/app-runtime";
 import { createHostServer } from "./server.js";
 import { parseGlmOutputBudget } from "./glm-output-budget.js";
 import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 import { resolveHostWindowSelector } from "./window-selection-config.js";
-
-interface HostArguments {
-  envFile: string;
-  socket: string;
-  model: "glm-5.3-flash" | "qwen3.8-flash";
-  output: string;
-  port: number;
-  origins: string[];
-  maxSteps: number;
-  maxModelRequests: number;
-  glmMaxOutputTokens: number;
-}
+import { createHostSessionConfig, type HostArguments } from "./session-config.js";
 
 const hostDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(hostDirectory, "../../..");
@@ -47,9 +33,9 @@ async function main(): Promise<void> {
   const credentials = readProviderCredentials();
   const outputDir = resolve(args.output);
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
-  const config = createSessionConfig(args, outputDir, managedBrowserProfile);
+  const config = createHostSessionConfig(args, outputDir, managedBrowserProfile, process.env);
   const windowSelector = resolveHostWindowSelector(process.env);
-  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} requestTimeoutMs=90000\n`);
+  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=90000\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -180,6 +166,8 @@ function parseArguments(argv: readonly string[]): HostArguments {
     const item = argv[index]!;
     if (item === "--help" || item === "-h") {
       process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
+      process.stdout.write("Optional local env-file settings: HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1; HARNESS_OPERATION_GUIDANCE=off|catalog-v1.\n");
+      process.stdout.write("foreground-caret-v1 is only for an explicitly verified candidate CUA socket; it is not a general stock CUA 0.22 compatibility claim.\n");
       process.exit(0);
     }
     if (!item.startsWith("--")) throw new Error("Host arguments must use named options.");
@@ -224,62 +212,6 @@ function parseBoundedPositiveInteger(raw: string | undefined, option: string, ma
   return value;
 }
 
-function createSessionConfig(
-  args: HostArguments,
-  outputDir: string,
-  managedBrowserProfile: { readonly profileLabel: string; readonly profileRoot: string },
-): ApplicationSessionConfig {
-  const model: RunModel = args.model;
-  const qwenModel = args.model === "qwen3.8-flash";
-  const baseUrl = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
-  const glmEndpoint = process.env.GLM_BASE_URL;
-  return {
-    model,
-    computer: {
-      kind: "cua",
-      socketPath: args.socket,
-      screenshotDir: resolve(outputDir, "driver-screenshots"),
-      grounding: "off",
-      managedBrowserProfileMode: "persistent",
-      managedBrowserProfileLabel: managedBrowserProfile.profileLabel,
-      managedBrowserProfileRoot: managedBrowserProfile.profileRoot,
-    },
-    outputDir,
-    maxSteps: args.maxSteps,
-    maxModelRequests: args.maxModelRequests,
-    planning: true,
-    memory: "facts",
-    memoryRetrieval: "lexical",
-    batching: "same-control-input-v1",
-    contextMode: "recent",
-    contextMaxHistoryEvents: 32,
-    contextMaxInputTokens: 8_000,
-    riskProfile: "live-interactive",
-    riskGuard: "layered",
-    riskModel: "same",
-    riskMaxModelRequests: 1,
-    riskTimeoutMs: 15_000,
-    cleanupDeadlineMs: 5_000,
-    // Keep no-progress evidence in the model context without automatically
-    // blocking a phone-driven action while the interaction path is under test.
-    monitor: "shadow",
-    windowHandoff: "confirm-v1",
-    glmThinking: readGlmThinking(process.env.GLM_THINKING),
-    glmMaxOutputTokens: args.glmMaxOutputTokens,
-    // GLM can take longer on image-heavy turns; allow one bounded 90-second
-    // response window while keeping the runtime's single retry finite.
-    glmRequestTimeoutMs: 90_000,
-    ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
-    ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
-    ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
-    ...(qwenModel ? {
-      qwenCoordinateMode: "normalized_1000" as const,
-      qwenThinking: "low" as const,
-      qwenOutputMode: "strict_json" as const,
-    } : {}),
-  };
-}
-
 function readProviderCredentials(): ProviderCredentials {
   const glmApiKey = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   const qwenApiKey = process.env.DASHSCOPE_API_KEY;
@@ -291,12 +223,6 @@ function readProviderCredentials(): ProviderCredentials {
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
-}
-
-function readGlmThinking(value: string | undefined): "enabled" | "low" | "high" | "max" {
-  return value === "enabled" || value === "low" || value === "high" || value === "max"
-    ? value
-    : "enabled";
 }
 
 async function loadEnvFile(path: string): Promise<void> {

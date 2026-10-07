@@ -4,11 +4,12 @@ import { resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, QwenTextEmbeddingProvider, type MemoryEmbeddingProvider, type MemoryRunModule } from "@computer-harness/memory";
 import { createExecutionSegmentTools, createPlanningRunModule, FilePlanStore, type PlanningRunModule } from "@computer-harness/planning";
-import type { MemoryMutation, RunId, RunOutcome } from "@computer-harness/protocol";
+import type { JsonValue, MemoryMutation, RunId, RunOutcome } from "@computer-harness/protocol";
 import { LayeredRiskGuard, ProviderRiskAssessor } from "@computer-harness/risk-guard";
 import {
   DefaultRuntimePolicy,
   RunController,
+  ToolRegistry,
   createDefaultToolRegistry,
   windowSwitchTools,
   type ActionPolicy,
@@ -21,17 +22,25 @@ import {
   type ProviderAdapter,
   type RunFeatureConfig,
   type RuntimePolicy,
-  type ToolRegistry,
 } from "@computer-harness/runtime";
 import { FileAssetStore, JsonlRunEventWriter, type AssetStore, type RunEventWriter } from "@computer-harness/trajectory";
 import type { AssetReader } from "@computer-harness/runtime";
-import { createComputer, prepareComputerRunAssembly } from "./computers.js";
+import { createComputer, prepareComputerRunAssembly, type ComputerToolPresentationOverride } from "./computers.js";
 import { createProvider } from "./providers.js";
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
-import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
+import { selectOperationGuidance } from "./operation-guidance.js";
+import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunCloseConfirmation, RunDependencies, RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
+  for (const value of [input.contextMaxInputTokens, input.contextMaxWireInputTokens]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) {
+      throw new Error("Context input budgets must be integers from 1 to 131072");
+    }
+  }
+  if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) {
+    throw new Error("Context text budget must not exceed wire budget");
+  }
   const runId = input.runId ?? generatedRunId();
   const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
@@ -111,7 +120,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       throw new Error(`injected Provider id '${provider.id}' does not match configured external Provider '${config.model.id}'`);
     }
 
-    const tools = dependencies.createToolRegistry?.() ?? createDefaultToolRegistry();
+    const tools = projectToolPresentations(
+      dependencies.createToolRegistry?.() ?? createDefaultToolRegistry(),
+      computerAssembly.toolPresentationOverrides,
+    );
     tools.registerMany(computerAssembly.groundingTools);
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
@@ -197,8 +209,15 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       features,
       ...(contextMemoryRecall === undefined ? {} : { memoryRecall: contextMemoryRecall }),
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
+      ...(config.contextMaxWireInputTokens === undefined ? {} : { maxWireInputTokens: config.contextMaxWireInputTokens }),
     });
-    const contextCompiler = projectModuleContext(baseContextCompiler, runId, planningModule, memoryModule);
+    const contextCompiler = projectModuleContext(
+      baseContextCompiler,
+      runId,
+      planningModule,
+      memoryModule,
+      config.operationGuidance ?? "off",
+    );
     const enabledToolNames = computerAssembly.enabledToolNames(tools);
     controller = new RunController({
       runId,
@@ -348,11 +367,13 @@ function projectModuleContext(
   runId: RunId,
   planning: PlanningRunModule | undefined,
   memory: MemoryRunModule | undefined,
+  operationGuidanceMode: "off" | "catalog-v1",
 ): ContextCompiler {
-  if (planning === undefined && memory === undefined) return compiler;
+  if (planning === undefined && memory === undefined && operationGuidanceMode === "off") return compiler;
   return {
     async compile(input: ContextCompileInput, signal: AbortSignal) {
       assertModuleRunId(runId, input.runId, "Context");
+      const { operationGuidance: _previousOperationGuidance, ...unprojectedInput } = input;
       let plan = input.plan;
       if (planning !== undefined && plan !== undefined) {
         assertModuleRunId(planning.runId, plan.runId, "Planning Context");
@@ -368,10 +389,17 @@ function projectModuleContext(
         ));
         assertModuleRunId(runId, projectedMemory.runId, "Memory Context projection");
       }
-      return compiler.compile({
-        ...input,
+      const projectedInput = {
+        ...unprojectedInput,
         ...(plan === undefined ? {} : { plan }),
         ...(projectedMemory === undefined ? {} : { memory: projectedMemory }),
+      };
+      const operationGuidance = operationGuidanceMode === "catalog-v1"
+        ? selectOperationGuidance(projectedInput)
+        : undefined;
+      return compiler.compile({
+        ...projectedInput,
+        ...(operationGuidance === undefined ? {} : { operationGuidance }),
       }, signal);
     },
   };
@@ -411,6 +439,61 @@ function validateExternalId(id: string, label: string): void {
   if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(id)) {
     throw new Error(`external ${label} id must be 1-64 ASCII letters, digits, dots, underscores, or hyphens`);
   }
+}
+
+function projectToolPresentations(
+  registry: ToolRegistry,
+  overrides: readonly ComputerToolPresentationOverride[],
+): ToolRegistry {
+  if (overrides.length === 0) return registry;
+  const overridesByName = new Map<string, ComputerToolPresentationOverride>();
+  for (const override of overrides) {
+    if (overridesByName.has(override.name)) throw new Error(`duplicate tool presentation override: ${override.name}`);
+    overridesByName.set(override.name, override);
+  }
+  const applied = new Set<string>();
+  const projected = new ToolRegistry();
+  for (const definition of registry.list()) {
+    const override = overridesByName.get(definition.name);
+    if (override === undefined) {
+      projected.register(definition);
+      continue;
+    }
+    if (definition.category !== "computer") {
+      throw new Error(`tool presentation override '${override.name}' requires a registered Computer tool`);
+    }
+    let inputSchema = definition.inputSchema;
+    for (const [propertyName, description] of Object.entries(override.inputPropertyDescriptions)) {
+      inputSchema = replaceInputPropertyDescription(inputSchema, propertyName, description, override.name);
+    }
+    projected.register({ ...definition, description: override.description, inputSchema });
+    applied.add(override.name);
+  }
+  for (const name of overridesByName.keys()) {
+    if (!applied.has(name)) throw new Error(`tool presentation override '${name}' has no registered tool`);
+  }
+  return projected;
+}
+
+function replaceInputPropertyDescription(schema: JsonValue, propertyName: string, description: string, toolName: string): JsonValue {
+  if (!isJsonObject(schema) || !isJsonObject(schema.properties)) {
+    throw new Error(`tool presentation override '${toolName}' requires an object inputSchema.properties`);
+  }
+  const property = schema.properties[propertyName];
+  if (!isJsonObject(property)) {
+    throw new Error(`tool presentation override '${toolName}' requires input property '${propertyName}'`);
+  }
+  return {
+    ...schema,
+    properties: {
+      ...schema.properties,
+      [propertyName]: { ...property, description },
+    },
+  };
+}
+
+function isJsonObject(value: JsonValue | undefined): value is { [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface AdapterReleaseOptions {
@@ -596,6 +679,7 @@ function createRunHandle(
   let controllerStarted = false;
   let closedBeforeStart = false;
   let feedClosed = false;
+  let handleClosePromise: Promise<void | RunCloseConfirmation> | undefined;
   let ownedAdapterCleanupPromise: Promise<unknown[]> | undefined;
   const cleanupOwnedAdapters = (includeComputer: boolean): Promise<unknown[]> => {
     ownedAdapterCleanupPromise ??= releaseOwnedAdapters(includeComputer);
@@ -650,27 +734,66 @@ function createRunHandle(
       if (completionPromise === undefined) return Promise.reject(new Error(`RunHandle for ${runId} has not started`));
       return completionPromise.then(() => buildRunReport(config, runId, cleanupDiagnostics, controller.getEffectiveToolNames()));
     },
-    async close() {
+    close() {
+      if (handleClosePromise !== undefined) return handleClosePromise;
       if (completionPromise !== undefined) {
+        const completedRun = completionPromise;
+        handleClosePromise = (async () => {
+          try {
+            await completedRun;
+          } finally {
+            closeFeed();
+          }
+
+          const timedOutComputerCleanup = cleanupDiagnostics.some((diagnostic) =>
+            diagnostic.status === "timed_out"
+            && (diagnostic.operation === "computer.close" || diagnostic.operation === "computer.dispose"));
+          const lateComputerCleanupConfirmed = timedOutComputerCleanup
+            ? await controller.confirmLateComputerCleanup(config.cleanupDeadlineMs)
+            : false;
+          const unresolved = cleanupDiagnostics.filter((diagnostic) => {
+            if (diagnostic.status === "timed_out"
+              && (diagnostic.operation === "computer.close" || diagnostic.operation === "computer.dispose")) {
+              return !lateComputerCleanupConfirmed;
+            }
+            return true;
+          });
+          if (unresolved.length > 0) {
+            throw new Error(`RunHandle for ${runId} cleanup was not confirmed: ${unresolved
+              .map((diagnostic) => `${diagnostic.operation}: ${diagnostic.message}`)
+              .join("; ")}`);
+          }
+          if (!lateComputerCleanupConfirmed) return undefined;
+          return {
+            kind: "late-computer-cleanup-confirmed",
+            runId,
+            resolvedTimedOutComputerDiagnostics: cleanupDiagnostics
+              .filter((diagnostic) => diagnostic.status === "timed_out"
+                && (diagnostic.operation === "computer.close" || diagnostic.operation === "computer.dispose"))
+              .map((diagnostic) => ({
+                operation: diagnostic.operation as "computer.close" | "computer.dispose",
+                message: diagnostic.message,
+                status: "timed_out" as const,
+              })),
+          };
+        })();
+        return handleClosePromise;
+      }
+      if (closedBeforeStart) return Promise.resolve();
+      closedBeforeStart = true;
+      handleClosePromise = (async () => {
+        let failures: unknown[] = [];
         try {
-          await completionPromise;
+          failures = await closeBeforeControllerStart();
         } finally {
           closeFeed();
         }
-        return;
-      }
-      if (closedBeforeStart) return;
-      closedBeforeStart = true;
-      let failures: unknown[] = [];
-      try {
-        failures = await closeBeforeControllerStart();
-      } finally {
-        closeFeed();
-      }
-      failures.push(...await cleanupOwnedAdapters(true));
-      if (failures.length > 0) {
-        throw new AggregateError(failures, `RunHandle for ${runId} failed to close all owned resources`);
-      }
+        failures.push(...await cleanupOwnedAdapters(true));
+        if (failures.length > 0) {
+          throw new AggregateError(failures, `RunHandle for ${runId} failed to close all owned resources`);
+        }
+      })();
+      return handleClosePromise;
     },
   };
 }

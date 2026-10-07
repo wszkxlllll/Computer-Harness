@@ -491,10 +491,14 @@ describe("home run-target selection", () => {
       mediaType: "image/png",
       dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
     };
-    const secondPreview: WindowCandidatePreview = { ...preview, previewToken: "Q".repeat(32), dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" };
+    const failedSecondPreview: WindowCandidatePreview = { ...preview, previewToken: "Q".repeat(32), dataBase64: "bm90LWEtcG5n" };
+    const secondPreview: WindowCandidatePreview = { ...preview, previewToken: "R".repeat(32) };
+    let resolveSecondPreviewRetry!: (value: WindowCandidatePreview) => void;
+    const pendingSecondPreviewRetry = new Promise<WindowCandidatePreview>((resolve) => { resolveSecondPreviewRetry = resolve; });
     vi.mocked(previewWindowTarget)
       .mockResolvedValueOnce(preview)
-      .mockResolvedValueOnce(secondPreview);
+      .mockResolvedValueOnce(failedSecondPreview)
+      .mockReturnValueOnce(pendingSecondPreviewRetry);
     vi.mocked(createRun).mockResolvedValue({ runId: "previewed-run", status: "running" });
     renderHome();
 
@@ -522,7 +526,24 @@ describe("home run-target selection", () => {
     const images = screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
     const secondImage = images[1];
     if (secondImage === undefined) throw new Error("expected the second candidate screenshot");
-    fireEvent.load(secondImage);
+    fireEvent.error(secondImage);
+    expect(await screen.findByText("这张实时截图无法显示。请在电脑恢复目标窗口后刷新；仍看不清时不要选择。")).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "确认这是目标窗口" })).toHaveLength(1);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(createRun).not.toHaveBeenCalled();
+
+    const retryButtons = screen.getAllByRole("button", { name: "重新读取预览" });
+    const secondCandidateRetry = retryButtons[1];
+    if (secondCandidateRetry === undefined) throw new Error("expected a retry action for the failed second candidate");
+    fireEvent.click(secondCandidateRetry);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(1));
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    resolveSecondPreviewRetry(secondPreview);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
+    const retriedImages = screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
+    const retriedSecondImage = retriedImages[1];
+    if (retriedSecondImage === undefined) throw new Error("expected the retried second candidate screenshot");
+    fireEvent.load(retriedSecondImage);
     const confirmations = await screen.findAllByRole("button", { name: "确认这是目标窗口" });
     expect(confirmations).toHaveLength(2);
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
@@ -534,6 +555,56 @@ describe("home run-target selection", () => {
       "在 Notepad 中查看当前窗口",
       expect.any(String),
       { mode: "window", targetToken: "duplicate-b", previewToken: secondPreview.previewToken },
+      defaultAssistantPreferences,
+      false,
+    ));
+    expect(vi.mocked(previewWindowTarget).mock.calls.map(([candidateToken]) => candidateToken)).toEqual([
+      "duplicate-a",
+      "duplicate-b",
+      "duplicate-b",
+    ]);
+  });
+
+  it("offers an optional preview for a unique window without changing direct selection", async () => {
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [{ token: "unique-window", appName: "Notepad.exe", title: "Notes" }],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const preview: WindowCandidatePreview = {
+      previewToken: "P".repeat(32),
+      appName: "Notepad.exe",
+      title: "Notes",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    vi.mocked(previewWindowTarget).mockResolvedValue(preview);
+    vi.mocked(createRun).mockResolvedValue({ runId: "optional-preview-run", status: "running" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "在 Notepad 中查看当前窗口" } });
+    await screen.findByText("这里还没有任务");
+    chooseStartMode(/手动选择窗口/);
+    fireEvent.click(await screen.findByRole("radio", { name: /Notepad\.exe.*Notes/u }));
+
+    const startButton = screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement;
+    expect(startButton.disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "查看此窗口预览" }));
+    const image = await screen.findByRole("img", { name: /Notepad\.exe.*Notes/u });
+    expect(previewWindowTarget).toHaveBeenCalledWith("unique-window", expect.any(AbortSignal));
+    expect(startButton.disabled).toBe(false);
+    expect(createRun).not.toHaveBeenCalled();
+
+    fireEvent.load(image);
+    expect(await screen.findByText("可选预览已显示；此窗口仍可按标签直接选择。")).toBeDefined();
+    fireEvent.click(startButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "在 Notepad 中查看当前窗口",
+      expect.any(String),
+      { mode: "window", targetToken: "unique-window" },
       defaultAssistantPreferences,
       false,
     ));
@@ -555,5 +626,49 @@ describe("home run-target selection", () => {
       expect((modeInput.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
     }
     expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("blocks new tasks while terminal cleanup is pending and reopens after refresh confirms release", async () => {
+    vi.mocked(listRuns)
+      .mockResolvedValueOnce([{ runId: "cleanup-run", goal: "Finished work", status: "finished", ownerState: "pending_cleanup" }])
+      .mockResolvedValueOnce([{ runId: "cleanup-run", goal: "Finished work", status: "finished", ownerState: "released" }]);
+    vi.mocked(createRun).mockResolvedValue({ runId: "after-cleanup", status: "created" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Start after cleanup" } });
+    await screen.findByRole("heading", { name: "电脑收尾尚未确认" });
+    const startButton = screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement;
+    expect(startButton.disabled).toBe(true);
+    expect(screen.getByText(/确认前不会发送新任务/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新列表" }));
+    await waitFor(() => expect(startButton.disabled).toBe(false));
+    expect(screen.queryByRole("heading", { name: "电脑收尾尚未确认" })).toBeNull();
+    fireEvent.click(startButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "Start after cleanup",
+      expect.any(String),
+      { mode: "browser" },
+      defaultAssistantPreferences,
+      false,
+    ));
+  });
+
+  it("keeps legacy finished summaries without ownerState compatible", async () => {
+    vi.mocked(listRuns).mockResolvedValue([{
+      runId: "legacy-finished-run",
+      goal: "Finished on an older Host",
+      status: "finished",
+    }]);
+    vi.mocked(createRun).mockResolvedValue({ runId: "legacy-next", status: "created" });
+    renderHome();
+
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Continue using the older Host" } });
+    await screen.findByText("Finished on an older Host");
+    const startButton = screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement;
+    expect(startButton.disabled).toBe(false);
+    fireEvent.click(startButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalled());
   });
 });

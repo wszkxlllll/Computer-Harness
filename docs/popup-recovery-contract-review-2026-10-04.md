@@ -1,5 +1,99 @@
 # Transient-parent recovery contract review
 
+## 2026-10-07 独立只读复核：前台输入与跨应用闭环
+
+日期：2026-10-07；实验时间以原记录 UTC 为准。
+
+文档角色：审计。状态：当前审计补充；下文历史 GO 只适用于各自基线。
+
+当前入口：[手机实机弹窗、输入回归与整改](./window-popup-regression-2026-10-04.md)。
+
+基线：本地 `codex/runtime-surface-preview-20261003`，HEAD `bb17a7b`，加检查时未提交改动；共享工作树不是冻结快照。
+
+范围：输入、窗口/弹窗闭环、浏览器启动语义、手机候选/状态、限制及跨平台影响。本审只读源码、测试源码及既有证据，仅写审计文档；未运行测试/构建、未发模型请求、未操作桌面、未读取 Codex 原始会话或秘密。
+
+### 结论与版本范围
+
+**暂不能放行“前台输入已修好”或“全部跨应用/手机闭环通过”。** 最近候选的真实文本损坏已由原轨迹、截图和完整读回独立对上。应保留已有局部成功，不预设需要整体重构；先区分底层输入时序/事务差异，再修部分列窗结果造成的恢复死路。
+
+| 层次 | 本次核对 | 边界 |
+| --- | --- | --- |
+| Harness 源码 | 上述分支/HEAD；初次 diff 统计为66个已跟踪文件、6324增/562删，另有未跟踪实现/测试 | 包含CUA、Runtime、Host、Web、Context、协议等增量；不能仅看HEAD或旧公开仓库。统计是检查时点，不是冻结交付 |
+| 构建与最近实验 | Adapter、ApplicationSession、RunController 的source/dist共六项SHA-256，均与最近失败实验的acceptance-summary对应字段一致 | 只证明这六项内容一致；mtime不证明版本，不能推广到全部产物和远端部署 |
+| 默认CUA | `cua-sdk-platform.ts`：Windows/macOS为0.22.2，Linux为0.32.0；运行进程PID33812的路径位于另一checkout的`.tools/cua-driver/0.22.2/bin/cua-driver.exe` | 本审未调用daemon查询build ID；目录版本标记与实际二进制身份强度不同 |
+| 实验CUA | 匹配SDK0.33.1，独立pipe `computer-harness-pi-v0331-paced-candidate`，artifact run37490081756 | 未成为默认版本；候选日志仅有listening/shutting down，无输入内部追踪 |
+| 候选来源 | manifest commit `4e8857ccf6d638dee89bedf43881b77e65eba45e`；EXE SHA-256实算匹配`9d48777458c1a7270bd78973e1e8824edb6a573210db9f3dc3ddd6f68ffcc66c` | 本地候选HEAD为`824538cfa77ed259b91ff06b277ca2661e383eb8`；但keyboard.rs blob `1945596ce9df79af39648a7b03f3b98596805347`与manifest相同，只确认该输入实现 |
+| 手机Web | 本地`apps/web/dist/assets/index-5Talrbto.js`早于当前相关源码；bundle缺“电脑收尾尚未确认”“重新载入截图”，源码已有 | 至少这两项本地构建落后；未查询正在服务的Web/Host build ID。主入口记Preview尚未部署最新源码，不能把源码修复当作已上线 |
+
+### 1. 最近输入失败的可复核证据
+
+证据根目录：`runs/diagnostics/full-foreground-task-acceptance-20261006160817512-5c27edaa/`。Run为`run-1791302904783-515b80c6-74e`，原轨迹为该目录`sessions/<Run>/trajectory.jsonl`，属于项目运行产物而非Codex会话。
+
+- seq16：switch_window completed，明确下一观察仍为full primary desktop；seq25：Ctrl+T completed；seq27：新desktop观察。
+- seq32/33：仅一次普通单行type proposal/started，91码点、唯一CH-RAW标记，无elementRef/换行，无第二次重输。实际SDK于`2026-10-06T16:09:10.011Z`开始，约773.1ms返回。
+- seq35：completed，消息为`Typed 91 character(s) into the foreground application (scope:desktop)`。Receipt在诊断采样后提交，不能将started→Receipt总时间当作底层773.1ms。
+- [完整读回](../runs/diagnostics/full-foreground-task-acceptance-20261006160817512-5c27edaa/candidate-document-readback.json)：唯一标记Notepad窗口，PID33052、HWND`0x31888`，唯一Document.value；读取调用isError=false/degraded=false。预期、实际均91码点，但**零基索引60**开始，预期U+0031（数字1）变为U+FF09（全角右括号），其后31字符全部是`）`。本审从原proposal.text和actualText独立重算长度、首次差异和尾部字符集合，结果一致，不仅依赖exactMatch字段。
+- 预期正文尾部应为`19 杭州东 历时0时45分 二等座有票（页面未显示价格明细）`，实际已替换。读回SHA-256为`d93773ea325a9342f4fd5dbf31468df798b27c14a08fcaf05214bc5b86bbbfbc`；预期为`65d6bfe492674171983253a6a9f7aa33c035c8b8637a24f7ac3335811196307c`。
+- 本审独立查看seq37对应的`driver-screenshots/f2232eb4-f740-4c98-9747-6f5aa37ce4ef.png`，正文连续括号与状态栏“91个字符”同时存在，也查看既有延迟采样第二图。记录中742.6ms与1695.2ms样本图片哈希相同，3131.5ms仍坏。因此不是仅采图过早，字符数相等也不能证明正文正确。
+
+**路径与责任分界。** `cua-driver-computer.ts:4035`的actionRequest对无native binding使用primary desktop、foreground、type_text，正文原样传入。候选`platform-windows/src/tools/impl_.rs:4510`在执行时取得foreground HWND，调用send_text_synthesized，返回明确为`scope=desktop/path=SendInput/effect=unverifiable`。候选`input/keyboard.rs:506,551`在一次foreground transaction内逐码点发送、间隔3ms。Harness `cua-driver-computer.ts:3592,3660`把非error/degraded返回投影为completed，普通单行没有全文精确读回。此次不是UIA多行SetValue问题；没有证据是Harness修改了正文，但派发成功/字数判断使任务成功判定未拦住损坏。
+
+**未知。** 读回foreground=null、inventory incomplete，不能证明输入时前台正确或错误。记录没有本次事务选中的HWND/PID、focused child HWND/TID、AttachThreadInput成否、各SendInput返回数量、drain成否/耗时。唯一标记文本证实实际落点，却不能补齐事务焦点历史。顶层前台检查也不等于编辑控件焦点证明。`keyboard.rs:708`调用wait_for_drain后未使用bool，是确认强度缺口；尚不能认定就是括号重复根因。
+
+**有效但混杂的对照。** `20261006130451712-83eb44e0/paced-input-experiment-readback.json`记录一次模型type、91次顺序SDK RPC、每次前台探测同PID/HWND，耗时120356.4ms，全文精确一致，各effect仍为unverifiable。runner的`dispatchPacedDesktopTypeText:1258`保留actionArgs，只替换chunk文本，不能误写为切到element SetValue。该对照同时改变RPC/事务次数、探测间隔、attachment/drain生命周期和总耗时，不能单独推出“逐字就好”或“3ms足够”。
+
+**最小下一实验，仅设计。** 待桌面协调且取得本轮实验许可，在同隔离SDK/候选、同受控空白文档、同91码点下，仍一次RPC/一次事务、每码点一组事件，仅把码点间隔改为成功91-RPC轨迹中的实测保守间隔（按逐调用时间取值，不凭平均数猜）；同时记录上述HWND/TID、attachment、SendInput count、drain结果，最后只读全文逐码点比较。慢单事务仍坏，单纯消费速度不足不能解释，应转事务/队列生命周期；成功则先收窄为时序敏感，再找可交付节奏。不要同时换UIA/剪贴板、重选窗口、自动重试或增加模型调用。本审未执行。
+
+### 2. Harness输入语义的独立限制
+
+Windows native-window多行由`executeMultilineType:3739`验证UIA token/snapshot、Session/Observation/Surface/geometry，再以background type_text发送新chunk；`3889–3902`只在同次value_readback confirmed时completed，否则partial。它是末尾追加，不是光标插入或选区替换；`runtime/computer-tools.ts:39–45`已告知。
+
+候选CUA `tools/impl_.rs:4806–4811`仍在CurrentValue失败时unwrap_or_default后SetValue，存在旧正文读取失败时覆盖风险。本审未实测该分支，也不将v0.33.1源码检查冒充默认v0.22.2二进制实测。这是单独风险，不是本次SendInput损坏的原因证明。
+
+`cua-driver-computer.ts:3249`让Windows所有含换行type进入该分支；desktop缺exact native binding，`3761`拒绝。工具说明与测试`1308`均明确此限制。Context `projections.ts:60`建议逐行type+Enter，但普通单行当前有真实损坏风险，不能把拆行作为可靠替代或整屏多行已通过。应修改这种可靠性暗示，保留“不盲猜UIA、不把unknown改为安全拒绝”的边界。
+
+### 3. 窗口/弹窗闭环与明确的过严分支
+
+保留成立链路：listWindows发Run-local windowRef，executeWindowSwitch消费旧列表；native transition做激活/新捕获，desktop `3017`只激活并保持desktop scope；activateWindowTarget核对driver foreground identity，不只信通用成功布尔。Runtime `observeAndCommit:2728`及Receipt validator `3369`消费parent/sibling/native/desktop safeRecovery，核对新SurfaceRef/transition；unknown保留，旧batch不重放。这些都有生产者/消费者，不应为了绕过失败而整体移除。
+
+真实证据范围：
+
+- 携程→Notepad Run `run-1791292339458-454347e9-dba`，seq105为partial+transient_parent_restored。本审独立读取实际TXT，与原type.text做CRLF/CR→LF规范化后全文一致。支持受管网页→native UIA报告→保存→父窗恢复；不证明desktop中文输入已修好，也不证明恢复后另完成了新GUI动作。
+- WPS native Run `run-1791293020638-54a50b53-362`，24动作/26请求后失败、无输出，seq13为native_surface_reconfirmed的unknown。不能从completed点击断言菜单已打开或正确采图。
+- WPS desktop Run `run-1791294022199-456e9415-043`原轨迹有1 refusal、6 partial/unknown；摘要18 completed不是总尝试数。既有fileValidation和作者记录支持正文/字体保存；本审未再次解包DOCX，不将其算本审实测。短ASCII和初始文档身份不足，不可扩大成完整中文新建能力。
+
+**P1，代码确认：** `cua-driver-computer.ts:2304–2312`不看inventory.complete/truncated，只要缺boundPeer就markSurfaceUnknown；随后observe `1145`、executeWindowSwitch `2970`拒绝unknown Surface。测试`1272–1301`只证明目标重现后还能列窗，没证明普通observe/switch可恢复。一次partial清单漏行可使仍活着的目标进入正常恢复链的死路，和其他路径“不凭部分清单证明消失”冲突。不是已证实该条件触发了最近输入失败。
+
+最小修正建议：partial/截断漏行归为本次发现不确定，撤销旧引用后做有界exact-target只读核实，不直接永久失效；保留真正关闭/错PID/HWND的拒绝。先编排“partial漏目标→精确目标仍活→新观察→新list/switch”以及complete absence、复用HWND换PID的反例。本审只阅读测试源码，未运行。
+
+### 4. 浏览器自动启动与模型自主能力
+
+手机Remote API `remote-run-api.ts:490,500,556,906`对非browser起点、switchWindows=true按saved/temporary设置准备managedBrowserCompanion、起始about:blank；saved还受profile准备与lease约束。`run-factory.ts:46–60`转hybrid，`computers.ts:357`在Computer.open时host.start。因此这是Host启动策略，不是模型先判断需要浏览器才启动；不开跨应用的普通native起点不创建companion。GoalComposer开关已告知“电脑也会按设置准备受管浏览器”，不是完全未告知行为。
+
+标准computer工具有list_windows/switch_window及普通GUI动作，没有launch_app/open_app。开关不承诺任意应用自主启动；desktop可能经授权正常界面启动应用，但仍需模型与后续发现/激活链实际成功；native绑定不会自动获得整屏启动器能力。desktop切到受管浏览器仍是visual-only desktop，不自动取得native DOM scope。
+
+建议保留显式opt-in、受管profile与个人浏览器区分。若目标是“只切原生应用、不额外开浏览器”，当前存在产品耦合，应单独确认按需启动/独立开关，不混入输入修复。不要合并“选择应用、启动应用、切换已开窗口、取得DOM授权”的能力承诺。
+
+### 5. 手机候选、预览、控制与部署一致性
+
+当前源码有精确candidate token/request/TTL、预览前后PID/HWND复核、可选预览不清普通选择、强制预览待图片load成功才确认、取消/过期/清理失败不返回可确认图。`window-discovery.test.ts:195,285,320,355`及PendingRequestPanel/useRunFeed测试有相关合同场景，但本审未运行。Host cleanup结束后另发状态，Web区分finished/pending_cleanup；这些边界应保留。
+
+实机证据缺口：`real-window-preview-20261006-E8uWgJ/result.json`是no_wps_candidate，虽然WPS进程数7；`yX4sS1`也为no_previewable_wps_candidate。进程存在不等于可选HWND，它们不能当作真实WPS预览/手机触摸解码通过。先核对实际服务的Host/Web build ID，再只读列窗→确切候选预览→load/过期失效；另获桌面许可后才确认选择token、实际激活目标、最新截图、取消及owner released。
+
+**P2静态竞态：** useRunFeed已隔离换Run的迟到数据；`apps/web/src/hooks/useRunCommands.ts:18–78`的busyCommand/notice/commandIds及异步回执没有runId/epoch隔离，`App.tsx:40`的RunWorkspace也未按runId加key。同一组件实例从A换B而A回执未结束时，旧notice/finally可能影响B。尚未实测，不能说是当前用户事故。最小验证：延迟A的send/get回执，rerender到B，再返回A，确认B提示、忙状态与registry不受影响；沿用现有epoch或Run-key生命周期，不另造控制层。
+
+### 6. 优先级与保留/修改/移除
+
+1. **P0输入正确性：** 3ms候选不升级；先完成第1节单变量对照，后续回归空白、中间光标、选区、中文、代理对、CR/LF，区分普通输入与追加合同。判定依据是实际内容，不是动作回执/字数；失败不重放。
+2. **P1发现可恢复性：** 修partial inventory→永久unknown；保留exact identity、fresh capture、真实absence反例，不能泛化成任意窗口可选。
+3. **P1交付一致性：** 源码、构建、服务资产身份分别记录；部署和桌面操作按现有协调授权。移除“源码GO=整体可用”的解读，保留历史证据原文。
+4. **P2控制竞态与性能：** 补换Run的command回执隔离。post-input-observation-settler默认1500ms等待、250ms采样、最多7样本/约3000ms调度窗，只证明画面采样稳定，不证明正文正确；capture自身仍受其超时。不要为稳定损坏继续堆sleep，按轨迹衡量后收窄适用范围。
+5. **平台与重复机制：** Windows SendInput/UIA/可见区域采图不能直接推广为Mac/Linux验收。可见区域采图以win32/local pipe/foreground为条件，失败回原采图，不是像素隔离保证。unknown防重放、fresh Surface、owner cleanup都有消费者，未发现应整体删除的证据。多行准入`3822/3833`重复检查可后续合并，但不是当前根因，不应以整理代码替代输入验证。
+
+本审实际执行仅Git/源码/测试源码阅读、现有JSON/轨迹/图片和保存TXT核对、若干哈希比较。历史tests/build成绩均不算本审运行；没有实时屏幕接口，未捕获新画面或读取当前焦点。本机.codex目录被沙箱拒绝，未用memory_summary；所查项目.agents/skills入口不存在。本地证据已足以形成上述输入结论。
+
+---
+
 Status: final source/integration GO for fb4d7bb plus the scoped DOM replay-guard correction below; this is not an end-to-end desktop or phone acceptance result. Earlier sections retain the historical planning and incremental review record.
 
 ## 最终合并集成审查（2026-10-04）
@@ -194,10 +288,12 @@ GO，可进入真实 Task1 后验。仅 Windows multiline 在当前 Observation 
 
 ### 配对手机 candidate preview 集中审查
 
+本节为原审查基线。2026-10-07 后续增量已将 raw／wire 限额统一为2MiB／3MiB；最新实现与验证见[当前整改入口](./window-popup-regression-2026-10-04.md)。以下1MiB／2MiB保留作当时证据，不是当前合同。图片成功解码也不等于软件已判断不同候选的画面足够可辨认，真实CUA候选仍须分别验收。
+
 GO，无剩余已发现 P1；真实手机体验尚未验证。Web 只在用户点击具体候选时读取预览；初始候选和 handoff 分别绑定 device 的 opaque candidate token，以及当前 Run owner/requestId/candidate。Host 使用配对 cookie、CSRF 和捕获后 session revalidation；HTTP 与 Relay 路由只接受限定字段，不允许直接传入任意 PID/HWND。proof token 有效期两分钟，初始 proof 不超过候选列表有效期；刷新、候选或请求 token 改变会清除旧图与选择。预览前后核验同一精确 PID/HWND，允许 partial inventory 中的正向精确身份，不推断全局 absence。随后真正选择仍走原有精确 native verification。
 
 预览使用临时只读 CUA session，不激活、不发输入、不创建 Surface/Run Observation 或资产；图片不进入模型上下文、轨迹或持久化文件。capture 信号上限 8 秒，cleanup 信号 5 秒；取消排队请求不新建 driver，清理失败保留待清理状态而不返回可确认图片。raw PNG 上限 1 MiB、Host/Relay JSON route 上限 2 MiB，并校验 PNG signature、canonical base64 和有界 viewport。Host 从鉴权之前就设置 no-store，包括错误响应；Relay 也使用 no-store。
 
-人机确认必须等对应图片成功 load 后才开放；损坏图片、过期 proof、无法区分的内容保持不可确认，并真实标注捕获时应用/标题、时间和关系，缺元数据不冒用旧候选标题。requestId/run/candidate token 改变在 layout effect 中立即清旧图，防止先绘制过期截图。本审发现并由 UI 作者修复一处不一致：handoff 重读同一候选时曾保留旧已加载截图和确认按钮；现在与 Home 一样，开始重读即清旧图/loaded/error 状态，pending 或失败均不能凭旧图确认。
+人机确认必须等对应图片成功 load 后才开放；损坏图片、过期 proof 保持不可确认，并真实标注捕获时应用/标题、时间和关系，缺元数据不冒用旧候选标题。软件没有自动判定“图片内容可区分”的能力，看不清时不应确认；不能把加载成功当作该语义已验证。requestId/run/candidate token 改变在 layout effect 中立即清旧图，防止先绘制过期截图。本审发现并由 UI 作者修复一处不一致：handoff 重读同一候选时曾保留旧已加载截图和确认按钮；现在与 Home 一样，开始重读即清旧图/loaded/error 状态，pending 或失败均不能凭旧图确认。
 
 独立仅 preview/paired 请求 pattern 加遗漏的关键负例，34 项通过；包含实际本地 Host HTTP→Relay WSS 往返，但截图与手机 UI 仍为测试夹具，并非原生 CUA 加真实配对手机实测。覆盖 token/TTL/owner/request、CSRF/revocation、route bytes bound、partial exact identity、post-capture identity 消失、取消/cleanup、图片 load gate、缺元数据/失败图片、request token 清图，以及重新读取失败不留下旧确认。134/134 九文件与 scoped noEmit、后续 UI/Host 小回归均为作者报告，未计为本审独立整包验证。未 build dist、未 GUI 输入、未调用外部 API。实际手机触摸/解码、原生窗口捕获质量和网络取消延迟仍待真实验收。

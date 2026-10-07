@@ -45,6 +45,15 @@ describe("owned transient HWND stage-one admission", () => {
     expect(assess()).toEqual({ decision: "admitted" });
   });
 
+  it("rejects a known no-activate exact-owned HWND as an independent child", () => {
+    const menu = { ...ownedChild, noActivate: true };
+    expect(assess(menu, inventory(baseWindow, menu))).toMatchObject({
+      decision: "rejected",
+      code: "WINDOW_SCOPE_REQUIRED",
+      reason: expect.stringContaining("WS_EX_NOACTIVATE"),
+    });
+  });
+
   it("does not treat a same-PID window with missing owner evidence as authorized", () => {
     const candidate: CuaWindowInfo = {
       target: ownedChild.target,

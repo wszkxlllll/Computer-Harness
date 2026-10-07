@@ -124,6 +124,8 @@ export interface RemoteRunSnapshot {
   /** Monotonic cursor over projected events, never the raw Runtime sequence. */
   readonly sequence: number;
   readonly outcome?: RunOutcome;
+  /** Desktop environment lease state for this exact Run after it becomes terminal. */
+  readonly ownerState?: "released" | "pending_cleanup";
   readonly error?: string;
   readonly reply?: string;
   readonly pendingRequest?: RemotePendingRequest;

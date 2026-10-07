@@ -208,6 +208,11 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
             </p>
           )}
           {snapshot.error && <p className="notice notice-error" role="alert">{snapshot.error}</p>}
+          {snapshot.status === "finished" && snapshot.ownerState === "pending_cleanup" && (
+            <p className="notice notice-warning" role="status">
+              任务已结束，但电脑尚未确认资源清理。请刷新任务状态；确认前不会开始新任务。若持续未确认，请在电脑端检查 Harness 状态。
+            </p>
+          )}
         </section>
 
         {commands.notice && <div className={`notice notice-${commands.notice.tone}`} role="status" aria-live="polite">{commands.notice.text}</div>}

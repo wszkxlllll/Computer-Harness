@@ -397,22 +397,21 @@ async function runFixture(session: ApplicationSession, windowSwitch: "off" | "op
 }
 
 describe("managed browser companion through ApplicationSession and the real tool registry", () => {
-  it.each([false, true])("restores desktop/native clicks while browser clicks stay blocked (DOM capture failure: %s)", async (failDomCapture) => {
+  it("keeps the full desktop capture scope while activating exact listed windows", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-companion-surface-click-"));
     const fixture = await createFixture(outputDir, {
       companion: true,
-      failDomCapture,
       steps: [
         { kind: "click", callId: "desktop-click", expectedEnabled: true },
         { kind: "list", callId: "desktop-list" },
         { kind: "switch", callId: "to-browser", listCallId: "desktop-list", targetTitle: "Managed Edge" },
-        { kind: "click", callId: "blocked-browser-click", expectedEnabled: false },
+        { kind: "click", callId: "browser-click", expectedEnabled: true },
         { kind: "list", callId: "browser-list" },
         { kind: "switch", callId: "to-native", listCallId: "browser-list", targetTitle: "Native Editor" },
         { kind: "click", callId: "native-click", expectedEnabled: true },
         { kind: "list", callId: "native-list" },
         { kind: "switch", callId: "back-to-browser", listCallId: "native-list", targetTitle: "Managed Edge" },
-        { kind: "click", callId: "blocked-browser-click-again", expectedEnabled: false },
+        { kind: "click", callId: "browser-click-after-return", expectedEnabled: true },
         { kind: "finish" },
       ],
     });
@@ -420,41 +419,54 @@ describe("managed browser companion through ApplicationSession and the real tool
       const { handle, outcome } = await runFixture(fixture.session, "opened-windows-v1");
       const failures = handle.controller.getEvents().filter((event) => event.type === "runtime.error" || event.type === "action.execution.failed");
       expect(outcome, JSON.stringify(failures)).toBe("succeeded");
+      expect(handle.config.computer).toMatchObject({
+        managedBrowserCompanion: true,
+        grounding: "hybrid-catalog-v1",
+        windowSwitch: "opened-windows-v1",
+        windowDeliveryMode: "foreground",
+      });
+      expect(handle.controller.getEffectiveToolNames()).toEqual(expect.arrayContaining(["click", "list_windows", "switch_window"]));
       const clicks = fixture.metrics.delegateDriver.calls.filter((call) => call.name === "click");
-      expect(clicks).toHaveLength(2);
-      expect(clicks[0]?.input).toMatchObject({ target: { kind: "desktop", display_id: "primary" } });
-      expect(clicks[1]?.input).toMatchObject({ target: { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId } });
+      expect(clicks).toHaveLength(4);
+      expect(clicks.map((call) => call.input?.target)).toEqual([
+        { kind: "desktop", display_id: "primary" },
+        { kind: "desktop", display_id: "primary" },
+        { kind: "desktop", display_id: "primary" },
+        { kind: "desktop", display_id: "primary" },
+      ]);
+      for (const click of clicks) {
+        expect(click.input).toMatchObject({
+          target: { kind: "desktop", display_id: "primary" },
+          x: 20,
+          y: 20,
+          delivery_mode: "foreground",
+        });
+      }
+      expect(fixture.metrics.delegateDriver.calls.filter((call) => call.name === "bring_to_front").map((call) => ({
+        pid: call.input?.pid,
+        window_id: call.input?.window_id,
+      }))).toEqual([
+        { pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+      ]);
+      expect(fixture.metrics.domTargets).toEqual([]);
+      expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_window_state")).toBe(false);
       const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
-      expect(observations.some((event) => event.type === "observation.created" && event.observation.surfaceRef.kind === (failDomCapture ? "browser_tab" : "dom"))).toBe(true);
+      expect(observations.length).toBeGreaterThan(0);
+      expect(observations.every((event) => event.observation.surfaceRef.kind === "desktop")).toBe(true);
+      expect(new Set(observations.map((event) => event.observation.surfaceRef.surfaceId)).size).toBe(1);
     } finally {
       await fixture.session.close();
       await rm(outputDir, { recursive: true, force: true });
     }
   });
 
-  it("keeps the default CUA run on its chosen native window without starting a browser Host", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-default-"));
-    const fixture = await createFixture(outputDir, { initialTarget: NATIVE_TARGET });
-    try {
-      const { handle, outcome } = await runFixture(fixture.session, "off");
-      const report = await handle.report();
-      expect(outcome).toBe("succeeded");
-      expect(fixture.metrics.host.starts).toBe(0);
-      expect(fixture.metrics.bootstrap.opens).toBe(0);
-      expect(fixture.metrics.provider.toolNames[0]).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
-      expect(fixture.metrics.delegateOptions[0]).toMatchObject({ windowTarget: NATIVE_TARGET, grounding: "off", windowSwitch: "off" });
-      expect(report.summary.grounding).toBe("off");
-      await fixture.session.close();
-    } finally {
-      await fixture.session.close();
-      await rm(outputDir, { recursive: true, force: true });
-    }
-  });
-
-  it("switches native → managed browser → native → managed browser with fresh refs and browser-only DOM", async () => {
+  it.each([false, true])("keeps native-window rebinding and browser-only DOM routing intact (DOM capture failure: %s)", async (failDomCapture) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-roundtrip-"));
     const fixture = await createFixture(outputDir, {
       companion: true,
+      failDomCapture,
       initialTarget: NATIVE_TARGET,
       allowedTargets: [NATIVE_TARGET, NATIVE_TARGET],
       managedBrowserUrl: "https://fixture.example/path?private=query",
@@ -462,12 +474,16 @@ describe("managed browser companion through ApplicationSession and the real tool
       profileLabel: "fixture.profile",
       profileRoot: "C:\\HarnessOwned\\managed-profiles",
       steps: [
+        { kind: "click", callId: "native-initial-click", expectedEnabled: true },
         { kind: "list", callId: "list-initial" },
         { kind: "switch", callId: "to-browser", listCallId: "list-initial", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "browser-click", expectedEnabled: true },
         { kind: "list", callId: "list-on-browser" },
         { kind: "switch", callId: "to-native", listCallId: "list-on-browser", targetTitle: "Native Editor" },
+        { kind: "click", callId: "native-click-after-return", expectedEnabled: true },
         { kind: "list", callId: "list-on-native" },
         { kind: "switch", callId: "back-to-browser", listCallId: "list-on-native", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "browser-click-after-return", expectedEnabled: true },
         { kind: "finish" },
       ],
     });
@@ -491,7 +507,22 @@ describe("managed browser companion through ApplicationSession and the real tool
       expect(fixture.metrics.provider.listedWindows[0]?.some((window) => window.title === "Out of scope")).toBe(false);
       expect(fixture.metrics.provider.listedWindows[0]?.find((window) => window.title === "Native Editor")?.isCurrent).toBe(true);
       expect(new Set(fixture.metrics.provider.selectedRefs).size).toBe(3);
-      expect(fixture.metrics.domTargets).toEqual([BROWSER_TARGET, BROWSER_TARGET]);
+      expect(fixture.metrics.domTargets).toEqual([BROWSER_TARGET, BROWSER_TARGET, BROWSER_TARGET, BROWSER_TARGET]);
+      const clicks = fixture.metrics.delegateDriver.calls.filter((call) => call.name === "click");
+      expect(clicks).toHaveLength(4);
+      expect(clicks.map((call) => call.input?.target)).toEqual([
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+      ]);
+      for (const click of clicks) {
+        expect(click.input).toMatchObject({ x: 20, y: 20, delivery_mode: "foreground" });
+      }
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations.some((event) => event.observation.surfaceRef.kind === "native_window")).toBe(true);
+      expect(observations.some((event) => event.observation.surfaceRef.kind === (failDomCapture ? "browser_tab" : "dom"))).toBe(true);
+      expect(observations.every((event) => event.observation.surfaceRef.kind !== "desktop")).toBe(true);
       expect(fixture.metrics.hostOptions[0]).toMatchObject({ profileMode: "persistent", profileLabel: "fixture.profile", persistentProfileRoot: "C:\\HarnessOwned\\managed-profiles" });
       expect(fixture.metrics.host.starts).toBe(1);
       expect(fixture.metrics.host.closes).toBe(1);
@@ -513,7 +544,7 @@ describe("managed browser companion through ApplicationSession and the real tool
     }
   });
 
-  it("starts on the CUA desktop and exposes the managed browser as a switch target", async () => {
+  it("starts on the CUA desktop and exposes the managed browser as a switch target without leaving desktop scope", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-desktop-"));
     const fixture = await createFixture(outputDir, {
       companion: true,
@@ -532,11 +563,38 @@ describe("managed browser companion through ApplicationSession and the real tool
       expect(fixture.metrics.hostOptions[0]).toMatchObject({ profileMode: "ephemeral" });
       expect(fixture.metrics.hostOptions[0]).not.toHaveProperty("persistentProfileRoot");
       expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_desktop_state")).toBe(true);
-      expect(fixture.metrics.domTargets).toEqual([BROWSER_TARGET]);
+      expect(fixture.metrics.domTargets).toEqual([]);
+      expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_window_state")).toBe(false);
       expect(fixture.metrics.hostOptions[0]).toMatchObject({ profileMode: "ephemeral" });
       expect(fixture.metrics.provider.listedWindows[0]?.find((window) => window.title === "Managed Edge")?.isCurrent).toBe(false);
       expect(fixture.metrics.delegateDriver.calls.filter((call) => call.name === "bring_to_front").at(-1)?.input)
         .toMatchObject({ pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId });
+      expect(fixture.metrics.provider.listedWindows).toHaveLength(1);
+      expect(fixture.metrics.provider.selectedRefs).toHaveLength(1);
+      expect(new Set(fixture.metrics.provider.selectedRefs).size).toBe(1);
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations.length).toBeGreaterThan(0);
+      expect(observations.every((event) => event.observation.surfaceRef.kind === "desktop")).toBe(true);
+      expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
+      await fixture.session.close();
+    } finally {
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the default CUA run on its chosen native window without starting a browser Host", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-default-"));
+    const fixture = await createFixture(outputDir, { initialTarget: NATIVE_TARGET });
+    try {
+      const { handle, outcome } = await runFixture(fixture.session, "off");
+      const report = await handle.report();
+      expect(outcome).toBe("succeeded");
+      expect(fixture.metrics.host.starts).toBe(0);
+      expect(fixture.metrics.bootstrap.opens).toBe(0);
+      expect(fixture.metrics.provider.toolNames[0]).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
+      expect(fixture.metrics.delegateOptions[0]).toMatchObject({ windowTarget: NATIVE_TARGET, grounding: "off", windowSwitch: "off" });
+      expect(report.summary.grounding).toBe("off");
       await fixture.session.close();
     } finally {
       await fixture.session.close();

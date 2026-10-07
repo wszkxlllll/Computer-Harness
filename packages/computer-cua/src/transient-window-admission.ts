@@ -30,6 +30,13 @@ export function assessOwnedTransientWindowAdmission(input: {
       reason: "the pre-action parent Surface generation is no longer active",
     };
   }
+  if (candidate.noActivate === true) {
+    return {
+      decision: "rejected",
+      code: "WINDOW_SCOPE_REQUIRED",
+      reason: "the exact owned HWND is WS_EX_NOACTIVATE and cannot become an independent foreground Surface",
+    };
+  }
   if (input.baselineTruncated === true || inventory.truncated === true) {
     return {
       decision: "manual",
@@ -136,6 +143,7 @@ export function assessOwnedTransientWindowAdmission(input: {
   const ownedVisible: CuaWindowInfo[] = [];
   for (const window of inventory.windows) {
     if (window.ownerPid !== parent.pid || window.ownerWindowId !== parent.windowId) continue;
+    if (window.noActivate === true) continue;
     if (window.isOnScreen === undefined) {
       return {
         decision: "manual",

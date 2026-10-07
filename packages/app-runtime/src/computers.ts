@@ -1,4 +1,4 @@
-import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaMultilineTypeProfile, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
 import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList, ObservationCapture, ObservationId } from "@computer-harness/protocol";
@@ -20,6 +20,8 @@ export type ComputerBackendConfig =
       windowTarget?: { pid: number; windowId: number };
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
+      /** Private Host opt-in to the experimental Windows foreground-caret typing route; use only after independent validation of the selected candidate driver. Never inferred from a driver version. */
+      multilineTypeProfile?: CuaMultilineTypeProfile;
       /** Explicit per-Run permission to discover and switch among opened windows. */
       windowSwitch?: "off" | "opened-windows-v1";
       /** Host-only exact target allowlist; omitted permits the enumerated opened-window inventory. */
@@ -50,7 +52,14 @@ export type ComputerBackendConfig =
 export interface ComputerRunAssemblyPolicy {
   readonly config: ComputerBackendConfig;
   readonly groundingTools: readonly ToolDefinition[];
+  readonly toolPresentationOverrides: readonly ComputerToolPresentationOverride[];
   enabledToolNames(registry: ToolRegistry): readonly string[] | undefined;
+}
+
+export interface ComputerToolPresentationOverride {
+  readonly name: string;
+  readonly description: string;
+  readonly inputPropertyDescriptions: Readonly<Record<string, string>>;
 }
 
 export function prepareComputerRunAssembly(
@@ -67,10 +76,22 @@ export function prepareComputerRunAssembly(
   const groundingTools = grounding === "off"
     ? []
     : groundingComputerTools({ includeSelectOption: managedGrounding });
+  const toolPresentationOverrides = effectiveConfig.kind === "cua" && process.platform === "win32" &&
+      effectiveConfig.multilineTypeProfile === "foreground-caret-v1"
+    ? [{
+      name: "type",
+      description: "Type text into the currently focused GUI control. In the host-enabled Windows foreground-caret-v1 profile, multiline text without elementRef follows ordinary foreground typing, intended to insert at the current caret or replace the current selection; driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send in controls where Enter has that meaning; check the intended control before typing. An explicit current UIA elementRef uses the separate append-to-end route regardless of caret or selection; that route does not automatically submit or send. Do not use elementRef for single-line text.",
+      inputPropertyDescriptions: {
+        text: "Text to type. With the host-enabled Windows foreground-caret-v1 profile, omit elementRef for multiline typing; ordinary foreground input is intended to insert at the current caret or replace the current selection, but driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send depending on the current control.",
+        elementRef: "Optional current UIA editable reference for the explicit multiline append-to-end route. It appends regardless of caret or selection; omit it to use ordinary foreground caret typing when that host profile is enabled.",
+      },
+    } satisfies ComputerToolPresentationOverride]
+    : [];
 
   return {
     config: effectiveConfig,
     groundingTools,
+    toolPresentationOverrides,
     enabledToolNames(registry) {
       if (!windowScoped || effectiveConfig.kind !== "cua") return undefined;
       // Single-target managed browsers only click through grounded elements.
@@ -284,6 +305,7 @@ export async function createComputer(
       screenshotDir: config.screenshotDir,
       ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
       ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
+      ...(config.multilineTypeProfile === undefined ? {} : { multilineTypeProfile: config.multilineTypeProfile }),
       ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
       ...(config.windowSwitch === undefined ? {} : { windowSwitch: config.windowSwitch }),
       ...(config.windowSwitchAllowedTargets === undefined ? {} : { windowSwitchAllowedTargets: config.windowSwitchAllowedTargets }),
@@ -374,6 +396,7 @@ class ManagedBrowserComputer implements Computer {
         domGroundingTransport: host.createTransport(),
         ...(initialTarget === undefined ? {} : { windowTarget: initialTarget }),
         ...(this.options.config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: this.options.config.windowDeliveryMode }),
+        ...(this.options.config.multilineTypeProfile === undefined ? {} : { multilineTypeProfile: this.options.config.multilineTypeProfile }),
         ...(this.options.config.grounding === undefined ? {} : { grounding: this.options.config.grounding }),
         ...(this.options.config.windowSwitch === undefined ? {} : { windowSwitch: this.options.config.windowSwitch }),
         ...(scopedTargets === undefined ? {} : { windowSwitchAllowedTargets: scopedTargets }),

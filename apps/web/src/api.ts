@@ -18,7 +18,7 @@ import {
   type WindowTargetList,
 } from "./types";
 import type { Pcm16AudioChunk, VoiceInputCapabilities, VoiceSessionUpdate } from "@computer-harness/voice";
-import type { RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
+import { MAX_WINDOW_PREVIEW_BYTES, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 
 export { ApiError } from "./types";
 
@@ -132,6 +132,10 @@ function errorMessageForCode(code?: string): string | undefined {
     WINDOW_SELECTION_REQUIRED: "电脑无法唯一确定要操作的窗口。请从刷新后的列表中手动选择一个窗口。",
     WINDOW_PREVIEW_REQUIRED: "请先查看这个精确窗口的实时预览，并在确认画面后再选择。",
     WINDOW_PREVIEW_UNAVAILABLE: "电脑无法安全预览这个精确窗口。请在电脑上恢复或调整目标窗口，刷新列表后重试。",
+    WINDOW_PREVIEW_TIMEOUT: "读取窗口预览超时。请确认目标窗口仍可见，稍后重试。",
+    WINDOW_PREVIEW_CAPTURE_FAILED: "电脑无法安全读取这个窗口的画面。请在电脑上恢复目标窗口、刷新列表后重试。",
+    WINDOW_PREVIEW_CLEANUP_PENDING: "电脑端仍在清理窗口预览会话。请先检查 Harness 状态，确认清理完成后再重试。",
+    WINDOW_PREVIEW_IMAGE_TOO_LARGE: "窗口预览图片超过安全传输上限。请缩小目标窗口，再刷新列表重试。",
     WINDOW_PREVIEW_BUSY: "另一张窗口预览仍在读取。等它完成或取消后再试。",
     WINDOW_ACTIVATION_FAILED: "电脑找到了匹配窗口，但无法将它恢复到屏幕上。任务尚未开始，请手动选择一个当前可见的窗口后重试。",
     WINDOW_DISCOVERY_FAILED: "电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。",
@@ -189,14 +193,14 @@ function validateWindowCandidatePreview(value: unknown): WindowCandidatePreview 
   const title = optionalWindowText(record.title, 512);
   const relationship = validateWindowCandidateRelationship(record.relationship);
   const dataBase64 = record.dataBase64;
-  const maxBase64Length = Math.ceil(1_048_576 / 3) * 4;
+  const maxBase64Length = Math.ceil(MAX_WINDOW_PREVIEW_BYTES / 3) * 4;
   if (typeof record.previewToken !== "string" || !/^[A-Za-z0-9_-]{32}$/u.test(record.previewToken) ||
       typeof record.capturedAt !== "string" || !Number.isFinite(Date.parse(record.capturedAt)) ||
       typeof record.expiresAt !== "string" || !Number.isFinite(Date.parse(record.expiresAt)) ||
       record.mediaType !== "image/png" || typeof dataBase64 !== "string" || dataBase64.length === 0 ||
       dataBase64.length > maxBase64Length ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(dataBase64) ||
-      decodedBase64Length(dataBase64) > 1_048_576 ||
+      decodedBase64Length(dataBase64) > MAX_WINDOW_PREVIEW_BYTES ||
       !hasExactKeys(viewport, ["width", "height"]) ||
       !Number.isSafeInteger(viewport.width) || !Number.isSafeInteger(viewport.height) ||
       Number(viewport.width) < 1 || Number(viewport.height) < 1 ||
@@ -224,7 +228,12 @@ function validateWindowTargetList(value: unknown): WindowTargetList {
       record.omittedAmbiguousCount !== undefined && (!Number.isSafeInteger(record.omittedAmbiguousCount) || Number(record.omittedAmbiguousCount) < 0)) {
     throw new Error("电脑返回的窗口列表格式无效。");
   }
-  const candidates = record.candidates.map(validateWindowTarget);
+  const candidatesByToken = new Map<string, WindowCandidate>();
+  for (const value of record.candidates) {
+    const candidate = validateWindowTarget(value);
+    if (!candidatesByToken.has(candidate.token)) candidatesByToken.set(candidate.token, candidate);
+  }
+  const candidates = [...candidatesByToken.values()];
   const labelCounts = new Map<string, number>();
   for (const candidate of candidates) {
     const key = `${normalizeWindowLabel(candidate.appName)}\u0000${normalizeWindowLabel(candidate.title)}`;

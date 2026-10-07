@@ -144,6 +144,50 @@ describe("projectWindowTargetInventory", () => {
     expect(filterInitialTargetWindowCandidates(projected)).toEqual(projected);
   });
 
+  it("keeps native-only owner rows for relation proof but excludes them from initial target choices", () => {
+    const nativeOnlyRoot = {
+      ...row(61_100, 71_100, 0, 0, "Native topology root"),
+      isOnScreen: true,
+      minimized: false,
+      cuaListed: false,
+    };
+    const cuaListedChild = {
+      ...row(61_100, 71_101, 61_100, 71_100, "CUA-listed owned child"),
+      isOnScreen: true,
+      minimized: false,
+      cuaListed: true,
+    };
+    const nativeOnlyHelper = {
+      ...row(61_100, 71_102, 61_100, 71_100, "Native helper"),
+      isOnScreen: true,
+      minimized: false,
+      cuaListed: false,
+    };
+
+    const projected = projectWindowTargetInventory(inventory([nativeOnlyRoot, cuaListedChild, nativeOnlyHelper]));
+
+    expect(projected).toEqual([{
+      pid: cuaListedChild.target.pid,
+      windowId: cuaListedChild.target.windowId,
+      appName: cuaListedChild.appName,
+      title: cuaListedChild.title,
+      relationship: { kind: "owned_child", owner: { pid: nativeOnlyRoot.target.pid, windowId: nativeOnlyRoot.target.windowId } },
+    }]);
+    expect(filterInitialTargetWindowCandidates(projected)).toEqual(projected);
+  });
+
+  it("excludes a known no-activate row from initial targets while retaining its owner in topology", () => {
+    const parent = { ...row(62_100, 72_100, 0, 0, "Notepad main"), isOnScreen: true, minimized: false };
+    const menu = {
+      ...row(62_100, 72_101, 62_100, 72_100, "Notepad popup"),
+      isOnScreen: true,
+      minimized: false,
+      noActivate: true,
+    };
+    const projected = projectWindowTargetInventory(inventory([parent, menu]));
+    expect(projected.map((candidate) => candidate.windowId)).toEqual([parent.target.windowId]);
+  });
+
   it.each([
     ["partial inventory", { complete: false }],
     ["truncated inventory", { truncated: true }],
@@ -152,6 +196,43 @@ describe("projectWindowTargetInventory", () => {
     const unknownVisibility = row(62_000, 72_000, 0, 0, "Unknown visibility");
     expect(projectWindowTargetInventory(inventory([unknownVisibility], overrides))).toMatchObject([
       { pid: unknownVisibility.target.pid, windowId: unknownVisibility.target.windowId },
+    ]);
+  });
+
+  it.each([
+    ["partial Win32 inventory", { complete: false, completeAttestation: "negative" as const }],
+    ["truncated CUA inventory", { source: "cua_inventory" as const, complete: false, completeAttestation: "negative" as const, truncated: true }],
+    ["negative completeness", { completeAttestation: "negative" as const }],
+  ])("filters an exact hidden non-minimized row from a %s without treating the inventory as globally complete", (_label, overrides) => {
+    const visible = { ...row(64_000, 74_000, 0, 0, "Visible app"), isOnScreen: true, minimized: false };
+    const hidden = { ...row(64_001, 74_001, 0, 0, "Hidden helper"), isOnScreen: false, minimized: false };
+    const minimized = { ...row(64_002, 74_002, 0, 0, "Minimized app"), isOnScreen: false, minimized: true };
+    const duplicate = { ...row(64_003, 74_003, 0, 0, "Duplicate hidden identity"), isOnScreen: false, minimized: false };
+    const duplicateAgain = { ...duplicate, title: "Duplicate hidden identity again" };
+    const unknown = row(64_004, 74_004, 0, 0, "Unknown visibility");
+
+    const projected = projectWindowTargetInventory(inventory([
+      visible,
+      hidden,
+      minimized,
+      duplicate,
+      duplicateAgain,
+      unknown,
+    ], overrides));
+
+    expect(projected.map((target) => target.windowId)).toEqual([
+      visible.target.windowId,
+      minimized.target.windowId,
+      duplicate.target.windowId,
+      duplicateAgain.target.windowId,
+      unknown.target.windowId,
+    ]);
+  });
+
+  it("retains a hidden-looking row when inventory provenance is unknown", () => {
+    const hidden = { ...row(64_010, 74_010, 0, 0, "Unknown-source row"), isOnScreen: false, minimized: false };
+    expect(projectWindowTargetInventory(inventory([hidden], { source: undefined, complete: false }))).toMatchObject([
+      { pid: hidden.target.pid, windowId: hidden.target.windowId },
     ]);
   });
 

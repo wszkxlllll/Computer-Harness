@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isValidApiRequestBody, resolveAllowedApiRoute, type JsonObject } from "./routing.js";
+import { isValidApiRequestBody, MAX_WINDOW_PREVIEW_RESPONSE_BYTES, resolveAllowedApiRoute, type JsonObject } from "./routing.js";
 
 describe("managed browser profile relay routes", () => {
   it("allows only the profile read, prepare, complete, relogin, and preference commands", () => {
@@ -47,7 +47,8 @@ describe("candidate-bound window preview relay routes", () => {
   it("allows only bounded preview requests bound to initial or waiting-run candidates", () => {
     const initial = resolveAllowedApiRoute("POST", "/api/windows/preview");
     const handoff = resolveAllowedApiRoute("POST", "/api/runs/run-123/window-candidates/preview");
-    expect(initial?.maxResponseBytes).toBeLessThan(2 * 1024 * 1024 + 1);
+    expect(MAX_WINDOW_PREVIEW_RESPONSE_BYTES).toBe(3 * 1024 * 1024);
+    expect(initial?.maxResponseBytes).toBe(MAX_WINDOW_PREVIEW_RESPONSE_BYTES);
     expect(handoff?.maxResponseBytes).toBe(initial?.maxResponseBytes);
     expect(resolveAllowedApiRoute("GET", "/api/windows/preview")).toBeNull();
     expect(resolveAllowedApiRoute("POST", "/api/runs/run-123/window-candidates/preview/other")).toBeNull();

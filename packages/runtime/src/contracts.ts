@@ -134,6 +134,7 @@ export interface ContextBudgetReport {
   omittedHistoryEvents: number;
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  maxWireInputTokens?: number;
   estimatedMemoryTokens?: number;
   memoryMaxTokens?: number;
   estimatedMonitorGuidanceTokens?: number;
@@ -187,6 +188,8 @@ export interface ContextCompileInput {
   features?: RunFeatureConfig;
   monitorGuidance?: MonitorGuidance;
   assistantPreferences?: RunAssistantPreferencesSnapshot;
+  /** One trusted, short-lived app-runtime selection; never a user-loaded Skill. */
+  operationGuidance?: ContextOperationGuidance;
   /** Current serializable binding and its capabilities, independent of the
    * latest screenshot viewport. */
   computerSession?: ComputerSessionDescriptor;
@@ -200,6 +203,12 @@ export interface ContextCompileInput {
   };
 }
 
+export interface ContextOperationGuidance {
+  readonly id: string;
+  readonly fingerprint: string;
+  readonly text: string;
+}
+
 export interface MonitorGuidance {
   readonly text: string;
   readonly fingerprint: string;
@@ -210,6 +219,8 @@ export interface ContextOptions {
   maxHistoryEvents?: number;
   /** Approximate text/tool budget; image cost is reported by the Provider when available. */
   maxInputTokens?: number;
+  /** Provider wire estimate cap, including request-envelope and image allowances. */
+  maxWireInputTokens?: number;
   /** Soft cap for memory text inside the Context fixed blocks. */
   memoryMaxTokens?: number;
 }

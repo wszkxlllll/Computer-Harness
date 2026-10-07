@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { CuaWindowDiscovery as ProductionCuaWindowDiscovery, type CuaWindowDiscoveryOptions } from "./window-discovery.js";
 
 installFakeCuaSdkModuleForTests();
+
+const ONE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
 
 function result(overrides: Partial<ToolResult> = {}): ToolResult {
   return {
@@ -23,6 +29,14 @@ function minimalPngBase64(width = 320, height = 240): string {
   view.setUint32(16, width);
   view.setUint32(20, height);
   return Buffer.from(data).toString("base64");
+}
+
+function pngWithDimensions(width: number, height: number): Uint8Array {
+  const data = new Uint8Array(ONE_PIXEL_PNG);
+  const header = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  header.setUint32(16, width);
+  header.setUint32(20, height);
+  return data;
 }
 
 class WindowsFixtureDiscovery extends ProductionCuaWindowDiscovery {
@@ -120,7 +134,7 @@ describe("CuaWindowDiscovery", () => {
       foregroundPid: 1234,
       foregroundWindowId: 5678,
       windows: [
-        { target: { pid: 1234, windowId: 5678 }, title: "Parent", ownerPid: 0, ownerWindowId: 0 },
+        { target: { pid: 1234, windowId: 5678 }, title: "Probe parent label", ownerPid: 0, ownerWindowId: 0 },
         {
           target: { pid: 1234, windowId: 9012 },
           title: "Owned popup",
@@ -132,6 +146,51 @@ describe("CuaWindowDiscovery", () => {
     });
     expect(probeCalls).toBe(1);
     expect(calls).toEqual(["startSession", "list_windows", "endSession", "shutdown", "destroy"]);
+  });
+
+  it("rejects a native-only preview target before attempting CUA capture", async () => {
+    const calls: string[] = [];
+    const driver = {
+      async startSession() { calls.push("startSession"); return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        calls.push(name);
+        return result({ structuredJson: JSON.stringify({ windows: [{
+          pid: 1234,
+          window_id: 5678,
+          app_name: "Fixture",
+          title: "Main",
+          bounds: { x: 10, y: 20, width: 500, height: 400 },
+        }] }) });
+      },
+      async verifyState() { calls.push("verifyState"); return result({ images: [{ mimeType: "image/png", dataBase64: minimalPngBase64() }] }); },
+      async endSession() { calls.push("endSession"); return { active: false, session: "picker" } as never; },
+      async shutdown() { calls.push("shutdown"); },
+      uniffiDestroy() { calls.push("destroy"); },
+    } as unknown as CuaDriverLike;
+    const discovery = new WindowsFixtureDiscovery({
+      socketPath: "fixture",
+      driverFactory: () => driver,
+      windowRelationshipProbe: {
+        async read() {
+          return {
+            source: "win32_relationship_probe" as const,
+            complete: true,
+            foregroundPid: 1234,
+            foregroundWindowId: 5678,
+            windows: [
+              { pid: 1234, windowId: 5678, ownerPid: 0, ownerWindowId: 0, zIndex: 1, isOnScreen: true, minimized: false, bounds: { x: 10, y: 20, width: 500, height: 400 }, windowClass: "FixtureMain" },
+              { pid: 4321, windowId: 8765, ownerPid: 1234, ownerWindowId: 5678, zIndex: 2, isOnScreen: true, minimized: false, bounds: { x: 50, y: 60, width: 300, height: 200 }, windowClass: "FixtureDialog" },
+            ],
+          };
+        },
+      },
+    });
+
+    await expect(discovery.captureWindowPreview({ pid: 4321, windowId: 8765 }, new AbortController().signal))
+      .rejects.toMatchObject({ code: "WINDOW_TARGET_NOT_FOUND" });
+    expect(calls).toContain("list_windows");
+    expect(calls).not.toContain("verifyState");
+    expect(calls).not.toContain("get_window_state");
   });
 
   it("previews one fresh exact HWND without activation, input, asset writes, or surface work", async () => {
@@ -177,6 +236,51 @@ describe("CuaWindowDiscovery", () => {
     expect(calls).not.toContain("bring_to_front");
     expect(calls).not.toContain("get_desktop_state");
     expect(calls).not.toContain("get_window_state");
+  });
+
+  it("reuses a supplied foreground-region capture for an exact preview without activating the candidate", async () => {
+    const calls: string[] = [];
+    const driver = {
+      async startSession() { calls.push("startSession"); return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        calls.push(name);
+        if (name !== "list_windows") return result();
+        return result({ structuredJson: JSON.stringify({ complete: true, windows: [{
+          pid: 1234,
+          window_id: 5678,
+          app_name: "Notepad.exe",
+          title: "Untitled - Notepad",
+          bounds: { x: 10, y: 20, width: 320, height: 240 },
+        }] }) });
+      },
+      async verifyState() { calls.push("verifyState"); return result(); },
+      async endSession() { calls.push("endSession"); return { active: false, session: "picker" } as never; },
+      async shutdown() { calls.push("shutdown"); },
+      uniffiDestroy() { calls.push("destroy"); },
+    } as unknown as CuaDriverLike;
+    const foregroundVisibleCapture = async (target: { pid: number; windowId: number }) => ({
+      target,
+      bounds: { x: 10, y: 20, width: 320, height: 240 },
+      data: pngWithDimensions(320, 240),
+    });
+    const discovery = new WindowsFixtureDiscovery({
+      socketPath: "fixture",
+      driverFactory: () => driver,
+      foregroundVisibleCapture,
+    });
+
+    const preview = await discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal);
+
+    expect(preview.capture).toMatchObject({
+      binding: { target: { pid: 1234, windowId: 5678 }, bounds: { x: 10, y: 20, width: 320, height: 240 } },
+      viewport: { width: 320, height: 240, coordinateSpace: "physical" },
+      source: "windows_foreground_region",
+    });
+    expect(preview.capture.data).toEqual(pngWithDimensions(320, 240));
+    expect(calls).toEqual(["startSession", "list_windows", "list_windows", "list_windows", "endSession", "shutdown", "destroy"]);
+    expect(calls).not.toContain("verifyState");
+    expect(calls).not.toContain("bring_to_front");
+    expect(calls).not.toContain("get_desktop_state");
   });
 
   it("previews an exact candidate present in a partial inventory without inferring global absence", async () => {
@@ -242,11 +346,34 @@ describe("CuaWindowDiscovery", () => {
     const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
     await expect(discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal))
-      .rejects.toThrow("candidate is missing or ambiguous");
+      .rejects.toMatchObject({ name: "WindowContractError", code: "WINDOW_TARGET_NOT_FOUND" });
     expect(listCount).toBe(3);
     expect(calls).toContain("endSession");
     expect(calls).toContain("shutdown");
     expect(calls).toContain("destroy");
+  });
+
+  it("classifies duplicate exact HWND rows as an inventory schema failure", async () => {
+    const calls: string[] = [];
+    const driver = {
+      async startSession() { calls.push("startSession"); return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        calls.push(name);
+        if (name !== "list_windows") return result();
+        return result({ structuredJson: JSON.stringify({ complete: false, windows: [
+          { pid: 1234, window_id: 5678, app_name: "Notepad.exe", title: "Untitled - Notepad", bounds: { x: 10, y: 20, width: 320, height: 240 } },
+          { pid: 1234, window_id: 5678, app_name: "Notepad.exe", title: "Other", bounds: { x: 10, y: 20, width: 320, height: 240 } },
+        ] }) });
+      },
+      async endSession() { calls.push("endSession"); return { active: false, session: "picker" } as never; },
+      async shutdown() { calls.push("shutdown"); },
+      uniffiDestroy() { calls.push("destroy"); },
+    } as unknown as CuaDriverLike;
+    const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
+
+    await expect(discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal))
+      .rejects.toMatchObject({ name: "WindowContractError", code: "WINDOW_TARGET_SCHEMA" });
+    expect(calls).toEqual(["startSession", "list_windows", "endSession", "shutdown", "destroy"]);
   });
 
   it("closes an in-progress capture when cancelled instead of retaining the temporary session", async () => {
@@ -290,17 +417,16 @@ describe("CuaWindowDiscovery", () => {
     expect(calls).toContain("destroy");
   });
 
-  it("rejects image bytes beyond the preview cap and closes the temporary session", async () => {
+  it.each([
+    { byteLength: MAX_WINDOW_PREVIEW_BYTES, expectedCode: undefined },
+    { byteLength: MAX_WINDOW_PREVIEW_BYTES + 1, expectedCode: "WINDOW_PREVIEW_IMAGE_TOO_LARGE" },
+  ])("enforces the exact $byteLength-byte CUA preview boundary and closes the temporary session", async ({ byteLength, expectedCode }) => {
     const calls: string[] = [];
-    const oversized = new Uint8Array(1_048_577);
-    oversized.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
-    oversized[12] = 73;
-    oversized[13] = 72;
-    oversized[14] = 68;
-    oversized[15] = 82;
-    new DataView(oversized.buffer).setUint32(16, 320);
-    new DataView(oversized.buffer).setUint32(20, 240);
-    const oversizedBase64 = Buffer.from(oversized).toString("base64");
+    const captureImage = new Uint8Array(byteLength);
+    captureImage.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+    new DataView(captureImage.buffer).setUint32(16, 320);
+    new DataView(captureImage.buffer).setUint32(20, 240);
+    const captureBase64 = Buffer.from(captureImage).toString("base64");
     const driver = {
       async startSession() { calls.push("startSession"); return { active: true, revived: false } as never; },
       async callTool(name: string) {
@@ -317,7 +443,7 @@ describe("CuaWindowDiscovery", () => {
         calls.push("verifyState");
         return result({
           verification: { status: 0, stable: true } as never,
-          images: [{ mimeType: "image/png", dataBase64: oversizedBase64 }],
+          images: [{ mimeType: "image/png", dataBase64: captureBase64 }],
         });
       },
       async endSession() { calls.push("endSession"); return { active: false, session: "picker" } as never; },
@@ -326,8 +452,14 @@ describe("CuaWindowDiscovery", () => {
     } as unknown as CuaDriverLike;
     const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
-    await expect(discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal))
-      .rejects.toThrow("bounded image size");
+    const preview = discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal);
+    if (expectedCode !== undefined) {
+      await expect(preview).rejects.toMatchObject({ name: "WindowContractError", code: expectedCode });
+    } else {
+      const captured = await preview;
+      expect(captured.capture.data.byteLength).toBe(MAX_WINDOW_PREVIEW_BYTES);
+      expect(captured.capture.binding.target).toEqual({ pid: 1234, windowId: 5678 });
+    }
     expect(calls).toContain("endSession");
     expect(calls).toContain("shutdown");
     expect(calls).toContain("destroy");
@@ -564,6 +696,7 @@ describe("CuaWindowDiscovery", () => {
     const driver = {
       async startSession() { return { active: true, revived: false } as never; },
       async callTool(name: string) {
+        if (name === "list_windows") return result({ structuredJson: JSON.stringify({ windows: [{ pid: 123, window_id: 10, app_name: "Editor", title: "Draft", bounds: { x: 0, y: 0, width: 640, height: 480 } }] }) });
         expect(name).toBe("bring_to_front");
         return result({
           structuredJson: JSON.stringify({
@@ -592,6 +725,7 @@ describe("CuaWindowDiscovery", () => {
       async startSession() { calls.push("startSession"); return { active: true, revived: false } as never; },
       async callTool(name: string) {
         calls.push(name);
+        if (name === "list_windows") return result({ structuredJson: JSON.stringify({ windows: [{ pid: 123, window_id: 10, app_name: "Editor", title: "Draft", bounds: { x: 0, y: 0, width: 640, height: 480 } }] }) });
         return result({ structuredJson: JSON.stringify({ landed_on_target: false, target_hwnd: "10", now_fg_hwnd: "11" }) });
       },
       async endSession() { calls.push("endSession"); return { active: false, session: "picker" } as never; },
@@ -601,13 +735,14 @@ describe("CuaWindowDiscovery", () => {
     const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
     await expect(discovery.activateWindow({ pid: 123, windowId: 10 }, new AbortController().signal))
       .rejects.toMatchObject({ name: "WindowContractError", code: "WINDOW_ACTIVATION_REFUSED" });
-    expect(calls).toEqual(["startSession", "bring_to_front", "endSession", "shutdown", "destroy"]);
+    expect(calls).toEqual(["startSession", "list_windows", "bring_to_front", "endSession", "shutdown", "destroy"]);
   });
 
   it("classifies a surfaced sheet whose HWND cannot independently become foreground", async () => {
     const driver = {
       async startSession() { return { active: true, revived: false } as never; },
       async callTool(name: string) {
+        if (name === "list_windows") return result({ structuredJson: JSON.stringify({ windows: [{ pid: 123, window_id: 11, app_name: "Editor", title: "Sheet", bounds: { x: 0, y: 0, width: 640, height: 480 } }] }) });
         expect(name).toBe("bring_to_front");
         return result({
           isError: true,
@@ -634,6 +769,46 @@ describe("CuaWindowDiscovery", () => {
         code: "WINDOW_ACTIVATION_UNCONFIRMED",
         message: expect.stringContaining("no capture or input was sent"),
       });
+  });
+
+  it("does not activate a fresh exact window known to be WS_EX_NOACTIVATE", async () => {
+    const calls: string[] = [];
+    const target = { pid: 123, windowId: 10 };
+    const driver = {
+      async startSession() { calls.push("startSession"); return { active: true, revived: false } as never; },
+      async callTool(name: string) {
+        calls.push(name);
+        if (name === "list_windows") return result({ structuredJson: JSON.stringify({ windows: [
+          { pid: target.pid, window_id: target.windowId, app_name: "Notepad", title: "Popup", bounds: { x: 0, y: 0, width: 180, height: 60 } },
+        ] }) });
+        throw new Error(`unexpected ${name}`);
+      },
+      async endSession() { calls.push("endSession"); return { active: false, session: "picker" } as never; },
+      async shutdown() { calls.push("shutdown"); },
+      uniffiDestroy() { calls.push("destroy"); },
+    } as unknown as CuaDriverLike;
+    const discovery = new WindowsFixtureDiscovery({
+      socketPath: "fixture",
+      driverFactory: () => driver,
+      windowRelationshipProbe: {
+        async read() {
+          return {
+            source: "win32_relationship_probe" as const,
+            complete: true,
+            windows: [{
+              ...target, ownerPid: 123, ownerWindowId: 20, zIndex: 2, isOnScreen: true, minimized: false,
+              bounds: { x: 0, y: 0, width: 180, height: 60 }, windowClass: "PopupWindow", noActivate: true,
+            }],
+          };
+        },
+      },
+    });
+
+    await expect(discovery.activateWindow(target, new AbortController().signal)).rejects.toMatchObject({
+      name: "WindowContractError",
+      code: "WINDOW_TARGET_NOT_FOUND",
+    });
+    expect(calls).toEqual(["startSession", "list_windows", "endSession", "shutdown", "destroy"]);
   });
 
   it("attempts cleanup after an aborted start and exposes cleanup failure", async () => {

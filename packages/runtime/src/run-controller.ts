@@ -347,6 +347,10 @@ export class RunController {
   private readonly assistantPreferences: RunAssistantPreferencesSnapshot | undefined;
   private readonly monitorMode: MonitorPolicyMode;
   private readonly cleanupDeadlineMs: number;
+  /** Exact Computer cleanup work that exceeded this Run's cleanup deadline. */
+  private lateComputerCleanupWork: Promise<boolean> | undefined;
+  private lateComputerCleanupResult: boolean | undefined;
+  private lateComputerCleanupConfirmation: Promise<boolean> | undefined;
   private readonly abortController = new AbortController();
   private readonly events: RuntimeEvent[] = [];
   /** Full bounded adapter catalog for the latest observation; the model only sees the hot projection. */
@@ -561,6 +565,31 @@ export class RunController {
       enabledCategories: [...this.enabledCategories],
       enabledToolNames: this.modelEnabledToolNames(),
     }).map((tool) => tool.name);
+  }
+
+  /**
+   * Give this Run's already-started Computer close/dispose work one bounded
+   * chance to confirm success after the ordinary cleanup deadline. This does
+   * not start or retry cleanup and is intentionally scoped to the exact
+   * promise owned by this Controller.
+   */
+  public confirmLateComputerCleanup(graceMs: number): Promise<boolean> {
+    if (!Number.isSafeInteger(graceMs) || graceMs <= 0) {
+      return Promise.reject(new Error("late Computer cleanup grace must be a positive safe integer"));
+    }
+    if (this.lateComputerCleanupConfirmation !== undefined) return this.lateComputerCleanupConfirmation;
+    if (this.lateComputerCleanupResult !== undefined) return Promise.resolve(this.lateComputerCleanupResult);
+    const work = this.lateComputerCleanupWork;
+    if (work === undefined) return Promise.resolve(false);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), graceMs);
+    });
+    this.lateComputerCleanupConfirmation = Promise.race([work, grace]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+    return this.lateComputerCleanupConfirmation;
   }
 
   private windowSwitchAvailable(): boolean {
@@ -1032,9 +1061,15 @@ export class RunController {
     onTimeout?.();
     this.reportCleanupError({ operation, message: `cleanup deadline exceeded during ${operation}`, status: "timed_out" });
     if (operation === "computer.close" || operation === "computer.dispose") {
-      void settled.then((lateResult) => {
-        if (lateResult.status === "completed") cleanupPendingComputers.delete(this.computer);
+      let lateWork: Promise<boolean>;
+      lateWork = settled.then((lateResult) => {
+        const completed = lateResult.status === "completed";
+        if (completed) cleanupPendingComputers.delete(this.computer);
+        this.lateComputerCleanupResult = completed;
+        if (this.lateComputerCleanupWork === lateWork) this.lateComputerCleanupWork = undefined;
+        return completed;
       });
+      this.lateComputerCleanupWork = lateWork;
     }
   }
 
@@ -1121,7 +1156,8 @@ export class RunController {
   }
 
   /** Drop all target-dependent state when switch execution cannot establish
-   * a trustworthy new binding. The Run must terminate after recording this. */
+   * a trustworthy new binding. A fresh observation may still recover the
+   * prior authorized scope; no pre-switch frames or refs survive. */
   private invalidateTargetAfterFailedSwitch(): void {
     this.latestObservation = undefined;
     this.latestObservationFingerprint = undefined;
@@ -1133,6 +1169,30 @@ export class RunController {
     if (this.pendingModelTurn !== undefined) this.pendingModelTurn = { ...this.pendingModelTurn, invalidated: true };
     if (this.pendingToolTurn !== undefined) this.pendingToolTurn = { ...this.pendingToolTurn, invalidated: true };
     this.pendingReobserve = false;
+  }
+
+  private async pauseAfterUnconfirmedWindowSwitch(
+    session: ComputerSession,
+    diagnostic: string,
+    observeFirst = true,
+  ): Promise<void> {
+    await this.commitEvent({ type: "runtime.error", category: "unknown_side_effect", message: diagnostic });
+    if (observeFirst) {
+      try {
+        await this.observeAndCommit(session);
+      } catch (error) {
+        this.throwIfAborted();
+        await this.commitEvent({
+          type: "runtime.error",
+          category: "unknown_side_effect",
+          message: `The prior authorized window could not be freshly observed after the switch attempt: ${errorMessage(error)}`,
+        });
+      }
+    }
+    await this.commitEvent({
+      type: "user.input.requested",
+      question: "窗口切换结果无法确认。请检查当前电脑画面，不要重复刚才的切换；确认当前窗口状态后告诉我下一步。",
+    });
   }
 
   private async rejectModelTurn(turn: Extract<ModelTurn, { type: "tool_calls" }>, reason: string): Promise<void> {
@@ -1503,9 +1563,11 @@ export class RunController {
     if (session !== undefined && !restrictToolNamesForCapabilities(this.toolRegistry, session.capabilities, [name])?.includes(name)) return false;
     if (name === "click") {
       const surface = this.latestObservation?.surfaceRef.kind;
-      // A managed browser remains browser_tab while DOM is unavailable.
-      // Missing DOM must never restore coordinate clicking on that target.
-      if (surface === "browser_tab" || surface === "dom" || surface === "unknown") return false;
+      // Unknown lineage cannot safely authorize a visual coordinate click.
+      // Known browser surfaces may use the existing exact-target CUA click
+      // path when the Provider selects a screenshot point; the adapter still
+      // enforces current identity, geometry, and foreground checks.
+      if (surface === "unknown") return false;
     }
     return this.enabledToolNames === undefined || this.enabledToolNames.has(name);
   }
@@ -1528,8 +1590,8 @@ export class RunController {
     if (!this.windowSwitchAvailable() || this.computer.listWindows === undefined) {
       throw new Error("window inventory is unavailable for this Run");
     }
-    if (this.activeComputerSession?.id !== session.id || this.snapshot.computerSession?.id !== session.id || this.latestObservation?.computerSessionId !== session.id) {
-      throw new Error("window inventory requires the active Computer session and its current observation");
+    if (this.activeComputerSession?.id !== session.id || this.snapshot.computerSession?.id !== session.id) {
+      throw new Error("window inventory requires the active Computer session and Host-authorized window scope");
     }
     // The adapter may expire references as soon as refresh starts, including
     // when discovery ultimately fails. Drop the old projection first.
@@ -2128,6 +2190,10 @@ export class RunController {
     this.throwIfAborted();
     const executionObservationId = this.snapshot.latestObservationId;
     const preActionFingerprint = this.latestObservationFingerprint;
+    // WindowHandoff is a native-window picker. A desktop observation has no
+    // bound window to hand off to, so refusals/completed actions should keep
+    // the existing desktop scope and rely on the fresh observation below.
+    const allowsNativeWindowHandoff = preActionFingerprint?.fingerprint.surfaceRef.kind !== "desktop";
     let candidate: PreparedComputerAction;
     let switchTarget: ComputerWindowOption | undefined;
     try {
@@ -2229,8 +2295,15 @@ export class RunController {
         };
         await this.commitEvent({ type: "tool.call.failed", result });
         this.callStates.set(call.id, "failed");
-        await this.commitEvent({ type: "runtime.error", category: "unknown_side_effect", message: errorMessage(error) });
-        await this.commitRunFinished({ outcome: "outcome_unknown" });
+        if (this.isAborted()) {
+          await this.commitEvent({ type: "runtime.error", category: "unknown_side_effect", message: errorMessage(error) });
+          await this.commitRunFinished({ outcome: "outcome_unknown" });
+          return;
+        }
+        await this.pauseAfterUnconfirmedWindowSwitch(
+          context.session,
+          `Window activation or capture could not be confirmed: ${errorMessage(error)}`,
+        );
         return;
       }
       await this.commitEvent({
@@ -2242,6 +2315,13 @@ export class RunController {
       this.callStates.set(call.id, "executing");
       return;
     }
+
+    const preActionSurfaceRef = preActionFingerprint?.fingerprint.surfaceRef;
+    const currentSurfaceRef = this.snapshot.activeSurfaceRef;
+    const confirmedWindowActivationRefusal = action.kind === "switch_window" &&
+      receipt.status === "refused" && receipt.driverCode === "WINDOW_ACTIVATION_REFUSED" &&
+      preActionSurfaceRef !== undefined && currentSurfaceRef !== undefined &&
+      sameSurfaceRef(preActionSurfaceRef, currentSurfaceRef);
 
     if (action.kind === "switch_window" && receipt.status === "completed") {
       const sessionAfter = receipt.sessionAfter;
@@ -2366,8 +2446,42 @@ export class RunController {
     }
     if (action.kind === "switch_window") {
       if (receipt.status !== "completed") {
-        // A failed/refused/cancelled activation is terminal for this Run. Do
-        // not observe the old target or let the Provider retry the same ref.
+        if (confirmedWindowActivationRefusal && preActionSurfaceRef !== undefined) {
+          let fresh: ObservationFrame;
+          try {
+            fresh = await this.observeAndCommit(context.session);
+          } catch (error) {
+            this.throwIfAborted();
+            await this.pauseAfterUnconfirmedWindowSwitch(
+              context.session,
+              `The exact window activation was refused, but the prior authorized Surface could not be freshly confirmed: ${errorMessage(error)}`,
+              false,
+            );
+            return;
+          }
+          const latestLineage = this.snapshot.surfaceLineage.at(-1);
+          const transitionReason = latestLineage !== undefined && sameSurfaceRef(latestLineage.to, fresh.surfaceRef)
+            ? latestLineage.reason
+            : undefined;
+          if (isRecoverableRefusedWindowObservation(preActionSurfaceRef, fresh.surfaceRef, transitionReason)) {
+            return;
+          }
+          await this.pauseAfterUnconfirmedWindowSwitch(
+            context.session,
+            "The exact window activation was refused, but the fresh observation did not confirm the prior authorized Surface lineage.",
+            false,
+          );
+          return;
+        }
+        if (receipt.status === "failed") {
+          await this.pauseAfterUnconfirmedWindowSwitch(
+            context.session,
+            receipt.message ?? `Window activation or capture failed without a confirmed outcome (${receipt.driverCode ?? "unknown"}).`,
+          );
+          return;
+        }
+        // Deterministic refusal and cancellation remain non-recoverable here;
+        // they do not authorize retrying the selected window reference.
         await this.commitRunFinished({ outcome: receipt.status === "refused" ? "failed" : "outcome_unknown" });
         return;
       }
@@ -2376,13 +2490,13 @@ export class RunController {
       await this.observeAndCommit(sessionAfter, { requireSessionViewportMatch: true });
       return;
     }
-    if (receipt.status === "refused" && receipt.driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
+    if (allowsNativeWindowHandoff && receipt.status === "refused" && receipt.driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
         this.windowHandoff === "confirm-v1" && this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined) {
       await beforeWindowHandoff?.();
       await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "foreground_mismatch" });
       return;
     }
-    if (receipt.status === "completed" && action.kind !== "wait" && this.windowHandoff === "confirm-v1" &&
+    if (allowsNativeWindowHandoff && receipt.status === "completed" && action.kind !== "wait" && this.windowHandoff === "confirm-v1" &&
         this.computer.handoffWindow !== undefined && this.computer.listWindowHandoffCandidates !== undefined &&
         this.computer.detectNewWindowHandoffCandidates !== undefined) {
       // Action and ToolCall receipts are durable before this read-only diff.
@@ -2639,7 +2753,9 @@ export class RunController {
         : options.safeRecovery.kind === "transient_owned_surface_reconciled"
           ? "child_push"
           : undefined;
+      const desktopRecovery = options.safeRecovery.kind === "desktop_surface_reconfirmed";
       if (!sameSurfaceRef(capture.surfaceRef, options.safeRecovery.surfaceRef) ||
+          (desktopRecovery && (capture.surfaceRef.kind !== "desktop" || options.safeRecovery.surfaceRef.kind !== "desktop")) ||
           (expectedTransition === undefined
             ? capture.surfaceTransitionReason !== undefined
             : capture.surfaceTransitionReason !== expectedTransition)) {
@@ -3256,15 +3372,25 @@ function normalizeActionReceiptForAction(
     const candidate = (value as { safeRecovery?: unknown }).safeRecovery;
     if (value.status !== "partial" || action.kind === "switch_window" || action.kind === "wait" ||
         executionSurfaceRef === undefined || !isValidSurfaceRef(executionSurfaceRef) ||
-        executionSurfaceRef.kind !== "native_window" || typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
-      throw new Error("safeRecovery is valid only for a partial ordinary GUI action on a verified native child Surface");
+        typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      throw new Error("safeRecovery is valid only for a partial ordinary GUI action on a verified Surface");
     }
     const recovery = candidate as Record<string, unknown>;
     if (Object.keys(recovery).some((key) => key !== "kind" && key !== "surfaceRef") ||
-        !isValidSafeRecoverySurfaceRef(recovery.surfaceRef) || recovery.surfaceRef.kind !== "native_window") {
-      throw new Error("safeRecovery does not identify a valid native recovery Surface");
+        !isValidSafeRecoverySurfaceRef(recovery.surfaceRef)) {
+      throw new Error("safeRecovery does not identify a valid recovery Surface");
     }
-    if (recovery.kind === "transient_parent_restored") {
+    if (recovery.kind === "desktop_surface_reconfirmed") {
+      const desktopGuiAction = ["click", "double_click", "right_click", "type", "keypress", "scroll", "drag"].includes(action.kind);
+      if (value.driverCode !== "ACTION_OUTCOME_UNKNOWN" || !desktopGuiAction ||
+          executionSurfaceRef.kind !== "desktop" || recovery.surfaceRef.kind !== "desktop" ||
+          !sameSurfaceRef(recovery.surfaceRef, executionSurfaceRef)) {
+        throw new Error("safeRecovery does not identify the exact desktop Surface and unknown GUI action being freshly observed");
+      }
+      safeRecovery = { kind: "desktop_surface_reconfirmed", surfaceRef: recovery.surfaceRef };
+    } else if (executionSurfaceRef.kind !== "native_window" || recovery.surfaceRef.kind !== "native_window") {
+      throw new Error("native safeRecovery requires an exact native action Surface");
+    } else if (recovery.kind === "transient_parent_restored") {
       if (recovery.surfaceRef.surfaceId !== executionSurfaceRef.parentSurfaceId) {
         throw new Error("safeRecovery does not identify the exact registered parent Surface of the action observation");
       }
@@ -3432,6 +3558,18 @@ function isValidSafeRecoverySurfaceRef(value: unknown): value is SurfaceRef {
 function sameSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
   return left.surfaceId === right.surfaceId && left.generation === right.generation && left.kind === right.kind &&
     left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
+}
+
+function isRecoverableRefusedWindowObservation(
+  previous: SurfaceRef,
+  next: SurfaceRef,
+  transitionReason: string | undefined,
+): boolean {
+  if (sameSurfaceRef(previous, next)) return true;
+  const sameFamily = previous.surfaceId === next.surfaceId && previous.kind === next.kind &&
+    previous.parentSurfaceId === next.parentSurfaceId && previous.admissionSource === next.admissionSource;
+  if (sameFamily && transitionReason === "generation_advanced") return true;
+  return isTrustedUnknownActionSurfaceTransition(previous, next, transitionReason);
 }
 
 function isTrustedUnknownActionSurfaceTransition(

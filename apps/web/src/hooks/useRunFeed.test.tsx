@@ -45,9 +45,9 @@ class FakeEventSource {
   }
 }
 
-function snapshot(sequence: number): RunSnapshot {
+function snapshot(sequence: number, runId = "run-1"): RunSnapshot {
   return {
-    runId: "run-1",
+    runId,
     goal: "Find three options",
     status: "running",
     sequence,
@@ -55,10 +55,11 @@ function snapshot(sequence: number): RunSnapshot {
   };
 }
 
-function Probe() {
-  const feed = useRunFeed("run-1");
+function Probe({ runId = "run-1" }: { runId?: string }) {
+  const feed = useRunFeed(runId);
   return (
     <div>
+      <span data-testid="run-id">{feed.snapshot?.runId ?? "none"}</span>
       <span data-testid="sequence">{feed.snapshot?.sequence ?? -1}</span>
       <span data-testid="connection">{feed.connection}</span>
       <span data-testid="error">{feed.error ?? ""}</span>
@@ -311,5 +312,40 @@ describe("run feed reconnect", () => {
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
     expect(FakeEventSource.instances[1].url).toBe("/api/runs/run-1/events?after=10");
     expect(screen.getByTestId("sequence").textContent).toBe("10");
+  });
+
+  it("isolates snapshots, events, and reconnect cursors when the mounted page changes run", async () => {
+    vi.mocked(getRun).mockResolvedValueOnce(snapshot(10, "run-1"));
+    const { rerender } = render(<Probe runId="run-1" />);
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    let resolveOldRefresh!: (value: RunSnapshot) => void;
+    vi.mocked(getRun).mockImplementation((requestedRunId) => requestedRunId === "run-1"
+      ? new Promise<RunSnapshot>((resolve) => { resolveOldRefresh = resolve; })
+      : Promise.resolve(snapshot(1, requestedRunId)));
+    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+    await waitFor(() => expect(getRun).toHaveBeenCalledTimes(2));
+
+    rerender(<Probe runId="run-2" />);
+    expect(screen.getByTestId("run-id").textContent).toBe("none");
+    expect(screen.getByTestId("event-count").textContent).toBe("0");
+    await waitFor(() => expect(screen.getByTestId("run-id").textContent).toBe("run-2"));
+    expect(screen.getByTestId("sequence").textContent).toBe("1");
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.instances[1].url).toBe("/api/runs/run-2/events?after=1");
+
+    await act(async () => { resolveOldRefresh(snapshot(100, "run-1")); });
+    expect(screen.getByTestId("run-id").textContent).toBe("run-2");
+    expect(screen.getByTestId("sequence").textContent).toBe("1");
+    expect(FakeEventSource.instances).toHaveLength(2);
+
+    act(() => FakeEventSource.instances[0].emit({
+      runId: "run-1",
+      sequence: 11,
+      type: "run.event",
+      data: { type: "run.status" },
+    }));
+    expect(screen.getByTestId("event-count").textContent).toBe("0");
+    expect(screen.getByTestId("sequence").textContent).toBe("1");
   });
 });

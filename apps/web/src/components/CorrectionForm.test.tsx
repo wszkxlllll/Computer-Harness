@@ -11,9 +11,11 @@ describe("correction form", () => {
     fireEvent.change(input, { target: { value: "Do not open the payment page" } });
     fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenNthCalledWith(1, "Do not open the payment page");
     expect(input.value).toBe("Do not open the payment page");
     fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit).toHaveBeenNthCalledWith(2, "Do not open the payment page");
     expect(input.value).toBe("");
   });
 });

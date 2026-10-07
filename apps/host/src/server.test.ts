@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { RemoteRunApiError, type RemoteRunApi, type RemoteRunSnapshot, type RemoteRunTargetInput } from "@computer-harness/app-runtime";
-import type { AssetId, RunAssistantPreferencesSnapshot, RunId } from "@computer-harness/protocol";
+import { MAX_WINDOW_PREVIEW_BYTES, type AssetId, type RunAssistantPreferencesSnapshot, type RunId } from "@computer-harness/protocol";
+import { MAX_WINDOW_PREVIEW_RESPONSE_BYTES } from "@computer-harness/relay-connector/routing";
 import { createHostServer } from "./server.js";
 import { ManagedBrowserProfileServiceError, type ManagedBrowserProfileStateView } from "./managed-browser-profile-service.js";
 
@@ -220,6 +221,70 @@ describe("Host HTTP boundary", () => {
         deviceId: pairedBody.deviceId, sessionToken, csrfToken: csrf, body: {},
       });
       expect(bridgeRelogin.statusCode).toBe(200);
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("keeps a two-MiB preview plus maximum labels inside the three-MiB Relay JSON envelope", async () => {
+    const makePngBytes = (byteLength: number): Buffer => {
+      const bytes = Buffer.alloc(byteLength);
+      bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
+      bytes.writeUInt32BE(13, 8);
+      bytes.write("IHDR", 12, "ascii");
+      bytes.writeUInt32BE(320, 16);
+      bytes.writeUInt32BE(240, 20);
+      return bytes;
+    };
+    let previewBytes = makePngBytes(MAX_WINDOW_PREVIEW_BYTES);
+    const api = fakeApi();
+    api.previewWindowTarget = async () => ({
+      previewToken: "P".repeat(32),
+      appName: "应".repeat(256),
+      title: "窗".repeat(512),
+      relationship: { kind: "owned_child", rootRole: "dialog", parentAppName: "父".repeat(256), parentTitle: "窗口".repeat(256) },
+      capturedAt: "2026-10-07T00:00:00.000Z",
+      expiresAt: "2026-10-07T00:02:00.000Z",
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: previewBytes.toString("base64"),
+    });
+    const host = createHostServer({ api, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin });
+    try {
+      const localSession = await host.server.inject({ method: "GET", url: "/api/local/session", headers: { origin: localOrigin } });
+      const localCsrf = jsonResponse<{ csrfToken: string }>(localSession).csrfToken;
+      const challenge = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+        method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+      }));
+      const token = new URL(challenge.pairingUrl).searchParams.get("token");
+      const pairRequest = jsonResponse<{ requestId: string }>(await host.server.inject({
+        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Preview boundary phone" },
+      }));
+      await host.server.inject({
+        method: "POST", url: "/api/local/pairing/requests/" + pairRequest.requestId + "/confirm",
+        headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+      });
+      const paired = await host.server.inject({ method: "POST", url: "/api/pair/requests/" + pairRequest.requestId + "/session", headers: { origin: relayOrigin }, payload: {} });
+      const cookie = String(paired.headers["set-cookie"]).split(";")[0];
+      const csrfToken = jsonResponse<{ csrfToken: string }>(paired).csrfToken;
+      const headers = { origin: relayOrigin, cookie, "x-csrf-token": csrfToken };
+
+      const exactBoundary = await host.server.inject({ method: "POST", url: "/api/windows/preview", headers, payload: { candidateToken: targetToken } });
+      expect(exactBoundary.statusCode).toBe(200);
+      expect(exactBoundary.headers["cache-control"]).toContain("no-store");
+      const projected = exactBoundary.json() as { dataBase64: string; appName: string; title: string; relationship: { parentAppName: string; parentTitle: string } };
+      expect(Buffer.from(projected.dataBase64, "base64")).toHaveLength(MAX_WINDOW_PREVIEW_BYTES);
+      expect(projected.appName).toBe("应".repeat(256));
+      expect(projected.title).toBe("窗".repeat(512));
+      expect(projected.relationship.parentTitle).toBe("窗口".repeat(256));
+      const jsonBytes = Buffer.byteLength(exactBoundary.body, "utf8");
+      expect(jsonBytes).toBeLessThan(MAX_WINDOW_PREVIEW_RESPONSE_BYTES);
+      expect(MAX_WINDOW_PREVIEW_RESPONSE_BYTES - jsonBytes).toBeGreaterThan(256 * 1024);
+
+      previewBytes = makePngBytes(MAX_WINDOW_PREVIEW_BYTES + 1);
+      const overLimit = await host.server.inject({ method: "POST", url: "/api/windows/preview", headers, payload: { candidateToken: targetToken } });
+      expect(overLimit.statusCode).toBe(502);
+      expect(jsonResponse<{ error: { code: string } }>(overLimit).error.code).toBe("WINDOW_PREVIEW_UNAVAILABLE");
     } finally {
       await host.close();
     }

@@ -634,6 +634,24 @@ describe("managed browser host pilot", () => {
     }
   });
 
+  it("waits for a fresh port when the Windows browser launcher exits successfully", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-devtools-launcher-exit-"));
+    const portFile = join(root, "DevToolsActivePort");
+    const launcherState: { exitCode: number | null; signalCode: string | null } = { exitCode: null, signalCode: null };
+    const child = launcherState as unknown as ChildProcess;
+    try {
+      const freshnessBoundaryMs = await prepareManagedBrowserDevToolsLaunch(root);
+      setTimeout(() => {
+        launcherState.exitCode = 0;
+        void writeFile(portFile, "4444\nfresh-browser-after-launcher-exit\n", "utf8");
+      }, 60);
+      await expect(waitForDevToolsPort(root, child, 1_000, new AbortController().signal, freshnessBoundaryMs))
+        .resolves.toEqual({ port: 4444 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("continues rejecting a DevTools port file whose explicit mtime predates launch", async () => {
     const root = await mkdtemp(join(tmpdir(), "computer-harness-devtools-old-mtime-"));
     const portFile = join(root, "DevToolsActivePort");
@@ -681,6 +699,22 @@ describe("managed browser host pilot", () => {
     await expect(waitForDevToolsBrowserEndpoint(1234, child, 120, new AbortController().signal, async () => {
       throw new Error("endpoint permanently unavailable");
     })).rejects.toThrow(/startup timed out/iu);
+  });
+
+  it("waits for a live DevTools endpoint after a clean launcher exit but rejects failed or signaled children", async () => {
+    const cleanLauncherExit = { exitCode: 0, signalCode: null } as unknown as ChildProcess;
+    let attempts = 0;
+    await expect(waitForDevToolsBrowserEndpoint(1234, cleanLauncherExit, 300, new AbortController().signal, async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("endpoint not ready");
+      return "ws://127.0.0.1:1234/devtools/browser/fresh";
+    })).resolves.toContain("fresh");
+    expect(attempts).toBeGreaterThanOrEqual(3);
+
+    await expect(waitForDevToolsBrowserEndpoint(1234, { exitCode: 2, signalCode: null } as unknown as ChildProcess, 1_000, new AbortController().signal))
+      .rejects.toThrow(/exited before DevTools endpoint became ready/iu);
+    await expect(waitForDevToolsBrowserEndpoint(1234, { exitCode: null, signalCode: "SIGTERM" } as unknown as ChildProcess, 1_000, new AbortController().signal))
+      .rejects.toThrow(/exited before DevTools endpoint became ready/iu);
   });
 
   it("rejects missing, multi-window and mismatched ownership evidence", () => {

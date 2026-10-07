@@ -36,13 +36,13 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
     },
     {
       name: "type",
-      description: "Type ordinary single-line text into the currently focused GUI control. On window-bound Windows CUA, multiline input targets a current UIA editor: provide elementRef when available, or omit it and let the backend resolve an unambiguous current editor. This UIA path appends to the end of the target's current value regardless of caret or selection; it does not replace selected text or submit/send. Windows desktop-wide CUA multiline input is not supported by this path; other platforms keep their native multiline typing route. Compose a complete multiline block before typing; for separate range edits, verify the selection because soft-wrapped visual lines are not paragraph boundaries. Do not use elementRef for ordinary single-line typing.",
+      description: "Type ordinary single-line text into the currently focused GUI control. For window-bound Windows CUA multiline input, prefer a current UIA editable elementRef. Omitting elementRef permits automatic targeting only when fresh grounding is complete and identifies one unambiguous editable UIA control; a partial catalog may be refused rather than guessed. This UIA path appends to the end of the target's current value regardless of caret or selection; it does not replace selected text or submit/send. Windows desktop-wide CUA multiline input is not supported by this path; without the Host-only foreground-caret profile, use separate single-line type calls with Enter between lines only when the target is confirmed to accept line breaks and the Goal calls for them. Enter is a real key event and can submit/send in controls where Enter has that meaning; check the control before typing. Other platforms keep their native multiline typing route. Compose the complete intended text before entering it; for separate range edits, verify the selection because soft-wrapped visual lines are not paragraph boundaries. Do not use elementRef for ordinary single-line typing.",
       category: "computer",
       inputSchema: {
         type: "object",
         properties: {
-          text: { type: "string", description: "Text to type. Window-bound Windows CUA multiline input requires an unambiguous current UIA editor and appends at its end regardless of caret or selection. Windows desktop-wide scope is unsupported by this path; other platforms use their native multiline typing route." },
-          elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA editor reference for window-bound Windows CUA multiline input. The UIA route appends to the end of the current value; it does not replace a selection. Expires when the observation or target window changes." },
+          text: { type: "string", description: "Text to type. Window-bound Windows CUA multiline input prefers a current UIA editable elementRef. Omission permits automatic targeting only with complete fresh grounding and one unambiguous editable UIA control; partial evidence may be refused. The UIA route appends at the end regardless of caret or selection. Without the Host-only foreground-caret profile, Windows desktop-wide multiline input is unsupported by this path; use one single-line type call per line with Enter between lines only when the target is confirmed to support line breaks and the Goal requires them. Enter is a real key event and may submit/send in search or message controls; check the target first. Other platforms use their native multiline typing route." },
+          elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Current UIA editable element reference from the exact current observation; preferred for window-bound Windows CUA multiline input. The UIA route appends to the end of the current value; it does not replace a selection. Expires when the observation or target window changes." },
         },
         required: ["text"],
         additionalProperties: false,
@@ -69,12 +69,6 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
             throw new Error("TYPE_GROUNDING_TARGET_UNAVAILABLE: the UIA element is explicitly disabled or not editable");
           }
           return { kind: "type", text, groundingRef: elementRef };
-        }
-        if (multiline && grounding !== undefined && grounding.completeness === "complete" &&
-            (grounding.source === "uia" || grounding.source === "hybrid")) {
-          const candidates = grounding.elements.filter((element) => element.source === "uia" && isTextEditingRole(element.role) &&
-            element.state?.enabled !== false && element.state?.editable !== false);
-          if (candidates.length === 1) return { kind: "type", text, groundingRef: candidates[0]!.elementRef };
         }
         return { kind: "type", text };
       },
@@ -183,7 +177,7 @@ export function windowSwitchTools(): readonly ToolDefinition[] {
 function switchWindowTool(): ComputerToolDefinition {
   return {
     name: "switch_window",
-    description: "Switch to a listed open window using windowRef (not PID/HWND). Must be the sole call this turn; wait for a fresh observation before any further action.",
+    description: "Activate listed windowRef, not PID/HWND. Desktop capture/input stays full; native-window scope rebinds. Already foreground: no-op. Sole call this turn; reobserve before next action.",
     category: "computer",
     isolatedTurn: true,
     inputSchema: {
@@ -240,7 +234,7 @@ export interface GroundingComputerToolsOptions {
 export function groundingComputerTools(options: GroundingComputerToolsOptions = {}): readonly ComputerToolDefinition[] {
   const tools: ComputerToolDefinition[] = [{
     name: "click_element",
-    description: "Click the center of a named element from the current UIA grounding catalog. Use only after a fresh observation; after clicking, observe again before typing or using another element.",
+    description: "Click the geometry center of an element in the current UIA or DOM grounding catalog. A unique complete DOM match is preferred for managed-browser content; otherwise a fresh non-container UIA point may use the normal checked click path. The center is not proof that the point is semantically clickable, and a successful receipt is not proof of effect. The catalog is bounded, so omitted controls may still be visible. If a grounded click is refused or the next observation shows no effect, do not retry the same target with another reference; use a clear point from the current screenshot with click, or another safe path, then observe before continuing.",
     category: "computer",
     inputSchema: {
       type: "object",
@@ -249,7 +243,7 @@ export function groundingComputerTools(options: GroundingComputerToolsOptions = 
           type: "string",
           minLength: 1,
           maxLength: 96,
-          description: "Opaque element reference from the current observation's UIA catalog; it expires when the observation or window changes.",
+          description: "Current element reference from the UIA or DOM grounding catalog; it expires when the observation or window changes. Managed-browser actions prefer a unique equivalent from complete DOM grounding; non-container UIA references can use the checked point-click fallback.",
         },
       },
       required: ["elementRef"],

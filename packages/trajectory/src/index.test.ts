@@ -1247,6 +1247,38 @@ describe("FileAssetStore", () => {
 });
 
 describe("readRuntimeEvents", () => {
+  it.each([true, false])("preserves operation guidance trace through schema roundtrip (included=%s)", (included) => {
+    const operationGuidance = {
+      id: "text_document_save",
+      fingerprint: "operation-guidance-v1",
+      included,
+      ...(!included ? { omittedReason: "budget" as const } : {}),
+    };
+    const request = event(0, {
+      type: "model.request.started",
+      providerId: "provider-test",
+      contextBudget: {
+        mode: "recent",
+        estimatedInputTokens: 100,
+        selectedHistoryEvents: 0,
+        omittedHistoryEvents: 0,
+        trace: {
+          compilerVersion: "test",
+          runId,
+          stablePrefixHash: "stable-prefix",
+          fixedBlocks: [],
+          selectedEventIds: [],
+          discardedEvents: [],
+          authoritativeUserEventIds: [],
+          historyEstimatedTokens: 0,
+          observationIncluded: false,
+          operationGuidance,
+        },
+      },
+    });
+    expect(runtimeEventSchema.parse(JSON.parse(JSON.stringify(request)))).toEqual(request);
+  });
+
   it("keeps the Zod discriminator set aligned with the protocol event list", () => {
     const effectsDefinition = runtimeEventSchema as unknown as {
       _def: {
@@ -1617,6 +1649,25 @@ describe("readRuntimeEvents", () => {
       receipt: { actionId, status: "failed" },
     };
     expect(runtimeEventSchema.safeParse(failedAsCompleted).success).toBe(false);
+
+    const desktopSurfaceRecovery = {
+      eventId: "event-desktop-recovery",
+      runId,
+      sequence: 0,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      type: "action.execution.failed" as const,
+      receipt: {
+        actionId,
+        status: "partial" as const,
+        driverCode: "ACTION_OUTCOME_UNKNOWN",
+        safeRecovery: { kind: "desktop_surface_reconfirmed" as const, surfaceRef: desktopSurfaceRef },
+      },
+    };
+    expect(runtimeEventSchema.parse(desktopSurfaceRecovery)).toEqual(desktopSurfaceRecovery);
+    expect(runtimeEventSchema.safeParse({
+      ...desktopSurfaceRecovery,
+      receipt: { ...desktopSurfaceRecovery.receipt, status: "failed" },
+    }).success).toBe(false);
 
     const rejectedAsFailed = {
       eventId: "event-0",

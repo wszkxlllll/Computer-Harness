@@ -308,7 +308,7 @@ export function isPotentiallySensitive(text: string): boolean {
 function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>['outcome'], failureAlreadyExplained = false): string {
   switch (outcome) {
     case "succeeded": return "任务已完成，可查看结果。";
-    case "failed": return failureAlreadyExplained ? "任务结束。" : "任务未能完成。";
+    case "failed": return "任务未能完成。";
     case "cancelled": return "任务已取消。";
     case "budget_exhausted": return failureAlreadyExplained ? "任务结束。" : "任务操作已达到上限。";
     case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "有项操作的结果无法确认，任务已暂停。";
@@ -323,9 +323,9 @@ function runtimeErrorVoiceText(category: string): string | undefined {
     case "budget":
       return "任务操作已达到上限，暂时停止。";
     case "unknown_side_effect":
-      return "有项操作的结果无法确认，任务已停止。";
+      return "有项操作的结果暂时无法确认，请查看当前任务状态。";
     case "partial_side_effect":
-      return "部分内容可能已经输入，结果无法确认，任务已停止。";
+      return "操作可能已部分完成，结果暂时无法确认，请查看当前任务状态。";
     case "cleanup":
       return "任务结束时有资源未能清理。";
     case "finish_summary_invalid":
@@ -339,7 +339,7 @@ function runtimeErrorVoiceText(category: string): string | undefined {
     case "runtime":
       return "任务运行遇到问题，已停止。";
     default:
-      return "任务遇到问题，已停止。";
+      return "任务遇到问题，请查看当前任务状态。";
   }
 }
 

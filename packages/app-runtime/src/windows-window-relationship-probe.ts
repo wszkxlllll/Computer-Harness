@@ -152,7 +152,7 @@ export function parseWindowRelationshipProbeOutput(
 
 function parseProbeWindow(value: unknown): WindowRelationshipProbeWindow | undefined {
   if (!isRecord(value) || !hasOnlyKeys(value, [
-    "pid", "windowId", "ownerPid", "ownerWindowId", "isOnScreen", "minimized", "bounds", "windowClass", "title", "appName",
+    "pid", "windowId", "ownerPid", "ownerWindowId", "isOnScreen", "minimized", "noActivate", "bounds", "windowClass", "title", "appName",
   ])) {
     throw new Error("Win32 window relationship probe returned an invalid window row");
   }
@@ -160,6 +160,7 @@ function parseProbeWindow(value: unknown): WindowRelationshipProbeWindow | undef
   const windowId = positiveInteger(value.windowId);
   const ownerPid = optionalOwnerId(value.ownerPid);
   const ownerWindowId = optionalOwnerId(value.ownerWindowId);
+  const noActivate = typeof value.noActivate === "boolean" ? value.noActivate : undefined;
   const bounds = parseBounds(value.bounds);
   const title = optionalBoundedLabel(value.title, 240);
   const appName = optionalBoundedLabel(value.appName, 128);
@@ -180,6 +181,7 @@ function parseProbeWindow(value: unknown): WindowRelationshipProbeWindow | undef
     ...(ownerWindowId === undefined ? {} : { ownerWindowId }),
     isOnScreen: value.isOnScreen,
     minimized: value.minimized,
+    ...(noActivate === undefined ? {} : { noActivate }),
     bounds,
     ...(typeof value.windowClass === "string" ? { windowClass: value.windowClass } : {}),
     ...(title === undefined ? {} : { title }),
@@ -264,6 +266,7 @@ public static class HarnessReadOnlyWindowProbe {
     public long ownerWindowId { get; set; }
     public bool isOnScreen { get; set; }
     public bool minimized { get; set; }
+  public bool? noActivate { get; set; }
     public object bounds { get; set; }
     public string windowClass { get; set; }
     public string title { get; set; }
@@ -276,6 +279,8 @@ public static class HarnessReadOnlyWindowProbe {
   [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out RECT rect, int size);
   [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)] private static extern int GetWindowLongW(IntPtr hwnd, int index);
+  [DllImport("kernel32.dll", EntryPoint = "SetLastError")] private static extern void SetLastError(uint error);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int maxCount);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetWindowTextW")] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);
   [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
@@ -285,6 +290,8 @@ public static class HarnessReadOnlyWindowProbe {
   private const uint GW_HWNDFIRST = 0;
   private const uint GW_HWNDNEXT = 2;
   private const uint DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+  private const int GWL_EXSTYLE = -20;
+  private const int WS_EX_NOACTIVATE = 0x08000000;
   private const int MAX_ENUMERATED_WINDOWS = 2048;
   private const int MAX_TITLE_LENGTH = 240;
   private const int MAX_APP_NAME_LENGTH = 128;
@@ -358,6 +365,7 @@ public static class HarnessReadOnlyWindowProbe {
         StringBuilder className = new StringBuilder(256);
         int classLength = GetClassName(hwnd, className, className.Capacity);
         if (classLength <= 0) { complete = false; return true; }
+        bool? noActivate = ReadNoActivate(hwnd);
         string windowClass = classLength > 0 ? className.ToString() : null;
         if (windowClass != null) {
           foreach (char character in windowClass) {
@@ -378,6 +386,7 @@ public static class HarnessReadOnlyWindowProbe {
           ownerWindowId = ownerWindowId,
           isOnScreen = IsWindowVisible(hwnd) && !minimized && intersectsDesktop,
           minimized = minimized,
+          noActivate = noActivate,
           bounds = new { x = rect.Left, y = rect.Top, width = width, height = height },
           windowClass = windowClass,
           title = ReadWindowTitle(hwnd),
@@ -397,6 +406,15 @@ public static class HarnessReadOnlyWindowProbe {
       int length = GetWindowText(hwnd, text, text.Capacity);
       if (length <= 0) return null;
       return BoundedLabel(text.ToString(0, Math.Min(length, MAX_TITLE_LENGTH)), MAX_TITLE_LENGTH);
+    } catch { return null; }
+  }
+  private static bool? ReadNoActivate(IntPtr hwnd) {
+    try {
+      SetLastError(0);
+      int extendedStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+      int error = Marshal.GetLastWin32Error();
+      if (extendedStyle == 0 && error != 0) return null;
+      return (extendedStyle & WS_EX_NOACTIVATE) != 0;
     } catch { return null; }
   }
   private static string ReadAppName(uint processId) {

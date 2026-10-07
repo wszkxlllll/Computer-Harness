@@ -1,5 +1,5 @@
 import type { ComputerWindowIdentity } from "@computer-harness/protocol";
-import type { CuaWindowInfo } from "./window-contract.js";
+import type { CuaWindowInfo, CuaWindowInventory } from "./window-contract.js";
 
 export const SELECTABLE_WINDOW_CANDIDATE_LIMIT = 128;
 
@@ -21,10 +21,13 @@ export function projectSelectableWindowCandidates(
   limit = SELECTABLE_WINDOW_CANDIDATE_LIMIT,
   include?: (window: CuaWindowInfo) => boolean,
   preserveExactOwnedTransientChildren = false,
+  eligibleNativeOnly?: (window: CuaWindowInfo) => boolean,
 ): SelectableWindowCandidateProjection {
   if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("window candidate limit must be a positive safe integer");
   const currentKey = currentTarget === undefined ? undefined : identityKey(currentTarget);
   const candidates = windows
+    .filter((window) => window.cuaListed !== false ||
+      platform === "win32" && eligibleNativeOnly?.(window) === true)
     .filter((window) => currentKey === identityKey(window.target) ||
       isSelectableApplicationWindow(window, platform) ||
       preserveExactOwnedTransientChildren && currentTarget !== undefined &&
@@ -40,6 +43,25 @@ export function projectSelectableWindowCandidates(
   };
 }
 
+/**
+ * Prove that a native-only HWND may be offered by an explicitly opted-in
+ * desktop switch flow. Other projection callers must continue to omit the
+ * eligibility callback and therefore exclude native-only rows.
+ */
+export function isEligibleNativeOnlyDesktopCandidate(
+  inventory: CuaWindowInventory,
+  window: CuaWindowInfo,
+): boolean {
+  if (inventory.source !== "win32_relationship_probe" || inventory.complete !== true ||
+      inventory.truncated === true || inventory.completeAttestation === "negative") return false;
+  const exactMatches = inventory.windows.filter((candidate) =>
+    candidate.target.pid === window.target.pid && candidate.target.windowId === window.target.windowId);
+  if (exactMatches.length !== 1) return false;
+  const nativeRow = exactMatches[0];
+  return nativeRow !== undefined && nativeRow.cuaListed === false && nativeRow.noActivate !== true &&
+    nativeRow.windowClass !== "#32768" && (nativeRow.isOnScreen === true || nativeRow.minimized === true);
+}
+
 export function isRelevantManualWindowCandidate(
   window: CuaWindowInfo,
   currentTarget: ComputerWindowIdentity,
@@ -47,7 +69,7 @@ export function isRelevantManualWindowCandidate(
   hostAuthorizedTargets: readonly ComputerWindowIdentity[] | undefined,
   platform: "win32" | "darwin" | "linux" | undefined,
 ): boolean {
-  if (window.minimized === true ||
+  if (window.cuaListed === false || window.minimized === true ||
       (platform === "win32" ? window.isOnScreen !== true : window.isOnScreen === false)) return false;
   if (foreground !== undefined && identityKey(window.target) === identityKey(foreground)) return true;
   const exactOwnedChild = window.ownerPid === currentTarget.pid && window.ownerWindowId === currentTarget.windowId;

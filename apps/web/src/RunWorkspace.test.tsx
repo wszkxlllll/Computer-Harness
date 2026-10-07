@@ -74,6 +74,52 @@ afterEach(() => {
 });
 
 describe("request-bound screenshot lifecycle", () => {
+  it("routes pause and the exact correction text through the current Run controls", () => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "running",
+        sequence: 4,
+        capabilities: { pause: true, resume: false, abort: true, correct: true },
+        pendingRequest: undefined,
+      },
+    };
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    expect(commands.control).toHaveBeenCalledWith("pause");
+    const correction = screen.getByLabelText("补充或修正任务要求") as HTMLTextAreaElement;
+    fireEvent.change(correction, { target: { value: "Use the date shown in the current report" } });
+    fireEvent.submit(correction.closest("form")!);
+    expect(commands.correct).toHaveBeenCalledWith("Use the date shown in the current report");
+  });
+
+  it("distinguishes terminal cleanup pending and clears the warning after confirmed release", () => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "finished",
+        ownerState: "pending_cleanup",
+        sequence: 9,
+        capabilities: { pause: false, resume: false, abort: false, correct: false },
+        pendingRequest: undefined,
+      },
+    };
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    expect(screen.getByText(/任务已结束，但电脑尚未确认资源清理/)).toBeDefined();
+    expect(screen.queryByRole("button", { name: "停止任务" })).toBeNull();
+
+    feedState = {
+      ...feedState,
+      snapshot: { ...feedState.snapshot!, ownerState: "released" },
+    };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect(screen.queryByText(/任务已结束，但电脑尚未确认资源清理/)).toBeNull();
+  });
+
   it("does not duplicate a live notice when React StrictMode replays effects", async () => {
     localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
       ...DEFAULT_PREFERENCES,
