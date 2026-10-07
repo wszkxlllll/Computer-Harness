@@ -48,7 +48,11 @@ Preview Relay/Web 已部署到 `2026-10-07-desktop-input-v1`，本机候选 Host
 
 #### 上游跟进与预览优化
 
-上游原Issue #4477 已由合并的 #4500 关闭，不能把旧版部署问题重复报成最新上游回归。按用户仅Issue、不发PR的授权，已在[原Issue补充进展](https://github.com/trycua/cua/issues/4477#issuecomment-6035452644)，说明部署仍基于0.22.2、受限focused writable Document UIA候选、431字符本机验证及浏览器单行兼容，不要求reopen。协调者独立API读回作者为wszkxlllll且正文限定准确；未创建上游PR。
+上游原 Issue #4477 已由合并的 #4500 关闭，原有[进展评论](https://github.com/trycua/cua/issues/4477#issuecomment-6035452644)仅作关联历史，不作为新问题的唯一入口。用户确认后，新建 [Issue #4830：0.33.1 前台单行中文输入错误及 focused Document 调查](https://github.com/trycua/cua/issues/4830)。正文分开列出原始失败、0.33.1 单次可核对输入／读回、失败的节流实验、空白／追加／浏览器兼容及两次真实保存验证；不声称两类故障同根因，也不要求重开 #4477。逐字对照已明确补充：官方0.33.1上一次模型type拆为91次逐码点SDK调用，读回精确但派发耗时120.356秒；不是91次模型调用，也不是可交付输入策略。
+
+用户随后授权移植并提交上游PR，已创建 [Draft PR #4836](https://github.com/trycua/cua/pull/4836)，基于最新main `b86959306a92dec1598f15df80249497e7ea3a85`，初始源码提交 `73d4148087e7d4a96a1e97bfabd71fa09733d888`，最终修正提交 `0492335190db987ec928bc95d7c5437860c438d7`。仅Windows focused Document输入能力、接入与测试共4文件，不混入独立的CurrentValue读取失败问题。复用main现有UIA single-flight worker和4秒deadline，保留原native queue drain；读写可能发生后不走native fallback。Sol源码审查修复两项P1后GO：使用core已识别的`ax`结果路径，并排除已有Chromium/Electron UIA echo边界以保留浏览器原路线，增加真实ActionExecutionRecord生产者／消费者归一化回归。随后协调者补查超时后的下一次输入，Sol确认Busy不能回退native，否则前一条迟到UIA写入可能与新SendInput交叉；最终提交将Busy与Timeout／Unavailable统一为不允许fallback的Unknown并更新测试，未增加调度框架。作者与提交者均经GitHub核为既定账户ID142909575，contributor-attribution已通过。
+
+Issue正文已替换“暂无PR／仍在探索”旧状态并双向关联PR，而非只追加评论；原#4477下自己的旧评论也改为链接新Issue／PR，不重开原问题。旧候选的实机证据与新main版云端检查严格分开，尚未对新main二进制做本机输入验收。fork手动触发新版Windows workflow首次返回404（默认分支未注册），随后创建独立fork-only构建分支，提交 `ed0f27789875cd225d5cf4d342ede5d14db1dbe6` 仅新增构建workflow，父提交必须精确为初始PR源码提交；构建workflow不进入上游PR。经Sol轻审GO的 [首轮Windows云检查37627381679](https://github.com/wszkxlllll/cua/actions/runs/37627381679) 已全部通过：格式检查、整crate 276测试通过／1忽略及Release编译。最终Busy修正后另以 `c6888b01a7313d39d4331fa0ea5a21a326c01543` 为构建提交、精确父提交0492335运行 [最终版云检查37629865356](https://github.com/wszkxlllll/cua/actions/runs/37629865356)，也已全部通过：格式、276测试通过／0失败／1忽略，Release编译6分02秒；不能用首轮绿冒充最终提交。两轮均不使用artifact或cache actions，本机不编译或下载新产物，仅使用已安装的独立rustfmt格式化源码；两个新工作区均无target目录。上游多项workflow为`action_required`，是等待维护者批准，并非编译失败。CLA job明确要求贡献者签署协议，需用户本人阅读确认，不能代理签署；不影响已完成的源码检查和fork构建。当前Preview保持原已验收驱动，不随上游移植切换。
 
 预览方向先检查原图捕获成功后是否可统一生成传输缩略图，从而减少2MiB超限；不放宽成同名盲选、不更改模型截图或坐标，也不把无法捕获伪装为缩图成功。调查后按下方最小方案实施，真实效果另行记录，不宣称已改善。
 
