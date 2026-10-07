@@ -19,7 +19,7 @@ export interface AllowedApiRoute {
 
 export const MAX_JSON_REQUEST_BYTES = 32 * 1024;
 export const MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024;
-export const MAX_WINDOW_PREVIEW_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const MAX_WINDOW_PREVIEW_RESPONSE_BYTES = 3 * 1024 * 1024;
 export const MAX_ASSET_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MAX_SSE_EVENT_BYTES = 64 * 1024;
 export const MAX_WIRE_MESSAGE_BYTES = 12 * 1024 * 1024;

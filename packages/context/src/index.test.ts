@@ -260,6 +260,11 @@ describe("DefaultContextCompiler", () => {
     expect(grounding?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("ref=uia-1") });
     const projectedGroundingText = grounding?.content[0]?.type === "text" ? grounding.content[0].text : "";
     expect(projectedGroundingText).toContain("surface=dom");
+    expect(projectedGroundingText).toContain("bounded candidate list, not a substitute for the screenshot");
+    expect(projectedGroundingText).toContain("when partial or truncated, omitted controls may still be visible");
+    expect(projectedGroundingText).toContain("unique complete DOM match is preferred");
+    expect(projectedGroundingText).toContain("use a clear current screenshot point with click");
+    expect(projectedGroundingText).toContain("do not retry the same target by changing refs");
     expect(projectedGroundingText).not.toContain(domSurfaceRef.surfaceId);
     expect(projectedGroundingText).not.toContain(opaqueBrowserTabId);
     expect(input.contextBudget?.trace?.grounding).toMatchObject({ present: true, projected: true, completeness: "partial", candidateElementCount: 1, projectedElementCount: 1 });
@@ -589,6 +594,14 @@ describe("DefaultContextCompiler", () => {
     expect(off.system).toContain("at most one Computer tool call");
     expect(off.system).not.toContain("same ModelTurn");
     expect(off.system).not.toContain("first GUI action");
+    const readOnlyLookupGuidance = off.system.slice(off.system.indexOf("Only read-only queries"), off.system.indexOf("If an exact read-only input"));
+    expect(readOnlyLookupGuidance).toContain("a coarse-grained query control or broader criteria for candidate discovery");
+    expect(readOnlyLookupGuidance).toContain("Verify each candidate against every original Goal constraint");
+    expect(readOnlyLookupGuidance).toContain("report only verified matches");
+    expect(readOnlyLookupGuidance).toContain("state any shortfall rather than loosening criteria to fill a requested count");
+    expect(readOnlyLookupGuidance).toContain("edits, submissions, sends, purchases or payments, deletions, disclosures, and other changes");
+    expect(readOnlyLookupGuidance).toMatch(/strictly within the original Goal/u);
+    expect(readOnlyLookupGuidance).not.toMatch(/\b(?:website|site|app|application|train|railway|ticket|flight|airline)\b/iu);
     const batch = await compiler.compile({ runId, goal: "batch", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", executionSegments: "segments-v1", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
     expect(batch.system).toContain("same ModelTurn as the first GUI action");
     expect(batch.system).toContain("one handoff-sized current phase");
@@ -633,15 +646,50 @@ describe("DefaultContextCompiler", () => {
       runId,
       goal: "switch to a listed application",
       recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }],
+      latestObservation: latest,
+      windowSwitchState: { options: [] },
+      computerSession: {
+        id: sessionId,
+        backend: "cua-driver-daemon",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: true },
+        openedAt: "2026-08-30T00:00:00.000Z",
+      },
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" },
     }, new AbortController().signal);
     const switchTool = guardedWindowSwitch.tools.find((tool) => tool.name === "switch_window")!;
     const clickTool = guardedWindowSwitch.tools.find((tool) => tool.name === "click")!;
     expect(guardedWindowSwitch.system).toContain("except switch_window");
     expect(guardedWindowSwitch.system).toContain("does not need _harnessEffect");
+    expect(guardedWindowSwitch.system).toContain("capture scope follows the current observed Surface");
+    const desktopSwitchContext = JSON.stringify(guardedWindowSwitch.messages);
+    expect(desktopSwitchContext).toContain("full primary desktop");
+    expect(desktopSwitchContext).toContain("call list_windows and use switch_window with a fresh windowRef returned by this Run");
+    expect(desktopSwitchContext).toContain("do not substitute taskbar or Start-menu clicks for this explicit activation");
+    expect(desktopSwitchContext).toContain("visual-only");
+    expect(desktopSwitchContext).toContain("do not attach a native-window UIA/DOM element scope");
+    expect(desktopSwitchContext).toContain("currently available Computer type tool description");
+    expect(desktopSwitchContext).toContain("confirm resulting content from a fresh screenshot");
+    expect(desktopSwitchContext).not.toContain("one-call multiline type path requires an exact native-window UIA binding");
+    expect(desktopSwitchContext).not.toContain("separate single-line type and Enter actions");
     expect(switchTool.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
     expect(switchTool.inputSchema).not.toMatchObject({ properties: expect.objectContaining({ _harnessEffect: expect.anything() }) });
     expect(clickTool.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
+
+    const nativeLatest = {
+      ...latest,
+      id: "obs-switch-native-window" as ObservationId,
+      surfaceRef: { surfaceId: "context-native-window" as SurfaceId, generation: 1, kind: "native_window" as const },
+    };
+    const nativeSwitch = await new DefaultContextCompiler(windowSwitchRegistry).compile({
+      runId,
+      goal: "switch from a native window to a listed application",
+      recentEvents: [{ ...event(0, { type: "observation.created", observation: nativeLatest }) }],
+      latestObservation: nativeLatest,
+      windowSwitchState: { options: [] },
+      features: { planning: "off", memory: "off", batching: "off" },
+    }, new AbortController().signal);
+    expect(JSON.stringify(nativeSwitch.messages)).toContain("rebinds screenshot/input scope to the selected listed window");
   });
 
   it("keeps the completion contract aware of recalled Memory without requiring another model call", async () => {
@@ -1061,6 +1109,57 @@ describe("DefaultContextCompiler", () => {
     expect(JSON.stringify(omitted.messages)).not.toContain("Review the current state before continuing.");
     expect(omitted.contextBudget?.monitorGuidanceIncluded).toBe(false);
     expect(omitted.contextBudget?.trace?.monitorGuidanceOmittedReason).toBe("budget");
+  });
+
+  it("keeps operation guidance at the prompt tail, preserves the stable prefix, and yields to existing context budget", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { features: { planning: "off", memory: "off", batching: "off" } });
+    const recentEvents = [event(0, { type: "user.input.received", text: "Keep the current task in scope." })];
+    const operationGuidance = {
+      id: "combined_task_guidance",
+      fingerprint: "combined-task-guidance-v1",
+      text: "新建或编辑文档前，先观察并确认当前页面是空白还是已有内容。长输入只看到尾部，不代表前缀丢失。保存时按当前控件语义处理目录与文件名，确认后不要反复重写。\n整理查询或比较结果时，只记录界面或来源明确给出的关系。价格与类别没有明确关联时分开列出或标为未知，不推断配对；不要把推断保存成 Memory 事实。",
+    };
+    const base = await compiler.compile({ runId, goal: "Create and save a document.", recentEvents }, new AbortController().signal);
+    const included = await compiler.compile({
+      runId,
+      goal: "Create and save a document.",
+      recentEvents,
+      operationGuidance,
+    }, new AbortController().signal);
+    const tail = included.messages.at(-1);
+    if (tail === undefined || tail.role !== "user") throw new Error("operation guidance is not the final user message");
+    const tailText = tail.content.find((block) => block.type === "text");
+    if (tailText?.type !== "text") throw new Error("operation guidance message has no text block");
+    expect(tailText.text).toContain(operationGuidance.text);
+    expect(tailText.text).toContain("确认当前页面是空白还是已有内容");
+    expect(tailText.text).toContain("价格与类别没有明确关联时分开列出或标为未知");
+    expect([...tailText.text].length).toBeLessThanOrEqual(512);
+    expect(included.contextBudget?.trace?.stablePrefixHash).toBe(base.contextBudget?.trace?.stablePrefixHash);
+    expect(included.contextBudget?.trace?.operationGuidance).toEqual({
+      id: operationGuidance.id,
+      fingerprint: operationGuidance.fingerprint,
+      included: true,
+    });
+
+    const budgeted = await compiler.compile({
+      runId,
+      goal: "Create and save a document.",
+      recentEvents,
+      operationGuidance,
+      context: { maxInputTokens: base.contextBudget!.estimatedInputTokens },
+    }, new AbortController().signal);
+    expect(budgeted.contextBudget?.estimatedInputTokens).toBeLessThanOrEqual(base.contextBudget!.estimatedInputTokens);
+    expect(budgeted.contextBudget?.selectedHistoryEvents).toBe(base.contextBudget?.selectedHistoryEvents);
+    expect(budgeted.contextBudget?.trace?.operationGuidance).toEqual({
+      id: operationGuidance.id,
+      fingerprint: operationGuidance.fingerprint,
+      included: false,
+      omittedReason: "budget",
+    });
+    const budgetedText = budgeted.messages.flatMap((message) =>
+      message.content.flatMap((block) => block.type === "text" ? [block.text] : []),
+    ).join("\n");
+    expect(budgetedText).not.toContain(operationGuidance.text);
   });
 
   it("uses the injected recall ranking in the actual ModelInput without treating tool results as user corrections", async () => {

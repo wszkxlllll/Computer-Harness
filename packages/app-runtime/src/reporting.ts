@@ -138,6 +138,7 @@ export async function buildRunReport(
     contextMode: config.contextMode,
     contextMaxHistoryEvents: config.contextMaxHistoryEvents,
     contextMaxInputTokens: config.contextMaxInputTokens ?? null,
+    contextMaxWireInputTokens: config.contextMaxWireInputTokens ?? null,
     tools: [...toolNames],
     planStoreRoot: config.planning ? resolve(config.outputDir, "plan-store") : null,
     computerSession: snapshot.computerSession ?? null,

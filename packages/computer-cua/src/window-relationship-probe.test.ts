@@ -144,27 +144,77 @@ describe("cross-platform window relationship inventory merge", () => {
     ]);
     expect(merged.windows[0]).toMatchObject({ title: parent.title, appName: parent.appName });
     expect(merged.windows[1]).toMatchObject({ ownerPid: parent.target.pid, ownerWindowId: parent.target.windowId, windowClass: "#32770" });
+    expect(merged.windows.map((window) => window.cuaListed)).toEqual([true, false]);
     expect(merged.windows.flatMap((window) => Object.keys(window))).not.toContain("text");
   });
 
-  it("prefers exact CUA labels and falls back to optional probe labels for exact rows", () => {
-    const probeParent = { ...probe().windows[0]!, title: "Win32 parent caption", appName: "wps" };
-    const probeChild = { ...child, title: "Win32 dialog caption", appName: "wps" };
+  it("preserves exact optional no-activate facts and rejects contradictory exact-identity facts", () => {
+    const nonActivatingChild = { ...child, noActivate: true };
+    const merged = mergeWindowRelationshipInventory(cua(), probe({
+      windows: [probe().windows[0]!, nonActivatingChild],
+    }), true);
+    expect(merged.complete).toBe(true);
+    expect(merged.windows[1]).toMatchObject({ target: { pid: child.pid, windowId: child.windowId }, noActivate: true });
+
+    const contradictory = mergeWindowRelationshipInventory(cua([{
+      target: { pid: child.pid, windowId: child.windowId },
+      bounds: child.bounds,
+      noActivate: false,
+    }]), probe({ windows: [probe().windows[0]!, nonActivatingChild] }), true);
+    expect(contradictory.complete).toBe(false);
+    expect(contradictory.windows).toHaveLength(1);
+    expect(contradictory.windows[0]).toHaveProperty("noActivate", false);
+
+    const malformed = mergeWindowRelationshipInventory(cua(), probe({
+      windows: [probe().windows[0]!, { ...child, noActivate: "yes" } as unknown as typeof child],
+    }), true);
+    expect(malformed.complete).toBe(false);
+    expect(malformed.windows).toEqual(cua().windows);
+  });
+
+  it("prefers exact Win32 captions but keeps CUA app labels stable and falls back when absent", () => {
+    const repeatedTitle = "Untitled - Notepad";
+    const repeatedAppName = "same CUA process label";
+    const cuaParent = { ...parent, title: repeatedTitle, appName: repeatedAppName };
+    const cuaChild: CuaWindowInfo = {
+      target: { pid: child.pid, windowId: child.windowId },
+      title: repeatedTitle,
+      appName: repeatedAppName,
+      bounds: child.bounds,
+    };
+    const probeParent = { ...probe().windows[0]!, title: "Budget - Notepad", appName: "notepad" };
+    const probeChild = { ...child, title: "Calendar - Notepad", appName: "notepad" };
     const noCaptionOwnedChild = {
       ...child,
       windowId: 404,
       zIndex: 4,
       appName: "wps",
     };
-    const merged = mergeWindowRelationshipInventory(cua(), probe({
-      windows: [probeParent, probeChild, noCaptionOwnedChild],
+    const cuaInventory = cua([cuaParent, cuaChild]);
+    const probeRows = [probeParent, probeChild, noCaptionOwnedChild];
+    const merged = mergeWindowRelationshipInventory(cuaInventory, probe({
+      windows: probeRows,
     }), true);
 
     expect(merged.complete).toBe(true);
-    expect(merged.windows[0]).toMatchObject({ title: parent.title, appName: parent.appName });
-    expect(merged.windows[1]).toMatchObject({ title: "Win32 dialog caption", appName: "wps" });
+    expect(merged.windows[0]).toMatchObject({ title: "Budget - Notepad", appName: repeatedAppName });
+    expect(merged.windows[1]).toMatchObject({ title: "Calendar - Notepad", appName: repeatedAppName });
     expect(merged.windows[2]).toMatchObject({ appName: "wps", windowClass: "#32770" });
-    expect(merged.windows[2]).not.toHaveProperty("title");
+    expect(merged.windows.map((window) => window.title)).toEqual(["Budget - Notepad", "Calendar - Notepad", undefined]);
+
+    const partial = mergeWindowRelationshipInventory(cuaInventory, probe({ complete: false, windows: probeRows.slice(0, 2) }), true);
+    expect(partial.complete).toBe(false);
+    expect(partial.windows.map((window) => window.title)).toEqual(["Budget - Notepad", "Calendar - Notepad"]);
+    expect(partial.windows.map((window) => window.appName)).toEqual([repeatedAppName, repeatedAppName]);
+
+    const withoutProbeLabels = mergeWindowRelationshipInventory(cuaInventory, probe({
+      windows: [
+        { ...probe().windows[0]!, title: "", appName: "" },
+        { ...child, title: "", appName: "" },
+      ],
+    }), true);
+    expect(withoutProbeLabels.windows.map((window) => window.title)).toEqual([repeatedTitle, repeatedTitle]);
+    expect(withoutProbeLabels.windows.map((window) => window.appName)).toEqual([repeatedAppName, repeatedAppName]);
   });
 
   it("does not borrow a label from another HWND in the same process", () => {

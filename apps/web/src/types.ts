@@ -14,6 +14,7 @@ export interface RunSummary {
   goal: string;
   status: RunStatus;
   outcome?: RunOutcome;
+  ownerState?: "released" | "pending_cleanup";
   sequence?: number;
   latestAssetId?: string;
   reply?: string;

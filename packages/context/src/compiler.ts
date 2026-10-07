@@ -20,6 +20,7 @@ export interface DefaultContextCompilerOptions {
   mode?: "raw" | "recent";
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  maxWireInputTokens?: number;
   memoryMaxTokens?: number;
   memoryRecall?: MemoryRecallService;
   features?: RunFeatureConfig;
@@ -29,6 +30,7 @@ export class DefaultContextCompiler implements ContextCompiler {
   private readonly mode: "raw" | "recent";
   private readonly maxHistoryEvents: number;
   private readonly maxInputTokens: number | undefined;
+  private readonly maxWireInputTokens: number | undefined;
   private readonly memoryMaxTokens: number;
   private readonly memoryRecall: MemoryRecallService | undefined;
   private readonly features: RunFeatureConfig;
@@ -45,6 +47,8 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("maxHistoryEvents must be a positive integer");
     }
     this.maxInputTokens = options.maxInputTokens;
+    this.maxWireInputTokens = options.maxWireInputTokens;
+    validateInputBudgets(this.maxInputTokens, this.maxWireInputTokens);
     if (this.maxInputTokens !== undefined && (!Number.isInteger(this.maxInputTokens) || this.maxInputTokens < 1)) {
       throw new Error("maxInputTokens must be a positive integer");
     }
@@ -70,7 +74,13 @@ export class DefaultContextCompiler implements ContextCompiler {
       ? undefined
       : `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`;
     const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
-    const windowSwitchStateText = formatWindowSwitchState(input.computerSession, input.windowSwitchState, latestObservation?.grounding, latestObservation?.viewport);
+    const windowSwitchStateText = formatWindowSwitchState(
+      input.computerSession,
+      input.windowSwitchState,
+      latestObservation?.grounding,
+      latestObservation?.viewport,
+      latestObservation?.surfaceRef.kind,
+    );
     const windowSwitchStateTokens = windowSwitchStateText === undefined ? 0 : estimateTextTokens(windowSwitchStateText);
     const assessmentBinding = currentObservationAssessmentBinding(orderedEvents);
     let assessmentBindingText = assessmentBinding !== undefined && assessmentBinding.observationId === latestObservation?.id
@@ -123,6 +133,8 @@ export class DefaultContextCompiler implements ContextCompiler {
     const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received"));
     let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
+    const maxWireInputTokens = input.context?.maxWireInputTokens ?? this.maxWireInputTokens;
+    validateInputBudgets(maxInputTokens, maxWireInputTokens);
     const rawAssistantPreferencesText = input.assistantPreferences === undefined
       ? undefined
       : formatAssistantPreferences(input.assistantPreferences);
@@ -302,12 +314,27 @@ export class DefaultContextCompiler implements ContextCompiler {
         ],
       });
     }
+    const operationGuidanceText = input.operationGuidance === undefined
+      ? undefined
+      : formatOperationGuidance(input.operationGuidance.text.slice(0, 400));
+    const rawOperationGuidanceTokens = operationGuidanceText === undefined ? 0 : [...operationGuidanceText].length;
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
-    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
-    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
-    if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
+    const baseEstimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
+    const baseEstimatedInputTokens = estimatedFixedTextTokens + baseEstimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
+    if (maxInputTokens !== undefined && baseEstimatedInputTokens > maxInputTokens) {
       throw new Error("Context history exceeds maxInputTokens after selection");
+    }
+    const operationGuidanceIncluded = operationGuidanceText !== undefined &&
+      (maxInputTokens === undefined || baseEstimatedInputTokens + rawOperationGuidanceTokens <= maxInputTokens);
+    const operationGuidanceTokens = operationGuidanceIncluded ? rawOperationGuidanceTokens : 0;
+    const estimatedHistoryTextTokens = baseEstimatedHistoryTextTokens + operationGuidanceTokens;
+    const estimatedInputTokens = baseEstimatedInputTokens + operationGuidanceTokens;
+    if (operationGuidanceIncluded && operationGuidanceText !== undefined) {
+      // Keep the trusted, per-turn note at the prompt tail. It is the lowest
+      // priority text projection and never displaces the Goal, user corrections,
+      // selected history, or the current observation when the budget is tight.
+      messages.push({ role: "user", content: [{ type: "text", text: operationGuidanceText }] });
     }
     const selectedIds = new Set(selectedEvents.map((event) => event.eventId));
     const candidateIds = new Set(historyCandidates.map((event) => event.eventId));
@@ -376,6 +403,14 @@ export class DefaultContextCompiler implements ContextCompiler {
         },
       }),
       observationIncluded: latestObservation !== undefined,
+      ...(input.operationGuidance === undefined ? {} : {
+        operationGuidance: {
+          id: input.operationGuidance.id,
+          fingerprint: input.operationGuidance.fingerprint,
+          included: operationGuidanceIncluded,
+          ...(!operationGuidanceIncluded ? { omittedReason: "budget" as const } : {}),
+        },
+      }),
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? {
         monitorGuidanceIncluded,
         ...(monitorGuidanceOmittedReason === undefined ? {} : { monitorGuidanceOmittedReason }),
@@ -408,6 +443,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       omittedHistoryEvents: Math.max(0, orderedEvents.length - selectedEvents.length),
       ...(input.context?.maxHistoryEvents === undefined && this.mode === "raw" ? {} : { maxHistoryEvents: input.context?.maxHistoryEvents ?? this.maxHistoryEvents }),
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxWireInputTokens === undefined ? {} : { maxWireInputTokens }),
       ...(memoryText === undefined ? {} : { estimatedMemoryTokens: memoryEstimatedTokens, memoryMaxTokens: input.context?.memoryMaxTokens ?? this.memoryMaxTokens }),
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? { estimatedMonitorGuidanceTokens: monitorGuidanceTokens, monitorGuidanceIncluded } : {}),
       ...(groundingCatalog === undefined ? {} : { estimatedGroundingTokens: groundingTokens, groundingIncluded }),
@@ -422,8 +458,23 @@ export class DefaultContextCompiler implements ContextCompiler {
   }
 }
 
+function validateInputBudgets(text: number | undefined, wire: number | undefined): void {
+  for (const value of [text, wire]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) {
+      throw new Error("Context input budgets must be integers from 1 to 131072");
+    }
+  }
+  if (text !== undefined && wire !== undefined && text > wire) {
+    throw new Error("Context text budget must not exceed wire budget");
+  }
+}
+
 function estimateTextTokens(value: string): number {
   return Math.ceil(value.length / 4);
+}
+
+function formatOperationGuidance(text: string): string {
+  return `Current task operation note (advisory only; the Goal and existing permissions remain authoritative):\n${text}`;
 }
 
 function canonicalCapturedAt(value: string): string | undefined {
@@ -483,7 +534,8 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
   const projected = candidates.slice(0, Math.min(catalog.maxElements, 16));
   const sourceLabel = catalog.source === "hybrid" ? "UIA+DOM" : catalog.source.toUpperCase();
   const lines = [
-    `${sourceLabel} grounding (${catalog.completeness}; surface=${catalog.surfaceRef.kind}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
+    `${sourceLabel} grounding (${catalog.completeness}; surface=${catalog.surfaceRef.kind}; observation-bound; refs expire after the next observation; if using click_element, use a current ref and observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
+    "This grounding catalog is a bounded candidate list, not a substitute for the screenshot; when partial or truncated, omitted controls may still be visible. On managed-browser content, a unique complete DOM match is preferred; otherwise a fresh non-container UIA ref can use the checked point-click path. A center point is not proof of a semantic effect. If a click is refused or the next observation shows no effect, do not retry the same target by changing refs; use a clear current screenshot point with click or another safe path.",
     ...(catalog.source === "hybrid" && catalog.degraded && !catalog.elements.some((element) => element.source === "dom")
       ? ["Managed browser content grounding is unavailable in this observation. Toolbar-only UIA does not establish the page content region. Use an available wait tool briefly, then use the automatic fresh observation after the page becomes ready; do not invent page refs, guess the content origin, or use drag as a substitute for a click."]
       : []),

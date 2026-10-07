@@ -31,6 +31,7 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
   const [offset, setOffset] = useState<Point>({ x: 0, y: 0 });
   const [imageLoaded, setImageLoaded] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
+  const [imageRetry, setImageRetry] = useState(0);
 
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => { imageLoadedRef.current = imageLoaded; }, [imageLoaded]);
@@ -143,6 +144,13 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
     setOffset({ x: 0, y: 0 });
   }
 
+  function retryImage() {
+    imageLoadedRef.current = false;
+    setImageLoaded(false);
+    setImageFailed(false);
+    setImageRetry((current) => current + 1);
+  }
+
   return (
     <div ref={backdropRef} className="screenshot-viewer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
       <section
@@ -180,6 +188,7 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
             <p className="notice notice-error viewer-image-error" role="alert">无法载入这张截图。可能已过期或当前连接无权查看；无法据此核对画面。</p>
           ) : (
             <img
+              key={imageRetry}
               className={`screenshot-viewer-image${imageLoaded ? " is-loaded" : ""}`}
               src={runAssetUrl(runId, assetId)}
               alt={alt}
@@ -193,6 +202,7 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
         </div>
 
         <div className="screenshot-viewer-controls" aria-label="截图缩放和平移控制">
+          {imageFailed && <button className="button button-secondary" type="button" onClick={retryImage}>重新载入截图</button>}
           <button className="button button-secondary" type="button" onClick={() => scaleBy(1 / 1.25)} aria-label="缩小截图">−</button>
           <span className="viewer-zoom-level" role="status" aria-live="polite">{Math.round(scale * 100)}%</span>
           <button className="button button-secondary" type="button" onClick={() => scaleBy(1.25)} aria-label="放大截图">＋</button>

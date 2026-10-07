@@ -10,7 +10,7 @@ import {
   type EnvironmentLeaseInfo,
   type EnvironmentOwner,
 } from "./environment-owner.js";
-import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js";
+import type { ResolvedRunConfig, RunCloseConfirmation, RunDependencies, RunHandle } from "./config.js";
 
 export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId" | "assistantPreferences">;
 
@@ -46,7 +46,7 @@ export type ApplicationSessionWindowTarget = { pid: number; windowId: number };
 /** Feature-only overrides selected by an interactive UI for the next Run. */
 export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   ApplicationSessionConfig,
-  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "riskGuard" | "monitor" | "grounding" | "windowHandoff" | "windowSwitch"
+  "planning" | "memory" | "memoryRetrieval" | "batching" | "contextMode" | "contextMaxHistoryEvents" | "contextMaxInputTokens" | "operationGuidance" | "riskGuard" | "monitor" | "grounding" | "windowHandoff" | "windowSwitch"
 >> & {
   windowTarget?: ApplicationSessionWindowTarget | null;
   windowDeliveryMode?: "background" | "foreground" | null;
@@ -362,8 +362,9 @@ export class ApplicationSession {
     try {
       const outcome = await outcomePromise;
       let report: RunReport | undefined;
+      let closeConfirmation: void | RunCloseConfirmation | undefined;
       try {
-        await handle.close();
+        closeConfirmation = await handle.close();
         report = await handle.report();
       } catch (error) {
         lease.markPending(`Run cleanup/report was not confirmed: ${errorMessage(error)}`);
@@ -375,7 +376,12 @@ export class ApplicationSession {
       // it into a permanent desktop lock: a later Run gets a fresh Controller,
       // Computer session, and initial observation. Only unconfirmed cleanup
       // retains the environment lease.
-      const safeToRelease = report !== undefined && cleanupDiagnostics !== undefined && cleanupDiagnostics.length === 0;
+      // Only a RunId-bound close confirmation can explain away retained
+      // Computer timeout diagnostics. Other cleanup failures still retain the
+      // lease, even if a replaceable factory's close promise resolves.
+      const safeToRelease = report !== undefined
+        && cleanupDiagnostics !== undefined
+        && cleanupDiagnosticsAreConfirmed(cleanupDiagnostics, record.runId, closeConfirmation);
       if (safeToRelease && lease.state === "active") {
         lease.release();
         replaceRecord(this.records, record, { outcome, ownerState: "released" });
@@ -402,6 +408,42 @@ export class ApplicationSession {
 function cleanupDiagnosticsFromReport(report: RunReport): readonly unknown[] | undefined {
   const diagnostics = report.summary.cleanupDiagnostics;
   return Array.isArray(diagnostics) ? diagnostics : undefined;
+}
+
+function cleanupDiagnosticsAreConfirmed(
+  diagnostics: readonly unknown[],
+  runId: RunId,
+  confirmation: void | RunCloseConfirmation | undefined,
+): boolean {
+  if (diagnostics.length === 0) return true;
+  if (confirmation === undefined
+    || confirmation.kind !== "late-computer-cleanup-confirmed"
+    || confirmation.runId !== runId
+    || !Array.isArray(confirmation.resolvedTimedOutComputerDiagnostics)
+    || confirmation.resolvedTimedOutComputerDiagnostics.length === 0) {
+    return false;
+  }
+
+  const remaining = [...diagnostics];
+  for (const resolved of confirmation.resolvedTimedOutComputerDiagnostics as readonly unknown[]) {
+    if (typeof resolved !== "object" || resolved === null || Array.isArray(resolved)) return false;
+    const candidate = resolved as { operation?: unknown; message?: unknown; status?: unknown };
+    if ((candidate.operation !== "computer.close" && candidate.operation !== "computer.dispose")
+      || typeof candidate.message !== "string"
+      || candidate.status !== "timed_out") {
+      return false;
+    }
+    const index = remaining.findIndex((diagnostic) => {
+      if (typeof diagnostic !== "object" || diagnostic === null || Array.isArray(diagnostic)) return false;
+      const reported = diagnostic as { operation?: unknown; message?: unknown; status?: unknown };
+      return reported.operation === candidate.operation
+        && reported.message === candidate.message
+        && reported.status === "timed_out";
+    });
+    if (index < 0) return false;
+    remaining.splice(index, 1);
+  }
+  return remaining.length === 0;
 }
 
 function replaceRecord(records: SessionRunRecord[], target: SessionRunRecord, patch: Partial<SessionRunRecord>): void {

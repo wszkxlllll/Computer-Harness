@@ -14,6 +14,8 @@ export interface WindowRelationshipProbeWindow {
   readonly minimized: boolean;
   readonly bounds: CuaWindowGeometry;
   readonly windowClass?: string;
+  /** Exact Win32 WS_EX_NOACTIVATE fact; absence means the producer did not attest it. */
+  readonly noActivate?: boolean;
   /** Optional top-level caption; control contents are never included. */
   readonly title?: string;
   /** Optional process basename without an executable path. */
@@ -90,11 +92,17 @@ export function mergeWindowRelationshipInventory(
   const windows = selectedRows.map((row) => {
     const identity = { pid: row.pid, windowId: row.windowId };
     const cuaRow = cuaRows.get(identityKey(identity));
-    const title = cuaRow?.title ?? row.title;
+    const title = row.title ?? cuaRow?.title;
+    // Keep the CUA-friendly process label stable across probe availability.
+    // Win32 process names omit the `.exe` suffix in common cases, while CUA
+    // labels are also used by preview continuity checks.
     const appName = cuaRow?.appName ?? row.appName;
     return {
       target: identity,
       bounds: { ...row.bounds },
+      // Keep native-only helper HWNDs in the topology, but mark that CUA's
+      // own target discovery did not return them in this sample.
+      cuaListed: cuaRows.has(identityKey(identity)),
       ...(title === undefined ? {} : { title }),
       ...(appName === undefined ? {} : { appName }),
       ...(row.zIndex === undefined ? {} : { zIndex: row.zIndex }),
@@ -103,6 +111,7 @@ export function mergeWindowRelationshipInventory(
       ...(row.ownerWindowId === undefined ? {} : { ownerWindowId: row.ownerWindowId }),
       minimized: row.minimized,
       ...(row.windowClass === undefined ? {} : { windowClass: row.windowClass }),
+      ...(row.noActivate === undefined ? {} : { noActivate: row.noActivate }),
     } satisfies CuaWindowInfo;
   });
 
@@ -147,8 +156,9 @@ function mergePartialExactRows(
       ...(cuaRow.isOnScreen === undefined ? { isOnScreen: probeRow.isOnScreen } : {}),
       ...(cuaRow.minimized === undefined ? { minimized: probeRow.minimized } : {}),
       ...(cuaRow.windowClass === undefined && probeRow.windowClass !== undefined ? { windowClass: probeRow.windowClass } : {}),
-      ...(cuaRow.title === undefined && probeRow.title !== undefined ? { title: probeRow.title } : {}),
-      ...(cuaRow.appName === undefined && probeRow.appName !== undefined ? { appName: probeRow.appName } : {}),
+      ...(cuaRow.noActivate === undefined && probeRow.noActivate !== undefined ? { noActivate: probeRow.noActivate } : {}),
+      ...(probeRow.title === undefined ? {} : { title: probeRow.title }),
+      ...(cuaRow.appName !== undefined || probeRow.appName === undefined ? {} : { appName: probeRow.appName }),
     } satisfies CuaWindowInfo];
   });
 
@@ -190,6 +200,7 @@ function validateProbeRows(
         !isWindowGeometry(value.bounds) ||
         (value.zIndex !== undefined && !Number.isSafeInteger(value.zIndex)) ||
         !validOptionalOwner(value.ownerPid, value.ownerWindowId) ||
+        (value.noActivate !== undefined && typeof value.noActivate !== "boolean") ||
         (value.windowClass !== undefined && !isAsciiClass(value.windowClass))) {
       return undefined;
     }
@@ -206,7 +217,8 @@ function relationshipFieldsAgree(cua: CuaWindowInfo, probe: WindowRelationshipPr
     agreesWhenPresent(cua.ownerWindowId, probe.ownerWindowId) &&
     agreesWhenPresent(cua.isOnScreen, probe.isOnScreen) &&
     agreesWhenPresent(cua.minimized, probe.minimized) &&
-    agreesWhenPresent(cua.windowClass, probe.windowClass);
+    agreesWhenPresent(cua.windowClass, probe.windowClass) &&
+    agreesWhenPresent(cua.noActivate, probe.noActivate);
 }
 
 /** CUA visible-list ranks and probe global-chain ranks have different scales. */

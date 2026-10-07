@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
 import {
   appendVoiceAudio,
   completeManagedBrowserLogin,
   createRun,
   finishVoiceInput,
+  getRun,
   getManagedBrowserProfileSettings,
   getVoiceInputCapabilities,
   listRuns,
@@ -33,6 +35,37 @@ describe("API error presentation", () => {
       message: "电脑当前离线或无法连接。确认电脑已开机并运行 Harness。",
       code: "host_unavailable",
     });
+  });
+});
+
+describe("Run cleanup status API compatibility", () => {
+  it("preserves ownerState on current Hosts and accepts older snapshots that omit it", async () => {
+    const currentSnapshot = {
+      runId: "cleanup-run",
+      goal: "A finished task",
+      status: "finished",
+      sequence: 12,
+      ownerState: "pending_cleanup",
+      capabilities: { pause: false, resume: false, abort: false, correct: false, approval: false, windowHandoff: false },
+    };
+    const legacySnapshot = {
+      runId: "legacy-run",
+      goal: "A finished task from an older Host",
+      status: "finished",
+      sequence: 12,
+      capabilities: { pause: false, resume: false, abort: false, correct: false, approval: false, windowHandoff: false },
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(currentSnapshot), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ runs: [currentSnapshot] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(legacySnapshot), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getRun("cleanup-run")).resolves.toMatchObject({ ownerState: "pending_cleanup" });
+    await expect(listRuns()).resolves.toMatchObject([{ runId: "cleanup-run", ownerState: "pending_cleanup" }]);
+    const legacy = await getRun("legacy-run");
+    expect(legacy).toMatchObject({ runId: "legacy-run", status: "finished" });
+    expect(legacy).not.toHaveProperty("ownerState");
   });
 });
 
@@ -202,6 +235,27 @@ describe("explicit window-target run contract", () => {
     }
   });
 
+  it.each([
+    { code: "WINDOW_PREVIEW_TIMEOUT", expected: "读取窗口预览超时。请确认目标窗口仍可见，稍后重试。" },
+    { code: "WINDOW_PREVIEW_CAPTURE_FAILED", expected: "电脑无法安全读取这个窗口的画面。请在电脑上恢复目标窗口、刷新列表后重试。" },
+    { code: "WINDOW_PREVIEW_CLEANUP_PENDING", expected: "电脑端仍在清理窗口预览会话。请先检查 Harness 状态，确认清理完成后再重试。" },
+    { code: "WINDOW_PREVIEW_IMAGE_TOO_LARGE", expected: "窗口预览图片超过安全传输上限。请缩小目标窗口，再刷新列表重试。" },
+  ])("maps $code to safe window-preview guidance", async ({ code, expected }) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code, message: "private window title and native diagnostic detail" },
+    }), { status: 409 })));
+
+    let failure: unknown;
+    try {
+      await previewWindowTarget("T".repeat(32));
+    } catch (caught) {
+      failure = caught;
+    }
+    expect(failure).toMatchObject({ code, message: expected });
+    expect((failure as Error).message).not.toContain("private window title");
+    expect((failure as Error).message).not.toContain("native diagnostic detail");
+  });
+
   it("requires previews for duplicate labels even if the Host omitted that marker", async () => {
     const candidates = [
       { token: "A".repeat(32), appName: "Editor", title: "Untitled" },
@@ -218,7 +272,26 @@ describe("explicit window-target run contract", () => {
     });
   });
 
-  it("rejects preview responses containing native identities or oversized decoded image data", async () => {
+  it("deduplicates repeated opaque candidate tokens without collapsing distinct same-label windows", async () => {
+    const candidates = [
+      { token: "A".repeat(32), appName: "Editor", title: "Untitled" },
+      { token: "A".repeat(32), appName: "Editor", title: "Untitled" },
+      { token: "B".repeat(32), appName: "Editor", title: "Untitled" },
+    ];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      candidates,
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    }), { status: 200 })));
+
+    await expect(listWindowTargets()).resolves.toMatchObject({
+      candidates: [
+        { token: "A".repeat(32), previewRequired: true },
+        { token: "B".repeat(32), previewRequired: true },
+      ],
+    });
+  });
+
+  it("accepts the exact preview byte limit and rejects native identities or over-limit image data", async () => {
     const preview = {
       previewToken: "P".repeat(32),
       appName: "Editor",
@@ -227,7 +300,7 @@ describe("explicit window-target run contract", () => {
       expiresAt: "2026-10-04T00:02:00.000Z",
       viewport: { width: 320, height: 240 },
       mediaType: "image/png",
-      dataBase64: Buffer.alloc(1_048_577).toString("base64"),
+      dataBase64: Buffer.alloc(MAX_WINDOW_PREVIEW_BYTES + 1).toString("base64"),
     };
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...preview, pid: 451, windowId: 894 }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -235,6 +308,11 @@ describe("explicit window-target run contract", () => {
 
     fetchMock.mockResolvedValue(new Response(JSON.stringify(preview), { status: 200 }));
     await expect(previewWindowTarget("T".repeat(32))).rejects.toThrow("窗口预览格式无效");
+
+    const atLimitImage = Buffer.alloc(MAX_WINDOW_PREVIEW_BYTES).toString("base64");
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ ...preview, dataBase64: atLimitImage }), { status: 200 }));
+    const accepted = await previewWindowTarget("T".repeat(32));
+    expect(Buffer.from(accepted.dataBase64, "base64")).toHaveLength(MAX_WINDOW_PREVIEW_BYTES);
   });
 
   it("sends only the versioned assistant preference whitelist when supplied", async () => {

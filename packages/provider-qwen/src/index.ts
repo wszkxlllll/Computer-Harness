@@ -615,10 +615,14 @@ function qwenToolCatalog(tools: readonly ModelToolSpec[], coordinateMode: QwenCo
   const lines = ["Available tools (semantic guidance; Runtime validates exact arguments):"];
   for (const tool of tools) {
     const argumentsText = compactToolArguments(tool, coordinateMode);
-    const description = tool.description.replace(/\s+/gu, " ").trim().slice(0, 180);
+    const description = compactDescription(tool.description);
     lines.push(`- ${tool.name}(${argumentsText}): ${description}`);
   }
   return lines.join("\n");
+}
+
+function compactDescription(description: string): string {
+  return description.replace(/\s+/gu, " ").trim();
 }
 
 function compactToolArguments(tool: ModelToolSpec, coordinateMode: QwenCoordinateMode): string {
@@ -638,10 +642,13 @@ function compactToolArguments(tool: ModelToolSpec, coordinateMode: QwenCoordinat
     const coordinate = tool.coordinate?.fields.some((field) => field === name)
       ? coordinateMode === "normalized_1000" ? "[0,1000]" : "[pixel]"
       : "";
+    const description = typeof property.description === "string"
+      ? ` description=${JSON.stringify(compactDescription(property.description))}`
+      : "";
     if (name === HARNESS_EFFECT_KEY) {
-      fields.push(`${name}${optional}:object{effects:array<${declaredActionEffects.join("|")}>,target:string,summary:string}`);
+      fields.push(`${name}${optional}:object{effects:array<${declaredActionEffects.join("|")}>,target:string,summary:string}${description}`);
     } else {
-      fields.push(`${name}${optional}:${type}${enumText}${coordinate}`);
+      fields.push(`${name}${optional}:${type}${enumText}${coordinate}${description}`);
     }
   }
   return fields.join(", ");

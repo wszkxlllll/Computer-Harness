@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
@@ -56,6 +56,8 @@ import {
   captureWindowWithRetry,
   discoverWindow,
   activateWindowTarget,
+  hasConfirmedWindowsActivationRefusal,
+  isLocalWindowsNamedPipeSocket,
   listWindowInventory,
   listWindowTargets,
   sameWindowGeometry,
@@ -70,10 +72,13 @@ import {
   type WindowCaptureRetryOptions,
   WindowContractError,
 } from "./window-contract.js";
+import { captureVisibleWindowRegion } from "./windows-visible-window-capture.js";
 import { assessOwnedTransientWindowAdmission } from "./transient-window-admission.js";
 import { mergeWindowRelationshipInventory, type WindowRelationshipProbe } from "./window-relationship-probe.js";
+import { settlePostInputObservation } from "./post-input-observation-settler.js";
 import { projectExactWindowRoot as exactWindowRoot } from "./window-root-projection.js";
 import {
+  isEligibleNativeOnlyDesktopCandidate,
   isRelevantManualWindowCandidate,
   projectSelectableWindowCandidates,
 } from "./window-candidate-projection.js";
@@ -81,6 +86,16 @@ import {
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 const CLEANUP_POLL_INTERVAL_MS = 50;
 const TRANSIENT_RECOVERY_RECHECK_DELAYS_MS = [300, 300, 300] as const;
+const unconfirmedNativeTransitionFailures = new WeakSet<object>();
+
+function markUnconfirmedNativeTransitionFailure(error: unknown): void {
+  if (typeof error === "object" && error !== null) unconfirmedNativeTransitionFailures.add(error);
+}
+
+function isUnconfirmedNativeTransitionFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && unconfirmedNativeTransitionFailures.has(error);
+}
+
 function hasLineBreak(text: string): boolean {
   return /[\r\n\u0085\u2028\u2029]/u.test(text);
 }
@@ -166,7 +181,6 @@ async function verifyTransientNativeChildRoot(
       candidate.ownerPid !== owner.pid || candidate.ownerWindowId !== owner.windowId) {
     return { status: "unavailable" };
   }
-
   const admissionSource = inventory.source === "win32_relationship_probe"
     ? "win32_relationship_probe" as const
     : "owned_transient_window_root_proof" as const;
@@ -514,6 +528,20 @@ function activeSurfaceUnavailable(current: PrivateSession): boolean {
   return ref === undefined || !isExecutableSurfaceRef(current.surfaceRegistry, ref);
 }
 
+function isPrimaryDesktopForegroundActionRequest(
+  request: { readonly name: string; readonly arguments: Record<string, unknown> },
+  sessionLabel: string,
+): boolean {
+  const target = request.arguments.target;
+  if (typeof target !== "object" || target === null || Array.isArray(target)) return false;
+  const targetRecord = target as Record<string, unknown>;
+  const targetKeys = Object.keys(targetRecord);
+  return request.arguments.session === sessionLabel && request.arguments.delivery_mode === "foreground" &&
+    targetRecord.kind === PRIMARY_DESKTOP.kind && targetRecord.display_id === PRIMARY_DESKTOP.display_id &&
+    targetKeys.length === 2 && targetKeys.every((key) => key === "kind" || key === "display_id") &&
+    ["click", "type_text", "press_key", "hotkey", "scroll", "drag"].includes(request.name);
+}
+
 function surfaceRefForWindow(current: PrivateSession, target: CuaWindowTarget): SurfaceRef | undefined {
   let surfaceRef = current.surfaceRegistry.activeSurface;
   while (surfaceRef !== undefined) {
@@ -648,10 +676,34 @@ function targetAllowedByHostScope(
   return allowedTargets === undefined || allowedTargets.some((allowed) => windowIdentityKey(allowed) === windowIdentityKey(target));
 }
 
+function isFreshUnscopedOwnedForegroundPeer(
+  candidate: CuaWindowInfo,
+  owner: CuaWindowTarget,
+  inventory: CuaWindowInventory,
+  mismatchWindowId: number | undefined,
+  foregroundDelivery: boolean,
+): boolean {
+  if (mismatchWindowId === undefined || candidate.target.windowId !== mismatchWindowId ||
+      candidate.cuaListed === false || inventory.complete !== true || inventory.truncated === true ||
+      inventory.completeAttestation === "negative" ||
+      candidate.ownerPid !== owner.pid || candidate.ownerWindowId !== owner.windowId ||
+      candidate.isOnScreen !== true || candidate.minimized === true ||
+      foregroundDelivery && candidate.noActivate === true ||
+      inventory.foregroundPid !== candidate.target.pid || inventory.foregroundWindowId !== candidate.target.windowId) {
+    return false;
+  }
+  return inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target)).length === 1;
+}
+
 function windowRefusalCode(code: string | undefined, message: string, structuredNoInputEvidence = false): string {
+  // This prefix is emitted only after input dispatch may have begun. Keep it
+  // on the existing unknown-outcome path even if the Tool also supplies a
+  // generic refusal code.
+  if (isUnknownForegroundInputOutcome(message)) return "CUA_TOOL_REFUSED";
   // CUA 0.22.2 reports the exact-HWND foreground refusal in Tool text rather
-  // than a dedicated error code. Require explicit evidence that it sent no
-  // input; the prefix alone is not enough to make an action retry-safe.
+  // than a dedicated error code. The old foreground_unavailable: prefix alone
+  // is not enough to make an action retry-safe; require explicit no-input
+  // evidence.
   const foregroundRefusal = /^foreground_unavailable:/iu.test(message);
   const noInputEvidence = hasExplicitNoInputEvidence(message) || structuredNoInputEvidence;
   if (foregroundRefusal || code === "WINDOW_FOREGROUND_MISMATCH") {
@@ -664,8 +716,13 @@ function hasExplicitNoInputEvidence(message: string): boolean {
   return /\bno (?:mouse |keyboard )?input (?:was|has been) (?:sent|dispatched|performed|injected)\b|\binput (?:was|has been) not (?:sent|dispatched|performed|injected)\b/iu.test(message);
 }
 
+function isUnknownForegroundInputOutcome(message: string): boolean {
+  return /^foreground_input_outcome_unknown:/iu.test(message);
+}
+
 function isAmbiguousForegroundResult(message: string): boolean {
-  return /^foreground_unavailable:/iu.test(message) && !hasExplicitNoInputEvidence(message);
+  return isUnknownForegroundInputOutcome(message) ||
+    (/^foreground_unavailable:/iu.test(message) && !hasExplicitNoInputEvidence(message));
 }
 
 function resultProvesNoInput(result: { readonly text: string; readonly structuredJson?: string }): boolean {
@@ -703,6 +760,7 @@ export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
 export type CuaWindowDeliveryMode = "background" | "foreground";
 export type CuaGroundingMode = "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
 export type CuaWindowSwitchMode = "off" | "opened-windows-v1";
+export type CuaMultilineTypeProfile = "foreground-caret-v1";
 
 // Keep the adapter side bounded but larger than the model-facing hot set. The
 // Runtime selector narrows this to at most 16 before Observation persistence;
@@ -729,6 +787,8 @@ export interface CuaDriverComputerOptions {
    * default preserves the existing background route.
    */
   windowDeliveryMode?: CuaWindowDeliveryMode;
+  /** Host-only opt-in to ordinary foreground typing for ungrounded Windows multiline text. */
+  multilineTypeProfile?: CuaMultilineTypeProfile;
   /** Optional, explicit UIA sidecar; requires an explicit window target. */
   grounding?: CuaGroundingMode;
   /** Explicit host-owned managed browser target for the DOM transport gate. */
@@ -773,6 +833,8 @@ interface PrivateSession {
     readonly complete: boolean;
     readonly truncated: boolean;
     readonly parentSurfaceRef: SurfaceRef;
+    /** Fresh pure-CUA list bounds, distinct from the native screenshot rectangle when capture is DWM-pixel based. */
+    readonly parentCuaBounds?: CuaWindowGeometry;
     readonly parentBinding: CuaWindowBinding;
   } | undefined;
   /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
@@ -793,10 +855,14 @@ interface PrivateSession {
   pendingSurfaceTransitionReason?: SurfaceTransitionReason;
   /** Exact root already checked for an existing owned transient during observe. */
   lastInspectedExistingTransientRootRef?: SurfaceRef;
+  /** Monotonic dispatch time for a local Windows foreground desktop GUI action whose next frame needs bounded paint settling. */
+  pendingPostGuiActionObservationAt?: number;
   /** Short-lived guard against replaying the same GUI primitive after an unknown foreground outcome. */
   unknownActionReplayGuard?: {
     readonly surfaceRef: SurfaceRef;
     readonly primitiveFingerprints: Set<string>;
+    /** Desktop recovery keeps this guard until a different GUI primitive completes and a fresh same-Surface observation follows. */
+    readonly recoveryKind?: "desktop_surface_reconfirmed";
     alternativeActionCompleted: boolean;
   };
   /** Set only while the current unknown action's post-dispatch native diff is being verified. */
@@ -823,7 +889,7 @@ interface PendingDriverCleanup {
 
 interface PrivateObservation {
   sessionId: string;
-  captureSource?: "verify_state" | "get_window_state_registered" | "get_window_state_fallback";
+  captureSource?: "verify_state" | "get_window_state_registered" | "get_window_state_fallback" | "windows_foreground_region";
   readonly surfaceRef: SurfaceRef;
   /**
    * The image coordinate space that the model used for this observation.
@@ -831,6 +897,8 @@ interface PrivateObservation {
    * current session viewport (which may belong to a later observation).
    */
   viewport: Viewport;
+  /** Fresh CUA list_windows geometry used only for execute-time freshness checks. */
+  cuaBounds?: CuaWindowGeometry;
   geometry?: CuaWindowGeometry;
 }
 
@@ -891,6 +959,7 @@ interface DriverErrorDetails {
 
 export class CuaDriverComputer implements Computer {
   private readonly options: Required<Pick<CuaDriverComputerOptions, "socketPath" | "screenshotDir" | "cleanupWaitMs">> & Omit<CuaDriverComputerOptions, "socketPath" | "screenshotDir" | "cleanupWaitMs">;
+  private readonly windowCaptureRetryOptions: WindowCaptureRetryOptions;
   private readonly observations = new Map<string, PrivateObservation>();
   private readonly groundings = new Map<string, BoundPrivateGrounding>();
   private latestObservationId: ObservationId | undefined;
@@ -912,6 +981,14 @@ export class CuaDriverComputer implements Computer {
         ? {}
         : { windowSwitchAllowedTargets: options.windowSwitchAllowedTargets.map((target) => ({ ...target })) }),
     };
+    const nativeForegroundCaptureAllowed = process.platform === "win32" && options.driverFactory === undefined &&
+      options.windowDeliveryMode === "foreground" && isLocalWindowsNamedPipeSocket(options.socketPath);
+    this.windowCaptureRetryOptions = {
+      ...this.options.windowCaptureRetry,
+      ...(this.options.windowCaptureRetry?.foregroundVisibleCapture !== undefined || !nativeForegroundCaptureAllowed
+        ? {}
+        : { foregroundVisibleCapture: captureVisibleWindowRegion }),
+    };
     if (!Number.isInteger(this.options.cleanupWaitMs) || this.options.cleanupWaitMs <= 0) {
       throw new Error("cleanupWaitMs must be a positive integer");
     }
@@ -919,6 +996,9 @@ export class CuaDriverComputer implements Computer {
       && this.options.windowDeliveryMode !== "background"
       && this.options.windowDeliveryMode !== "foreground") {
       throw new Error("windowDeliveryMode must be background or foreground");
+    }
+    if (this.options.multilineTypeProfile !== undefined && this.options.multilineTypeProfile !== "foreground-caret-v1") {
+      throw new Error("multilineTypeProfile must be foreground-caret-v1");
     }
     if (this.options.windowSwitch !== undefined
       && this.options.windowSwitch !== "off"
@@ -992,7 +1072,7 @@ export class CuaDriverComputer implements Computer {
         }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
-        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, platform));
+        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.windowCaptureRetryOptions, resolveCapturePlatform(this.options.platform, platform));
         windowBinding = capture.binding;
         viewport = capture.viewport;
         const peer = registerNativePeer(surfaceRegistry, asNativeWindowIdentity(capture.binding.target));
@@ -1079,13 +1159,34 @@ export class CuaDriverComputer implements Computer {
       }
       await mkdir(this.options.screenshotDir, { recursive: true });
       const screenshotPath = join(this.options.screenshotDir, `${safeId(String(observationId))}.png`);
+      const pendingPostGuiActionObservationAt = current.pendingPostGuiActionObservationAt;
+      delete current.pendingPostGuiActionObservationAt;
       try {
-        const result = await callTool(current.driver, "get_desktop_state", {
-          session: current.label,
-          screenshot_out_file: screenshotPath,
-        }, signal);
-        const dimensions = readStructuredScreenshotDimensions(result) ?? await readPngDimensions(screenshotPath);
-        if (dimensions === undefined) throw new Error("CUA get_desktop_state did not return screenshot dimensions");
+        const captureDesktopFrame = async () => {
+          signal.throwIfAborted();
+          // Reuse one private path across samples, but never accept a prior
+          // frame as proof that this capture completed.
+          await rm(screenshotPath, { force: true });
+          const result = await callTool(current.driver, "get_desktop_state", {
+            session: current.label,
+            screenshot_out_file: screenshotPath,
+          }, signal);
+          const capturedAt = new Date().toISOString();
+          const dimensions = readStructuredScreenshotDimensions(result) ?? await readPngDimensions(screenshotPath);
+          if (dimensions === undefined) throw new Error("CUA get_desktop_state did not return screenshot dimensions");
+          const data = new Uint8Array(await readFile(screenshotPath));
+          return { png: data, value: { dimensions, data, capturedAt } };
+        };
+        const captured = pendingPostGuiActionObservationAt === undefined
+          ? (await captureDesktopFrame()).value
+          : await settlePostInputObservation({
+            inputCompletedAt: pendingPostGuiActionObservationAt,
+            capture: captureDesktopFrame,
+            signal,
+            wait: waitWithAbort,
+            now: () => performance.now(),
+          });
+        const { dimensions, data, capturedAt } = captured;
         if (dimensions.width !== current.descriptor.viewport.width || dimensions.height !== current.descriptor.viewport.height) {
           const advanced = advanceSurfaceGeneration(current.surfaceRegistry, observedSurfaceRef);
           if (advanced.decision !== "applied") {
@@ -1098,7 +1199,12 @@ export class CuaDriverComputer implements Computer {
           current.windowRefs.clear();
           this.clearTargetObservationState(current, observedSurfaceRef);
         }
-        const data = new Uint8Array(await readFile(screenshotPath));
+        const unknownActionReplayGuard = current.unknownActionReplayGuard;
+        if (unknownActionReplayGuard?.recoveryKind === "desktop_surface_reconfirmed" &&
+            sameSurfaceRef(unknownActionReplayGuard.surfaceRef, observedSurfaceRef) &&
+            unknownActionReplayGuard.alternativeActionCompleted) {
+          delete current.unknownActionReplayGuard;
+        }
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
           surfaceRef: observedSurfaceRef,
@@ -1107,7 +1213,7 @@ export class CuaDriverComputer implements Computer {
         this.latestObservationId = observationId;
         const surfaceTransitionReason = takeSurfaceTransitionReason(current);
         return {
-          capturedAt: new Date().toISOString(),
+          capturedAt,
           viewport: current.descriptor.viewport,
           surfaceRef: observedSurfaceRef,
           ...(surfaceTransitionReason === undefined ? {} : { surfaceTransitionReason }),
@@ -1135,7 +1241,7 @@ export class CuaDriverComputer implements Computer {
           current.label,
           captureBinding.target,
           signal,
-          this.options.windowCaptureRetry,
+          this.windowCaptureRetryOptions,
           resolveCapturePlatform(this.options.platform, current.platform),
         );
         const liveBinding = capture.binding;
@@ -1219,16 +1325,23 @@ export class CuaDriverComputer implements Computer {
           this.clearSurfaceLineageObservationState(current, activeRefBeforeSync);
         }
         const unknownActionReplayGuard = current.unknownActionReplayGuard;
-        if (unknownActionReplayGuard !== undefined &&
-            (!sameSurfaceRef(unknownActionReplayGuard.surfaceRef, surfaceRef) ||
-              unknownActionReplayGuard.alternativeActionCompleted)) {
-          delete current.unknownActionReplayGuard;
+        if (unknownActionReplayGuard !== undefined) {
+          if (unknownActionReplayGuard.recoveryKind === "desktop_surface_reconfirmed") {
+            if (sameSurfaceRef(unknownActionReplayGuard.surfaceRef, surfaceRef) &&
+                unknownActionReplayGuard.alternativeActionCompleted) {
+              delete current.unknownActionReplayGuard;
+            }
+          } else if (!sameSurfaceRef(unknownActionReplayGuard.surfaceRef, surfaceRef) ||
+              unknownActionReplayGuard.alternativeActionCompleted) {
+            delete current.unknownActionReplayGuard;
+          }
         }
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
           captureSource: capture.source,
           surfaceRef,
           viewport: capture.viewport,
+          ...(capture.cuaBounds === undefined ? {} : { cuaBounds: capture.cuaBounds }),
           geometry: liveBinding.bounds,
         });
         if (grounding !== undefined) {
@@ -1306,6 +1419,12 @@ export class CuaDriverComputer implements Computer {
       const childTarget = asCuaWindowTarget(child.nativeWindow);
       let inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
       let candidate = inventory.windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+      if (this.options.windowDeliveryMode === "foreground" && candidate?.noActivate === true && candidate.isOnScreen === true && candidate.minimized !== true &&
+          candidate.ownerPid === parentTarget.pid && candidate.ownerWindowId === parentTarget.windowId) {
+        // Keep a known non-activating popup on its parent's visual/UIA path.
+        // It may still be interactive; only its independent Surface is popped.
+        childAbsent = true;
+      } else {
       // Menus can retain their native HWND after ESC. A complete snapshot can
       // prove that the admitted interaction Surface is gone without claiming
       // that the OS destroyed the HWND. Never reuse Stage1 on this hidden row.
@@ -1401,6 +1520,7 @@ export class CuaDriverComputer implements Computer {
           }
         }
         current.windowBindings.set(windowIdentityKey(candidate.target), { target: candidate.target, bounds: candidate.bounds });
+      }
       }
     }
     if (!childAbsent) return undefined;
@@ -1527,7 +1647,7 @@ export class CuaDriverComputer implements Computer {
         current.label,
         candidate.target,
         signal,
-        this.options.windowCaptureRetry,
+        this.windowCaptureRetryOptions,
         resolveCapturePlatform(this.options.platform, current.platform),
       );
       signal.throwIfAborted();
@@ -1691,6 +1811,7 @@ export class CuaDriverComputer implements Computer {
         childRow.ownerPid !== parentTarget.pid || childRow.ownerWindowId !== parentTarget.windowId)) return undefined;
     const replacement = inventory.windows.some((window) => {
       if (windowIdentityKey(window.target) === windowIdentityKey(childTarget)) return false;
+      if (this.options.windowDeliveryMode === "foreground" && window.noActivate === true) return false;
       if (window.target.windowId === childTarget.windowId) return true;
       return window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
         window.isOnScreen !== false && window.minimized !== true;
@@ -1712,7 +1833,7 @@ export class CuaDriverComputer implements Computer {
       current.label,
       firstProof.parentTarget,
       signal,
-      this.options.windowCaptureRetry,
+      this.windowCaptureRetryOptions,
       resolveCapturePlatform(this.options.platform, current.platform),
     );
     if (!sameWindowGeometry(firstParentCapture.binding.bounds, firstProof.parentBounds)) return undefined;
@@ -1812,22 +1933,63 @@ export class CuaDriverComputer implements Computer {
     current: PrivateSession,
     action: ActionIntent,
     actionSurfaceRef: SurfaceRef,
+    request: { readonly name: string; readonly arguments: Record<string, unknown> },
+    actionWindowBinding: CuaWindowBinding | undefined,
     signal: AbortSignal,
   ): Promise<ActionReceipt> {
-    const safeSurfaceRef = await this.reconfirmNativeSurfaceAfterUnknownAction(current, actionSurfaceRef, signal);
-    this.rememberUnknownActionPrimitive(current, action, actionSurfaceRef);
+    signal.throwIfAborted();
+    const desktopSurfaceReconfirmed = this.isExactPrimaryDesktopAction(current, actionSurfaceRef, request, actionWindowBinding);
+    this.rememberUnknownActionPrimitive(
+      current,
+      action,
+      actionSurfaceRef,
+      desktopSurfaceReconfirmed ? "desktop_surface_reconfirmed" : undefined,
+    );
+    if (desktopSurfaceReconfirmed && this.canSettleLocalWindowsDesktopObservation(current)) {
+      current.pendingPostGuiActionObservationAt = performance.now();
+    }
+    const safeSurfaceRef = desktopSurfaceReconfirmed
+      ? undefined
+      : await this.reconfirmNativeSurfaceAfterUnknownAction(current, actionSurfaceRef, signal);
     return {
       actionId: action.actionId,
       status: "partial",
       driverCode: "ACTION_OUTCOME_UNKNOWN",
       message: "CUA could not confirm the foreground after dispatch; input may have been sent. The action outcome is unknown. Do not repeat this action; inspect a fresh screen and choose a different GUI action.",
-      ...(safeSurfaceRef === undefined
-        ? {}
-        : { safeRecovery: { kind: "native_surface_reconfirmed" as const, surfaceRef: safeSurfaceRef } }),
+      ...(desktopSurfaceReconfirmed
+        ? { safeRecovery: { kind: "desktop_surface_reconfirmed" as const, surfaceRef: { ...actionSurfaceRef } } }
+        : safeSurfaceRef === undefined
+          ? {}
+          : { safeRecovery: { kind: "native_surface_reconfirmed" as const, surfaceRef: safeSurfaceRef } }),
     };
   }
 
-  private rememberUnknownActionPrimitive(current: PrivateSession, action: ActionIntent, surfaceRef: SurfaceRef): void {
+  private isExactPrimaryDesktopAction(
+    current: PrivateSession,
+    actionSurfaceRef: SurfaceRef,
+    request: { readonly name: string; readonly arguments: Record<string, unknown> },
+    actionWindowBinding: CuaWindowBinding | undefined,
+  ): boolean {
+    const activeRef = current.surfaceRegistry.activeSurface;
+    const surface = activeSurface(current);
+    return current.active && this.session === current && actionWindowBinding === undefined &&
+      isPrimaryDesktopForegroundActionRequest(request, current.label) &&
+      activeRef?.kind === "desktop" && sameSurfaceRef(activeRef, actionSurfaceRef) &&
+      surface?.kind === "desktop" && resolveDisplayId(current.surfaceRegistry, activeRef) === PRIMARY_DESKTOP.display_id &&
+      isExecutableSurfaceRef(current.surfaceRegistry, actionSurfaceRef);
+  }
+
+  private canSettleLocalWindowsDesktopObservation(current: PrivateSession): boolean {
+    return resolveCapturePlatform(this.options.platform, current.platform) === "win32" &&
+      isLocalWindowsNamedPipeSocket(this.options.socketPath);
+  }
+
+  private rememberUnknownActionPrimitive(
+    current: PrivateSession,
+    action: ActionIntent,
+    surfaceRef: SurfaceRef,
+    recoveryKind?: "desktop_surface_reconfirmed",
+  ): void {
     const primitiveFingerprint = actionPrimitiveFingerprint(action);
     const activeGuard = current.unknownActionReplayGuard;
     if (activeGuard !== undefined && sameSurfaceRef(activeGuard.surfaceRef, surfaceRef)) {
@@ -1838,6 +2000,7 @@ export class CuaDriverComputer implements Computer {
     current.unknownActionReplayGuard = {
       surfaceRef: { ...surfaceRef },
       primitiveFingerprints: new Set([primitiveFingerprint]),
+      ...(recoveryKind === undefined ? {} : { recoveryKind }),
       alternativeActionCompleted: false,
     };
   }
@@ -1902,6 +2065,21 @@ export class CuaDriverComputer implements Computer {
       baselineTruncated: false,
       parentSurfaceCurrent: isCurrentSurfaceRef(current.surfaceRegistry, parentRef),
     }).decision === "admitted");
+    if (candidates.length === 0 && ownedVisible.some((window) => window.noActivate === true)) {
+      const restoredParent = this.restoredParentFromCompleteInventory(current, oldChildRef, inventory);
+      if (restoredParent !== undefined) {
+        this.commitVerifiedChildPop(current, oldChildRef, restoredParent.parentSurfaceId, {
+          target: restoredParent.parentTarget,
+          bounds: restoredParent.parentBounds,
+        });
+        const activeParentRef = current.surfaceRegistry.activeSurface;
+        if (activeParentRef === undefined || activeParentRef.surfaceId !== restoredParent.parentSurfaceId ||
+            !isExecutableSurfaceRef(current.surfaceRegistry, activeParentRef)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the verified parent was not active after popping a non-activating popup");
+        }
+        return { decision: "recovered", surfaceRef: activeParentRef };
+      }
+    }
     if (candidates.length !== 1) return { decision: "stop" };
     const candidate = candidates[0]!;
     const foregroundIsInOwnerPair =
@@ -1932,7 +2110,7 @@ export class CuaDriverComputer implements Computer {
         current.label,
         candidate.target,
         signal,
-        this.options.windowCaptureRetry,
+        this.windowCaptureRetryOptions,
         resolveCapturePlatform(this.options.platform, current.platform),
       );
       signal.throwIfAborted();
@@ -2054,13 +2232,21 @@ export class CuaDriverComputer implements Computer {
       ? undefined
       : windows.find((window) => window.target.windowId === current.foregroundMismatchWindowId &&
         !targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets));
-    if (unauthorizedForeground !== undefined) {
+    const isUnscopedOwnedForegroundPeer = (window: CuaWindowInfo) => isFreshUnscopedOwnedForegroundPeer(
+      window,
+      binding.target,
+      inventory,
+      current.foregroundMismatchWindowId,
+      this.options.windowDeliveryMode === "foreground",
+    );
+    if (unauthorizedForeground !== undefined && !isUnscopedOwnedForegroundPeer(unauthorizedForeground)) {
       throw new WindowContractError("WINDOW_SCOPE_REQUIRED", "the foreground window is outside the host-authorized window scope");
     }
     const candidatePool = windows
       .filter((window) => windowIdentityKey(window.target) !== windowIdentityKey(binding.target))
       .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets) ||
-        window.ownerPid === binding.target.pid && window.ownerWindowId === binding.target.windowId)
+        window.ownerPid === binding.target.pid && window.ownerWindowId === binding.target.windowId ||
+        isUnscopedOwnedForegroundPeer(window))
       .filter((window) => !isRegisteredChildWindow(current, window.target))
       .filter((window) => isRelevantManualWindowCandidate(
         window,
@@ -2071,7 +2257,14 @@ export class CuaDriverComputer implements Computer {
         this.options.windowSwitchAllowedTargets,
         current.platform,
       ));
-    const candidates = projectSelectableWindowCandidates(candidatePool, binding.target, current.platform, undefined, undefined, true).windows
+    const candidates = projectSelectableWindowCandidates(
+      candidatePool,
+      binding.target,
+      current.platform,
+      undefined,
+      (window) => this.options.windowDeliveryMode !== "foreground" || window.noActivate !== true,
+      true,
+    ).windows
       .map((window) => {
         const relationship = windowCandidateRelationship(
           window,
@@ -2101,8 +2294,8 @@ export class CuaDriverComputer implements Computer {
 
   /**
    * Return the top-level windows CUA reports without its on-screen-only
-   * filter, using opaque per-Run refs. Dispatch still rechecks the exact
-   * native identity and captures the selected target fresh.
+   * filter, using opaque per-Run refs. Dispatch rechecks exact native identity;
+   * desktop scope activates in place while native-window scope captures/rebinds.
    */
   public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<ComputerWindowList> {
     const current = this.requireSession(session);
@@ -2110,14 +2303,11 @@ export class CuaDriverComputer implements Computer {
     if (this.options.windowSwitch !== "opened-windows-v1") {
       throw new WindowContractError("WINDOW_SWITCH_DISABLED", "cross-window switching is not enabled for this Run");
     }
-    if (activeSurfaceUnavailable(current)) {
-      throw new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session");
-    }
     signal.throwIfAborted();
-    const inventory = await listWindowTargets(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
     signal.throwIfAborted();
     const boundPeer = activePeerTarget(current);
-    if (boundPeer !== undefined && !inventory.some((window) => windowIdentityKey(window.target) === windowIdentityKey(boundPeer))) {
+    if (boundPeer !== undefined && !inventory.windows.some((window) => windowIdentityKey(window.target) === windowIdentityKey(boundPeer))) {
       const activeRef = current.surfaceRegistry.activeSurface;
       if (activeRef !== undefined) {
         const invalidated = markSurfaceUnknown(current.surfaceRegistry, activeRef);
@@ -2131,11 +2321,29 @@ export class CuaDriverComputer implements Computer {
       .filter((surface): surface is Extract<SurfaceRecord, { readonly kind: "native_window" }> =>
         surface.kind === "native_window" && surface.parentSurfaceId !== undefined && surface.status !== "closed")
       .map((surface) => windowIdentityKey(asCuaWindowTarget(surface.nativeWindow))));
-    const windows = inventory
+    const isDesktopScope = activeSurface(current)?.kind === "desktop";
+    const windows = inventory.windows
       .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets))
       .filter((window) => !childWindowKeys.has(windowIdentityKey(window.target)));
-    const currentKey = boundPeer === undefined ? undefined : windowIdentityKey(boundPeer);
-    const projected = projectSelectableWindowCandidates(windows, boundPeer, current.platform);
+    const inventoryForegroundTarget = isDesktopScope && inventory.foregroundPid !== undefined && inventory.foregroundWindowId !== undefined
+      ? { pid: inventory.foregroundPid, windowId: inventory.foregroundWindowId }
+      : undefined;
+    const foregroundMatches = inventoryForegroundTarget === undefined
+      ? []
+      : windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(inventoryForegroundTarget));
+    const currentTarget = boundPeer ?? (foregroundMatches.length === 1 ? inventoryForegroundTarget : undefined);
+    const currentKey = currentTarget === undefined ? undefined : windowIdentityKey(currentTarget);
+    const projected = projectSelectableWindowCandidates(
+      windows,
+      currentTarget,
+      current.platform,
+      undefined,
+      (window) => (isDesktopScope || this.options.windowDeliveryMode === "foreground")
+        ? window.noActivate !== true
+        : true,
+      false,
+      isDesktopScope ? (window) => isEligibleNativeOnlyDesktopCandidate(inventory, window) : undefined,
+    );
     const options = projected.windows.map((window) => {
       const peer = registerNativePeer(current.surfaceRegistry, asNativeWindowIdentity(window.target));
       if (peer.decision !== "applied") return undefined;
@@ -2204,7 +2412,7 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the pre-action parent Surface generation or exact binding is no longer active");
     }
     const freshParentBinding = await discoverWindow(current.driver, current.label, baseline.parentBinding.target, signal);
-    if (!sameWindowGeometry(freshParentBinding.bounds, baseline.parentBinding.bounds)) {
+    if (!sameWindowGeometry(freshParentBinding.bounds, baseline.parentCuaBounds ?? baseline.parentBinding.bounds)) {
       const advanced = advanceSurfaceGeneration(current.surfaceRegistry, baseline.parentSurfaceRef);
       if (advanced.decision === "applied") {
         current.surfaceRegistry = advanced.state;
@@ -2226,6 +2434,7 @@ export class CuaDriverComputer implements Computer {
       const rawSurfaced = inventory.windows.filter((window) => !baseline.targetKeys.has(windowIdentityKey(window.target)));
       const surfaced = projectSelectableWindowCandidates(rawSurfaced, baseline.parentBinding.target, current.platform, undefined, (window) =>
         {
+          if (window.noActivate === true) return false;
           const exactForeground = inventory.foregroundPid === window.target.pid &&
             inventory.foregroundWindowId === window.target.windowId;
           const exactOwner = window.ownerPid === baseline.parentBinding.target.pid &&
@@ -2463,6 +2672,8 @@ export class CuaDriverComputer implements Computer {
     const isNewlySurfacedForCurrentAction = current.newlySurfacedWindowKeys.has(windowIdentityKey(candidate));
     let authorizedTargets = this.options.windowSwitchAllowedTargets;
     let expectedOwner: CuaWindowTarget | undefined;
+    const isForegroundMismatchPeer = !targetAllowedByHostScope(candidate, authorizedTargets) &&
+      current.foregroundMismatchWindowId === candidate.windowId;
     if (!targetAllowedByHostScope(candidate, authorizedTargets)) {
       // A user-confirmed exact-owned child is part of the current parent's
       // interaction scope. Recheck the live parent and the child's exact
@@ -2477,10 +2688,21 @@ export class CuaDriverComputer implements Computer {
       }
       const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
       const ownedRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate));
-      if (ownedRows.length !== 1 || ownedRows[0]!.ownerPid !== binding.target.pid ||
-          ownedRows[0]!.ownerWindowId !== binding.target.windowId || ownedRows[0]!.isOnScreen !== true ||
-          ownedRows[0]!.minimized === true) {
-        throw new WindowContractError("WINDOW_SWITCH_UNAUTHORIZED", "the selected window is not a fresh visible exact-owned child of the current target");
+      const ownedRow = ownedRows.length === 1 ? ownedRows[0] : undefined;
+      const freshMismatchPeer = isForegroundMismatchPeer && ownedRow !== undefined &&
+        isFreshUnscopedOwnedForegroundPeer(
+          ownedRow,
+          binding.target,
+          inventory,
+          current.foregroundMismatchWindowId,
+          this.options.windowDeliveryMode === "foreground",
+        );
+      if (ownedRow === undefined ||
+          isForegroundMismatchPeer && !freshMismatchPeer ||
+          ownedRow.ownerPid !== binding.target.pid ||
+          ownedRow.ownerWindowId !== binding.target.windowId || ownedRow.isOnScreen !== true ||
+          ownedRow.minimized === true) {
+        throw new WindowContractError("WINDOW_SWITCH_UNAUTHORIZED", "the selected window is not a fresh visible exact-owned child; a foreground-mismatch peer requires complete exact identity evidence");
       }
       authorizedTargets = [...(authorizedTargets ?? []), { pid: candidate.pid, windowId: candidate.windowId }];
       expectedOwner = { pid: binding.target.pid, windowId: binding.target.windowId };
@@ -2491,7 +2713,7 @@ export class CuaDriverComputer implements Computer {
       staleMessage: "window handoff candidate changed before confirmation",
       ...(authorizedTargets === undefined ? {} : { authorizedTargets }),
       ...(expectedOwner === undefined ? {} : { expectedOwner }),
-      ...(isNewlySurfacedForCurrentAction ? { classifyOwnedChild: true } : {}),
+      ...(isNewlySurfacedForCurrentAction && !isForegroundMismatchPeer ? { classifyOwnedChild: true } : {}),
       ...(candidate.appName === undefined ? {} : { expectedAppName: candidate.appName }),
       ...(candidate.title === undefined ? {} : { expectedTitle: candidate.title }),
     });
@@ -2553,6 +2775,9 @@ export class CuaDriverComputer implements Computer {
         options.expectedTitle !== undefined && options.expectedTitle !== fresh.title) {
       throw new WindowContractError(options.staleCode, options.staleMessage ?? "selected window identity changed before target transition");
     }
+    if (this.options.windowDeliveryMode === "foreground" && fresh.noActivate === true) {
+      throw new WindowContractError(options.staleCode, "selected window is a known WS_EX_NOACTIVATE auxiliary and cannot be activated as an independent target");
+    }
     if (options.expectedOwner !== undefined) {
       const ownerRows = windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(options.expectedOwner!));
       const childRows = windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
@@ -2563,7 +2788,13 @@ export class CuaDriverComputer implements Computer {
           !sameWindowGeometry(ownerRows[0]!.bounds, parentBinding.bounds) || ownerRows[0]!.isOnScreen !== true ||
           ownerRows[0]!.minimized === true || childRows[0]!.ownerPid !== options.expectedOwner.pid ||
           childRows[0]!.ownerWindowId !== options.expectedOwner.windowId || childRows[0]!.isOnScreen !== true ||
-          childRows[0]!.minimized === true || (!transitionInventory.complete && !exactForeground)) {
+          childRows[0]!.minimized === true ||
+          !transitionInventory.complete && !exactForeground ||
+          current.foregroundMismatchWindowId === target.windowId &&
+            (!transitionInventory.complete || transitionInventory.truncated === true ||
+              transitionInventory.completeAttestation === "negative" || !exactForeground ||
+              ownerRows[0]!.cuaListed === false || childRows[0]!.cuaListed === false ||
+              this.options.windowDeliveryMode === "foreground" && childRows[0]!.noActivate === true)) {
         throw new WindowContractError(options.staleCode, "fresh inventory no longer proves the current parent geometry and exact visible child owner relationship");
       }
     }
@@ -2614,28 +2845,32 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError(options.staleCode, options.staleMessage ?? "selected Surface generation changed before target transition");
     }
 
-    let activationAttempted = false;
     if (this.options.windowDeliveryMode === "foreground") {
       signal.throwIfAborted();
-      activationAttempted = true;
       try {
         await bringWindowToFrontOnce(current.driver, current.label, target, signal);
       } catch (error) {
-        if (targetSurfaceRef === undefined) this.invalidateUnknownTargetTransition(current, activeRefBefore, undefined);
-        else this.invalidateUnknownTargetTransition(current, activeRefBefore, targetSurfaceRef);
+        // Activation attempts carry no app-content input. Keep the exact old
+        // authorized Surface/binding executable, but expire every frame/ref
+        // that could otherwise be reused across the attempted transition.
+        current.windowRefs.clear();
+        this.clearTargetObservationState(current, activeRefBefore, targetSurfaceRef);
+        if (!hasConfirmedWindowsActivationRefusal(error)) markUnconfirmedNativeTransitionFailure(error);
         throw error;
       }
     }
 
     let capture: Awaited<ReturnType<typeof captureWindowWithRetry>>;
     try {
-      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, current.platform));
+      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.windowCaptureRetryOptions, resolveCapturePlatform(this.options.platform, current.platform));
       signal.throwIfAborted();
     } catch (error) {
-      if (activationAttempted) {
-        if (targetSurfaceRef === undefined) this.invalidateUnknownTargetTransition(current, activeRefBefore, undefined);
-        else this.invalidateUnknownTargetTransition(current, activeRefBefore, targetSurfaceRef);
-      }
+      // A failed candidate capture does not prove the prior bound HWND lost
+      // identity. Do not promote the candidate; retain the old Surface and
+      // binding for a later fresh observation, with no stale refs or frames.
+      current.windowRefs.clear();
+      this.clearTargetObservationState(current, activeRefBefore, targetSurfaceRef);
+      markUnconfirmedNativeTransitionFailure(error);
       throw error;
     }
 
@@ -2680,24 +2915,6 @@ export class CuaDriverComputer implements Computer {
     current.windowRefs.clear();
     this.clearTargetObservationState(current, activeRefBefore, targetSurfaceRef);
     return current.descriptor;
-  }
-
-  private invalidateUnknownTargetTransition(
-    current: PrivateSession,
-    previous: SurfaceRef | undefined,
-    target: SurfaceRef | undefined,
-  ): void {
-    if (previous !== undefined && isCurrentSurfaceRef(current.surfaceRegistry, previous)) {
-      const invalidated = markSurfaceUnknown(current.surfaceRegistry, previous);
-      if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
-    }
-    if (target !== undefined && isCurrentSurfaceRef(current.surfaceRegistry, target)) {
-      const invalidated = markSurfaceUnknown(current.surfaceRegistry, target);
-      if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
-    }
-    current.windowRefs.clear();
-    delete current.browserTarget;
-    this.clearTargetObservationState(current, previous, target);
   }
 
   private clearTargetObservationState(current: PrivateSession, ...surfaces: Array<SurfaceRef | undefined>): void {
@@ -2769,6 +2986,9 @@ export class CuaDriverComputer implements Computer {
     // A switch consumes the entire prior inventory. A subsequent choice must
     // come from a fresh list, even if the selected target proves stale.
     current.windowRefs.clear();
+    if (activeSurface(current)?.kind === "desktop") {
+      return this.executeDesktopWindowSwitch(current, action, selectedTarget, selectedRef, signal);
+    }
     try {
       const sessionAfter = await this.transitionWindow(current, selectedTarget, signal, {
         onScreenOnly: false,
@@ -2781,15 +3001,103 @@ export class CuaDriverComputer implements Computer {
       return { actionId: action.actionId, status: "completed", sessionAfter };
     } catch (error) {
       if (error instanceof WindowContractError) {
+        const driverCode = error.code;
+        const message = error.message;
         if (activeSurfaceUnavailable(current)) {
-          return { actionId: action.actionId, status: "failed", driverCode: error.code, message: error.message };
+          return { actionId: action.actionId, status: "failed", driverCode, message };
         }
-        return refused(action.actionId, error.code, error.message);
+        if (isUnconfirmedNativeTransitionFailure(error)) {
+          return { actionId: action.actionId, status: "failed", driverCode, message };
+        }
+        if (hasConfirmedWindowsActivationRefusal(error)) {
+          return { actionId: action.actionId, status: "refused", driverCode, message };
+        }
+        return refused(action.actionId, driverCode, message);
       }
       const details = driverErrorDetails(error);
       if (details.tag === "Transport") current.active = false;
       throw normalizeDriverError(error, "execute");
     }
+  }
+
+  private async executeDesktopWindowSwitch(
+    current: PrivateSession,
+    action: SwitchWindowAction,
+    target: CuaWindowTarget,
+    selectedSurfaceRef: SurfaceRef,
+    signal: AbortSignal,
+  ): Promise<ActionReceipt> {
+    const desktopSurfaceRef = current.surfaceRegistry.activeSurface;
+    if (desktopSurfaceRef === undefined || activeSurface(current)?.kind !== "desktop" ||
+        !isCurrentSurfaceRef(current.surfaceRegistry, desktopSurfaceRef) ||
+        !isExecutableSurfaceRef(current.surfaceRegistry, desktopSurfaceRef)) {
+      return refused(action.actionId, "SURFACE_REF_STALE", "primary desktop Surface changed before activating the listed window");
+    }
+    if (!targetAllowedByHostScope(target, this.options.windowSwitchAllowedTargets) || isRegisteredChildWindow(current, target)) {
+      return refused(action.actionId, "WINDOW_SWITCH_UNAUTHORIZED", "selected window is outside the Host-authorized top-level window scope");
+    }
+    if (!isCurrentSurfaceRef(current.surfaceRegistry, selectedSurfaceRef)) {
+      return refused(action.actionId, "WINDOW_REF_STALE", "windowRef no longer identifies a current listed window; list windows again");
+    }
+    signal.throwIfAborted();
+    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+    signal.throwIfAborted();
+    const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+    if (matches.length !== 1) {
+      return refused(action.actionId, "WINDOW_SWITCH_STALE", "selected window identity is no longer uniquely present in the fresh inventory");
+    }
+    const fresh = matches[0]!;
+    const eligibleNativeOnlyDesktopTarget = isEligibleNativeOnlyDesktopCandidate(inventory, fresh);
+    if (!targetAllowedByHostScope(fresh.target, this.options.windowSwitchAllowedTargets) ||
+        fresh.cuaListed === false && !eligibleNativeOnlyDesktopTarget ||
+        isRegisteredChildWindow(current, fresh.target)) {
+      return refused(action.actionId, "WINDOW_SWITCH_UNAUTHORIZED", "selected window is no longer a Host-authorized top-level window");
+    }
+    if (fresh.isOnScreen === false && fresh.minimized !== true) {
+      return refused(action.actionId, "WINDOW_SWITCH_STALE", "selected window is no longer a visible or restorable application window");
+    }
+    if (fresh.noActivate === true) {
+      return refused(action.actionId, "WINDOW_SWITCH_NOACTIVATE", "selected window is a known WS_EX_NOACTIVATE auxiliary and cannot be activated independently");
+    }
+
+    const alreadyForeground = inventory.foregroundPid === target.pid && inventory.foregroundWindowId === target.windowId;
+    if (alreadyForeground) {
+      this.clearTargetObservationState(current, desktopSurfaceRef, selectedSurfaceRef);
+      return {
+        actionId: action.actionId,
+        status: "completed",
+        message: "The listed window is already the exact foreground window; no activation was dispatched and the next observation remains the full primary desktop.",
+        sessionAfter: current.descriptor,
+      };
+    }
+
+    signal.throwIfAborted();
+    try {
+      await bringWindowToFrontOnce(current.driver, current.label, target, signal);
+    } catch (error) {
+      // A failed foreground change does not invalidate the full desktop
+      // Surface. Expire its old screenshot/references, but keep the primary
+      // display executable so a fresh desktop observation can clarify state.
+      this.clearTargetObservationState(current, desktopSurfaceRef, selectedSurfaceRef);
+      const details = driverErrorDetails(error);
+      if (details.tag === "Transport") current.active = false;
+      const confirmedRefusal = hasConfirmedWindowsActivationRefusal(error);
+      return {
+        actionId: action.actionId,
+        status: confirmedRefusal ? "refused" : "failed",
+        driverCode: error instanceof WindowContractError ? error.code : "WINDOW_SWITCH_OUTCOME_UNKNOWN",
+        message: confirmedRefusal
+          ? "Windows did not activate the exact listed window; no UI input was sent and the full-desktop scope remains active. Do not type into that target; re-observe and choose a different switching action or ask an operator to activate it."
+          : details.message,
+      };
+    }
+    this.clearTargetObservationState(current, desktopSurfaceRef, selectedSurfaceRef);
+    return {
+      actionId: action.actionId,
+      status: "completed",
+      message: "Activated the exact listed window; the next observation remains the full primary desktop.",
+      sessionAfter: current.descriptor,
+    };
   }
 
   public async execute(
@@ -2835,6 +3143,8 @@ export class CuaDriverComputer implements Computer {
     const shortcutPlatform = this.options.platform ?? current.platform ?? process.platform;
     const locationBarShortcut = isBrowserShortcut(action, "L", shortcutPlatform);
     const selectAllShortcut = isBrowserShortcut(action, "A", shortcutPlatform);
+    const unmodifiedEscape = action.kind === "keypress" && action.keys.length === 1 &&
+      ["ESC", "ESCAPE"].includes(action.keys[0]?.trim().toUpperCase() ?? "");
     if (action.kind !== "wait" && action.kind !== "type" && !selectAllShortcut) this.browserChromeInput = undefined;
     if (action.kind === "wait") {
       delete current.lastInspectedExistingTransientRootRef;
@@ -2866,7 +3176,8 @@ export class CuaDriverComputer implements Computer {
     }
     const replayGuard = current.unknownActionReplayGuard;
     let alternativePrimitiveForUnknownAction: string | undefined;
-    if (replayGuard !== undefined && !sameSurfaceRef(replayGuard.surfaceRef, activeRefAfterReconcile)) {
+    if (replayGuard !== undefined && !sameSurfaceRef(replayGuard.surfaceRef, activeRefAfterReconcile) &&
+        replayGuard.recoveryKind !== "desktop_surface_reconfirmed") {
       delete current.unknownActionReplayGuard;
     } else if (replayGuard !== undefined) {
       const primitiveFingerprint = actionPrimitiveFingerprint(action);
@@ -2901,7 +3212,8 @@ export class CuaDriverComputer implements Computer {
       }
       try {
         const liveBinding = await discoverWindow(current.driver, current.label, actionWindowBinding.target, signal);
-        if (!sameWindowGeometry(liveBinding.bounds, decisionObservation!.geometry!)) {
+        const observedCuaBounds = decisionObservation.cuaBounds ?? decisionObservation.geometry!;
+        if (!sameWindowGeometry(liveBinding.bounds, observedCuaBounds)) {
           const geometrySurface = surfaceRefForWindow(current, liveBinding.target);
           if (geometrySurface !== undefined) {
           const advanced = advanceSurfaceGeneration(current.surfaceRegistry, geometrySurface);
@@ -2918,8 +3230,10 @@ export class CuaDriverComputer implements Computer {
           current.windowBindings.set(windowIdentityKey(liveBinding.target), liveBinding);
           return refused(action.actionId, "WINDOW_GEOMETRY_CHANGED", "window geometry changed since the action observation");
         }
-        current.windowBindings.set(windowIdentityKey(liveBinding.target), liveBinding);
-        actionWindowBinding = liveBinding;
+        if (decisionObservation.captureSource !== "windows_foreground_region") {
+          current.windowBindings.set(windowIdentityKey(liveBinding.target), liveBinding);
+          actionWindowBinding = liveBinding;
+        }
       } catch (error) {
         const details = driverErrorDetails(error);
         if (details.tag === "Transport") current.active = false;
@@ -2939,6 +3253,9 @@ export class CuaDriverComputer implements Computer {
       }
     }
     const isMultilineType = current.platform === "win32" && action.kind === "type" && hasLineBreak(action.text);
+    const isForegroundCaretMultilineType = isMultilineType && action.groundingRef === undefined &&
+      this.options.multilineTypeProfile === "foreground-caret-v1";
+    const isMultilineUiaType = isMultilineType && !isForegroundCaretMultilineType;
     if (action.kind === "select_option") {
     const privateGrounding = this.groundings.get(String(action.basedOn));
     const resolved = privateGrounding?.elements.get(action.groundingRef);
@@ -3037,21 +3354,17 @@ export class CuaDriverComputer implements Computer {
       && isManagedBrowserContainerRole(resolvedGrounding.element.role)) {
       return refused(action.actionId, "MANAGED_BROWSER_CONTAINER_NOT_INTERACTIVE", "managed-browser window/document containers are not interactive controls");
     }
-    // Hybrid observations intentionally expose both producers.  A model may
-    // still select the UIA copy of a browser control even when an equivalent
-    // DOM candidate is available.  Normalize that selection here, at the
-    // adapter boundary, so browser clicks remain observation-bound CDP
-    // actions.  The native coordinate path below is retained for non-browser
-    // UIA and visual controls only.
+    // Hybrid observations intentionally expose both producers. A model may
+    // select the UIA copy of a browser control; when a unique equivalent from
+    // a complete DOM observation exists, prefer that observation-bound CDP
+    // path. Otherwise the fresh UIA reference continues through the guarded
+    // native point path below, which applies the same identity, geometry,
+    // enabled-state, and exact-point checks as an ordinary screenshot click.
     const domEquivalent = action.kind === "click"
       && resolvedGrounding?.element.source === "uia"
       && browserTarget !== undefined && privateGrounding?.domComplete === true
       ? findEquivalentDomGrounding(privateGrounding, resolvedGrounding)
       : undefined;
-    if (action.kind === "click" && browserTarget !== undefined && resolvedGrounding?.element.source === "uia" &&
-        resolvedGrounding.element.browserRegion !== "chrome" && domEquivalent === undefined) {
-      return refused(action.actionId, "MANAGED_BROWSER_DOM_REQUIRED", "managed-browser content requires a unique equivalent from a complete DOM observation; no native click was sent");
-    }
     const browserGrounding = domEquivalent ?? (
       resolvedGrounding?.element.source === "dom" ? resolvedGrounding : undefined
     );
@@ -3173,7 +3486,11 @@ export class CuaDriverComputer implements Computer {
         candidate: { role: candidate.element.role, ...(candidate.candidateName === undefined ? {} : { name: candidate.candidateName }), bbox: candidate.element.bbox, ...(candidate.candidateFrame === undefined ? {} : { frame: candidate.candidateFrame }), fingerprint: candidate.candidateFingerprint },
       };
     }
-    if ((action.kind === "type" || action.kind === "keypress") && !locationBarShortcut && this.expectedDomInput !== undefined) {
+    // Escape can cancel editing or dismiss an overlay without entering text.
+    // Let it reach the same checked foreground dispatcher even when editable
+    // browser focus has moved; keep the expected input binding so every later
+    // type or non-Escape keypress must still pass fresh focus verification.
+    if ((action.kind === "type" || action.kind === "keypress") && !locationBarShortcut && !unmodifiedEscape && this.expectedDomInput !== undefined) {
       if (domTransport?.verifyFocus === undefined) return refused(action.actionId, "DOM_INPUT_FOCUS_UNAVAILABLE", "managed-browser focus verification unavailable; no keyboard input was sent");
       const expected = this.expectedDomInput;
       try {
@@ -3212,7 +3529,7 @@ export class CuaDriverComputer implements Computer {
     if (validatedEditablePoint !== undefined && requestAction.kind === "click") requestAction = { ...requestAction, point: validatedEditablePoint };
     let request: { name: string; arguments: Record<string, unknown> } | undefined;
     try {
-      if (!isMultilineType) {
+      if (!isMultilineUiaType) {
         request = actionRequest(
           requestAction,
           current.label,
@@ -3247,6 +3564,7 @@ export class CuaDriverComputer implements Computer {
           complete: visibleInventory.complete,
           truncated: visibleInventory.truncated === true,
           parentSurfaceRef: { ...parentSurfaceRef },
+          ...(decisionObservation?.cuaBounds === undefined ? {} : { parentCuaBounds: { ...decisionObservation.cuaBounds } }),
           parentBinding: { target: { ...currentWindowBinding.target }, bounds: { ...currentWindowBinding.bounds } },
         };
         current.visibleWindowBaseline = visibleKeys;
@@ -3257,7 +3575,7 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "visible-window inventory failed before action; no input was sent");
       }
     }
-    if (isMultilineType) {
+    if (isMultilineUiaType) {
       // Multiline uses the same fresh pre-action inventory baseline as every
       // opted-in foreground action. Its completed receipt returns through the
       // normal Runtime post-action handoff diff before the next observation.
@@ -3312,7 +3630,7 @@ export class CuaDriverComputer implements Computer {
           // the one-shot pre-action inventory for a fresh, read-only recovery
           // or Host handoff; never report a retry-safe refusal here.
           this.invalidateObservationAfterAction(current);
-          return await this.unknownForegroundActionReceipt(current, action, decisionObservation.surfaceRef, signal);
+          return await this.unknownForegroundActionReceipt(current, action, decisionObservation.surfaceRef, request, actionWindowBinding, signal);
         }
         if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
           current.foregroundMismatchWindowId = parseActualForegroundWindowId(result.text);
@@ -3321,6 +3639,13 @@ export class CuaDriverComputer implements Computer {
       }
       if (result.degraded) {
         return { actionId: action.actionId, status: "failed", driverCode: "CUA_DEGRADED", message: result.text };
+      }
+      if (decisionObservation !== undefined &&
+          this.isExactPrimaryDesktopAction(current, decisionObservation.surfaceRef, request, actionWindowBinding) &&
+          this.canSettleLocalWindowsDesktopObservation(current)) {
+        // A successful local Windows foreground desktop GUI dispatch can be
+        // followed by a paint-only transition; settling does not verify its effect.
+        current.pendingPostGuiActionObservationAt = performance.now();
       }
       if (locationBarShortcut && browserTarget !== undefined && decisionObservation !== undefined) {
         this.expectedDomInput = undefined;
@@ -3381,7 +3706,7 @@ export class CuaDriverComputer implements Computer {
         if (decisionObservation !== undefined && driverCode === "CUA_TOOL_REFUSED" &&
             isAmbiguousForegroundResult(details.message)) {
           this.invalidateObservationAfterAction(current);
-          return await this.unknownForegroundActionReceipt(current, action, decisionObservation.surfaceRef, signal);
+          return await this.unknownForegroundActionReceipt(current, action, decisionObservation.surfaceRef, request, actionWindowBinding, signal);
         }
         if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
           current.foregroundMismatchWindowId = parseActualForegroundWindowId(details.message);

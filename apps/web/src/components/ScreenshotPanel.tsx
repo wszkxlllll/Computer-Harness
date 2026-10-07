@@ -13,10 +13,14 @@ interface ScreenshotPanelProps {
 export function ScreenshotPanel({ runId, assetId, requestId, onViewerOpened, onViewerClosed }: ScreenshotPanelProps) {
   const [openAssetId, setOpenAssetId] = useState<string>();
   const [openedRequestId, setOpenedRequestId] = useState<string>();
+  const [thumbnailLoaded, setThumbnailLoaded] = useState(false);
   const [thumbnailFailed, setThumbnailFailed] = useState(false);
   const returnFocusRef = useRef<HTMLElement | undefined>(undefined);
 
-  useEffect(() => setThumbnailFailed(false), [assetId]);
+  useEffect(() => {
+    setThumbnailLoaded(false);
+    setThumbnailFailed(false);
+  }, [assetId]);
 
   function openViewer(event: ReactMouseEvent<HTMLButtonElement>) {
     if (!assetId) return;
@@ -41,10 +45,17 @@ export function ScreenshotPanel({ runId, assetId, requestId, onViewerOpened, onV
             <p className="notice notice-warning" role="status">无法载入最近截图。任务仍可查看，但不能用这张缩略图核对画面。</p>
           ) : (
             <button className="screenshot-open-button" type="button" onClick={openViewer}>
-              <img src={runAssetUrl(runId, assetId)} alt="最近一次观察到的电脑画面缩略图" referrerPolicy="no-referrer" onError={() => setThumbnailFailed(true)} />
+              <img
+                src={runAssetUrl(runId, assetId)}
+                alt="最近一次观察到的电脑画面缩略图"
+                referrerPolicy="no-referrer"
+                onLoad={() => setThumbnailLoaded(true)}
+                onError={() => { setThumbnailLoaded(false); setThumbnailFailed(true); }}
+              />
               <span>全屏查看截图</span>
             </button>
           )}
+          {!thumbnailLoaded && !thumbnailFailed && <p className="field-hint" role="status">正在载入最近截图…</p>}
           {thumbnailFailed && <button className="button button-secondary" type="button" onClick={openViewer}>重试查看截图</button>}
         </>
       ) : (

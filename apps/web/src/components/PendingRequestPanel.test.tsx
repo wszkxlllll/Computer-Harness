@@ -11,6 +11,39 @@ const parentSurfaceRef = {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("pending request panel", () => {
+  it("deduplicates handoff candidates by token and labels parent context separately from an untitled child", () => {
+    const onChooseWindow = vi.fn().mockResolvedValue(undefined);
+    const child = {
+      token: "I".repeat(32),
+      appName: "Editor.exe",
+      relationship: { kind: "owned_child" as const, rootRole: "dialog" as const, parentAppName: "Editor.exe", parentTitle: "Parent document" },
+    };
+    const peer = {
+      token: "J".repeat(32),
+      appName: "Editor.exe",
+      title: "Second document",
+      relationship: { kind: "scoped_peer" as const },
+    };
+    render(
+      <PendingRequestPanel
+        request={{ requestId: "window-deduplicate-token", kind: "window_handoff", candidates: [child, { ...child }, peer] }}
+        runId="run-deduplicate-token"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={onChooseWindow}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    expect(document.querySelectorAll(".window-choice-preview-item")).toHaveLength(2);
+    expect(screen.getAllByText("窗口标题不可用")).toHaveLength(1);
+    expect(screen.getByText("当前 Editor.exe · Parent document 的对话框")).toBeDefined();
+    expect(screen.getByText("电脑已授权的另一窗口")).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "查看此窗口的真实画面" })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /Editor\.exe.*Second document/u })).toBeDefined();
+    expect(onChooseWindow).not.toHaveBeenCalled();
+  });
+
   it("preserves a typed answer until the host confirms it was applied", async () => {
     const onRespond = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     render(
@@ -27,11 +60,30 @@ describe("pending request panel", () => {
     fireEvent.change(input, { target: { value: "Friday morning" } });
     fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(onRespond).toHaveBeenCalledTimes(1));
+    expect(onRespond).toHaveBeenNthCalledWith(1, "Friday morning");
     expect(input.value).toBe("Friday morning");
 
     fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(onRespond).toHaveBeenCalledTimes(2));
+    expect(onRespond).toHaveBeenNthCalledWith(2, "Friday morning");
     expect(input.value).toBe("");
+  });
+
+  it("passes the selected approval decision to the current request", () => {
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PendingRequestPanel
+        request={{ requestId: "approval-decision", kind: "approval", reason: "Review this operation.", requiresVisualReview: false }}
+        onApprove={onApprove}
+        onRespond={vi.fn()}
+        onChooseWindow={vi.fn()}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "允许这项操作" }));
+    fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
+    expect(onApprove.mock.calls).toEqual([[true], [false]]);
   });
 
   it("keeps foreground-mismatch window handoffs out of the ignore path", () => {
@@ -112,6 +164,48 @@ describe("pending request panel", () => {
     fireEvent.load(image);
     fireEvent.click(await screen.findByRole("button", { name: "确认这个窗口并继续任务" }));
     await waitFor(() => expect(onChooseWindow).toHaveBeenCalledWith(candidate, preview.previewToken));
+  });
+
+  it("lets the operator inspect a unique handoff candidate without making its preview mandatory", async () => {
+    const preview = {
+      previewToken: "V".repeat(32),
+      appName: "Notepad.exe",
+      title: "Notes",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png" as const,
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(preview), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const candidate = { token: "U".repeat(32), appName: "Notepad.exe", title: "Notes" };
+    const onChooseWindow = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PendingRequestPanel
+        request={{ requestId: "window-optional-preview", kind: "window_handoff", reasonCode: "foreground_mismatch", candidates: [candidate] }}
+        runId="run-optional-preview"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={onChooseWindow}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    const directChoice = screen.getByRole("button", { name: /Notepad\.exe.*Notes/u });
+    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    const image = await screen.findByRole("img", { name: /Notepad\.exe.*Notes/u });
+    expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-optional-preview/window-candidates/preview", expect.objectContaining({
+      method: "POST",
+      cache: "no-store",
+      body: JSON.stringify({ requestId: "window-optional-preview", candidateToken: candidate.token }),
+    }));
+    expect(onChooseWindow).not.toHaveBeenCalled();
+
+    fireEvent.load(image);
+    expect(await screen.findByText("可选预览已显示；选择此窗口仍按原有确认规则进行。")).toBeDefined();
+    fireEvent.click(directChoice);
+    await waitFor(() => expect(onChooseWindow).toHaveBeenCalledWith(candidate));
   });
 
   it("removes a previously confirmed screenshot as soon as it is refreshed and keeps it unavailable after refresh failure", async () => {

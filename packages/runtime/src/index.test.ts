@@ -137,13 +137,22 @@ class FakeComputer implements Computer {
   }
 }
 
+class NativeWindowObservationComputer extends FakeComputer {
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+    const capture = await super.observe(session, observationId, signal);
+    return { ...capture, surfaceRef: nativePeerSurfaceRef };
+  }
+}
+
 class WindowSwitchComputer extends FakeComputer {
   public inventoryCalls = 0;
   public failTargetObservation = false;
   private switched = false;
+  public preserveDesktopScope = false;
+  public alreadyForegroundNoOp = false;
   public targetWindowRef = "opaque-target";
   public readonly closedSessionIds: string[] = [];
-  public switchOutcome: "completed" | "refused" | "throw" | "wrong-backend" = "completed";
+  public switchOutcome: "completed" | "refused" | "failed" | "throw" | "wrong-backend" = "completed";
   public readonly targetSession: ComputerSession = {
     ...this.session,
     viewport: { width: 640, height: 480, coordinateSpace: "physical" },
@@ -160,13 +169,14 @@ class WindowSwitchComputer extends FakeComputer {
   }
 
   public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
-    if (this.failTargetObservation && this.switched && session.id === this.targetSession.id) throw new Error("target screenshot unavailable");
+    if (this.failTargetObservation && this.switched && !this.preserveDesktopScope && session.id === this.targetSession.id) throw new Error("target screenshot unavailable");
     const capture = await super.observe(session, observationId, signal);
+    const reboundToNativeWindow = this.switched && !this.preserveDesktopScope;
     return {
       ...capture,
       viewport: session.viewport,
-      surfaceRef: this.switched ? nativePeerSurfaceRef : desktopSurfaceRef,
-      ...(this.switched ? { surfaceTransitionReason: "peer_switch" as const } : {}),
+      surfaceRef: reboundToNativeWindow ? nativePeerSurfaceRef : desktopSurfaceRef,
+      ...(reboundToNativeWindow ? { surfaceTransitionReason: "peer_switch" as const } : {}),
     };
   }
 
@@ -181,10 +191,33 @@ class WindowSwitchComputer extends FakeComputer {
     this.calls.push(`execute:${action.kind}:${action.windowRef}`);
     if (action.windowRef !== this.targetWindowRef) return { actionId: action.actionId, status: "refused" as const, driverCode: "WINDOW_REF_STALE" };
     if (this.switchOutcome === "throw") throw new Error("activation outcome not observable");
-    if (this.switchOutcome === "refused") return { actionId: action.actionId, status: "refused" as const, driverCode: "WINDOW_ACTIVATION_REFUSED" };
+    if (this.switchOutcome === "refused") return {
+      actionId: action.actionId,
+      status: "refused" as const,
+      driverCode: "WINDOW_ACTIVATION_REFUSED",
+      message: "Windows did not activate the exact listed window; no UI input was sent. Do not type into that target; choose a different switching action or ask an operator to activate it.",
+    };
+    if (this.switchOutcome === "failed") return { actionId: action.actionId, status: "failed" as const, driverCode: "WINDOW_ACTIVATION_REFUSED" };
     const sessionAfter = this.switchOutcome === "wrong-backend" ? { ...this.targetSession, backend: "other" } : this.targetSession;
     this.switched = true;
+    if (this.preserveDesktopScope) {
+      return {
+        actionId: action.actionId,
+        status: "completed" as const,
+        message: this.alreadyForegroundNoOp
+          ? "The listed window is already the exact foreground window; no activation was dispatched and the next observation remains the full primary desktop."
+          : "Activated the exact listed window; the next observation remains the full primary desktop.",
+        sessionAfter: session,
+      };
+    }
     return { actionId: action.actionId, status: "completed" as const, sessionAfter };
+  }
+}
+
+class NativeWindowSwitchComputer extends WindowSwitchComputer {
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+    const capture = await super.observe(session, observationId, signal);
+    return { ...capture, surfaceRef: nativePeerSurfaceRef };
   }
 }
 
@@ -688,6 +721,20 @@ function clickRegistry(): ToolRegistry {
 function windowSwitchRegistry(): ToolRegistry {
   const registry = clickRegistry();
   registry.registerMany(windowSwitchTools());
+  registry.register({
+    name: "hotkey",
+    description: "Press a simultaneous keyboard shortcut.",
+    category: "computer",
+    inputSchema: { type: "object", properties: { keys: { type: "array", items: { type: "string" }, minItems: 1 } }, required: ["keys"], additionalProperties: false },
+    validate: (args) => {
+      if (typeof args !== "object" || args === null || Array.isArray(args) ||
+          !Array.isArray((args as { keys?: unknown }).keys) ||
+          !(args as { keys: unknown[] }).keys.every((key) => typeof key === "string")) {
+        throw new Error("hotkey.keys must be a string array");
+      }
+    },
+    toAction: (args) => ({ kind: "keypress", keys: (args as { keys: string[] }).keys }),
+  });
   return registry;
 }
 
@@ -898,8 +945,91 @@ describe("RunController ExecutionSegment lifecycle", () => {
 });
 
 describe("RunController confirmed window handoff", () => {
+  it("freshly observes a desktop foreground refusal without native handoff or replay", async () => {
+    class DesktopMismatchComputer extends FakeComputer {
+      public handoffCandidateCalls = 0;
+      public handoffCalls = 0;
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return { actionId: action.actionId, status: "refused" as const, driverCode: "WINDOW_FOREGROUND_MISMATCH", message: "no input was sent" };
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        this.handoffCandidateCalls += 1;
+        return [{ pid: 42, windowId: 88, appName: "Editor", title: "Untitled" }];
+      }
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        this.handoffCalls += 1;
+        return session;
+      }
+    }
+    const computer = new DesktopMismatchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("desktop-mismatch-click")] },
+      { type: "finish", summary: "continued after the fresh desktop observation" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      run = controller.start("continue after a desktop click is refused");
+      await waitUntil(() => controller.getSnapshot().status === "finished" || controller.getSnapshot().status === "waiting_window");
+      expect(controller.getSnapshot().status).toBe("finished");
+      await expect(run).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+      expect(computer.handoffCandidateCalls).toBe(0);
+      expect(computer.handoffCalls).toBe(0);
+      const events = controller.getEvents();
+      expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.driverCode === "WINDOW_FOREGROUND_MISMATCH")).toBe(true);
+      expect(events.some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      expect(events.filter((event) => event.type === "observation.created").map((event) => event.observation.surfaceRef.kind)).toEqual(["desktop", "desktop"]);
+      expect(controller.getSnapshot().activeSurfaceRef?.kind).toBe("desktop");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await run?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("skips completed-action native popup detection on desktop while native scope still detects", async () => {
+    class DesktopPopupComputer extends FakeComputer {
+      public detectionCalls = 0;
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        this.detectionCalls += 1;
+        return [{ pid: 999, windowId: 89, appName: "Popup", title: "Incidental notice" }];
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [{ pid: 999, windowId: 89, appName: "Popup", title: "Incidental notice" }];
+      }
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        throw new Error("desktop scope must not hand off to a native popup");
+      }
+    }
+    const computer = new DesktopPopupComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("desktop-popup-click")] },
+      { type: "finish", summary: "completed after a fresh desktop observation" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    try {
+      await expect(controller.start("continue on the full desktop after a click")).resolves.toBe("succeeded");
+      expect(computer.detectionCalls).toBe(0);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      expect(controller.getEvents().filter((event) => event.type === "observation.created").map((event) => event.observation.surfaceRef.kind)).toEqual(["desktop", "desktop"]);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each(["TRANSIENT_SURFACE_UNKNOWN", "WINDOW_INVENTORY_UNKNOWN"])("pauses for manual popup recovery after a completed action: %s", async (code) => {
-    class ManualPopupComputer extends FakeComputer {
+    class ManualPopupComputer extends NativeWindowObservationComputer {
       public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
         throw Object.assign(new Error("exact popup state is unknown"), { code });
       }
@@ -933,7 +1063,7 @@ describe("RunController confirmed window handoff", () => {
   });
 
   it("lets the host ignore a cross-process incidental popup after a fresh observation, without replay", async () => {
-    class ProactiveHandoffComputer extends FakeComputer {
+    class ProactiveHandoffComputer extends NativeWindowObservationComputer {
       public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal, options?: import("./contracts.js").ComputerExecuteOptions) {
         signal.throwIfAborted();
         this.calls.push(`execute:${action.kind}:${String(options?.detectNewWindowHandoff)}`);
@@ -992,7 +1122,7 @@ describe("RunController confirmed window handoff", () => {
   });
 
   it("waits after a no-input foreground refusal, never retries it, and observes the confirmed target", async () => {
-    class HandoffComputer extends FakeComputer {
+    class HandoffComputer extends NativeWindowObservationComputer {
       public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
         signal.throwIfAborted();
         this.calls.push(`execute:${action.kind}`);
@@ -3112,6 +3242,98 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("continues from an exact freshly observed primary desktop after unknown foreground dispatch, without accepting the old tool suffix", async () => {
+    class ReconfirmedDesktopComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The desktop action may have been sent; inspect a fresh frame and do not repeat it.",
+          safeRecovery: { kind: "desktop_surface_reconfirmed" as const, surfaceRef: desktopSurfaceRef },
+        };
+      }
+    }
+    const computer = new ReconfirmedDesktopComputer();
+    const staleSuffix = typeCall("unknown-desktop-stale-suffix");
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-desktop-click"), staleSuffix] },
+      { type: "finish", summary: "continued from the fresh desktop observation", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1" },
+    );
+    await expect(controller.start("continue from the refreshed desktop")).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+    expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    const events = controller.getEvents();
+    expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "partial" &&
+      event.receipt.driverCode === "ACTION_OUTCOME_UNKNOWN" &&
+      event.receipt.safeRecovery?.kind === "desktop_surface_reconfirmed")).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.failed" && event.result.status === "failed" &&
+      event.result.error.code === "ACTION_OUTCOME_UNKNOWN")).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === staleSuffix.id)).toBe(true);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+    expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it.each([
+    ["generation change", { ...desktopSurfaceRef, generation: desktopSurfaceRef.generation + 1 }, "generation_advanced" as const],
+    ["scope change", { ...desktopSurfaceRef, surfaceId: "different-desktop-surface" as SurfaceRef["surfaceId"] }, "peer_switch" as const],
+  ])("does not accept desktop safe recovery after a fresh observation reports a %s", async (_label, changedSurface, transitionReason) => {
+    class ChangedDesktopComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return this.calls.filter((call) => call.startsWith("observe:")).length === 1
+          ? capture
+          : { ...capture, surfaceRef: changedSurface, surfaceTransitionReason: transitionReason };
+      }
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The desktop action may have been sent; inspect a fresh frame and do not repeat it.",
+          safeRecovery: { kind: "desktop_surface_reconfirmed" as const, surfaceRef: desktopSurfaceRef },
+        };
+      }
+    }
+    const computer = new ChangedDesktopComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall(`unknown-desktop-${_label}`)] },
+      { type: "finish", summary: "operator checked the changed desktop", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer);
+    const running = controller.start("perform the GUI task");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(provider.inputs).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(3);
+      expect(controller.getEvents().some((event) => event.type === "runtime.error" &&
+        event.category === "unknown_side_effect" && /SAFE_RECOVERY_SURFACE_MISMATCH/u.test(event.message))).toBe(true);
+      await controller.submitUserInput("I checked the changed screen; continue safely.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not continue when the fresh observation contradicts native-surface reconfirmation", async () => {
     const claimedSurface: SurfaceRef = {
       surfaceId: "claimed-unknown-native-surface" as SurfaceRef["surfaceId"],
@@ -3988,6 +4210,53 @@ describe("RunController model-directed window switching", () => {
     }
   });
 
+  it("completes an already-foreground desktop switch in the same scope and observes the full desktop", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    computer.preserveDesktopScope = true;
+    computer.alreadyForegroundNoOp = true;
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("desktop-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("desktop-noop-switch")] },
+      { type: "finish", summary: "The selected application was already foreground; the full desktop remains observed." },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("activate the listed application while retaining desktop scope")).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:switch_window:opaque-target"]);
+      expect(controller.getSnapshot()).toMatchObject({ computerSession: { id: computer.session.id }, stepCount: 1, outcome: "succeeded" });
+      expect(provider.inputs).toHaveLength(3);
+
+      const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      const observations = events.filter((event): event is Extract<RuntimeEvent, { type: "observation.created" }> => event.type === "observation.created");
+      expect(observations).toHaveLength(2);
+      expect(observations.map((event) => event.observation.computerSessionId)).toEqual([computer.session.id, computer.session.id]);
+      expect(observations.map((event) => event.observation.surfaceRef)).toEqual([desktopSurfaceRef, desktopSurfaceRef]);
+      expect(events.filter((event) => event.type === "computer.surface.transitioned").map((event) => ({
+        from: event.type === "computer.surface.transitioned" ? event.from : undefined,
+        to: event.type === "computer.surface.transitioned" ? event.to : undefined,
+        reason: event.type === "computer.surface.transitioned" ? event.reason : undefined,
+      }))).toEqual([{ from: null, to: desktopSurfaceRef, reason: "initial_observation" }]);
+
+      const switchResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("desktop-noop-switch" as ToolCallId),
+      );
+      expect(switchResult?.result.output).toMatchObject({
+        status: "completed",
+        message: expect.stringContaining("no activation was dispatched"),
+      });
+      expect(contextCompiler.inputs[2]?.computerSession?.id).toBe(computer.session.id);
+      expect(contextCompiler.inputs[2]?.windowSwitchState).toMatchObject({ currentWindow: { appName: "Browser", title: "Search results" } });
+      expect(contextCompiler.inputs[2]?.windowSwitchState?.options).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the shared definitions hidden and denies their calls when the Run opt-in is off", async () => {
     const registry = windowSwitchRegistry();
     const computer = new WindowSwitchComputer();
@@ -4201,32 +4470,264 @@ describe("RunController model-directed window switching", () => {
     }
   });
 
+  it("freshly observes the same desktop after a proven activation refusal and lets the model choose a different action", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    computer.preserveDesktopScope = true;
+    computer.switchOutcome = "refused";
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("refused-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("refused-switch")] },
+      { type: "tool_calls", calls: [{ id: "alt-tab-after-refusal" as ToolCallId, name: "hotkey", arguments: { keys: ["ALT", "TAB"] } }] },
+      { type: "finish", summary: "A different desktop switching action was selected after fresh observation." },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("replan after the exact desktop activation is refused")).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toEqual([
+        "execute:switch_window:opaque-target",
+      ]);
+      expect(computer.calls.filter((call) => call === "execute:keypress")).toHaveLength(1);
+      expect(provider.inputs).toHaveLength(4);
+      expect(JSON.stringify(provider.inputs[2])).toContain("Do not type into that target");
+
+      const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      const observations = events.filter((event): event is Extract<RuntimeEvent, { type: "observation.created" }> => event.type === "observation.created");
+      expect(observations).toHaveLength(3);
+      expect(observations.map((event) => event.observation.surfaceRef)).toEqual([
+        desktopSurfaceRef,
+        desktopSurfaceRef,
+        desktopSurfaceRef,
+      ]);
+      const failedSwitch = events.find((event): event is Extract<RuntimeEvent, { type: "action.execution.failed" }> =>
+        event.type === "action.execution.failed" && event.receipt.driverCode === "WINDOW_ACTIVATION_REFUSED",
+      );
+      expect(failedSwitch?.receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_ACTIVATION_REFUSED" });
+      expect(events.filter((event) => event.type === "computer.surface.transitioned")).toHaveLength(1);
+      expect(controller.getSnapshot()).toMatchObject({ activeSurfaceRef: desktopSurfaceRef, outcome: "succeeded" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("freshly observes the prior native target after an exact activation refusal", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new NativeWindowSwitchComputer();
+    computer.switchOutcome = "refused";
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("native-refused-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("native-refused-switch")] },
+      { type: "finish", summary: "continued from a fresh observation of the prior native target" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("preserve native activation refusal behavior")).resolves.toBe("succeeded");
+      expect(provider.inputs).toHaveLength(3);
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+      expect(controller.getSnapshot()).toMatchObject({ activeSurfaceRef: nativePeerSurfaceRef, outcome: "succeeded" });
+      expect(controller.getSnapshot().latestObservationId).toBeDefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each([
-    ["refused", "failed"],
-    ["throw", "outcome_unknown"],
-    ["wrong-backend", "outcome_unknown"],
-  ] as const)("clears stale observations and stops after a %s window activation result", async (switchOutcome, expectedOutcome) => {
+    {
+      name: "same browser Surface with a fresh generation",
+      before: {
+        ...nativePeerSurfaceRef,
+        kind: "browser_tab" as const,
+        parentSurfaceId: "runtime-test-browser-root" as SurfaceRef["surfaceId"],
+      },
+      after: {
+        ...nativePeerSurfaceRef,
+        kind: "browser_tab" as const,
+        parentSurfaceId: "runtime-test-browser-root" as SurfaceRef["surfaceId"],
+        generation: 2,
+      },
+      reason: "generation_advanced" as const,
+    },
+    {
+      name: "trusted child push",
+      before: nativePeerSurfaceRef,
+      after: {
+        surfaceId: "runtime-test-owned-child" as SurfaceRef["surfaceId"],
+        generation: 1,
+        kind: "native_window" as const,
+        parentSurfaceId: nativePeerSurfaceRef.surfaceId,
+        admissionSource: "win32_relationship_probe" as const,
+      },
+      reason: "child_push" as const,
+    },
+    {
+      name: "trusted child pop",
+      before: {
+        surfaceId: "runtime-test-owned-child" as SurfaceRef["surfaceId"],
+        generation: 1,
+        kind: "native_window" as const,
+        parentSurfaceId: nativePeerSurfaceRef.surfaceId,
+        admissionSource: "win32_relationship_probe" as const,
+      },
+      after: nativePeerSurfaceRef,
+      reason: "child_pop" as const,
+    },
+  ])("continues after a refusal with $name lineage", async ({ before, after, reason }) => {
+    class RefusalLineageComputer extends NativeWindowSwitchComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        if (this.observationCount === 1) return { ...capture, surfaceRef: before };
+        return { ...capture, surfaceRef: after, surfaceTransitionReason: reason };
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new RefusalLineageComputer();
+    computer.switchOutcome = "refused";
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("lineage-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("lineage-switch")] },
+      { type: "finish", summary: "fresh observation confirmed a trusted Surface lineage" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("switch only if activation is verifiable")).resolves.toBe("succeeded");
+      expect(controller.getSnapshot()).toMatchObject({ activeSurfaceRef: after, outcome: "succeeded" });
+      expect(controller.getSnapshot().latestObservationId).toBeDefined();
+      expect(provider.inputs).toHaveLength(3);
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      expect(events.some((event) => event.type === "computer.surface.transitioned" && event.reason === reason &&
+        JSON.stringify(event.to) === JSON.stringify(after))).toBe(true);
+      expect(events.some((event) => event.type === "user.input.requested")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not continue after a refused switch when fresh observation shows an untrusted peer", async () => {
+    const unrelatedPeer: SurfaceRef = {
+      surfaceId: "runtime-test-unrelated-peer" as SurfaceRef["surfaceId"],
+      generation: 1,
+      kind: "native_window",
+    };
+    class UntrustedRefusalComputer extends NativeWindowSwitchComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        if (this.observationCount === 1) return capture;
+        return { ...capture, surfaceRef: unrelatedPeer, surfaceTransitionReason: "peer_switch" as const };
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new UntrustedRefusalComputer();
+    computer.switchOutcome = "refused";
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("untrusted-refusal-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("untrusted-refusal-switch")] },
+      { type: "finish", summary: "continued only after the operator checked the changed screen" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    const running = controller.start("switch only if activation is verifiable");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(controller.getSnapshot().activeSurfaceRef).toEqual(unrelatedPeer);
+      expect(provider.inputs).toHaveLength(2);
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      expect(controller.getEvents().some((event) => event.type === "user.input.requested")).toBe(true);
+      await controller.submitUserInput("I checked the current screen; continue safely.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(provider.inputs).toHaveLength(3);
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["failed", "throw", "wrong-backend"] as const)("pauses for an operator check after unconfirmed %s switch outcome without replay", async (switchOutcome) => {
     const registry = windowSwitchRegistry();
     const computer = new WindowSwitchComputer();
     computer.switchOutcome = switchOutcome;
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [listWindowsCall(`failure-inventory-${switchOutcome}`)] },
       { type: "tool_calls", calls: [switchWindowCall(`failure-switch-${switchOutcome}`)] },
-      { type: "finish", summary: "must not be reached" },
+      { type: "finish", summary: "continued after the operator checked the current window" },
     ]);
     const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
       windowSwitch: "opened-windows-v1",
     });
+    const running = controller.start("switch only if activation is verifiable");
     try {
-      await expect(controller.start("switch only if activation is verifiable")).resolves.toBe(expectedOutcome);
-      expect(controller.getSnapshot().latestObservationId).toBeUndefined();
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(controller.getSnapshot().pendingUserQuestion).toContain("不要重复刚才的切换");
       expect(provider.inputs).toHaveLength(2);
       expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
-      expect(controller.getEvents().some((event) => event.type === "action.execution.failed" && event.receipt.status !== "completed")).toBe(true);
-      const replayed = reduceRuntimeEvents(await readRuntimeEvents(join(directory, "trajectory.jsonl")), runId);
-      expect(replayed.latestObservationId).toBeUndefined();
-      expect(replayed.outcome).toBe(expectedOutcome);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+      expect(controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+      await controller.submitUserInput("I checked the current window; continue safely.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(provider.inputs).toHaveLength(3);
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(3);
     } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("still pauses when the best-effort observation after an unconfirmed switch also fails", async () => {
+    class OneFailedRecoveryObservationComputer extends WindowSwitchComputer {
+      private observeCalls = 0;
+
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        this.observeCalls += 1;
+        if (this.observeCalls === 2) {
+          this.calls.push(`observe-failed:${observationId}`);
+          throw new Error("fresh screenshot unavailable");
+        }
+        return super.observe(session, observationId, signal);
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new OneFailedRecoveryObservationComputer();
+    computer.switchOutcome = "failed";
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("failed-capture-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("failed-capture-switch")] },
+      { type: "finish", summary: "continued after the operator checked the current window" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    const running = controller.start("switch only if activation is verifiable");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(controller.getSnapshot().latestObservationId).toBeUndefined();
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe-failed:"))).toHaveLength(1);
+      expect(controller.getEvents().some((event) => event.type === "runtime.error" && /could not be freshly observed/u.test(event.message))).toBe(true);
+      await controller.submitUserInput("I checked the current window; continue safely.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:switch_window"))).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -4259,6 +4760,10 @@ describe("RunController model-directed window switching", () => {
 
   it("expires listed refs when the legacy popup picker refreshes inventory and the Host chooses C", async () => {
     class PopupWindowSwitchComputer extends WindowSwitchComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef: nativePeerSurfaceRef };
+      }
       public override async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
         signal.throwIfAborted();
         return [{ pid: 303, windowId: 909, appName: "Popup", title: "Incidental dialog" }];

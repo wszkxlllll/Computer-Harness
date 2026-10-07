@@ -449,19 +449,38 @@ function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId,
       .find((text) => text.includes("Available tools (semantic guidance; Runtime validates exact arguments):"));
     const listDescription = scenario.registry.get("list_windows")?.description;
     const switchDescription = scenario.registry.get("switch_window")?.description;
+    const typeTool = scenario.registry.modelTools().find((tool) => tool.name === "type");
+    const typeSchema = typeTool?.inputSchema;
+    const typeProperties = typeSchema !== null && typeof typeSchema === "object" && !Array.isArray(typeSchema) &&
+        typeSchema.properties !== null && typeof typeSchema.properties === "object" && !Array.isArray(typeSchema.properties)
+      ? typeSchema.properties
+      : undefined;
+    const typeTextDescription = typeProperties?.text !== null && typeof typeProperties?.text === "object" && !Array.isArray(typeProperties.text)
+      ? typeProperties.text.description
+      : undefined;
+    const typeElementRefDescription = typeProperties?.elementRef !== null && typeof typeProperties?.elementRef === "object" && !Array.isArray(typeProperties.elementRef)
+      ? typeProperties.elementRef.description
+      : undefined;
     const listLine = catalogText?.split("\n").find((line) => line.startsWith("- list_windows("));
     const switchLine = catalogText?.split("\n").find((line) => line.startsWith("- switch_window("));
+    // Runtime may filter type from this switch-only turn; validate its full
+    // presentation when offered, without widening the fixture's tool access.
+    const typeLine = catalogText?.split("\n").find((line) => line.startsWith("- type("));
+    const compact = (value) => value.replace(/\s+/gu, " ").trim();
     if (catalogText === undefined || listDescription === undefined || switchDescription === undefined ||
-        listDescription.length > 180 || switchDescription.length > 180 ||
-        !listLine?.endsWith(listDescription) || !switchLine?.endsWith(switchDescription) ||
+        typeof typeTool?.description !== "string" || typeof typeTextDescription !== "string" || typeof typeElementRefDescription !== "string" ||
+        !listLine?.endsWith(compact(listDescription)) || !switchLine?.endsWith(compact(switchDescription)) ||
+        (typeLine !== undefined && !typeLine.endsWith(compact(typeTool.description))) ||
         !listDescription.startsWith("List {windows,truncated,omittedCount}") ||
         !listDescription.includes("untrusted") || !listDescription.includes("survive observations") ||
         !listDescription.includes("expire on refresh/switch/end") ||
         !listDescription.includes("unlisted apps may exist") ||
-        !switchDescription.includes("Switch to a listed open window using windowRef") ||
-        !switchDescription.includes("sole call this turn") ||
-        !switchDescription.includes("wait for a fresh observation before any further action")) {
-      throw new ProbeFailure("QWEN_TOOL_CATALOG_TRUNCATED", "Qwen outbound catalog omitted a complete cross-window safety instruction.");
+        !switchDescription.includes("not PID/HWND") || !switchDescription.includes("Desktop capture/input stays full") ||
+        !switchDescription.includes("native-window scope rebinds") || !switchDescription.includes("Already foreground: no-op") ||
+        !switchDescription.includes("Sole call this turn") || !switchDescription.includes("reobserve before next action") ||
+        (typeLine !== undefined && !typeLine.includes(`description=${JSON.stringify(compact(typeTextDescription))}`)) ||
+        (typeLine !== undefined && !typeLine.includes(`description=${JSON.stringify(compact(typeElementRefDescription))}`))) {
+      throw new ProbeFailure("QWEN_TOOL_CATALOG_TRUNCATED", "Qwen outbound catalog omitted a complete registered tool or parameter description.");
     }
   }
   const modelSwitches = [];

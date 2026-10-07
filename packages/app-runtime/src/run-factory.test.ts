@@ -5,15 +5,16 @@ import { describe, expect, it, vi } from "vitest";
 import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, type MemoryRunModule, type MemoryStore } from "@computer-harness/memory";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import type { EventId, JsonValue, MemoryMutation, RunId, RuntimeEvent, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
-import { createDefaultToolRegistry, type Computer, type MemoryRecallService, type ModelInput, type NonComputerToolDefinition, type PlanningTaskMutation, type ProviderAdapter } from "@computer-harness/runtime";
+import { createDefaultToolRegistry, ToolRegistry, type Computer, type MemoryRecallService, type ModelInput, type NonComputerToolDefinition, type PlanningTaskMutation, type ProviderAdapter } from "@computer-harness/runtime";
 import { createPlanningRunModule, FilePlanStore, InMemoryPlanStore, type PlanningRunModule } from "@computer-harness/planning";
 import { readRuntimeEvents, reduceRuntimeEvents } from "@computer-harness/trajectory";
 import { buildRunReport, createRun, createRunFactory, writeRunReport, type ResolvedRunConfig } from "./index.js";
 
 const fixtureSurfaceRef = { surfaceId: "run-factory-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
-// Check effective report defaults against current source without rebuilding dist.
+// Keep this integration test on current package sources without rebuilding dist.
 vi.mock("@computer-harness/provider-glm", () => import("../../provider-glm/src/index.js"));
+vi.mock("@computer-harness/context", () => import("../../context/src/index.js"));
 
 function config(outputDir: string): ResolvedRunConfig {
   return {
@@ -114,6 +115,132 @@ function recoveryReportBaseEvents(runId: RunId): RuntimeEvent[] {
 }
 
 describe("app-runtime RunHandle", () => {
+  it.each([
+    [undefined, false],
+    ["off", false],
+    ["catalog-v1", true],
+  ] as const)("keeps task operation guidance opt-in for a Run (%s)", async (operationGuidance, expectedIncluded) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-operation-guidance-"));
+    const inputs: ModelInput[] = [];
+    let configuredOperationGuidance: string | undefined;
+    let compiledGoal: string | undefined;
+    let selectedOperationGuidance: string | undefined;
+    const provider: ProviderAdapter = {
+      id: "fixture-provider",
+      async generate(input) {
+        inputs.push(input);
+        return { type: "finish", summary: "fixture done", reportedStatus: "success" };
+      },
+    };
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        goal: "新建文档并保存。",
+        ...(operationGuidance === undefined ? {} : { operationGuidance }),
+      }, {
+        createProvider: () => provider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+        createContextCompiler: (tools, features, runConfig) => {
+          configuredOperationGuidance = runConfig.operationGuidance;
+          const base = new DefaultContextCompiler(tools, { features });
+          return {
+            async compile(input, signal) {
+              compiledGoal = input.goal;
+              selectedOperationGuidance = input.operationGuidance?.id;
+              return base.compile(input, signal);
+            },
+          };
+        },
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(configuredOperationGuidance).toBe(operationGuidance);
+      expect(compiledGoal).toBe("新建文档并保存。");
+      expect(selectedOperationGuidance).toBe(expectedIncluded ? "text_document_save" : undefined);
+      const input = inputs[0];
+      if (input === undefined) throw new Error("fixture Provider did not receive a Context");
+      const guidanceMessages = input.messages.filter((message) =>
+        message.role === "user" && JSON.stringify(message.content).includes("Current task operation note"),
+      );
+      expect(guidanceMessages).toHaveLength(expectedIncluded ? 1 : 0);
+      expect(input.contextBudget?.trace?.operationGuidance?.included).toBe(expectedIncluded ? true : undefined);
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("projects the opt-in multiline typing presentation without replacing registered tool behavior", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-multiline-type-profile-"));
+    const inputs: ModelInput[] = [];
+    const baseRegistry = createDefaultToolRegistry();
+    const sourceType = baseRegistry.get("type");
+    if (sourceType?.category !== "computer") throw new Error("default registry is missing the type Computer tool");
+    const validate = vi.fn(sourceType.validate);
+    const toAction = vi.fn(sourceType.toAction);
+    const customSchema: JsonValue = {
+      ...(sourceType.inputSchema as { [key: string]: JsonValue }),
+      fixtureMarker: "preserved",
+    };
+    const customRegistry = new ToolRegistry();
+    for (const definition of baseRegistry.list()) {
+      customRegistry.register(definition.name === "type"
+        ? { ...sourceType, audiences: ["main"] as const, inputSchema: customSchema, validate, toAction }
+        : definition);
+    }
+    let projectedType: ReturnType<ToolRegistry["get"]> = undefined;
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        computer: { kind: "cua", socketPath: "candidate.sock", screenshotDir: "screenshots", multilineTypeProfile: "foreground-caret-v1" },
+      }, {
+        createProvider: () => ({
+          id: "fixture-provider",
+          async generate(input) {
+            inputs.push(input);
+            return { type: "finish", summary: "profile fixture done" };
+          },
+        }),
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+        createToolRegistry: () => customRegistry,
+        createContextCompiler: (tools, features) => {
+          projectedType = tools.get("type");
+          return new DefaultContextCompiler(tools, { features });
+        },
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      const modelType = inputs[0]?.tools.find((tool) => tool.name === "type");
+      expect(modelType?.inputSchema).toMatchObject({ fixtureMarker: "preserved" });
+      expect(projectedType?.category).toBe("computer");
+      expect(projectedType?.audiences).toEqual(["main"]);
+      expect(projectedType?.validate).toBe(validate);
+      expect(projectedType?.category === "computer" ? projectedType.toAction : undefined).toBe(toAction);
+      if (process.platform === "win32") {
+        expect(modelType?.description).toContain("foreground-caret-v1");
+        expect(modelType?.description).toContain("Enter key events and can submit/send");
+        expect(modelType?.description).toContain("that route does not automatically submit or send");
+        expect(modelType?.description).toContain("intended to insert at the current caret or replace the current selection");
+        expect(modelType?.description).toContain("driver completion does not verify the resulting content");
+        expect(modelType?.description).not.toContain("preserves the current caret or selection");
+        expect(modelType?.description).not.toContain("separate single-line type calls with Enter between lines");
+        expect(JSON.stringify(modelType?.inputSchema)).not.toContain("without the Host-only foreground-caret profile");
+        expect(modelType?.inputSchema).toMatchObject({
+          properties: {
+            text: { description: expect.stringContaining("intended to insert at the current caret or replace the current selection") },
+            elementRef: { description: expect.stringContaining("append-to-end") },
+          },
+        });
+        expect(modelType?.inputSchema).toMatchObject({
+          properties: { text: { description: expect.stringContaining("Enter key events and can submit/send") } },
+        });
+      } else {
+        expect(modelType?.description).toBe(sourceType.description);
+      }
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("passes the frozen Run preference snapshot to Context but not provider factories", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-assistant-preferences-"));
     const preferences = {
@@ -462,7 +589,13 @@ describe("app-runtime RunHandle", () => {
       },
     };
     try {
-      const handle = await createRun({ ...config(outputDir), glmThinking: thinking, ...(budget === undefined ? {} : { glmMaxOutputTokens: budget }) }, {
+      const handle = await createRun({
+        ...config(outputDir),
+        glmThinking: thinking,
+        contextMaxInputTokens: 16_384,
+        contextMaxWireInputTokens: 24_576,
+        ...(budget === undefined ? {} : { glmMaxOutputTokens: budget }),
+      }, {
         credentials: { glmApiKey: "must-not-be-serialized" },
         createProvider: (options) => {
           expect(options.credentials.glmApiKey).toBe("must-not-be-serialized");
@@ -489,6 +622,8 @@ describe("app-runtime RunHandle", () => {
         runtimeOutcome: "succeeded",
         glmMaxOutputTokens: budget ?? 8192,
         glmThinking: thinking === "disabled" ? "enabled" : thinking,
+        contextMaxInputTokens: 16_384,
+        contextMaxWireInputTokens: 24_576,
       });
       expect(report.events.map((event) => event.type)).toEqual([
         "run.created",
@@ -1194,8 +1329,11 @@ describe("app-runtime RunHandle", () => {
       const report = await handle.report();
       expect(moduleClose).toHaveBeenCalledOnce();
       expect(report.summary.cleanupDiagnostics).toContainEqual(expect.objectContaining({ operation: "memory_module.close", status: "timed_out" }));
-      await handle.close();
+      const close = handle.close();
+      expect(handle.close()).toBe(close);
+      await expect(close).rejects.toThrow(/memory_module\.close/iu);
       expect(moduleClose).toHaveBeenCalledOnce();
+      expect((await handle.report()).summary.cleanupDiagnostics).toEqual(report.summary.cleanupDiagnostics);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

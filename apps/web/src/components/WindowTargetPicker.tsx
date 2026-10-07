@@ -100,73 +100,80 @@ export function WindowTargetPicker({
           <legend>可选窗口（{candidates.length}）</legend>
           <div className="window-target-list">
             {candidates.map((candidate, index) => {
+              const candidateId = `window-target-${index}`;
               const preview = previews?.get(candidate.token);
               const previewValid = preview !== undefined && Date.parse(preview.expiresAt) > currentTime;
               const previewLoaded = preview !== undefined && loadedPreviewTokens.has(preview.previewToken);
               const previewDisplayError = preview === undefined ? undefined : previewDisplayErrors.get(preview.previewToken);
               const loadingPreview = previewLoadingToken === candidate.token;
-              const row = (
+              const copy = (
                 <>
-                  {!candidate.previewRequired && (
-                    <input
-                      id={`window-target-${index}`}
-                      type="radio"
-                      name="window-target"
-                      value={String(index)}
-                      checked={selectedToken === candidate.token}
-                      onChange={() => onSelect(candidate.token)}
-                      aria-describedby={expiresAt ? "window-target-expiry" : undefined}
-                      disabled={disabled || expired}
-                    />
-                  )}
-                  <span className="window-target-copy">
-                    <span className="window-target-app">{candidate.appName?.trim() || "未命名应用"}</span>
-                    <span className="window-target-title">{candidate.title?.trim() || "未命名窗口"}</span>
-                    {candidate.relationship && <span className="window-target-title">{windowRelationshipLabel(candidate.relationship)}</span>}
-                  </span>
-                  {candidate.previewRequired && (
-                    <span className="window-target-preview-controls">
-                      <button className="button button-secondary" type="button" disabled={disabled || expired || loadingPreview || previewLoadingToken !== undefined} onClick={() => onPreview?.(candidate.token)}>
-                        {loadingPreview ? "正在读取此窗口…" : preview === undefined ? "查看此窗口预览" : "重新读取预览"}
-                      </button>
-                      {loadingPreview && <span className="field-hint" role="status">正在从电脑读取这个精确窗口，不会激活或操作它。</span>}
-                      {previewErrors?.get(candidate.token) && <span className="notice notice-warning" role="alert">{previewErrors.get(candidate.token)}</span>}
-                      {preview && (
-                        <span className="window-candidate-preview">
-                          <span className="window-target-app">捕获时应用：{preview.appName?.trim() || "应用名不可用"}</span>
-                          <span className="window-target-title">捕获时标题：{preview.title?.trim() || "窗口标题不可用"} · {formatCapturedAt(preview.capturedAt)}</span>
-                          <span className="window-target-title">{preview.relationship ? windowRelationshipLabel(preview.relationship) : "捕获时关系未验证"}</span>
-                          <img
-                            src={`data:image/png;base64,${preview.dataBase64}`}
-                            alt={`${preview.appName ?? "未知应用"}：${preview.title ?? "未知窗口"} 的实时窗口预览`}
-                            onLoad={() => setLoadedPreviewTokens((current) => new Set(current).add(preview.previewToken))}
-                            onError={() => {
-                              setLoadedPreviewTokens((current) => {
-                                const next = new Set(current);
-                                next.delete(preview.previewToken);
-                                return next;
-                              });
-                              setPreviewDisplayErrors((current) => new Map(current).set(preview.previewToken, "这张实时截图无法显示。请在电脑恢复目标窗口后刷新；仍看不清时不要选择。"));
-                            }}
-                          />
-                          {previewDisplayError && <span className="notice notice-warning" role="alert">{previewDisplayError}</span>}
-                          {previewValid && previewLoaded && previewDisplayError === undefined
+                  <span className="window-target-app">{candidate.appName?.trim() || "未命名应用"}</span>
+                  <span className="window-target-title">{candidate.title?.trim() || "未命名窗口"}</span>
+                  {candidate.relationship && <span className="window-target-title">{windowRelationshipLabel(candidate.relationship)}</span>}
+                </>
+              );
+              return (
+                <div className={`window-target-option${candidate.previewRequired ? " window-target-preview-option" : ""}`} key={candidate.token}>
+                  {candidate.previewRequired
+                    ? <span className="window-target-copy">{copy}</span>
+                    : <>
+                      <input
+                        id={candidateId}
+                        type="radio"
+                        name="window-target"
+                        value={String(index)}
+                        checked={selectedToken === candidate.token}
+                        onChange={() => onSelect(candidate.token)}
+                        aria-describedby={expiresAt ? "window-target-expiry" : undefined}
+                        disabled={disabled || expired}
+                      />
+                      <label className="window-target-copy" htmlFor={candidateId}>{copy}</label>
+                    </>}
+                  <span className="window-target-preview-controls">
+                    <button className="button button-secondary" type="button" disabled={disabled || expired || loadingPreview || previewLoadingToken !== undefined || onPreview === undefined} onClick={() => onPreview?.(candidate.token)}>
+                      {loadingPreview ? "正在读取此窗口…" : preview === undefined ? "查看此窗口预览" : "重新读取预览"}
+                    </button>
+                    {loadingPreview && <span className="field-hint" role="status">正在从电脑读取这个精确窗口，不会激活或操作它。</span>}
+                    {previewErrors?.get(candidate.token) && <span className="notice notice-warning" role="alert">{previewErrors.get(candidate.token)}</span>}
+                    {preview && (
+                      <span className="window-candidate-preview">
+                        <span className="window-target-app">捕获时应用：{preview.appName?.trim() || "应用名不可用"}</span>
+                        <span className="window-target-title">捕获时标题：{preview.title?.trim() || "窗口标题不可用"} · {formatCapturedAt(preview.capturedAt)}</span>
+                        <span className="window-target-title">{preview.relationship ? windowRelationshipLabel(preview.relationship) : "捕获时关系未验证"}</span>
+                        <img
+                          src={`data:image/png;base64,${preview.dataBase64}`}
+                          alt={`${preview.appName ?? "未知应用"}：${preview.title ?? "未知窗口"} 的实时窗口预览`}
+                          onLoad={() => setLoadedPreviewTokens((current) => new Set(current).add(preview.previewToken))}
+                          onError={() => {
+                            setLoadedPreviewTokens((current) => {
+                              const next = new Set(current);
+                              next.delete(preview.previewToken);
+                              return next;
+                            });
+                            setPreviewDisplayErrors((current) => new Map(current).set(preview.previewToken, "这张实时截图无法显示。请在电脑恢复目标窗口后刷新；仍看不清时不要选择。"));
+                          }}
+                        />
+                        {previewDisplayError && <span className="notice notice-warning" role="alert">{previewDisplayError}</span>}
+                        {candidate.previewRequired
+                          ? previewValid && previewLoaded && previewDisplayError === undefined
                             ? <button className="button button-primary" type="button" disabled={disabled || expired} onClick={() => onSelect(candidate.token, preview.previewToken)}>
                               确认这是目标窗口
                             </button>
                             : previewValid
-                              ? <span className="field-hint" role="status">截图成功显示后才能确认。画面不清楚或仍无法区分时请勿选择，并在电脑恢复窗口后刷新。</span>
-                              : <span className="field-hint" role="status">此预览确认已过期。重新读取当前窗口后才能选择。</span>}
-                        </span>
-                      )}
-                      {selectedToken === candidate.token && selectedPreviewToken === preview?.previewToken && previewValid && <span className="field-hint" role="status">已确认这个窗口作为任务起点。</span>}
-                    </span>
-                  )}
-                </>
+                              ? <span className="field-hint" role="status">截图成功显示后才能确认。画面不清楚时请勿选择，并在电脑恢复窗口后刷新。</span>
+                              : <span className="field-hint" role="status">此预览确认已过期。重新读取当前窗口后才能选择。</span>
+                          : previewValid && previewLoaded && previewDisplayError === undefined
+                            ? <span className="field-hint" role="status">可选预览已显示；此窗口仍可按标签直接选择。</span>
+                            : previewValid
+                              ? <span className="field-hint" role="status">正在载入可选预览；此窗口的选择不会因此改变。</span>
+                              : <span className="field-hint" role="status">此可选预览已过期。重新读取后可以查看当前画面。</span>}
+                      </span>
+                    )}
+                    {candidate.previewRequired && selectedToken === candidate.token && selectedPreviewToken === preview?.previewToken && previewValid && <span className="field-hint" role="status">已确认这个窗口作为任务起点。</span>}
+                  </span>
+                </div>
               );
-              return candidate.previewRequired
-                ? <div className="window-target-option window-target-preview-option" key={candidate.token}>{row}</div>
-                : <label className="window-target-option" htmlFor={`window-target-${index}`} key={candidate.token}>{row}</label>;
             })}
           </div>
         </fieldset>

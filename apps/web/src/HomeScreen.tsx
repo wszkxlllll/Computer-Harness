@@ -42,7 +42,9 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
   const [browserSetupRequired, setBrowserSetupRequired] = useState(false);
   const commandIdByTarget = useRef(new Map<string, string>());
   const previewAbortController = useRef<AbortController | undefined>(undefined);
-  const activeRun = runs.find((run) => activeStatuses.has(run.status));
+  const activeRun = runs.find((run) => activeStatuses.has(run.status)) ??
+    runs.find((run) => run.status === "finished" && run.ownerState === "pending_cleanup");
+  const activeRunAwaitingCleanup = activeRun?.status === "finished" && activeRun.ownerState === "pending_cleanup";
   const windowExpiresAtMs = windowExpiresAt ? Date.parse(windowExpiresAt) : Number.NaN;
   const hasCurrentTarget = selectedTargetToken !== undefined && windowTargets.some((candidate) => candidate.token === selectedTargetToken);
   const selectedTargetCandidate = windowTargets.find((candidate) => candidate.token === selectedTargetToken);
@@ -255,12 +257,15 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
   }
 
   async function previewWindow(candidateToken: string) {
+    const requiresPreviewConfirmation = windowTargets.find((candidate) => candidate.token === candidateToken)?.previewRequired === true;
     previewAbortController.current?.abort();
     const controller = new AbortController();
     previewAbortController.current = controller;
-    setSelectedTargetToken(undefined);
-    setSelectedWindowPreviewToken(undefined);
-    setWindowSelectionGoal(undefined);
+    if (requiresPreviewConfirmation) {
+      setSelectedTargetToken(undefined);
+      setSelectedWindowPreviewToken(undefined);
+      setWindowSelectionGoal(undefined);
+    }
     setWindowPreviews((current) => {
       const next = new Map(current);
       next.delete(candidateToken);
@@ -276,7 +281,7 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
       const preview = await previewWindowTarget(candidateToken, controller.signal);
       if (controller.signal.aborted || previewAbortController.current !== controller) return;
       setWindowPreviews((current) => new Map(current).set(candidateToken, preview));
-      if (selectedTargetToken === candidateToken) setSelectedWindowPreviewToken(undefined);
+      if (requiresPreviewConfirmation && selectedTargetToken === candidateToken) setSelectedWindowPreviewToken(undefined);
     } catch (caught) {
       if (controller.signal.aborted || previewAbortController.current !== controller) return;
       setWindowPreviewErrors((current) => new Map(current).set(candidateToken, caught instanceof Error ? caught.message : "无法读取这个精确窗口，请在电脑恢复后刷新列表。"));
@@ -297,11 +302,16 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
           <section className="active-run-row" aria-labelledby="active-run-title">
             <StatusLabel status={activeRun.status} compact />
             <div className="active-run-row-copy">
-              <h2 id="active-run-title">正在处理的任务</h2>
+              <h2 id="active-run-title">{activeRunAwaitingCleanup ? "电脑收尾尚未确认" : "正在处理的任务"}</h2>
               <p>{activeRun.goal}</p>
             </div>
             <a className="button button-secondary" href={`/run/${encodeURIComponent(activeRun.runId)}`}>查看任务</a>
           </section>
+        )}
+        {activeRunAwaitingCleanup && (
+          <p className="notice notice-warning" role="status">
+            任务已结束，但电脑尚未确认资源清理；确认前不会发送新任务。刷新任务列表；如果持续如此，请在电脑端检查 Harness 状态。
+          </p>
         )}
 
         <GoalComposer
@@ -341,7 +351,7 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
           error={error}
           setupRequired={browserSetupRequired}
         />
-        {activeRun && <p className="field-hint">当前电脑一次处理一个任务；当前任务结束后即可开始新的任务。</p>}
+        {activeRun && !activeRunAwaitingCleanup && <p className="field-hint">当前电脑一次处理一个任务；当前任务结束后即可开始新的任务。</p>}
 
         <section className="history-section" aria-labelledby="history-title">
           <span id="recent-tasks" className="anchor-target" aria-hidden="true" />

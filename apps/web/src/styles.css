@@ -275,7 +275,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .window-target-title { color: var(--muted); font-size: .83rem; overflow-wrap: anywhere; }
 .goal-composer .window-target-preview-option { align-items: stretch; cursor: default; display: block; }
 .window-target-preview-controls, .window-candidate-preview { display: grid; gap: .45rem; min-width: 0; }
-.window-target-preview-controls { margin-top: .55rem; }
+.window-target-preview-controls { grid-column: 1 / -1; margin-top: .55rem; }
 .window-candidate-preview { border-left: 2px solid var(--line); padding-left: .65rem; }
 .window-candidate-preview img { background: #f1f3f6; border: 1px solid var(--line); border-radius: .35rem; height: auto; max-height: 20rem; max-width: 100%; object-fit: contain; object-position: left top; width: fit-content; }
 .window-target-expiry { color: var(--muted); font-size: .78rem; margin: .4rem 0 0; }

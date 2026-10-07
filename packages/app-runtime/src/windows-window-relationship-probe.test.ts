@@ -55,6 +55,29 @@ describe("Windows read-only relationship probe", () => {
     expect(Object.keys(parsed.windows[0]!)).not.toContain("text");
   });
 
+  it("preserves only successfully read WS_EX_NOACTIVATE evidence without degrading topology completeness", () => {
+    const parsed = parseWindowRelationshipProbeOutput(JSON.stringify({
+      ...fixture,
+      windows: [
+        { ...fixture.windows[0], noActivate: false },
+        { ...fixture.windows[1], noActivate: true },
+      ],
+    }));
+    expect(parsed.complete).toBe(true);
+    expect(parsed.windows.map((window) => window.noActivate)).toEqual([false, true]);
+
+    const unavailable = parseWindowRelationshipProbeOutput(JSON.stringify({
+      ...fixture,
+      windows: [
+        { ...fixture.windows[0], noActivate: null },
+        { ...fixture.windows[1], noActivate: "unknown" },
+      ],
+    }));
+    expect(unavailable.complete).toBe(true);
+    expect(unavailable.windows[0]).not.toHaveProperty("noActivate");
+    expect(unavailable.windows[1]).not.toHaveProperty("noActivate");
+  });
+
   it("accepts bounded labels, drops unusable optional labels, and rejects content fields", () => {
     expect(parseWindowRelationshipProbeOutput(JSON.stringify({ ...fixture, complete: true, truncated: true })).complete).toBe(false);
     const labeled = parseWindowRelationshipProbeOutput(JSON.stringify({
@@ -122,6 +145,11 @@ describe("Windows read-only relationship probe", () => {
       expect(script).toContain("GetWindowThreadProcessId");
       expect(script).toContain("GetForegroundWindow");
       expect(script).toContain("GetWindowTextW");
+      expect(script).toContain('EntryPoint = "GetWindowLongW", SetLastError = true');
+      expect(script).toContain("private const int GWL_EXSTYLE = -20;");
+      expect(script).toContain("private const int WS_EX_NOACTIVATE = 0x08000000;");
+      expect(script).toContain("noActivate = ReadNoActivate(hwnd)");
+      expect(script).toContain("if (extendedStyle == 0 && error != 0) return null;");
       expect(script).toContain("GetWindowText(hwnd, text, text.Capacity)");
       expect(script).toContain("Process.GetProcessById(pid)");
       expect(script).toContain("ProcessName contains the executable's basename without an absolute path.");

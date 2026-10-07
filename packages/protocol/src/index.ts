@@ -1,5 +1,8 @@
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
+/** Maximum raw PNG bytes accepted for a single candidate-bound window preview before Base64 JSON transport. */
+export const MAX_WINDOW_PREVIEW_BYTES = 2 * 1024 * 1024;
+
 export type RunId = Brand<string, "RunId">;
 export type ComputerSessionId = Brand<string, "ComputerSessionId">;
 export type SurfaceId = Brand<string, "SurfaceId">;
@@ -894,6 +897,11 @@ export type ActionReceipt =
             /** The same exact native Surface is still foreground and is safe to freshly observe; the action outcome remains unknown. */
             readonly kind: "native_surface_reconfirmed";
             readonly surfaceRef: SurfaceRef;
+          }
+        | {
+            /** The exact primary desktop Surface is still the action scope and is safe to freshly observe; the action outcome remains unknown. */
+            readonly kind: "desktop_surface_reconfirmed";
+            readonly surfaceRef: SurfaceRef;
           };
     }
   | {
@@ -1086,6 +1094,12 @@ export interface ContextTrace {
   observationIncluded: boolean;
   monitorGuidanceIncluded?: boolean;
   monitorGuidanceOmittedReason?: "budget";
+  operationGuidance?: {
+    readonly id: string;
+    readonly fingerprint: string;
+    readonly included: boolean;
+    readonly omittedReason?: "budget";
+  };
   preparedRequest?: PreparedRequestMetadata;
 }
 
@@ -1104,7 +1118,7 @@ export type RuntimeEventData =
       to: SurfaceRef;
       reason: SurfaceTransitionReason;
     }
-  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
+  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; maxWireInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
       type: "model.request.failed";

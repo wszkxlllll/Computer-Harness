@@ -598,19 +598,81 @@ describe("RuntimeEvent to RunNotice projection", () => {
       type: "runtime.error",
       category: "unknown_side_effect",
       message: "Do not speak this raw error, path, or coordinate.",
-    }))).toMatchObject({ kind: "error", text: "有项操作的结果无法确认，任务已停止。" });
+    }))).toMatchObject({ kind: "error", text: "有项操作的结果暂时无法确认，请查看当前任务状态。" });
     expect(projector.project(event(4, {
       type: "runtime.error",
       category: "partial_side_effect",
       message: "Partial Unicode input on hwnd 12345 at E:/private/document.txt",
     }))).toMatchObject({
       kind: "error",
-      text: "部分内容可能已经输入，结果无法确认，任务已停止。",
+      text: "操作可能已部分完成，结果暂时无法确认，请查看当前任务状态。",
     });
-    expect(projector.project(event(5, { type: "run.finished", outcome: "outcome_unknown" }))?.text).toBe("任务结束。");
-    expect(projector.project(event(6, {
+    expect(projector.project(event(5, {
+      type: "runtime.error",
+      category: "future_uncertain_category",
+      message: "Unknown error categories must not be assumed terminal.",
+    }))).toMatchObject({ kind: "error", text: "任务遇到问题，请查看当前任务状态。" });
+    expect(projector.project(event(6, { type: "run.finished", outcome: "outcome_unknown" }))?.text).toBe("任务结束。");
+    expect(projector.project(event(7, {
       type: "runtime.error", category: "monitor_diagnostic", message: "private Monitor exception",
     }))).toBeUndefined();
+  });
+
+  it("announces uncertain effects neutrally, then delivers fresh milestone and the actual terminal result", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    const scheduler = new RunNoticeScheduler();
+    const generation = scheduler.activateRun(runId);
+    const deliveredText: string[] = [];
+
+    const uncertain = projector.project(event(1, {
+      type: "runtime.error",
+      category: "unknown_side_effect",
+      message: "Private driver details must not be spoken.",
+    }));
+    expect(uncertain).toMatchObject({ kind: "error", delivery: "interrupt", text: "有项操作的结果暂时无法确认，请查看当前任务状态。" });
+    if (uncertain === undefined) throw new Error("expected a neutral uncertain-effect notice");
+    expect(scheduler.offer(uncertain, generation)).toMatchObject({ status: "queued" });
+    expect(scheduler.offer(uncertain, generation)).toMatchObject({ status: "duplicate" });
+    deliveredText.push(scheduler.takeNext()!.text);
+
+    expect(projector.project(observation(2, "observation-2"))).toBeUndefined();
+    expect(projector.project(modelRequestStarted(3))).toBeUndefined();
+    const milestone = projector.project(observationAssessmentEvent(4, assessment({
+      progress: { kind: "milestone", summary: "当前页面已显示查询结果。" },
+    })));
+    expect(milestone).toMatchObject({ kind: "progress", delivery: "polite", text: "当前页面已显示查询结果。" });
+    expect(scheduler.offer(milestone!, generation)).toMatchObject({ status: "queued" });
+    deliveredText.push(scheduler.takeNext()!.text);
+
+    const succeeded = projector.project(event(5, { type: "run.finished", outcome: "succeeded" }));
+    expect(succeeded).toMatchObject({ kind: "result", delivery: "interrupt", text: "任务已完成，可查看结果。" });
+    expect(scheduler.offer(succeeded!, generation)).toMatchObject({ status: "queued" });
+    deliveredText.push(scheduler.takeNext()!.text);
+    expect(deliveredText).toEqual([
+      "有项操作的结果暂时无法确认，请查看当前任务状态。",
+      "当前页面已显示查询结果。",
+      "任务已完成，可查看结果。",
+    ]);
+    expect(projector.project(event(6, { type: "run.finished", outcome: "failed" }))).toBeUndefined();
+
+    const failedProjector = new RunNoticeProjector(runId);
+    expect(failedProjector.project(event(1, { type: "run.finished", outcome: "failed" }))).toMatchObject({
+      kind: "result",
+      text: "任务未能完成。",
+    });
+  });
+
+  it.each(["unknown_side_effect", "partial_side_effect", "future_uncertain_category"])("announces the actual failed terminal result after neutral %s guidance", (category) => {
+    const projector = new RunNoticeProjector(runId);
+    const uncertain = projector.project(event(1, {
+      type: "runtime.error", category, message: "Private diagnostic details.",
+    }));
+    expect(uncertain?.kind).toBe("error");
+    expect(uncertain?.text).not.toMatch(/已停止|已结束|未能完成/u);
+    expect(projector.project(event(2, { type: "run.finished", outcome: "failed" }))).toMatchObject({
+      kind: "result", text: "任务未能完成。",
+    });
+    expect(projector.project(event(3, { type: "run.finished", outcome: "failed" }))).toBeUndefined();
   });
 });
 

@@ -9,11 +9,7 @@ import type { WindowTargetInfo } from "./application-session.js";
  * surface/action permission.
  */
 export function projectWindowTargetInventory(inventory: CuaWindowInventory): readonly WindowTargetInfo[] {
-  const visibilityIsTrusted = inventory.complete === true && inventory.truncated !== true &&
-    inventory.completeAttestation !== "negative" && (
-      inventory.source === "win32_relationship_probe" ||
-      (inventory.source === "cua_inventory" && inventory.completeAttestation === "explicit")
-    );
+  const visibilitySourceIsKnown = inventory.source === "win32_relationship_probe" || inventory.source === "cua_inventory";
   const ownerPairsAreTrusted = inventory.complete === true && inventory.truncated !== true &&
     inventory.completeAttestation !== "negative" && (
       inventory.source === "win32_relationship_probe" ||
@@ -33,11 +29,14 @@ export function projectWindowTargetInventory(inventory: CuaWindowInventory): rea
     .map((window) => [identityKey(window.target), window]));
 
   return inventory.windows.flatMap((window) => {
-    // Keep full rows available above while checking exact owner pairs, then
-    // exclude only positively known invisible, non-minimized helper windows
-    // from the user/provider target pool. Missing visibility evidence remains
-    // eligible for legacy/partial SDK inventories.
-    if (visibilityIsTrusted && window.isOnScreen === false && window.minimized === false) return [];
+    // Keep full rows available above while checking exact owner pairs. A
+    // partial/truncated inventory cannot prove global absence, but an explicit
+    // visibility value still describes this exact row. Keep unknown and
+    // minimized rows, and preserve duplicate identities for caller abstention.
+    const identity = identityKey(window.target);
+    const duplicateIdentity = counts.get(identity) !== 1;
+    if (window.cuaListed === false || (inventory.source === "win32_relationship_probe" && window.noActivate === true)) return [];
+    if (visibilitySourceIsKnown && !duplicateIdentity && window.isOnScreen === false && window.minimized === false) return [];
     const relationship = ownerPairsAreTrusted ? directOwnedChildRelationship(window, uniqueRows) : undefined;
     return [{
       pid: window.target.pid,

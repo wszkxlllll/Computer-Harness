@@ -67,6 +67,9 @@ export interface ResolvedRunConfig {
   contextMode: "raw" | "recent";
   contextMaxHistoryEvents: number;
   contextMaxInputTokens?: number;
+  contextMaxWireInputTokens?: number;
+  /** Opt-in to the bounded built-in operation-guidance catalog; defaults off. */
+  operationGuidance?: "off" | "catalog-v1";
   /** Frozen, provider-neutral answer preferences for this Run only. */
   assistantPreferences?: RunAssistantPreferencesSnapshot;
   riskProfile: "experiment" | "live-interactive";
@@ -168,6 +171,20 @@ export interface RunDependencies {
   onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
 }
 
+/**
+ * Exact diagnostics that a RunHandle has cleared by completing its own late
+ * Computer close/dispose work. Other cleanup diagnostics cannot be covered.
+ */
+export interface RunCloseConfirmation {
+  readonly kind: "late-computer-cleanup-confirmed";
+  readonly runId: RunId;
+  readonly resolvedTimedOutComputerDiagnostics: readonly {
+    readonly operation: "computer.close" | "computer.dispose";
+    readonly message: string;
+    readonly status: "timed_out";
+  }[];
+}
+
 export interface RunHandle {
   readonly runId: RunId;
   readonly config: ResolvedRunConfig;
@@ -176,6 +193,12 @@ export interface RunHandle {
   readonly eventFeed: RunEventFeed;
   start(starter?: (controller: RunController, goal: string, markControllerStarted: () => void) => Promise<RunOutcome>): Promise<RunOutcome>;
   report(): Promise<RunReport>;
-  /** Dispose before start or wait for Controller-owned cleanup after start. */
-  close(): Promise<void>;
+  /**
+   * Dispose before start or confirm all owned cleanup after start. A resolved
+   * promise is positive cleanup confirmation. When its report retains a
+   * timed-out Computer diagnostic that later succeeded, it returns that exact
+   * diagnostic in a RunId-bound confirmation. Implementations, including
+   * injected Run factories, must not cover other unresolved diagnostics.
+   */
+  close(): Promise<void | RunCloseConfirmation>;
 }

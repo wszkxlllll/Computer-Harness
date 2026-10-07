@@ -1920,7 +1920,7 @@ export async function waitForDevToolsPort(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     signal.throwIfAborted();
-    if (child.exitCode !== null) throw new DomGroundingUnavailableError("managed browser exited before DevTools became ready");
+    if (managedBrowserLauncherFailed(child)) throw new DomGroundingUnavailableError("managed browser exited before DevTools became ready");
     try {
       const portFile = join(profileRoot, "DevToolsActivePort");
       const metadata = await stat(portFile);
@@ -1949,7 +1949,7 @@ export async function waitForDevToolsBrowserEndpoint(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     signal.throwIfAborted();
-    if (child.exitCode !== null) throw new DomGroundingUnavailableError("managed browser exited before DevTools endpoint became ready");
+    if (managedBrowserLauncherFailed(child)) throw new DomGroundingUnavailableError("managed browser exited before DevTools endpoint became ready");
     try {
       return await readEndpoint(port, signal);
     } catch (error) {
@@ -1959,6 +1959,18 @@ export async function waitForDevToolsBrowserEndpoint(
     await wait(50, signal);
   }
   throw new DomGroundingUnavailableError("managed browser DevTools endpoint startup timed out");
+}
+
+/**
+ * On Windows, a browser launcher may exit successfully while the owned browser
+ * process is still bringing up its DevTools endpoint. That exit is not proof of
+ * readiness: callers still require a fresh port file, live endpoint, and the
+ * existing process/window ownership checks. Failed or signaled children remain
+ * immediate startup failures.
+ */
+function managedBrowserLauncherFailed(child: ChildProcess): boolean {
+  if (child.signalCode !== null && child.signalCode !== undefined) return true;
+  return child.exitCode !== null && child.exitCode !== undefined && child.exitCode !== 0;
 }
 
 export async function cleanupManagedBrowser(
