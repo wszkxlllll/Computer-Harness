@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type {
   JsonValue,
   ModelUsage,
@@ -454,39 +455,48 @@ export class FetchQwenHttpClient implements QwenHttpClient {
   }
 
   public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
+    signal.throwIfAborted();
     const requestController = new AbortController();
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      requestController.abort(new Error(`Qwen request deadline exceeded after ${this.requestTimeoutMs}ms`));
-    }, this.requestTimeoutMs);
-    const abortRequest = () => requestController.abort(signal.reason);
+    const deadlineAt = performance.now() + this.requestTimeoutMs;
+    let firstAbortSource: "local_request_timeout" | "run_cancelled" | undefined;
+    let firstAbortReason: unknown;
+    let rejectAbort: (reason: unknown) => void = () => {};
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    // Cancellation can happen synchronously before a transport race is installed.
+    void aborted.catch(() => {});
+    const recordFirstAbort = (source: "local_request_timeout" | "run_cancelled", reason: unknown): void => {
+      if (firstAbortSource !== undefined) return;
+      firstAbortSource = source;
+      firstAbortReason = reason;
+      rejectAbort(reason);
+      requestController.abort(reason);
+    };
+    const expireRequest = (): void => {
+      recordFirstAbort("local_request_timeout", new Error(`Qwen request deadline exceeded after ${this.requestTimeoutMs}ms`));
+    };
+    const timeout = setTimeout(expireRequest, this.requestTimeoutMs);
+    const abortRequest = () => recordFirstAbort("run_cancelled", signal.reason);
     if (signal.aborted) abortRequest();
     else signal.addEventListener("abort", abortRequest, { once: true });
-    let response: Response;
+    const checkActive = (): void => {
+      if (firstAbortSource === undefined && performance.now() >= deadlineAt) expireRequest();
+      if (firstAbortSource !== undefined) throw firstAbortReason;
+    };
+    const awaitActive = async <T>(operation: () => Promise<T>): Promise<T> => {
+      checkActive();
+      const result = await Promise.race([operation(), aborted]);
+      // Late settlement is not usable even if a blocked timer has not fired yet.
+      checkActive();
+      return result;
+    };
+    let readingBody = false;
     try {
-      response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: requestController.signal });
-    } catch (error) {
-      try {
-        if (signal.aborted) throw signal.reason ?? error;
-        if (timedOut) throw new QwenProviderError(`Qwen request timed out after ${this.requestTimeoutMs}ms`, "QWEN_REQUEST_TIMEOUT", true, "same_input");
-        throw new QwenProviderError(
-          `Qwen network request failed: ${error instanceof Error ? error.message : String(error)}`,
-          "QWEN_NETWORK_ERROR",
-          true,
-          "same_input",
-        );
-      } finally {
-        clearTimeout(timeout);
-        signal.removeEventListener("abort", abortRequest);
-      }
-    }
-    try {
-      const payload = await response.json().catch((error: unknown) => {
-        if (signal.aborted) throw signal.reason ?? error;
-        if (timedOut) throw new QwenProviderError(`Qwen response body timed out after ${this.requestTimeoutMs}ms`, "QWEN_REQUEST_TIMEOUT", true, "same_input");
-        throw new QwenProviderError(`Qwen response body could not be read: ${error instanceof Error ? error.message : String(error)}`, "QWEN_NETWORK_ERROR", true, "same_input");
-      }) as unknown;
+      checkActive();
+      const serializedBody = JSON.stringify(body);
+      checkActive();
+      const response = await awaitActive(() => fetch(url, { method: "POST", headers, body: serializedBody, signal: requestController.signal }));
+      readingBody = true;
+      const payload = await awaitActive(() => response.json()) as unknown;
       if (!response.ok) {
         const providerMessage = readQwenErrorMessage(payload);
         const retryable = response.status === 429 || response.status >= 500;
@@ -497,7 +507,20 @@ export class FetchQwenHttpClient implements QwenHttpClient {
           retryable ? "same_input" : "feedback",
         );
       }
+      checkActive();
       return payload;
+    } catch (error) {
+      if (firstAbortSource === undefined && performance.now() >= deadlineAt) expireRequest();
+      if (firstAbortSource === "run_cancelled") throw firstAbortReason;
+      if (firstAbortSource === "local_request_timeout") {
+        // The remote request may still be running; local timeout must not trigger replay.
+        throw new QwenProviderError(`Qwen ${readingBody ? "response body" : "request"} timed out after ${this.requestTimeoutMs}ms`, "QWEN_REQUEST_TIMEOUT", false, "feedback");
+      }
+      if (error instanceof QwenProviderError) throw error;
+      throw new QwenProviderError(
+        `Qwen ${readingBody ? "response body could not be read" : "network request failed"}: ${error instanceof Error ? error.message : String(error)}`,
+        "QWEN_NETWORK_ERROR", true, "same_input",
+      );
     } finally {
       clearTimeout(timeout);
       signal.removeEventListener("abort", abortRequest);

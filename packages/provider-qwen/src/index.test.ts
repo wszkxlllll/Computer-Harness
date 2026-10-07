@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { performance } from "node:perf_hooks";
 import type { AssetId, JsonValue, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
-import { Qwen38FlashAdapter, type QwenHttpClient } from "./index.js";
+import { FetchQwenHttpClient, Qwen38FlashAdapter, type QwenHttpClient } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 2 };
@@ -630,5 +631,123 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.preserve_thinking).toBe(false);
     const mixed = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [...calls, { id: "q38-control", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "success" }) } }] } }] });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mixed, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_TOOL_CALL" });
+  });
+});
+
+describe("FetchQwenHttpClient deadline and cancellation", () => {
+  const flush = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const invoke = (signal = new AbortController().signal, body: Record<string, unknown> = {}) =>
+    new FetchQwenHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid/no-network", body, {}, signal);
+
+  it("refuses pre-cancellation without dispatch, timer or signal listener", async () => {
+    vi.useFakeTimers(); const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController(); const reason = { fixture: "cancelled" }; controller.abort(reason);
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    try {
+      await expect(invoke(controller.signal)).rejects.toBe(reason);
+      expect(fetchMock).not.toHaveBeenCalled(); expect(add).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+    } finally { add.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it.each(["headers", "body"] as const)("settles timeout when %s ignores Abort forever", async (phase) => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => phase === "headers" ? new Promise<never>(() => {}) : { ok: true, status: 200, json: () => new Promise<never>(() => {}) });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = invoke().catch((error: unknown) => error); await flush(); await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+      expect(fetchMock).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it.each(["headers", "body"] as const)("does not accept late %s fulfillment or retry after timeout", async (phase) => {
+    vi.useFakeTimers(); let resolveLate: (value: unknown) => void = () => {};
+    const late = new Promise<unknown>(resolve => { resolveLate = resolve; });
+    const json = vi.fn(() => late);
+    vi.stubGlobal("fetch", vi.fn(async () => phase === "headers" ? late : { ok: true, status: 200, json }));
+    try {
+      const result = invoke().catch((error: unknown) => error); await flush(); await vi.advanceTimersByTimeAsync(10);
+      const failure = await result; expect(failure).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false });
+      resolveLate(phase === "headers" ? { ok: true, status: 200, json } : { late: true }); await flush();
+      expect(await result).toBe(failure); expect(fetch).toHaveBeenCalledTimes(1);
+      if (phase === "headers") expect(json).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it.each(["headers", "body"] as const)("preserves a Run reason while %s ignores Abort and later rejects", async (phase) => {
+    vi.useFakeTimers(); let rejectLate: (reason: unknown) => void = () => {};
+    const late = new Promise<unknown>((_resolve, reject) => { rejectLate = reject; });
+    vi.stubGlobal("fetch", vi.fn(async () => phase === "headers" ? late : { ok: true, status: 200, json: () => late }));
+    const controller = new AbortController(); const reason = { fixture: "user-cancelled" };
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    try {
+      const result = invoke(controller.signal).catch((error: unknown) => error); await flush(); controller.abort(reason);
+      expect(await result).toBe(reason); await vi.advanceTimersByTimeAsync(20);
+      rejectLate(new Error("ignored late failure")); await flush();
+      expect(await result).toBe(reason); expect(fetch).toHaveBeenCalledTimes(1);
+      expect(remove).toHaveBeenCalledWith("abort", expect.any(Function)); expect(vi.getTimerCount()).toBe(0);
+    } finally { remove.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("locks local timeout before a synchronous Run cancellation caused by the abort event", async () => {
+    vi.useFakeTimers(); const controller = new AbortController(); const reason = new Error("Run cancelled after local timeout");
+    vi.stubGlobal("fetch", vi.fn((_url: string, options: { signal: AbortSignal }) => {
+      options.signal.addEventListener("abort", () => controller.abort(reason), { once: true });
+      return new Promise<never>(() => {});
+    }));
+    try {
+      const result = invoke(controller.signal).catch((error: unknown) => error); await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("never dispatches when toJSON cancels or cancels then throws", async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    try {
+      for (const throwing of [false, true]) {
+        const controller = new AbortController(); const reason = new Error("serialization cancelled");
+        const body = { toJSON() { controller.abort(reason); if (throwing) throw new Error("later serializer failure"); return {}; } };
+        await expect(invoke(controller.signal, body)).rejects.toBe(reason);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each(["serialization", "headers", "body"] as const)("rejects a logical deadline in %s before timer delivery", async (phase) => {
+    vi.useFakeTimers(); let monotonic = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (phase === "headers") monotonic = 35;
+      return { ok: true, status: 200, json: async () => { if (phase === "body") monotonic = 35; return { late: true }; } };
+    }));
+    try {
+      const body = phase === "serialization" ? { toJSON() { monotonic = 35; return {}; } } : {};
+      await expect(invoke(new AbortController().signal, body)).rejects.toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+      expect(fetch).toHaveBeenCalledTimes(phase === "serialization" ? 0 : 1); expect(vi.getTimerCount()).toBe(0);
+    } finally { now.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("uses one deadline across headers and body and consumes a late body rejection", async () => {
+    vi.useFakeTimers(); let resolveHeaders: (value: unknown) => void = () => {};
+    let rejectBody: (reason: unknown) => void = () => {};
+    const headers = new Promise(resolve => { resolveHeaders = resolve; });
+    const body = new Promise((_resolve, reject) => { rejectBody = reject; });
+    vi.stubGlobal("fetch", vi.fn(() => headers));
+    try {
+      const result = invoke().catch((error: unknown) => error); await vi.advanceTimersByTimeAsync(7);
+      resolveHeaders({ ok: true, status: 200, json: () => body }); await flush(); await vi.advanceTimersByTimeAsync(3);
+      expect(await result).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false });
+      rejectBody(new Error("late body parse failure")); await flush(); expect(fetch).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("preserves success and ordinary HTTP retry policy before expiry", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ complete: true }) })));
+    try {
+      await expect(invoke()).resolves.toEqual({ complete: true });
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
+      await expect(invoke()).rejects.toMatchObject({ code: "QWEN_HTTP_503", retryable: true, retryMode: "same_input" });
+    } finally { vi.unstubAllGlobals(); }
   });
 });
