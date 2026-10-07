@@ -9,6 +9,8 @@ import type {
   VerifyStateInput,
   WindowPredicate,
 } from "./cua-sdk-contract.js";
+import { realpath } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export type { CuaDriverLike } from "./cua-sdk-contract.js";
 
@@ -48,12 +50,28 @@ export interface InputFactory<T> {
 }
 
 type CuaSdkModuleLoader = (alias: string) => Promise<CuaSdkModule>;
+type CuaSdkModuleImportDependencies = {
+  readonly resolve: (specifier: string) => string;
+  readonly realpath: (path: string) => Promise<string>;
+  readonly importModule: (url: string) => Promise<CuaSdkModule>;
+};
 
 const cachedModules = new Map<string, Promise<CuaSdkModule>>();
 let testModuleLoader: CuaSdkModuleLoader | undefined;
+let testImportDependencies: CuaSdkModuleImportDependencies | undefined;
+
+const defaultImportDependencies: CuaSdkModuleImportDependencies = {
+  resolve: (specifier) => import.meta.resolve(specifier),
+  realpath,
+  importModule: (url) => import(/* @vite-ignore */ url) as Promise<CuaSdkModule>,
+};
 
 async function importCuaSdkModule(alias: string): Promise<CuaSdkModule> {
-  return await import(/* @vite-ignore */ alias) as unknown as CuaSdkModule;
+  const dependencies = testImportDependencies ?? defaultImportDependencies;
+  const resolved = new URL(dependencies.resolve(alias));
+  if (resolved.protocol !== "file:") throw new TypeError("CUA SDK entry must resolve to a file URL");
+  const canonicalPath = await dependencies.realpath(fileURLToPath(resolved));
+  return await dependencies.importModule(pathToFileURL(canonicalPath).href);
 }
 
 /** Load the platform-specific SDK only when an operation actually needs CUA. */
@@ -73,6 +91,12 @@ export function loadCuaSdkModule(platform: NodeJS.Platform = process.platform): 
 /** Internal test seam. It is intentionally not re-exported from the package entrypoint. */
 export function setCuaSdkModuleLoaderForTests(loader: CuaSdkModuleLoader | undefined): void {
   testModuleLoader = loader;
+  cachedModules.clear();
+}
+
+/** Internal test seam for the default ESM resolution and canonical import route. */
+export function setCuaSdkModuleImportDependenciesForTests(dependencies: CuaSdkModuleImportDependencies | undefined): void {
+  testImportDependencies = dependencies;
   cachedModules.clear();
 }
 
