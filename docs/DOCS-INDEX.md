@@ -1,5 +1,9 @@
 # Computer Harness 文档索引
 
+## 当前体验优化与上游跟进（2026-10-09）
+
+[手机端适老化与无障碍体验审查、实施记录](./mobile-accessibility-experience-review-2026-10-08.md)：保留现有布局，收敛输入、状态、审批、结果重听、连接恢复和字号重排；实现与Sol复核完成，完整Web回归195项、隔离浏览器检查74项通过，尚未部署，不冒充真实用户验收。CUA [PR #4836](https://github.com/trycua/cua/pull/4836) 的CLA已按用户授权签署并通过；精确PR源码的云端单测、Release编译和产物构建通过，Ready仍需原生桌面证据，真实记事本补验与官方Windows矩阵进行中，详见[统一修复记录](./window-popup-regression-2026-10-04.md)。
+
 ## 使用、构建与许可
 
 [项目概览与手机体验说明](../README.md)注明公共 Demo Relay 尚未开放，并提供 Windows 本机 Host 启动前置、平台状态、安全边界和许可入口；[开发者上手](./getting-started.md)补充模型、CUA、OSWorld和排错步骤。项目许可见根目录[LICENSE](../LICENSE)，直接依赖与 CUA notices 见[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
