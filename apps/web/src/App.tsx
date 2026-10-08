@@ -83,12 +83,12 @@ function PhoneSessionGate({ children }: { children: ReactNode }) {
     return <VoiceInputCapabilitiesContext.Provider value={voiceInputCapabilities}>{children}</VoiceInputCapabilitiesContext.Provider>;
   }
   if (state === "loading") {
-    return <main className="page-shell"><div className="loading-panel" role="status">正在连接你的电脑…</div></main>;
+    return <main id="main-content" className="page-shell" tabIndex={-1}><div className="loading-panel" role="status">正在连接你的电脑…</div></main>;
   }
   return (
     <>
       <BrandHeader />
-      <main className="page-shell narrow-page">
+      <main id="main-content" className="page-shell narrow-page" tabIndex={-1}>
         <p className="eyebrow">手机控制台</p>
         <h1 className="page-title">{state === "unpaired" ? "先连接你的电脑" : "电脑暂时没有响应"}</h1>
         <div className={`notice ${state === "unpaired" ? "notice-info" : "notice-warning"}`} role={state === "offline" ? "alert" : "status"}>

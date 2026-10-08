@@ -2,11 +2,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunWorkspace } from "./RunWorkspace";
+import { RunSpeechActions, RunWorkspace } from "./RunWorkspace";
 import { PreferencesProvider } from "./PreferencesContext";
 import { useRunFeed } from "./hooks/useRunFeed";
 import { useRunCommands } from "./hooks/useRunCommands";
-import type { ApprovalEvidence, RunSnapshot } from "./types";
+import type { ApprovalEvidence, RunNotice, RunSnapshot } from "./types";
 import { DEFAULT_PREFERENCES, PREFERENCES_STORAGE_KEY } from "./preferences";
 import type { VoiceCapabilities } from "./voice-capabilities";
 import type { VoiceOutputSession } from "@computer-harness/voice";
@@ -74,6 +74,216 @@ afterEach(() => {
 });
 
 describe("request-bound screenshot lifecycle", () => {
+  it("disables manual progress and result reading during voice input but leaves stop reading available", () => {
+    render(<RunSpeechActions voiceInputActive hasResult onReadProgress={vi.fn()} onReadResult={vi.fn()} onStop={vi.fn()} />);
+
+    expect((screen.getByRole("button", { name: "听听进度" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "朗读结果" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "停止朗读" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows current Host progress and update time in simple mode, with a keyboard skip target", () => {
+    localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_PREFERENCES,
+      presentation: { ...DEFAULT_PREFERENCES.presentation, layoutMode: "simple" },
+    }));
+    const latestNotice: RunNotice = {
+      noticeId: "progress-latest",
+      kind: "progress",
+      text: "电脑已打开查询结果页面。",
+      delivery: "polite",
+      eventSequence: 8,
+      feedSequence: 5,
+    };
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "running",
+        sequence: 5,
+        updatedAt: "2026-10-08T02:03:04.000Z",
+        reply: "电脑返回的查询结果。",
+        capabilities: { correct: true },
+        pendingRequest: undefined,
+      },
+      notices: [
+        { ...latestNotice, noticeId: "progress-old", text: "较早的进展。", feedSequence: 4 },
+        latestNotice,
+      ],
+    };
+
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    expect(screen.getByText("电脑正在处理")).toBeDefined();
+    expect(document.querySelector(".run-activity-copy")?.textContent)
+      .toContain("上次进展：电脑已打开查询结果页面。");
+    expect(screen.queryByText("较早的进展。")).toBeNull();
+    expect(screen.getByText(/更新于/)).toBeDefined();
+    const statusDetails = document.querySelector(".run-activity-details") as HTMLDetailsElement;
+    expect(statusDetails.open).toBe(false);
+    expect(statusDetails.textContent).toContain("刷新只读取最新状态，不会重新开始任务。");
+    expect(screen.getByRole("button", { name: "听听进度" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "朗读结果" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "跳到主要内容" }).getAttribute("href")).toBe("#main-content");
+    expect(document.getElementById("main-content")?.tagName).toBe("MAIN");
+  });
+
+  it("shows the latest real Runtime progress event when optional spoken progress text is absent", () => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "running",
+        capabilities: {},
+        pendingRequest: undefined,
+      },
+      events: [{
+        runId: "run-1",
+        sequence: 6,
+        type: "run.progress",
+        data: { phase: "action", status: "completed" },
+      }],
+      notices: [],
+    };
+
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    expect(document.querySelector(".run-activity-copy")?.textContent).toContain("电脑完成了一步操作");
+    expect(screen.queryByText("上次进展：暂无文字记录。")).toBeNull();
+  });
+
+  it.each([
+    ["paused", "任务已暂停"],
+    ["waiting_approval", "等你确认操作"],
+    ["finished", "任务已结束"],
+  ] as const)("keeps %s authoritative when the last progress event is older", (status, statusText) => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status,
+        sequence: 12,
+        capabilities: status === "waiting_approval" ? { approval: true } : {},
+        pendingRequest: status === "waiting_approval" ? approval.pendingRequest : undefined,
+      },
+      events: [{
+        runId: "run-1",
+        sequence: 11,
+        type: "run.progress",
+        data: { phase: "model", status: "started" },
+      }],
+      notices: [],
+    };
+
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    expect(document.querySelector(".run-activity-current-status")?.textContent).toContain(statusText);
+    expect(document.querySelector(".run-activity-copy")?.textContent)
+      .toBe("上次进展：模型正在分析当前画面");
+  });
+
+  it("offers a direct status retry when the initial snapshot fails and does not imply the task stopped", async () => {
+    feedState = { ...feedState, snapshot: undefined, error: "电脑暂时无法连接。", connection: "offline" };
+    vi.mocked(commands.refreshStatus).mockResolvedValueOnce(undefined);
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    expect(screen.getByText(/任务目前情况未知；连接中断不代表任务已经停止/)).toBeDefined();
+    const reason = document.querySelector(".run-error-details") as HTMLDetailsElement;
+    expect(reason.open).toBe(false);
+    expect(reason.textContent).toContain("电脑暂时无法连接。");
+    fireEvent.click(screen.getByRole("button", { name: "重试读取任务状态" }));
+    await waitFor(() => expect(commands.refreshStatus).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "重试读取任务状态" })).toBeDefined();
+  });
+
+  it("speaks current progress and result on request with auto notices off, and keeps global stop available", async () => {
+    localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_PREFERENCES,
+      voice: { runNoticesEnabled: false, speechRate: "fast" },
+    }));
+    const spoken: string[] = [];
+    const cancel = vi.fn(async () => undefined);
+    const outputSession: VoiceOutputSession = {
+      enqueueText: async ({ text }) => { spoken.push(text); },
+      finish: async () => undefined,
+      cancel,
+    };
+    const openSession = vi.fn(async () => outputSession);
+    const voiceCapabilities: VoiceCapabilities = { createOutputAdapter: () => ({ openSession }) };
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "running",
+        sequence: 3,
+        updatedAt: "2026-10-08T02:03:04.000Z",
+        reply: "已找到两个选项。",
+        capabilities: { correct: true },
+        pendingRequest: undefined,
+      },
+      notices: [{
+        noticeId: "manual-progress",
+        kind: "progress",
+        text: "电脑已打开查询结果页面。",
+        delivery: "polite",
+        eventSequence: 3,
+        feedSequence: 3,
+      }],
+    };
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" voiceCapabilities={voiceCapabilities} /></PreferencesProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "听听进度" }));
+    await waitFor(() => expect(spoken).toHaveLength(1));
+    expect(spoken[0]).toContain("当前任务状态：电脑正在处理。");
+    expect(spoken[0]).toContain("最近一次进展：电脑已打开查询结果页面。");
+    expect(spoken[0]).toContain("可能早于当前状态");
+    expect(spoken[0]).toContain("电脑已打开查询结果页面。");
+    expect(openSession).toHaveBeenCalledWith({ speechRate: 1.15 });
+
+    fireEvent.click(screen.getByRole("button", { name: "朗读结果" }));
+    await waitFor(() => expect(spoken).toHaveLength(2));
+    expect(spoken[1]).toContain("已找到两个选项。");
+    expect(cancel).not.toHaveBeenCalled();
+
+    feedState = { ...feedState, notices: [...feedState.notices, {
+      noticeId: "new-progress-while-manual-speech-enabled",
+      kind: "progress",
+      text: "电脑正在整理结果。",
+      delivery: "polite",
+      eventSequence: 4,
+      feedSequence: 4,
+    }] };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" voiceCapabilities={voiceCapabilities} /></PreferencesProvider>);
+    expect(cancel).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "停止朗读" }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("user"));
+  });
+
+  it("shows visible speech fallback text when an output adapter is unavailable", async () => {
+    const voiceCapabilities: VoiceCapabilities = {
+      createOutputAdapter: () => ({
+        openSession: async () => { throw new Error("speech unavailable"); },
+      }),
+    };
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "running",
+        capabilities: {},
+        pendingRequest: undefined,
+      },
+      notices: [],
+    };
+    render(<PreferencesProvider><RunWorkspace runId="run-1" voiceCapabilities={voiceCapabilities} /></PreferencesProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "听听进度" }));
+
+    expect(await screen.findByText(/语音播报未能播放.*speech unavailable/)).toBeDefined();
+    expect(screen.getByText("上次进展：暂无文字记录。")).toBeDefined();
+  });
+
   it("routes pause and the exact correction text through the current Run controls", () => {
     feedState = {
       ...feedState,

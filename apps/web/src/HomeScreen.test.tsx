@@ -119,10 +119,10 @@ describe("home run-target selection", () => {
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: `Run in ${_name} mode` } });
-    const switchInput = screen.getByRole("switch", { name: /跨应用完成任务/ }) as HTMLInputElement;
+    const switchInput = screen.getByRole("switch", { name: /允许切换其他应用/ }) as HTMLInputElement;
     expect(switchInput.checked).toBe(false);
     expect(switchInput.getAttribute("aria-describedby")).toBe("cross-window-run-switch-help");
-    expect(screen.getByText(/应用名和标题会发送给当前模型/)).toBeDefined();
+    expect(screen.getByText(/窗口名称、标题和相关网页内容可能随本次任务发送给所选服务/)).toBeDefined();
     fireEvent.click(switchInput);
 
     chooseStartMode(modeLabel);
@@ -131,6 +131,8 @@ describe("home run-target selection", () => {
     await screen.findByText("这里还没有任务");
     if (_name === "browser") {
       expect(screen.queryByRole("radio", { name: /本机已准备|临时空白/ })).toBeNull();
+      expect(screen.getByText(/电脑会打开网站，并按页面上的内容完成任务/)).toBeDefined();
+      expect(screen.getByText(/是否沿用登录状态，按电脑上的浏览器设置决定/)).toBeDefined();
     }
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 

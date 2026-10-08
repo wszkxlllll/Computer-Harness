@@ -151,7 +151,7 @@ function errorMessageForCode(code?: string): string | undefined {
     VOICE_FINISH_TIMEOUT: "语音识别没有及时完成。请重试，或检查转写内容后再提交。",
     VOICE_SESSION_ACTIVE: "这台手机已有一段录音正在处理。请先结束或取消它。",
     VOICE_SESSION_EXPIRED: "录音时间过长或连接中断，请重新开始。",
-    VOICE_AUDIO_LIMIT: "录音已达到时长上限。请停止录音后检查转写内容。",
+    VOICE_AUDIO_LIMIT: "录音已达到时长上限。请结束录音后检查转写内容。",
     VOICE_EVENT_GAP: "录音进度连接中断，请重新录制这段语音。",
     INVALID_AUDIO_CHUNK: "录音数据格式不受支持，请重试或改用文字输入。",
   };

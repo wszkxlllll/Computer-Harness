@@ -17,6 +17,7 @@ interface PendingRequestPanelProps {
   canChooseWindow?: boolean;
   reviewBlocked?: boolean;
   voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
+  onVoiceActiveChange?: (active: boolean) => void;
   onApprove: (approved: boolean) => Promise<void>;
   onRespond: (text: string) => Promise<boolean>;
   onChooseWindow: (candidate: WindowCandidate, previewToken?: string) => Promise<void>;
@@ -34,6 +35,7 @@ export function PendingRequestPanel({
   canChooseWindow = true,
   reviewBlocked = false,
   voiceCaptureAdapterFactory,
+  onVoiceActiveChange,
   onApprove,
   onRespond,
   onChooseWindow,
@@ -214,11 +216,16 @@ export function PendingRequestPanel({
     <section className="pending-panel" aria-labelledby="pending-title">
       <h2 id="pending-title">{title}</h2>
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
+      {request.kind === "approval" && isComputerActionApproval && request.reason && (
+        <div className="approval-request-reason">
+          <p className="pending-description">{request.reason}</p>
+          <p className="field-hint">这段文字说明本身不是屏幕证据；请核对下方与本次请求绑定的画面，无法核对时请拒绝。</p>
+        </div>
+      )}
       {request.kind === "approval" && request.reason && !isComputerActionApproval && <p className="pending-description">{request.reason}</p>}
-      {request.kind === "approval" && ((isComputerActionApproval && request.reason) || actions.length > 0) && (
+      {request.kind === "approval" && (actions.length > 0 || request.preview !== undefined) && (
         <details className="approval-more-details">
-          <summary>更多信息</summary>
-          {isComputerActionApproval && request.reason && <p>{request.reason}</p>}
+          <summary>更多操作参数</summary>
           {request.preview && <ApprovalActionParameters preview={request.preview} />}
         </details>
       )}
@@ -246,7 +253,7 @@ export function PendingRequestPanel({
       {request.kind === "approval" && isComputerActionApproval && !evidenceCanBeReviewed && (
         <p className="notice notice-error approval-preview-fallback" role="alert">这项电脑操作没有可打开的请求绑定画面，无法核对目标；暂时不能批准。请刷新任务状态，或拒绝这项请求。</p>
       )}
-      {request.kind === "approval" && !request.preview && (
+      {request.kind === "approval" && !isComputerActionApproval && !request.preview && (
         <p className="notice notice-warning approval-preview-fallback" role="note">电脑没有提供操作参数。请根据请求说明自行判断是否处理。</p>
       )}
       {request.kind === "approval" && isComputerActionApproval && evidenceCanBeReviewed && !evidenceLoaded && (
@@ -273,7 +280,7 @@ export function PendingRequestPanel({
         <p className="field-hint" role="status">电脑暂时没有提供处理这项确认的能力，请刷新任务状态。</p>
       )}
 
-      {request.kind === "user_input" && <UserReplyForm key={request.requestId} busy={controlsDisabled} voiceCaptureAdapterFactory={voiceCaptureAdapterFactory} onSubmit={onRespond} />}
+      {request.kind === "user_input" && <UserReplyForm key={request.requestId} busy={controlsDisabled} voiceCaptureAdapterFactory={voiceCaptureAdapterFactory} onVoiceActiveChange={onVoiceActiveChange} onSubmit={onRespond} />}
 
       {request.kind === "window_handoff" && canChooseWindow && (
         <div className="window-choice-list" role="group" aria-label="可选择的窗口">
@@ -360,7 +367,7 @@ function formatCapturedAt(value: string): string {
     : "读取时间未知";
 }
 
-function UserReplyForm({ busy, voiceCaptureAdapterFactory, onSubmit }: { busy: boolean; voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter; onSubmit: (text: string) => Promise<boolean> }) {
+function UserReplyForm({ busy, voiceCaptureAdapterFactory, onVoiceActiveChange, onSubmit }: { busy: boolean; voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter; onVoiceActiveChange?: (active: boolean) => void; onSubmit: (text: string) => Promise<boolean> }) {
   const [text, setText] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
   const formDisabled = busy || voiceActive;
@@ -372,11 +379,16 @@ function UserReplyForm({ busy, voiceCaptureAdapterFactory, onSubmit }: { busy: b
     if (await onSubmit(value)) setText("");
   }
 
+  function updateVoiceActive(active: boolean) {
+    setVoiceActive(active);
+    onVoiceActiveChange?.(active);
+  }
+
   return (
     <form className="reply-form" onSubmit={submit}>
       <label htmlFor="request-reply">你的补充</label>
       <textarea id="request-reply" rows={3} value={text} onChange={(event) => setText(event.currentTarget.value)} required disabled={formDisabled} />
-      <VoiceInputControl disabled={busy} onActiveChange={setVoiceActive} onTranscript={(recognized) => setText((current) => appendVoiceInputText(current, recognized))} createCaptureAdapter={voiceCaptureAdapterFactory} />
+      <VoiceInputControl disabled={busy} onActiveChange={updateVoiceActive} onTranscript={(recognized) => setText((current) => appendVoiceInputText(current, recognized))} createCaptureAdapter={voiceCaptureAdapterFactory} />
       <button className="button button-primary button-large" type="submit" disabled={formDisabled || !text.trim()}>发送补充</button>
     </form>
   );

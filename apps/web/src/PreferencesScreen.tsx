@@ -151,7 +151,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
 
   return (
     <PhoneLayout active="settings">
-      <main className="page-shell preferences-page" aria-labelledby="preferences-title">
+      <main id="main-content" className="page-shell preferences-page" aria-labelledby="preferences-title" tabIndex={-1}>
         <h1 id="preferences-title" className="page-title">设置</h1>
 
         <section className="preferences-section" aria-labelledby="display-preferences-title">

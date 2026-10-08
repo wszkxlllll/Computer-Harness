@@ -73,6 +73,8 @@ describe("phone pairing screen", () => {
     render(<PairingScreen />);
     await flushEffects();
     expect(getPairRequest).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/电脑确认后，此页会显示连接结果/)).toBeDefined();
+    expect(screen.queryByText(/自动进入任务列表/)).toBeNull();
 
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(getPairRequest).toHaveBeenCalledTimes(1);

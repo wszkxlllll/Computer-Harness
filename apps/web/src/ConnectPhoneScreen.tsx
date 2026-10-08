@@ -98,7 +98,7 @@ export function ConnectPhoneScreen() {
   return (
     <>
       <BrandHeader mode="computer" />
-      <main className="page-shell connect-page">
+      <main id="main-content" className="page-shell connect-page" tabIndex={-1}>
         <h1 className="page-title">连接管理</h1>
         <details className="connection-guide">
           <summary>连接说明</summary>

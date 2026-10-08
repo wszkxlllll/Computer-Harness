@@ -32,7 +32,7 @@ export function EventTimeline({ events, simplified = false }: EventTimelineProps
   );
 }
 
-function eventLabel(event: RemoteEvent): string | undefined {
+export function eventLabel(event: RemoteEvent): string | undefined {
   if (event.type === "run.progress") return progressLabel(event.data);
   if (event.type === "run.notice" && typeof event.data?.text === "string") return event.data.text.slice(0, 320);
   if (event.type === "run.surface_transition") {

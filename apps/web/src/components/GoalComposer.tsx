@@ -120,8 +120,8 @@ export function GoalComposer({
 
       <label className="preference-toggle" htmlFor="cross-window-run-switch">
         <span className="preference-toggle-copy">
-          <strong>跨应用完成任务</strong>
-          <span id="cross-window-run-switch-help">启用后，模型可以列出和切换已打开窗口；应用名和标题会发送给当前模型，可能包含文件名或个人信息。电脑也会按设置准备受管浏览器；浏览器页面内容可能用于本次任务。</span>
+          <strong>允许切换其他应用</strong>
+          <span id="cross-window-run-switch-help">开启后，电脑可查看并切换已打开的窗口。窗口名称、标题和相关网页内容可能随本次任务发送给所选服务。</span>
         </span>
         <input
           id="cross-window-run-switch"
@@ -149,7 +149,7 @@ export function GoalComposer({
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="browser" checked={targetMode === "browser"} onChange={() => changeMode("browser")} />
-              <span className="target-mode-copy"><strong>打开网站（推荐）</strong><span>使用受管浏览器和基于页面元素的可验证操作；登录状态使用电脑设置，起始网址可选。</span></span>
+              <span className="target-mode-copy"><strong>打开网站（推荐）</strong><span>电脑会打开网站，并按页面上的内容完成任务。是否使用已登录状态，取决于电脑上的浏览器设置；网址可留空。</span></span>
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="desktop" checked={targetMode === "desktop"} onChange={() => changeMode("desktop")} />
@@ -203,7 +203,7 @@ export function GoalComposer({
             aria-invalid={browserUrlInvalid}
             disabled={formDisabled}
           />
-          <p id="browser-target-help" className="field-hint">留空会打开空白页。浏览器状态使用电脑「浏览器与登录状态」设置的默认值。</p>
+          <p id="browser-target-help" className="field-hint">留空会打开空白页。是否沿用登录状态，按电脑上的浏览器设置决定。</p>
           {browserUrlInvalid && <p id="browser-target-error" className="inline-error" role="alert">请输入完整的 http:// 或 https:// 地址。</p>}
         </div>
       )}

@@ -359,7 +359,9 @@ describe("pending request panel", () => {
       />,
     );
 
-    expect(screen.getByText("This operation requires approval.")).toBeDefined();
+    const reason = screen.getByText("This operation requires approval.");
+    expect(reason.closest("details")).toBeNull();
+    expect(screen.getByText(/这段文字说明本身不是屏幕证据/)).toBeDefined();
     expect(document.querySelector(".approval-action-summary")?.textContent).toContain("点击");
     expect(screen.getByText("输入 12 字")).toBeDefined();
     expect(screen.getByText("按 Ctrl + L")).toBeDefined();
@@ -372,7 +374,7 @@ describe("pending request panel", () => {
     expect(screen.getByText("窗口目标核对信息（主机清单）")).toBeDefined();
     expect(screen.getByText("WPS · Review draft - unsaved")).toBeDefined();
     expect(screen.getByText(/选择时/)).toBeDefined();
-    const moreDetails = screen.getByText("更多信息").closest("details") as HTMLDetailsElement;
+    const moreDetails = screen.getByText("更多操作参数").closest("details") as HTMLDetailsElement;
     expect(moreDetails.open).toBe(false);
     moreDetails.open = true;
     expect(screen.getByText("This operation requires approval.")).toBeDefined();
@@ -459,7 +461,7 @@ describe("pending request panel", () => {
     expect(screen.getByText(/请核对目标和画面/)).toBeDefined();
     expect(screen.getByText(/电脑无法证明机器焦点/)).toBeDefined();
     expect(screen.getByText(/读屏无法读取截图/)).toBeDefined();
-    const actionDetails = screen.getByText("更多信息").closest("details") as HTMLDetailsElement;
+    const actionDetails = screen.getByText("更多操作参数").closest("details") as HTMLDetailsElement;
     const evidenceDetails = screen.getByText("截图与坐标信息").closest("details") as HTMLDetailsElement;
     expect(actionDetails.open).toBe(false);
     expect(evidenceDetails.open).toBe(false);

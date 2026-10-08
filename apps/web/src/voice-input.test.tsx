@@ -142,14 +142,16 @@ describe("voice input control", () => {
     );
 
     expect(createCaptureAdapter).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
-    await screen.findByRole("button", { name: "停止录音" });
+    expect(screen.getByText(/最长 60 秒/)).toBeDefined();
+    expect(screen.getByText(/识别后检查文字，再手动发送/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    await screen.findByRole("button", { name: "结束录音" });
     expect(createCaptureAdapter).toHaveBeenCalledWith(3_200);
     expect(onTranscript).not.toHaveBeenCalled();
 
     await act(async () => { capture.emitChunk(); });
     await screen.findByText("上海到杭州");
-    fireEvent.click(screen.getByRole("button", { name: "停止录音" }));
+    fireEvent.click(screen.getByRole("button", { name: "结束录音" }));
 
     await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("请查询上海到杭州的车票。"));
     expect(capture.stopped).toBe(true);
@@ -157,7 +159,7 @@ describe("voice input control", () => {
     expect(sentChunks).toEqual([0, 1]);
     expect(vi.mocked(appendVoiceAudio).mock.calls[0]?.[1]).toHaveLength(1);
     expect(finishVoiceInput).toHaveBeenCalledWith("voice-session-1", 3);
-    expect(screen.getByText("识别结果已填入输入框，请检查并编辑后再发送。")).toBeDefined();
+    expect(screen.getByText("识别结果已填入输入框；检查后再手动发送。")).toBeDefined();
   });
 
   it("cancels capture and the Host session without committing partial recognition", async () => {
@@ -168,8 +170,8 @@ describe("voice input control", () => {
         <VoiceInputControl onTranscript={onTranscript} createCaptureAdapter={() => ({ start: async () => capture })} />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
-    await screen.findByRole("button", { name: "停止录音" });
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    await screen.findByRole("button", { name: "结束录音" });
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     await waitFor(() => expect(cancelVoiceInput).toHaveBeenCalledWith("voice-session-1", 2));
     expect(capture.cancelled).toBe(true);
@@ -202,15 +204,15 @@ describe("voice input control", () => {
       </VoiceInputCapabilitiesContext.Provider>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
-    await screen.findByRole("button", { name: "停止录音" });
-    fireEvent.click(screen.getByRole("button", { name: "停止录音" }));
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    await screen.findByRole("button", { name: "结束录音" });
+    fireEvent.click(screen.getByRole("button", { name: "结束录音" }));
     await waitFor(() => expect(finishVoiceInput).toHaveBeenCalledWith("voice-old", 3));
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     await waitFor(() => expect(cancelVoiceInput).toHaveBeenCalledWith("voice-old", 3));
 
     fireEvent.click(screen.getByRole("button", { name: "重新录音" }));
-    await screen.findByRole("button", { name: "停止录音" });
+    await screen.findByRole("button", { name: "结束录音" });
     releaseOldFinish({
       sessionId: "voice-old",
       events: [
@@ -223,7 +225,7 @@ describe("voice input control", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(onTranscript).not.toHaveBeenCalled();
     expect(screen.queryByText("旧任务结果")).toBeNull();
-    expect(screen.getByText("正在录音。再次按“停止录音”后，识别结果会填入输入框供你编辑。")).toBeDefined();
+    expect(screen.getByText("正在录音，最长 60 秒。点“结束录音”后检查文字，再手动发送。")).toBeDefined();
     await secondCapture.cancel();
   });
 
@@ -247,7 +249,7 @@ describe("voice input control", () => {
         />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    expect(screen.getByRole("button", { name: "按下说话" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "点击开始录音" })).toBeDefined();
     goal.unmount();
 
     const correction = render(
@@ -255,7 +257,7 @@ describe("voice input control", () => {
         <CorrectionForm onSubmit={vi.fn(async () => true)} />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    expect(screen.getByRole("button", { name: "按下说话" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "点击开始录音" })).toBeDefined();
     correction.unmount();
 
     render(
@@ -269,7 +271,7 @@ describe("voice input control", () => {
         />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    expect(screen.getByRole("button", { name: "按下说话" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "点击开始录音" })).toBeDefined();
   });
 
   it("locks each parent form against edits and submission throughout capture/finalization", async () => {
@@ -291,8 +293,8 @@ describe("voice input control", () => {
       </VoiceInputCapabilitiesContext.Provider>,
     );
     fireEvent.change(screen.getByLabelText("想让电脑做什么？"), { target: { value: "查询天气" } });
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
-    await screen.findByRole("button", { name: "停止录音" });
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    await screen.findByRole("button", { name: "结束录音" });
     expect((screen.getByLabelText("想让电脑做什么？") as HTMLTextAreaElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.submit(screen.getByRole("button", { name: "开始任务" }).closest("form")!);
@@ -303,27 +305,32 @@ describe("voice input control", () => {
 
     const correctionCapture = new FakeCapture();
     const correctionSubmit = vi.fn(async () => true);
+    const correctionVoiceActiveChange = vi.fn();
     const correction = render(
       <VoiceInputCapabilitiesContext.Provider value={capabilities}>
-        <CorrectionForm voiceCaptureAdapterFactory={() => ({ start: async () => correctionCapture })} onSubmit={correctionSubmit} />
+        <CorrectionForm voiceCaptureAdapterFactory={() => ({ start: async () => correctionCapture })} onVoiceActiveChange={correctionVoiceActiveChange} onSubmit={correctionSubmit} />
       </VoiceInputCapabilitiesContext.Provider>,
     );
     fireEvent.change(screen.getByLabelText("补充或修正任务要求"), { target: { value: "不要打开付款页" } });
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
-    await screen.findByRole("button", { name: "停止录音" });
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    await screen.findByRole("button", { name: "结束录音" });
+    expect(correctionVoiceActiveChange).toHaveBeenLastCalledWith(true);
     expect((screen.getByLabelText("补充或修正任务要求") as HTMLTextAreaElement).disabled).toBe(true);
     fireEvent.submit(screen.getByLabelText("补充或修正任务要求").closest("form")!);
     expect(correctionSubmit).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(correctionVoiceActiveChange).toHaveBeenLastCalledWith(false));
     correction.unmount();
 
     const answerCapture = new FakeCapture();
     const answerSubmit = vi.fn(async () => true);
+    const answerVoiceActiveChange = vi.fn();
     render(
       <VoiceInputCapabilitiesContext.Provider value={capabilities}>
         <PendingRequestPanel
           request={{ requestId: "input-busy", kind: "user_input", question: "补充一下？" }}
           voiceCaptureAdapterFactory={() => ({ start: async () => answerCapture })}
+          onVoiceActiveChange={answerVoiceActiveChange}
           onApprove={vi.fn()}
           onRespond={answerSubmit}
           onChooseWindow={vi.fn()}
@@ -332,12 +339,14 @@ describe("voice input control", () => {
       </VoiceInputCapabilitiesContext.Provider>,
     );
     fireEvent.change(screen.getByLabelText("你的补充"), { target: { value: "上海出发" } });
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
-    await screen.findByRole("button", { name: "停止录音" });
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    await screen.findByRole("button", { name: "结束录音" });
+    expect(answerVoiceActiveChange).toHaveBeenLastCalledWith(true);
     expect((screen.getByLabelText("你的补充") as HTMLTextAreaElement).disabled).toBe(true);
     fireEvent.submit(screen.getByLabelText("你的补充").closest("form")!);
     expect(answerSubmit).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(answerVoiceActiveChange).toHaveBeenLastCalledWith(false));
   });
 
   it("keeps text entry available and the microphone unopened when Host capability is unavailable", () => {
@@ -347,7 +356,7 @@ describe("voice input control", () => {
         <VoiceInputControl onTranscript={vi.fn()} createCaptureAdapter={createCaptureAdapter} />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    expect((screen.getByRole("button", { name: "按下说话" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "点击开始录音" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("语音输入尚不可用，仍可直接输入文字。")).toBeDefined();
     expect(createCaptureAdapter).not.toHaveBeenCalled();
   });
@@ -361,9 +370,9 @@ describe("voice input control", () => {
         <VoiceInputControl onTranscript={onTranscript} createCaptureAdapter={() => ({ start: async () => capture })} />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
-    await screen.findByRole("button", { name: "停止录音" });
-    fireEvent.click(screen.getByRole("button", { name: "停止录音" }));
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    await screen.findByRole("button", { name: "结束录音" });
+    fireEvent.click(screen.getByRole("button", { name: "结束录音" }));
     await waitFor(() => expect(cancelVoiceInput).toHaveBeenCalledWith("voice-session-1", 2));
     expect(finishVoiceInput).not.toHaveBeenCalled();
     expect(onTranscript).not.toHaveBeenCalled();
@@ -377,11 +386,11 @@ describe("voice input control", () => {
         <VoiceInputControl onTranscript={onTranscript} createCaptureAdapter={() => ({ start: async () => capture })} />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "按下说话" }));
+    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
     await waitFor(() => expect(finishVoiceInput).toHaveBeenCalledWith("voice-session-1", expect.any(Number)));
     expect(capture.stopped).toBe(true);
     expect(cancelVoiceInput).not.toHaveBeenCalled();
     expect(onTranscript).toHaveBeenCalledWith("请查询上海到杭州的车票。");
-    expect(screen.getByText("已到 60 秒上限，完整识别结果已填入输入框，请检查后再发送。")).toBeDefined();
+    expect(screen.getByText("已到 1 秒上限，完整识别结果已填入输入框，请检查后再发送。")).toBeDefined();
   });
 });

@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CorrectionForm } from "./components/CorrectionForm";
 import { ConnectionNote } from "./components/ConnectionNote";
-import { EventTimeline } from "./components/EventTimeline";
+import { EventTimeline, eventLabel } from "./components/EventTimeline";
 import { PendingRequestPanel } from "./components/PendingRequestPanel";
 import { PhoneLayout } from "./components/PhoneLayout";
 import { ResultPanel } from "./components/ResultPanel";
 import { ScreenshotPanel } from "./components/ScreenshotPanel";
-import { StatusLabel, statusTextFor } from "./components/StatusLabel";
+import { statusTextFor } from "./components/StatusLabel";
 import { usePreferences } from "./PreferencesContext";
 import { useRunCommands } from "./hooks/useRunCommands";
 import { useRunFeed } from "./hooks/useRunFeed";
-import type { PendingRequestBase } from "./types";
+import type { PendingRequestBase, RemoteEvent, RunNotice } from "./types";
 import { BrowserSpeechOutput, RunNoticeCursor, RunNoticeSpeechController, VOICE_INPUT_STARTED_EVENT } from "./run-notice-speech";
 import type { VoiceCapabilities } from "./voice-capabilities";
 import type { VoiceSpeechRate } from "@computer-harness/voice";
@@ -31,7 +31,9 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   const [viewerReview, setViewerReview] = useState<ViewerReview>();
   const [blockedRequestId, setBlockedRequestId] = useState<string>();
   const [refreshingAfterViewer, setRefreshingAfterViewer] = useState(false);
+  const [retryingSnapshot, setRetryingSnapshot] = useState(false);
   const [voiceOutputMessage, setVoiceOutputMessage] = useState<string>();
+  const [activeVoiceInputs, setActiveVoiceInputs] = useState<ReadonlySet<string>>(() => new Set());
   const runHeadingRef = useRef<HTMLHeadingElement>(null);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
@@ -41,6 +43,10 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     ? snapshotRef.current?.pendingRequest
     : pendingRequestStateRef.current.request;
   const { preferences } = usePreferences();
+  const autoNoticesEnabledRef = useRef(preferences.voice.runNoticesEnabled);
+  const speechRate: VoiceSpeechRate = preferences.voice.speechRate === "slow"
+    ? 0.85
+    : preferences.voice.speechRate === "fast" ? 1.15 : 1;
   const speechController = useMemo(() => new RunNoticeSpeechController(
     () => voiceCapabilities?.createOutputAdapter?.() ?? new BrowserSpeechOutput(),
     setVoiceOutputMessage,
@@ -48,6 +54,12 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   const noticeCursor = useMemo(() => new RunNoticeCursor(runId), [runId]);
   const speechLifecycleRef = useRef(new Map<RunNoticeSpeechController, number>());
   const isTerminal = snapshot?.status === "finished";
+  const voiceInputActive = activeVoiceInputs.size > 0;
+  const latestProgressNotice = latestNoticeOfKind(notices, "progress");
+  const latestProgressEvent = events.reduce<RemoteEvent | undefined>((latest, event) =>
+    event.type === "run.progress" && (latest === undefined || event.sequence > latest.sequence) ? event : latest,
+  undefined);
+  const latestProgressText = selectLatestProgressText(latestProgressNotice, latestProgressEvent);
 
   useEffect(() => {
     const lifecycle = (speechLifecycleRef.current.get(speechController) ?? 0) + 1;
@@ -64,26 +76,25 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   }, [speechController]);
 
   useEffect(() => {
-    const rate: VoiceSpeechRate = preferences.voice.speechRate === "slow"
-      ? 0.85
-      : preferences.voice.speechRate === "fast" ? 1.15 : 1;
-    speechController.setSpeechRate(rate);
+    speechController.setSpeechRate(speechRate);
     const newNotices = noticeCursor.select(runId, notices, preferences.voice.runNoticesEnabled);
     if (!preferences.voice.runNoticesEnabled) {
-      void speechController.cancel("user");
+      if (autoNoticesEnabledRef.current) void speechController.cancel("user");
+      autoNoticesEnabledRef.current = false;
       return;
     }
+    autoNoticesEnabledRef.current = true;
     for (const notice of newNotices) {
       void speechController.deliver(notice, {
         enabled: preferences.voice.runNoticesEnabled,
-        speechRate: rate,
+        speechRate,
         snapshotSequence: pendingRequestStateRef.current?.sequence ?? snapshotRef.current?.sequence,
         currentPendingRequest: currentSpeechPendingRequest,
       }).then((state) => {
         if (state === "handled") noticeCursor.acknowledge(notice.noticeId);
       });
     }
-  }, [notices, noticeCursor, pendingRequestState?.request?.requestId, pendingRequestState?.request?.kind, pendingRequestState?.sequence, preferences.voice.runNoticesEnabled, preferences.voice.speechRate, runId, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind, snapshot?.sequence, speechController]);
+  }, [notices, noticeCursor, pendingRequestState?.request?.requestId, pendingRequestState?.request?.kind, pendingRequestState?.sequence, preferences.voice.runNoticesEnabled, runId, snapshot?.pendingRequest?.requestId, snapshot?.pendingRequest?.kind, snapshot?.sequence, speechController, speechRate]);
 
   useEffect(() => {
     speechController.syncPendingRequest(currentSpeechPendingRequest());
@@ -131,6 +142,17 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     window.requestAnimationFrame(() => runHeadingRef.current?.focus());
   }, [viewerReview, snapshot?.pendingRequest, commands.setNotice]);
 
+  async function refreshManually() {
+    if (retryingSnapshot) return;
+    setRetryingSnapshot(true);
+    try {
+      const fresh = await commands.refreshStatus();
+      if (fresh) setBlockedRequestId(undefined);
+    } finally {
+      setRetryingSnapshot(false);
+    }
+  }
+
   useEffect(() => {
     const currentRequestId = snapshot?.pendingRequest?.requestId;
     if (blockedRequestId && blockedRequestId !== "*" && currentRequestId && currentRequestId !== blockedRequestId) {
@@ -141,9 +163,19 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   if (!snapshot) {
     return (
       <PhoneLayout active="tasks">
-        <main className="page-shell run-page">
-          <div className="loading-panel" role="status">正在读取任务状态…</div>
-          {error && <div className="notice notice-error" role="alert">{error}</div>}
+        <main id="main-content" className="page-shell run-page" tabIndex={-1}>
+          {error
+            ? <div className="notice notice-error" role="alert">
+              <p>暂时无法读取这项任务的最新状态。任务目前情况未知；连接中断不代表任务已经停止。</p>
+              <details className="run-error-details">
+                <summary>查看原因</summary>
+                <p>{error}</p>
+              </details>
+              <button className="button button-secondary button-large" type="button" disabled={retryingSnapshot} onClick={() => void refreshManually()}>
+                {retryingSnapshot ? "正在重新读取…" : "重试读取任务状态"}
+              </button>
+            </div>
+            : <div className="loading-panel" role="status">正在读取任务状态…</div>}
           <a className="button button-secondary" href="/">返回任务列表</a>
         </main>
       </PhoneLayout>
@@ -179,23 +211,50 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     }
   }
 
-  async function refreshManually() {
-    const fresh = await commands.refreshStatus();
-    if (fresh) setBlockedRequestId(undefined);
+  const hostUpdatedAt = formatHostUpdatedAt(snapshot.updatedAt);
+  const currentProgressSpeechText = [
+    `当前任务状态：${statusTextFor(snapshot.status)}。`,
+    latestProgressText
+      ? `最近一次进展：${latestProgressText}。这条进展来自电脑上一次回报，可能早于当前状态。`
+      : "电脑目前没有可朗读的文字进展。",
+    hostUpdatedAt ? `电脑最近更新时间：${hostUpdatedAt}。` : undefined,
+    connection === "offline" || connection === "reconnecting"
+      ? "手机与电脑暂时断开连接，电脑任务可能仍在继续；恢复连接后才能读取最新状态。"
+      : undefined,
+  ].filter((part): part is string => Boolean(part)).join(" ");
+  const resultSpeechText = snapshot.reply
+    ? `电脑返回的任务结果。${snapshot.reply}`
+    : undefined;
+
+  function speakManually(text: string) {
+    if (voiceInputActive) return;
+    setVoiceOutputMessage(undefined);
+    void speechController.speakText(text, speechRate);
+  }
+
+  function updateVoiceInputActive(inputId: string, active: boolean) {
+    setActiveVoiceInputs((current) => {
+      if (current.has(inputId) === active) return current;
+      const next = new Set(current);
+      if (active) next.add(inputId);
+      else next.delete(inputId);
+      return next;
+    });
   }
 
   return (
     <PhoneLayout active="tasks">
-      <main className="page-shell run-page">
+      <main id="main-content" className="page-shell run-page" tabIndex={-1}>
         <a className="back-link" href="/">← 返回任务列表</a>
         <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
           当前任务状态：{statusTextFor(snapshot.status)}。{pending ? "有一项待处理请求。" : "没有待处理请求。"}
         </p>
         <section className="run-heading" aria-labelledby="run-goal">
           <div className="run-heading-top">
-            <StatusLabel status={snapshot.status} />
             <ConnectionNote connection={connection} />
-            <button className="text-button refresh-run" type="button" onClick={() => void refreshManually()}>刷新任务状态</button>
+            <button className="text-button refresh-run" type="button" disabled={retryingSnapshot} onClick={() => void refreshManually()}>
+              {retryingSnapshot ? "正在读取…" : "刷新任务状态"}
+            </button>
           </div>
           <h1 ref={runHeadingRef} id="run-goal" tabIndex={-1}>{snapshot.goal}</h1>
           {(snapshot.target?.appName || snapshot.target?.title || snapshot.target?.provenance === "unknown_after_switch" || snapshot.target?.provenance === "selected_target") && (
@@ -207,7 +266,12 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
               {snapshot.target?.provenance === "selected_target" && <small>窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。</small>}
             </p>
           )}
-          {snapshot.error && <p className="notice notice-error" role="alert">{snapshot.error}</p>}
+          {snapshot.error && !(snapshot.status === "finished" && snapshot.outcome && !snapshot.reply) && (
+            <details className="run-error-details">
+              <summary>查看原因</summary>
+              <p>{snapshot.error}</p>
+            </details>
+          )}
           {snapshot.status === "finished" && snapshot.ownerState === "pending_cleanup" && (
             <p className="notice notice-warning" role="status">
               任务已结束，但电脑尚未确认资源清理。请刷新任务状态；确认前不会开始新任务。若持续未确认，请在电脑端检查 Harness 状态。
@@ -215,8 +279,35 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
           )}
         </section>
 
+        <section className="run-activity-panel" aria-labelledby="run-activity-title">
+          <h2 id="run-activity-title" className="run-activity-heading">任务进度</h2>
+          <p className="run-activity-current-status">
+            <strong>{statusTextFor(snapshot.status)}</strong>
+            {hostUpdatedAt && <time className="run-activity-updated" dateTime={snapshot.updatedAt}>更新于 {hostUpdatedAt}</time>}
+          </p>
+          {latestProgressText
+            ? <p className="run-activity-copy" role="status" aria-live="polite" aria-atomic="true">上次进展：{latestProgressText}</p>
+            : <p className="run-activity-copy">上次进展：暂无文字记录。</p>}
+          {(connection === "offline" || connection === "reconnecting") && (
+            <p className="run-activity-disconnected">
+              手机与电脑连接暂时中断。电脑上的任务可能仍在继续；恢复连接后会读取最新状态。
+            </p>
+          )}
+          <details className="run-activity-details">
+            <summary>状态说明</summary>
+            <p>进展文字可能早于当前状态。刷新只读取最新状态，不会重新开始任务。</p>
+          </details>
+          <RunSpeechActions
+            voiceInputActive={voiceInputActive}
+            hasResult={Boolean(resultSpeechText)}
+            onReadProgress={() => speakManually(currentProgressSpeechText)}
+            onReadResult={() => { if (resultSpeechText) speakManually(resultSpeechText); }}
+            onStop={() => void speechController.cancel("user")}
+          />
+        </section>
+
         {commands.notice && <div className={`notice notice-${commands.notice.tone}`} role="status" aria-live="polite">{commands.notice.text}</div>}
-        {voiceOutputMessage && <p className="notice notice-warning" role="note" aria-live="off">{voiceOutputMessage}</p>}
+        {voiceOutputMessage && <p className="notice notice-warning" role="status" aria-live="polite">{voiceOutputMessage}</p>}
         {error && <div className="notice notice-warning" role="status">{error}</div>}
         {refreshingAfterViewer && <p className="notice notice-info" role="status">正在重新读取任务状态；暂不发送请求…</p>}
 
@@ -235,6 +326,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
             onIgnoreNewWindow={commands.ignoreNewWindow}
             onEvidenceViewerOpened={rememberViewerRequest}
             onEvidenceViewerClosed={(requestId) => void refreshAfterViewer(requestId)}
+            onVoiceActiveChange={(active) => updateVoiceInputActive(`request:${pending.requestId}`, active)}
           />
         )}
 
@@ -253,9 +345,9 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
           </section>
         )}
 
-        {canCorrect && <CorrectionForm disabled={commands.busyCommand !== undefined} onSubmit={commands.correct} />}
+        {canCorrect && <CorrectionForm disabled={commands.busyCommand !== undefined} onVoiceActiveChange={(active) => updateVoiceInputActive("correction", active)} onSubmit={commands.correct} />}
 
-        <ResultPanel reply={snapshot.reply} outcome={snapshot.outcome} />
+        <ResultPanel reply={snapshot.reply} outcome={snapshot.outcome} error={snapshot.error} />
         {!(pending?.kind === "approval" && (pending.requiresVisualReview !== false || (pending.preview?.actions?.length ?? 0) > 0)) && (
           <ScreenshotPanel
             runId={runId}
@@ -268,5 +360,62 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
         <EventTimeline events={events} simplified={preferences.presentation.layoutMode === "simple"} />
       </main>
     </PhoneLayout>
+  );
+}
+
+function latestNoticeOfKind(notices: readonly RunNotice[], kind: RunNotice["kind"]): RunNotice | undefined {
+  return notices.reduce<RunNotice | undefined>((latest, notice) => {
+    if (notice.kind !== kind) return latest;
+    const sequence = notice.feedSequence ?? notice.eventSequence;
+    const latestSequence = latest?.feedSequence ?? latest?.eventSequence ?? -1;
+    return sequence > latestSequence ? notice : latest;
+  }, undefined);
+}
+
+function selectLatestProgressText(
+  notice: RunNotice | undefined,
+  event: RemoteEvent | undefined,
+): string | undefined {
+  const noticeSequence = notice?.feedSequence ?? notice?.eventSequence ?? -1;
+  const eventSequence = event?.sequence ?? -1;
+  if (notice && noticeSequence >= eventSequence) return notice.text;
+  return event ? eventLabel(event) : notice?.text;
+}
+
+function formatHostUpdatedAt(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return undefined;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+interface RunSpeechActionsProps {
+  voiceInputActive: boolean;
+  hasResult: boolean;
+  onReadProgress: () => void;
+  onReadResult: () => void;
+  onStop: () => void;
+}
+
+export function RunSpeechActions({ voiceInputActive, hasResult, onReadProgress, onReadResult, onStop }: RunSpeechActionsProps) {
+  return (
+    <div className="run-speech-actions" aria-label="语音辅助">
+      <button className="button button-secondary" type="button" disabled={voiceInputActive} onClick={onReadProgress}>
+        听听进度
+      </button>
+      {hasResult && (
+        <button className="button button-secondary" type="button" disabled={voiceInputActive} onClick={onReadResult}>
+          朗读结果
+        </button>
+      )}
+      <button className="button button-secondary" type="button" onClick={onStop}>
+        停止朗读
+      </button>
+    </div>
   );
 }

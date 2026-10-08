@@ -82,6 +82,17 @@ interface PendingNoticeRequest {
   readonly kind: string;
 }
 
+interface PendingTerminalNotice {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+}
+
+interface TerminalSessionFinish {
+  readonly generation: number;
+  readonly session: VoiceOutputSession;
+  readonly promise: Promise<void>;
+}
+
 class BrowserSpeechSession implements VoiceOutputSession {
   private closed = false;
   private lastSequence = -1;
@@ -261,6 +272,8 @@ export class RunNoticeSpeechController {
   private terminal = false;
   private session?: VoiceOutputSession;
   private sessionPromise?: Promise<VoiceOutputSession>;
+  private pendingTerminalNotice?: PendingTerminalNotice;
+  private terminalSessionFinish?: TerminalSessionFinish;
   private sessionRate?: VoiceSpeechRate;
   private preferredSpeechRate?: VoiceSpeechRate;
   private readonly seenNoticeIds = new Set<string>();
@@ -291,9 +304,18 @@ export class RunNoticeSpeechController {
     }
     this.inFlightNoticeIds.add(notice.noticeId);
     const intentEpoch = notice.delivery === "interrupt" ? ++this.intentEpoch : this.intentEpoch;
+    let terminalNotice: PendingTerminalNotice | undefined;
+    if (notice.kind === "result") {
+      let resolve!: () => void;
+      const promise = new Promise<void>((resolvePromise) => { resolve = resolvePromise; });
+      terminalNotice = { promise, resolve };
+      this.pendingTerminalNotice = terminalNotice;
+    }
 
     try {
-      if (notice.delivery === "interrupt") await this.cancelPlayback("interrupted");
+      if (notice.delivery === "interrupt") {
+        await this.cancelPlayback("interrupted", notice.kind === "result");
+      }
       if (!this.isCurrentIntent(intentEpoch)) {
         this.rememberNotice(notice.noticeId);
         return "handled";
@@ -327,10 +349,16 @@ export class RunNoticeSpeechController {
       const chunk = { chunkId: notice.noticeId, sequence: ++this.sequence, text: notice.text };
       const playback = session.enqueueText(chunk);
       if (notice.kind === "result") {
-        void playback.then(() => session.finish()).then(
+        const generation = this.generation;
+        let terminalFinish: TerminalSessionFinish | undefined;
+        const finishPromise = playback.then(() => session.finish()).then(
           () => this.releasePendingNotice(notice.noticeId),
           (error: unknown) => { this.releasePendingNotice(notice.noticeId); return this.fail(session, error); },
-        );
+        ).finally(() => {
+          if (terminalFinish) this.retireTerminalSession(terminalFinish);
+        });
+        terminalFinish = { generation, session, promise: finishPromise };
+        this.terminalSessionFinish = terminalFinish;
       } else {
         void playback.then(
           () => this.releasePendingNotice(notice.noticeId),
@@ -345,6 +373,36 @@ export class RunNoticeSpeechController {
       return "handled";
     } finally {
       this.inFlightNoticeIds.delete(notice.noticeId);
+      if (terminalNotice) {
+        terminalNotice.resolve();
+        if (this.pendingTerminalNotice === terminalNotice) this.pendingTerminalNotice = undefined;
+      }
+    }
+  }
+
+  /** Speaks user-requested text through the same run-scoped output queue. */
+  public async speakText(text: string, speechRate: VoiceSpeechRate): Promise<void> {
+    const normalized = text.trim();
+    if (!normalized) return;
+    if (this.preferredSpeechRate !== speechRate) {
+      this.preferredSpeechRate = speechRate;
+      await this.cancelPlayback("user");
+    }
+    const generation = this.generation;
+    try {
+      const session = await this.getManualSession(generation, speechRate);
+      if (!session || generation !== this.generation) return;
+      const sequence = ++this.sequence;
+      await session.enqueueText({
+        chunkId: `manual-${generation}-${sequence}`,
+        sequence,
+        text: normalized,
+      });
+    } catch (error) {
+      if (generation !== this.generation) return;
+      const detail = error instanceof Error ? `（${error.message}）` : "";
+      this.onFailure(`语音播报未能播放${detail}；当前任务文字仍可在页面查看。`);
+      await this.cancel("failed");
     }
   }
 
@@ -370,10 +428,16 @@ export class RunNoticeSpeechController {
     await this.cancelPlayback(reason);
   }
 
-  private async cancelPlayback(reason: VoiceOutputCancelReason): Promise<void> {
+  private async cancelPlayback(reason: VoiceOutputCancelReason, preservePendingTerminalNotice = false): Promise<void> {
     this.generation += 1;
     this.sequence = 0;
     this.pendingNoticeIds.clear();
+    if (!preservePendingTerminalNotice) {
+      const terminalNotice = this.pendingTerminalNotice;
+      this.pendingTerminalNotice = undefined;
+      terminalNotice?.resolve();
+    }
+    this.terminalSessionFinish = undefined;
     const session = this.session;
     const opening = this.sessionPromise;
     this.session = undefined;
@@ -381,6 +445,36 @@ export class RunNoticeSpeechController {
     this.sessionRate = undefined;
     if (session) await session.cancel(reason).catch(() => undefined);
     else if (opening) void opening.then((lateSession) => lateSession.cancel(reason)).catch(() => undefined);
+  }
+
+  private async getManualSession(generation: number, speechRate: VoiceSpeechRate): Promise<VoiceOutputSession | undefined> {
+    while (generation === this.generation) {
+      const pendingTerminalNotice = this.pendingTerminalNotice;
+      if (pendingTerminalNotice) {
+        await pendingTerminalNotice.promise;
+        continue;
+      }
+      const terminalFinish = this.terminalSessionFinish;
+      if (terminalFinish) {
+        await terminalFinish.promise.catch(() => undefined);
+        continue;
+      }
+      const session = await this.getSession(generation, speechRate);
+      if (!session || generation !== this.generation) return undefined;
+      if (this.pendingTerminalNotice || this.terminalSessionFinish) continue;
+      return session;
+    }
+    return undefined;
+  }
+
+  private retireTerminalSession(finish: TerminalSessionFinish): void {
+    if (this.terminalSessionFinish !== finish) return;
+    this.terminalSessionFinish = undefined;
+    if (this.generation !== finish.generation || this.session !== finish.session) return;
+    this.session = undefined;
+    this.sessionPromise = undefined;
+    this.sessionRate = undefined;
+    this.sequence = 0;
   }
 
   private async getSession(generation: number, speechRate: VoiceSpeechRate): Promise<VoiceOutputSession | undefined> {

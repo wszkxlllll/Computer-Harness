@@ -13,6 +13,27 @@ afterEach(() => {
 });
 
 describe("run result panel", () => {
+  it.each([
+    ["succeeded", "已完成", "任务已完成，但电脑没有返回文字结果。"],
+    ["failed", "未完成", "任务没有完成。"],
+    ["cancelled", "已停止", "任务已停止。"],
+    ["budget_exhausted", "已达到本次限制", "任务未完成：已达到本次任务限制。"],
+    ["outcome_unknown", "结果待确认", "还不能确认任务是否完成。"],
+    ["new_outcome_from_future", "结果待核实", "还不能确认任务是否完成。"],
+  ])("explains a %s outcome even when no reply was returned", (outcome, label, fallback) => {
+    const { rerender } = render(<ResultPanel outcome={outcome} />);
+    expect(screen.getByRole("heading", { name: "任务结果" })).toBeDefined();
+    expect(screen.getByText(label)).toBeDefined();
+    expect(screen.getByText(fallback)).toBeDefined();
+    expect(screen.queryByText("电脑返回的内容")).toBeNull();
+
+    rerender(<ResultPanel outcome={outcome} error="本次操作未能完成。" />);
+    const reason = document.querySelector(".result-error-details") as HTMLDetailsElement;
+    expect(reason.open).toBe(false);
+    expect(reason.textContent).toContain("本次操作未能完成。");
+    expect(screen.getByText(fallback)).toBeDefined();
+  });
+
   it("offers the full reply only when the collapsed panel actually clips it", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
       configurable: true,
