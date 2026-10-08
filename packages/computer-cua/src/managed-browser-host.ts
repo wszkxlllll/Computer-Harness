@@ -281,6 +281,8 @@ export interface ManagedBrowserStartupPageDiagnostic {
 export interface ManagedBrowserWindowBindingHint {
   readonly browserWindowId: number;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  /** Read from the selected CDP page, never inferred from a candidate rectangle. */
+  readonly deviceScaleFactor?: number;
   readonly ownedProcessIds?: readonly number[];
   readonly onDiagnostic?: (diagnostic: ManagedBrowserWindowResolutionDiagnostic) => void;
 }
@@ -427,6 +429,7 @@ export interface ManagedBrowserPageActivity {
   /** Opaque per-document marker used only to invalidate stale actions. */
   readonly navigationKey?: string;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly deviceScaleFactor?: number;
 }
 
 export interface ManagedBrowserNavigationReadiness {
@@ -655,6 +658,7 @@ export function selectManagedBrowserStartupActivity(
 const MANAGED_PAGE_ACTIVITY_SCRIPT = String.raw`({
   visibilityState: document.visibilityState,
   hasFocus: document.hasFocus(),
+  deviceScaleFactor: window.devicePixelRatio,
   navigationKey: typeof performance !== "undefined" && Number.isFinite(performance.timeOrigin) ? String(performance.timeOrigin) : undefined
 })`;
 const MAX_MANAGED_PAGE_TARGETS = 32;
@@ -899,7 +903,7 @@ export function validateOwnedWindowResolution(
     : hint.ownedProcessIds.includes(evidence.processId);
   const boundsMatch = hint?.browserBounds === undefined
     ? true
-    : evidence.windowBounds !== undefined && managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds);
+    : evidence.windowBounds !== undefined && managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds, hint.deviceScaleFactor);
   if (!evidence.ownedByHost || evidence.hostProcessId !== browserProcessId || !processOwned || evidence.processId !== resolution.target.pid || evidence.windowId !== resolution.target.windowId || evidence.windowCount !== 1 || hint?.browserWindowId !== undefined && evidence.browserWindowId !== hint.browserWindowId || !boundsMatch) {
     throw new DomGroundingUnavailableError("managed browser window resolver ownership_mismatch: host ownership was not proven");
   }
@@ -912,19 +916,19 @@ export function validateOwnedWindowResolution(
 export function managedBrowserWindowBoundsMatch(
   left: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
   right: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  deviceScaleFactor = 1,
 ): boolean {
-  if (left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height) return true;
-  // CDP reports browser bounds in device-independent pixels while CUA may
-  // report physical pixels.  Compare dimensions for one common scale and
-  // deliberately ignore the small frame-origin offset.  Process ownership
-  // and uniqueness remain mandatory; geometry is only a safe disambiguator.
-  const widthScale = left.width / right.width;
-  const heightScale = left.height / right.height;
-  const scaleDelta = Math.abs(widthScale - heightScale) / Math.max(widthScale, heightScale);
-  const leftAspect = left.width / left.height;
-  const rightAspect = right.width / right.height;
-  const aspectDelta = Math.abs(leftAspect - rightAspect) / Math.max(leftAspect, rightAspect);
-  return scaleDelta <= 0.08 && aspectDelta <= 0.08;
+  if (!Number.isFinite(deviceScaleFactor) || deviceScaleFactor < 1 || deviceScaleFactor > 8) return false;
+  if (![left.x, left.y, right.x, right.y].every(Number.isSafeInteger) ||
+      ![left.width, left.height, right.width, right.height].every((value) => Number.isSafeInteger(value) && value > 0)) return false;
+  // CUA's visible DWM frame excludes the invisible resize border included by
+  // CDP. Bound that frame difference in CSS pixels; never derive DPI from an
+  // arbitrary candidate's aspect ratio. Missing scale only permits 1:1.
+  const tolerance = 16 * deviceScaleFactor;
+  return Math.abs(left.x - right.x * deviceScaleFactor) <= tolerance &&
+    Math.abs(left.y - right.y * deviceScaleFactor) <= tolerance &&
+    Math.abs(left.width - right.width * deviceScaleFactor) <= tolerance &&
+    Math.abs(left.height - right.height * deviceScaleFactor) <= tolerance;
 }
 
 export class ManagedBrowserHost {
@@ -1061,6 +1065,7 @@ export class ManagedBrowserHost {
       const windowHint: ManagedBrowserWindowBindingHint = {
         browserWindowId: selected.browserWindowId,
         ...(selected.browserBounds === undefined ? {} : { browserBounds: selected.browserBounds }),
+        ...(selected.deviceScaleFactor === undefined ? {} : { deviceScaleFactor: selected.deviceScaleFactor }),
         ownedProcessIds: [...ownedProcessIds],
         ...(this.options.onWindowResolutionDiagnostic === undefined ? {} : { onDiagnostic: this.options.onWindowResolutionDiagnostic }),
       };
@@ -2251,6 +2256,7 @@ async function inspectManagedPageActivity(
     let visibilityState: ManagedBrowserPageActivity["visibilityState"] = "unloaded";
     let hasFocus: boolean | undefined;
     let navigationKey: string | undefined;
+    let deviceScaleFactor: number | undefined;
     try {
       socket = await LoopbackWebSocket.connect(webSocketDebuggerUrl, signal);
       const visibilityResponse = await socket.command("Runtime.evaluate", { expression: MANAGED_PAGE_ACTIVITY_SCRIPT, returnByValue: true, awaitPromise: false }, signal);
@@ -2260,6 +2266,10 @@ async function inspectManagedPageActivity(
         visibilityState = candidateVisibility;
       }
       if (isRecord(visibilityValue) && typeof visibilityValue.hasFocus === "boolean") hasFocus = visibilityValue.hasFocus;
+      if (isRecord(visibilityValue) && typeof visibilityValue.deviceScaleFactor === "number" &&
+          Number.isFinite(visibilityValue.deviceScaleFactor) && visibilityValue.deviceScaleFactor >= 1 && visibilityValue.deviceScaleFactor <= 8) {
+        deviceScaleFactor = visibilityValue.deviceScaleFactor;
+      }
       if (isRecord(visibilityValue) && typeof visibilityValue.navigationKey === "string" && /^[0-9]+(?:\.[0-9]+)?$/u.test(visibilityValue.navigationKey)) {
         navigationKey = visibilityValue.navigationKey.slice(0, 64);
       }
@@ -2274,6 +2284,7 @@ async function inspectManagedPageActivity(
       ...(hasFocus === undefined ? {} : { hasFocus }),
       ...(navigationKey === undefined ? {} : { navigationKey }),
       ...(browserBounds === undefined ? {} : { browserBounds }),
+      ...(deviceScaleFactor === undefined ? {} : { deviceScaleFactor }),
     };
   } catch (error) {
     if (signal.aborted) throw error;

@@ -154,6 +154,10 @@ Gate 2 和模型 runner 的完整参数以上述 Bridge/Stage 5 文档为准；R
 
 TUI 必须将焦点放在当前终端，不注册全局热键；visible input 可能留在 terminal scrollback/recording，这不是隐私保证。`--interactive` 行式模式与 `--tui` 快捷键不同；P/R/I 只属于 TUI 控制面。
 
+### 受管浏览器窗口身份
+
+受管 Edge／Chromium 启动必须同时满足进程归属、CDP 选定窗口和唯一原生窗口证据。几何核对使用选定页面的实际 `devicePixelRatio`，并对位置与尺寸逐项限制边框差异（最多 16 CSS 像素）；不从候选宽高比例推断缩放，不选最大或最接近的窗口。缺失缩放时只允许 1:1 的有界帧差；多个合法候选仍拒绝 `multiple_candidates`。页面缩放、多屏原点或驱动坐标不一致导致拒绝时，应保留 CDP／CUA 几何诊断，不扩大容差或改用整屏冒充受管 DOM 成功。
+
 ## 7. 贡献前检查
 
 默认贡献路径不需要 API、桌面或 VM：
