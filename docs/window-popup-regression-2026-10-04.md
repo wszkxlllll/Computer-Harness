@@ -16,6 +16,8 @@
 
 本次候选`get_window_state`有23—24个tree条目及treeMarkdown，但SDK输出`elements=[]`、`elementsComplete=false`；5秒只读预算也未提供Document value。因此不以该字段作为输入前硬门槛，使用新空白标签的独立画面与保存文件作为测试证据，没有为此扩展产品协议或PR。候选session、daemon退出及桌面占用释放均确认；原有记事本文件／标签和部署驱动不变。PR／Issue正文已更新实机结果和CI缺口，仍保持Draft，未因Enter标签或UIA读回限制扩大修复。
 
+清理已完成：仅关闭本轮保存的测试标签，原有标签保留；核实新建ASCII临时目录位于系统Temp且无重解析点后，逐项移除候选exe、manifest、不完整ZIP、独立状态及oracle文件和其空目录。没有删除原SDK、配置、登录profile或用户文件。候选exe与manifest哈希一致，但另一个残留ZIP不完整、未通过archive digest校验，不能宣称ZIP校验通过；已一并清理。诊断报告保留，测试二进制不再留在本机。
+
 ## 状态
 
 ### 当前放行结论（2026-10-07 部署后）
