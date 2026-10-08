@@ -2,7 +2,7 @@
 
 ## 当前体验优化与上游跟进（2026-10-09）
 
-[手机端适老化与无障碍体验审查、实施记录](./mobile-accessibility-experience-review-2026-10-08.md)：保留现有布局，收敛输入、状态、审批、结果重听、连接恢复和字号重排；实现与Sol复核完成，完整Web回归195项、隔离浏览器检查74项通过，尚未部署，不冒充真实用户验收。CUA [PR #4836](https://github.com/trycua/cua/pull/4836) 的CLA已按用户授权签署并通过；精确PR源码的云端单测、Release编译和产物构建通过，Ready仍需原生桌面证据，真实记事本补验与官方Windows矩阵进行中，详见[统一修复记录](./window-popup-regression-2026-10-04.md)。
+[手机端适老化与无障碍体验审查、实施记录](./mobile-accessibility-experience-review-2026-10-08.md)：保留现有布局，收敛输入、状态、审批、结果重听、连接恢复和字号重排；实现与Sol复核完成，完整Web回归195项、隔离浏览器检查74项通过，尚未部署，不冒充真实用户验收。CUA [PR #4836](https://github.com/trycua/cua/pull/4836) 的CLA已通过；精确PR源码的云端构建、真实记事本写入与文末追加最小验收通过。官方Windows矩阵有光标叠层超时缺口，共享矩阵尚未完成，PR仍为Draft，不扩大输入修复去夹带光标改动，详见[统一修复记录](./window-popup-regression-2026-10-04.md)。
 
 ## 使用、构建与许可
 

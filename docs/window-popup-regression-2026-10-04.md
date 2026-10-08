@@ -1,5 +1,21 @@
 # 手机实机弹窗回归与整改
 
+## 2026-10-08 上游跟进
+
+2026-10-09更新：为保持PR最小范围，下述零HWND身份扩展及配套WPF正例已从当前PR路线拆出，仅保存在本地实验分支 `codex/windows-focused-document-virtual-experiment-20261008`、提交 `749da483`，没有提交新PR或部署。当前上游PR #4836仍为原4文件、源码 `0492335`。不能为了让新夹具通过而扩大产品准入；真实记事本补验针对原PR二进制。用户已允许本轮记事本实验：编译仍在GitHub，测试二进制只临时放入独立目录，用后清理，不在本机编译或保留构建缓存。
+
+用户明确授权后，已在 [PR #4836 发表 CLA 签署声明](https://github.com/trycua/cua/pull/4836#issuecomment-6054053316)，GitHub检查已为SUCCESS；这取代下方10月7日尚未获得代发授权时的待签状态。PR和Issue正文同步更新，不再保留当前“CLA待签”结论。
+
+当前PR源码的最小实机证据已补齐：精确源码0492335的云端二进制在真实记事本中完成历史91码点文本写入、原生Enter及中文／非BMP文末追加，三次独立UTF-8文件全文读回均一致。已有276单测／Release云端编译通过。10月8日WPF虚拟Document peer实验已退出PR，不作为通过证据；不宣称支持任意富文本编辑、Undo或已测得统计稳定性。
+
+零HWND父链扩展仅留在上述本地实验分支，不能因夹具需要而混入原PR。当前独立fork构建分支只添加云端workflow，不修改PR源码：二进制与来源清单构建任务 [37807097947](https://github.com/wszkxlllll/cua/actions/runs/37807097947) 已通过，官方Windows原生矩阵调用 [37807893750](https://github.com/wszkxlllll/cua/actions/runs/37807893750) 尚在运行。云端构建成功不是实机输入通过。实机测试仅临时使用经来源与哈希核验的候选产物，不替换Preview默认驱动；本机不安装编译工具链或保留云端构建缓存。
+
+原生矩阵已完成部分的实际结果：安装／更新、截图／桌面范围通过；native job中WPF 28项、WinUI3 10项、WebView2／网页夹具4项、最小化窗口2项通过，但`agent_cursor_overlay_obeys_untargeted_and_targeted_z_order`等待目标叠层z-order在2秒超时，导致该job失败。已读失败日志，不把它写成输入路径测试失败，也不能在没有base复测时断言是既有偶发问题；不在输入PR内夹带光标修复。共享Electron／Tauri矩阵尚未完成，整轮不能称为全绿。
+
+实机记录：`runs/diagnostics/pr4836-notepad-acceptance-20261009/2026-10-08T16-48-39-246Z-6f9897ff.json`。两次被测`type_text`均为Accessibility／Confirmed；Enter为GlobalInput／Unverifiable，但保存文件独立证明换行已产生。脚本的原始汇总标签把Enter回执也要求Confirmed，因而留下`content-exact-route-not-confirmed`；原始报告保留，审计以`nativeRouteConfirmed=true`、三次`exact=true`及实际文件哈希为准，不将既定不可自行验证的Enter误判为文本路径失败。最终文本96码点、规范化UTF-8 167字节，SHA-256为`b71ed8ce4eb8cf5cc2525b673e74de83b60cd4a605dd492fd1b67002a1ddd924`，协调者独立读取实际文件核对通过。
+
+本次候选`get_window_state`有23—24个tree条目及treeMarkdown，但SDK输出`elements=[]`、`elementsComplete=false`；5秒只读预算也未提供Document value。因此不以该字段作为输入前硬门槛，使用新空白标签的独立画面与保存文件作为测试证据，没有为此扩展产品协议或PR。候选session、daemon退出及桌面占用释放均确认；原有记事本文件／标签和部署驱动不变。PR／Issue正文已更新实机结果和CI缺口，仍保持Draft，未因Enter标签或UIA读回限制扩大修复。
+
 ## 状态
 
 ### 当前放行结论（2026-10-07 部署后）
