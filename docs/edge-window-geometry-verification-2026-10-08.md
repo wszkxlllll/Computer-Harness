@@ -1,6 +1,6 @@
 # 受管 Edge 窗口几何修复与 Windows 验收
 
-日期：2026-10-08。基线：PR #22 head `079c1c418405236a3b1be6176f83ef9ab7a74370`。
+日期：2026-10-08；复审修正：2026-10-09。原基线：PR #22 head `079c1c418405236a3b1be6176f83ef9ab7a74370`；本轮修正追加在原 PR #25 提交 `2a28a927787e77f9dd65afa5b1aefae24f1cc9d6` 之上，保留原作者提交。
 
 ## 结论与提交范围
 
@@ -8,13 +8,35 @@
 
 本提交只含受管浏览器几何合同、回归测试、开发说明及本脱敏报告。不含 CUA 二进制、模型凭据、个人目录、截图、浏览器 profile、原始轨迹或生成的健康资料。
 
+## 2026-10-09 复审整改与接收范围
+
+初版直接把页面DPR用作整个CDP外窗的尺度。复审确认普通125%网页zoom可使正确外窗被拒；页面还可覆盖DPR，导致同owned PID下另一个比例匹配的兄弟窗被错误绑定。已保留位置／尺寸及唯一性改进，移除窗口身份对页面DPR的依赖，没有扩大帧差或添加网站／应用特例。
+
+最终窗口尺度仅来自同一CDP目标的原生`Page.getLayoutMetrics`响应：物理与CSS visual viewport的宽高比得到CSS→物理尺度，再除CSS visual viewport的page zoom，得到窗口DIP→原生像素尺度。横纵和前后两次数据须一致。Windows DWM与当前X11库存使用原生像素，macOS CGWindow／CDP外窗均为屏幕点，后者固定1:1。缺失或变化的证据不回退页面DPR，只允许1:1核对。新内部字段`browserBoundsToCuaScale`由该采集链生成并供hint、resolver及Host验证消费；不改公共Runtime／Provider／工具协议，DOM collector的CSS到截图尺度不变。
+
+单位依据：[Chromium Windows ScreenToDIPRect实现](https://raw.githubusercontent.com/chromium/chromium/main/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc)、[当前PageAgent指标实现](https://raw.githubusercontent.com/chromium/chromium/main/third_party/blink/renderer/core/inspector/inspector_page_agent.cc)、[DWM边界与DPI说明](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect)。这不是把协议文档中的泛称pixels直接当成物理像素，也不由候选窗口反推比例。
+
+本轮Luna max实施，Sol定向复核通过。Sol独立重跑原错误链路：页面伪造DPR=2、原生指标尺度=1，修正后绑定真实1x主窗并拒绝2x兄弟窗，两个验证器均选择正确windowId；80／100／125／150%页面zoom也保持窗口尺度1。此项是纯源码／mock CDP链路验证，不冒充真实浏览器或桌面执行。
+
+| 本轮独立验证 | 结果 |
+| --- | --- |
+| Node 24.19.0 根typecheck（含spike）及Web静态构建 | 退出0 |
+| 全仓Vitest最终JSON报告 | 1827／1827通过，0失败 |
+| Node脚本自测 | 70通过，0失败，1项因本机无符号链接能力跳过 |
+| 实施者定向Host／resolver测试 | 62／62通过 |
+| Sol定向复核 | 无剩余阻塞项 |
+
+首次全仓有一项Host／Relay根页404：新工作树尚无Web静态包。补标准Web构建后最终全仓通过，未为此修改业务代码。最终Vitest报告仅留本机忽略的`runs/pr25-final-review-20261009-vitest.json`，SHA256 `60ae1079f4e9d0b67a74465fb90a9386c14e97b397a812dbf97185f31ea6f8ff`。本轮没有新增真实GUI或付费API任务，没有操作个人profile、部署或合并main；下方Windows实机数据仍是原作者2026-10-08结果，不将其重计为本轮修正的实机证据。
+
+代码整改可接收；发布前仍建议在持久profile中做100%／125%页面放大的短窗口绑定检查。混合DPI、负原点、Wayland原生及任意后端不能据此声称全面支持，原健康报告事实偏差也未由此修复。
+
 ## 问题与修复
 
 原实现根据候选窗口的宽高比例推断共同缩放，未约束实际尺寸和位置。实测同一 owned PID 下，344×206 的小窗口与 1036×653 的主窗口都被判为兼容 CDP 的 1050×660 窗口，导致 `multiple_candidates`。既有唯一性门禁正确拒绝，没有选错 HWND 后继续输入。
 
 修改位置：
 
-- `packages/computer-cua/src/managed-browser-host.ts`：从选定 CDP 页面的活动证据读取 `devicePixelRatio`，传入绑定提示和 ownership 验证；几何比较同时约束 x、y、width、height，最多允许 16 CSS 像素的帧差，不再从候选比例推断任意 DPI。
+- `packages/computer-cua/src/managed-browser-host.ts`：从选定CDP目标的原生viewport指标生成稳定的窗口转换尺度，传入绑定提示和ownership验证；不采页面DPR作为身份依据。几何比较同时约束x、y、width、height，最多允许16 DIP帧差，不从候选比例推断任意DPI。
 - `packages/computer-cua/src/managed-browser-resolver.ts`：候选过滤、诊断计数及验证器使用同一规则；即使存在一个完全相等候选，也不跳过其他兼容候选的模糊性检查。
 - `packages/computer-cua/src/managed-browser-resolver.test.ts`：增加比例小窗排除、错位／未证实缩放拒绝、多兼容窗口拒绝和异常比例拒绝；已有 1.5 缩放用例显式提供独立缩放证据。
 
