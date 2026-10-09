@@ -4,6 +4,10 @@
 状态：隔离 Preview 的 Relay/Web 已于 2026-10-07 更新到 desktop-input-v1 并通过服务器侧检查；Windows 输入候选仍按下方记录单独验收，完整跨应用业务通过与否以实机结果为准。
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
 
+## 2026-10-09：只读部署状态核对
+
+手机体验修改与PR #25完整历史现已合入PR #22本地候选`85e74d8`，仍未push／部署；不把独立组件测试或PR25旧head CI当作集成候选通过。Node24／固定pnpm 11.19.0根build、Web build及Node脚本自测70/70（另1项环境跳过）退出0；Vitest 1841/1843，两例CLI窄屏分页检查在5秒限时内未完成，未提高timeout。合并候选报告见`runs/diagnostics/pr22-integration-20261009-2235/`。只读核对时公网Preview 8443仍引用旧资源`/assets/index-jH9TY0Xe.js`，Preview current为`2026-10-07-desktop-input-v1`；稳定443 current未变。本机4318当前没有监听，本轮未启动或重启Host，手机尚不能从该Host配对。若后续部署，只切独立Preview新release，不替换CUA候选或稳定服务；Relay重启后需重新配对。
+
 ## 2026-10-07 Preview 部署与 Windows 输入候选
 
 ### 同日后续更新：仅本机Host（已完成）

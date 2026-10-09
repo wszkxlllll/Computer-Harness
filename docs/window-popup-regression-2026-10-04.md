@@ -1,5 +1,81 @@
 # 手机实机弹窗回归与整改
 
+## 2026-10-09：PR25与本地体验集成状态
+
+用户授权将PR #25完整历史与本地手机体验改动集成到PR #22的Preview分支，不进入main。已在Pi工作树分支`codex/runtime-surface-preview-20261003`将PR25 head `8bf63ac`正常合入，merge commit为`85e74d822a3d903b2ed33a4acdda564f26cbc839`；保留原作者提交与四份待更新文档，没有改写历史。#23评估器与#24平台加固未夹带。集成源码已过Sol复核；本轮只处理该合并候选和相关部署记录。
+
+截至本记录：#22远端仍是合入前head`079c1c4`，本地集成候选尚未push或部署。旧Preview release、stable 443及CUA候选`7852ab1`保留；当前公网Preview仍是旧页面资源，本机4318未监听。不会把源码测试通过写成手机已更新或真机业务验收。
+
+集成候选的本地构建／回归已完成但非全绿：Node24与固定pnpm 11.19.0下Web生产构建和根`pnpm run build`均退出0；Node官方脚本自测70通过、0失败、1项本机符号链接能力跳过。默认并发Vitest为1835/1843通过、8项失败；按2最大／1最小worker复跑为1841/1843通过，仅CLI `apps/cli/src/tui.test.ts`的20列和40列窄屏长中文分页用例各超5秒。5个相关失败文件低并发定向154/155；20列精确单测一次通过、40列精确单测一次同样超时。未改测试、源码或5秒时限。检查时CPU为100%、可用内存24.1%，与本机压力下间歇性超时相符，但不据此将失败宣称为通过。报告：`runs/diagnostics/pr22-integration-20261009-2235/vitest-2max-1min.json`、`.../tui-isolated.json`、`.../tui-40col-isolated.json`及`.../node-selftests.log`。PR #25源码原有复核／CI全绿不能替代集成候选CI；完整验证事实以新head CI另记。
+
+下一步：
+
+1. 仅提交本轮负责的四份已存在文档，排除工作树内无关未跟踪文件；按既定GitHub身份检查后更新PR #22，保留全部作者历史。云端CI以新head独立验证；若四组CI通过，可作为独立全量代码证据放行Preview，同时保留本机两个窄屏超时记录。
+2. 部署时使用新的独立Preview release和精确预期current保护；保留旧release、稳定入口和CUA候选，只有在新构建及服务器健康检查过后才切换Preview。公网服务操作由root使用已核验的固定主机认证工具执行，本轮不写入或回显凭据。
+3. 受管浏览器100%／125%缩放短实机绑定、手机端真实Run及浏览器→记事本业务链路另行安排；本轮不启动桌面或付费API任务，不以本机模拟预览代替。
+
+后续阶段先冻结可用版本，暂停增加主要模块。优先交付一条高效、可重复、可录像的跨应用Demo：查询实际信息→整理并保存→可选的文件发送审批。未获明确授权时只走到审批，不实际对外发送。记录模型等待、回合数、重复动作、人工介入和结果正确性，区分设施故障与模型策略问题；有证据再做通用优化，不写应用特例或固定答案。
+
+接着按既定六类生活场景补真实任务证据与可复用操作说明，开展手机大字／语音及真实用户体验检查。macOS／Linux由对应成员用同一合同完成实机跨应用验证，CI不能替代。最后收敛README、最小使用流程、许可与依赖声明、演示录像和测试结果。长期Memory、Subagent、自进化与Jev仍保留研究方向，本阶段不挤占可靠Demo和人本交互验收。
+
+## 2026-10-09：PR #25 接收审查
+
+最新结论：**原版P1已修，代码整改可接收，最新CI全绿**。用户授权后，已在隔离工作树保留队友原提交`2a28a92`并追加源码`ef007af4f88d6b16f16023731688287c7a1d8274`及文档`8bf63ace1ee6afa8d3688de14c896f8fbc612e41`，推回[PR #25](https://github.com/wszkxlllll/Computer-Harness/pull/25)原head分支。两个追加提交的GitHub作者／提交者均解析为账号142909575；没有改写队友作者、合并main或部署。以下初审问题针对原head2a28a92，base079c1c4不变，不再把它当作最新未修状态。
+
+### 整改与最终复核
+
+最终窗口尺度不读页面可覆盖的DPR。Windows／当前X11由同一目标的原生`Page.getLayoutMetrics`物理／CSS visual viewport宽高比再除page zoom，验证横纵及前后指标一致；Mac外窗与CUA库存同为屏幕点，1:1。内部字段`browserBoundsToCuaScale`有真实采集、hint、resolver与Host验证消费者，未增加公共Runtime／Provider协议，也未改DOM collector比例。缺证据只允许1:1，没有扩大帧差或按候选猜比例。
+
+第一版整改虽分离pagezoom，但仍取页面DPR；Sol独立复现网页覆盖DPR=2可使同PID的2x兄弟窗被两个验证器误接受，因此未放行。Luna max移除这一来源，改用既有CDP原生指标；Sol再次重跑原复现，现选择真实1x主窗并拒绝2x兄弟窗，80／100／125／150%页面zoom均保持正确尺度，无剩余阻塞项。原错误方案没有作为另一个模式保留。
+
+最终独立验证：Node24.19根typecheck与Web构建退出0，完整Vitest1827／1827，脚本自测70通过／0失败／1项本机符号链接能力跳过；实施者定向62项及noEmit通过。首次全仓一项根页404是新工作树缺Web静态包，补标准构建后通过，未改业务代码。最终JSON报告位于隔离工作树的忽略目录，SHA256为`60ae1079f4e9d0b67a74465fb90a9386c14e97b397a812dbf97185f31ea6f8ff`。本轮没有GUI／付费API任务或个人profile操作；没有更改Pi源码／预览服务，PR仍待合入后部署。[最终head CI 37888553878](https://github.com/wszkxlllll/Computer-Harness/actions/runs/37888553878)已完成：Windows／Mac／Linux Node22及Linux Node24四组verify、ci-required全部成功，不用旧head全绿代替，也不将离线CI称为真机测试。
+
+PR原开发说明及实机报告同步更新并通过GitHub正文读回核验，保留原作者Windows任务成功／失败、未知回执与医疗正文事实偏差。发布前仍建议持久profile100%／125%短实机绑定确认；混合DPI／负原点／Wayland原生不在本轮全面放行范围。
+
+### 有效改进
+
+- 原规则只比较候选宽高比例，会把相似比例的小窗也算成主窗候选。新规则同时约束位置与尺寸，确实排除了作者记录的344×206小窗；不是按窗口标题或应用名称补特例。
+- PID归属、精确窗口身份和唯一性保留；两个兼容候选仍拒绝，没有偷选最大／最近窗口。
+- 新字段有生产消费链：页面活动采集→selected activity→binding hint→resolver过滤及Host ownership验证。公共Runtime／Provider／工具协议没有被侵入；问题是尺度语义不正确，不是孤立字段。
+
+### P1：将包含页面zoom的DPR当作窗口坐标尺度
+
+PR版本`managed-browser-host.ts:661`读取`window.devicePixelRatio`，1068行送入hint，928—931行按它乘CDP窗口的x／y／width／height。页面DPR包含用户网页缩放，不等于外层窗口的显示器尺度。W3C的[devicePixelRatio定义](https://www.w3.org/TR/cssom-view/#dom-window-devicepixelratio)明确包含当前page zoom；Chromium的[坐标空间说明](https://chromium.googlesource.com/experimental/website/+/2381c9d8305fee4a2d02fab5cbee46d209f50483/site/developers/design-documents/blink-coordinate-spaces/index.md)区分CSS像素、DIP和物理像素，普通浏览器zoom改变CSS像素与DIP的关系。[当前BrowserHandler源码](https://raw.githubusercontent.com/chromium/chromium/main/chrome/browser/devtools/protocol/browser_handler.cc)则从外层BaseWindow的GetBounds／GetRestoredBounds生成CDP窗口bounds，不按网页zoom放大整个窗口。
+
+Sol从PR原始源码经现有TypeScript在内存转译，执行真实比较函数，未重写一个近似算法：
+
+| 同一窗口 | 输入 | 实际结果 |
+| --- | --- | --- |
+| CDP `{10,10,1050,660}`；CUA `{17,10,1036,653}` | DPR=1 | 接受 |
+| 外窗几何不变，普通页面zoom为125% | DPR=1.25 | 拒绝 |
+
+后一行期望宽度被算成1312.5，真实1036，差276.5，远超20容差；resolver及两个ownership验证入口都会使用该错误量。持久登录profile保存网页放大是常见状态，尤其与低视力使用有关，不能仅用“任意zoom未验证”把这个启动回归下沉为不影响接收的极端边界。
+
+新增回归都手工构造`deviceScaleFactor`；已有Host测试没有覆盖新字段实际采集／传播，因而CI通过未发现上述问题。公用比较器中的Windows DWM帧差假设也不能自动证明macOS／Linux坐标单位成立；此处不重复列成另一项阻塞。
+
+### 初审退回要求（代码项现已落实，实机补验仍保留）
+
+1. 保留本PR位置、尺寸及唯一性改进；把窗口坐标转换与网页内容DPR分开。明确CDP外窗和各Computer后端bounds的单位，使用对应平台可验证的窗口／显示尺度；两者本就同单位时按1:1比较。不要靠候选宽高反推任意比例，也不要扩大16px容差、添加网站特例或强制用户把页面恢复100%来掩盖问题。
+2. 新尺度若仍需字段，须给出真实生产者、更新和消费者；不要把页面DPR换个名字就称为display scale。无需修改Provider、模型坐标协议或Runtime主循环。
+3. 补生产路径测试：CDP页面活动读取→选中页面→hint→resolver及Host验证。至少区分显示尺度与页面zoom，覆盖100%／125%／150%网页放大、同一外窗不变、合法高DPI、小比例弹窗排除、多兼容候选拒绝及无尺度证据。
+4. 离线通过后，在原复现环境做主窗／小窗和持久profile放大页面短验收，再做一条浏览器→记事本→返回浏览器的任务。不要求重跑整套业务集；Windows结果不能替代Mac／Linux坐标合同证据。保留作者已有成功／失败记录，不改写原始结果。
+
+### 验证与集成边界
+
+作者报告Windows全仓1820项、真实24请求／20 GUI尝试跨应用任务通过，但同时明确生成的健康资料有事实偏差；本次读取的是脱敏报告，未独立重跑该任务，也不把模型正文正确性计作通过。本次独立检查GitHub四组CI及ci-required均成功、Sol真实比较函数复现上述回归；没有声称独立跑过PR全仓测试。
+
+当前本地分支与PR共祖为079c1c4，三个受管浏览器代码文件在本地后续提交未另改动；`git merge-tree --write-tree HEAD origin/pr25-audit`成功，无提交级冲突。但本地文档仍有未提交修改，不能直接覆盖或据此宣称工作树可无条件合并。修正后先重新复审，再吸收到Preview分支，保留队友作者信息；本次没有发布GitHub审查意见、关闭PR、合并或部署。
+
+## 2026-10-09：上游替代提案与当前状态核对
+
+本次仅核对公开PR、diff、CI和服务状态，没有部署、启动Host、替换CUA、操作桌面或关闭任何PR。#4836当前已是Ready／Open，源码仍为`0492335`；这取代上一轮“仍为Draft”的状态，但正文尚有Draft字样，需要后续同步。官方Windows矩阵37807893750已结束：shared Electron／Tauri、installer、capture通过，native因光标叠层z-order超时失败，canonical certification被跳过，整轮不是全绿。
+
+[PR #4901](https://github.com/trycua/cua/pull/4901)是另一份Draft／Open提案，作者`injaneity`；之前在#4836留言的是`f-trycua`。当前公开记录不能据此称为维护者已决定接管或替换。它引用`Fixes #4830`和`Alternative to #4836`，没有合入或关闭#4836。其唯一提交作者是injaneity，未保留我们的代码提交或共同作者；引用了问题和复现样本，这与移植我们的实现并保留代码作者是不同情况。
+
+两条路线不同：#4836以UIA能力在已确认的空Document／文末插入，通过ValuePattern写入并读回；#4901改Windows原生前台输入，每个UTF-16单元或Return与sentinel一起发送，等目标队列读到sentinel后再发下一单元。不是已失败的固定间隔sleep实验，也不依赖Document ValuePattern；若真实验证成立，有望保留更多原生编辑语义。作者对VK_PACKET读提前导致覆盖的解释仍缺本机根因证据，0.25s／400字符及≤1.5倍性能是设计估计，不是实测结果。
+
+初审边界：#4901的Windows单元／编译CI通过，但作者明确未执行Win32实机路径，新增Notepad保存测试仅manual allowlist，不由CI选取。测试中的`KillPid`按匹配窗口PID执行`taskkill /T /F`；现代Notepad可能复用已有进程，不能原样在有用户标签的电脑运行，须先解决测试隔离／清理。下一步先保留我们已验证的产品基线，云端构建其精确SHA，再以独立测试标签、保存全文读回验证91／390码点、换行、emoji、文末追加、浏览器单行及耗时；不能把这一轮源码初审写成替代方案已通过。
+
 ## 2026-10-08 上游跟进
 
 2026-10-09更新：为保持PR最小范围，下述零HWND身份扩展及配套WPF正例已从当前PR路线拆出，仅保存在本地实验分支 `codex/windows-focused-document-virtual-experiment-20261008`、提交 `749da483`，没有提交新PR或部署。当前上游PR #4836仍为原4文件、源码 `0492335`。不能为了让新夹具通过而扩大产品准入；真实记事本补验针对原PR二进制。用户已允许本轮记事本实验：编译仍在GitHub，测试二进制只临时放入独立目录，用后清理，不在本机编译或保留构建缓存。
@@ -14,7 +90,7 @@
 
 实机记录：`runs/diagnostics/pr4836-notepad-acceptance-20261009/2026-10-08T16-48-39-246Z-6f9897ff.json`。两次被测`type_text`均为Accessibility／Confirmed；Enter为GlobalInput／Unverifiable，但保存文件独立证明换行已产生。脚本的原始汇总标签把Enter回执也要求Confirmed，因而留下`content-exact-route-not-confirmed`；原始报告保留，审计以`nativeRouteConfirmed=true`、三次`exact=true`及实际文件哈希为准，不将既定不可自行验证的Enter误判为文本路径失败。最终文本96码点、规范化UTF-8 167字节，SHA-256为`b71ed8ce4eb8cf5cc2525b673e74de83b60cd4a605dd492fd1b67002a1ddd924`，协调者独立读取实际文件核对通过。
 
-本次候选`get_window_state`有23—24个tree条目及treeMarkdown，但SDK输出`elements=[]`、`elementsComplete=false`；5秒只读预算也未提供Document value。因此不以该字段作为输入前硬门槛，使用新空白标签的独立画面与保存文件作为测试证据，没有为此扩展产品协议或PR。候选session、daemon退出及桌面占用释放均确认；原有记事本文件／标签和部署驱动不变。PR／Issue正文已更新实机结果和CI缺口，仍保持Draft，未因Enter标签或UIA读回限制扩大修复。
+本次候选`get_window_state`有23—24个tree条目及treeMarkdown，但SDK输出`elements=[]`、`elementsComplete=false`；5秒只读预算也未提供Document value。因此不以该字段作为输入前硬门槛，使用新空白标签的独立画面与保存文件作为测试证据，没有为此扩展产品协议或PR。候选session、daemon退出及桌面占用释放均确认；原有记事本文件／标签和部署驱动不变。PR／Issue正文已更新实机结果和CI缺口；当轮结束时为Draft，后续GitHub状态见上方最新核对，未因Enter标签或UIA读回限制扩大修复。
 
 清理已完成：仅关闭本轮保存的测试标签，原有标签保留；核实新建ASCII临时目录位于系统Temp且无重解析点后，逐项移除候选exe、manifest、不完整ZIP、独立状态及oracle文件和其空目录。没有删除原SDK、配置、登录profile或用户文件。候选exe与manifest哈希一致，但另一个残留ZIP不完整、未通过archive digest校验，不能宣称ZIP校验通过；已一并清理。诊断报告保留，测试二进制不再留在本机。
 

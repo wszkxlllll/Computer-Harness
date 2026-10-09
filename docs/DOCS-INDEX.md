@@ -2,7 +2,11 @@
 
 ## 当前体验优化与上游跟进（2026-10-09）
 
-[手机端适老化与无障碍体验审查、实施记录](./mobile-accessibility-experience-review-2026-10-08.md)：保留现有布局，收敛输入、状态、审批、结果重听、连接恢复和字号重排；实现与Sol复核完成，完整Web回归195项、隔离浏览器检查74项通过，尚未部署，不冒充真实用户验收。CUA [PR #4836](https://github.com/trycua/cua/pull/4836) 的CLA已通过；精确PR源码的云端构建、真实记事本写入与文末追加最小验收通过。官方Windows矩阵有光标叠层超时缺口，共享矩阵尚未完成，PR仍为Draft，不扩大输入修复去夹带光标改动，详见[统一修复记录](./window-popup-regression-2026-10-04.md)。
+PR #25已追加修复`ef007af`与文档`8bf63ac`，移除含网页zoom且可伪造的页面DPR身份来源，改为可信CDP窗口尺度；原PR候选的Sol复核、全仓1827项及四组CI／ci-required通过。用户授权后，其完整历史已本地合入PR #22 Preview分支，merge commit `85e74d8`；没有合并main、改写作者或部署。集成head下Node24／固定pnpm 11.19.0的根build、Web build和Node自测70通过／0失败／1本机符号链接能力跳过。Vitest 1841/1843，剩下仅CLI两项窄屏长中文分页5秒超时；未改timeout，不称本机全绿。新head仍待push后的四组CI独立验证，详见[统一修复记录](./window-popup-regression-2026-10-04.md)顶部。
+
+字段补查发现手机端`updatedAt`无真实Host生产者，已按用户要求移除字段及展示／朗读／模拟数据；定向复核和Web回归195项通过。4335曾短期开启只读模拟预览，截至本记录核验时无监听；服务器尚未部署。详见下方手机体验记录第5节。
+
+[手机端适老化与无障碍体验审查、实施记录](./mobile-accessibility-experience-review-2026-10-08.md)：保留现有布局，收敛输入、状态、审批、结果重听、连接恢复和字号重排；实现与Sol复核完成，完整Web回归195项、隔离浏览器检查74项通过，尚未部署。最新[部署核对](./voice-preview-deploy-phone-test-2026-09-29.md)确认Preview仍为旧asset、本机4318未监听。CUA #4836当前已Ready，真实记事本最小验收通过；官方矩阵shared通过、native有光标超时，整轮不是全绿。另有Draft替代提案#4901，尚缺Windows实机证据；路线区别与保留基线的判断见[统一修复记录](./window-popup-regression-2026-10-04.md)。
 
 ## 使用、构建与许可
 
@@ -10,7 +14,7 @@
 
 ## 当前交接主线
 
-**2026-10-09 PR25复审整改**：[受管Edge窗口几何修复与跨应用结果](./edge-window-geometry-verification-2026-10-08.md)。窗口绑定改用原生CDP指标，去除页面zoom及可伪造DPR对身份的影响；内部尺度真实生产消费，Mac按屏幕点1:1，DOM坐标合同不变。定向62项、独立全仓1827项及typecheck通过，Sol复核放行代码；本轮无新增GUI／付费API验收。文档保留原作者10月8日真实跨应用成功、UIA多行失败与unknown以及健康报告事实偏差，不把旧实机证据重计为新版本全面验收。
+**2026-10-09 PR25与手机体验集成**：[受管Edge窗口几何修复与跨应用结果](./edge-window-geometry-verification-2026-10-08.md)的完整历史已正常合入PR #22本地Preview分支，merge commit `85e74d8`；窗口绑定改用可信CDP指标，移除可伪造DPR身份来源，DOM坐标合同不变。手机端收敛和孤立`updatedAt`移除也已包含。集成候选根build、Web build及Node脚本自测通过；Vitest 1841/1843，两项窄屏长中文分页检查超时。新head尚待push／CI与独立Preview部署；不把PR25原始CI或手机单独测试代替集成候选。文档保留原作者跨应用成功、UIA多行失败与unknown及健康报告事实偏差，不将旧实机证据重计为新版本全面验收。
 
 **同日最新进展（2026-10-07）**：用户手机携程→记事本任务通过只读截图／实际文件验收，25请求、229.092秒，请求等待176.776秒；后续没有盲删必要恢复步骤。Context／预览增量源码`d840000c`全仓1817/1817，已更新本机Host；服务器Relay/Web和候选CUA不变，手机需重新配对。使用与版本矩阵见[部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)，效果／边界与Demo录制安排见[统一收尾](./window-popup-regression-2026-10-04.md)。[项目材料](./project-materials.md)第7节补入AIC正式要求与提前准备，明确开放成果不等于必须无限免费公网控制。
 
