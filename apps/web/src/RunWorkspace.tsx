@@ -211,13 +211,11 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     }
   }
 
-  const hostUpdatedAt = formatHostUpdatedAt(snapshot.updatedAt);
   const currentProgressSpeechText = [
     `当前任务状态：${statusTextFor(snapshot.status)}。`,
     latestProgressText
       ? `最近一次进展：${latestProgressText}。这条进展来自电脑上一次回报，可能早于当前状态。`
       : "电脑目前没有可朗读的文字进展。",
-    hostUpdatedAt ? `电脑最近更新时间：${hostUpdatedAt}。` : undefined,
     connection === "offline" || connection === "reconnecting"
       ? "手机与电脑暂时断开连接，电脑任务可能仍在继续；恢复连接后才能读取最新状态。"
       : undefined,
@@ -283,7 +281,6 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
           <h2 id="run-activity-title" className="run-activity-heading">任务进度</h2>
           <p className="run-activity-current-status">
             <strong>{statusTextFor(snapshot.status)}</strong>
-            {hostUpdatedAt && <time className="run-activity-updated" dateTime={snapshot.updatedAt}>更新于 {hostUpdatedAt}</time>}
           </p>
           {latestProgressText
             ? <p className="run-activity-copy" role="status" aria-live="polite" aria-atomic="true">上次进展：{latestProgressText}</p>
@@ -380,18 +377,6 @@ function selectLatestProgressText(
   const eventSequence = event?.sequence ?? -1;
   if (notice && noticeSequence >= eventSequence) return notice.text;
   return event ? eventLabel(event) : notice?.text;
-}
-
-function formatHostUpdatedAt(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return undefined;
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
 }
 
 interface RunSpeechActionsProps {

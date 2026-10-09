@@ -499,7 +499,6 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .run-activity-heading { font-size: 1.02rem; line-height: 1.35; margin: 0; }
 .run-activity-current-status { align-items: baseline; display: flex; flex-wrap: wrap; font-weight: 700; gap: .2rem .55rem; margin: .35rem 0; overflow-wrap: anywhere; }
 .run-activity-copy { margin: .45rem 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.run-activity-updated { color: var(--muted); font-size: .82rem; font-weight: 400; font-variant-numeric: tabular-nums; }
 .run-activity-details { color: var(--muted); font-size: .82rem; margin-top: .4rem; }
 .run-activity-details summary { min-height: 2.75rem; padding: .45rem 0; }
 .run-activity-details p { margin: .1rem 0 .45rem; }

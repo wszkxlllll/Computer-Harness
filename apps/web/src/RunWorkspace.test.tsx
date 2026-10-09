@@ -82,7 +82,7 @@ describe("request-bound screenshot lifecycle", () => {
     expect((screen.getByRole("button", { name: "停止朗读" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("shows current Host progress and update time in simple mode, with a keyboard skip target", () => {
+  it("shows current status and latest progress in simple mode with a keyboard skip target", () => {
     localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
       ...DEFAULT_PREFERENCES,
       presentation: { ...DEFAULT_PREFERENCES.presentation, layoutMode: "simple" },
@@ -101,7 +101,6 @@ describe("request-bound screenshot lifecycle", () => {
         ...approval,
         status: "running",
         sequence: 5,
-        updatedAt: "2026-10-08T02:03:04.000Z",
         reply: "电脑返回的查询结果。",
         capabilities: { correct: true },
         pendingRequest: undefined,
@@ -118,7 +117,6 @@ describe("request-bound screenshot lifecycle", () => {
     expect(document.querySelector(".run-activity-copy")?.textContent)
       .toContain("上次进展：电脑已打开查询结果页面。");
     expect(screen.queryByText("较早的进展。")).toBeNull();
-    expect(screen.getByText(/更新于/)).toBeDefined();
     const statusDetails = document.querySelector(".run-activity-details") as HTMLDetailsElement;
     expect(statusDetails.open).toBe(false);
     expect(statusDetails.textContent).toContain("刷新只读取最新状态，不会重新开始任务。");
@@ -216,7 +214,6 @@ describe("request-bound screenshot lifecycle", () => {
         ...approval,
         status: "running",
         sequence: 3,
-        updatedAt: "2026-10-08T02:03:04.000Z",
         reply: "已找到两个选项。",
         capabilities: { correct: true },
         pendingRequest: undefined,

@@ -19,7 +19,6 @@ export interface RunSummary {
   latestAssetId?: string;
   reply?: string;
   target?: WindowTargetLabel;
-  updatedAt?: string;
 }
 
 export interface WindowTargetLabel {
