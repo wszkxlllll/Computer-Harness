@@ -82,7 +82,7 @@
 
 本地证据：`runs/diagnostics/mobile-accessibility-20261008-headless-qa/qa-2026-10-08T16-30-47-205Z-3952/report.json`及同目录截图。测试使用明确的模拟任务，不是业务成功率证据；报告和截图留存，测试临时浏览器配置已清理。
 
-部署状态：尚未部署本轮手机端修改，不能让用户刷新Preview去验证尚未发布的功能。现有服务、驱动与登录配置未因本轮界面开发替换。
+部署状态（2026-10-09）：手机端修改随集成源码head `d2ee1a3`发布到独立Preview release `2026-10-09-pr22-d2ee1a3-v2`；Preview资源、health、匿名API拒绝与稳定443未改均已检查。电脑Host 4318已对齐并连通Relay WSS，`/connect`和`/api/local/session`均200，CUA候选`7852ab1`与既有登录profile保留。手机尚未重新扫码配对，本次没有建立pairing、创建Run或做真实手机任务；刷新页面不等于已验收。受管Edge 100%／125%真实GUI绑定检查也未完成，工具运行时限制与本机Vitest窄屏超时见[统一修复记录](./window-popup-regression-2026-10-04.md)。
 
 ### 本机界面查看（2026-10-09）
 

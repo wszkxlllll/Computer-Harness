@@ -1,12 +1,20 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29
-状态：隔离 Preview 的 Relay/Web 已于 2026-10-07 更新到 desktop-input-v1 并通过服务器侧检查；Windows 输入候选仍按下方记录单独验收，完整跨应用业务通过与否以实机结果为准。
+状态：隔离Preview Relay/Web现为`2026-10-09-pr22-d2ee1a3-v2`，本机Host 4318已对齐并建立Relay WSS。手机尚待重新扫码，未在本轮创建pairing或真实Run；Windows输入/zoom实机结果不因部署自动通过。
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
 
 ## 2026-10-09：只读部署状态核对
 
-手机体验修改与PR #25完整历史现已合入PR #22本地候选`85e74d8`，仍未push／部署；不把独立组件测试或PR25旧head CI当作集成候选通过。Node24／固定pnpm 11.19.0根build、Web build及Node脚本自测70/70（另1项环境跳过）退出0；Vitest 1841/1843，两例CLI窄屏分页检查在5秒限时内未完成，未提高timeout。合并候选报告见`runs/diagnostics/pr22-integration-20261009-2235/`。只读核对时公网Preview 8443仍引用旧资源`/assets/index-jH9TY0Xe.js`，Preview current为`2026-10-07-desktop-input-v1`；稳定443 current未变。本机4318当前没有监听，本轮未启动或重启Host，手机尚不能从该Host配对。若后续部署，只切独立Preview新release，不替换CUA候选或稳定服务；Relay重启后需重新配对。
+PR25完整历史与本地手机体验已按保留作者方式合入PR #22；代码head `d2ee1a3`的新CI四矩阵及ci-required全部通过。Node24／固定pnpm 11.19.0根build、Web build、Node自测70通过／0失败／1项环境跳过；本机Vitest 1841/1843，两例CLI窄屏长中文分页检查超5秒，未改timeout。集成报告见`runs/diagnostics/pr22-integration-20261009-2235/`。
+
+独立Preview已原子切换到`/opt/computer-harness-preview/releases/2026-10-09-pr22-d2ee1a3-v2`，新JS为`/assets/index-Dksr18pu.js`（SHA-256 `256A9FF98C08A259644982087047D2776AF376F0ED201AF0FB9A5C5C8FA52C85`），公网health/root/asset为200，匿名`GET /api/runs`为401。Relay重启清空手机内存session，stable 443/current未变；原Preview release `2026-10-07-desktop-input-v1`保留作回滚点。回退时只把Preview `current`原子指回旧release并重启`computer-harness-relay-preview.service`，随后复查health/asset/匿名API；不得改stable。
+
+本机Host PID 47180监听4318，`/connect`、`/api/local/session`均200，页面引用新asset；Host到Preview `:8443`存在ESTABLISHED WSS，Host stderr无Relay认证错误。物理桌面owner lease及operation marker均不存在，新Host run目录无Run轨迹，未发送pairing请求、未approve、未CreateRun、未执行桌面/模型API任务。
+
+用户重新连接步骤：在电脑浏览器打开`http://127.0.0.1:4318/connect`，用手机重新扫描该页面显示的二维码，并在需要时由用户本人确认手机配对请求；不能自动配对或自动批准。只有重新连接后才能继续同一个Preview体验；本次部署与连接检查本身不证明手机语音或真实任务通过。
+
+受管Edge网页zoom 100%／125%窗口绑定短实机检查未完成。尝试入口通过隔离`node_repl`运行时调用既有`openCuaBootstrapSession`，但该工具运行时没有Node全局`process`；SDK在`cua-sdk-platform.ts:22`读取`process.platform`时抛出`ReferenceError`，失败发生在连接候选pipe前，没有启动Edge窗口。这是工具运行时限制，不是产品代码或候选驱动回归；也不把单测/CI代替GUI验收。
 
 ## 2026-10-07 Preview 部署与 Windows 输入候选
 

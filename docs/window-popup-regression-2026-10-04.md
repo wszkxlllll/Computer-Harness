@@ -1,18 +1,30 @@
 # 手机实机弹窗回归与整改
 
+## 2026-10-09：窗口候选截图失败的直接诊断
+
+用户确认失败发生在手机窗口候选的截图预览，而不是任务执行。协调者直接检查，未委派新诊断、重启服务或修改产品源码。当前Host没有业务Run产物；stderr仅有Fastify弃用提示，候选CUA日志记录UIA desktop enumeration超过2000ms后退回Win32。日志没有保存这些预览请求的原始错误码，不能仅凭该条UIA警告断定每次手机失败原因。
+
+直接复现使用正常Node24、同一Preview daemon与项目原有`createWindowTargetDiscovery`、`captureWindowPreview`、PNG归一化路径；只读列窗和捕获已有Edge窗口，不激活、不输入，不保存截图正文。8秒预算的预览在9064ms（含清理）返回TimeoutError；仅诊断将预算改为20秒，一次在12096ms成功取得619188字节PNG，另一次仍于20073ms超时；最后带RPC耗时记录的一次于17433ms成功取得523768字节PNG。截图均1567×935，未触发2MiB传输限制，归一化没有缩图。以上不是对用户每次请求的逐条回放，也不能证明加长超时就稳定。
+
+最后一次成功的本地RPC观测包括预览内3次`list_windows`约800／1724／993ms和一次`verifyState`3739ms；临时session启动／清理为几十毫秒。完整链路还包含Win32关系盘点与前台可见区域检查，剩余时间尚未逐项计量，不把差值全部归因于某一个probe。生产Host的外层预览预算为8秒（`remote-run-api.ts`，来自Oct4的075d75e5），内部窗口捕获可用20秒；PR25没有修改该预算。CPU实测100%，20逻辑处理器；Windows进程计数器中vmmemWSL为1229%（约12.3个逻辑核、占整机约61%），不能把该计数解释为整机1229%。用户确认同时运行实验。资源竞争是重要因素，但没有空载对照，不能宣称唯一根因。
+
+结论与后续：该预览链路可取得有效截图，但在当前满载环境下耗时超过8秒且波动明显；不是模型API等待、PNG过大，也不是前一轮隔离node_repl缺`process`的同一故障。先停止追加压力测试、不停止用户实验。产品修正应重点减少缩略图路径重复的完整桌面／UIA／Win32盘点，保留精确PID/HWND及几何校验；统筹外层预览、内部捕获与清理预算，而不是盲目增加重试。还应补可脱敏的预览耗时／错误码记录，否则失败现场难以追溯。下一次空载对照再区分设施固有耗时与资源争用。本次没有落实这些产品修正。
+
+本轮已发布的手机改进主要是状态与历史进展区分、审批原因提前显示、主动朗读／停止、同Run状态读取重试、录音交互说明和相对字号重排，保留原视觉布局，不是界面重设计。公网8443已提供`index-Dksr18pu.js`且哈希核验通过；用户手机是否仍缓存旧页面没有客户端证据，不能仅凭公网资源已更新断言手机已加载新版。
+
 ## 2026-10-09：PR25与本地体验集成状态
 
 用户授权将PR #25完整历史与本地手机体验改动集成到PR #22的Preview分支，不进入main。已在Pi工作树分支`codex/runtime-surface-preview-20261003`将PR25 head `8bf63ac`正常合入，merge commit为`85e74d822a3d903b2ed33a4acdda564f26cbc839`；保留原作者提交与四份待更新文档，没有改写历史。#23评估器与#24平台加固未夹带。集成源码已过Sol复核；本轮只处理该合并候选和相关部署记录。
 
-截至本记录：#22远端仍是合入前head`079c1c4`，本地集成候选尚未push或部署。旧Preview release、stable 443及CUA候选`7852ab1`保留；当前公网Preview仍是旧页面资源，本机4318未监听。不会把源码测试通过写成手机已更新或真机业务验收。
+集成与发布已完成：文档提交前的统一代码head为`d2ee1a3a66839fac2149938a7dea617c0d8c57c6`，含PR25 merge `85e74d8`；PR #22新head四矩阵CI及ci-required全绿（run `37946804774`）。本机固定pnpm 11.19.0／Node24根build、Web build通过，Node自测70 pass／0 fail／1环境跳过；本机Vitest 1841/1843，两条旧CLI窄屏长中文分页用例各因5秒限时超时，未改timeout。服务器仅Preview已切到`2026-10-09-pr22-d2ee1a3-v2`，Web JS为`index-Dksr18pu.js`，stable 443/current保持不变，CUA候选仍为`7852ab1`。
+
+本机Preview Host现监听4318：`/connect`与`/api/local/session`均200，Host→Preview `:8443`有WSS连接，stderr无Relay认证错误；物理桌面owner lease与operation marker不存在。本轮没有创建配对请求、批准手机、CreateRun、业务Run、桌面输入或模型API调用。手机端要重新连接：在电脑打开`http://127.0.0.1:4318/connect`，用手机重新扫描页面上的二维码；需要在屏幕确认的请求仍须由用户本人决定，不会自动配对或批准。
+
+原计划中的100%／125%真实Edge zoom绑定smoke未完成，不以CI或单测替代。受控执行中`node_repl`隔离runtime没有Node全局`process`，调用既有`openCuaBootstrapSession`在加载CUA SDK阶段失败（`cua-sdk-platform.ts:22`读取`process.platform`），故没有启动Edge窗口；这不是候选SHA／pipe失败，也不是产品代码回归。启动正常Node24本机Host与Relay/WSS连接成功。此项native GUI验证仍待使用正常Node24执行入口后安排。
 
 集成候选的本地构建／回归已完成但非全绿：Node24与固定pnpm 11.19.0下Web生产构建和根`pnpm run build`均退出0；Node官方脚本自测70通过、0失败、1项本机符号链接能力跳过。默认并发Vitest为1835/1843通过、8项失败；按2最大／1最小worker复跑为1841/1843通过，仅CLI `apps/cli/src/tui.test.ts`的20列和40列窄屏长中文分页用例各超5秒。5个相关失败文件低并发定向154/155；20列精确单测一次通过、40列精确单测一次同样超时。未改测试、源码或5秒时限。检查时CPU为100%、可用内存24.1%，与本机压力下间歇性超时相符，但不据此将失败宣称为通过。报告：`runs/diagnostics/pr22-integration-20261009-2235/vitest-2max-1min.json`、`.../tui-isolated.json`、`.../tui-40col-isolated.json`及`.../node-selftests.log`。PR #25源码原有复核／CI全绿不能替代集成候选CI；完整验证事实以新head CI另记。
 
-下一步：
-
-1. 仅提交本轮负责的四份已存在文档，排除工作树内无关未跟踪文件；按既定GitHub身份检查后更新PR #22，保留全部作者历史。云端CI以新head独立验证；若四组CI通过，可作为独立全量代码证据放行Preview，同时保留本机两个窄屏超时记录。
-2. 部署时使用新的独立Preview release和精确预期current保护；保留旧release、稳定入口和CUA候选，只有在新构建及服务器健康检查过后才切换Preview。公网服务操作由root使用已核验的固定主机认证工具执行，本轮不写入或回显凭据。
-3. 受管浏览器100%／125%缩放短实机绑定、手机端真实Run及浏览器→记事本业务链路另行安排；本轮不启动桌面或付费API任务，不以本机模拟预览代替。
+回退仅限独立Preview：将`/opt/computer-harness-preview/current`原子恢复到保留的`/opt/computer-harness-preview/releases/2026-10-07-desktop-input-v1`并重启`computer-harness-relay-preview.service`，之后复查health、asset与匿名API 401；不得改stable current／443。回退未执行。用户真实手机Run、审批与结果重听尚待重新扫码后另行安排；本轮不启动桌面或付费API任务。
 
 后续阶段先冻结可用版本，暂停增加主要模块。优先交付一条高效、可重复、可录像的跨应用Demo：查询实际信息→整理并保存→可选的文件发送审批。未获明确授权时只走到审批，不实际对外发送。记录模型等待、回合数、重复动作、人工介入和结果正确性，区分设施故障与模型策略问题；有证据再做通用优化，不写应用特例或固定答案。
 
@@ -64,7 +76,7 @@ Sol从PR原始源码经现有TypeScript在内存转译，执行真实比较函�
 
 作者报告Windows全仓1820项、真实24请求／20 GUI尝试跨应用任务通过，但同时明确生成的健康资料有事实偏差；本次读取的是脱敏报告，未独立重跑该任务，也不把模型正文正确性计作通过。本次独立检查GitHub四组CI及ci-required均成功、Sol真实比较函数复现上述回归；没有声称独立跑过PR全仓测试。
 
-当前本地分支与PR共祖为079c1c4，三个受管浏览器代码文件在本地后续提交未另改动；`git merge-tree --write-tree HEAD origin/pr25-audit`成功，无提交级冲突。但本地文档仍有未提交修改，不能直接覆盖或据此宣称工作树可无条件合并。修正后先重新复审，再吸收到Preview分支，保留队友作者信息；本次没有发布GitHub审查意见、关闭PR、合并或部署。
+截至该次PR25审查时，本地分支与PR共祖为079c1c4，`git merge-tree --write-tree HEAD origin/pr25-audit`成功且无提交级冲突；当时文档仍未提交，因此记录强调需先审查再集成。其后用户授权后已按本节顶部状态保留作者历史合入PR #22、更新并部署独立Preview；这一段只描述当时的审查边界，不再代表当前集成/部署状态。
 
 ## 2026-10-09：上游替代提案与当前状态核对
 
