@@ -50,7 +50,7 @@ describe("managed browser CUA window resolver", () => {
     ]).driver, "s", 4321, new AbortController().signal, { browserWindowId: 77, ownedProcessIds: [4321, 5432, 6543] })).rejects.toMatchObject({ reason: "multiple_candidates" });
   });
 
-  it("accepts one uniquely owned window when CDP and CUA use a common DPI scale", async () => {
+  it("converts CDP DIP bounds to native CUA window units using an independent display scale", async () => {
     const fixture = driverWithWindows([
       { pid: 5432, window_id: 2, bounds: { x: 24, y: 15, width: 1557, height: 1490 } },
       { pid: 9999, window_id: 3, bounds: { x: 864, y: 129, width: 516, height: 309 } },
@@ -58,7 +58,7 @@ describe("managed browser CUA window resolver", () => {
     await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, {
       browserWindowId: 77,
       browserBounds: { x: 10, y: 10, width: 1050, height: 1000 },
-      deviceScaleFactor: 1.5,
+      browserBoundsToCuaScale: 1.5,
       ownedProcessIds: [5432],
     })).resolves.toMatchObject({ target: { pid: 5432, windowId: 2 } });
   });
@@ -103,7 +103,7 @@ describe("managed browser CUA window resolver", () => {
     ]);
     await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, {
       browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 },
-      deviceScaleFactor: 1, ownedProcessIds: [5432],
+      browserBoundsToCuaScale: 1, ownedProcessIds: [5432],
     })).resolves.toMatchObject({ target: { pid: 5432, windowId: 2 } });
   });
 
@@ -127,9 +127,9 @@ describe("managed browser CUA window resolver", () => {
     const hint = { browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 }, ownedProcessIds: [5432] };
     await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, hint))
       .rejects.toMatchObject({ reason: "multiple_candidates" });
-    for (const deviceScaleFactor of [0, 0.33, Number.NaN, Number.POSITIVE_INFINITY]) {
+    for (const browserBoundsToCuaScale of [0, 0.33, Number.NaN, Number.POSITIVE_INFINITY]) {
       await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal,
-        { ...hint, deviceScaleFactor })).rejects.toMatchObject({ reason: "ownership_mismatch" });
+        { ...hint, browserBoundsToCuaScale })).rejects.toMatchObject({ reason: "ownership_mismatch" });
     }
   });
 });

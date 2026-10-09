@@ -7,8 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { runInNewContext } from "node:vm";
+import type { CuaDriverLike } from "./cua-sdk-contract.js";
 import { domCandidateFingerprint, type DomGroundingRawCandidate } from "./dom-grounding.js";
-import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { resolveOwnedManagedBrowserWindow } from "./managed-browser-resolver.js";
+import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, browserBoundsToCuaScaleFromPageMetrics, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, createManagedBrowserWindowBindingHint, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, inspectManagedPageActivity, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserDevToolsPage, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
   it("selects a platform browser and bounded executable candidates", () => {
@@ -728,6 +730,86 @@ describe("managed browser host pilot", () => {
     expect(() => validateOwnedWindowResolution(10, { ...base, ownershipEvidence: { ...base.ownershipEvidence, processId: 99 } })).toThrow(/ownership_mismatch/iu);
   });
 
+  it.each([0.8, 1, 1.25, 1.5])("separates page zoom %s from local window scale using CDP viewport metrics", (pageZoom) => {
+    for (const osScale of [1, 1.25, 1.5]) {
+      const metrics = managedBrowserLayoutMetrics(pageZoom, osScale);
+      expect(browserBoundsToCuaScaleFromPageMetrics(metrics, metrics, "win32")).toBeCloseTo(osScale);
+      expect(browserBoundsToCuaScaleFromPageMetrics(metrics, metrics, "linux")).toBeCloseTo(osScale);
+    }
+  });
+
+  it("fails closed when trusted viewport scale evidence is absent, inconsistent, or changes", () => {
+    const valid = managedBrowserLayoutMetrics(1.25, 1.5);
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, valid, "win32")).toBe(1.5);
+    expect(browserBoundsToCuaScaleFromPageMetrics(undefined, valid, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, undefined, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, managedBrowserLayoutMetrics(1.5, 1.5), "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, managedBrowserLayoutMetrics(1.25, 1), "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics({ cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom: 1 } }, valid, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics({
+      visualViewport: { clientWidth: 1600, clientHeight: 900 },
+      cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom: 1 },
+    }, valid, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(managedBrowserLayoutMetrics(1, 0.8), managedBrowserLayoutMetrics(1, 0.8), "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(undefined, undefined, "darwin")).toBe(1);
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, valid, "aix")).toBeUndefined();
+  });
+
+  it("uses trusted CDP geometry through activity, hint, both validators, and rejects a 2x sibling despite page DPR override", async () => {
+    const page: ManagedBrowserDevToolsPage = {
+      type: "page",
+      id: "bound-page",
+      webSocketDebuggerUrl: "ws://page-fixture",
+    };
+    const browserBounds = { left: 10, top: 10, width: 800, height: 600 };
+    const metrics = managedBrowserLayoutMetrics(1, 1);
+    const cdp = managedBrowserActivityCdpFixture({ browserBounds, layoutMetrics: [metrics, metrics], spoofedPageDpr: 2 });
+    const signal = new AbortController().signal;
+    const selected = await resolveManagedBrowserActivePageSet(
+      [page],
+      (target, activitySignal) => inspectManagedPageActivity(target, "ws://browser-fixture", activitySignal, cdp.connect, "win32"),
+      signal,
+      77,
+    );
+    expect(selected).toMatchObject({
+      page: { id: "bound-page" }, browserWindowId: 77, visibilityState: "visible",
+      browserBounds: { x: 10, y: 10, width: 800, height: 600 }, browserBoundsToCuaScale: 1,
+    });
+    expect(cdp.calls.filter((call) => call.method === "Page.getLayoutMetrics")).toHaveLength(2);
+    const runtimeCall = cdp.calls.find((call) => call.method === "Runtime.evaluate");
+    expect(runtimeCall?.params.expression).not.toContain("devicePixelRatio");
+
+    const hint = createManagedBrowserWindowBindingHint(selected!, [4321, 5432]);
+    expect(hint).toMatchObject({ browserWindowId: 77, browserBoundsToCuaScale: 1, ownedProcessIds: [4321, 5432] });
+    const driver = managedBrowserWindowListDriver([
+      { pid: 5432, window_id: 1, bounds: { x: 548, y: 82, width: 344, height: 206 } },
+      { pid: 5432, window_id: 2, bounds: { x: 10, y: 10, width: 800, height: 600 } },
+      { pid: 5432, window_id: 3, bounds: { x: 20, y: 20, width: 1600, height: 1200 } },
+    ]);
+    const resolution = await resolveOwnedManagedBrowserWindow(driver, "managed-session", 4321, signal, hint);
+    expect(resolution).toBeDefined();
+    expect(resolution!.target).toEqual({ pid: 5432, windowId: 2 });
+    expect(validateOwnedWindowResolution(4321, resolution!, hint)).toEqual(resolution!.target);
+  });
+
+  it("omits only the scale when trusted CDP metrics are missing or change during activity collection", async () => {
+    const page: ManagedBrowserDevToolsPage = { type: "page", id: "bound-page", webSocketDebuggerUrl: "ws://page-fixture" };
+    const missing = managedBrowserActivityCdpFixture({ layoutMetrics: [undefined] });
+    const missingActivity = await inspectManagedPageActivity(page, "ws://browser-fixture", new AbortController().signal, missing.connect, "win32");
+    expect(missingActivity).toMatchObject({ visibilityState: "visible", hasFocus: true });
+    expect(missingActivity?.browserBoundsToCuaScale).toBeUndefined();
+
+    const changed = managedBrowserActivityCdpFixture({ layoutMetrics: [managedBrowserLayoutMetrics(1.25, 1.5), managedBrowserLayoutMetrics(1.5, 1.5)] });
+    const changedActivity = await inspectManagedPageActivity(page, "ws://browser-fixture", new AbortController().signal, changed.connect, "win32");
+    expect(changedActivity).toMatchObject({ visibilityState: "visible", hasFocus: true });
+    expect(changedActivity?.browserBoundsToCuaScale).toBeUndefined();
+
+    const mac = managedBrowserActivityCdpFixture({ layoutMetrics: [], spoofedPageDpr: 2 });
+    const macActivity = await inspectManagedPageActivity(page, "ws://browser-fixture", new AbortController().signal, mac.connect, "darwin");
+    expect(macActivity?.browserBoundsToCuaScale).toBe(1);
+    expect(mac.calls.some((call) => call.method === "Page.getLayoutMetrics")).toBe(false);
+  });
+
   it("revalidates the bound page set without confusing navigation or a replacement tab", () => {
     const sameTab = [{ type: "page", id: "tab-1", webSocketDebuggerUrl: "ws://127.0.0.1:1/devtools/page/tab-1-navigation" }];
     expect(validateManagedBrowserPageSet(sameTab, "tab-1")).toMatchObject({ id: "tab-1" });
@@ -978,4 +1060,68 @@ function serverTextFrame(payload: Buffer, opcode: number, final: boolean): Buffe
   if (payload.length < 126) header[1] = payload.length;
   else { header[1] = 126; header.writeUInt16BE(payload.length, 2); }
   return Buffer.concat([header, payload]);
+}
+
+function managedBrowserActivityCdpFixture(options: {
+  readonly layoutMetrics: readonly (unknown | undefined)[];
+  readonly spoofedPageDpr?: number;
+  readonly browserBounds?: { readonly left: number; readonly top: number; readonly width: number; readonly height: number };
+}): {
+  readonly connect: Parameters<typeof inspectManagedPageActivity>[3];
+  readonly calls: Array<{ readonly url: string; readonly method: string; readonly params: Record<string, unknown> }>;
+} {
+  const calls: Array<{ readonly url: string; readonly method: string; readonly params: Record<string, unknown> }> = [];
+  let metricsRead = 0;
+  const connect: Parameters<typeof inspectManagedPageActivity>[3] = async (url, _signal) => ({
+    async command(method, params) {
+      calls.push({ url, method, params });
+      if (url === "ws://browser-fixture" && method === "Browser.getWindowForTarget") {
+        return { result: { windowId: 77 } };
+      }
+      if (url === "ws://browser-fixture" && method === "Browser.getWindowBounds") {
+        return { result: { bounds: options.browserBounds ?? { left: 8, top: 8, width: 820, height: 520 } } };
+      }
+      if (url === "ws://page-fixture" && method === "Page.getLayoutMetrics") {
+        return { result: options.layoutMetrics[metricsRead++] };
+      }
+      if (url === "ws://page-fixture" && method === "Runtime.evaluate") {
+        return { result: { result: { value: {
+          visibilityState: "visible",
+          hasFocus: true,
+          // Simulates a page-controlled DPR value. Production activity must
+          // not request or use it; window bounds use only Page metrics above.
+          ...(options.spoofedPageDpr === undefined ? {} : { pageDevicePixelRatio: options.spoofedPageDpr }),
+          navigationKey: "123.5",
+        } } } };
+      }
+      throw new Error(`unexpected CDP command ${method}`);
+    },
+    close() {},
+  });
+  return { connect, calls };
+}
+
+function managedBrowserLayoutMetrics(pageZoom: number, osScale: number): Record<string, unknown> {
+  const cssWidth = 800;
+  const cssHeight = 600;
+  const cssToPhysical = pageZoom * osScale;
+  return {
+    visualViewport: { clientWidth: cssWidth * cssToPhysical, clientHeight: cssHeight * cssToPhysical },
+    cssVisualViewport: { clientWidth: cssWidth, clientHeight: cssHeight, zoom: pageZoom },
+  };
+}
+
+function managedBrowserWindowListDriver(windows: readonly unknown[]): CuaDriverLike {
+  return {
+    async callTool() {
+      return {
+        isError: false,
+        degraded: false,
+        structuredJson: JSON.stringify({ windows }),
+        text: "",
+        images: [],
+        rawJson: "{}",
+      };
+    },
+  } as unknown as CuaDriverLike;
 }
