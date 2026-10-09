@@ -50,7 +50,7 @@ describe("managed browser CUA window resolver", () => {
     ]).driver, "s", 4321, new AbortController().signal, { browserWindowId: 77, ownedProcessIds: [4321, 5432, 6543] })).rejects.toMatchObject({ reason: "multiple_candidates" });
   });
 
-  it("accepts one uniquely owned window when CDP and CUA use a common DPI scale", async () => {
+  it("converts CDP DIP bounds to native CUA window units using an independent display scale", async () => {
     const fixture = driverWithWindows([
       { pid: 5432, window_id: 2, bounds: { x: 24, y: 15, width: 1557, height: 1490 } },
       { pid: 9999, window_id: 3, bounds: { x: 864, y: 129, width: 516, height: 309 } },
@@ -58,6 +58,7 @@ describe("managed browser CUA window resolver", () => {
     await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, {
       browserWindowId: 77,
       browserBounds: { x: 10, y: 10, width: 1050, height: 1000 },
+      browserBoundsToCuaScale: 1.5,
       ownedProcessIds: [5432],
     })).resolves.toMatchObject({ target: { pid: 5432, windowId: 2 } });
   });
@@ -94,5 +95,41 @@ describe("managed browser CUA window resolver", () => {
       reason: "ownership_mismatch",
     });
     expect(JSON.stringify(diagnostics)).not.toContain("title");
+  });
+  it("excludes a proportional popup instead of deriving DPI from its dimensions", async () => {
+    const fixture = driverWithWindows([
+      { pid: 5432, window_id: 1, bounds: { x: 548, y: 82, width: 344, height: 206 } },
+      { pid: 5432, window_id: 2, bounds: { x: 17, y: 10, width: 1036, height: 653 } },
+    ]);
+    await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, {
+      browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 },
+      browserBoundsToCuaScale: 1, ownedProcessIds: [5432],
+    })).resolves.toMatchObject({ target: { pid: 5432, windowId: 2 } });
+  });
+
+  it("refuses scaled or displaced lookalikes without matching scale and position evidence", async () => {
+    const hint = { browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 }, ownedProcessIds: [5432] };
+    for (const bounds of [
+      { x: 17, y: 10, width: 344, height: 206 },
+      { x: 500, y: 300, width: 1036, height: 653 },
+      { x: 15, y: 15, width: 1561, height: 983 },
+    ]) {
+      await expect(resolveOwnedManagedBrowserWindow(driverWithWindows([{ pid: 5432, window_id: 2, bounds }]).driver,
+        "s", 4321, new AbortController().signal, hint)).rejects.toMatchObject({ reason: "ownership_mismatch" });
+    }
+  });
+
+  it("keeps two compatible owned windows ambiguous and rejects malformed scale evidence", async () => {
+    const fixture = driverWithWindows([
+      { pid: 5432, window_id: 1, bounds: { x: 10, y: 10, width: 1050, height: 660 } },
+      { pid: 5432, window_id: 2, bounds: { x: 17, y: 10, width: 1036, height: 653 } },
+    ]);
+    const hint = { browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 }, ownedProcessIds: [5432] };
+    await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, hint))
+      .rejects.toMatchObject({ reason: "multiple_candidates" });
+    for (const browserBoundsToCuaScale of [0, 0.33, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal,
+        { ...hint, browserBoundsToCuaScale })).rejects.toMatchObject({ reason: "ownership_mismatch" });
+    }
   });
 });
