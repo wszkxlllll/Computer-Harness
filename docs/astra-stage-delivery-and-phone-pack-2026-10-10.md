@@ -1,11 +1,11 @@
 # 当前阶段交付与集中补验包
 
-本包配合[执行计划](./astra-autonomous-test-repair-plan-2026-10-10.md)和[实际账本](./astra-autonomous-execution-ledger-2026-10-10.md)。它是尚未关闭出口的续接说明，不代表完整任务或实体手机已通过。冻结源码/build/远端PR会在最终审查后补入本页；目前已提交组合17ec145，PR24两处最小UI增量经Sol独立40项通过；Luna最终组合1866项Vitest/72项TAP、typecheck/Webbuild通过。
+本包配合[执行计划](./astra-autonomous-test-repair-plan-2026-10-10.md)和[实际账本](./astra-autonomous-execution-ledger-2026-10-10.md)。它是尚未关闭出口的续接说明，不代表完整任务或实体手机已通过。产品源码/build冻结17ec145；测试修复a491076当前五项CI全绿，后续仅文档；PR24两处最小UI增量经Sol独立40项通过；Luna最终组合1866项Vitest/72项TAP、typecheck/Webbuild通过。
 
 ## 已有成果及实际限制
 
-- 已保留历史dirty；本轮5个显式源码提交、最终组合1866项Vitest和72项TAP通过；当前PR23隔离head136项通过。
-- 正常本机配对批准、Web Run创建、stock原生窗口截图成立。第二Chrome tab的隔离尚未证明；浏览器DOM listTabs当前超时，不能将其签作双浏览器完成。
+- 已保留历史dirty；本轮5个显式产品/计数提交及1个测试修复提交、最终组合1866项Vitest和72项TAP通过；当前PR23隔离head136项通过。
+- 正常本机配对批准、Web Run创建、stock原生窗口截图成立。后续专用headless Chrome独立admin/client contexts正常UI配对批准、刷新去重、无效码及390px视口通过；公网两独立HTTP会话配对/认证/CSRF/隔离撤销通过。均不冒Provider/Computer业务或真实手机。
 - A01 main3/risk0：一次90s未收到headers，两次正常CLI HTTP200；唯一GUI click遭driver明确拒绝，无正文输入/保存，完整196B任务未完成。三次foreground尝试均在模型前拒绝，不增加调用。费用金额未知。
 - 当前console session锁定经两个独立只读路径确认；GUI任务只在正常解锁后继续，不绕过。Mac无已交付成果文件，Windows/Linux原生现场尚无可达环境；已有ubuntu-vm正常SSH一次超时。
 - 控制/预览302项是L1合同，PR23两条真实失败消费保持inconclusive/false。正常报告导入保留runtime failed与business not_assessed，未制造真人复核。
@@ -46,11 +46,11 @@ M1相机/移动浏览器、M2真实触摸、M3后台/真实手机网络、M4尺�
 
 ## 最终候选构建与PR取舍
 
-产品源码17ec145a57f742b8e65d4f6c5b368f9777b5aae0；本机476项dist实际闭包SHA-256 `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`，manifest在本地baseline/runtime-build-manifest-17ec145.json。正常Host PID87588于18:38:43启动，源码内容与随后17ec145提交相同；entry hash `07b2c43a961c81ca0b3cc47adfd973bdfcba44c5c148df2bc751ee90a3096fd5`。Web bundle index-BxSWOU01.js hash `7df7b87809af3262ce48b0f55c2619b923c001ad74103e5d19312dad24c29d99`。完整闭包不等于每个文件已加载进该PID，未通过inspector读取模块缓存。
+产品源码17ec145a57f742b8e65d4f6c5b368f9777b5aae0；本机476项dist实际闭包SHA-256 `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`，manifest在本地baseline/runtime-build-manifest-17ec145.json。正常Host PID87588于18:38:43启动（现已正常退出；显式既有Relay配置的新Host89224通过公网HTTP配对E2E，无在途Run），源码内容与随后17ec145提交相同；entry hash `07b2c43a961c81ca0b3cc47adfd973bdfcba44c5c148df2bc751ee90a3096fd5`。Web bundle index-BxSWOU01.js hash `7df7b87809af3262ce48b0f55c2619b923c001ad74103e5d19312dad24c29d99`。完整闭包不等于每个文件已加载进该PID，未通过inspector读取模块缓存。
 
 | 实时PR差异 | 当前取舍及证据 | 剩余边界 |
 | --- | --- | --- |
-| PR22 Host session-config拆分 | 现有Host createSessionConfig已连接输入/输出预算、timeout/thinking、layered Guard/handoff；glm-output-budget测试与真实180000/low启动摘要成立 | 不为纯模块拆分追整树；正常客户端全控制仍缺DOM可用性 |
+| PR22 Host session-config拆分 | 现有Host createSessionConfig已连接输入/输出预算、timeout/thinking、layered Guard/handoff；glm-output-budget测试与真实180000/low启动摘要成立 | 不为纯模块拆分追整树；正常配对UI已补证；真实Runtime任务控制仍缺解锁桌面 |
 | PR22 Windows visible-window-capture扩展 | 当前window-contract精确PID/HWND、零几何容差verify_state、PNG解析、共享deadline捕获重试、输入前新鲜visible inventory已有；全suite该driver文件262项通过 | 对应原生Windows GUI未可用，不代原生修复/现场 |
 | PR22 post-input-observation-settler | 当前RunController完成receipt后立即observeAndCommit，新鲜观察及有界transient重取已有 | 没有全动作稳定settler；无真实flaky症状前不加另一层等待，不宣称稳定性能 |
 | PR24预算/网络/终态 | 当前双预算保最新GUI/权威输入、pre-HTTP拒绝、相关request/decision/attempt交换、bounded deadline/取消，以及Runtime诚实failed均保留；当前组合全通过 | 完整查询/保存任务仍无现场通过，历史CI不相加 |
@@ -68,4 +68,17 @@ T2完整任务：逐字输入本页六行正文，UTF-8/LF/末尾恰好一个LF�
 
 T1完整任务：仅在Apple中国大陆当前公开页查Mac mini、MacBook Air、iMac三个系列最低价标准配置，逐项记录名称/型号、价格/币种、芯片、RAM、存储、是否带显示屏、来源URL与查询时间；预算9000元，全部三项都保留并比较预算约束。未知或不可达如实标注，不登录/下单/支付；variant预算8800元。
 
-T3完整任务：携程公开页比较上海虹桥→杭州东2026年11月15日09:00–13:00出发的三个不同高铁车次，2成人/二等座，记录车次、出发/到达/历时、单价/总价、可售状态、URL/查询时间。票未开放写未知，不捏造。初始预算9000元；在三个来源已取得、首次保存之前用正常客户端纠正为8800元并明确旧预算失效。整理TextEdit/记事本纯文本至`<唯一新绝对路径>`，保存关闭重开核全文；variant初8800→8500。每轮全新目标文件，辅助不能代业务步骤。
+T3完整任务：携程公开页比较上海虹桥→杭州东2026年10月17日09:00–13:00出发的三个不同高铁车次，2成人/二等座，记录车次、出发/到达/历时、单价/总价、可售状态、URL/查询时间。票未开放写未知，不捏造。初始预算9000元；在三个来源已取得、首次保存之前用正常客户端纠正为8800元并明确旧预算失效。整理TextEdit/记事本纯文本至`<唯一新绝对路径>`，保存关闭重开核全文；variant初8800→8500。每轮全新目标文件，辅助不能代业务步骤。
+
+正常公网Relay协议已补证：两独立合法HTTP会话申请/电脑确认/领取会话全部成功；缺错CSRF403、非法字段Run400、两自有设备独立撤销成立，无Provider/Computer业务。首CI Windows单项retry测试race由a491076最小测试barrier修复，Sol Runtime137项复验通过；该head最新CI五项全绿，首失败保留。
+
+
+## 最终交付与保留服务
+
+草稿[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)已附当前聊天；正常Git transport不可达时使用已授权GitHub Git Data API保原SHA同步，非force更新分支，无历史重写。当前生产内容17ec145、测试a491076，[当前代码CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38046814449)五项成功；最终文档head/CI以PR实时记录为准。
+
+保留本轮正常Host PID89224（4317，无在途Run）、stock CUA driver PID83913及专用TextEdit PID22394；自有headless Chrome/profile已关闭，HTTP两设备与UI三设备均正常撤销，旧设备/无关服务未动。PID仅为此稳定点，不代下次接管事实；续接先核进程与在途。
+
+公网当前origin对应Preview服务。实际固定闭包34项中27同/7异：Relay package.json、protocol dist/index.js/package.json、relay-connector dist/routing.js/package.json、voice dist/run-notices.js/package.json。Preview current/父目录/releases/Web dist不可由现有SSH账号写入，sudo无非交互规则、本地无部署workflow/helper；未写远端或改服务。另一个可写stable目录不属于当前origin，未拿它冒同版发布。继续发布需服务所有者提供正常合法发布路径；健康/HTTP配对不等于闭包同版。
+
+剩余分别为：Mac正常解锁后的完整T2/T1/T3及真实控制/双窗/sheet；Windows/Linux可达原生环境；Preview合法发布权；实体手机M1–M4；另一位队友试用；成功成果与真人复核后的评测校准。所有已可自主执行的准备、修复、离线检查、正常配对、远端审查/交付均已完成，不无限等待上述条件。

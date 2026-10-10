@@ -86,3 +86,18 @@ PR24现有head静态复审发现两项必要UI合同缺口，已交Luna最小恢
 正常Host当前内容与17ec145一致，实际无模型HTTP冷启动200/200/401/403反例成立；只证明相应HTTP/认证边界，TLS连接存在不代Relay完整交互。浏览器DOM listTabs约30s超时，未绕锁或冒双浏览器隔离成功。
 
 Sol实际使用正常CLI配置解析和报告API消费CLI真实失败轨迹与PR23外部评估：runtime failed、external_import success=false、business not_assessed。这是离线报告集成，不是新CLI业务Run；provenance说明配置重建/清理诊断未重建。
+
+## 18:57：公网协议E2E与首CI失败归因
+
+Sol实际读取脱敏真实HTTP E2E摘要。合法公开HostRelayConnector ready/注册ACK成立；正常Host89224挑战200，两个独立正常客户端202→管理确认200→会话200，缺/错CSRF403，非法createRun400/Run列表0，分别自撤销401且另一客户端不受影响。全程模型main3不变。这证明正常公网Relay/Host协议会话与反例，不代Browser UI、真实controller任务或手机。首次两次503记录保留，旧Host有效值未快照，不能断言旧凭据错；当前显式配置可工作。
+
+PR26 head26b19a6首CI的Windows1865/1866，唯一测试在retry reserve case的5000次setImmediate轮询前未进入首次Provider；Ubuntu22/24/macOS均成功。Sol实际读下载日志与源码，发现该case还可能早于retry timer注册就advance fake time。交Luna仅该test用实际retry调度barrier，不扩轮询/跳平台/改生产期限。待独检和新CI。
+
+
+## 19:12：最终CI、headless UI与发布权限边界
+
+Sol实际审查a491076测试diff并独立运行单例1/1及Runtime137/137。修复等待失败事件持久提交后的500ms retry timer注册，保持119500拒绝/119499接受与生产期限不变。[当前CI38046814449](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38046814449)的Ubuntu Node22/24、macOS、Windows、required均成功；首Windows失败保留。
+
+实际读取headless摘要并视觉核390×844脱敏截图：390px宽页面无横向溢出、无可见token/二维码；摘要记录独立contexts配对批准、pending刷新1→1、无效码pending/device0→0。该截图是清理后的连接管理页，不能单凭截图证明客户端已连接；连接事实取正常UI摘要/记录。3个自有device正常撤销、专用Chrome关闭；本地JS hash7df7b878，不冒公网同版或手机。
+
+Luna以既有严格SSH只读核当前origin的Preview：34项闭包27同/7异，root管理发布目录全部不可写，无非交互sudo规则或本地发布helper。保留未发布状态，不改变权限、不部署可写stable冒替。公网协议配对通过与同版发布权缺口分列。当前本轮自主可执行项已穷尽，后续具体外部条件在执行看板/手机包列明。

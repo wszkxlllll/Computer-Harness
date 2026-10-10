@@ -16,15 +16,16 @@
 | 本地原始证据 | `runs/astra-autonomous-20261010-sol-luna/`（忽略，不提交截图、会话令牌及原始私密轨迹） |
 | 模型请求上限 | main120 / risk12 / total132；含失败、重试、重定向；先预占再派发 |
 | 当前新增实际调用 | main3 / risk0 / total3；首90s失败与正常CLI两次HTTP200均保留，CLI终态failed/零输入 |
+| 当前可见返回usage | 两个HTTP200合计prompt16343 / completion9740 / total26083 tokens；首timeout无usage，金额未知，不能把已知usage当本批完整账单 |
 | 当前预占 | 首Run main40 / risk2 / total42；A01-private累计保留，累计消耗3（失败不退号） |
 | 接管源码 HEAD | `b1e44e150579bbf5f0d2b6183a49f83aefe08bd0` |
-| 当前提交组合 | `17ec145`；PR24两处最小UI增量经独检提交，真实T2证据仍属此前明确版本 |
+| 当前提交组合 | 产品`17ec145`，测试修复`a491076`；后续仅交付文档，真实T2证据仍属此前明确版本 |
 | S2冻结源码 HEAD | `2e64d90`（产品/测试 `e0ca96f`，自主计数入口 `2e64d90`；内容未随提交改变） |
 | 分支 | `codex/three-track-integration-20261006` |
 | 基线快照 | 2026-10-10 17:34:22，tracked changes24，untracked status entries245（目录折叠，不等于逐文件数） |
 | 源码清单 | 451项；`baseline/source-manifest.json` SHA-256 `154d73a5ceb538f0b08835b1c3a1b7f9a6abd48e4d89afc1460f1a90974866cc` |
 | 可恢复材料 | `baseline/git-status.txt`、`baseline/tracked-diff.patch`、源码 hash 清单；未跟踪文件保持原位 |
-| 当前构建/进程/客户端 | 17ec145内容；476项dist闭包SHA `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`；Host87588正常运行，无在途Run；Web index-BxSWOU01.js，详细进程/资产baseline快照 |
+| 当前构建/进程/客户端 | 17ec145内容；476项dist闭包SHA `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`；Host89224正常运行，无在途Run（87588已正常退出）；Web index-BxSWOU01.js，详细进程/资产baseline快照 |
 | S1构建闭包 | 476个apps/packages dist文件，含Web4资产；`baseline/runtime-build-manifest.json` SHA-256 `310b5de388dc1f81a930a45b2029ae9f25b671787db16bc8ea4aba4671a41855` |
 
 ## 本轮事件
@@ -60,7 +61,15 @@
 | 当前正常服务冷启动 | `17ec145`同内容 / S2 / 真HTTP无Run | Luna正常Host PID87588、127.0.0.1:4317；GET页面200、本地管理session200（不输出csrf）、未配对session401 SESSION_REQUIRED、跨Origin无cookie/CSRF POST空Run403 ORIGIN_REJECTED；正常配置匹配TLS Relay连接成立 | 前后main3/risk0；无Run创建/模型/GUI。不计完整Relay控制；当前Web index-BxSWOU01.js SHA `7df7b87809af3262ce48b0f55c2619b923c001ad74103e5d19312dad24c29d99` |
 | 正常报告消费真实CLI失败 | `17ec145` / S5 / 离线实际报告API | Sol用正常CLI parseArgs/toResolvedRunConfig→buildRunReport/writeRunReport消费原CLI失败与PR23评估，输出`pr23-real-evidence/normal-report-import/`；runtimeOutcome=failed、fixture external_import/success=false、businessResult=not_assessed | 无新Run/Provider/Computer；配置与toolNames从已知CLI/真实exchange重建、清理诊断未重建，provenance明确。不是新CLI任务或D01人工评分 |
 | 交付准备 | S6 | T1/T2/T3各三张卡完整，集中手机包/回退说明已建立；选中分支234文件扫描无敏感文件名、private key/live token命中，未输出匹配原文 | 可继续远端推送/草稿PR/CI核查；私有runs不提交，未完成任务明确留栏 |
+| 18:48 远端交付 | 文档head `26b19a6`，产品 `17ec145` / S6 | github.com:443正常Git transport连接超时；正常已授权GitHub API可达。按Git Data API逐一同步27个缺失tree/commit，所有SHA与本地一致、37新增祖先历史保留；非force建立整合branch ref。创建并attach [draft PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26) | 无重写/force/合并；私有runs与8个历史tracked dirty未纳入。公开可复现任务模板已附 |
+| PR26首CI | head `26b19a6` / S5/S6 | [run38046181339](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38046181339)：Ubuntu22/24与macOS成功；Windows1865/1866，单个Runtime retry边界测试在5000次setImmediate轮询内未等到初次Provider；required失败保留 | 交Luna最小确定性retry调度barrier修复，不跳过Windows、不改变生产期限或边界；新head CI待复验 |
+| Relay实际注册缺口与定位 | Host87588 / S2 | 正常POST本机challenge两次503 RELAY_UNAVAILABLE、约10001ms，activeChallenge已取消/零request/Run。health200/TLS/WSS匿名101不能代合法ready。停自有Host后公开HostRelayConnector使用既有.env.relay合法凭据收到relay.ready与registration ACK并正常close | main3保持；公网不可用/版本不符推论不成立。旧Host终止前无四字段有效比对，保持未知；显式配置正常Host复验继续 |
+| 18:57 真实公网HTTP配对闭环 | 产品`17ec145`内容 / S2 / 正常Relay→Host协议 | 正常Host89224用显式既有.env.relay启动，challenge200/46ms。两独立0600 CookieJar公网pair request202→本机正常confirm200→Relay session200→各session200；独立cookie/device成立。缺/错CSRF403、非法字段Run400、重复GET runs均200/count0 | main3不变/零Run/GUI。撤A204→401时B仍200，最后撤B204→401；两个自有测试device清理，旧设备未碰。摘要`baseline/host-pairing-http-e2e-20261010.json`。这是正常协议E2E，不冒浏览器UI或Provider/Computer成果 |
+
+| 19:04 Windows CI修复复验 | 测试`a491076`，生产`17ec145` / S5/S6 | 只改Runtime retry边界测试：等待失败事件提交后实际500ms retry timer注册，再推进fake time。Sol独立单例1/1及Runtime137/137通过；[run38046814449](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38046814449) Ubuntu Node22/24、macOS、Windows及required五项全成功 | 首CI失败保留；生产期限/边界不改，无跳平台。当前CI与旧PR历史结果分列 |
+| 19:10 正常headless UI闭环 | 产品`17ec145`本地Web / S2/S4 | 专用Chrome154新profile、独立admin/client contexts：可见链接申请→电脑批准→connected；客户端刷新前后pending均1。390×844无横向溢出；无效码提示过期且pending/device均0。摘要`baseline/headless-web-pairing-summary-20261010.json` SHA `f7a2b5c9…d9ee8b`；Sol实际读摘要并查看脱敏截图 | 零Run/Provider；3个自有测试device经正常UI撤销，headless/profile已关闭。测试本地JS hash7df7b878，不冒公网当前资产同版或实体手机 |
+| 19:12 公网Preview同版发布边界 | S6 / 既有严格SSH只读 | 实际Host origin对应Preview服务；当前34项固定闭包27相同/7不同。Preview根/current父/releases/Web dist均不可写，sudo -n -l无可用非交互规则，本地无部署workflow/helper；历史激活操作属root管理 | 未写远端/切服务/发布可写但不同origin的stable。正常公网HTTP配对通过与同版发布分栏；剩余为服务所有者合法发布权限，不能由TCP/健康替代 |
 
 ## 当前未关闭出口
 
-S0接管及S1当前组合基线已关闭。S2正常DOM隔离配对/真HTTP控制、S4安全UI增量、S5评测器CLI导入/远端差异、S6交付均继续可执行。S3完整T2三轮、S4真实T1/T3/原生双窗sheet当前受已证实控制台锁屏限制；仅正常解锁后续，不绕过。Windows/Linux现场分别缺可达平台（ubuntu-vm一次正常SSH超时，不能宣称所有Linux不存在）。实体手机M1–M4、队友试用独立留栏。详细逐项状态见执行计划看板。
+本轮可自主完成的接管、离线修复/检查、正常公网HTTP认证配对、隔离headless UI、评测器真实失败导入、PR取舍、非force远端交付与手机包已完成。剩余具体外部条件：Mac当前console正常解锁后完整T2/T1/T3三轮与真实控制/同名双窗/sheet；对应Windows/Linux可达原生桌面（ubuntu-vm一次正常SSH超时）；Preview服务所有者发布权限以安装同版闭包；实体手机M1–M4；另一位队友试用；真实成功任务及真人审核以完成评分校准。不将任何一项并作“等手机”，不以L1或配对通过关闭任务成果。详细逐项状态见执行计划看板。
