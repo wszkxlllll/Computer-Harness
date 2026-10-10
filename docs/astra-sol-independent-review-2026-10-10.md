@@ -108,3 +108,10 @@ Luna以既有严格SSH只读核当前origin的Preview：34项闭包27同/7异，
 按用户本次明确决定，Astra 当前责任限定为 macOS 电脑端、Web/Relay 与手机客户端；Windows/Linux 的实现、修复、原生实测、环境寻找和交付不再属于待办、阻塞或完成条件。Sol复核两份计划、交付包、账本当前出口、进度结论与AGENTS范围句；原历史事件、测试/CI事实、现有兼容源码及CI均保留。完整macOS任务、Web/Relay与手机验收标准保持；正常解锁仅是继续真实Mac GUI任务的前提，不妨碍离线或Web工作。
 
 本次只修改文档并同步既有PR26；未重跑测试、付费模型、GUI或部署。AGENTS仅本次新增范围句纳入提交，其余既有dirty保留。
+
+
+## 2026-10-11：解锁续接与保存sheet复核
+
+用户正常解锁后，旧window14410已失效，未发Provider的精确绑定拒绝保留；正常重启自有同版stock daemon后重新发现。错误Open对话框初态Run正常取消并更换为空白14623，fresh capture确实改变，不能将此前图像不变直接归因捕获缓存。最新Run `run-1791647793800-73957d72-cf2` seq23真实截图有完整六行正文，CMD+S后独立保存窗口14633出现；输入仍向父窗14623派发，后续unverified receipt与默认文件名未变不构成保存成功。126事件终态cancelled，原A01累计main24/risk0，目标文件absent。
+
+原始inventory无owner/parent关系字段，不能自动称exact-owned sheet。公开list_windows/switch_window已可用，Run未调用；最小工具说明补充dialog独立窗、无可见效果先list、显式切换并等新观察。Sol独立实际22/22已有Runtime/adapter切窗、安全域、过期与父子恢复定向测试通过（377未选测试不计通过）；新提示尚待真实验证。模型observationAssessment的no_effect为模型自报，不是driver验证字段。保留显式refs/身份/独立turn，未放宽同PID信任或自动切换。

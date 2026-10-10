@@ -144,6 +144,8 @@ describe("default Computer tools", () => {
     const list = definitions.find((definition) => definition.name === "list_windows");
     const change = definitions.find((definition) => definition.name === "switch_window");
     expect(list?.category).toBe("side");
+    expect(list?.description).toContain("a dialog may be a separate window");
+    expect(list?.description).toContain("wait for a fresh observation before interacting");
     expect(change).toMatchObject({ category: "computer", isolatedTurn: true });
     expect(createDefaultComputerTools().get("list_windows")).toBeUndefined();
     expect(createDefaultComputerTools().get("switch_window")).toBeUndefined();

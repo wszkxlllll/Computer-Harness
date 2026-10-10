@@ -15,9 +15,9 @@
 | 命名空间 | `astra-autonomous-20261010-sol-luna-A01` |
 | 本地原始证据 | `runs/astra-autonomous-20261010-sol-luna/`（忽略，不提交截图、会话令牌及原始私密轨迹） |
 | 模型请求上限 | main120 / risk12 / total132；含失败、重试、重定向；先预占再派发 |
-| 当前新增实际调用 | main3 / risk0 / total3；首90s失败与正常CLI两次HTTP200均保留，CLI终态failed/零输入 |
-| 当前可见返回usage | 两个HTTP200合计prompt16343 / completion9740 / total26083 tokens；首timeout无usage，金额未知，不能把已知usage当本批完整账单 |
-| 当前预占 | 首Run main40 / risk2 / total42；A01-private累计保留，累计消耗3（失败不退号） |
+| 当前新增实际调用 | main24 / risk0 / total24；跨2026-10-11继续原A01，失败及取消请求均累计；当前全部Run终态，无在途 |
+| 当前可见返回usage | 22个已知usage响应合计prompt280033 / completion14228 / total294261 tokens；首timeout及最新取消请求无usage，金额未知，不冒称完整账单 |
+| 当前预占 | 首Run main40 / risk2 / total42；A01-private累计保留，累计消耗24（失败/取消不退号） |
 | 接管源码 HEAD | `b1e44e150579bbf5f0d2b6183a49f83aefe08bd0` |
 | 当前提交组合 | 产品`17ec145`，测试修复`a491076`；后续仅交付文档，真实T2证据仍属此前明确版本 |
 | S2冻结源码 HEAD | `2e64d90`（产品/测试 `e0ca96f`，自主计数入口 `2e64d90`；内容未随提交改变） |
@@ -70,8 +70,12 @@
 | 19:10 正常headless UI闭环 | 产品`17ec145`本地Web / S2/S4 | 专用Chrome154新profile、独立admin/client contexts：可见链接申请→电脑批准→connected；客户端刷新前后pending均1。390×844无横向溢出；无效码提示过期且pending/device均0。摘要`baseline/headless-web-pairing-summary-20261010.json` SHA `f7a2b5c9…d9ee8b`；Sol实际读摘要并查看脱敏截图 | 零Run/Provider；3个自有测试device经正常UI撤销，headless/profile已关闭。测试本地JS hash7df7b878，不冒公网当前资产同版或实体手机 |
 | 19:12 公网Preview同版发布边界 | S6 / 既有严格SSH只读 | 实际Host origin对应Preview服务；当前34项固定闭包27相同/7不同。Preview根/current父/releases/Web dist均不可写，sudo -n -l无可用非交互规则，本地无部署workflow/helper；历史激活操作属root管理 | 未写远端/切服务/发布可写但不同origin的stable。正常公网HTTP配对通过与同版发布分栏；剩余为服务所有者合法发布权限，不能由TCP/健康替代 |
 
+| 2026-10-11 解锁续接 | 产品17ec145内容 / S3 / L2 | 用户确认已解锁；原精确window14410已失效，零Provider失败后正常重启自有stock daemon92890，同0.22.2二进制。旧Open框14603初态错误Run `run-1791647543220-67255bdc-45a` 7个HTTP200、66事件后正常取消，未输入正文；重新准备空白并stock fresh capture确认新窗14623 | 原A01 main3→10/risk0；不复用旧窗口，不根据派发receipt冒认GUI有效 |
+| 2026-10-11 正文正例/保存未完成 | 同内容 / S3 / L2 | `run-1791647793800-73957d72-cf2` Harness实际输入完整196B正文，seq23截图正例；CMD+S后独立保存sheet14633出现，但Run仍绑定父窗14623。后续输入仅unverified/posted，默认文件名未改变；126事件终态cancelled，目标文件absent，未保存/关闭重开 | 原A01 main10→24/risk0，含末次取消请求；同因付费暂停，修公开list/switch反馈后一次复测 |
+| 2026-10-11 sheet独检 | Sol只读 / S3修复中 | stock原始inventory有同PID22394的14623父窗与14633“保存”，但无owner/parent关系字段，完整attestation缺失；不称exact-owned child。CMD+S工具反馈仅提示新窗，无opaque ref，模型未调用已启用list_windows/switch_window；模型no_effect为自报观察，不是driver证明 | 最小补公共工具发现/单独切窗/新观察提示；保留精确身份和显式模型切换，不自动信任同PID窗口。当前修订尚未真实验收 |
+
 ## 当前范围决定与未关闭出口
 
 2026-10-10 用户决定本项目只负责 macOS 电脑端、Web/Relay 与手机客户端，并覆盖原三线计划中的 Windows/Linux 平台目标。历史 Windows/Linux 事件、实现与跨平台 CI 结果保留；不继续承担其实现、修复、原生实测、环境寻找或交付，也不将其列为当前待办、阻塞或完成条件。
 
-本轮可自主完成的接管、离线修复/检查、正常公网HTTP认证配对、隔离headless UI、评测器真实失败导入、PR取舍、非force远端交付与手机包已完成。剩余具体外部条件：Mac当前console正常解锁后完整T2/T1/T3三轮与真实控制/同名双窗/sheet；Preview服务所有者发布权限以安装同版闭包；实体手机M1–M4；另一位队友试用；真实成功任务及真人审核以完成评分校准。不将任何一项并作“等手机”，不以L1或配对通过关闭任务成果。详细逐项状态见执行计划看板。
+本轮可自主完成的接管、离线修复/检查、正常公网HTTP认证配对、隔离headless UI、评测器真实失败导入、PR取舍、非force远端交付与手机包已完成。当前Mac已由用户正常解锁，完整T2/T1/T3三轮与真实控制/同名双窗/sheet继续自主执行，不再列为解锁外部阻塞。剩余具体外部条件：Preview服务所有者发布权限以安装同版闭包；实体手机M1–M4；另一位队友试用；真实成功任务及真人审核以完成评分校准。不将任何一项并作“等手机”，不以L1或配对通过关闭任务成果。详细逐项状态见执行计划看板。

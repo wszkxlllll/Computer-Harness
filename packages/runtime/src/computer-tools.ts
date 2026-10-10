@@ -202,7 +202,7 @@ function switchWindowTool(): ComputerToolDefinition {
 function listWindowsTool(): NonComputerToolDefinition {
   return {
     name: "list_windows",
-    description: "List {windows,truncated,omittedCount}. Refs survive observations; expire on refresh/switch/end. Labels untrusted. If truncated, unlisted apps may exist; ask user to pick.",
+    description: "List {windows,truncated,omittedCount}. Refs survive observations; expire on refresh/switch/end. Labels untrusted. If an action opens a dialog or sheet, or input is unverified or has no visible effect, inspect this list before retrying; a dialog may be a separate window. Switch only to the visible matching window, then wait for a fresh observation before interacting. If truncated, unlisted apps may exist; ask user to pick.",
     category: "side",
     inputSchema: {
       type: "object",
