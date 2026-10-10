@@ -124,8 +124,8 @@
 | S0 接管与版本 | 完成；历史dirty保留、账本/版本/stock0.22.2/服务归属已核 | 环境/归属与新批次 |
 | S1 离线基线 | 最终生产17ec145：Luna114文件1866 Vitest+72 TAP/typecheck/Webbuild；Sol40项UI独检、a491076 Runtime137项独检；当前五项CI全绿 | 首失败与修复保留，不累计历史数 |
 | S2 Web/Runtime入口 | 正常Web Run/stock截图；两独立公网HTTP会话配对、CSRF与隔离撤销通过；headless独立contexts正常UI批准/刷新去重/无效码/390px通过 | Provider/Computer业务与真实手机未通过；公网部署闭包未同版 |
-| S3 Mac T2 | 2026-10-11用户已解锁；原A01最终main120/risk0；9a449e20热集独检280项、1cec2ea3名称对称修复独检63项，真实M6选择/滚动/导航通过；最后完整T1自报success但缺iMac/Air配置，独检未完成。A02独立60/6/66、revision1预占60/4/64，实际26/0；正常与planning完整T1对照均cancelled，停止同因重复，继续controller/T3；计数8952537独检15项，入口TTY已持久。完整196B正文有真实截图正例；low/high完整任务与直接sheet补证均cancelled、文件absent | 已证原生includeChildWindows默认true将父族图装入sheet尺寸；最小false补丁离线345项、Sol捕获13项通过。新候选daemon首图被OS TCC拒绝，独立候选app已固定，等待正常OS屏幕录制/辅助功能授权；完整保存关闭重开、独立重复和变体仍缺 |
-| S4 T1/T3/控制 | L1控制/预览302项、PR24两项安全UI修复及正常配对UI反例通过 | 完整T1/T3/真实controller任务及原生双窗sheet继续自主执行；真实手机另列 |
+| S3 Mac T2 | 用户已解锁；完整196B正文有真实截图正例，但完整保存关闭重开、独立重复和变体仍缺 | 已证includeChildWindows=true父族捕获错域；原生false补丁离线345项/Sol13项，独立CaptureFix app首图被TCC拒绝，等待正常OS屏幕录制/辅助功能授权；stock未替换 |
+| S4 T1/T3/控制 | a8dad6d平台合同作者/独检各491项、Qwen完整出站通过，真实CMD+A覆盖输入成立；A01最终120/0、A02实际58/3/剩2main；完整T1三产品及T3三车次尚未通过。正常认证controller已完成真实模型Run、请求中取消及独立暂停/纠正/恢复 | 同版同因paid停止；零Provider补DOM建议覆盖定位，真实同名preview及刷新/缺错token/关闭目标否定链零Provider通过；精确审批去重、reject零执行、correct旧approval失效与SSE断开恢复已独检；其余竞态/身份边界继续。L1控制/预览302项与真实矩阵分栏；T3原生保存依赖候选权限，手机另列 |
 | S5 评测器 | 隔离PR23审批证据兼容cb6aacf经Sol157/157，依赖draft PR27；真实A01重评inconclusive/false，5个误报mismatch消除，业务缺iMac/配置独立保留；PR22/24取舍已核 | 真实成功样本/真人审核缺口 |
 | S6 交付与手机包 | 已显式提交、非force原SHA同步、draft PR26附聊天；构建/回退/任务模板/手机包齐备；最终文档同步核CI | Preview 7/34不同且路径root管理、无非交互发布权限，不能宣称公网同版发布 |
 
@@ -148,3 +148,6 @@
 本轮实际记录见 [Sol/Luna 自主执行账本](./astra-autonomous-execution-ledger-2026-10-10.md)。
 
 最终启动/回退与集中补验见[阶段交付与手机包](./astra-stage-delivery-and-phone-pack-2026-10-10.md)。
+
+
+2026-10-11 最新控制出口：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。

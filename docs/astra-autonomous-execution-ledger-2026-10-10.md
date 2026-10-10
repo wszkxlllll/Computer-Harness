@@ -30,7 +30,11 @@
 
 ## 当前后续批次 A02
 
-独立cap main60/risk6/total66；正式revision1预占60/4/64，实际main26/risk0/total26、sequence26。A01原120/0冻结，合计新增实际146/0；已知135个usage响应合计prompt2277075/completion40975/total2318050tokens，11请求usage未知、金额未知。当前全部Run终态、无在途paid。完整T1仍未完成，正在隔离修复PR23合法审批证据兼容，随后真实controller与T3继续。当前远端/PR26 HEAD `010388c`五项CI全绿（run38077084697）。
+独立cap main60/risk6/total66；正式revision1预占60/4/64。最新controller稳定点实际main58/risk3/total61、sequence61；A01原120/0冻结，合计main178/risk3/total181。166个已知usage响应合计prompt2895950/completion46963/total2942913tokens，15请求usage未知、金额未知。全部已创建Run终态，旧Host13117正常退出，新受控Host15334加载b08268c/90s low并保留，无在途paid。平台合同491项独检及Qwen完整出站通过，真实CMD+A覆盖输入成立；T1/T3完整成果仍未完成。正常同名preview否定链、精确审批同commandId去重与一次执行后正常取消已有证据；审批风险是每Run review预算耗尽fallback，非风险分类一致。SSE真实429已由b08268c修复；正常同版Host五次串行连接200、并发3×200/第四429/关闭后恢复200。reject关联动作零执行已通过；correct失效及断线矩阵继续。PR23审批修复cb6aacf/PR27五项CI全绿（run38078732458）；产品PR26当前HEADa8dad6d五项CI全绿（38080421749）。
+
+## 当前有界批次 A03
+
+仅为SSE已修后尚未覆盖的审批中纠正使旧request失效、正常取消/断线矩阵，以及实际DOM修复后的验证保留小额；不得重复已通过reject或同版同因业务。公开initializeBatch正常初始化，独立root `A03-private`、batch A03、reservation controller-matrix-dom-fix；cap12main/3risk/15total，首reserve8/2/10，当前actual2main/1risk/3total、sequence3，state0600。A01最终120/0与A02稳定58/3/61保持，不重置历史。正常Host15648已从正式A03模板启动，90s low；最新Run已终态，无在途。
 
 ## 本轮事件
 
@@ -155,3 +159,56 @@ Planning正式对照 `run-1791658406322-7e2a3f10-282`终态cancelled：13request
 隔离评测器冻结 `cb6aacfcd256cad84f6389d4933967984888f1c6`，仅 evaluator 与其测试两文件；独立 Sol 全量157/157、diffcheck通过。正常审批保留 decision basedOn、以新审核截图执行的链现在可核验；关联审批是独立不变量，唯一 request/call/action、proposal 全字段、批准顺序、新鲜 observation 均必须精确匹配，改成 wait/fresh basedOn/另一 actionId 不绕过。表驱动覆盖拒绝/待审/错ID/复用/乱序/过期及坐标、keys、raw text/sanitized length变体；合法click/type用合成人工审核成功正例。
 
 真实A01末Run重消费后5个误报 observation mismatch 消除，仍 `inconclusive/success=false`、五维null且 `human_review_missing`；独立业务缺iMac/Air配置/未证存储结论仍保留，未编造真人评分或T1成功。按原SHA非force同步专用分支，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27) base为PR23的 `member-c/evaluator-20261005`；PR26说明已关联。未修改队友原分支，未混入产品分支。A02仍26/0、A01+A02合计146/0，无新Provider调用；下一自主项为正常Host/controller控制与T3来源查询。
+
+
+## 正常认证 controller 实测闭环（2026-10-11）
+
+正常受控Host PID11238通过完整mainenv、Relay配置和overlay启动；实际入口为A02 `batch-host --entry host`，计数8952537/产品1cec2ea3，34 requests/40steps上限，stock4254。启动模板持久化，仅路径与参数，无配置值。旧Chrome会话过期与扩展tab超时保留为准备错误；改走正常新pair/request→电脑confirm→session/CSRF，隔离凭据0600，仅本地保存，未使用旧cookie或匿名入口。
+
+- `run-1791659878741-a0c01b1a-5f6`：认证Web API创建，正式Computer打开example.com并截图，真实GLM一请求、usage16010/339/16349，Runtime succeeded。Sol独立view注册PNG确认“Example Domain”标题和多语言正文，报告与图相符，无输入；仅低风险控制准备任务，不计T1/T3。
+- `run-1791659971681-95de9c51-ca7`：正常API创建202/SSE200；实际Runtime paused→user.input→resumed→cancelled。正常pause accepted、correct applied、resume applied、abort accepted；API事件包含命令，sequence21，Runtime轨迹sequence11，两种序列不混用。Provider前控制，零新模型调用，不称同Run模型控制。
+- `run-1791660042944-5f1dc553-d34`：同认证设备新Run202，guard actual27→28之后才pause202/accepted、abort202/accepted；SSE200、API终态sequence13。Runtime seq6 model.request.started→seq7 model.request.failed(cancelled, aborted from paired device)→seq9 cancelled，真实请求中取消闭环成立。尚未进入paused，所以没有发correct/resume；不将accepted冒作已暂停。
+
+两新增实际请求使A02为28/0，第二请求取消无usage；已知136响应2334399tokens、12未知usage，金额未知。Host保留，无自有Provider在途；停止example对照，下一为原完整T3卡携程来源查询。此处为正常认证控制协议L3与本机真实Runtime，不代Web按钮点击、完整控制矩阵或实体手机通过。
+
+
+## T3公开页面、正常切窗与90s单变量（2026-10-11）
+
+- `run-1791660111414-ec85170d-ff0`：完整原T3卡，正常认证API202、真实Provider1请求（16571tokens）、城市框DOM click已完成；Runtime明确拒绝“managed browser window handoff requires the explicit window-switch opt-in”，终态failed。入口目标漏传显式开关，未放宽保护；A02 28→29。SSE429保留，我方只读监控本地轨迹未连接SSE，不把限流猜为监控原因。
+- `run-1791660170489-326455b6-3e3`：仅正常target增加既有 `switchWindows:true`、完整goal不改，同Host/会话。实际planning task_create、click/CTRL+A/type及新观察；末图城市为“杭州东北京”，证明输入已发生但错误Mac select-all没有替换原北京。4个HTTP200、86085tokens，最后响应 `_harnessEffect` unsupported field→GLM_INVALID_TOOL_CALL，终态failed，A02 29→33。原始非法arguments按现有审计隐私未保存，具体多余字段未知。schema明确仅effects/target/summary、additionalProperties:false，保持严格。
+- retryable/feedback无重试的已证配置关系：固定retry window120s与attemptReserve180s使现有公式不允许retry；addProviderRetryFeedback只追加拒绝原因和contract提示，不把非法raw toolcall放回输入。没有改Runtime公式；正常停自有Host11238（SIGINT停止listener但进程仍在，随后SIGTERM正常退出），私有overlay仅timeout改90000，新受控Host12126及正常新配对成立，实际启动摘要环境90s。
+- `run-1791660422778-0a614547-e65`：原T3卡/switchWindows/low不变，仅90s。6实际请求、5已知usage117217tokens，未重现非法effect，也未触发feedback，不能说retry链已实测成功。连续城市框点击无进展，Sol同一2s监控在seq52/67前后PNG相同阈值命中，以精确Run正常API abort（accepted）32.19s取消；第6请求cancelled，终态cancelled，Host保留。A02 33→39，无三个车次来源/预算纠正/保存重开成果，携程首页实际可达，不冒网站不可达。
+
+已发现覆盖T1/T3的公共合同缺口：ComputerSessionDescriptor没有可靠OS投影，context仅backend/capabilities；hotkey工具要求Mac使用CMD，而batching系统提示及matcher只支持CTRL+A且明示CMD/Meta不能batch。用户授权继续最小修为可靠driver/session平台提示和平台对应select-all batching，未知来源不猜、其它平台旧合同保留，不全局替键；当前无新paid，等待Luna实现及Sol完整schema/Qwen出站独检。
+
+平台修复已冻结 `a8dad6d7efb881d3bb1c53c7fef62986a2da0ad9` 并按原SHA非force同步PR26分支。仅9个源码/测试文件：版本匹配driver health报告的已知平台进入session和context；可靠Mac使用CMD/META+A batching，其它/未知平台保留原CTRL+A合同，实际keys不重写、Guard不变。作者typecheck/build exit0及491/491；Sol独立相同四套件491/491、diffcheck0。生产compiler→Qwen strict_json/native_tools完整21工具出站proof同时保留macOS提示、CMD合同及严格effect schema，physical fetch/GUI均0，明确是合成合同证据而非业务完成。私有证据为 `A02-private/sol-platform-batch-targeted.log`、`sol-platform-qwen-wire-proof.json`。当前A02仍39/0、剩21 main；旧Host12126不冒充加载新版本，正在正常重启同90s low配置并新配对后复测完整T3网页卡。候选native权限未获用户回复，保存阶段仍未通过。
+
+`a8dad6d`完整T3复测 `run-1791661164483-c0d9382b-8d4`：新受控Host13117、正常新认证会话、同90s low，完整原卡与switchWindows:true。真实seq3 session.platform=darwin；模型seq61调用CMD+A、seq68完成，后续type将“上海上海虹桥”正确覆盖为“上海虹桥”，Sol独立view注册PNG d1194f4c确认站名候选，平台修复取得真实正例。随后两次选择UIA建议项，seq91/104均MANAGED_BROWSER_DOM_REQUIRED且零native click；尚未证明唯一完整DOM等价项，不能据融合热集partial推断底层DOM不完整。Sol同一直接monitor在同图seq93/107阈值命中，64.45s正常API abort accepted，第9请求cancelled、seq112终态，无三个车次来源/预算纠正/保存成果。停止同版paid，零Provider继续核raw DOM候选覆盖。此Run9请求、8已知usage prompt198400/completion1819/total200219；A02累计48/0、剩12 main，A01+A02合计168/0，154已知响应合计2754491tokens，14请求usage未知，金额未知。Host保留且无在途，原生候选TCC仍等待用户正常授权。
+
+## 正常同名窗口预览与否定链（2026-10-11）
+
+旧T3临时managed页已正常关闭，原失败帧仅保截图与热集，raw DOM不可追溯。新携程首页零Provider collector complete=true、84候选，但下拉收起没有该建议，不能据此归因旧帧；后续以生产SDK诊断复现展开建议，不计T3成果。先推进互不依赖控制/预览。
+
+正常ManagedBrowserHost准备两个自有同标题Chrome诊断窗，初始纯色不同、不输入业务正文；正常认证Host GET windows要求两者previewRequired，分别POST preview 200。Sol独立view红/蓝PNG，同标题和实际内容可辨；四张原PNG hash、IHDR尺寸与viewport逐项匹配，权限0600。刷新后旧candidate preview和旧target+preview create均409 WINDOW_TARGET_STALE；缺/错previewToken create均409 WINDOW_PREVIEW_REQUIRED且无Run；两自有窗均关闭后两个仍持有candidate均409 WINDOW_PREVIEW_UNAVAILABLE。有效证据 `A02-private/window-preview-v2/window-preview-c188084a-c17e-40cd-8e49-d9326f8dd034.json`，Run集合/计数前后相同，A02仍48/0，零Provider/业务输入，资源正常清理。此处签收实际同名预览及上述否定链，不冒完整竞态/身份复用/手机或任务成功。
+
+诊断失败保留：首轮误检查image/screenshot字段（真实为dataBase64），非产品无图；非必要CDP bounds命令失败后，资源登记过迟导致自有probe残留，已精确正常Browser.close/终止其Node并确认退出、清自有profile，后续创建成功即登记finally。先前按列表顺序关闭单窗却选另一候选得到200是探针顺序错误，后续不假定顺序、关闭两窗后分别拒绝成立。没有修改生产Guard或为了诊断改产品。
+
+
+受控本地页审批尝试 `run-1791661961172-f1346353-e3f`：真实main1（16203tokens）及Guard risk1（3933tokens）后，Guard正确判本地计数按钮为allow/model_low_impact/local_edit，无审批请求；DOM click dispatched/completed，但后续观察因browser target再次漏switchWindows:true而handoff拒绝、seq17 failed，没有独立核到按钮最终计数，不将派发当完整成果。A02 actual49/1/50、sequence50，合计main169/risk1/170；本地诊断server正常关闭，源页本地保留。入口重复遗漏已要求正常模板一次固定switchWindows:true；不改标签诱审批或重复同页付费。下一使用已有公开Mac mini配置导航的正常Guard待审入口补矩阵，公开SDK测试policy只能另列测试层。
+
+公开配置控制卡 `run-1791662071962-3ea85c67-6cc` 已固定switchWindows:true；3main（65728tokens）后模型self success/Runtime succeeded，实际仅从/mac/进入/mac-mini/产品介绍页并等待加载，未点击明确链接配置页的购买按钮，错误将禁止下单理解为不进入配置。Sol独立view末图确认产品页与可见购买入口，报告型号/起价虽与图相符，但控制卡配置导航未完成、无待审请求，不计审批矩阵或完整T1。A02 52/1；之后唯一有界清晰边界控制卡从/mac-mini/起，明确允许购买入口的公开配置导航且加袋前停止，不改Guard或产品prompt。
+
+
+2026-10-11 精确审批与SSE根因稳定点：Run `run-1791662161183-9150898e-e52` 正常Guard第二候选进入review预算耗尽fallback。Sol独立核fresh PNG的公开购买配置入口后批准exact request；同commandId首次202 accepted、原样重复202 applied、receipt200 applied。关联action只一条execution.completed；后续第二pending未批准，正常abort，seq43 finished/cancelled。仅此审批链通过，不是T1配置比较通过。自有直接监控244.94s观察终态、未另发取消；本Run3main+1risk、4usage63208tokens。SSE补证两次429且零帧；自有历史无限reader已正常退出，但Host `streams.add(terminate)` / `streams.delete(dispose)` 删除不同引用，使已关闭连接仍占device三槽。Sol只读定位真实缺陷，交Luna最小修复/幂等清理、断开恢复与并发上限反例，不能把429作为外部限制或SSE已通过。
+
+
+2026-10-11 SSE最小修复冻结：b08268c两文件93+/1-，不含其他dirty。登记/删除均terminate回调，cap3及认证不变；作者/独检完整server.test各7/7、typecheck0，真实listen关闭/abort/Host清理/单device隔离均覆盖。修复阶段零Provider，A02保持55/2；将正常恢复同版Host与新pair后补SSE重连及剩余审批矩阵。
+
+
+2026-10-11 修后真实SSE与拒绝：旧Host13117正常退出、新Host15334正常加载b08268c/90s low并重新正常pair。旧Run内存不跨Host，旧events404保留为正常生命周期，不额外paid重造旧Run。新Run `run-1791662827567-59746f5f-bd8` 上五次串行connect/abort全200、并发三条200/第四429、关闭后重新200。SSE脚本零Provider，背景真实Run调用单列。exact pending request正常reject202，Sol独立关联action started/completed均0；随后正常abort，runtime seq30 cancelled。直接监控22.27s终态、未另发取消。A02实际58main/3risk/61，新增三份已知usage39350tokens、一份取消usage未知。
+
+
+2026-10-11 SSE终态after-seq独检完成：正常真实Run回放HTTP200序列1–28含finished；after28重连200只收29–31合法尾事件；after31再连200/零新事件，snapshot finished/31一致。没有漏终态或重复旧序列，连接全部正常关闭。修复前429证据保留，修后同版真实SSE签收。
+
+
+2026-10-11 A03纠正旧审批失效：Run `run-1791663014351-5cf61e79-976`，正常correct202后snapshot running/seq25、pending cleared；旧request按fresh sequence approve得到409 STALE_REQUEST，Sol独立关联action started/completed均0。随后正常abort202、seq31 finished/cancelled；直接监控24.29s见终态，未另发取消。A03实际2main/1risk，三份已知usage39297tokens。A01–A03合计180main/4risk/184请求，169已知响应prompt2934789/completion47421/total2982210tokens，15请求usage未知。正常Host15648保留，无在途；接下来生产SDK零Provider重现站名建议DOM，不能记T3成果。

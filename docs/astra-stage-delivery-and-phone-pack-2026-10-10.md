@@ -1,6 +1,6 @@
 # 当前阶段交付与集中补验包
 
-2026-10-11 当前续接：用户已正常解锁，任务继续执行。产品1cec2ea3、计数8952537、原生补丁0ccc9ee；产品分支当前010388c五项CI全绿。A01已冻结120/0；A02独立cap60/6/66、revision1预占60/4/64，实际26/0，合计146次。已知135响应2318050 tokens，另11请求usage未知，金额未知。两次A02完整T1对照均cancelled；planning工具可见但模型未调用，三产品仍未完成，停止同因付费重复并继续controller/T3。完整T2仍无指定成果，候选CuaDriverCaptureFix.app待正常屏幕录制/辅助功能授权。隔离PR23审批证据修复cb6aacf独检157/157，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27)已交付；真实A01重评仍inconclusive/false、无真人评分，缺iMac和配置的独立业务失败保留。细节及后续服务/Run状态以[账本](./astra-autonomous-execution-ledger-2026-10-10.md)为准。
+2026-10-11 当前续接：用户已正常解锁，任务继续执行。产品SSE修复冻结b08268c，当前五项CI全绿（38082393162）；原生补丁0ccc9ee的独立CaptureFix app仍待正常屏幕录制/辅助功能授权。A01冻结120/0；A02 cap60/6/66、revision1预占60/4/64，实际58/3，A03 cap12/3/15、首reserve8/2/10、实际2/1，合计184次（main180/risk4）。169已知响应2982210tokens，15请求usage未知、金额未知。真实CMD+A覆盖城市输入已独立核图；完整T1三产品、T3三车次与T2保存重开仍未完成，不同版重复同因。正常认证controller已完成真实模型Run、请求中取消及独立暂停/纠正/恢复；精确批准去重、reject零执行、correct旧approval失效、SSE断开恢复及真实同名preview否定链已独检。隔离PR23修复cb6aacf经Sol157/157，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27)已交付；真实A01重评仍inconclusive/false，业务缺iMac/配置与真人评分缺失分别保留。最新服务与实测以[账本](./astra-autonomous-execution-ledger-2026-10-10.md)为准。
 
 以下1866/72、main3及锁屏结论属于10月10日历史交付稳定点，不能作为当前进程、调用或阻塞状态。
 
@@ -20,7 +20,7 @@
 
 构建入口：`pnpm run typecheck`、`pnpm test`、`pnpm --filter @computer-harness/web build`。正常Host启动参数保持`--env-file <本地私有env>`、`--socket <实际stock socket>`、`--model glm-5.3-flash`、`--output <本轮私有Run目录>`、`--port 4317 --origin http://localhost:4317`。实际Host管理地址为`http://localhost:4317/connect`。端口/Origin必须严格一致；不要把localhost配对URL当手机可达URL。
 
-自主付费入口继续同一`scripts/autonomous/batch-host.mjs`。A01-private最终120/0已冻结，不能重新初始化或再派发；当前使用独立A02-private，cap60/6/66、revision1预占60/4/64，actual26/0。完整mainenv与overlay分开加载、绝对batch root和真实TTY命令已持久保存，后续只替换任务/目标/必要参数；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。GLM timeout 180000ms与low均是有记录的每Run调优，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
+自主付费入口继续同一`scripts/autonomous/batch-host.mjs`。A01-private最终120/0已冻结，不能重新初始化或再派发；当前使用独立A02-private，cap60/6/66、revision1预占60/4/64，actual58/3。完整mainenv与overlay分开加载、绝对batch root和真实TTY命令已持久保存，后续只替换任务/目标/必要参数；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。历史GLM timeout180000ms与low是有记录的每Run调优；当前正常受控Host已恢复90s low，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
 
 完整本地任务卡在忽略目录`runs/astra-autonomous-20261010-sol-luna/task-cards/`，T1/T2/T3均各baseline、independent-repeat、variant。T2正文196B/UTF-8/LF/finalLF，三卡唯一新路径；文件存在则重新准备唯一卡，不能覆盖。T3已冻结路线/日期/2成人二等座/三结果与客户端预算降低节点，未开放票价须写未知，不能捏造携程结果。关闭重开由Harness完成，人工重绑只列补证。
 
@@ -86,3 +86,6 @@ T3完整任务：携程公开页比较上海虹桥→杭州东2026年10月17日0
 公网当前origin对应Preview服务。实际固定闭包34项中27同/7异：Relay package.json、protocol dist/index.js/package.json、relay-connector dist/routing.js/package.json、voice dist/run-notices.js/package.json。Preview current/父目录/releases/Web dist不可由现有SSH账号写入，sudo无非交互规则、本地无部署workflow/helper；未写远端或改服务。另一个可写stable目录不属于当前origin，未拿它冒同版发布。继续发布需服务所有者提供正常合法发布路径；健康/HTTP配对不等于闭包同版。
 
 剩余分别为：正在执行的Mac完整T2/T1/T3及真实控制/双窗/sheet；原生新候选正常OS授权；Preview合法发布权；实体手机M1–M4；另一位队友试用；成功成果与真人复核后的评测校准。正常解锁后继续所有可自主任务；单项外部条件不停止其余工作，离线/配对/远端交付不能替代真实任务验收。
+
+
+2026-10-11 最新控制出口：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。

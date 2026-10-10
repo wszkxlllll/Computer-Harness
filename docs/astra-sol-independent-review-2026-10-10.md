@@ -160,3 +160,22 @@ T095原始trajectory位于既有私有临时root，直接读取75事件并查看
 ## 2026-10-11 PR23 精确审批链独立复核
 
 Sol只读审查Luna在隔离PR23工作区的两个文件，并独立运行157/157测试及diffcheck。发现并修复的边界包括：execution字段与proposal不同、已批准action/call被后续请求复用，以及把execution改成wait或fresh basedOn绕过原陈旧观察条件。最终关联审批检查独立于普通wait/current规则，完整合成review的click/type成功正例与字段变体拒绝均通过。冻结 `cb6aacf`，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27)，不升级PR26业务成果。真实A01评测仍inconclusive/false；独立T1缺iMac和配置证据结论不由human_review_missing替代。
+
+2026-10-11 平台合同独检：冻结 `a8dad6d`，独立四套件491/491、diffcheck0；作者typecheck/build0。平台仅来自版本匹配driver health报告，未知省略，未以Host操作系统推断。Mac CMD/META+A select-all batching、其它/未知CTRL+A旧合同均有回归，未重写keys或改Guard。独立生产compiler→Qwen strict_json/native_tools出站完整21工具验证macOS提示及严格effect schema，0物理fetch/0GUI；这是合成合同证据，真实T3网页复测与完整跨应用成果另记。
+
+2026-10-11 正常同名preview独检：Sol读取c188084a私有proof并独立view两个原PNG，红/蓝自有同标题Chrome分别可辨；四图SHA/IHDR尺寸/viewport/0600逐项符合，计数48及Run集合前后不变。正常刷新旧candidate/target+preview均409 STALE，缺错previewToken create409 REQUIRED且零Run，两自有窗均关闭后的两个candidate409 UNAVAILABLE。先前字段误读、CDP准备清理缺口及单窗顺序误配200均保留，未当产品失败或隐去；清理缺口已确认自有进程退出。签收上述真实否定链，完整竞态/身份复用/审批断线矩阵另验。
+
+
+2026-10-11 精确审批独检：实际读私有command proof与原trajectory，确认同commandId accepted→duplicate applied→receipt applied，action e291f88c仅seq30一次execution.completed；第二pending无批准，seq43 cancelled。fresh PNG此前已独立核可正常公开导航；review预算耗尽fallback单列，不作风险分类一致结论。正常监控244.94s terminal、cancelSent=false。SSE429不能记重连通过；只读server源码发现登记terminate、dispose删除dispose，引用不一致导致device集合残留，已要求最小修与零Provider实际连接反例。已退出的自有无限SSE reader与产品清理缺陷分别记录。A02实际55main/2risk，A01+A02累计177请求、163已知usage2903563tokens，其余14usage未知。
+
+
+2026-10-11 SSE修复独检：冻结b08268c，仅server.ts清理删除引用与server.test.ts回归两文件。Sol完整server.test独立7/7 exit0（A02-private/sol-sse-slot-server-test.log）；作者typecheck通过。真实loopback A三条200/第四429，B仍200；cancel/abort后三个subscription各close一次、A重新200；Host关闭剩余两个，总close五次，幂等保护保持。正常生产Host重启与同版pair/SSE补证继续，离线listen测试不冒实际controller矩阵通过。
+
+
+2026-10-11 修后真实控制独检：实际读取sse-slot-live-after-fix-proof与reject原轨迹，正常新Host15334串行五次200/并发三条200第四429/关闭后恢复200；脚本自身零Provider但背景Run有调用，未以计数前后不同误记脚本调用。exact rejected action started/completed都0，正常abort终态cancelled；monitor22.27s见终态。SSE after-seq终态尾事件正在单独复核。A02稳定58main/3risk、A01+A02共181请求；166已知usage2942913tokens、15未知。
+
+
+SSE终态独检补齐：读取完整after-seq proof，HTTP200的1–28终态、29–31尾事件、after31空尾与snapshot31一致。独立实际读A03 limits12/3/15、reserve8/2/10、actual0/sequence0、0600；A02仍58/3/61。允许正常切换受控Host并继续未覆盖correct矩阵，未重新初始化A02或修改原cap。
+
+
+A03真实纠正独检：实际读proof与原trajectory，correct清pending后fresh-sequence旧request approve409 STALE_REQUEST；旧action无任何execution started/completed。正常abort终态cancelled，monitor24.29s见终态。A03 2main/1risk，三份usage39297；总184请求、169已知usage2982210、15未知。签收纠正失效与取消，不作恢复后完整业务/手机通过。
