@@ -44,6 +44,7 @@ export function PairingQrPanel({ challenge, hasActiveChallenge, busy, loading, o
             : qrImage
             ? <img src={qrImage} alt="一次性手机配对二维码" width="256" height="256" />
             : <div className="qr-placeholder" role="status">正在生成二维码…</div>}
+          <a className="button button-secondary button-large" href={challenge.pairingUrl} target="_blank" rel="noreferrer">在另一浏览器打开配对链接</a>
           <p className="qr-expires">有效至 {formatDate(challenge.expiresAt)}</p>
           {isLoopbackUrl(challenge.pairingUrl)
             ? <p className="notice notice-warning qr-warning">这个二维码指向本机地址。手机扫描时，localhost 会指向手机自己；当前仅能验证本地界面，不能完成手机连接。</p>
