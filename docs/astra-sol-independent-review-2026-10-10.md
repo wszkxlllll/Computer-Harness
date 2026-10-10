@@ -115,3 +115,43 @@ Luna以既有严格SSH只读核当前origin的Preview：34项闭包27同/7异，
 用户正常解锁后，旧window14410已失效，未发Provider的精确绑定拒绝保留；正常重启自有同版stock daemon后重新发现。错误Open对话框初态Run正常取消并更换为空白14623，fresh capture确实改变，不能将此前图像不变直接归因捕获缓存。最新Run `run-1791647793800-73957d72-cf2` seq23真实截图有完整六行正文，CMD+S后独立保存窗口14633出现；输入仍向父窗14623派发，后续unverified receipt与默认文件名未变不构成保存成功。126事件终态cancelled，原A01累计main24/risk0，目标文件absent。
 
 原始inventory无owner/parent关系字段，不能自动称exact-owned sheet。公开list_windows/switch_window已可用，Run未调用；最小工具说明补充dialog独立窗、无可见效果先list、显式切换并等新观察。Sol独立实际22/22已有Runtime/adapter切窗、安全域、过期与父子恢复定向测试通过（377未选测试不计通过）；新提示尚待真实验证。模型observationAssessment的no_effect为模型自报，不是driver验证字段。保留显式refs/身份/独立turn，未放宽同PID信任或自动切换。
+
+T095原始trajectory位于既有私有临时root，直接读取75事件并查看初始截图：原始空白文档已命名b93…rtf；六个GUI动作只有两次输入、click、Return、转纯文本、CMD+S，全程surface1，无list_windows/switch_window/handoff。这验证历史149B诗文是已有命名RTF转TXT原地保存，并未覆盖本轮未命名文档的独立Save sheet及指定唯一路径；不将其旧成功推定为当前sheet链路已通过。原始私有轨迹/截图不提交。
+
+
+2026-10-11 保存sheet delta复核：首次草稿仅在detect填标注，而真实Runtime在detect之前已提交fresh list工具结果；Sol拒绝该时序并由Luna修为execute→list→detect→list实序。已独立复跑4文件451/451定向测试exit0（私有日志`A01-private/sol-delta-targeted-test.log`），作者typecheck通过，独立diffcheck0。completed baseline与当前Surface generation/精确binding匹配后按私有native PID/window身份比较，只标明确visible候选；失败读取、下一动作及目标transition清信息，成功fresh list仅重投影仍visible身份。工具前置firstObservedOptions、Context新候选优先展示，均明确不证明创建/owner/前台/关系，未改变Host scope、opaque ref失效或自动切换授权。共享Runtime竞态测试仅等待持久化且已reduce的handoff事件，保留全部原断言。下一正常完整T2真实复测前原A01仍main51/risk0，无在途；离线通过不签收保存成果。
+
+
+2026-10-11 原生sheet捕获根因独检：low/high完整T2均在Save后无switch，后者真实出站high/180000ms/8192/11tools，直接监控及时取消。直接绑定Save的补证Run只发生CMD+SHIFT+G与click，没有type/保存；不能记作sheet文本输入失败。Sol独立查看该Run816×534原PNG，父窗约642×534、右侧黑边约174px，与父586×488按高度fit一致，内容域不等于所注册sheet408×267。系统screencapture exact父/子ID均返回同1172×976父族图；SCWindow.frame、filter.contentRect与CG bounds却分别精确对应各目标。Luna只读AX SPI证明focused AXSheet14759→AXParent14748，同PID22394，非同PID或标题猜测。Sol实际读取0600 native-window-proof.json并view false图，确认SCStreamConfiguration默认includeChildWindows=true；四矩阵中false分别返回纯父文档或独立sheet，true把父族绘入sheet小画布，故仅验尺寸会伪通过。Apple公开配置提供[includeChildWindows](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/includechildwindows)；当前最小修复为原生exact-window capture显式false，保留身份/frame校验，不在TS裁黑边、不全屏替代。干净固定d114源隔离构建与真实new-daemon验证仍在执行，离线probe图不能当已部署修复。A01此稳定点actual/sequence67、risk0、revision2，无在途请求。
+
+
+2026-10-11 原生最小补丁冻结独检：隔离 d114f35 worktree 仅 capture.rs 改变，配置 helper 显式 with_includes_child_windows(false)，exact filter、identity/frame/scale/尺寸及输入守卫不变；新增尺寸与 child flag 回归。Sol 独立读取完整 patch、复算 patch SHA980323a0737626152a27ad0edda2eb0408f944e707f5a63f6094bd74d3e8393b 与候选 SHA cf81ab359cfb2acf38096da455a1fecd3dbbdda5019c6780bcc65cc2b80131b0，并实际执行 capture::tests 13/13（包括身份变化拒绝与缓存失效）。作者 platform-macos 全 lib 345 passed/2 ignored、fmt 与 offline locked build 成功；原有 CoreMediaBridge 重复符号警告保留。候选未替换 stock，独立检查签收源码与离线验证，真实 fresh-daemon 图像仍待验。
+
+2026-10-11 候选权限身份复核：独立 codesign --verify --deep --strict 通过；CaptureFix app 的签后 executable SHA a0c49e066d62fe54eaff29facbda658168610f70bb64f582a07351a2f0c8ddc7。原 stock executable SHA 仍82280013239871397bf57baf133271413640b3bba8a51661a841e5f2bc50219c，未替换。新候选是独立 bundle id com.trycua.driver.capturefix.local.20261011，非stock签名身份；实际TCC屏幕捕获拒绝、AX未解析，而同时既有Swift上下文可捕获同目标。正常OS屏幕录制/辅助功能授权作为具体外部条件交root向用户请求；没有改TCC数据库或通过伪装进程复用授权。
+
+2026-10-11 非GUI续接独检：共享Runtime两等待已换持久事件barrier，含Run先结束与5s超时race/清timer；Sol完整handoff 11/11，单文件5247fb8。T1首次真实Run在computer.open终态failed、零Provider，系global fetch guard误拦CDP metadata；d0313d9仅允许精确127.0.0.1显式合法port的/json/version及/json/list，默认/GET、只允许signal/method/redirect、强制redirect:error，无body/auth/query/编码路径或其它fetch扩放。Sol完整diff、15/15 guard+entry反例独审通过；另实际生产dist default+DOM/select_option+windowSwitch 13tools零HTTP分类全main，无需扩大工具白名单。A01仍main67/risk0，真实T1复测正执行，未签收成果。
+
+2026-10-11 T1逐事件补正与直接控制复核：原dom-only Run12派发/11usage，hybrid Run6派发/5usage，累计85/risk0，已知76响应1096848 tokens、另9请求usage未知。hybrid首次只有toolbar，但seq16/37/47/57各8个DOM refs，seq25 DOM Mac点击完成且后续实际/mac/内容，不能断言全Run无DOM。四次MANAGED_BROWSER_DOM_REQUIRED都选择UIA，后两次为Mac mini链接。通用私有监控默认input arm，实际hybrid8.11s后二次同图自动SIGINT，seq60 cancelled；零信号回放原dom-only seq36前缀可在两次停止，read/wait/CMD+C同图反例不触发。公共click_element说明/schema错误地只称UIA catalog，正在改正确DOM/UIA适用合同；无放宽Guard。原生raw树depth16/32均无AXWebArea/Document，非简单深度/256截断；继续正常force-renderer-accessibility零Provider对照。
+
+2026-10-11 T1独立补核：实际读取零Provider脱敏摘要，无flag三次toolbar-only；加flag六次稳定WebArea/DOM。完整baseline selector保留Mac mini DOM hotset，未证排序缺陷，不调整配额。当前click_element description/schema将“UIA catalog”改为当前grounding catalog并明确managed内容用DOM ref，UIA内容只有唯一DOM等价时可能执行；只改公共文案及错误名，不改守卫。Sol独立computer-tools 11/11、完整provider-description selftest exit0，日志A01-private/sol-t1-description-probe.log；生产managed launch flag仍由Luna实施，尚未签收产品真实启动。
+
+生产flag首轮独立定向保留失败：launcher/tool组合56项55通过、1失败，新persistent fixture遗漏显式executablePath而本机无Edge，故未到spawn；不是flag运行失败。交Luna仅补测试fixture路径后重跑，同组日志sol-managed-ax-contract-test.log保留。
+
+117c9cc 四文件冻结复核：新persistent fixture补显式process.execPath后，Sol同组56/56实际通过exit0，首失败日志保留、复验日志sol-managed-ax-contract-retest.log。ManagedBrowserHost仅加force-renderer-accessibility于原自有profile spawn，不改个人浏览器、DOM信任或输入守卫；click_element合同明确DOM/UIA边界、<=180字符，完整Qwen selftest exit0/networkCalls0。typecheck dist实际包含flag；当前生产正常launch实图/refs门槛由Luna执行中，不以实验override冒产品部署通过。提交仅四指定文件，历史dirty未纳入。
+
+117c9cc真实T1两轮独检：首Run五派发进入Mac mini产品页，seq39配置价格导航审批视觉核验可批准；实际FD0指向zsh heredoc临时文件、PTY仅在FD1/2，y回显未交readline，正常取消seq41。修模板后第二Run FD0=/dev/tty、FD1/2真实PTY；四派发中两动作明确拒绝，既有通用monitor6.05s二次同图直接SIGINT，seq37 cancelled，未盲耗预算。累计main94/risk0，新增两轮8已知usage129998 tokens，A01共84已知usage1226846、10未知usage请求。
+
+第二Run seq14公开hotset仅uia-0e6e51f06e45-25为Mac mini 新款；dom-0e6e51f06e45-25首次出现于seq16模型响应，并非历史已发DOM引用。故DOM_CLICK_BBOX_MISMATCH不能被当作真实mini布局reflow证据。随后seq24/34仍热集UIA mini；产品零Provider已证raw DOM mini enabled且bbox完整但热集淘汰。source的跨源dedupe直接比较AXLink/link以及带空格/无空格名称，不能当已统一等价；交Luna最小managed可执行候选投影修复，Guard/状态/toolbar真实性保留，下一真实请求须先新修复独检。
+
+候选投影首草稿独检拒绝：Sol实际driver+selector277项，272通过、5失败（sol-dom-projection-targeted.log）。adapter merge直接删public UIA alias使原DOM CDP、partial/ambiguous零fallback、editable DOM/UIA及Mac CSS→PNG by UIA测试拿不到原refs，属于层次合同回归，不能更改旧期待掩盖。作者撤回adapter草稿，转Runtime hotset排序/去重，原完整catalog/private refs与Guard保持；此稳定点main94不变，无新增paid。
+
+9a449e20 selector最终独检：adapter草稿撤回后，Sol实际263 driver+17 selector合计280/280 exit0（sol-selector-final-targeted.log）；原5回归保留原期待。仅enabled DOM与UIA content跨源高IoU别名规范化AXLink/link及空白，原其它角色/来源/状态不变；Han边界修复保L/N与原中文grams。实际生产零Provider原Mini CSS框投影与公开bbox一致，live validateClick completed且无输入。新完整T1 Run run-1791655591349-293b16fd-445已挂exactCLI3019直接监控；首843223e4审批fresh PNG对应公开配置页入口，正常批准后fresh24e39289审批图已在配置页，而模型旧图拟点击原购买位置，要求正常拒绝陈旧动作，不把posted或旧屏幕当当前授权。
+
+新T1失败名称二分：Sol使用冻结9a449生产dist的buildManagedDomClickExpression，输入seq57真实完整M6 label、完全同frame、生产domCandidateFingerprint，仅validateOnly纯VM复现DOM_CLICK_BBOX_MISMATCH（A01-private/sol-real-label-expression-repro.json）。target.name的NFKC将3个全角逗号转ASCII，但live nameOf返回原全角name，roleMatches直接相等因此为空。此补证是L1表达式复现，正常live字段及修复后真正输入仍待Luna验证；不能把同frame错误归因几何改变。
+
+名称修复末版独检：候选name比较单行复用既有normalize(...,160)，真实115字M6固定fixture经正式collector/fingerprint/表达式validateOnly闭环，错名、5px移框、重复候选仍拒绝/歧义，无点击；Sol完整host46+selector17合计63/63 exit0（sol-name-normalization-final.log）。同一生产dist表达式/实际label/同frame纯VM前后证据由DOM_CLICK_BBOX_MISMATCH变为completed/no input（sol-real-label-expression-fixed.json），仅L1表达式复现，不替代正常现场输入成功。
+
+1cec2ea3现场与路径独核：实际4a9a95a0 readonly proof raw/public radio各1，真实完整name，CSS797/431/328/143与public1041.413/676.723/428.587/186.817，当前tab/generation匹配，最终DOM_CLICK_OCCLUDED而非completed；证明名字/指纹/frame唯一匹配已过后原hit-test拒绝。Sol git show 9a449旧源码确认validateOnly专有clip/elementFromPoint与非editable正常element.click的既有差异，当前一行补丁没有删守卫。纯VM已通过与现场occluded分别留证，下一真实完整任务必须自行执行。
+
+
+2026-10-11 A01最后完整T1独检：`run-1791657013535-e2460d0f-9f1`运行层succeeded及模型success与业务完成分开。真实轨迹明确iMac未访问、Air配置未知、Mini 256GB来自推断，故完整卡未通过。正常审批只核当前动作/截图、不教模型分步任务；PR23隔离评测器消费实际初末证据后inconclusive/success=false、五维null/human_review_missing及5个action_observation_mismatch，未伪造评分。A01最终120/0，A02独立60/6/66有界续接，首入口0HTTP身份拒绝已精确定位guard对较小cap错误等值约束；正在最小修复，原上限/历史不变。

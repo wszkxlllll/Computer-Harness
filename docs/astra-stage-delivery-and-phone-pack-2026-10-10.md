@@ -1,5 +1,9 @@
 # 当前阶段交付与集中补验包
 
+2026-10-11 当前续接：用户已正常解锁，任务继续执行；当前产品冻结1cec2ea3、计数8952537、原生最小补丁0ccc9ee。A01最终main120/risk0，109个已知usage响应1746208 tokens，另11请求usage未知，金额未知；原A01上限与历史不变。末Run自报success，但iMac未访问/Air配置未知，完整T1独检未完成；PR23真实导入inconclusive/success=false、五维null，无真人评分。A02独立cap60/6/66、首预占40/2/42正在同完整三产品卡执行，不能拆单品拼成功。完整T2仍无指定成果，候选CuaDriverCaptureFix.app仍需正常屏幕录制/辅助功能授权。产品1cec2ea3当前五项CI全绿；9a449e20的Windows共享TUI超时保留历史，不将旧CI冒新head。细节以[账本](./astra-autonomous-execution-ledger-2026-10-10.md)为准。
+
+以下1866/72、main3及锁屏结论属于10月10日历史交付稳定点，不能作为当前进程、调用或阻塞状态。
+
 本包配合[执行计划](./astra-autonomous-test-repair-plan-2026-10-10.md)和[实际账本](./astra-autonomous-execution-ledger-2026-10-10.md)。它是尚未关闭出口的续接说明，不代表完整任务或实体手机已通过。产品源码/build冻结17ec145；测试修复a491076当前五项CI全绿，后续仅文档；PR24两处最小UI增量经Sol独立40项通过；Luna最终组合1866项Vitest/72项TAP、typecheck/Webbuild通过。
 
 ## 已有成果及实际限制
@@ -7,7 +11,7 @@
 - 已保留历史dirty；本轮5个显式产品/计数提交及1个测试修复提交、最终组合1866项Vitest和72项TAP通过；当前PR23隔离head136项通过。
 - 正常本机配对批准、Web Run创建、stock原生窗口截图成立。后续专用headless Chrome独立admin/client contexts正常UI配对批准、刷新去重、无效码及390px视口通过；公网两独立HTTP会话配对/认证/CSRF/隔离撤销通过。均不冒Provider/Computer业务或真实手机。
 - A01 main3/risk0：一次90s未收到headers，两次正常CLI HTTP200；唯一GUI click遭driver明确拒绝，无正文输入/保存，完整196B任务未完成。三次foreground尝试均在模型前拒绝，不增加调用。费用金额未知。
-- 当前console session锁定经两个独立只读路径确认；GUI任务只在正常解锁后继续，不绕过。Mac无已交付成果文件。Windows/Linux实现与 CI 历史保留，不属于本项目责任或当前出口。
+- 历史console session锁定曾经两个独立只读路径确认；用户现已解锁，原生新候选权限另列。Mac无已交付成果文件。Windows/Linux实现与 CI 历史保留，不属于本项目责任或当前出口。
 - 控制/预览302项是L1合同，PR23两条真实失败消费保持inconclusive/false。正常报告导入保留runtime failed与business not_assessed，未制造真人复核。
 
 ## 本机正常续接
@@ -16,7 +20,7 @@
 
 构建入口：`pnpm run typecheck`、`pnpm test`、`pnpm --filter @computer-harness/web build`。正常Host启动参数保持`--env-file <本地私有env>`、`--socket <实际stock socket>`、`--model glm-5.3-flash`、`--output <本轮私有Run目录>`、`--port 4317 --origin http://localhost:4317`。实际Host管理地址为`http://localhost:4317/connect`。端口/Origin必须严格一致；不要把localhost配对URL当手机可达URL。
 
-自主付费入口继续同一`scripts/autonomous/batch-host.mjs`与A01-private计数；batchId为A01、reservationId为T2-baseline，actual main3不可重新初始化。现有reservation main40/risk2；其续额仅在同账本保留累计后办理。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。GLM timeout 180000ms与low均是有记录的每Run调优，默认90s保持；low尚未进入真实请求，不能宣称已更快。
+自主付费入口继续同一`scripts/autonomous/batch-host.mjs`与A01-private计数；batchId为A01、reservationId为T2-baseline，actual main94不可重新初始化。当前revision3已沿正式API增量至main120/risk4/total124；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。GLM timeout 180000ms与low均是有记录的每Run调优，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
 
 完整本地任务卡在忽略目录`runs/astra-autonomous-20261010-sol-luna/task-cards/`，T1/T2/T3均各baseline、independent-repeat、variant。T2正文196B/UTF-8/LF/finalLF，三卡唯一新路径；文件存在则重新准备唯一卡，不能覆盖。T3已冻结路线/日期/2成人二等座/三结果与客户端预算降低节点，未开放票价须写未知，不能捏造携程结果。关闭重开由Harness完成，人工重绑只列补证。
 
@@ -50,12 +54,12 @@ M1相机/移动浏览器、M2真实触摸、M3后台/真实手机网络、M4尺�
 
 | 实时PR差异 | 当前取舍及证据 | 剩余边界 |
 | --- | --- | --- |
-| PR22 Host session-config拆分 | 现有Host createSessionConfig已连接输入/输出预算、timeout/thinking、layered Guard/handoff；glm-output-budget测试与真实180000/low启动摘要成立 | 不为纯模块拆分追整树；正常配对UI已补证；真实Runtime任务控制仍缺解锁桌面 |
+| PR22 Host session-config拆分 | 现有Host createSessionConfig已连接输入/输出预算、timeout/thinking、layered Guard/handoff；glm-output-budget测试与真实180000/low启动摘要成立 | 不为纯模块拆分追整树；正常配对UI已补证；真实Runtime任务控制继续补验，旧锁屏不再是当前条件 |
 | PR22 Windows visible-window-capture扩展（历史兼容实现） | 当前window-contract精确PID/HWND、零几何容差verify_state、PNG解析、共享deadline捕获重试、输入前新鲜visible inventory已有；全suite该driver文件262项通过 | 保留源码与 CI；Windows 原生修复及现场不属于本项目责任 |
 | PR22 post-input-observation-settler | 当前RunController完成receipt后立即observeAndCommit，新鲜观察及有界transient重取已有 | 没有全动作稳定settler；无真实flaky症状前不加另一层等待，不宣称稳定性能 |
 | PR24预算/网络/终态 | 当前双预算保最新GUI/权威输入、pre-HTTP拒绝、相关request/decision/attempt交换、bounded deadline/取消，以及Runtime诚实failed均保留；当前组合全通过 | 完整查询/保存任务仍无现场通过，历史CI不相加 |
 | PR24 select_option/失败提示 | 已最小恢复17ec145；可信绑定选项显隐与真实状态40项独检 | 仅参数/证据预览，不代实际操作安全或结果；不改变Guard |
-| PR24独立macos-target-topology | 精确identity/geometry注册capture、SurfaceRegistry generation/parent与transient/handoff保护已融合；不整文件覆盖当前更广实现 | 外部owned-window关系probe实际是Win32。Mac没有同等自动owned-sheet拓扑证明，新弹窗走handoff/unknown，不能列自动验收；当前锁屏无现场补证 |
+| PR24独立macos-target-topology | 精确identity/geometry注册capture、SurfaceRegistry generation/parent与transient/handoff保护已融合；不整文件覆盖当前更广实现 | 外部owned-window关系probe实际是Win32。Mac没有同等自动owned-sheet拓扑证明，新弹窗走handoff/unknown，不能列自动验收；现有AXSheet→AXParent实际关系补证尚未产品化，原生候选TCC待授权 |
 | PR23评测器 | 隔离1f57852，136项独检；两条实际失败inconclusive/false；正常报告API导入失败保持failed/not_assessed | 无D01真实成功成果、评分校准或真人复核；不合并进产品冒成果 |
 
 当前整合分支相对main包含此前已提交产品改动与diagnostics归档；这不是本轮新写234个文件。新源码提交只包含已明确审查的产品/测试/批次计数文件，本轮历史dirty和私有runs未加入。草稿PR只做阶段审查，不宣称本项目范围已完整验收。
@@ -81,4 +85,4 @@ T3完整任务：携程公开页比较上海虹桥→杭州东2026年10月17日0
 
 公网当前origin对应Preview服务。实际固定闭包34项中27同/7异：Relay package.json、protocol dist/index.js/package.json、relay-connector dist/routing.js/package.json、voice dist/run-notices.js/package.json。Preview current/父目录/releases/Web dist不可由现有SSH账号写入，sudo无非交互规则、本地无部署workflow/helper；未写远端或改服务。另一个可写stable目录不属于当前origin，未拿它冒同版发布。继续发布需服务所有者提供正常合法发布路径；健康/HTTP配对不等于闭包同版。
 
-剩余分别为：Mac正常解锁后的完整T2/T1/T3及真实控制/双窗/sheet；Preview合法发布权；实体手机M1–M4；另一位队友试用；成功成果与真人复核后的评测校准。所有已可自主执行的准备、修复、离线检查、正常配对、远端审查/交付均已完成，不无限等待上述条件。
+剩余分别为：正在执行的Mac完整T2/T1/T3及真实控制/双窗/sheet；原生新候选正常OS授权；Preview合法发布权；实体手机M1–M4；另一位队友试用；成功成果与真人复核后的评测校准。正常解锁后继续所有可自主任务；单项外部条件不停止其余工作，离线/配对/远端交付不能替代真实任务验收。

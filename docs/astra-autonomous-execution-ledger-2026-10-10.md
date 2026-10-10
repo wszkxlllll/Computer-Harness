@@ -15,17 +15,17 @@
 | 命名空间 | `astra-autonomous-20261010-sol-luna-A01` |
 | 本地原始证据 | `runs/astra-autonomous-20261010-sol-luna/`（忽略，不提交截图、会话令牌及原始私密轨迹） |
 | 模型请求上限 | main120 / risk12 / total132；含失败、重试、重定向；先预占再派发 |
-| 当前新增实际调用 | main24 / risk0 / total24；跨2026-10-11继续原A01，失败及取消请求均累计；当前全部Run终态，无在途 |
-| 当前可见返回usage | 22个已知usage响应合计prompt280033 / completion14228 / total294261 tokens；首timeout及最新取消请求无usage，金额未知，不冒称完整账单 |
-| 当前预占 | 首Run main40 / risk2 / total42；A01-private累计保留，累计消耗24（失败/取消不退号） |
+| 当前新增实际调用 | main120 / risk0 / total120；A01达到原上限并冻结，所有A01实际Run终态，无在途paid |
+| 当前可见返回usage | 109个已知usage响应合计prompt1712409 / completion33799 / total1746208 tokens；其余失败/取消请求无usage，金额未知，不冒称完整账单 |
+| 当前预占 | 首Run40/2/42；正式revision3增量预占main120/risk4/total124，原actual/sequence/派发链保持；累计消耗120（失败/取消不退号） |
 | 接管源码 HEAD | `b1e44e150579bbf5f0d2b6183a49f83aefe08bd0` |
-| 当前提交组合 | 产品`17ec145`，测试修复`a491076`；后续仅交付文档，真实T2证据仍属此前明确版本 |
+| 当前提交组合 | 产品`1cec2ea3`（DOM名称对称规范化及9a449e20 Runtime hotset修复，含117c9cc受管浏览器AX/工具合同与2c361c3结构化inventory）、计数`d0313d9`（high有界配置及CDP只读分流），原生补丁`0ccc9ee`，共享测试`5247fb8`；各真实Run按实际加载版本分别记，保留旧失败 |
 | S2冻结源码 HEAD | `2e64d90`（产品/测试 `e0ca96f`，自主计数入口 `2e64d90`；内容未随提交改变） |
 | 分支 | `codex/three-track-integration-20261006` |
 | 基线快照 | 2026-10-10 17:34:22，tracked changes24，untracked status entries245（目录折叠，不等于逐文件数） |
 | 源码清单 | 451项；`baseline/source-manifest.json` SHA-256 `154d73a5ceb538f0b08835b1c3a1b7f9a6abd48e4d89afc1460f1a90974866cc` |
 | 可恢复材料 | `baseline/git-status.txt`、`baseline/tracked-diff.patch`、源码 hash 清单；未跟踪文件保持原位 |
-| 当前构建/进程/客户端 | 17ec145内容；476项dist闭包SHA `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`；Host89224正常运行，无在途Run（87588已正常退出）；Web index-BxSWOU01.js，详细进程/资产baseline快照 |
+| 当前构建/进程/客户端 | 原Host89224已退出，4317当前无监听；原stock socket已无owner，恢复Luna正常重启原签名stock0.22.2 daemon4254，status/list-tools可达。历史Host17ec145闭包SHA `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`/Web index-BxSWOU01.js不作当前运行版。最近CLI使用1cec2ea3已typecheck dist（含117c9cc受管浏览器flag/工具合同），Run已终态；Runtime/CUA/Context实际新标记已核；不能将磁盘构建更新冒称保留Host已热切版 |
 | S1构建闭包 | 476个apps/packages dist文件，含Web4资产；`baseline/runtime-build-manifest.json` SHA-256 `310b5de388dc1f81a930a45b2029ae9f25b671787db16bc8ea4aba4671a41855` |
 
 ## 本轮事件
@@ -74,8 +74,63 @@
 | 2026-10-11 正文正例/保存未完成 | 同内容 / S3 / L2 | `run-1791647793800-73957d72-cf2` Harness实际输入完整196B正文，seq23截图正例；CMD+S后独立保存sheet14633出现，但Run仍绑定父窗14623。后续输入仅unverified/posted，默认文件名未改变；126事件终态cancelled，目标文件absent，未保存/关闭重开 | 原A01 main10→24/risk0，含末次取消请求；同因付费暂停，修公开list/switch反馈后一次复测 |
 | 2026-10-11 sheet独检 | Sol只读 / S3修复中 | stock原始inventory有同PID22394的14623父窗与14633“保存”，但无owner/parent关系字段，完整attestation缺失；不称exact-owned child。CMD+S工具反馈仅提示新窗，无opaque ref，模型未调用已启用list_windows/switch_window；模型no_effect为自报观察，不是driver证明 | 最小补公共工具发现/单独切窗/新观察提示；保留精确身份和显式模型切换，不自动信任同PID窗口。当前修订尚未真实验收 |
 
+| 2026-10-11 提示修订实测未通过 | cc2af36 / S3 / L2 | 原完整1133B goal、新空白14661的Run `run-1791648620167-5bbc26cb-dad` 正常输入正文/转纯文本/CMD+S；保存sheet出现后仍未调用list/switch、重复父窗输入。117事件终态cancelled，指定文件absent。三次补证父窗启动在sheet前台时精确拒绝，均零Provider/捕获/输入 | 原A01 main24→37/risk0，失败取消不退号；停止同因paid，转动作后结构化候选反馈 |
+| 2026-10-11 新CI暴露catalog截断 | cc2af36 / S5/S6 | 当前CI1866 Vitest全通过，TAP provider-description-probe失败QWEN_TOOL_CATALOG_TRUNCATED；Qwen固定180字catalog截断新增sheet安全说明。旧全绿不冒当前状态 | 修保留公共list/switch完整安全说明与全probe；当前剩3main预占，复测前正式增量续预占，保留actual/sequence37及批次总120/12/132 |
+
+| 2026-10-11 结构化候选修复/组合独检 | 80192f1产品+5ba8e0a计数 / S3/S5 | 公共动作后fresh opaque inventory、过期refs拒绝与Qwen完整安全说明修复；Sol独立183定向、Qwen真实出站离线probe及114文件1870 Vitest+72 TAP通过，另12 guard/entry通过 | 原A01正式扩预占40/2/42→80/4/84，actual/sequence37及派发链不变，审计追加extension1条；非force远端保原SHA同步 |
+| 2026-10-11 全inventory真实不足 | 同组合 / S3 / L2 | `run-1791649481080-2f52f675-d30` 正常新blank14695/完整goal；seq40真实工具输出64项含4同名“保存”，但模型仍未switch，输入仍父窗。126事件/14请求终态cancelled，文件absent；修复证实能输出refs，不能证实能完成sheet操作 | 原A01 main37→51/risk0；转本动作前后私有native identity的首次观测信息delta，不能随机ref字符串比较或自动owner授权 |
+| 2026-10-11 清理与直接取消监控 | S3 / 非paid | Luna正常丢弃本轮明确自有14623/14661/14695失败副本，stock确认消失，未知用户窗保留；自有caffeinate已结束。Sol私有有界2s轨迹/PNG监控已建立并历史check-only验证，无信号 | 下一Run独立发现dialog反馈后两次连续同图input，直接核精确自有CLI PID/starttime并SIGINT，不经多轮转达；不自动业务GUI或新Provider |
+
+| 2026-10-11 delta独检冻结 | `2c361c3` / S3修复→L2复测 | Sol发现初稿在tool反馈后才计算delta，由Luna修为真实execute→list→detect→list顺序，completed baseline/current Surface/exact binding和明确visible native identity差集；新候选信息前置、读失败/下一动作/transition清旧标签，不扩大授权。Sol实际4文件451/451与diffcheck0，作者typecheck0 | 原A01 main51/risk0；9文件显式提交，非force远端同SHA/PR26同步，下一完整空白T2立即启动，2s直接取消监控就绪 |
+
+| 2026-10-11 delta真实命中/直接取消 | `2c361c3` / S3 / L2 | `run-1791650511165-fb22d1f0-f33` 正常新blank14729/完整goal；seq35 CMD+S首次候选恰1个“保存”、sourceActionId与实际动作一致，完整67项；实际toolNames含list/switch，Context保留该工具结果且0遗漏。模型识别Save及随后输入无效，仍type→click旧父窗；文件absent | 原A01 main51→58/risk0。Sol已实际2s监控并在seq45/54两次同图input直接SIGINT，seq57 cancelled/CLI退出；不再付费加prompt，下一仅high thinking每Run单变量对照；正式revision2预占104/4/108，原actual/sequence58保留 |
+
+| 2026-10-11 high单变量对照 | 产品`2c361c3`、计数`0a376a8` / S3 / L2 | 首high Run `run-1791650788726-16dfb303-84f` 因测试入口旧effort白名单拒绝，零HTTP/计数不变；最小允许undefined/low/high、max/未知仍拒，Sol独立13/13。随后 `run-1791650884337-6cfa4f69-d60` 实际出站high/180000ms/8192/11tools、HTTP200；Save后仍hotkey→click旧父窗/无switch | 原A01 main58→64/risk0；seq41/50同图input由Sol直接SIGINT，seq53 cancelled。两profile同因失败后停止paid重复；转当前精确Save sheet直接绑定的输入补证，仅诊断不签收完整T2 |
+
+| 2026-10-11 sheet捕获真根因 | 原stock0.22.2 / S3 / 只读原生诊断 | 精确sheet补证`run-1791651193520-5dc21586-0dc`仅CMD+SHIFT+G/click，无type/保存，三PNG同hash；view显示父族内容被fit到sheet816×534，注册bounds408×267错域。SC/CG/AX SPI精确目标及parent关系成立；原生四矩阵证明includeChildWindows默认true，false才返回独立正确域 | 原A01 main64→67/risk0、终态cancelled，文件absent；停止paid，干净d114 native仅显式includeChildWindows=false修复/构建中，未冒已部署。原stock与历史dirty保留，补丁/构建/回退材料将入repo |
+
 ## 当前范围决定与未关闭出口
 
 2026-10-10 用户决定本项目只负责 macOS 电脑端、Web/Relay 与手机客户端，并覆盖原三线计划中的 Windows/Linux 平台目标。历史 Windows/Linux 事件、实现与跨平台 CI 结果保留；不继续承担其实现、修复、原生实测、环境寻找或交付，也不将其列为当前待办、阻塞或完成条件。
 
 本轮可自主完成的接管、离线修复/检查、正常公网HTTP认证配对、隔离headless UI、评测器真实失败导入、PR取舍、非force远端交付与手机包已完成。当前Mac已由用户正常解锁，完整T2/T1/T3三轮与真实控制/同名双窗/sheet继续自主执行，不再列为解锁外部阻塞。剩余具体外部条件：Preview服务所有者发布权限以安装同版闭包；实体手机M1–M4；另一位队友试用；真实成功任务及真人审核以完成评分校准。不将任何一项并作“等手机”，不以L1或配对通过关闭任务成果。详细逐项状态见执行计划看板。
+
+
+2026-10-11 原生 exact-window capture 最小候选：干净 d114f35 源仅 capture.rs 显式 includeChildWindows=false；作者345 passed/2 ignored、fmt/offline locked build通过，Sol独立capture测试13/13及patch/产物SHA核对通过。候选PID97824、独立socket启动成功，但首精确sheet14759捕获被OS TCC明确拒绝，shell fallback也失败，screenshot_frame_valid=false；无输入/新模型HTTP，A01仍main67/risk0。原stock保持不变，Swift矩阵成功不计为新daemon部署验收。继续核合法权限/启动身份及共享Runtime测试竞态，未经真实图验证不重跑付费T2。
+
+2026-10-11 T1正常managed-browser首Run：run-1791652409383-ab187e69-b4c已run.created，computer.open在CDP endpoint阶段失败，Provider/modelRequests/actions均0；A01仍main67/risk0。原因为全局physical fetch guard把正常127.0.0.1 /json/version拒为非GLM endpoint，Chrome已产DevTools端口、专用profile清理confirmed，不是Chrome安装故障。正在做仅只读CDP endpoint分流与零计数反例验证，未经独检不重跑。共享Runtime两处旧轮询已改持久事件barrier+终态/5s race，Sol完整handoff 11/11，提交5247fb8；原生补丁与构建说明0ccc9ee已同步PR26。
+
+2026-10-11 T1两次真实对照终态：DOM-only Run run-1791652639520-19540328-e6c取消，12派发/11已知usage响应；初始catalog degraded/empty，地址栏type全部明确no-input拒绝。旧监控仅依Save marker未覆盖网页，Sol直接SIGINT自有CLI；改同一私有监控默认覆盖输入、两次同图或重复明确no-input拒绝，并零信号验证真实seq36前缀会停、read/wait/copy同图不误停。hybrid零Provider公开Computer首次open/observe/close只有14个toolbar UIA refs、DOM0；单次真实hybrid Run run-1791653048455-d434cc54-91a的初观察同样DOM0，但seq16/37/47/57各有8个DOM refs，seq25用DOM Mac链接实际导航到/mac/；4次MANAGED_BROWSER_DOM_REQUIRED均选UIA refs（含后两次Mac mini），监控8.11s自动SIGINT、seq60 cancelled，6派发/5已知usage响应。A01累计85/risk0、9请求usage未知；T1三产品查询未完成。下一paid门槛为零Provider先实际取得网页内容DOM refs与Apple产品链接/可读正文，toolbar不合格；继续查Mac AXWebArea/contentRect可信生产链，禁止削弱Guard或再仅换profile。PR22实时d4eae01源码同样DOM-only fail-closed，未找到可直接复用的独立trusted producer。
+
+2026-10-11 T1根因补正：hybrid可信producer间歇恢复，不能称整Run无DOM或Mac producer恒失效。公共click_element description与elementRef schema只称UIA catalog，而实际managed-browser内容要求DOM或完整可信别名，工具说明与执行合同不一致。下一步最小纠正source适用边界，零Provider核Mac mini等产品DOM refs能进入实际出站hot-set；若融合配额保留必拒绝UIA内容却挤掉可执行DOM，修候选可执行性/排序而非放宽Guard。d0313d9远端ref/PR head匹配，当前五项CI均success。
+
+| 2026-10-11 T1零Provider AX二分与DOM门槛 | d0313d9 + 实验spawn override / S3 / 只读 | 无flag三次仅14个toolbar UIA；精确raw树depth16/32均无AXWebArea。正常自有ephemeral Chrome加force-renderer-accessibility实验后六次稳定87候选、18DOM/16DOM链接和AXWebArea。/mac/实际84候选中25DOM，完整baseline goal走Runtime selector后16项8DOM/8UIA且保留Mac mini DOM引用，故不改hotset排序 | main85/risk0不变；脱敏证据A01-private/hybrid-zero-provider/summary-20261011.json，明确实验spawn覆盖尚非产品启动验证。生产最小flag及click_element DOM/UIA合同修订后独检，再真实T1；不放宽Guard |
+
+| T1最小启动/工具合同冻结 | 117c9cc / S3 / L1 | 自有managed Chrome正常启动加force-renderer-accessibility，click_element公共合同明确DOM/UIA适用；守卫/selector不改。首新增persistent fixture缺路径导致55/56，补fixture后Sol56/56、完整Qwen selftest exit0，历史失败保留 | 仅四文件显式提交，main85不变；dist真实flag已核，正常产品launch零Provider门槛继续，通过后直接完整T1 baseline，未等待CI当作运行许可 |
+
+| T1产品零Provider门槛与正式续额 | 117c9cc / S3 | 正常ManagedBrowserHost无spawn override：/mac/124候选/32DOM，完整goal实际selector16项/8DOM含enabled MacBook Air link、物理bbox及goal_match/dom_content_priority；Mac mini DOM在raw但未入此帧hotset。任一目标产品已可正常导航，不新增三者同帧要求。原生TCC尚未获用户回复 | Sol沿既有API正式revision3扩到120/4/124，actual85/seq85不变；首次reason长度拒绝零HTTP后正常完成，批上限120/12/132不变。117c9cc五CI实际全成功；放行完整T1 baseline，保持直接监控 |
+
+| 117c9cc正式T1 baseline启动 | run-1791654303592-bfb49906-050 / S4 / 正常CLI L2 | 原完整goal、hybrid、正常自有ephemeral/mac/起点、low180s、20/20；CLI1291。Sol立即挂既有直接monitor900s。前5请求、2GUI completed，真实DOM进入Mac mini官方页；seq39普通配置价格入口导航触发fallback financial审批 | main90/risk0；Sol独立view绑定ffb4213e PNG，Apple/mac-mini/精确坐标783.995,461.165在蓝色购买配置入口，不是订单/付款；既有用户授权内交Luna正常CLI仅批准该次并留痕，不改Guard。完整三产品任务仍进行中，不能以点击/单品通过收口 |
+
+| T1审批输入入口拒绝与修复 | 117c9cc / run-1791654303592-bfb49906-050 | seq39购买配置导航审批，y两次无approval.resolved。Sol lsof证FD0为zsh heredoc临时文件、FD1/2为PTY；不是Guard/controller已证缺陷。Luna正常SIGINT，seq41 cancelled，5响应usage90851 tokens，审批动作未执行 | main90；修固定模板恢复FD0=/dev/tty，原完整卡/源码/URL/profile不变，不重跑DOM准备 |
+| T1正确TTY复验及时取消 | 117c9cc / run-1791654516049-31d9eb08-9ab | Sol lsof核FD0=/dev/tty、FD1/2=/dev/ttys006；monitor6.05s二次同图seq24/34直接SIGINT，seq37 cancelled。新增4请求/3usage39147tokens。wait completed，DOM_CLICK_BBOX_MISMATCH与UIA MANAGED_BROWSER_DOM_REQUIRED均明确拒绝无输入 | main94/risk0、84已知usage1226846 tokens、10请求usage未知；无paid在途。seq14只发UIA mini uia-…-25，模型请求未露出的dom-…-25，不能据此断言真实mini布局变动；同帧raw/投影/live几何和可执行候选投影继续零Provider定位，不同版盲跑 |
+
+2026-10-11 selector最小修复9a449e20：仅Runtime hotset跨源enabled DOM/content alias规范化与Han/L/N分词边界，不删adapter完整catalog、不放宽Guard。作者与Sol分别完整定向280/280通过，原5回归恢复；typecheck/build通过。正常产品零Provider proof Mac mini DOM进入16项hotset、同框UIA别名降后而toolbar/UIA-only保留；raw CSS→physical projection与live readonly validateClick一致、无输入/0Provider。私有摘要A01-private/hybrid-zero-provider/product-launch-20261011/selector-fix/mac-mini-selector-proof.json。原始SHA/tree非force同步PR26。完整原卡T1新Run已进入Mac mini配置价页，首公开导航由正常CLI视觉批准；后续同坐标重提的fresh审批图已变化，拒绝陈旧动作后继续观察。当前不是T1完成。
+
+9a449e20完整T1终态：run-1791655591349-293b16fd-445 seq70 cancelled，7模型请求/6已知usage113104tokens（prompt111795/completion1309），A01累计101/risk0、90已知usage1339950、11未知usage。正常TTY首审批完成，实际Mac mini配置页已加载；第二陈旧重复导航审批正常拒绝。随后两次真实公开M6 DOM refs的click在派发前DOM_CLICK_BBOX_MISMATCH拒绝，seq57/67公开bbox完全相同、PNG同图；直接monitor78.92s达到二输入阈值SIGINT确切CLI3019。未完成三产品任务，不重放。源码只读发现click target.name做NFKC而live nameOf未做，真实M6 label含全角逗号，需零Provider验证名称不对称而非预判页面滚动或缩放。
+
+2026-10-11执行代理恢复：原Luna连续三次工具流断开后停止，新Luna（同用户指定模型）接续唯一写产品/真实GUI。继承已落一行name规范化，真实115字M6回归末版作者46/46、typecheck/build与Sol63/63通过。只读live probe第一次因raw.role未定义参数错误退出，finally关闭自有浏览器、0Provider；不能冒称产品失败或live通过。原Host/stock退出经核确认，固定原签名bundle SHA822800…正常恢复自有daemon4254，现stock只读可达；无需用户重新许可，无TCC库修改。
+
+1cec2ea3名称补丁冻结：业务一行normalize(candidate.name,160)，真实M6 115字符fixture，作者46/46/typecheck/build、Sol host+selector63/63。正常生产readonly模板已持久化 A01-private/hybrid-zero-provider/product-launch-20261011/selector-fix/managed-browser-live-validate-template.mjs；原raw.role/fingerprint读取错误逐项记录，正式4a9a95a0…json得到唯一raw/public radio/name/frame/fingerprint与当前tab/generation匹配后，最终DOM_CLICK_OCCLUDED拒绝、0Provider/0输入/cleanup0，绝不称全通过。Sol核旧9a449版已存在validateOnly clip/hit-test与非editable DOM.click分支差异；修复未改变任一guard，只关闭名称不对称误报bbox根因。完整原卡T1继续同A01剩19模型请求；此前actual101保持，所有历史用量保留。
+
+
+## A01达到原上限与A02正式续接（2026-10-11）
+
+- A01最后Run `run-1791657013535-e2460d0f-9f1`：原完整T1三产品卡，19 requests/14 steps，CLI exit0，Runtime succeeded/model success；独立业务检查**未完成**：iMac从未访问、Air配置未知，Mac mini 256GB仅按列表首项推断不能作已证配置。真实M6选择、内存/存储滚动、Air页面导航已有输入正例；正常审批按各自新截图核验，陈旧购买ref落点购物袋的两次提案拒绝，未补发分产品任务。无购买/支付/未知副作用，直接监控482.86s以terminal正常退出。
+- 该Run已知usage prompt400501/completion5757/total406258；A01最终main120/risk0，总known109响应1746208tokens，11请求usage未知。金额未知，原120/12/132批次cap与全部hash/anchor/audit保留。
+- 隔离PR23 `1f57852`正常消费该真实轨迹：`pr23-real-evidence/t1-a01-incomplete-model-success-assessment.json`，verdict=inconclusive/success=false，五维null、human_review_missing及5个action_observation_mismatch；初末截图实际hash绑定成立。模型success未被当业务通过；没有编造真人审核或自动业务评分。
+- A02理由：第一次真正跨过名称故障并有实际网页导航/读取进展，但A01剩19不足完整三产品独立验收。独立命名空间`A02-private`正常initializeBatch，cap main60/risk6/total66、首Run预占40/2/42，state/anchor/audit独立0；完整原卡、冻结版、持久TTY模板及直接取消监控复用，禁止拆单品拼成功。私有`A02-batch-decision.json`/`A02-private/batch-decision.json`与启动模板已持久。
+- A02首次入口 `run-1791657677453-e6e5d51b-45f`：0GUI、首Provider请求在delegate前`COUNTER_IDENTITY_REFUSED`，实际main0。精确原因是initializeBatch允许较小cap，但guard读state仍硬要求cap等于120/12/132；Luna正最小修为每项不超过默认硬上限，保留全部identity/hash/audit，不重建A02或删除失败。
+- `1cec2ea3`远端原SHA与PR26一致，当前五项CI全绿（run38075969909）；9a449的Windows共享TUI超时作为历史失败保留。
+
+A02计数修复冻结`8952537f1de96b4c6b8b13b69b536841187cd487`：只有stateAndAnchor cap等值改每项≤默认硬上限，validCounts仍要求非负safe integer/total=main+risk，identity/hash/anchor/audit及原A01回归不变。作者和Sol各独立15/15通过。修复后同A02 root正常Run `run-1791657750228-282eae92-1e1`，原完整卡40/40、PID5705、TTY61934；实际guard加载8952537同内容（提交前加载），产品1cec2ea3不变；Sol直接监控session10310即时挂上。首配置导航仅正常审批当前蓝色购买按钮，无人工业务分步补发。
