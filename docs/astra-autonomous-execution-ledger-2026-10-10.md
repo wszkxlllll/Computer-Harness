@@ -252,4 +252,12 @@ A04 T1追加重试事实：seq99收到GLM_INVALID_TOOL_CALL（_harnessEffect uns
 
 2026-10-11 最后服务/覆盖审计：旧high Host18761正常退出，复用持久模板恢复90s low新构建Host20858，stock4254与原socket保持。Sol独立GET /、/api/local/session、正常认证/api/runs全部200，新Host Run列表0/活动0；历史五个A04 Run终态均保留本地轨迹。只读consoleLocked=false；候选未启动，reader/probe/caffeinate均已清理，专用TextEdit证据现场保留，不操作未知个人窗口。当前Computer dist SHA256 9fc76ac695cb8aad89d847adcb34e07ab58409c8c660f8490e80c7fdca291a1a、Host entry07b2c43a…、Web bundle7df7b878…；这是实际构建文件指纹，不冒所有模块已逐一读取进程缓存。证据A04-private/sol-final-service-build-proof.json。
 
-产品282d528已保原SHA非force同步PR26，五项CI按当前head记录、不沿用旧green。最后审计区分：完整T1/T2/T3三轮真实未通过；组合候选capture/focus复验需两项正常TCC；部分原生双窗/sheet和实际CGID复用仍无现场证明。已证控制/预览局部与L1分栏；Preview同版发布需服务所有者合法权限，实体手机M1–M4与另一位真人试用/评分独立。已充分归因的网页模型参数/旧引用/业务缺项保留失败，不再同因付费追题。Windows/Linux已移出责任；当前剩余没有可在不新增同因paid、无真实外部授权下继续关闭的明确源码/材料缺陷。最终文档与PR说明同步后阶段交付，不宣称Astra完成。
+产品源282d528已按原SHA非force同步PR26；上一交付head e0923b6五项CI全绿，新文档head尚未核CI。最后审计区分：完整T1/T2/T3三轮真实未通过；组合候选capture/focus复验需两项正常TCC；部分原生双窗/sheet和实际CGID复用仍无现场证明。已证控制/预览局部与L1分栏；Preview同版发布需服务所有者合法权限，实体手机M1–M4与另一位真人试用/评分独立。已充分归因的网页模型参数/旧引用/业务缺项保留失败，不再同因付费追题。Windows/Linux已移出责任；当前剩余没有可在不新增同因paid、无真实外部授权下继续关闭的明确源码/材料缺陷。最终文档与PR说明同步后阶段交付，不宣称Astra完成。
+
+
+## 2026-10-11 正常系统设置UI权限尝试与待用户认证
+
+- 已在System Settings > Privacy & Security分别进入Screen & System Audio Recording、Accessibility并各自点击Add。两项均在文件选择器打开前显示原生Touch ID/登录密码挑战；Screen Recording原提示为“正在尝试修改你的系统设置”，Accessibility提示为“正在尝试解锁系统设置”。前两次挑战已取消，未输入凭据、未选择/启用候选、未改变任何权限；这不是“未试”，而是正常UI确实要求用户认证。
+- 随后再次进入Screen & System Audio Recording > Add，当前原生Touch ID/密码挑战留在界面供用户本人完成；没有保存截图，live AX挑战文本与脱敏事件记录见忽略目录 `A04-private/system-settings-tcc-ui-attempt-20261011.json`（0600）。候选未启动/安装。
+- 实际低Host PID20858在认证前已停止，4317无监听；正常认证会话查询 `/api/runs` 为200、0条、0活动，未创建Run/未发Provider。stock PID4254与 `/private/tmp/a01-cua-luna.sock` 保留。A04计数维持42main/2risk/44；本次未使用caffeinate。所有历史Run终态。
+- 上一交付head e0923b6（产品源282d528）五项CI全绿；新文档head的CI尚未核，单独记录，不继承代码head绿灯。

@@ -1,6 +1,6 @@
 # 当前阶段交付与集中补验包
 
-2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端。平台CMD/META及onclick建议采集修复取得真实正例；完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正均未通过，三轮出口不降标。唯一high T1正确CMD+L后暴露原生焦点证明缺口；产品282d528的独立focus_proof与TS严格消费已完成离线修复，catalog仍partial、不凭截图或DOM失焦放行。Sol独立TS298项、原生347项/2 ignored及fmtcheck通过，作者typecheck/native check/debug build通过；组合CaptureFix候选未执行，正常屏幕录制与辅助功能授权仍待用户批准。stock无法验证新增proof，真实修复成功尚未签收。
+2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端。平台CMD/META及onclick建议采集修复取得真实正例；完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正均未通过，三轮出口不降标。唯一high T1正确CMD+L后暴露原生焦点证明缺口；产品282d528的独立focus_proof与TS严格消费已完成离线修复，catalog仍partial、不凭截图或DOM失焦放行。Sol独立TS298项、原生347项/2 ignored及fmtcheck通过，作者typecheck/native check/debug build通过；组合CaptureFix候选尚未启动或安装；已在System Settings正常UI分别点击Screen & System Audio Recording与Accessibility的“添加”，两项均在文件选择器前要求Touch ID/密码认证，前两次已取消且未选中/启用候选；当前Screen & System Audio Recording原生认证挑战留给用户本人完成。上一交付head e0923b6（产品源282d528）五项CI全绿；本次文档head的CI尚未核。stock无法验证新增proof，真实修复成功尚未签收。
 
 正常认证controller同Run已证paused后零新派发、correct投影、resume与最终纠正标记；精确批准去重/reject零执行/旧approval失效/SSE重连及同名preview并发、取消恢复、自然过期否定链通过，仍分列API协议、Web按钮与实体手机。A01–A04累计222main/6risk/228物理请求，210已知usage共3955751tokens、18请求usage未知、金额未知；A04 actual42/2/44、cap96/6/102、reserve80/4/84。隔离评估器cb6aacf/PR27经Sol157项独检，真实false-success重评仍inconclusive/false，业务缺项与真人评分缺失独立保留。当前源码/CI及服务事实以PR26、执行看板和账本为准。
 
@@ -32,9 +32,9 @@
 
 组合候选为`/Users/guoyuhang/Desktop/大创/Computer-Harness-three-track-integration/.tools/cua-driver/CuaDriverCaptureFix.app`，显示名`Capture and Focus Fix Local Candidate`，独立bundleID `com.trycua.driver.capturefix.local.20261011`；signed binary SHA-256 `4f3f99d9ef6c91da9203ca202e70a2b2cc5682b784dd5d92921bcf5fbc414ebc`，CDHash `91531a0d8e6c8a68c6173c7d7a5da7d2811746c7`。Sol独立strict验签通过，未启动、未安装或改TCC。
 
-唯一桌面系统介入是给这个明确候选开启“系统设置→隐私与安全性→屏幕与系统音频录制”及“辅助功能”两项正常权限。已有解锁不替代新应用权限；无需手机操作。批准后由智能体正常启动候选、先零Provider核精确sheet捕获/比例与地址栏focus_proof，再继续完整原卡及独立复验/变体，不能把离线测试算作真实T1/T2/T3通过。当前stock无新proof仍拒绝地址栏type，保护保持有效。
+已实际在“系统设置→隐私与安全性”分别进入“录屏与系统录音”和“辅助功能”并点击“添加”；两个正常流程都先要求Touch ID/密码，文件选择器未打开，候选未选择/启用且权限未改变。当前录屏与系统录音的原生认证挑战留给用户本人完成；无需手机操作。用户完成原生认证后，由智能体在文件选择器中选择精确候选app，分别启用并核实两项权限，再正常启动候选；先零Provider核精确sheet捕获/比例与地址栏focus_proof，再继续完整原卡及独立复验/变体，不能把离线测试算作真实T1/T2/T3通过。stock无新proof仍拒绝地址栏type，保护保持有效。
 
-当前保留正常low Host20858（4317，90s、40请求/步，A04正式护栏）及stock4254/socket `/private/tmp/a01-cua-luna.sock`；旧high Host18761已退出。Sol独立核首页、local session与认证Run列表均200，Run列表0/无在途；历史终态轨迹保留。当前Computer dist SHA256 `9fc76ac695cb8aad89d847adcb34e07ab58409c8c660f8490e80c7fdca291a1a`，Host entry及Web bundle与上次构建相同；不据文件hash推断整个进程缓存。自有reader、probe、caffeinate已关闭，stock与专用TextEdit证据现场保留；不动未知个人窗口。正常新配对凭据只在私有0600文件，公开包没有token。
+low Host20858已正常停止，4317无listener；停止前首页、local session与认证Run列表均200，Run列表0/无活动Run。stock PID4254及原socket `/private/tmp/a01-cua-luna.sock` 保留；旧high Host18761已退出，历史终态轨迹保留。当前Computer dist SHA256 `9fc76ac695cb8aad89d847adcb34e07ab58409c8c660f8490e80c7fdca291a1a`，Host entry及Web bundle与上次构建相同；不据文件hash推断整个进程缓存。自有reader、probe、caffeinate已关闭，stock与专用TextEdit证据现场保留；不动未知个人窗口。正常新配对凭据只在私有0600文件，公开包没有token。
 
 ## 手机集中补验（手机可用且同版电脑任务出口通过后）
 

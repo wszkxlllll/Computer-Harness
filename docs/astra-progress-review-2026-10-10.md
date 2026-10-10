@@ -4,7 +4,7 @@
 
 核对日期：2026-10-10，Asia/Shanghai。核对范围：三线统一计划、验收台账、修复/测试/远端审查三个聊天的最近记录、当前整合工作树及 T095 实际成果。本文保留历史起点与当前状态。2026-10-10 用户决定本项目仅负责 macOS 电脑端、Web/Relay 与手机客户端，该决定覆盖原平台目标；Windows/Linux历史事件、源码及CI保留，但不再属于当前责任、待办、阻塞或完成条件。
 
-2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端。平台CMD/META及onclick建议采集修复取得真实正例；完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正均未通过，三轮出口不降标。唯一high T1正确CMD+L后暴露原生焦点证明缺口；产品282d528的独立focus_proof与TS严格消费已完成离线修复，catalog仍partial、不凭截图或DOM失焦放行。Sol独立TS298项、原生347项/2 ignored及fmtcheck通过，作者typecheck/native check/debug build通过；组合CaptureFix候选未执行，正常屏幕录制与辅助功能授权仍待用户批准。stock无法验证新增proof，真实修复成功尚未签收。
+2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端。平台CMD/META及onclick建议采集修复取得真实正例；完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正均未通过，三轮出口不降标。唯一high T1正确CMD+L后暴露原生焦点证明缺口；产品282d528的独立focus_proof与TS严格消费已完成离线修复，catalog仍partial、不凭截图或DOM失焦放行。Sol独立TS298项、原生347项/2 ignored及fmtcheck通过，作者typecheck/native check/debug build通过；组合CaptureFix候选尚未启动或安装；已在System Settings正常UI分别点击Screen & System Audio Recording与Accessibility的“添加”，两项均在文件选择器前要求Touch ID/密码认证，前两次已取消且未选中/启用候选；当前Screen & System Audio Recording原生认证挑战留给用户本人完成。上一交付head e0923b6（产品源282d528）五项CI全绿；本次文档head的CI尚未核。stock无法验证新增proof，真实修复成功尚未签收。
 
 正常认证controller同Run已证paused后零新派发、correct投影、resume与最终纠正标记；精确批准去重/reject零执行/旧approval失效/SSE重连及同名preview并发、取消恢复、自然过期否定链通过，仍分列API协议、Web按钮与实体手机。A01–A04累计222main/6risk/228物理请求，210已知usage共3955751tokens、18请求usage未知、金额未知；A04 actual42/2/44、cap96/6/102、reserve80/4/84。隔离评估器cb6aacf/PR27经Sol157项独检，真实false-success重评仍inconclusive/false，业务缺项与真人评分缺失独立保留。当前源码/CI及服务事实以PR26、执行看板和账本为准。
 

@@ -204,3 +204,6 @@ Sol独立核high T1 seq149的CMD+L回执与注册PNG：URL确实蓝选；随后�
 Sol独立Computer284+SDK14=298项通过；native完整lib347通过/2 ignored，fmtcheck、diffcheck0；作者typecheck/check/debug build通过。新负例覆盖错snapshot/身份/前台/几何/坐标域/内容区、缺编辑/聚焦/ancestry、DOM冲突、未知/非Mac平台及live变化；one-shot复用零type。两repo补丁在clean d114重放后与构建三源文件逐字节相同。独立验签确认候选独立bundleID及SHA4f3f99d9…/CDHash91531a0d…，stock未替换，候选未执行。先临时stock bundleID包装已在执行前纠正，不构成权限复用。
 
 本签收仅源码/离线测试与候选构建。stock原生没有新增proof，候选真实capture/focus仍需正常两项TCC授权；完整T1/T2/T3及三轮没有通过。正常controller同Run暂停零派发、纠正恢复、SSE与preview局部实证单列，未冒实体手机/真人评分。全部请求对账228物理/210已知usage/18未知，费用金额未知。
+
+
+2026-10-11 本机权限UI状态补记：Sol已核脱敏AX记录/服务和计数投影；GUI挑战为操作者实证，未另抢桌面。操作者正常进入System Settings两项隐私权限并点击“添加”，二者均触发Touch ID/密码挑战；前两次取消，当前录屏与系统录音挑战留在屏幕供用户本人完成。未输入凭据、候选未选择/启用、权限未改；没有保存截图，脱敏AX结果记录于私有 `A04-private/system-settings-tcc-ui-attempt-20261011.json`。此前“未执行候选/授权待用户”的当前状态应解读为权限尚未获批，而非没有尝试正常UI。上一交付head e0923b6（产品源282d528）五项CI全绿；新文档head尚未核CI。
