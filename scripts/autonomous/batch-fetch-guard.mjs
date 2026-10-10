@@ -101,7 +101,8 @@ function stateAndAnchor(paths, rootIdentity, batchId, reservationId) {
   const anchor = JSON.parse(stableRead(paths.anchor, rootIdentity));
   if (!plain(state) || state.schema !== schema || state.batchId !== batchId || state.reservationId !== reservationId) fail("COUNTER_IDENTITY_REFUSED");
   const limits = validCounts(state.limits), reservation = validCounts(state.reservation);
-  if (canonical(limits) !== canonical(DEFAULT_BATCH_LIMITS) || reservation.total > limits.total || reservation.main > limits.main || reservation.risk > limits.risk) fail("COUNTER_IDENTITY_REFUSED");
+  if (limits.total > DEFAULT_BATCH_LIMITS.total || limits.main > DEFAULT_BATCH_LIMITS.main || limits.risk > DEFAULT_BATCH_LIMITS.risk ||
+      reservation.total > limits.total || reservation.main > limits.main || reservation.risk > limits.risk) fail("COUNTER_IDENTITY_REFUSED");
   const counts = validCounts(state.actual);
   if (!Number.isSafeInteger(state.sequence) || state.sequence < 0 || typeof state.chainHash !== "string" || !/^[a-f0-9]{64}$/u.test(state.chainHash) ||
       state.stateHash !== stateDigest(state) || !plain(anchor) || anchor.schema !== schema || anchor.batchId !== batchId || anchor.sequence !== state.sequence || anchor.chainHash !== state.chainHash || anchor.stateHash !== state.stateHash ||

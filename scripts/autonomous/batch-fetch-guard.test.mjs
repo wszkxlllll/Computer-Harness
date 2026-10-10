@@ -37,6 +37,26 @@ test("reserves a main and risk ceiling before the normal Run and enforces both g
   assert.deepEqual(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual, { total: 42, main: 40, risk: 2 });
 });
 
+test("accepts a bounded custom batch cap and rejects caps above defaults before delegation", async (t) => {
+  const bounded = await fixture(t, {
+    limits: { total: 66, main: 60, risk: 6 },
+    reservation: { total: 42, main: 40, risk: 2 },
+  });
+  for (let i = 0; i < 40; i += 1) await bounded.guard.fetch(GLM_ENDPOINT, request());
+  for (let i = 0; i < 2; i += 1) await bounded.guard.fetch(GLM_ENDPOINT, request(["risk_classification"]));
+  await assert.rejects(bounded.guard.fetch(GLM_ENDPOINT, request()), /FETCH_BUDGET_EXHAUSTED/);
+  assert.equal(bounded.calls.length, 42);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(bounded.root, "counter.json"), "utf8")).actual, { total: 42, main: 40, risk: 2 });
+
+  const overLimit = await fixture(t, {
+    limits: { total: 133, main: 121, risk: 12 },
+    reservation: DEFAULT_RUN_RESERVATION,
+  });
+  await assert.rejects(overLimit.guard.fetch(GLM_ENDPOINT, request()), /COUNTER_IDENTITY_REFUSED/);
+  assert.equal(overLimit.calls.length, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(overLimit.root, "counter.json"), "utf8")).actual, { total: 0, main: 0, risk: 0 });
+});
+
 test("allows the bounded GLM high reasoning profile and rejects max or unknown effort before delegation", async (t) => {
   const f = await fixture(t);
   await f.guard.fetch(GLM_ENDPOINT, request(["click"], { reasoning_effort: "high" }));
