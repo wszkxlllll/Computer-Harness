@@ -220,6 +220,8 @@ function listWindowsTool(): NonComputerToolDefinition {
           ...(option.appName === undefined ? {} : { appName: option.appName }),
           ...(option.title === undefined ? {} : { title: option.title }),
           isCurrent: option.isCurrent,
+          ...(option.firstObservedAfterAction === undefined ? {} : { firstObservedAfterAction: option.firstObservedAfterAction }),
+          ...(option.sourceActionId === undefined ? {} : { sourceActionId: option.sourceActionId }),
         })),
         truncated: inventory.truncated,
         omittedCount: inventory.omittedCount,

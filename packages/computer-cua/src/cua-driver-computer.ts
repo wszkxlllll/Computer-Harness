@@ -786,6 +786,8 @@ interface PrivateSession {
   };
   /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
   newlySurfacedWindowKeys: ReadonlySet<string>;
+  /** Visible identities observed after a completed action; model inventory annotation only. */
+  firstObservedAfterActionWindows: { readonly actionId: ActionIntent["actionId"]; readonly targetKeys: ReadonlySet<string> } | undefined;
   /** Candidate snapshot produced by the immediately preceding list call. */
   newHandoffCandidates: readonly ComputerWindowCandidate[];
   /** Exact HWND reported by CUA as foreground for the current no-input refusal. */
@@ -1051,6 +1053,7 @@ export class CuaDriverComputer implements Computer {
         visibleWindowBaseline: undefined,
         preActionWindowBaseline: undefined,
         newlySurfacedWindowKeys: new Set(),
+        firstObservedAfterActionWindows: undefined,
         newHandoffCandidates: [],
         foregroundMismatchWindowId: undefined,
         proactiveHandoffCandidatesReady: false,
@@ -2131,6 +2134,8 @@ export class CuaDriverComputer implements Computer {
   public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<ComputerWindowList> {
     const current = this.requireSession(session);
     current.windowRefs.clear();
+    const previousFirstObservedAfterAction = current.firstObservedAfterActionWindows;
+    current.firstObservedAfterActionWindows = undefined;
     if (this.options.windowSwitch !== "opened-windows-v1") {
       throw new WindowContractError("WINDOW_SWITCH_DISABLED", "cross-window switching is not enabled for this Run");
     }
@@ -2140,6 +2145,30 @@ export class CuaDriverComputer implements Computer {
     signal.throwIfAborted();
     const inventory = await listWindowTargets(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
     signal.throwIfAborted();
+    const actionBaseline = current.preActionWindowBaseline;
+    const activeBinding = activeWindowBinding(current);
+    const baselineStillBound = actionBaseline !== undefined && activeBinding !== undefined &&
+      sameSurfaceRef(current.surfaceRegistry.activeSurface, actionBaseline.parentSurfaceRef) &&
+      isCurrentSurfaceRef(current.surfaceRegistry, actionBaseline.parentSurfaceRef) &&
+      isExecutableSurfaceRef(current.surfaceRegistry, actionBaseline.parentSurfaceRef) &&
+      windowIdentityKey(activeBinding.target) === windowIdentityKey(actionBaseline.parentBinding.target);
+    if (actionBaseline?.completed === true && baselineStillBound) {
+      const firstObservedAfterActionKeys = inventory
+        .filter((window) => window.isOnScreen === true && !actionBaseline.targetKeys.has(windowIdentityKey(window.target)))
+        .map((window) => windowIdentityKey(window.target));
+      current.firstObservedAfterActionWindows = firstObservedAfterActionKeys.length > 0
+        ? { actionId: actionBaseline.actionId, targetKeys: new Set(firstObservedAfterActionKeys) }
+        : undefined;
+    } else if (actionBaseline === undefined && previousFirstObservedAfterAction !== undefined) {
+      const visibleKeys = new Set(inventory
+        .filter((window) => window.isOnScreen === true && previousFirstObservedAfterAction.targetKeys.has(windowIdentityKey(window.target)))
+        .map((window) => windowIdentityKey(window.target)));
+      current.firstObservedAfterActionWindows = visibleKeys.size > 0
+        ? { actionId: previousFirstObservedAfterAction.actionId, targetKeys: visibleKeys }
+        : undefined;
+    } else {
+      current.firstObservedAfterActionWindows = undefined;
+    }
     const boundPeer = activePeerTarget(current);
     if (boundPeer !== undefined && !inventory.some((window) => windowIdentityKey(window.target) === windowIdentityKey(boundPeer))) {
       const activeRef = current.surfaceRegistry.activeSurface;
@@ -2171,6 +2200,9 @@ export class CuaDriverComputer implements Computer {
         ...(window.appName === undefined ? {} : { appName: window.appName }),
         ...(window.title === undefined ? {} : { title: window.title }),
         isCurrent: currentKey === windowIdentityKey(window.target),
+        ...(window.isOnScreen === true && current.firstObservedAfterActionWindows?.targetKeys.has(windowIdentityKey(window.target)) === true
+          ? { firstObservedAfterAction: true, sourceActionId: current.firstObservedAfterActionWindows.actionId }
+          : {}),
       };
     }).filter((window): window is ComputerWindowOption => window !== undefined);
     const registrationOmissions = projected.windows.length - options.length;
@@ -2194,6 +2226,7 @@ export class CuaDriverComputer implements Computer {
 
   public async detectNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
     const current = this.requireSession(session);
+    current.firstObservedAfterActionWindows = undefined;
     signal.throwIfAborted();
     if (current.missingParent !== undefined) throw new BoundWindowMissingError(current.missingParent.sourceActionId);
     const confirmingUnknownAction = current.unknownActionReconciliationPending === true;
@@ -2364,6 +2397,12 @@ export class CuaDriverComputer implements Computer {
       if (reconciled !== undefined) return [];
     }
     const surfaced = inventory.surfaced;
+    const firstObservedAfterActionKeys = inventory.sourceInventory.windows
+      .filter((window) => window.isOnScreen === true && !baseline.targetKeys.has(windowIdentityKey(window.target)))
+      .map((window) => windowIdentityKey(window.target));
+    current.firstObservedAfterActionWindows = firstObservedAfterActionKeys.length > 0
+      ? { actionId: baseline.actionId, targetKeys: new Set(firstObservedAfterActionKeys) }
+      : undefined;
     const exactInventoryForAutoPush = baseline.complete && inventory.complete;
     let pushedChild = false;
     const supportsTransientUia = this.options.grounding === "uia-catalog-v1" || this.options.grounding === "hybrid-catalog-v1";
@@ -2800,6 +2839,7 @@ export class CuaDriverComputer implements Computer {
     this.latestObservationId = undefined;
     current.visibleWindowBaseline = undefined;
     current.preActionWindowBaseline = undefined;
+    current.firstObservedAfterActionWindows = undefined;
     current.newlySurfacedWindowKeys = new Set();
     current.newHandoffCandidates = [];
     current.foregroundMismatchWindowId = undefined;
@@ -2882,6 +2922,7 @@ export class CuaDriverComputer implements Computer {
     options?: ComputerExecuteOptions,
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
+    current.firstObservedAfterActionWindows = undefined;
     if (current.missingParent !== undefined) return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "missing bound window awaits explicit handoff; no input was sent");
     current.foregroundMismatchWindowId = undefined;
     current.preActionWindowBaseline = undefined;
@@ -3335,6 +3376,7 @@ export class CuaDriverComputer implements Computer {
           parentSurfaceRef: { ...parentSurfaceRef },
           parentBinding: { target: { ...currentWindowBinding.target }, bounds: { ...currentWindowBinding.bounds } },
         };
+        current.firstObservedAfterActionWindows = undefined;
         current.visibleWindowBaseline = visibleKeys;
         current.newlySurfacedWindowKeys = new Set();
         current.newHandoffCandidates = [];

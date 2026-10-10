@@ -17,6 +17,7 @@ import type {
 } from "@computer-harness/protocol";
 import { createDefaultComputerTools, createDefaultToolRegistry, windowSwitchTools } from "@computer-harness/runtime";
 import { DefaultContextCompiler, selectMemoryForContext } from "./index.js";
+import { formatWindowSwitchState } from "./projections.js";
 
 const runId = "run-context" as RunId;
 const sessionId = "session-context" as ComputerSessionId;
@@ -51,6 +52,20 @@ function observation(id: string) {
 }
 
 describe("DefaultContextCompiler", () => {
+  it("projects first-observed window metadata before same-label alternatives without implying ownership", () => {
+    const text = formatWindowSwitchState(undefined, {
+      options: [
+        { windowRef: "existing-save", appName: "Editor", title: "Save", isCurrent: false },
+        { windowRef: "new-save", appName: "Editor", title: "Save", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" as ActionId },
+      ],
+      truncated: false,
+      omittedCount: 0,
+    }, undefined, viewport);
+    expect(text).toContain("windowRef=new-save [first observed after action=save-action; not proof of creation, ownership, foreground, or relation]");
+    expect(text).toContain("windowRef=existing-save");
+    expect(text?.indexOf("windowRef=new-save")).toBeLessThan(text?.indexOf("windowRef=existing-save") ?? -1);
+  });
+
   it("keeps the system prefix stable while fully budgeting dynamic request guidance and retaining final-only tools", async () => {
     const compiler = new DefaultContextCompiler(createDefaultToolRegistry());
     const goal = "complete all requested fields without guessing";

@@ -2114,7 +2114,7 @@ describe("CuaDriverComputer", () => {
     const fake = windowDriver();
     const computer = new CuaDriverComputer({
       socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
-      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", driverFactory: () => fake.driver,
     });
     const signal = new AbortController().signal;
     try {
@@ -2128,9 +2128,60 @@ describe("CuaDriverComputer", () => {
         kind: "click", point: { x: 10, y: 20 },
       }, signal, { detectNewWindowHandoff: true });
       expect(receipt.status).toBe("completed");
+      const listedDialog = (await computer.listWindows(session, signal)).options.find((option) => option.title === "Save As");
+      expect(listedDialog).toMatchObject({
+        firstObservedAfterAction: true,
+        sourceActionId: "proactive-same-process-click",
+      });
       expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([dialog]);
+      expect((await computer.listWindows(session, signal)).options.find((option) => option.title === "Save As")).toMatchObject({
+        firstObservedAfterAction: true,
+        sourceActionId: "proactive-same-process-click",
+      });
       expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([dialog]);
-      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.observe(session, "proactive-same-process-followup-observation" as ObservationId, signal);
+      await computer.execute(session, {
+        actionId: "proactive-same-process-followup-click" as ActionId,
+        basedOn: "proactive-same-process-followup-observation" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect((await computer.listWindows(session, signal)).options.find((option) => option.title === "Save As"))
+        .not.toHaveProperty("firstObservedAfterAction");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(2);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("marks only the newly observed same-name window and never infers relation from its label", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-first-observed-same-name-"));
+    const fake = windowDriver();
+    const existing = { pid: 4321, windowId: 8765, appName: "Editor", title: "Save" };
+    const surfaced = { pid: fake.target.pid, windowId: 9876, appName: "Editor", title: "Save", ownerPid: 0, ownerWindowId: 0 };
+    fake.setExtraWindow(existing);
+    fake.setSecondExtraWindowAfterClick(surfaced);
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "same-name-window-before" as ObservationId, signal);
+      await computer.execute(session, {
+        actionId: "same-name-window-open-action" as ActionId,
+        basedOn: "same-name-window-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      const sameName = (await computer.listWindows(session, signal)).options.filter((option) => option.title === "Save");
+      expect(sameName).toHaveLength(2);
+      expect(sameName.find((option) => option.firstObservedAfterAction === true)).toMatchObject({
+        firstObservedAfterAction: true,
+        sourceActionId: "same-name-window-open-action",
+      });
+      expect(sameName.filter((option) => option.firstObservedAfterAction !== true)).toHaveLength(1);
+      await computer.detectNewWindowHandoffCandidates(session, signal);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

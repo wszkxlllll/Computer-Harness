@@ -2332,15 +2332,23 @@ export class RunController {
               ...(actionOutput as Record<string, JsonValue>),
               windowInventory: {
                 currentWindow: inventory.options.find((option) => option.isCurrent)?.windowRef ?? null,
+                firstObservedOptions: inventory.options.filter((option) => option.firstObservedAfterAction === true).map((option) => ({
+                  windowRef: option.windowRef,
+                  ...(option.appName === undefined ? {} : { appName: option.appName }),
+                  ...(option.title === undefined ? {} : { title: option.title }),
+                  ...(option.sourceActionId === undefined ? {} : { sourceActionId: option.sourceActionId }),
+                })),
                 options: inventory.options.map((option) => ({
                   windowRef: option.windowRef,
                   ...(option.appName === undefined ? {} : { appName: option.appName }),
                   ...(option.title === undefined ? {} : { title: option.title }),
                   isCurrent: option.isCurrent,
+                  ...(option.firstObservedAfterAction === undefined ? {} : { firstObservedAfterAction: option.firstObservedAfterAction }),
+                  ...(option.sourceActionId === undefined ? {} : { sourceActionId: option.sourceActionId }),
                 })),
                 truncated: inventory.truncated,
                 omittedCount: inventory.omittedCount,
-                guidance: "This fresh inventory does not establish that another window is related to the action. Use switch_window only for a listed window that visibly matches the dialog; then wait for a fresh observation before acting.",
+                guidance: "firstObservedAfterAction means only that this exact window identity was visible in a read-only inventory after the source action; it does not prove creation, ownership, foreground, or relation. Match the visible dialog yourself before using switch_window, then wait for a fresh observation before acting.",
               },
             };
           }
@@ -3564,6 +3572,12 @@ function validateComputerWindowList(value: ComputerWindowList): ComputerWindowLi
         item.windowRef.trim().length === 0 || item.windowRef.length > 128 || typeof item.isCurrent !== "boolean") {
       throw new Error(`Computer window inventory option ${index} has an invalid windowRef/isCurrent`);
     }
+    if ((item.firstObservedAfterAction !== undefined && typeof item.firstObservedAfterAction !== "boolean") ||
+        (item.sourceActionId !== undefined && (typeof item.sourceActionId !== "string" || item.sourceActionId.trim().length === 0 || item.sourceActionId.length > 128)) ||
+        (item.firstObservedAfterAction === true && item.sourceActionId === undefined) ||
+        (item.sourceActionId !== undefined && item.firstObservedAfterAction !== true)) {
+      throw new Error(`Computer window inventory option ${index} has invalid first-observation metadata`);
+    }
     if (refs.has(item.windowRef)) throw new Error("Computer window inventory contains duplicate windowRef values");
     refs.add(item.windowRef);
     if (item.isCurrent) currentCount += 1;
@@ -3582,6 +3596,8 @@ function validateComputerWindowList(value: ComputerWindowList): ComputerWindowLi
       ...(item.appName === undefined ? {} : { appName: item.appName }),
       ...(item.title === undefined ? {} : { title: item.title }),
       isCurrent: item.isCurrent,
+      ...(item.firstObservedAfterAction === undefined ? {} : { firstObservedAfterAction: item.firstObservedAfterAction }),
+      ...(item.sourceActionId === undefined ? {} : { sourceActionId: item.sourceActionId as ActionId }),
     };
   });
   if (currentCount > 1) throw new Error("Computer window inventory marked more than one option as current");

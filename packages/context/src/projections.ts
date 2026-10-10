@@ -67,7 +67,10 @@ export function formatWindowSwitchState(
     lines.push("No list_windows inventory is cached. Call list_windows before choosing another target.");
   } else {
     lines.push("Latest list_windows inventory (choose only a listed windowRef; references remain valid across ordinary observations and expire when the list is refreshed, a target changes, or the Run ends. App/title labels reflect discovery time and may be stale):");
-    for (const option of state.options.slice(0, 128)) lines.push(formatWindowOption(option));
+    const firstObserved = state.options.filter((option) => option.firstObservedAfterAction === true);
+    const firstObservedRefs = new Set(firstObserved.map((option) => option.windowRef));
+    const orderedOptions = [...firstObserved, ...state.options.filter((option) => !firstObservedRefs.has(option.windowRef))];
+    for (const option of orderedOptions.slice(0, 128)) lines.push(formatWindowOption(option));
     if (state.truncated === true) lines.push(`- This candidate projection is truncated: ${state.omittedCount ?? "an unknown number of"} additional selectable windows were omitted. Do not infer that an unlisted app is absent; ask the user to choose from the operating system's window switcher.`);
     if (state.options.length === 0) lines.push("- no selectable opened windows were returned");
   }
@@ -77,7 +80,10 @@ export function formatWindowSwitchState(
 function formatWindowOption(option: ComputerWindowOption): string {
   const appName = option.appName === undefined ? "" : ` app=${compactLabel(option.appName, 128)}`;
   const title = option.title === undefined ? "" : ` title=${compactLabel(option.title, 160)}`;
-  return `- windowRef=${compactLabel(option.windowRef, 128)}${option.isCurrent ? " [current]" : ""}${appName}${title}`;
+  const firstObserved = option.firstObservedAfterAction === true && option.sourceActionId !== undefined
+    ? ` [first observed after action=${compactLabel(option.sourceActionId, 128)}; not proof of creation, ownership, foreground, or relation]`
+    : "";
+  return `- windowRef=${compactLabel(option.windowRef, 128)}${option.isCurrent ? " [current]" : ""}${firstObserved}${appName}${title}`;
 }
 
 export function composeSystemPrompt(base: string, features: RunFeatureConfig): string {

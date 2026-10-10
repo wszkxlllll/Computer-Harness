@@ -156,13 +156,13 @@ describe("default Computer tools", () => {
       session: {} as never,
       signal: new AbortController().signal,
       listWindows: async () => ({
-        options: [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+        options: [{ windowRef: "opaque-1", title: "Search", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" as never }],
         truncated: true,
         omittedCount: 3,
       }),
     });
     expect(inventory).toEqual({
-      windows: [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+      windows: [{ windowRef: "opaque-1", title: "Search", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" }],
       truncated: true,
       omittedCount: 3,
     });

@@ -826,6 +826,10 @@ export interface ComputerWindowOption {
   readonly appName?: string;
   readonly title?: string;
   readonly isCurrent: boolean;
+  /** Informational only: this exact native identity was visible in a post-action diff. */
+  readonly firstObservedAfterAction?: boolean;
+  /** Run-scoped action that preceded the first visible diff observation. This proves no ownership or causality. */
+  readonly sourceActionId?: ActionId;
 }
 
 /** A bounded, deterministic projection of the latest opened-window topology.

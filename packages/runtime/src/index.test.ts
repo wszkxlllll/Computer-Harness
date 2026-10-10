@@ -1050,11 +1050,28 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall("proactive-first"), typeCall("proactive-stale-second")] },
       { type: "finish", summary: "continued after popup was ignored" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1", batching: "same-control-input-v1" });
+    let resolveHandoffRequested!: () => void;
+    const handoffRequested = new Promise<void>((resolve) => { resolveHandoffRequested = resolve; });
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      batching: "same-control-input-v1",
+      onEventCommitted: (event) => {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "new_window_detected") resolveHandoffRequested();
+      },
+    });
     let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
     try {
       run = controller.start("save in the dialog that appears");
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          handoffRequested,
+          run.then(() => { throw new Error("run finished before the new-window handoff event was committed"); }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("new-window handoff event was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
       expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents().map((event) => event.type === "tool.call.rejected" ? event.reason : event.type) })).toBe("waiting_window");
       expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click:true"]);
       expect(computer.calls).toContain("detect-new-window");
@@ -4089,7 +4106,7 @@ describe("RunController model-directed window switching", () => {
             { windowRef: "opaque-current", isCurrent: true },
             { windowRef: "opaque-target", isCurrent: false },
           ],
-          guidance: expect.stringContaining("does not establish that another window is related"),
+          guidance: expect.stringContaining("does not prove creation, ownership, foreground, or relation"),
         },
       });
     } finally {
@@ -4140,7 +4157,10 @@ describe("RunController model-directed window switching", () => {
         return {
           options: [
             { windowRef: `${suffix}-current`, appName: "Editor", title: "Draft", isCurrent: true },
-            { windowRef: `${suffix}-target`, appName: "TextEdit", title: "Save", isCurrent: false },
+            {
+              windowRef: `${suffix}-target`, appName: "TextEdit", title: "Save", isCurrent: false,
+              ...(this.inventoryGeneration === 1 ? {} : { firstObservedAfterAction: true, sourceActionId: "open-save-sheet" as ActionId }),
+            },
           ],
           truncated: false,
           omittedCount: 0,
@@ -4182,8 +4202,10 @@ describe("RunController model-directed window switching", () => {
         windowInventory: {
           options: [
             { windowRef: "fresh-current", isCurrent: true },
-            { windowRef: "fresh-target", title: "Save", isCurrent: false },
+            { windowRef: "fresh-target", title: "Save", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "open-save-sheet" },
           ],
+          firstObservedOptions: [{ windowRef: "fresh-target", title: "Save", sourceActionId: "open-save-sheet" }],
+          guidance: expect.stringContaining("does not prove creation, ownership, foreground, or relation"),
         },
       });
       expect(JSON.stringify(saveResult?.result.output)).not.toContain("old-target");
