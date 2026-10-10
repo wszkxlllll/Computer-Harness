@@ -1,0 +1,62 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/capture.rs b/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
+index 88ea72f..e8fee04 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
+@@ -444,13 +444,26 @@ fn lock_window_plan_cache(
+         .unwrap_or_else(|poisoned| poisoned.into_inner())
+ }
+ 
++fn window_capture_configuration(
++    width: u32,
++    height: u32,
++) -> screencapturekit::prelude::SCStreamConfiguration {
++    // Each registered window has its own WindowServer frame. Including child
++    // windows can composite an attached sheet with its parent and then resize
++    // that family image into the selected window's dimensions.
++    screencapturekit::prelude::SCStreamConfiguration::new()
++        .with_width(width)
++        .with_height(height)
++        .with_includes_child_windows(false)
++}
++
+ /// Look up shareable content, build desktop-independent filter + pixel config.
+ /// Runs outside the cache lock.
+ fn build_window_capture_plan(
+     window_id: u32,
+     expected_identity: WindowCaptureIdentity,
+ ) -> anyhow::Result<std::sync::Arc<WindowCapturePlan>> {
+-    use screencapturekit::prelude::{SCContentFilter, SCShareableContent, SCStreamConfiguration};
++    use screencapturekit::prelude::{SCContentFilter, SCShareableContent};
+ 
+     let content = SCShareableContent::get()
+         .map_err(|e| anyhow::anyhow!("SCShareableContent::get failed: {e}"))?;
+@@ -506,9 +519,7 @@ fn build_window_capture_plan(
+     let out_w = rounded_pixel_dim(width_pts * scale, "width")?;
+     let out_h = rounded_pixel_dim(height_pts * scale, "height")?;
+ 
+-    let config = SCStreamConfiguration::new()
+-        .with_width(out_w)
+-        .with_height(out_h);
++    let config = window_capture_configuration(out_w, out_h);
+ 
+     Ok(std::sync::Arc::new(WindowCapturePlan {
+         filter,
+@@ -827,6 +838,18 @@ mod tests {
+     use std::rc::Rc;
+     use std::sync::Arc;
+ 
++    #[test]
++    fn exact_window_capture_excludes_child_windows_without_changing_dimensions() {
++        let config = window_capture_configuration(816, 534);
++
++        assert_eq!(config.width(), 816);
++        assert_eq!(config.height(), 534);
++        assert!(
++            !config.includes_child_windows(),
++            "an exact-window capture must not composite attached child windows"
++        );
++    }
++
+     #[test]
+     fn native_window_capture_short_circuits_shell_fallback() {
+         let png = cua_driver_core::image_utils::encode_rgba_to_png(&[0, 0, 0, 255], 1, 1)
