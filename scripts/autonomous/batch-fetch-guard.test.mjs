@@ -172,6 +172,37 @@ test("unknown tools, endpoint changes and redirects are rejected without delegat
   assert.equal(f.calls.length, 0);
 });
 
+test("allows only read-only loopback CDP metadata fetches without consuming model request budget", async (t) => {
+  const f = await fixture(t);
+  const signal = new AbortController().signal;
+  await f.guard.fetch("http://127.0.0.1:9222/json/version", { signal });
+  await f.guard.fetch("http://127.0.0.1:65535/json/list");
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.calls.map(({ url, init }) => ({ url, init: { method: init.method, redirect: init.redirect, signal: init.signal } })), [
+    { url: "http://127.0.0.1:9222/json/version", init: { method: "GET", redirect: "error", signal } },
+    { url: "http://127.0.0.1:65535/json/list", init: { method: "GET", redirect: "error", signal: undefined } },
+  ]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual, { total: 0, main: 0, risk: 0 });
+});
+
+test("rejects loopback CDP lookalikes, query data, unsafe methods and redirects", async (t) => {
+  const f = await fixture(t);
+  const refused = [
+    ["http://localhost:9222/json/version", { method: "GET" }],
+    ["http://127.0.0.1/json/version", { method: "GET" }],
+    ["http://127.0.0.1:65536/json/version", { method: "GET" }],
+    ["http://127.0.0.1:9222/json/version?token=x", { method: "GET" }],
+    ["http://127.0.0.1:9222/json/%76ersion", { method: "GET" }],
+    ["http://user@127.0.0.1:9222/json/version", { method: "GET" }],
+    ["http://127.0.0.1:9222/json/version", { method: "POST", body: "payload" }],
+    ["http://127.0.0.1:9222/json/list", { method: "GET", redirect: "follow" }],
+    ["http://127.0.0.1:9222/json/list", { method: "GET", headers: { authorization: "x" } }],
+  ];
+  for (const [url, init] of refused) await assert.rejects(f.guard.fetch(url, init), /FETCH_ENDPOINT_REFUSED|FETCH_REQUEST_REFUSED/u);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual, { total: 0, main: 0, risk: 0 });
+});
+
 test("the complete default Host main-tool vocabulary is classified as main", async (t) => {
   const names = ["click", "double_click", "right_click", "type", "keypress", "hotkey", "scroll", "drag", "wait", "switch_window", "list_windows", "click_element", "select_option", "task_create", "task_update", "task_list", "task_get", "execution_segment_set", "memory_get", "memory_write_fact", "memory_mark_fact_needs_check", "memory_search", "memory_upsert_entity", "memory_list", "memory_invalidate_entity", "terminate", "interact"];
   const f = await fixture(t);

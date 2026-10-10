@@ -40,6 +40,18 @@ function initialChainHash({ batchId, reservationId, limits, reservation }) {
 }
 
 export function classifyGlmRequest(url, init) {
+  if (typeof url === "string" && url !== GLM_ENDPOINT) {
+    const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/json\/(?:version|list)$/u.exec(url);
+    if (match !== null && Number(match[1]) <= 65_535) {
+      const request = init === undefined ? {} : ownData(init, "FETCH_REQUEST_REFUSED");
+      const allowedKeys = new Set(["method", "redirect", "signal"]);
+      if (Object.keys(request).some((key) => !allowedKeys.has(key)) ||
+          request.method !== undefined && request.method !== "GET" ||
+          request.redirect !== undefined && request.redirect !== "error") fail("FETCH_REQUEST_REFUSED");
+      return { channel: "loopback_cdp", request: { method: "GET", redirect: "error", ...(request.signal === undefined ? {} : { signal: request.signal }) } };
+    }
+    fail("FETCH_ENDPOINT_REFUSED");
+  }
   if (typeof url !== "string" || url !== GLM_ENDPOINT) fail("FETCH_ENDPOINT_REFUSED");
   const request = ownData(init, "FETCH_REQUEST_REFUSED");
   if (request.method !== "POST" || typeof request.body !== "string" || request.redirect !== undefined && request.redirect !== "error") fail("FETCH_REQUEST_REFUSED");
@@ -219,6 +231,7 @@ export function createDurableFetchGuard({ root, batchId, reservationId, delegate
   const fetch = async (url, init) => {
     if (closed) fail("FETCH_GUARD_CLOSED");
     const { channel, request } = classifyGlmRequest(url, init);
+    if (channel === "loopback_cdp") return delegate(url, request);
     let lockFd;
     try { lockFd = fs.openSync(paths.lock, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600); }
     catch { fail("COUNTER_LOCK_BUSY_OR_STALE"); }
