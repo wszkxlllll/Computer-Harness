@@ -126,6 +126,10 @@ export interface ApprovalActionPreviewItem {
   points?: Array<{ x: number; y: number }>;
   keys?: string[];
   typedCharacterCount?: number;
+  groundingRef?: string;
+  optionText?: string;
+  optionCharacterCount?: number;
+  optionTextStatus?: "visible" | "redacted";
 }
 
 export interface WindowCandidate {

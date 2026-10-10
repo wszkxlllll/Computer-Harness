@@ -11,6 +11,16 @@ const parentSurfaceRef = {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("pending request panel", () => {
+  it("labels requested select parameters separately from unverified model claims", () => {
+    render(<PendingRequestPanel request={{ requestId: "select", kind: "approval", reason: "Review", preview: { actions: [{ operation: "select_option", kind: "select_option", groundingRef: "dom-ref", optionText: "Observed variant", optionTextStatus: "visible", optionCharacterCount: 16 }, { operation: "select_option", kind: "select_option", optionTextStatus: "redacted", optionCharacterCount: 12 }], modelDeclaredEffect: { target: "Unverified claim", summary: "Model explanation", verified: false } } }} onApprove={vi.fn()} onRespond={vi.fn()} onChooseWindow={vi.fn()} onIgnoreNewWindow={vi.fn()} />);
+    expect(screen.getAllByText("选择选项").length).toBeGreaterThan(0);
+    expect(screen.getByText("Observed variant")).toBeDefined();
+    expect(screen.getByText("dom-ref")).toBeDefined();
+    expect(screen.getByText("内容已隐去（12 个字符）")).toBeDefined();
+    expect(screen.getByText("模型说明（未经验证）")).toBeDefined();
+    expect(screen.getAllByText(/参数不是已执行结果/).length).toBeGreaterThan(0);
+  });
+
   it("preserves a typed answer until the host confirms it was applied", async () => {
     const onRespond = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     render(
