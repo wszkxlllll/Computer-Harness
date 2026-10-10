@@ -764,7 +764,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     }
     return textFromElements(explicit, 8, 160, element);
   };
-  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
   const nameOf = (element, role) => {
     const candidates = [
       element.getAttribute("aria-label"),
@@ -778,7 +778,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       if (name !== undefined) return name;
     }
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
-    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
     return allowsTextName ? boundedText(element.textContent, 160) : undefined;
   };
   const optionDescription = (option) => {
@@ -820,7 +820,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const isCanvasLike = (element, role) => element.localName === "canvas" || role === "canvas" || role === "webgl" || role === "bitmap";
   const isInteractive = (element, role) => {
     if (element.disabled === true) return true;
-    if (element.tabIndex >= 0 || element.isContentEditable === true) return true;
+    if (element.tabIndex >= 0 || element.isContentEditable === true || typeof element.onclick === "function") return true;
     if (role !== undefined && interactiveRoles.has(role.toLowerCase())) return true;
     return ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName);
   };
@@ -837,7 +837,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     const name = nameOf(element, role);
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
     const description = roleName === "combobox" || element.localName === "select" ? selectedOptionDescription(element, role) : undefined;
-    const enabled = element.disabled !== true;
+    const enabled = element.disabled !== true && element.getAttribute("aria-disabled") !== "true";
     const inputType = (element.getAttribute("type") || "text").toLowerCase();
     const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
     const optionProjection = visibleNativeSelectOptions(element);
@@ -1578,7 +1578,7 @@ export function buildManagedDomClickExpression(input: {
     const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
     const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
     const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
-    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
     const boundedText = (value, max) => {
       if (typeof value !== "string") return undefined;
       const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
@@ -1662,7 +1662,7 @@ export function buildManagedDomClickExpression(input: {
         if (name !== undefined) return name;
       }
       const roleName = typeof role === "string" ? role.toLowerCase() : "";
-      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
       return allowsTextName ? boundedText(element.textContent, 160) : undefined;
     };
     const frameOf = (element) => {
@@ -1694,7 +1694,7 @@ export function buildManagedDomClickExpression(input: {
         seen.add(element);
         const role = roleOf(element);
         const frame = frameOf(element);
-        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || role !== "";
+        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || typeof element.onclick === "function" || role !== "";
         if (frame !== undefined && interactive && !["canvas", "img"].includes(element.localName)) {
           const name = nameOf(element, role);
           candidates.push({ element, role, name, frame, fingerprint: fingerprintOf(element, role, name) });

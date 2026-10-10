@@ -205,6 +205,73 @@ describe("managed browser host pilot", () => {
     expect(duplicate.clicked).toBe(false);
   });
 
+  it("round-trips a real nested onclick list item without treating cursor or text as interactive", () => {
+    const suggestionText = "上海虹桥shanghaihongqiao";
+    const child = syntheticElement("span", { textContent: "上海虹桥", rect: { x: 125, y: 388, width: 65, height: 19 } });
+    const phonetic = syntheticElement("span", { textContent: "shanghaihongqiao", rect: { x: 125, y: 407, width: 120, height: 16 } });
+    const suggestion = syntheticElement("li", {
+      children: [child, phonetic],
+      textContent: "上海虹桥shanghaihongqiao",
+      rect: { x: 125, y: 385.5, width: 334, height: 24 },
+      onclick: () => undefined,
+    });
+    const cursorOnly = syntheticElement("li", { textContent: "Not clickable", rect: { x: 10, y: 100, width: 100, height: 24 } });
+    const nonFunctionHandler = syntheticElement("li", { textContent: "Also not clickable", onclick: "javascript:alert(1)" });
+    const page = new SyntheticDocument([suggestion, cursorOnly, nonFunctionHandler]);
+    const context = {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto", cursor: "pointer" }),
+      window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 },
+    };
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation;
+    const candidate = evaluation.candidates.find((item) => item.name === suggestionText)!;
+    const binding = {
+      role: "generic",
+      name: suggestionText,
+      frame: candidate.frame as { x: number; y: number; width: number; height: number },
+      fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate),
+    };
+
+    expect(candidate).toMatchObject({ tagName: "li", ariaRole: "generic", name: suggestionText, interactive: true });
+    expect(candidate.frame).toEqual({ x: 125, y: 385.5, width: 334, height: 24 });
+    expect(evaluation.candidates.some((item) => item.name === "Not clickable" || item.name === "Also not clickable")).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(suggestion.clicked).toBe(true);
+    expect(child.clicked).toBe(false);
+    expect(phonetic.clicked).toBe(false);
+
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, name: "上海南站" }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, frame: { ...binding.frame, x: binding.frame.x + 5 } }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    const withoutHandler = syntheticElement("li", { children: [child], textContent: suggestionText, rect: suggestion.getBoundingClientRect() });
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: new SyntheticDocument([withoutHandler]) })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    expect(withoutHandler.clicked).toBe(false);
+
+    const nestedDuplicate = syntheticElement("li", { textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined });
+    const ambiguous = syntheticElement("li", { children: [nestedDuplicate], textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined });
+    const ambiguousPage = new SyntheticDocument([ambiguous]);
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, { ...context, document: ambiguousPage }) as SyntheticEvaluation).candidates.filter((item) => item.name === suggestionText)).toHaveLength(2);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: ambiguousPage })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_AMBIGUOUS" });
+    expect(ambiguous.clicked).toBe(false);
+    expect(nestedDuplicate.clicked).toBe(false);
+
+    for (const disabled of [
+      syntheticElement("li", { textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined, disabled: true }),
+      syntheticElement("li", { textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined, attrs: { "aria-disabled": "true" } }),
+    ]) {
+      const disabledPage = new SyntheticDocument([disabled]);
+      const disabledCandidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, { ...context, document: disabledPage }) as SyntheticEvaluation).candidates[0]!;
+      expect(disabledCandidate.state).toMatchObject({ enabled: false });
+      expect(runInNewContext(buildManagedDomClickExpression({
+        role: "generic",
+        name: suggestionText,
+        frame: disabledCandidate.frame as { x: number; y: number; width: number; height: number },
+        fingerprint: domCandidateFingerprint(disabledCandidate as DomGroundingRawCandidate),
+      }), { ...context, document: disabledPage })).toMatchObject({ status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED" });
+      expect(disabled.clicked).toBe(false);
+    }
+  });
+
   it("ignores non-input type and refuses occluded native click probes without dispatch", () => {
     const button = syntheticElement("button", { attrs: { type: "submit", "aria-label": "Go" } });
     const page = new SyntheticDocument([button]);
@@ -876,6 +943,7 @@ interface SyntheticElementOptions {
   readonly tabIndex?: number;
   readonly disabled?: boolean;
   readonly isContentEditable?: boolean;
+  readonly onclick?: unknown;
   readonly rect?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 }
 
@@ -892,6 +960,7 @@ interface SyntheticEvaluation {
 
 class SyntheticElement {
   public onFocus: (() => void) | undefined;
+  public readonly onclick: unknown;
   public readonly localName: string;
   public readonly children: readonly SyntheticElement[];
   public readonly labels: readonly SyntheticElement[] | undefined;
@@ -915,6 +984,7 @@ class SyntheticElement {
     this.tabIndex = options.tabIndex ?? -1;
     this.disabled = options.disabled === true;
     this.isContentEditable = options.isContentEditable === true;
+    this.onclick = options.onclick;
     this.shadowRoot = undefined;
     this.rect = options.rect ?? { x: 10, y: 10, width: 120, height: 24 };
   }
