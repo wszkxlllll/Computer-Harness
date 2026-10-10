@@ -10,11 +10,10 @@ import {
   type ModelInput,
   type ProviderAdapter,
   type ActionPolicyDecision,
-  type RunOutcome,
-  type Viewport,
   type MonitorPolicyMode,
 } from "@computer-harness/runtime";
-import type { RuntimeEvent, ActionIntent, ActionReceipt, AssetId, AssetRef, ComputerSessionId, ComputerWindowCandidate, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId } from "@computer-harness/protocol";
+import type { RuntimeEvent, ActionIntent, ActionReceipt, AssetId, AssetRef, ComputerSessionId, ComputerWindowCandidate, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId, RunOutcome, Viewport } from "@computer-harness/protocol";
+import { BoundWindowMissingError } from "@computer-harness/protocol";
 import type { WindowTargetInfo, WindowTargetPreview } from "./application-session.js";
 import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
@@ -57,8 +56,10 @@ function fixtureComputer(
   executeAction?: (action: ActionIntent) => Promise<ActionReceipt> | ActionReceipt,
   handoffCandidates: readonly ComputerWindowCandidate[] = [],
   listHandoffCandidates?: (signal: AbortSignal) => Promise<readonly ComputerWindowCandidate[]> | readonly ComputerWindowCandidate[],
+  missingHandoff?: (candidate: ComputerWindowCandidate) => void,
 ): Computer {
   let sequence = 0;
+  let lastAction: ActionIntent | undefined;
   const session: ComputerSession = {
     id: computerSessionId as ComputerSessionId,
     backend: "fixture",
@@ -79,6 +80,7 @@ function fixtureComputer(
       };
     },
     async execute(_session, action) {
+      lastAction = action;
       if (executeAction !== undefined) return executeAction(action);
       if (action.kind === "switch_window" && switchWindowReceiptStatus !== undefined) {
         if (switchWindowReceiptStatus === "completed") {
@@ -98,9 +100,13 @@ function fixtureComputer(
     async listWindowHandoffCandidates(_session, signal) {
       return listHandoffCandidates === undefined ? handoffCandidates : listHandoffCandidates(signal);
     },
-    async handoffWindow(currentSession) { return currentSession; },
+    async detectNewWindowHandoffCandidates() {
+      if (missingHandoff !== undefined && lastAction !== undefined) throw new BoundWindowMissingError(lastAction.actionId);
+      return [];
+    },
+    async handoffWindow(currentSession, candidate) { missingHandoff?.(candidate); return currentSession; },
     async close() { await closeComputer(); },
-  } as unknown as Computer;
+  };
 }
 
 function providerFor(options: {
@@ -159,6 +165,7 @@ function createFixture(
     windowHandoff?: "off" | "confirm-v1";
     windowHandoffCandidates?: readonly ComputerWindowCandidate[];
     listWindowHandoffCandidates?: (signal: AbortSignal) => Promise<readonly ComputerWindowCandidate[]> | readonly ComputerWindowCandidate[];
+    missingHandoff?: (candidate: ComputerWindowCandidate) => void;
   },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
@@ -239,6 +246,7 @@ function createFixture(
           options.executeAction,
           options.windowHandoffCandidates,
           options.listWindowHandoffCandidates,
+          options.missingHandoff,
         );
       },
       ...(options.guardDecisions === undefined ? {} : {
@@ -299,6 +307,60 @@ function deferred<T>() {
 }
 
 describe("ApplicationRemoteRunApi", () => {
+  it("F045 rotates same-pair remote tokens, rejects old tokens and preserves exact source/token through structuredClone", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-remote-f045-"));
+    const root = { pid: 731, windowId: 7311, appName: "Editor", title: "Fixture" };
+    const candidate: ComputerWindowCandidate = { pid: 731, windowId: 7312, appName: "Editor", title: "Output", handoffToken: "issued-epoch-token" };
+    let issuedCandidate = candidate;
+    const selected: ComputerWindowCandidate[] = [];
+    const click: ToolCall = { id: "f045-call" as ToolCallId, name: "click", arguments: { x: 4, y: 4 } };
+    const { api, session, setWindows } = createFixture(directory, {
+      summary: "Done", windowHandoff: "confirm-v1", listWindowHandoffCandidates: () => [issuedCandidate],
+      missingHandoff: value => { selected.push(value); },
+      turnFactory: n => n === 1 ? { type: "tool_calls", calls: [click] } : { type: "finish", summary: "Done" },
+    });
+    setWindows([root]);
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "f045-remote", "Continue after exact host confirmation", { mode: "window", targetToken: initial.candidates[0]!.token });
+      await waitFor(() => api.getRun("device-one", started.runId)?.pendingRequest?.kind === "window_handoff", "missing request not published");
+      const waiting = api.getRun("device-one", started.runId)!;
+      const pending = waiting.pendingRequest;
+      if (pending?.kind !== "window_handoff") throw new Error("wrong request kind");
+      expect(pending.reasonCode).toBe("bound_window_missing");
+      const controller = session.activeRun!.controller;
+      const handoff = vi.spyOn(controller, "handoffWindow");
+      await expect(api.submitCommand("device-one", started.runId, { commandId: "wrong-source", expectedSequence: waiting.sequence, type: "window.confirm", requestId: "old-action", candidateToken: pending.candidates[0]!.token })).rejects.toMatchObject({ code: "STALE_REQUEST" });
+      expect(selected).toEqual([]); expect(handoff).not.toHaveBeenCalled();
+      issuedCandidate = { ...candidate, handoffToken: "refreshed-same-pair-token" };
+      // Deliberately exercise the existing private refresh seam for the SAME
+      // pending sourceActionId. There is no public refresh command to invent;
+      // a new requestID would hide a missing token-sensitive fingerprint.
+      const internal = api as unknown as {
+        runs: Map<string, { windowCandidateRefresh: object }>;
+        refreshWindowCandidates(record: unknown, refresh: unknown): Promise<void>;
+      };
+      const record = internal.runs.get(started.runId)!;
+      await internal.refreshWindowCandidates(record, record.windowCandidateRefresh);
+      const refreshed = api.getRun("device-one", started.runId)!;
+      const refreshedPending = refreshed.pendingRequest;
+      if (refreshedPending?.kind !== "window_handoff") throw new Error("refreshed request missing");
+      expect(refreshedPending.requestId).toBe(pending.requestId);
+      const choice = refreshedPending.candidates[0]!;
+      expect(choice.token).not.toBe(pending.candidates[0]!.token);
+      await expect(api.submitCommand("device-one", started.runId, { commandId: "expired-remote-token", expectedSequence: refreshed.sequence, type: "window.confirm", requestId: pending.requestId, candidateToken: pending.candidates[0]!.token })).rejects.toMatchObject({ code: "STALE_REQUEST" });
+      await expect(api.submitCommand("device-one", started.runId, { commandId: "request-id-bypass", expectedSequence: refreshed.sequence, type: "window.confirm", candidateToken: choice.token } as Parameters<typeof api.submitCommand>[2])).rejects.toBeDefined();
+      expect(selected).toEqual([]); expect(handoff).not.toHaveBeenCalled();
+      const previewToken = choice.previewRequired ? (await api.previewWindowHandoffCandidate("device-one", started.runId, pending.requestId, choice.token)).previewToken : undefined;
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, { commandId: "current-source", expectedSequence: current.sequence, type: "window.confirm", requestId: pending.requestId, candidateToken: choice.token, ...(previewToken === undefined ? {} : { previewToken }) });
+      await session.waitForActiveRun();
+      expect(selected).toEqual([issuedCandidate]); expect(selected[0]).not.toBe(issuedCandidate);
+      expect(handoff).toHaveBeenCalledTimes(1); expect(handoff).toHaveBeenCalledWith(issuedCandidate, pending.requestId);
+    } finally {
+      session.activeRun?.controller.cancel("test cleanup"); await session.waitForActiveRun().catch(() => undefined); await session.close(); await rm(directory, { recursive: true, force: true });
+    }
+  });
   it("requires an exact one-window preview proof before selecting repeated labels manually", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-required-"));
     const first = { pid: 701, windowId: 7011, appName: "Notepad.exe", title: "Untitled - Notepad" };
@@ -2595,7 +2657,7 @@ describe("ApplicationRemoteRunApi", () => {
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (process.platform === "win32" && ["EPERM", "EACCES", "ENOTSUP", "UNKNOWN"].includes(code ?? "")) {
-          skip("Windows junction creation is unavailable for this account or filesystem.");
+          skip();
           return;
         }
         throw error;

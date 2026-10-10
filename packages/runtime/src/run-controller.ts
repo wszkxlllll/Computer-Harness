@@ -32,7 +32,7 @@ import type {
   ToolCallId,
   ToolResult,
 } from "@computer-harness/protocol";
-import { memoryFactRetentionClass, memoryFactScope, sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
+import { BoundWindowMissingError, memoryFactRetentionClass, memoryFactScope, sameMemoryFactContent, validateMemoryMutation } from "@computer-harness/protocol";
 import {
   type AssetStore,
   type RunEventWriter,
@@ -1292,6 +1292,11 @@ export class RunController {
         if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.handoffWindow === undefined) {
           throw new Error("no window handoff is awaiting confirmation");
         }
+        if (this.snapshot.pendingWindowHandoff?.reasonCode === "bound_window_missing" &&
+            (command.expectedRequestId === undefined || command.expectedRequestId !== this.snapshot.pendingWindowHandoff.sourceActionId ||
+             typeof command.candidate.handoffToken !== "string" || command.candidate.handoffToken.length === 0)) {
+          throw new Error("missing-window handoff requires the exact request and fresh candidate token");
+        }
         if (command.expectedRequestId !== undefined && this.snapshot.pendingWindowHandoff?.sourceActionId !== command.expectedRequestId) {
           throw new Error("window handoff request does not match the pending request");
         }
@@ -2438,6 +2443,11 @@ export class RunController {
         surfaced = await this.computer.detectNewWindowHandoffCandidates(context.session, this.abortController.signal);
       } catch (error) {
         this.throwIfAborted();
+        if (error instanceof BoundWindowMissingError && error.sourceActionId === action.actionId) {
+          await beforeWindowHandoff?.();
+          await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "bound_window_missing" });
+          return;
+        }
         const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
         if (code !== "TRANSIENT_SURFACE_UNKNOWN" && code !== "WINDOW_INVENTORY_UNKNOWN") throw error;
         await beforeWindowHandoff?.();

@@ -6,6 +6,7 @@ import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
 import type { ActionId, ActionIntent, ObservationId } from "@computer-harness/protocol";
+import { BoundWindowMissingError } from "@computer-harness/protocol";
 import { CuaDriverComputer as ProductionCuaDriverComputer, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
 import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { captureWindow, captureWindowWithRetry as productionCaptureWindowWithRetry, listWindowInventory, listWindowTargets } from "./window-contract.js";
@@ -24,6 +25,174 @@ const ONE_BY_ONE_PNG = Buffer.from(
 );
 
 installFakeCuaSdkModuleForTests();
+
+describe("F045 strict completed bound-window missing boundary", () => {
+  it("keeps a missing target locked, rotates same-pair tokens and accepts clone only at the current epoch", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-missing-"));
+    const fake = windowDriver();
+    const peer = { pid: fake.target.pid, windowId: 8765, appName: "Editor", title: "Saved output" };
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    const session = await computer.open({}, signal);
+    const id = "f045-before" as ObservationId;
+    const action: ActionIntent = { actionId: "f045-action" as ActionId, basedOn: id, kind: "click", point: { x: 10, y: 20 } };
+    try {
+      await computer.observe(session, id, signal);
+      expect((await computer.execute(session, action, signal, { detectNewWindowHandoff: true })).status).toBe("completed");
+      fake.omitBoundWindow(true); fake.setExtraWindow(peer);
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toMatchObject({ sourceActionId: action.actionId, source: "completed_action_parent_rediscovery" });
+      await expect(computer.observe(session, "forbidden" as ObservationId, signal)).rejects.toBeInstanceOf(BoundWindowMissingError);
+      expect((await computer.execute(session, action, signal)).status).toBe("refused");
+      const old = (await computer.listWindowHandoffCandidates(session, signal))[0]!;
+      const fresh = (await computer.listWindowHandoffCandidates(session, signal))[0]!;
+      expect(old.handoffToken).not.toBe(fresh.handoffToken);
+      const activations = fake.calls.filter(c => c.name === "bring_to_front").length;
+      await expect(computer.handoffWindow(session, structuredClone(old), signal)).rejects.toMatchObject({ code: "WINDOW_HANDOFF_STALE" });
+      const { handoffToken: omittedToken, ...withoutToken } = fresh;
+      await expect(computer.handoffWindow(session, withoutToken, signal)).rejects.toMatchObject({ code: "WINDOW_HANDOFF_STALE" });
+      for (const patch of [{ pid: 9999 }, { windowId: 9999 }, { title: "Different" }, { appName: "Foreign" }]) {
+        await expect(computer.handoffWindow(session, { ...fresh, ...patch }, signal)).rejects.toMatchObject({ code: "WINDOW_HANDOFF_STALE" });
+      }
+      expect(fake.calls.filter(c => c.name === "bring_to_front")).toHaveLength(activations);
+      expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      await computer.handoffWindow(session, structuredClone(fresh), signal);
+      expect(fake.calls.filter(c => c.name === "bring_to_front")).toHaveLength(activations + 1);
+    } finally { await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["failed", "degraded", "refused", "exception", "abort"])("does not upgrade %s action into a completed-missing boundary", async mode => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-noncompleted-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal, session = await computer.open({}, signal);
+    try {
+      await computer.observe(session, "before" as ObservationId, signal);
+      if (mode === "failed") fake.failActionOnCall(1, "synthetic", "WINDOW_TARGET_NOT_FOUND");
+      else if (mode === "degraded") fake.degradeActionOnCall(1);
+      else if (mode === "refused") fake.setForegroundRefusal(true);
+      const original = fake.driver.callTool.bind(fake.driver);
+      if (mode === "exception" || mode === "abort") fake.driver.callTool = async (name, args, opts) => {
+        if (name === "click") throw mode === "abort" ? new DOMException("synthetic", "AbortError") : new Error("synthetic transport");
+        return original(name, args, opts);
+      };
+      const execution = computer.execute(session, { actionId: "not-completed" as ActionId, basedOn: "before" as ObservationId, kind: "click", point: { x: 10, y: 20 } }, signal, { detectNewWindowHandoff: true });
+      if (mode === "exception" || mode === "abort") await execution.catch(() => undefined);
+      else expect((await execution).status).not.toBe("completed");
+      fake.setMissing(true);
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.not.toBeInstanceOf(BoundWindowMissingError);
+    } finally { await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["inventory-abort", "inventory-close", "bring-abort", "capture-abort", "capture-close"])("does not commit a missing handoff across %s", async boundary => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-race-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const controller = new AbortController(), signal = controller.signal;
+    const session = await computer.open({}, signal);
+    let closed = false;
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const paused = new Promise<void>(resolve => { entered = resolve; });
+    try {
+      await computer.observe(session, "race-before" as ObservationId, signal);
+      await computer.execute(session, { actionId: "race-action" as ActionId, basedOn: "race-before" as ObservationId, kind: "click", point: { x: 10, y: 20 } }, signal, { detectNewWindowHandoff: true });
+      fake.omitBoundWindow(true); fake.setExtraWindow({ pid: fake.target.pid, windowId: 8765, appName: "Editor", title: "Output" });
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toBeInstanceOf(BoundWindowMissingError);
+      const candidate = (await computer.listWindowHandoffCandidates(session, signal))[0]!;
+      const originalCall = fake.driver.callTool.bind(fake.driver), originalCapture = fake.driver.verifyState.bind(fake.driver);
+      let armed = true;
+      fake.driver.callTool = async (name, args, opts) => {
+        const result = await originalCall(name, args, opts);
+        if (armed && (boundary.startsWith("inventory") && name === "list_windows" || boundary.startsWith("bring") && name === "bring_to_front")) {
+          armed = false; entered(); await gate;
+        }
+        return result;
+      };
+      fake.driver.verifyState = async (input, opts) => {
+        const result = await originalCapture(input, opts);
+        if (armed && boundary.startsWith("capture")) { armed = false; entered(); await gate; }
+        return result;
+      };
+      const activationBefore = fake.calls.filter(c => c.name === "bring_to_front").length;
+      const handoff = computer.handoffWindow(session, structuredClone(candidate), signal);
+      // Install rejection observation before releasing the intentionally late op.
+      const rejected = expect(handoff).rejects.toBeDefined();
+      await paused;
+      await expect(computer.listWindowHandoffCandidates(session, new AbortController().signal)).rejects.toThrow("confirmation is in flight");
+      if (boundary.endsWith("close")) { await computer.close(session); closed = true; } else controller.abort(new Error("synthetic cancellation"));
+      release(); await rejected;
+      const attempts = fake.calls.filter(c => c.name === "bring_to_front").length - activationBefore;
+      expect(attempts).toBe(boundary.startsWith("inventory") ? 0 : 1);
+      // An already-dispatched activation is not represented as zero side effects.
+      await expect(computer.observe(session, "race-after" as ObservationId, new AbortController().signal)).rejects.toBeDefined();
+    } finally { release?.(); if (!closed) await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("consumes a completed baseline once, rather than authorizing a second diff", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-one-diff-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal, session = await computer.open({}, signal);
+    try {
+      await computer.observe(session, "once" as ObservationId, signal);
+      await computer.execute(session, { actionId: "once" as ActionId, basedOn: "once" as ObservationId, kind: "click", point: { x: 10, y: 20 } }, signal, { detectNewWindowHandoff: true });
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      fake.omitBoundWindow(true);
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+    } finally { await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["off", "background", "preaction-missing", "inventory-transport", "inventory-abort"])("does not route %s into the completed-parent marker", async mode => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-source-boundary-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: mode === "background" ? "background" : "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal, session = await computer.open({}, signal);
+    try {
+      await computer.observe(session, "source-before" as ObservationId, signal);
+      if (mode === "preaction-missing") fake.omitBoundWindow(true);
+      await computer.execute(session, { actionId: "source-action" as ActionId, basedOn: "source-before" as ObservationId, kind: "click", point: { x: 10, y: 20 } }, signal, { detectNewWindowHandoff: mode !== "off" }).catch(error => { expect(error).not.toBeInstanceOf(BoundWindowMissingError); });
+      fake.omitBoundWindow(true);
+      if (mode.startsWith("inventory")) {
+        const original = fake.driver.callTool.bind(fake.driver);
+        fake.driver.callTool = async (name, args, opts) => {
+          if (name === "list_windows") throw mode === "inventory-abort" ? new DOMException("synthetic", "AbortError") : Object.assign(new Error("synthetic"), { tag: "Transport" });
+          return original(name, args, opts);
+        };
+      }
+      try { expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]); }
+      catch (error) { expect(error).not.toBeInstanceOf(BoundWindowMissingError); }
+    } finally { await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("does not authorize an owned-child parent lookup failure as completed-parent rediscovery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-owned-parent-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", windowSwitchAllowedTargets: [fake.target], driverFactory: () => fake.driver });
+    const signal = new AbortController().signal, session = await computer.open({}, signal);
+    try {
+      fake.setExtraWindow({ pid: fake.target.pid, windowId: 8765, appName: "Editor", title: "Child", ownerPid: fake.target.pid, ownerWindowId: fake.target.windowId });
+      fake.omitBoundWindow(true);
+      await expect(computer.handoffWindow(session, { pid: fake.target.pid, windowId: 8765, appName: "Editor", title: "Child" }, signal)).rejects.not.toBeInstanceOf(BoundWindowMissingError);
+    } finally { await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("does not reuse a previous completed action after the current action is refused", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-old-baseline-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "off", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal, session = await computer.open({}, signal);
+    try {
+      await computer.observe(session, "old-before" as ObservationId, signal);
+      const action: ActionIntent = { actionId: "old-completed" as ActionId, basedOn: "old-before" as ObservationId, kind: "click", point: { x: 10, y: 20 } };
+      expect((await computer.execute(session, action, signal, { detectNewWindowHandoff: true })).status).toBe("completed");
+      fake.setForegroundRefusal(true);
+      expect((await computer.execute(session, { ...action, actionId: "current-refused" as ActionId }, signal, { detectNewWindowHandoff: true })).status).not.toBe("completed");
+      fake.omitBoundWindow(true);
+      try { await computer.detectNewWindowHandoffCandidates(session, signal); }
+      catch (error) { expect(error).not.toBeInstanceOf(BoundWindowMissingError); }
+    } finally { await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+});
 
 function result(overrides: Partial<ToolResult> = {}): ToolResult {
   return {
@@ -62,6 +231,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let bounds = { ...initialBounds };
   let image = { ...initialImage };
   let missing = false;
+  let omitBoundWindow = false;
   let groundingState: Record<string, unknown> | undefined;
   let groundingStateSequence: readonly Record<string, unknown>[] | undefined;
   let groundingStateIndex = 0;
@@ -151,7 +321,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         if (extraWindowOnListCall?.call === listWindowsCallCount) extraWindow = extraWindowOnListCall.value;
         const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
         return result({ structuredJson: JSON.stringify({ complete: windowInventoryComplete, windows: unavailable ? [] : [
-          { pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds, z_index: 1, is_on_screen: true },
+          ...(omitBoundWindow ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds, z_index: 1, is_on_screen: true }]),
           ...(extraWindow === undefined ? [] : [{
             pid: extraWindow.pid,
             window_id: extraWindow.windowId,
@@ -274,6 +444,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     calls,
     setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
     setMissing(value: boolean) { missing = value; },
+    omitBoundWindow(value: boolean) { omitBoundWindow = value; },
     setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; groundingStateSequence = undefined; groundingStateIndex = 0; },
     setGroundingStateSequence(values: readonly Record<string, unknown>[]) { groundingStateSequence = values; groundingStateIndex = 0; },
     setGroundingAbort(value: boolean) { abortGrounding = value; },
@@ -3306,7 +3477,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it.each(["hidden", "absent", "visible", "incomplete", "minimized", "parent-missing", "parent-hidden", "replacement", "reused-hwnd", "conflict"])(
+  it.each(["hidden", "absent", "visible", "incomplete", "minimized", "parent-missing", "parent-hidden", "replacement", "reused-hwnd", "conflict", "rediscovery-missing"])(
     "reconciles an active child before post-ESC admission (%s)", async (scenario) => {
       const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-post-escape-"));
       const fake = windowDriver();
@@ -3341,10 +3512,11 @@ describe("CuaDriverComputer", () => {
         const response = await originalCallTool(name, inputJson);
         if (name === "press_key" && JSON.parse(inputJson).key === "ESC") {
           escaped = true;
-          fake.setExtraWindow(scenario === "absent" ? undefined : {
+          fake.setExtraWindow(scenario === "absent" || scenario === "rediscovery-missing" ? undefined : {
             ...menu, isOnScreen: scenario === "visible", minimized: scenario === "minimized",
             ...(scenario === "reused-hwnd" ? { pid: 9999 } : {}),
           });
+          if (scenario === "rediscovery-missing") fake.omitBoundWindow(true);
           if (scenario === "replacement") fake.setSecondExtraWindow({ ...menu, windowId: 8901, zIndex: 3 });
         }
         return response;
@@ -3393,9 +3565,14 @@ describe("CuaDriverComputer", () => {
           expect(replaced.surfaceTransitionReason).toBe("child_push");
           expect(replaced.surfaceRef.surfaceId).not.toBe(child.surfaceRef.surfaceId);
           expect(replaced.surfaceRef.parentSurfaceId).toBe(parent.surfaceRef.surfaceId);
+        } else if (scenario === "rediscovery-missing") {
+          const rejected = computer.detectNewWindowHandoffCandidates(session, signal);
+          await expect(rejected).rejects.toMatchObject({ code: "WINDOW_TARGET_NOT_FOUND" });
+          await expect(rejected).rejects.not.toBeInstanceOf(BoundWindowMissingError);
         } else {
-          await expect(computer.detectNewWindowHandoffCandidates(session, signal))
-            .rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
+          const rejected = computer.detectNewWindowHandoffCandidates(session, signal);
+          await expect(rejected).rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
+          await expect(rejected).rejects.not.toBeInstanceOf(BoundWindowMissingError);
           expect(await computer.listNewWindowHandoffCandidates(session, signal)).toEqual([]);
         }
         expect(fake.calls.filter((call) => call.name === "press_key")).toHaveLength(1);

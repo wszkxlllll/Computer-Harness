@@ -103,7 +103,7 @@ export type RemotePendingRequest =
   | {
       readonly requestId: string;
       readonly kind: "window_handoff";
-      readonly reasonCode: "foreground_mismatch" | "new_window_detected";
+      readonly reasonCode: "foreground_mismatch" | "new_window_detected" | "bound_window_missing";
       readonly candidates: readonly RemoteWindowCandidate[];
       readonly omittedCandidateCount?: number;
     };

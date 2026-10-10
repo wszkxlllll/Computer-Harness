@@ -14,6 +14,7 @@ import {
   type ManagedBrowserTarget,
 } from "@computer-harness/computer-cua";
 import { CuaDriverComputer } from "../../computer-cua/src/cua-driver-computer.js";
+import { installFakeCuaSdkModuleForTests } from "../../computer-cua/src/cua-sdk-test-support.js";
 import { ApplicationSession, type ApplicationSessionConfig } from "./application-session.js";
 import { createComputer } from "./computers.js";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
@@ -22,6 +23,7 @@ const BROWSER_TARGET: CuaWindowTarget = { pid: 7101, windowId: 71011 };
 const NATIVE_TARGET: CuaWindowTarget = { pid: 7202, windowId: 72022 };
 const THIRD_TARGET: CuaWindowTarget = { pid: 7303, windowId: 73033 };
 const WINDOW_BOUNDS = { x: 100, y: 120, width: 100, height: 100 };
+installFakeCuaSdkModuleForTests();
 const ONE_BY_ONE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",

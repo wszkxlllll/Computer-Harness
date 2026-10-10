@@ -1258,7 +1258,8 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       );
       if (!this.isCurrentWindowCandidateRefresh(record, refresh)) return;
       const snapshot = record.handle.controller.getSnapshot();
-      const fingerprint = JSON.stringify(candidates.map(candidateKey).sort());
+      const fingerprint = JSON.stringify(candidates.map(candidate =>
+        [candidateKey(candidate), candidate.handoffToken ?? null]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
       if (fingerprint === record.candidateFingerprint) {
         refresh.settled = true;
         const pending = this.pendingRequest(record, snapshot);

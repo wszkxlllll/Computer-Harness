@@ -942,10 +942,22 @@ export type ComputerWindowCandidateRelationship =
   | { readonly kind: "scoped_peer" };
 
 export interface ComputerWindowCandidate extends ComputerWindowIdentity {
+  /** Adapter-issued refresh token. Required only for bound_window_missing. */
+  readonly handoffToken?: string;
   readonly appName?: string;
   readonly title?: string;
   /** Exact owner relation for popup handoff, or Host allowlist scope for a peer. */
   readonly relationship?: ComputerWindowCandidateRelationship;
+}
+
+/** Only the completed-action parent rediscovery boundary may emit this marker. */
+export class BoundWindowMissingError extends Error {
+  public readonly code = "WINDOW_TARGET_NOT_FOUND";
+  public readonly source = "completed_action_parent_rediscovery";
+  public constructor(public readonly sourceActionId: ActionId) {
+    super("completed bound window requires explicit fresh target confirmation");
+    this.name = "BoundWindowMissingError";
+  }
 }
 
 export type RunStatus =
@@ -1097,7 +1109,7 @@ export type RuntimeEventData =
   | { type: "run.started" }
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
-  | { type: "computer.window.handoff.requested"; sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" }
+  | { type: "computer.window.handoff.requested"; sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" | "bound_window_missing" }
   | { type: "computer.window.handoff.completed"; target: ComputerWindowIdentity; session: ComputerSessionDescriptor }
   | { type: "computer.window.handoff.ignored"; sourceActionId: ActionId }
   | { type: "observation.created"; observation: ObservationFrame }

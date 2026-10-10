@@ -1,5 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
+import { BoundWindowMissingError } from "@computer-harness/protocol";
 import { join } from "node:path";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import type {
@@ -769,12 +770,20 @@ interface PrivateSession {
   visibleWindowBaseline: ReadonlySet<string> | undefined;
   /** Fresh inventory immediately before an opted-in foreground GUI action. */
   preActionWindowBaseline: {
+    readonly actionId: ActionIntent["actionId"];
+    completed: boolean;
     readonly targetKeys: ReadonlySet<string>;
     readonly complete: boolean;
     readonly truncated: boolean;
     readonly parentSurfaceRef: SurfaceRef;
     readonly parentBinding: CuaWindowBinding;
   } | undefined;
+  missingParent?: {
+    readonly sourceActionId: ActionIntent["actionId"];
+    candidates: Map<string, ComputerWindowCandidate>;
+    epoch: number;
+    confirming: boolean;
+  };
   /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
   newlySurfacedWindowKeys: ReadonlySet<string>;
   /** Candidate snapshot produced by the immediately preceding list call. */
@@ -1068,6 +1077,7 @@ export class CuaDriverComputer implements Computer {
   ): Promise<ObservationCapture> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
+    if (current.missingParent !== undefined) throw new BoundWindowMissingError(current.missingParent.sourceActionId);
     if (activeSurfaceUnavailable(current)) {
       throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session"), "observe");
     }
@@ -2042,6 +2052,11 @@ export class CuaDriverComputer implements Computer {
 
   public async listWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
     const current = this.requireSession(session);
+    const missing = current.missingParent;
+    if (missing?.confirming) throw new Error("window handoff confirmation is in flight");
+    const epoch = missing === undefined ? undefined : ++missing.epoch;
+    // Invalidate before I/O, including failed/aborted refreshes.
+    missing?.candidates.clear();
     current.windowRefs.clear();
     if (!this.canUseManualWindowHandoff(current)) {
       throw new Error("window handoff is available only for an explicitly bound native window");
@@ -2071,7 +2086,7 @@ export class CuaDriverComputer implements Computer {
         this.options.windowSwitchAllowedTargets,
         current.platform,
       ));
-    const candidates = projectSelectableWindowCandidates(candidatePool, binding.target, current.platform, undefined, undefined, true).windows
+    const candidates: ComputerWindowCandidate[] = projectSelectableWindowCandidates(candidatePool, binding.target, current.platform, undefined, undefined, true).windows
       .map((window) => {
         const relationship = windowCandidateRelationship(
           window,
@@ -2087,6 +2102,15 @@ export class CuaDriverComputer implements Computer {
         ...(relationship === undefined ? {} : { relationship }),
         };
       });
+    signal.throwIfAborted();
+    if (missing !== undefined) {
+      if (current.missingParent !== missing || missing.epoch !== epoch || missing.confirming) throw new Error("window handoff boundary changed during refresh");
+      return candidates.map((candidate) => {
+        const issued = { ...candidate, handoffToken: randomUUID() };
+        missing.candidates.set(issued.handoffToken, issued);
+        return issued;
+      });
+    }
     const newlySurfacedKeys = new Set(current.newlySurfacedWindowKeys);
     if (current.visibleWindowBaseline !== undefined) {
       for (const window of windows) {
@@ -2161,6 +2185,7 @@ export class CuaDriverComputer implements Computer {
   public async listNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
+    if (current.missingParent !== undefined) return []; // Missing is not proven-new or auto-selectable.
     if (current.proactiveHandoffCandidatesReady) return current.newHandoffCandidates;
     const foregroundWindowId = current.foregroundMismatchWindowId;
     if (foregroundWindowId === undefined) return [];
@@ -2169,6 +2194,8 @@ export class CuaDriverComputer implements Computer {
 
   public async detectNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
     const current = this.requireSession(session);
+    signal.throwIfAborted();
+    if (current.missingParent !== undefined) throw new BoundWindowMissingError(current.missingParent.sourceActionId);
     const confirmingUnknownAction = current.unknownActionReconciliationPending === true;
     delete current.unknownActionReconfirmedSurfaceRef;
     const baseline = current.preActionWindowBaseline;
@@ -2203,7 +2230,19 @@ export class CuaDriverComputer implements Computer {
         windowIdentityKey(ownerTarget) !== windowIdentityKey(baseline.parentBinding.target)) {
       throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the pre-action parent Surface generation or exact binding is no longer active");
     }
-    const freshParentBinding = await discoverWindow(current.driver, current.label, baseline.parentBinding.target, signal);
+    let freshParentBinding: CuaWindowBinding;
+    try {
+      freshParentBinding = await discoverWindow(current.driver, current.label, baseline.parentBinding.target, signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      // No other discover/reconcile/unknown-action path is a recovery permit.
+      if (!(error instanceof WindowContractError) || error.code !== "WINDOW_TARGET_NOT_FOUND" ||
+          !baseline.completed || confirmingUnknownAction || baseline.parentSurfaceRef.parentSurfaceId !== undefined ||
+          !this.canUseManualWindowHandoff(current)) throw error;
+      current.missingParent = { sourceActionId: baseline.actionId, candidates: new Map(), epoch: 0, confirming: false };
+      this.clearTargetObservationState(current, baseline.parentSurfaceRef);
+      throw new BoundWindowMissingError(baseline.actionId);
+    }
     if (!sameWindowGeometry(freshParentBinding.bounds, baseline.parentBinding.bounds)) {
       const advanced = advanceSurfaceGeneration(current.surfaceRegistry, baseline.parentSurfaceRef);
       if (advanced.decision === "applied") {
@@ -2457,6 +2496,32 @@ export class CuaDriverComputer implements Computer {
       throw new Error("window handoff is available only for an explicitly bound native window");
     }
     validateWindowTarget(candidate);
+    const missing = current.missingParent;
+    if (missing !== undefined) {
+      const issued = candidate.handoffToken === undefined ? undefined : missing.candidates.get(candidate.handoffToken);
+      if (missing.confirming || issued === undefined || issued.pid !== candidate.pid || issued.windowId !== candidate.windowId ||
+          issued.title !== candidate.title || issued.appName !== candidate.appName ||
+          !targetAllowedByHostScope(candidate, this.options.windowSwitchAllowedTargets)) {
+        throw new WindowContractError("WINDOW_HANDOFF_STALE", "missing-window candidate requires its current refresh token and exact host scope");
+      }
+      // Explicit Host confirmation grants only this exact selected peer, not
+      // the undefined broad inventory scope or an old-parent child bypass.
+      missing.confirming = true; // Serialize refresh/confirm before the first await or side effect.
+      try {
+      const result = await this.transitionWindow(current, candidate, signal, {
+        onScreenOnly: true, staleCode: "WINDOW_HANDOFF_STALE", authorizedTargets: [{ pid: candidate.pid, windowId: candidate.windowId }],
+        missingPermit: { boundary: missing, epoch: missing.epoch, issued },
+        ...(issued.appName === undefined ? {} : { expectedAppName: issued.appName }),
+        ...(issued.title === undefined ? {} : { expectedTitle: issued.title }),
+      });
+      signal.throwIfAborted();
+      if (current.missingParent !== missing || missing.candidates.get(candidate.handoffToken!) !== issued) {
+        throw new WindowContractError("WINDOW_HANDOFF_STALE", "missing-window confirmation expired during transition");
+      }
+      delete current.missingParent;
+      return result;
+      } finally { missing.confirming = false; }
+    }
     if (binding.target.pid === candidate.pid && binding.target.windowId === candidate.windowId) {
       throw new Error("window handoff target must differ from the current window");
     }
@@ -2516,6 +2581,7 @@ export class CuaDriverComputer implements Computer {
       readonly classifyOwnedChild?: boolean;
       readonly authorizedTargets?: readonly CuaWindowTarget[];
       readonly selectedSurfaceRef?: SurfaceRef;
+      readonly missingPermit?: { readonly boundary: NonNullable<PrivateSession["missingParent"]>; readonly epoch: number; readonly issued: ComputerWindowCandidate };
     },
   ): Promise<ComputerSessionDescriptor> {
     validateWindowTarget(target);
@@ -2523,6 +2589,20 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError("WINDOW_SWITCH_UNAUTHORIZED", "selected window is outside the host-authorized window scope");
     }
     const activeRefBefore = current.surfaceRegistry.activeSurface;
+    const assertTransitionCurrent = (): void => {
+      const permit = options.missingPermit;
+      if (permit === undefined) return; // Do not narrow historical non-missing recovery paths.
+      signal.throwIfAborted();
+      if (this.session !== current || !current.active || activeRefBefore === undefined ||
+          !sameSurfaceRef(activeRefBefore, current.surfaceRegistry.activeSurface) ||
+          !isExecutableSurfaceRef(current.surfaceRegistry, activeRefBefore)) {
+        throw new WindowContractError(options.staleCode, "target transition session or Surface is no longer current");
+      }
+      if (current.missingParent !== permit.boundary || !permit.boundary.confirming ||
+          permit.boundary.epoch !== permit.epoch || permit.boundary.candidates.get(permit.issued.handoffToken!) !== permit.issued) {
+        throw new WindowContractError(options.staleCode, "missing-window confirmation is no longer current");
+      }
+    };
     const activeBefore = activeSurface(current);
     if (activeBefore?.parentSurfaceId !== undefined &&
         (activeBefore.kind === "overlay" || activeBefore.kind === "native_window")) {
@@ -2538,6 +2618,7 @@ export class CuaDriverComputer implements Computer {
     const windows = transitionInventory?.windows ?? await listWindowTargets(
       current.driver, current.label, signal, undefined, options.onScreenOnly, this.options.windowRelationshipProbe,
     );
+    assertTransitionCurrent();
     const fresh = windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
     if (fresh === undefined && selectedIsCurrent) {
       if (activeRefBefore !== undefined) {
@@ -2601,6 +2682,7 @@ export class CuaDriverComputer implements Computer {
     }
     current.windowRefs.clear();
 
+    assertTransitionCurrent();
     let targetSurfaceRef = options.selectedSurfaceRef;
     if (targetSurfaceRef === undefined && confirmedChildEvidence === undefined) {
       const registered = registerNativePeer(current.surfaceRegistry, asNativeWindowIdentity(target));
@@ -2616,7 +2698,7 @@ export class CuaDriverComputer implements Computer {
 
     let activationAttempted = false;
     if (this.options.windowDeliveryMode === "foreground") {
-      signal.throwIfAborted();
+      assertTransitionCurrent();
       activationAttempted = true;
       try {
         await bringWindowToFrontOnce(current.driver, current.label, target, signal);
@@ -2629,8 +2711,9 @@ export class CuaDriverComputer implements Computer {
 
     let capture: Awaited<ReturnType<typeof captureWindowWithRetry>>;
     try {
+      assertTransitionCurrent();
       capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, current.platform));
-      signal.throwIfAborted();
+      assertTransitionCurrent();
     } catch (error) {
       if (activationAttempted) {
         if (targetSurfaceRef === undefined) this.invalidateUnknownTargetTransition(current, activeRefBefore, undefined);
@@ -2799,6 +2882,7 @@ export class CuaDriverComputer implements Computer {
     options?: ComputerExecuteOptions,
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
+    if (current.missingParent !== undefined) return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "missing bound window awaits explicit handoff; no input was sent");
     current.foregroundMismatchWindowId = undefined;
     current.preActionWindowBaseline = undefined;
     current.proactiveHandoffCandidatesReady = false;
@@ -3243,6 +3327,8 @@ export class CuaDriverComputer implements Computer {
           return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "bound target was missing from visible-window inventory; no input was sent");
         }
         current.preActionWindowBaseline = {
+          actionId: action.actionId,
+          completed: false,
           targetKeys: visibleKeys,
           complete: visibleInventory.complete,
           truncated: visibleInventory.truncated === true,
@@ -3261,6 +3347,7 @@ export class CuaDriverComputer implements Computer {
       // Preserve normal Surface/window preflight, then fail closed in the
       // Windows UIA route before any input primitive is dispatched.
       const receipt = await this.executeMultilineType(current, session, action, decisionObservation, actionWindowBinding, signal);
+      if (receipt.status === "completed" && current.preActionWindowBaseline?.actionId === action.actionId) current.preActionWindowBaseline.completed = true;
       if (receipt.status === "completed" && alternativePrimitiveForUnknownAction !== undefined &&
           current.unknownActionReplayGuard !== undefined && decisionObservation !== undefined &&
           sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
@@ -3340,6 +3427,7 @@ export class CuaDriverComputer implements Computer {
       const diagnostic = currentWindowBinding !== undefined && ["click", "scroll", "drag"].includes(action.kind)
         ? `cua-window-pixels source=${decisionObservation?.captureSource ?? "unknown"} viewport=${decisionObservation?.viewport.width}x${decisionObservation?.viewport.height} bounds=${currentWindowBinding.bounds.width}x${currentWindowBinding.bounds.height} target=${currentWindowBinding.target.pid}/${currentWindowBinding.target.windowId} delivery=${this.options.windowDeliveryMode ?? "background"} point=${JSON.stringify(Object.fromEntries(Object.entries(request.arguments).filter(([key]) => ["x", "y", "from_x", "from_y", "to_x", "to_y"].includes(key))))}`
         : undefined;
+      if (current.preActionWindowBaseline?.actionId === action.actionId) current.preActionWindowBaseline.completed = true;
       return { actionId: action.actionId, status: "completed", ...((result.text || diagnostic) ? { message: [result.text, diagnostic].filter(Boolean).join("; ") } : {}) };
     } catch (error) {
       const details = driverErrorDetails(error);

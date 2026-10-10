@@ -49,7 +49,7 @@ export interface RunSnapshot {
   pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
   pendingUserInputRequestId?: EventId;
-  pendingWindowHandoff?: { sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" };
+  pendingWindowHandoff?: { sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" | "bound_window_missing" };
   unresolvedActionId?: ActionId;
   /** Internal reducer binding used to validate kind-specific terminal receipt data. */
   unresolvedActionKind?: ActionIntent["kind"];
@@ -1418,7 +1418,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("computer.open.completed"),
     session: computerSessionSchema,
   }),
-  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.requested"), sourceActionId: nonEmptyString, reasonCode: z.enum(["foreground_mismatch", "new_window_detected"]) }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.requested"), sourceActionId: nonEmptyString, reasonCode: z.enum(["foreground_mismatch", "new_window_detected", "bound_window_missing"]) }),
   z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.completed"), target: computerWindowIdentitySchema, session: computerSessionSchema }),
   z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.ignored"), sourceActionId: nonEmptyString }),
   z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),

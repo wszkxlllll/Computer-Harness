@@ -150,7 +150,7 @@ export async function runApplicationTui(
   let currentSnapshot: RunSnapshot = initialRunSnapshot(HOME_RUN_ID);
   let currentEvents: RuntimeEvent[] = [];
   let lastSequence = -1;
-  let activeHandoffReasonCode: "foreground_mismatch" | "new_window_detected" | undefined;
+  let activeHandoffReasonCode: "foreground_mismatch" | "new_window_detected" | "bound_window_missing" | undefined;
   let feedState: TuiFeedState = "live";
   let detailPage = 0;
   let inputLimitReached = false;
@@ -479,7 +479,10 @@ export async function runApplicationTui(
   };
 
   const applyWindowHandoff = async (handle: RunHandle, candidate: WindowTargetInfo): Promise<void> => {
-    await handle.controller.handoffWindow(candidate);
+    const request = handle.controller.getSnapshot().pendingWindowHandoff;
+    if (request === undefined) throw new Error("no window handoff is awaiting confirmation");
+    if (request.reasonCode === "bound_window_missing") await handle.controller.handoffWindow(candidate, request.sourceActionId);
+    else await handle.controller.handoffWindow(candidate);
     if (currentHandle !== handle) return;
     selectedWindowTarget = { pid: candidate.pid, windowId: candidate.windowId };
     activeHandoffReasonCode = undefined;
@@ -534,6 +537,8 @@ export async function runApplicationTui(
     activeHandoffReasonCode = handoffReason;
     windowMatchReason = handoffReason === "new_window_detected"
       ? "A new visible window appeared after the completed action. Review candidates; Jev suggestions always require Enter confirmation."
+      : handoffReason === "bound_window_missing"
+      ? "The completed action's bound window is missing. Explicitly select a fresh authorized target or abort; no action will be replayed."
       : "Run is paused after an exact foreground refusal; no input was sent. Recheck the next target.";
     mode = "handoff";
     render();
@@ -578,7 +583,7 @@ export async function runApplicationTui(
           } else if (index >= 0) {
             windowCursor = index;
             const candidate = windowTargets[index]!;
-            if (handoffReason === "new_window_detected") {
+            if (handoffReason === "new_window_detected" || handoffReason === "bound_window_missing") {
               windowMatchReason = "Jev suggests the highlighted candidate; press Enter to confirm manually.";
             } else if (candidate.pid !== activeMetadata.cuaWindowTarget?.pid) {
               windowMatchReason = "Automatic handoff is limited to newly surfaced windows in the bound process. Choose manually or abort.";
@@ -1710,6 +1715,8 @@ export function buildTuiFrame(
     ...(handoffWaiting
       ? [snapshot.pendingWindowHandoff?.reasonCode === "new_window_detected"
         ? "NEW WINDOW: H chooses a target; C keeps the current target after a fresh observation; A aborts."
+        : snapshot.pendingWindowHandoff?.reasonCode === "bound_window_missing"
+        ? "BOUND WINDOW MISSING: H explicitly chooses a fresh target; A aborts. The completed action is not replayed."
         : "FOREGROUND MISMATCH: H chooses a target; A aborts. The refused action is not retried."]
       : []),
     `Steps: ${snapshot.stepCount}   Model requests: ${snapshot.modelRequestCount}   Guard: ${snapshot.guardEvaluationCount}   Risk model: ${snapshot.riskModelRequestCount}`,
@@ -2257,7 +2264,7 @@ function buildTuiHandoffFrame(
   reason: string,
   columns?: number,
   rows?: number,
-  handoffReasonCode?: "foreground_mismatch" | "new_window_detected",
+  handoffReasonCode?: "foreground_mismatch" | "new_window_detected" | "bound_window_missing",
 ): string {
   const width = tuiWidth(columns);
   const height = Math.max(12, rows ?? process.stdout.rows ?? 24);
@@ -2265,6 +2272,8 @@ function buildTuiHandoffFrame(
     "Harness | WINDOW HANDOFF",
     handoffReasonCode === "new_window_detected"
       ? "A GUI action completed and a new visible window appeared."
+      : handoffReasonCode === "bound_window_missing"
+      ? "A GUI action completed; its bound window is missing. Explicit confirmation or abort is required."
       : "Action refused: no mouse input was sent to the other window.",
     `Previous: ${formatCuaTarget(metadata)}`,
     `Status: ${error || reason}`,
@@ -2350,6 +2359,8 @@ function managedBrowserFeatureLine(metadata: TuiMetadata): string {
 function formatEvent(event: RuntimeEvent, width: number): string {
   if (event.type === "computer.window.handoff.requested") return event.reasonCode === "new_window_detected"
     ? "window.handoff: new visible window; manual confirmation required"
+    : event.reasonCode === "bound_window_missing"
+    ? "window.handoff: completed bound window missing; explicit confirmation required"
     : "window.handoff: foreground mismatch; host confirmation required";
   if (event.type === "computer.window.handoff.completed") return clip(`window.handoff: pid=${event.target.pid} id=${event.target.windowId}`, width);
   if (event.type === "computer.window.handoff.ignored") return "window.handoff: popup ignored; current target freshly observed";

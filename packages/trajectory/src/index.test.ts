@@ -107,6 +107,16 @@ function runningEvents(): RuntimeEvent[] {
   ];
 }
 
+describe("F045 bound missing durable schema and replay", () => {
+  it("encodes/decodes/replays the request and rejects an ignore escape", () => {
+    const request = eventAt(6, { type: "computer.window.handoff.requested", sourceActionId: actionId, reasonCode: "bound_window_missing" });
+    const decoded = runtimeEventSchema.parse(JSON.parse(JSON.stringify(request))) as RuntimeEvent;
+    const waiting = reduceRuntimeEvents([...runningEvents(), decoded], runId);
+    expect(waiting.pendingWindowHandoff).toEqual({ sourceActionId: actionId, reasonCode: "bound_window_missing" });
+    expect(() => reduceRunEvent(waiting, eventAt(7, { type: "computer.window.handoff.ignored", sourceActionId: actionId }))).toThrow(/matching proactive/u);
+  });
+});
+
 describe("switch_window session receipt contract", () => {
   const switchedSession: ComputerSessionDescriptor = {
     ...session,

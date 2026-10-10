@@ -15,6 +15,7 @@ import type { ResolvedRunConfig, RunDependencies, RunHandle } from "./config.js"
 export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId" | "assistantPreferences">;
 
 export interface WindowTargetInfo {
+  readonly handoffToken?: string;
   readonly pid: number;
   readonly windowId: number;
   readonly appName?: string;

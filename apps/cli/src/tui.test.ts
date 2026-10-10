@@ -1076,6 +1076,37 @@ describe("TUI renderer", () => {
     }
   });
 
+  it("F045 missing target cannot ignore and forwards the current action ID and opaque token", async () => {
+    const target = { pid: 1234, windowId: 8765, appName: "Editor", title: "Output", handoffToken: "current-epoch" };
+    const fixture = makePendingCorrectionFixture(async () => undefined, undefined, { kind: "cua", socketPath: "fixture.sock", screenshotDir: "runs/tui-f045/screenshots" });
+    const handoffWindow = vi.fn(async () => {
+      const { pendingWindowHandoff: _pending, ...rest } = fixture.controller.getSnapshot();
+      fixture.setSnapshot({ ...rest, status: "running" });
+    });
+    const ignore = vi.fn(async () => undefined);
+    const select = vi.fn(async () => ({ kind: "abstain" as const, reason: "uncertain" as const }));
+    Object.assign(fixture.controller, { listWindowHandoffCandidates: async () => [target], listNewWindowHandoffCandidates: async () => [], handoffWindow, ignoreNewWindowAndContinueOnCurrentTarget: ignore });
+    const tui = runApplicationTui(fixture.session, { provider: "glm", computer: "cua", output: "runs/tui-f045", profile: "live-interactive", riskGuard: "layered", cuaWindowTarget: { pid: 1234, windowId: 5678 }, cuaWindowDeliveryMode: "foreground" }, { terminal: { input: fixture.input, output: fixture.output }, windowSelector: { select } });
+    try {
+      fixture.input.emit("keypress", "Save this file", {}); fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => fixture.session.status === "running");
+      fixture.setSnapshot({ ...fixture.controller.getSnapshot(), status: "waiting_window", pendingWindowHandoff: { sourceActionId: "completed-save" as ActionId, reasonCode: "bound_window_missing" } });
+      fixture.eventFeed.publish({ eventId: "missing-request" as EventId, runId: fixture.runId, sequence: 0, occurredAt: "2026-10-08T00:00:00.000Z", type: "computer.window.handoff.requested", sourceActionId: "completed-save" as ActionId, reasonCode: "bound_window_missing" });
+      await waitForTui(() => fixture.outputText.join("").includes("No newly surfaced window matches the CUA-reported foreground HWND"));
+      expect(select).not.toHaveBeenCalled(); expect(handoffWindow).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "c" });
+      await waitForTui(() => fixture.outputText.join("").includes("only for a proactive new-window notice"));
+      expect(ignore).not.toHaveBeenCalled(); expect(handoffWindow).not.toHaveBeenCalled();
+      fixture.input.emit("keypress", "", { name: "return" });
+      await waitForTui(() => handoffWindow.mock.calls.length === 1);
+      expect(handoffWindow).toHaveBeenCalledWith(target, "completed-save");
+    } finally {
+      if (fixture.session.status === "running") fixture.session.abort("test cleanup");
+      await waitForTui(() => fixture.session.status === "idle");
+      fixture.input.emit("keypress", "", { name: "escape" }); fixture.input.emit("keypress", "", { name: "q" }); await tui;
+    }
+  });
+
   it("keeps handoff manual when Jev abstains, then uses the selected exact candidate", async () => {
     const oldTarget = { pid: 1234, windowId: 5678, appName: "Editor", title: "Document" };
     const dialog = { pid: 1234, windowId: 8765, appName: "Editor", title: "Save As" };
