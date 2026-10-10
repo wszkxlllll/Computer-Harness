@@ -28,6 +28,10 @@
 | 当前构建/进程/客户端 | 原Host89224已退出，4317当前无监听；原stock socket已无owner，恢复Luna正常重启原签名stock0.22.2 daemon4254，status/list-tools可达。历史Host17ec145闭包SHA `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`/Web index-BxSWOU01.js不作当前运行版。最近CLI使用1cec2ea3已typecheck dist（含117c9cc受管浏览器flag/工具合同），Run已终态；Runtime/CUA/Context实际新标记已核；不能将磁盘构建更新冒称保留Host已热切版 |
 | S1构建闭包 | 476个apps/packages dist文件，含Web4资产；`baseline/runtime-build-manifest.json` SHA-256 `310b5de388dc1f81a930a45b2029ae9f25b671787db16bc8ea4aba4671a41855` |
 
+## 当前后续批次 A02
+
+独立cap main60/risk6/total66；正式revision1预占60/4/64，实际main26/risk0/total26、sequence26。A01原120/0冻结，合计新增实际146/0；已知135个usage响应合计prompt2277075/completion40975/total2318050tokens，11请求usage未知、金额未知。当前全部Run终态、无在途paid。完整T1仍未完成，正在隔离修复PR23合法审批证据兼容，随后真实controller与T3继续。当前远端/PR26 HEAD `010388c`五项CI全绿（run38077084697）。
+
 ## 本轮事件
 
 | 时间 | 版本 / 阶段 / 入口 | 事实与结果 | 调用 / 介入 / 下一步 |
@@ -134,3 +138,20 @@
 - `1cec2ea3`远端原SHA与PR26一致，当前五项CI全绿（run38075969909）；9a449的Windows共享TUI超时作为历史失败保留。
 
 A02计数修复冻结`8952537f1de96b4c6b8b13b69b536841187cd487`：只有stateAndAnchor cap等值改每项≤默认硬上限，validCounts仍要求非负safe integer/total=main+risk，identity/hash/anchor/audit及原A01回归不变。作者和Sol各独立15/15通过。修复后同A02 root正常Run `run-1791657750228-282eae92-1e1`，原完整卡40/40、PID5705、TTY61934；实际guard加载8952537同内容（提交前加载），产品1cec2ea3不变；Sol直接监控session10310即时挂上。首配置导航仅正常审批当前蓝色购买按钮，无人工业务分步补发。
+
+A02首有效Run `run-1791657750228-282eae92-1e1` 终态cancelled/CLI exit0：13 requests、11steps、4审批、usage prompt270842/completion3968/total274810。Sol在第二次Mini配置→overview→同配置/旧Buy UIA提案形成无新产品或已证字段进展的闭环时，直接核own PID5705/uid/argv后SIGINT，pending动作未批准；`business-loop-cancel.json`保seq87/98/111/116/130/133。A02实际main13/risk0（cap60/6/66、预占40/2/42不变），无在途；A01仍120/0，合计133/0。已知122响应合计2021018tokens，11请求usage未知，金额未知。停止同版paid，离线用真实轨迹核上下文/导航/完成证据约束；T1尚未通过，不能用completed派发替代业务进展。
+
+下一单变量为正常CLI公开`--planning`（tasks-v1），不是新增prompt或单题解析。私有`A02-private/planning-proof/verify-tasks-v1-projection.mjs`使用完整T1卡、生产FilePlanStore/DefaultContextCompiler/GlmAdapter.prepare，作者及Sol独立0Provider/0GUI验证：phase持久到后续输入，task_create/update/list/get可见；最终remaining1仍有原goal/plan、仅terminate与未完成failure约束。phase明确synthetic、非模型成果；pending plan的DefaultRuntimePolicy.canFinish仍allowed，planning本身不构成完成证明。正式扩预占至60/4/64 revision1，actual13与cap60/6/66保留。首次reason超160字符按合同拒绝无更改，缩短后正常API成功。
+
+`run-1791658406322-7e2a3f10-282`已同完整T1卡开启planning对照，40steps/requests、low/180s、hybrid/ephemeral不变，实际计数沿A02继续；Luna唯一执行、PID6777/TTY7756，Sol直接monitor36600即时挂上。持久正常启动命令`A02-private/launch-planning-t1.py`已Sol核完整batch-host wrapper/绝对root/reservation/--entry cli --/真实FD0 TTY，后续复用；此前漏wrapper首Usage零Run/零HTTP保留。首Mini公开配置导航正常审批仅核当时新截图，未补业务步骤。
+
+Planning正式对照 `run-1791658406322-7e2a3f10-282`终态cancelled：13requests/10GUI steps/9审批，13个HTTP200 usage合计prompt293824/completion3208/total297032tokens。工具表真实暴露task_create/update/list/get，但task_*调用与planning.task.updated均0，不能称模型建立了phase。Mini 16GB“已含”有独立PNG证据；完整三产品仍未完成。第二次49B Air URL type提案在首次n后重复，审批PNG74695cab/aaa0f983逐字节同SHA `be27a35e647a126be7d9ee0adc3a6c3699f9f0a7fa7eaac70e0b8114e4d12e46`、地址栏未验证焦点；Sol直接核ownPID6777/uid/argv后SIGINT，不等转达，pending动作未批准，无unknown side effects。A02累计26/0，停止同版/同因付费，转PR23/controller/T3。
+
+导航加载候选：Sol实际view首次DOM购买点击后的模型图f4523649，仍旧landing且Chrome显示spinner/停止X；当时旧Buy catalog与图相符，后续审批fresh图才到配置页。该事实支持后续观察暴露navigation pending或有界settle的候选，不证明当前catalog几何/上下文丢失，本轮不为此加新门槛或分散改产品。
+
+
+## PR23 审批证据兼容闭环（2026-10-11）
+
+隔离评测器冻结 `cb6aacfcd256cad84f6389d4933967984888f1c6`，仅 evaluator 与其测试两文件；独立 Sol 全量157/157、diffcheck通过。正常审批保留 decision basedOn、以新审核截图执行的链现在可核验；关联审批是独立不变量，唯一 request/call/action、proposal 全字段、批准顺序、新鲜 observation 均必须精确匹配，改成 wait/fresh basedOn/另一 actionId 不绕过。表驱动覆盖拒绝/待审/错ID/复用/乱序/过期及坐标、keys、raw text/sanitized length变体；合法click/type用合成人工审核成功正例。
+
+真实A01末Run重消费后5个误报 observation mismatch 消除，仍 `inconclusive/success=false`、五维null且 `human_review_missing`；独立业务缺iMac/Air配置/未证存储结论仍保留，未编造真人评分或T1成功。按原SHA非force同步专用分支，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27) base为PR23的 `member-c/evaluator-20261005`；PR26说明已关联。未修改队友原分支，未混入产品分支。A02仍26/0、A01+A02合计146/0，无新Provider调用；下一自主项为正常Host/controller控制与T3来源查询。

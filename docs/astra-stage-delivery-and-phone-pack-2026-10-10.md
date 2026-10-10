@@ -1,6 +1,6 @@
 # 当前阶段交付与集中补验包
 
-2026-10-11 当前续接：用户已正常解锁，任务继续执行；当前产品冻结1cec2ea3、计数8952537、原生最小补丁0ccc9ee。A01最终main120/risk0，109个已知usage响应1746208 tokens，另11请求usage未知，金额未知；原A01上限与历史不变。末Run自报success，但iMac未访问/Air配置未知，完整T1独检未完成；PR23真实导入inconclusive/success=false、五维null，无真人评分。A02独立cap60/6/66、首预占40/2/42正在同完整三产品卡执行，不能拆单品拼成功。完整T2仍无指定成果，候选CuaDriverCaptureFix.app仍需正常屏幕录制/辅助功能授权。产品1cec2ea3当前五项CI全绿；9a449e20的Windows共享TUI超时保留历史，不将旧CI冒新head。细节以[账本](./astra-autonomous-execution-ledger-2026-10-10.md)为准。
+2026-10-11 当前续接：用户已正常解锁，任务继续执行。产品1cec2ea3、计数8952537、原生补丁0ccc9ee；产品分支当前010388c五项CI全绿。A01已冻结120/0；A02独立cap60/6/66、revision1预占60/4/64，实际26/0，合计146次。已知135响应2318050 tokens，另11请求usage未知，金额未知。两次A02完整T1对照均cancelled；planning工具可见但模型未调用，三产品仍未完成，停止同因付费重复并继续controller/T3。完整T2仍无指定成果，候选CuaDriverCaptureFix.app待正常屏幕录制/辅助功能授权。隔离PR23审批证据修复cb6aacf独检157/157，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27)已交付；真实A01重评仍inconclusive/false、无真人评分，缺iMac和配置的独立业务失败保留。细节及后续服务/Run状态以[账本](./astra-autonomous-execution-ledger-2026-10-10.md)为准。
 
 以下1866/72、main3及锁屏结论属于10月10日历史交付稳定点，不能作为当前进程、调用或阻塞状态。
 
@@ -20,7 +20,7 @@
 
 构建入口：`pnpm run typecheck`、`pnpm test`、`pnpm --filter @computer-harness/web build`。正常Host启动参数保持`--env-file <本地私有env>`、`--socket <实际stock socket>`、`--model glm-5.3-flash`、`--output <本轮私有Run目录>`、`--port 4317 --origin http://localhost:4317`。实际Host管理地址为`http://localhost:4317/connect`。端口/Origin必须严格一致；不要把localhost配对URL当手机可达URL。
 
-自主付费入口继续同一`scripts/autonomous/batch-host.mjs`与A01-private计数；batchId为A01、reservationId为T2-baseline，actual main94不可重新初始化。当前revision3已沿正式API增量至main120/risk4/total124；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。GLM timeout 180000ms与low均是有记录的每Run调优，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
+自主付费入口继续同一`scripts/autonomous/batch-host.mjs`。A01-private最终120/0已冻结，不能重新初始化或再派发；当前使用独立A02-private，cap60/6/66、revision1预占60/4/64，actual26/0。完整mainenv与overlay分开加载、绝对batch root和真实TTY命令已持久保存，后续只替换任务/目标/必要参数；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。GLM timeout 180000ms与low均是有记录的每Run调优，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
 
 完整本地任务卡在忽略目录`runs/astra-autonomous-20261010-sol-luna/task-cards/`，T1/T2/T3均各baseline、independent-repeat、variant。T2正文196B/UTF-8/LF/finalLF，三卡唯一新路径；文件存在则重新准备唯一卡，不能覆盖。T3已冻结路线/日期/2成人二等座/三结果与客户端预算降低节点，未开放票价须写未知，不能捏造携程结果。关闭重开由Harness完成，人工重绑只列补证。
 

@@ -155,3 +155,8 @@ T095原始trajectory位于既有私有临时root，直接读取75事件并查看
 
 
 2026-10-11 A01最后完整T1独检：`run-1791657013535-e2460d0f-9f1`运行层succeeded及模型success与业务完成分开。真实轨迹明确iMac未访问、Air配置未知、Mini 256GB来自推断，故完整卡未通过。正常审批只核当前动作/截图、不教模型分步任务；PR23隔离评测器消费实际初末证据后inconclusive/success=false、五维null/human_review_missing及5个action_observation_mismatch，未伪造评分。A01最终120/0，A02独立60/6/66有界续接，首入口0HTTP身份拒绝已精确定位guard对较小cap错误等值约束；正在最小修复，原上限/历史不变。
+
+
+## 2026-10-11 PR23 精确审批链独立复核
+
+Sol只读审查Luna在隔离PR23工作区的两个文件，并独立运行157/157测试及diffcheck。发现并修复的边界包括：execution字段与proposal不同、已批准action/call被后续请求复用，以及把execution改成wait或fresh basedOn绕过原陈旧观察条件。最终关联审批检查独立于普通wait/current规则，完整合成review的click/type成功正例与字段变体拒绝均通过。冻结 `cb6aacf`，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27)，不升级PR26业务成果。真实A01评测仍inconclusive/false；独立T1缺iMac和配置证据结论不由human_review_missing替代。

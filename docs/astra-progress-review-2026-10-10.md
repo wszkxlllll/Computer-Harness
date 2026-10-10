@@ -4,7 +4,7 @@
 
 核对日期：2026-10-10，Asia/Shanghai。核对范围：三线统一计划、验收台账、修复/测试/远端审查三个聊天的最近记录、当前整合工作树及 T095 实际成果。本文保留历史起点与当前状态。2026-10-10 用户决定本项目仅负责 macOS 电脑端、Web/Relay 与手机客户端，该决定覆盖原平台目标；Windows/Linux历史事件、源码及CI保留，但不再属于当前责任、待办、阻塞或完成条件。
 
-2026-10-11 当前续接覆盖下方历史起点：用户已解锁，Windows/Linux已移出责任；PR26已交付并持续更新，当前产品1cec2ea3、计数修复8952537、原生补丁0ccc9ee。A01最终main120/risk0，原批上限保留；A02独立60/6/66、首Run预占40/2/42，完整T2仍未通过；新候选app需正常OS屏幕录制/辅助功能授权，正常managed-browser T1独立继续。A01最后Run模型自报success但iMac未访问/Air配置未知，完整T1独检未通过；PR23真实导入success=false且无真人评分。产品零Provider已取得真实DOM，完整查询/跨应用/控制/双窗与三轮复验仍为可自主任务，不以旧锁屏结论收口。当前head CI以PR实时状态为准，详细事实见[自主账本](./astra-autonomous-execution-ledger-2026-10-10.md)。
+2026-10-11 当前续接覆盖下方历史起点：用户已解锁，Windows/Linux已移出责任。产品1cec2ea3、计数8952537、原生补丁0ccc9ee；当前产品分支010388c五项CI全绿。A01冻结120/0；A02独立cap60/6/66、预占60/4/64，实际26/0，合计146次。A01末Run自报success但缺iMac/配置，A02正常与planning对照均无完整三产品成果并已cancelled，停止同因重复；真实controller与T3继续。新候选app待正常OS屏幕录制/辅助功能授权，完整T2保存重开仍缺。隔离PR23审批证据兼容cb6aacf经Sol157/157，依赖draft PR27已交付；真实重评仍success=false且无真人评分，业务缺项单列。详细事实见[自主账本](./astra-autonomous-execution-ledger-2026-10-10.md)。
 
 ## 1. 结论与目标
 
