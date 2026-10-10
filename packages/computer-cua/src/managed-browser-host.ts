@@ -1706,7 +1706,7 @@ export function buildManagedDomClickExpression(input: {
     walk(document);
     const role = normalize(target.role, 64);
     const name = normalize(target.name, 160);
-    const roleMatches = candidates.filter((candidate) => candidate.role === role && candidate.name === name);
+    const roleMatches = candidates.filter((candidate) => candidate.role === role && normalize(candidate.name, 160) === name);
     const matches = roleMatches.filter((candidate) => candidate.fingerprint === target.fingerprint && sameFrame(candidate.frame, target.frame));
     if (matches.length === 0) {
       if (roleMatches.some((candidate) => sameFrame(candidate.frame, target.frame))) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE", message: "DOM candidate fingerprint changed" };

@@ -182,6 +182,29 @@ describe("managed browser host pilot", () => {
     expect(replacement.clicked).toBe(false);
   });
 
+  it("normalizes live accessible names symmetrically and keeps click validation fail-closed", () => {
+    const fullWidthName = "M6 芯片 速度迅疾如飞，性能表现更上一层楼，处理日常个人事务、专业工作和进行各类创作，都得心应手。 12 核中央处理器、12 核图形处理器、双 16 核神经网络引擎 RMB 6999 起 或 RMB 292/月 (24 期) 起";
+    const normalizedName = fullWidthName.normalize("NFKC");
+    const first = syntheticElement("input", { attrs: { type: "radio", "aria-label": fullWidthName } });
+    const page = new SyntheticDocument([first]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const binding = { role: "radio", name: fullWidthName, frame: candidate.frame as { x: number; y: number; width: number; height: number }, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate), validateOnly: true };
+
+    expect(candidate.name).toBe(fullWidthName);
+    expect(normalizedName).not.toBe(fullWidthName);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(first.clicked).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, name: "M6, Other, Price" }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, frame: { ...binding.frame, x: binding.frame.x + 5 } }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+
+    const duplicate = syntheticElement("input", { attrs: { type: "radio", "aria-label": fullWidthName } });
+    const ambiguousPage = new SyntheticDocument([first, duplicate]);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: ambiguousPage })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_AMBIGUOUS" });
+    expect(first.clicked).toBe(false);
+    expect(duplicate.clicked).toBe(false);
+  });
+
   it("ignores non-input type and refuses occluded native click probes without dispatch", () => {
     const button = syntheticElement("button", { attrs: { type: "submit", "aria-label": "Go" } });
     const page = new SyntheticDocument([button]);
