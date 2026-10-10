@@ -1002,10 +1002,27 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall("manual-popup-click"), typeCall("manual-popup-stale-type")] },
       { type: "finish", summary: "continued after manual recovery" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1", batching: "same-control-input-v1" });
+    let resolveInputRequested!: () => void;
+    const inputRequested = new Promise<void>((resolve) => { resolveInputRequested = resolve; });
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      batching: "same-control-input-v1",
+      onEventCommitted: (event) => {
+        if (event.type === "user.input.requested") resolveInputRequested();
+      },
+    });
     const running = controller.start("complete the popup interaction");
     try {
-      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          inputRequested,
+          running.then(() => { throw new Error("run finished before the user-input request was committed"); }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("user-input request was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
       expect(controller.getSnapshot().status, JSON.stringify({ calls: computer.calls, events: controller.getEvents() })).toBe("waiting_user");
       expect(controller.getSnapshot().pendingUserQuestion).toBe("当前弹窗状态暂时无法确认，请在电脑上确认或关闭弹窗后继续。");
       expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
@@ -1122,11 +1139,27 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall("handoff-refused")] },
       { type: "finish", summary: "continued after re-observation" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    let resolveForegroundHandoff!: () => void;
+    const foregroundHandoff = new Promise<void>((resolve) => { resolveForegroundHandoff = resolve; });
+    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      onEventCommitted: (event) => {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "foreground_mismatch") resolveForegroundHandoff();
+      },
+    });
     let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
     try {
       run = controller.start("save in new dialog");
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window");
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          foregroundHandoff,
+          run.then(() => { throw new Error("run finished before the foreground-mismatch handoff was committed"); }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("foreground-mismatch handoff was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
       await expect(controller.ignoreNewWindowAndContinueOnCurrentTarget()).rejects.toThrow(/only a proactively detected window may be ignored/u);
       expect(controller.getSnapshot().pendingWindowHandoff).toMatchObject({ reasonCode: "foreground_mismatch" });
       expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(1);
