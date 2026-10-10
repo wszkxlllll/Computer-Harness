@@ -35,6 +35,9 @@ function canonical(value) { return JSON.stringify(value); }
 function sha(value) { return createHash("sha256").update(value).digest("hex"); }
 function stateDigest(state) { const copy = { ...state }; delete copy.stateHash; return sha(canonical(copy)); }
 function pathSet(root) { return { state: resolve(root, "counter.json"), anchor: resolve(root, "counter.anchor.json"), lock: resolve(root, "counter.lock"), audit: resolve(root, "audit.jsonl") }; }
+function initialChainHash({ batchId, reservationId, limits, reservation }) {
+  return sha(canonical({ schema, batchId, reservationId, limits, reservation, actual: { total: 0, main: 0, risk: 0 }, sequence: 0 }));
+}
 
 export function classifyGlmRequest(url, init) {
   if (typeof url !== "string" || url !== GLM_ENDPOINT) fail("FETCH_ENDPOINT_REFUSED");
@@ -89,9 +92,58 @@ function stateAndAnchor(paths, rootIdentity, batchId, reservationId) {
   const counts = validCounts(state.actual);
   if (!Number.isSafeInteger(state.sequence) || state.sequence < 0 || typeof state.chainHash !== "string" || !/^[a-f0-9]{64}$/u.test(state.chainHash) ||
       state.stateHash !== stateDigest(state) || !plain(anchor) || anchor.schema !== schema || anchor.batchId !== batchId || anchor.sequence !== state.sequence || anchor.chainHash !== state.chainHash || anchor.stateHash !== state.stateHash ||
+      (state.reservationRevision !== undefined && (!Number.isSafeInteger(state.reservationRevision) || state.reservationRevision < 0)) ||
+      (state.reservationChainHash !== undefined && (typeof state.reservationChainHash !== "string" || !/^[a-f0-9]{64}$/u.test(state.reservationChainHash))) ||
       state.sequence !== counts.total || counts.total > limits.total || counts.main > limits.main || counts.risk > limits.risk || counts.total > reservation.total ||
       counts.main > reservation.main || counts.risk > reservation.risk) fail("COUNTER_ROLLBACK_OR_LIMIT");
   return { state, counts };
+}
+
+function verifyAudit(paths, rootIdentity, state) {
+  const lines = stableRead(paths.audit, rootIdentity).split("\n").filter(Boolean);
+  const records = lines.map((line) => {
+    try { return ownData(JSON.parse(line), "COUNTER_AUDIT_REFUSED"); } catch { fail("COUNTER_AUDIT_REFUSED"); }
+  });
+  const firstExtension = records.find((record) => record.kind === "reservation_extended");
+  const initialReservation = firstExtension === undefined ? validCounts(state.reservation) : validCounts(firstExtension.oldReservation);
+  let reservation = initialReservation;
+  let reservationRevision = 0;
+  let reservationChainHash = initialChainHash({ batchId: state.batchId, reservationId: state.reservationId, limits: state.limits, reservation: initialReservation });
+  let actual = { total: 0, main: 0, risk: 0 };
+  let sequence = 0;
+  let chainHash = reservationChainHash;
+  for (const record of records) {
+    if (record.batchId !== state.batchId) fail("COUNTER_AUDIT_REFUSED");
+    if (record.kind === "reservation_extended") {
+      const oldReservation = validCounts(record.oldReservation), newReservation = validCounts(record.newReservation);
+      if (record.revision !== reservationRevision + 1 || canonical(oldReservation) !== canonical(reservation) ||
+          newReservation.total < oldReservation.total || newReservation.main < oldReservation.main || newReservation.risk < oldReservation.risk ||
+          newReservation.total === oldReservation.total && newReservation.main === oldReservation.main && newReservation.risk === oldReservation.risk ||
+          newReservation.total > state.limits.total || newReservation.main > state.limits.main || newReservation.risk > state.limits.risk ||
+          typeof record.reason !== "string" || typeof record.at !== "string") fail("COUNTER_AUDIT_REFUSED");
+      const event = { kind: "reservation_extended", revision: record.revision, oldReservation, newReservation, reason: record.reason, at: record.at };
+      reservationChainHash = sha(reservationChainHash + canonical(event));
+      if (record.reservationChainHash !== reservationChainHash) fail("COUNTER_AUDIT_REFUSED");
+      reservation = newReservation;
+      reservationRevision += 1;
+      continue;
+    }
+    const channel = record.channel;
+    const next = { ...actual };
+    if (channel !== "main" && channel !== "risk") fail("COUNTER_AUDIT_REFUSED");
+    next.total += 1;
+    next[channel] += 1;
+    const event = { sequence: sequence + 1, channel, actual: next, at: record.at };
+    chainHash = sha(chainHash + canonical(event));
+    if (record.sequence !== event.sequence || canonical(validCounts(record.actual)) !== canonical(next) || record.chainHash !== chainHash ||
+        next.total > reservation.total || next.main > reservation.main || next.risk > reservation.risk) fail("COUNTER_AUDIT_REFUSED");
+    actual = next;
+    sequence += 1;
+  }
+  if (sequence !== state.sequence || canonical(actual) !== canonical(state.actual) || chainHash !== state.chainHash ||
+      reservationRevision !== (state.reservationRevision ?? 0) || canonical(reservation) !== canonical(state.reservation) ||
+      (state.reservationChainHash !== undefined && state.reservationChainHash !== reservationChainHash)) fail("COUNTER_AUDIT_REFUSED");
+  return { reservationRevision, reservationChainHash };
 }
 
 export function initializeBatch(root, { batchId, reservationId, limits = DEFAULT_BATCH_LIMITS, reservation = DEFAULT_RUN_RESERVATION } = {}) {
@@ -116,6 +168,47 @@ export function initializeBatch(root, { batchId, reservationId, limits = DEFAULT
     fs.closeSync(auditFd); fs.fsyncSync(dirFd);
   } finally { fs.closeSync(dirFd); }
   return { root: resolvedRoot, identity };
+}
+
+/** Extend one existing durable reservation without resetting its actual count or Run identity. */
+export function extendBatchReservation(root, { batchId, reservationId, reservation, reason } = {}) {
+  if (typeof batchId !== "string" || typeof reservationId !== "string" || !plain(reservation) ||
+      typeof reason !== "string" || reason.trim().length === 0 || reason.length > 160 || /[\u0000-\u001f\u007f]/u.test(reason)) fail("RESERVATION_EXTENSION_REFUSED");
+  const resolvedRoot = resolve(root), paths = pathSet(resolvedRoot), identity = checkRoot(resolvedRoot);
+  let lockFd;
+  try { lockFd = fs.openSync(paths.lock, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600); }
+  catch { fail("COUNTER_LOCK_BUSY_OR_STALE"); }
+  let dirFd;
+  try {
+    checkRoot(resolvedRoot);
+    dirFd = fs.openSync(resolvedRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    const { state, counts } = stateAndAnchor(paths, identity, batchId, reservationId);
+    const verified = verifyAudit(paths, identity, state);
+    const oldReservation = validCounts(state.reservation), nextReservation = validCounts(reservation);
+    if (nextReservation.total < oldReservation.total || nextReservation.main < oldReservation.main || nextReservation.risk < oldReservation.risk ||
+        nextReservation.total === oldReservation.total && nextReservation.main === oldReservation.main && nextReservation.risk === oldReservation.risk ||
+        nextReservation.total > state.limits.total || nextReservation.main > state.limits.main || nextReservation.risk > state.limits.risk ||
+        nextReservation.total < counts.total || nextReservation.main < counts.main || nextReservation.risk < counts.risk) fail("RESERVATION_EXTENSION_REFUSED");
+    const revision = verified.reservationRevision + 1;
+    const at = new Date().toISOString();
+    const event = { kind: "reservation_extended", revision, oldReservation, newReservation: nextReservation, reason: reason.trim(), at };
+    const reservationChainHash = sha(verified.reservationChainHash + canonical(event));
+    const updated = { ...state, reservation: nextReservation, reservationRevision: revision, reservationChainHash };
+    updated.stateHash = stateDigest(updated);
+    writeAtomic(paths.state, canonical(updated) + "\n", dirFd);
+    // stateHash already binds the extension revision and hash-chain fields.
+    // Keep the anchor shape unchanged so an already-running older guard can
+    // append the next fetch event without invalidating this reservation.
+    writeAtomic(paths.anchor, canonical({ schema, batchId, sequence: state.sequence, chainHash: state.chainHash, stateHash: updated.stateHash }) + "\n", dirFd);
+    const auditFd = fs.openSync(paths.audit, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW);
+    try { fs.writeFileSync(auditFd, canonical({ batchId, ...event, reservationChainHash }) + "\n"); fs.fsyncSync(auditFd); } finally { fs.closeSync(auditFd); }
+    fs.fsyncSync(dirFd);
+    return { reservation: nextReservation, actual: counts, sequence: state.sequence, reservationRevision: revision };
+  } finally {
+    if (dirFd !== undefined) fs.closeSync(dirFd);
+    fs.closeSync(lockFd);
+    fs.unlinkSync(paths.lock);
+  }
 }
 
 export function createDurableFetchGuard({ root, batchId, reservationId, delegate }) {

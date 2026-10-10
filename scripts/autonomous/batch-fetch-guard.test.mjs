@@ -7,6 +7,7 @@ import {
   createDurableFetchGuard,
   DEFAULT_BATCH_LIMITS,
   DEFAULT_RUN_RESERVATION,
+  extendBatchReservation,
   GLM_ENDPOINT,
   initializeBatch,
   installGuard,
@@ -59,6 +60,78 @@ test("a new Host guard after restart resumes the same durable monotonic count", 
   await afterRestart.fetch(GLM_ENDPOINT, request());
   await assert.rejects(afterRestart.fetch(GLM_ENDPOINT, request()), /FETCH_BUDGET_EXHAUSTED/);
   assert.equal(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual.total, 2);
+});
+
+test("extends the same reservation cumulatively and hash-audits the change without changing actual or sequence", async (t) => {
+  const f = await fixture(t);
+  await f.guard.fetch(GLM_ENDPOINT, request());
+  await f.guard.fetch(GLM_ENDPOINT, request(["risk_classification"]));
+  const before = JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8"));
+  const result = extendBatchReservation(f.root, {
+    batchId: "A01",
+    reservationId: "T2-baseline",
+    reservation: { total: 84, main: 80, risk: 4 },
+    reason: "Continue the same A01 validation batch",
+  });
+  const after = JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8"));
+  const audit = fs.readFileSync(join(f.root, "audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const extension = audit.at(-1);
+  assert.deepEqual(result, { reservation: { total: 84, main: 80, risk: 4 }, actual: { total: 2, main: 1, risk: 1 }, sequence: 2, reservationRevision: 1 });
+  assert.equal(after.reservationId, before.reservationId);
+  assert.deepEqual(after.actual, before.actual);
+  assert.equal(after.sequence, before.sequence);
+  assert.deepEqual(after.reservation, { total: 84, main: 80, risk: 4 });
+  assert.equal(after.reservationRevision, 1);
+  assert.match(after.reservationChainHash, /^[a-f0-9]{64}$/u);
+  assert.equal(extension.kind, "reservation_extended");
+  assert.deepEqual(extension.oldReservation, DEFAULT_RUN_RESERVATION);
+  assert.deepEqual(extension.newReservation, { total: 84, main: 80, risk: 4 });
+  assert.equal(extension.reason, "Continue the same A01 validation batch");
+  assert.equal(extension.reservationChainHash, after.reservationChainHash);
+  const anchorPath = join(f.root, "counter.anchor.json");
+  const priorAnchor = JSON.parse(fs.readFileSync(anchorPath, "utf8"));
+  fs.writeFileSync(anchorPath, JSON.stringify({ schema: priorAnchor.schema, batchId: priorAnchor.batchId, sequence: priorAnchor.sequence, chainHash: priorAnchor.chainHash, stateHash: priorAnchor.stateHash }) + "\n", { mode: 0o600 });
+  const resumed = createDurableFetchGuard({ root: f.root, batchId: "A01", reservationId: "T2-baseline", delegate: async () => ({ ok: true }) });
+  await resumed.fetch(GLM_ENDPOINT, request());
+  const afterOldAnchorShape = JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8"));
+  assert.equal(afterOldAnchorShape.sequence, 3);
+  assert.equal(afterOldAnchorShape.reservationRevision, 1);
+  extendBatchReservation(f.root, {
+    batchId: "A01",
+    reservationId: "T2-baseline",
+    reservation: { total: 90, main: 86, risk: 4 },
+    reason: "Continue same cumulative batch after old Host write",
+  });
+});
+
+test("rejects reservation identity, decrement, no-op, and global-limit changes without altering counter state", async (t) => {
+  const f = await fixture(t);
+  await f.guard.fetch(GLM_ENDPOINT, request());
+  const common = { batchId: "A01", reservationId: "T2-baseline", reason: "bounded test extension" };
+  assert.throws(() => extendBatchReservation(f.root, { ...common, reservationId: "other-run", reservation: { total: 84, main: 80, risk: 4 } }), /COUNTER_IDENTITY_REFUSED/);
+  extendBatchReservation(f.root, { ...common, reservation: { total: 84, main: 80, risk: 4 } });
+  const before = fs.readFileSync(join(f.root, "counter.json"), "utf8");
+  assert.throws(() => extendBatchReservation(f.root, { ...common, reservation: { total: 42, main: 40, risk: 2 } }), /RESERVATION_EXTENSION_REFUSED/);
+  assert.throws(() => extendBatchReservation(f.root, { ...common, reservation: { total: 133, main: 121, risk: 12 } }), /RESERVATION_EXTENSION_REFUSED/);
+  assert.throws(() => extendBatchReservation(f.root, { ...common, reservation: { total: 84, main: 80, risk: 4 } }), /RESERVATION_EXTENSION_REFUSED/);
+  assert.equal(fs.readFileSync(join(f.root, "counter.json"), "utf8"), before);
+});
+
+test("refuses reservation extension when the exclusive lock is held or the audit chain was changed", async (t) => {
+  const f = await fixture(t);
+  const common = { batchId: "A01", reservationId: "T2-baseline", reservation: { total: 84, main: 80, risk: 4 }, reason: "bounded test extension" };
+  fs.writeFileSync(join(f.root, "counter.lock"), "busy", { mode: 0o600, flag: "wx" });
+  assert.throws(() => extendBatchReservation(f.root, common), /COUNTER_LOCK_BUSY_OR_STALE/);
+  fs.unlinkSync(join(f.root, "counter.lock"));
+  await f.guard.fetch(GLM_ENDPOINT, request());
+  extendBatchReservation(f.root, common);
+  const auditPath = join(f.root, "audit.jsonl");
+  const lines = fs.readFileSync(auditPath, "utf8").trim().split("\n");
+  const last = JSON.parse(lines.at(-1));
+  last.reason = "tampered after extension";
+  lines[lines.length - 1] = JSON.stringify(last);
+  fs.writeFileSync(auditPath, `${lines.join("\n")}\n`, { mode: 0o600 });
+  assert.throws(() => extendBatchReservation(f.root, { ...common, reservation: { total: 90, main: 86, risk: 4 } }), /COUNTER_AUDIT_REFUSED/);
 });
 
 test("parallel callers serialize through the exclusive lock and cannot exceed the reservation", async (t) => {
