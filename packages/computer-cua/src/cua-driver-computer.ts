@@ -1024,6 +1024,7 @@ export class CuaDriverComputer implements Computer {
       const descriptor: ComputerSessionDescriptor = {
         id: label as ComputerSessionDescriptor["id"],
         backend: "cua-driver-daemon",
+        ...(platform === undefined ? {} : { platform }),
         viewport,
         // The explicit window route uses the driver's targeted delivery for
         // the verified input primitives below. It never falls back to the

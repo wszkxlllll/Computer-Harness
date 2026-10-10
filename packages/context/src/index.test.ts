@@ -645,6 +645,7 @@ describe("DefaultContextCompiler", () => {
     expect(batch.system).toContain("relatedTaskIds");
     expect(batch.system).toContain("same-turn writes alongside GUI");
     expect(batch.system).toContain("state writes");
+    expect(batch.system).not.toContain("OS=");
     expect(batch.system).toContain("click→type");
     expect(batch.system).toContain("hotkey with exact keys [CTRL, A]");
     expect(batch.system).toContain("click_element and CMD/Meta+A are not supported in batches");
@@ -653,6 +654,41 @@ describe("DefaultContextCompiler", () => {
     expect(batch.system).toContain("Call it immediately before the first GUI click");
     expect(batch.system).toContain("Do not create one for a simple one-click screen or every click");
     expect(batch.system).toContain("never use it for type/keypress/scroll/drag/wait");
+    const macBatch = await compiler.compile({
+      runId,
+      goal: "replace text on macOS",
+      recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }],
+      computerSession: {
+        id: sessionId,
+        backend: "cua-driver-daemon",
+        platform: "darwin",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: "2026-08-30T00:00:00.000Z",
+      },
+      features: { planning: "off", memory: "off", batching: "same-control-input-v1" },
+    }, new AbortController().signal);
+    expect(macBatch.system).toContain("OS=macOS");
+    expect(macBatch.system).toContain("hotkey with exact keys [CMD, A] (or [META, A]");
+    expect(macBatch.system).toContain("CTRL+A are not supported in batches");
+    expect(macBatch.system).not.toContain("hotkey with exact keys [CTRL, A]");
+    const linuxBatch = await compiler.compile({
+      runId,
+      goal: "replace text on Linux",
+      recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }],
+      computerSession: {
+        id: sessionId,
+        backend: "cua-driver-daemon",
+        platform: "linux",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: "2026-08-30T00:00:00.000Z",
+      },
+      features: { planning: "off", memory: "off", batching: "same-control-input-v1" },
+    }, new AbortController().signal);
+    expect(linuxBatch.system).toContain("OS=Linux");
+    expect(linuxBatch.system).toContain("hotkey with exact keys [CTRL, A]");
+    expect(linuxBatch.system).toContain("CMD/Meta+A are not supported in batches");
     const planningOnly = await compiler.compile({ runId, goal: "planning only", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "off", batching: "same-control-input-v1" } }, new AbortController().signal);
     expect(planningOnly.system).toContain("same ModelTurn as the first GUI action");
     expect(planningOnly.system).toContain("do not copy the original Goal");

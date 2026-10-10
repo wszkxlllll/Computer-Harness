@@ -96,7 +96,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     });
     const allowedTools = finishOnly ? baseTools.filter((tool) => tool.category === "control" && tool.name === "terminate") : baseTools;
     const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(allowedTools) : allowedTools;
-    const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
+    const systemPrompt = composeSystemPrompt(this.systemPrompt, features, input.computerSession?.platform);
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
       ? formatExecutionSegment(input.executionSegment)

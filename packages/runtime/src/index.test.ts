@@ -88,16 +88,19 @@ class TestIds implements IdFactory {
 
 class FakeComputer implements Computer {
   public readonly calls: string[] = [];
-  public readonly session: ComputerSession = {
-    id: sessionId,
-    backend: "fake",
-    viewport,
-    capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
-    openedAt: "2026-08-28T00:00:00.000Z",
-  };
+  public readonly session: ComputerSession;
   private observationCount = 0;
 
-  public constructor(private readonly stableScreenshots = false) {}
+  public constructor(private readonly stableScreenshots = false, platform?: ComputerSession["platform"]) {
+    this.session = {
+      id: sessionId,
+      backend: "fake",
+      ...(platform === undefined ? {} : { platform }),
+      viewport,
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-08-28T00:00:00.000Z",
+    };
+  }
 
   public async open(_options: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSession> {
     signal.throwIfAborted();
@@ -571,6 +574,10 @@ function clickCall(callId: string): ToolCall {
     name: "click",
     arguments: { x: 40, y: 50 },
   };
+}
+
+function selectAllCall(callId: string, keys: string[]): ToolCall {
+  return { id: callId as ToolCallId, name: "hotkey", arguments: { keys } };
 }
 
 class PreparedScriptedProvider implements ProviderAdapter {
@@ -1510,6 +1517,27 @@ describe("RunController S2-2 happy path", () => {
     expect(started[0].executionObservationId).toBe(started[0].action.basedOn);
     expect(started[1].executionObservationId).not.toBe(started[1].action.basedOn);
     expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it.each([
+    { platform: "darwin" as const, keys: ["CMD", "A"], allowed: true },
+    { platform: "darwin" as const, keys: ["META", "A"], allowed: true },
+    { platform: "darwin" as const, keys: ["CTRL", "A"], allowed: false },
+    { platform: "win32" as const, keys: ["CTRL", "A"], allowed: true },
+    { platform: "linux" as const, keys: ["CTRL", "A"], allowed: true },
+    { platform: undefined, keys: ["CTRL", "A"], allowed: true },
+    { platform: undefined, keys: ["CMD", "A"], allowed: false },
+  ])("matches the select-all batch chord only for the reported platform: $platform / $keys", async ({ platform, keys, allowed }) => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("platform-click"), selectAllCall("platform-select-all", keys), typeCall("platform-type", "new value")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const computer = new FakeComputer(false, platform);
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { batching: "same-control-input-v1" });
+    await expect(controller.start("replace text in the active field")).resolves.toBe("succeeded");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(allowed ? 3 : 0);
+    expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected").length).toBe(allowed ? 0 : 3);
     await rm(directory, { recursive: true, force: true });
   });
 

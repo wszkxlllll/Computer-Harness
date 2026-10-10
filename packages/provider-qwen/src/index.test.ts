@@ -118,6 +118,25 @@ describe("Qwen3.8-Flash provider adapter", () => {
     await expect(adapter.generatePrepared(prepared, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 319.6, y: 299.5 } }] });
   });
 
+  it("preserves the platform-specific hotkey tool contract on the Qwen wire", async () => {
+    const client = new Client(response("hotkey", { keys: ["CMD", "A"] }));
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
+    const modelInput = input();
+    const registeredHotkey = createDefaultComputerTools().modelTools().find((tool) => tool.name === "hotkey");
+    if (registeredHotkey === undefined) throw new Error("shared hotkey tool is missing");
+    modelInput.system = "Verified active computer platform: OS=macOS. For select-all use CMD+A.";
+    modelInput.tools = modelInput.tools.map((tool) => tool.name === "hotkey" ? registeredHotkey : tool);
+    await expect(adapter.generate(modelInput, { signal: new AbortController().signal })).resolves.toMatchObject({
+      type: "tool_calls",
+      calls: [{ name: "hotkey", arguments: { keys: ["CMD", "A"] } }],
+    });
+    const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
+    const hotkey = tools.find((tool) => tool.function.name === "hotkey");
+    expect(hotkey?.function.description).toContain("CMD");
+    expect(hotkey?.function.parameters).toMatchObject({ required: ["keys"], properties: { keys: { type: "array" } }, additionalProperties: false });
+    expect(client.body?.messages).toBeDefined();
+  });
+
   it("keeps the stable strict prefix separate from dynamic history, images, catalog, and payload identity", async () => {
     const captureStrict = async (value: ModelInput, bytes = new Uint8Array([7, 8])) => {
       const client = new Client(strictFinishResponse());

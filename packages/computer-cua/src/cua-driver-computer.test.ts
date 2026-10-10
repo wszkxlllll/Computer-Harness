@@ -573,6 +573,38 @@ describe("CuaDriverComputer", () => {
     expect(resolveCapturePlatform(undefined, undefined, "darwin")).toBe("darwin");
   });
 
+  it("projects only a platform reported by the version-matched driver health report", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-platform-projection-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new ProductionCuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      expect(session.platform).toBe("darwin");
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+
+    const unknownDirectory = await mkdtemp(join(tmpdir(), "computer-harness-cua-unknown-platform-"));
+    const unknown = windowDriver();
+    unknown.setPlatform("unknown");
+    const unknownComputer = new ProductionCuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: unknownDirectory, windowTarget: unknown.target,
+      windowDeliveryMode: "foreground", driverFactory: () => unknown.driver,
+    });
+    try {
+      const session = await unknownComputer.open({}, new AbortController().signal);
+      expect(session).not.toHaveProperty("platform");
+      await unknownComputer.close(session);
+    } finally {
+      await rm(unknownDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("activates the exact HWND once before fresh capture and never reactivates before an action", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-activation-"));
     const fake = windowDriver();

@@ -926,6 +926,8 @@ export interface ComputerCapabilities {
 export interface ComputerSessionDescriptor {
   readonly id: ComputerSessionId;
   readonly backend: string;
+  /** Optional OS platform reported by a trusted computer driver. Omit when unknown. */
+  readonly platform?: "win32" | "darwin" | "linux";
   readonly viewport: Readonly<Viewport>;
   readonly capabilities: Readonly<ComputerCapabilities>;
   readonly openedAt: string;

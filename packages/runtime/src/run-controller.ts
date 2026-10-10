@@ -1853,7 +1853,8 @@ export class RunController {
       && calls.length !== 1
       ? "switch_window must be the only ToolCall in its ModelTurn"
       : undefined;
-    const batchAllowed = this.batching !== "off" && computerEntries > 1 && orderRejection === undefined && isSameControlInputBatch(calls, preflight);
+    const batchAllowed = this.batching !== "off" && computerEntries > 1 && orderRejection === undefined &&
+      isSameControlInputBatch(calls, preflight, this.snapshot.computerSession?.platform);
     const hasApproval = preflight.some(
       (entry) => entry.rejection === undefined && entry.decision?.decision === "require_approval",
     );
@@ -3722,7 +3723,11 @@ function isExplicitStopInput(text: string): boolean {
     || /^(?:stop|cancel|abort)(?:task)?(?:[.!?]|$)/iu.test(normalized);
 }
 
-function isSameControlInputBatch(calls: readonly ToolCall[], entries: readonly PreflightEntry[]): boolean {
+function isSameControlInputBatch(
+  calls: readonly ToolCall[],
+  entries: readonly PreflightEntry[],
+  platform?: import("@computer-harness/protocol").ComputerSessionDescriptor["platform"],
+): boolean {
   if (entries.length !== calls.length) return false;
   const firstComputer = entries.findIndex((entry) => entry.definition?.category === "computer");
   if (firstComputer < 0) return false;
@@ -3735,8 +3740,12 @@ function isSameControlInputBatch(calls: readonly ToolCall[], entries: readonly P
   const isSelectAll = (call: ToolCall): boolean => {
     if (call.name !== "hotkey" || typeof call.arguments !== "object" || call.arguments === null || Array.isArray(call.arguments)) return false;
     const keys = (call.arguments as { keys?: unknown }).keys;
-    return Array.isArray(keys) && keys.length === 2 && keys.every((key) => typeof key === "string") &&
-      new Set(keys.map((key) => key.toUpperCase())).has("CTRL") && new Set(keys.map((key) => key.toUpperCase())).has("A");
+    if (!Array.isArray(keys) || keys.length !== 2 || !keys.every((key) => typeof key === "string")) return false;
+    const normalized = new Set(keys.map((key) => key.toUpperCase()));
+    const modifierMatches = platform === "darwin"
+      ? normalized.has("CMD") || normalized.has("META")
+      : normalized.has("CTRL");
+    return normalized.size === 2 && modifierMatches && normalized.has("A");
   };
   if (names.length === 2) {
     return (isClick(names[0] ?? "") && isType(names[1] ?? "")) ||
