@@ -6285,6 +6285,103 @@ describe("CuaDriverComputer", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it("uses exact macOS native focus proof only for the bound partial catalog without exposing a catalog row", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-focus-attestation-"));
+    const fake = windowDriver({ x: 100, y: 120, width: 960, height: 680 }, { width: 958, height: 678 });
+    fake.setPlatform("darwin");
+    const proof = {
+      version: "macos-focused-element-v1",
+      snapshot_id: "s12345678",
+      pid: fake.target.pid,
+      window_id: fake.target.windowId,
+      frontmost_pid: fake.target.pid,
+      focused_window_id: fake.target.windowId,
+      coordinate_space: "macos-screen-points",
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+      focused_element: {
+        role: "AXTextField",
+        name: "Address and search bar",
+        frame: { x: 200, y: 130, width: 500, height: 30 },
+        enabled: true,
+        editable: true,
+        focused: true,
+        ancestry_verified: true,
+      },
+    };
+    const setState = (focusProof: unknown = proof) => fake.setGroundingState({
+      pid: fake.target.pid,
+      window_id: fake.target.windowId,
+      snapshot_id: "s12345678",
+      elements_complete: false,
+      elements: [{ role: "AXWebArea", name: "Page", frame: { x: 100, y: 200, width: 960, height: 600 }, enabled: true }],
+      ...(focusProof === undefined ? {} : { focus_proof: focusProof }),
+    });
+    setState();
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const transport = createMockDomGroundingTransport({ complete: true, tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: [] });
+    const computer = new ProductionCuaDriverComputer({ socketPath: "test", screenshotDir: directory, platform: "darwin", windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "macos-focus-proof" as ObservationId;
+      const observation = await computer.observe(session, basedOn, signal);
+      expect(observation.grounding?.completeness).toBe("partial");
+      expect(observation.grounding?.elements.some((element) => element.name === "Address and search bar")).toBe(false);
+      expect(await computer.execute(session, { kind: "keypress", actionId: "mac-location" as ActionId, basedOn, keys: ["CMD", "L"] }, signal)).toMatchObject({ status: "completed" });
+      expect(await computer.execute(session, { kind: "type", actionId: "mac-location-type" as ActionId, basedOn, text: "https://example.test/" }, signal)).toMatchObject({ status: "completed" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      expect(await computer.execute(session, { kind: "type", actionId: "mac-location-one-shot" as ActionId, basedOn, text: "second write" }, signal)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+      expect(await computer.execute(session, { kind: "keypress", actionId: "mac-location-again" as ActionId, basedOn, keys: ["CMD", "L"] }, signal)).toMatchObject({ status: "completed" });
+      setState({ ...proof, focused_element: { ...proof.focused_element, name: "Find in page", frame: { x: 300, y: 150, width: 350, height: 30 } } });
+      expect(await computer.execute(session, { kind: "type", actionId: "mac-location-live-change" as ActionId, basedOn, text: "must not send" }, signal)).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["wrong-snapshot", "wrong-pid", "wrong-window", "wrong-target-window", "wrong-frontmost", "wrong-bounds", "outside-bounds", "wrong-coordinates", "wrong-version", "inside-content", "disabled", "not-editable", "not-focused", "no-ancestry", "wrong-name", "dom-focused", "dom-partial", "non-macos", "unknown-platform"] as const)("does not use an untrusted macOS focus proof: %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-focus-negative-"));
+    const fake = windowDriver({ x: 100, y: 120, width: 960, height: 680 }, { width: 958, height: 678 });
+    fake.setPlatform(scenario === "non-macos" ? "linux" : scenario === "unknown-platform" ? "unknown" : "darwin");
+    const proof: Record<string, unknown> = {
+      version: "macos-focused-element-v1", snapshot_id: "s12345678", pid: fake.target.pid, window_id: fake.target.windowId,
+      frontmost_pid: fake.target.pid, focused_window_id: fake.target.windowId, coordinate_space: "macos-screen-points",
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+      focused_element: { role: "AXTextField", name: "Address and search bar", frame: { x: 200, y: 130, width: 500, height: 30 }, enabled: true, editable: true, focused: true, ancestry_verified: true },
+    };
+    const item = proof.focused_element as Record<string, unknown>;
+    if (scenario === "wrong-snapshot") proof.snapshot_id = "s87654321";
+    if (scenario === "wrong-pid") proof.pid = 9999;
+    if (scenario === "wrong-window") proof.focused_window_id = 8888;
+    if (scenario === "wrong-target-window") proof.window_id = 8888;
+    if (scenario === "wrong-frontmost") proof.frontmost_pid = 9999;
+    if (scenario === "wrong-bounds") proof.window_bounds = { x: 101, y: 120, width: 960, height: 680 };
+    if (scenario === "outside-bounds") item.frame = { x: 2000, y: 130, width: 500, height: 30 };
+    if (scenario === "wrong-coordinates") proof.coordinate_space = "physical";
+    if (scenario === "wrong-version") proof.version = "macos-focused-element-v0";
+    if (scenario === "inside-content") item.frame = { x: 200, y: 300, width: 500, height: 30 };
+    if (scenario === "disabled") item.enabled = false;
+    if (scenario === "not-editable") item.editable = false;
+    if (scenario === "not-focused") item.focused = false;
+    if (scenario === "no-ancestry") item.ancestry_verified = false;
+    if (scenario === "wrong-name") item.name = "Find in page";
+    fake.setGroundingState({ pid: fake.target.pid, window_id: fake.target.windowId, snapshot_id: "s12345678", elements_complete: false,
+      elements: [{ role: "AXWebArea", name: "Page", frame: { x: 100, y: 200, width: 960, height: 600 }, enabled: true }], focus_proof: proof });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const transport = createMockDomGroundingTransport({ complete: scenario !== "dom-partial", tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario === "dom-focused" ? [{ tagName: "input", ariaRole: "textbox", name: "Page input", frame: { x: 200, y: 300, width: 100, height: 30 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: true } }] : [] });
+    const computer = new ProductionCuaDriverComputer({ socketPath: "test", screenshotDir: directory, platform: "darwin", windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "macos-focus-negative" as ObservationId;
+      await computer.observe(session, basedOn, signal);
+      expect(await computer.execute(session, { kind: "keypress", actionId: "mac-location-negative" as ActionId, basedOn, keys: ["CMD", "L"] }, signal)).toMatchObject({ status: "completed" });
+      expect(await computer.execute(session, { kind: "type", actionId: "mac-location-negative-type" as ActionId, basedOn, text: "https://example.test/" }, signal)).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it.each(["missing", "partial", "ambiguous"] as const)("refuses native UIA content fallback when DOM equivalence is %s", async (scenario) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-dom-gate-"));
     const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });

@@ -863,6 +863,8 @@ interface PrivateGrounding {
   readonly contentRect?: DomGroundingContentRect;
   /** Completeness of the DOM producer, independently of the UIA catalog. */
   readonly domComplete?: boolean;
+  /** Independent macOS AX focus attestation; never projected as an ordinary catalog row. */
+  readonly focusProof?: PrivateGroundingElement;
   readonly elements: ReadonlyMap<string, PrivateGroundingElement>;
 }
 
@@ -3536,9 +3538,11 @@ export class CuaDriverComputer implements Computer {
         windowIdentityKey(binding.target) !== windowIdentityKey(browserTarget.windowTarget)) return undefined;
     try {
       const uia = await readGroundingCatalog(current.driver, current.label, binding, viewport, observationId, session.id, signal, true);
-      if (uia.catalog.degraded || uia.catalog.completeness !== "complete" || uia.contentRect === undefined) return undefined;
+      if (uia.catalog.degraded || uia.contentRect === undefined) return undefined;
       const focused = [...uia.elements.values()].filter((item) => item.element.state?.focused === true);
-      const candidate = focused.length === 1 ? focused[0] : undefined;
+      const candidate = uia.catalog.completeness === "complete"
+        ? focused.length === 1 ? focused[0] : undefined
+        : current.platform === "darwin" ? uia.focusProof : undefined;
       if (candidate?.uiaIdentityFingerprint === undefined || !isAddressBarElement(candidate.element)) return undefined;
       const dom = await transport.collect({ observationId, computerSessionId: session.id, viewport, browserTarget }, signal);
       if (dom.complete !== true || dom.degraded === true || dom.tabId !== browserTarget.tabId || dom.generation !== browserTarget.generation ||
@@ -4323,6 +4327,9 @@ async function readGroundingCatalog(
     ...(candidate.snapshotId === undefined ? {} : { snapshotId: candidate.snapshotId }),
   }));
   const contentRect = trustedContentRectFromUia(selectedRecords.map((candidate) => candidate.element), viewport);
+  const focusProof = managedBrowserHybrid && contentRect !== undefined
+    ? parseMacFocusedElementProof(structured, binding, viewport, snapshotId, contentRect)
+    : undefined;
   const annotatedRecords = managedBrowserHybrid && contentRect !== undefined
     ? selectedRecords.map((candidate) => ({
       ...candidate,
@@ -4373,7 +4380,74 @@ async function readGroundingCatalog(
       elements: publicElements,
     },
     ...(contentRect === undefined ? {} : { contentRect }),
+    ...(focusProof === undefined ? {} : { focusProof }),
     elements,
+  };
+}
+
+function parseMacFocusedElementProof(
+  structured: Record<string, unknown> | undefined,
+  binding: CuaWindowBinding,
+  viewport: Viewport,
+  snapshotId: string | undefined,
+  contentRect: DomGroundingContentRect,
+): PrivateGroundingElement | undefined {
+  const proof = parseStructuredRecord(structured?.focus_proof);
+  const focused = parseStructuredRecord(proof?.focused_element);
+  const bounds = parseGroundingFrame(proof?.window_bounds);
+  const frame = parseGroundingFrame(focused?.frame);
+  if (proof?.version !== "macos-focused-element-v1"
+      || proof.coordinate_space !== "macos-screen-points"
+      || snapshotId === undefined
+      || safeCuaSnapshotId(proof.snapshot_id) !== snapshotId
+      || proof.pid !== binding.target.pid
+      || proof.window_id !== binding.target.windowId
+      || proof.frontmost_pid !== binding.target.pid
+      || proof.focused_window_id !== binding.target.windowId
+      || focused?.focused !== true
+      || focused.enabled !== true
+      || focused.editable !== true
+      || focused.ancestry_verified !== true
+      || bounds === undefined
+      || !sameWindowGeometry(bounds, binding.bounds)
+      || frame === undefined
+      || frame.x < bounds.x || frame.y < bounds.y
+      || frame.x + frame.width > bounds.x + bounds.width
+      || frame.y + frame.height > bounds.y + bounds.height) return undefined;
+
+  const role = boundedGroundingLabel(focused.role, 64);
+  const name = boundedGroundingLabel(focused.name, 160);
+  if (role === undefined || name === undefined) return undefined;
+  const nativeLocal = {
+    x: frame.x - bounds.x,
+    y: frame.y - bounds.y,
+    width: frame.width,
+    height: frame.height,
+  };
+  const projected = {
+    x: nativeLocal.x * viewport.width / bounds.width,
+    y: nativeLocal.y * viewport.height / bounds.height,
+    width: nativeLocal.width * viewport.width / bounds.width,
+    height: nativeLocal.height * viewport.height / bounds.height,
+    coordinateSpace: "physical" as const,
+  };
+  if (!validGroundingRect(projected, viewport)) return undefined;
+  const element: GroundingElement = {
+    elementRef: "uia-native-focus-proof",
+    role,
+    name,
+    bbox: projected,
+    state: { enabled: true, editable: true, focused: true },
+    source: "uia",
+    browserRegion: classifyUiaBrowserRegion({ bbox: projected }, contentRect, viewport),
+  };
+  const uiaIdentityFingerprint = makeUiaTargetFingerprint(element, binding);
+  if (uiaIdentityFingerprint === undefined) return undefined;
+  return {
+    element,
+    point: { x: projected.x + projected.width / 2, y: projected.y + projected.height / 2 },
+    geometry: binding.bounds,
+    uiaIdentityFingerprint,
   };
 }
 

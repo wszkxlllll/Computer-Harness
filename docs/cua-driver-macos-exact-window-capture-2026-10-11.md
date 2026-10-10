@@ -1,3 +1,5 @@
+> The earlier `a0…` digest in this capture-only report is historical. The current combined capture-and-focus candidate, isolated bundle identity, and binary SHA-256 are recorded in [F-20261011-071](a-line-sync/fixes/F-20261011-071-macos-browser-focus-proof.md).
+
 # macOS exact-window capture patch (2026-10-11)
 
 The registered Save sheet had its own CGWindow ID, AXSheet role, AX parent window, frame, and ScreenCaptureKit filter. `SCStreamConfiguration` defaults `includeChildWindows` to `true`. With that default, ScreenCaptureKit composited the parent window and attached Save sheet, then returned the family image at the selected sheet's dimensions. The native driver checked output dimensions, so a parent-family image could be accepted as an exact sheet observation and its coordinates were unsafe.
