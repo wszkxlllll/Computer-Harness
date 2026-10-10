@@ -242,7 +242,7 @@ export interface GroundingComputerToolsOptions {
 export function groundingComputerTools(options: GroundingComputerToolsOptions = {}): readonly ComputerToolDefinition[] {
   const tools: ComputerToolDefinition[] = [{
     name: "click_element",
-    description: "Click the center of a named element from the current UIA grounding catalog. Use only after a fresh observation; after clicking, observe again before typing or using another element.",
+    description: "Click a named element from the current catalog. For managed page content, use a DOM ref; UIA page refs may be refused unless uniquely matched to DOM. Observe again after clicks.",
     category: "computer",
     inputSchema: {
       type: "object",
@@ -251,7 +251,7 @@ export function groundingComputerTools(options: GroundingComputerToolsOptions = 
           type: "string",
           minLength: 1,
           maxLength: 96,
-          description: "Opaque element reference from the current observation's UIA catalog; it expires when the observation or window changes.",
+          description: "Current observation's opaque grounding ref. Use a DOM ref for managed page content; UIA page refs may be refused. Expires when the observation or window changes.",
         },
       },
       required: ["elementRef"],
@@ -263,7 +263,7 @@ export function groundingComputerTools(options: GroundingComputerToolsOptions = 
       const observation = context.observation;
       const catalog = context.rawGrounding ?? observation?.grounding;
       if (catalog === undefined || catalog.completeness === "unknown") {
-        throw new Error("GROUNDING_CATALOG_UNAVAILABLE: current observation has no usable UIA catalog");
+        throw new Error("GROUNDING_CATALOG_UNAVAILABLE: current observation has no usable grounding catalog");
       }
       if (observation !== undefined && (catalog.observationId !== observation.id || catalog.computerSessionId !== observation.computerSessionId)) {
         throw new Error("GROUNDING_CAPTURE_MISMATCH: current execution catalog is not bound to the observation/session");

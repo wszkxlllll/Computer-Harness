@@ -294,6 +294,7 @@ describe("managed browser host pilot", () => {
       startupTimeoutMs: 100,
       resolveOwnedWindowTarget: async () => undefined,
       spawnManagedBrowser: (_executable, args) => {
+        expect(args).toContain("--force-renderer-accessibility");
         const profileArgument = args.find((argument) => argument.startsWith("--user-data-dir="));
         if (profileArgument === undefined) throw new Error("test did not receive the owned profile argument");
         profileRoot = profileArgument.slice("--user-data-dir=".length);
@@ -307,6 +308,40 @@ describe("managed browser host pilot", () => {
     expect(waitForProcessTree).toHaveBeenCalledOnce();
     expect(profileRoot).toBeDefined();
     await expect(access(profileRoot!)).rejects.toThrow();
+  });
+
+  it("enables renderer accessibility for an owned persistent managed profile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-persistent-managed-accessibility-"));
+    const abort = new AbortController();
+    const child = { pid: 654323, exitCode: null } as unknown as ChildProcess;
+    let profileRoot: string | undefined;
+    const host = new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      executablePath: process.execPath,
+      profileMode: "persistent",
+      profileLabel: "fixture-accessibility",
+      persistentProfileRoot: root,
+      startupTimeoutMs: 100,
+      resolveOwnedWindowTarget: async () => undefined,
+      spawnManagedBrowser: (_executable, args) => {
+        expect(args).toContain("--force-renderer-accessibility");
+        const profileArgument = args.find((argument) => argument.startsWith("--user-data-dir="));
+        if (profileArgument === undefined) throw new Error("test did not receive the owned persistent profile argument");
+        profileRoot = profileArgument.slice("--user-data-dir=".length);
+        abort.abort(new Error("fixture abort after persistent-profile spawn"));
+        return child;
+      },
+      cleanupHooks: { waitForProcessTree: async () => true, closeGracefully: async () => true },
+    });
+
+    try {
+      await expect(host.start(abort.signal)).rejects.toThrow("fixture abort after persistent-profile spawn");
+      expect(profileRoot).toBeDefined();
+      await expect(access(profileRoot!)).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("reports the exact startup phase with bounded redacted stderr and cleanup certainty", async () => {

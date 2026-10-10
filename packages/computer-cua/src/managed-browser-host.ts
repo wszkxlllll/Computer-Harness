@@ -987,6 +987,7 @@ export class ManagedBrowserHost {
         "--no-default-browser-check",
         "--disable-sync",
         "--disable-extensions",
+        "--force-renderer-accessibility",
         "--new-window",
         ...launchUrls,
       ];

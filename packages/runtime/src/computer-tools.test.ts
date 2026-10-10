@@ -195,6 +195,10 @@ describe("default Computer tools", () => {
     const definition = groundingComputerTools()[0];
     expect(definition?.name).toBe("click_element");
     if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
+    expect(definition.description).toContain("current catalog");
+    expect(definition.description).toContain("For managed page content, use a DOM ref");
+    expect(definition.description.length).toBeLessThanOrEqual(180);
+    expect(JSON.stringify(definition.inputSchema)).toContain("Use a DOM ref for managed page content");
     const context = {
       runId: "run" as never,
       session: {} as never,
