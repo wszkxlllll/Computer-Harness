@@ -109,7 +109,9 @@ T3：携程公开查询→macOS TextEdit 整理，途中通过客户端降低预
 
 ## 10. 本轮逐项状态入口
 
-2026-10-11续接：用户已正常解锁；产品b08268c五项CI全绿，可信Mac平台/CMD+A合同与真实覆盖输入均通过。A01冻结120/0、A02实际58/3；正常认证controller的真实模型/取消及独立暂停纠正恢复、真实同名preview与刷新/缺错token/关闭目标否定链已有证据。完整T1/T2/T3与完整控制矩阵仍未验收，继续自主执行；新原生候选两项正常OS权限尚待用户批准，Preview发布权、实体手机及真人参与分别留栏。当前详细状态以执行看板和账本为准，下方10月10日稳定点保留为历史。
+2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端。平台CMD/META及onclick建议采集修复取得真实正例；完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正均未通过，三轮出口不降标。唯一high T1正确CMD+L后暴露原生焦点证明缺口；产品282d528的独立focus_proof与TS严格消费已完成离线修复，catalog仍partial、不凭截图或DOM失焦放行。Sol独立TS298项、原生347项/2 ignored及fmtcheck通过，作者typecheck/native check/debug build通过；组合CaptureFix候选未执行，正常屏幕录制与辅助功能授权仍待用户批准。stock无法验证新增proof，真实修复成功尚未签收。
+
+正常认证controller同Run已证paused后零新派发、correct投影、resume与最终纠正标记；精确批准去重/reject零执行/旧approval失效/SSE重连及同名preview并发、取消恢复、自然过期否定链通过，仍分列API协议、Web按钮与实体手机。A01–A04累计222main/6risk/228物理请求，210已知usage共3955751tokens、18请求usage未知、金额未知；A04 actual42/2/44、cap96/6/102、reserve80/4/84。隔离评估器cb6aacf/PR27经Sol157项独检，真实false-success重评仍inconclusive/false，业务缺项与真人评分缺失独立保留。当前源码/CI及服务事实以PR26、执行看板和账本为准。
 
 截至2026-10-10 18:42，当前提交组合17ec145。完整计划仍未验收：本机正常Web配对/Run/截图、真实Provider交换与离线合同已取得，但完整T2/T1/T3及原生窗口矩阵无成果通过；当前console会话锁定已独立证实。全部批次出口对应的已证范围、继续可执行项和具体外部条件见[执行计划看板](./astra-autonomous-test-repair-plan-2026-10-10.md#12-执行看板与续接格式)，实际请求main3/risk0与详细失败见[自主账本](./astra-autonomous-execution-ledger-2026-10-10.md)。实体手机与队友条件分别留栏；Windows/Linux 不属于本项目责任、待办或完成条件。
 
@@ -121,4 +123,4 @@ T3：携程公开查询→macOS TextEdit 整理，途中通过客户端降低预
 完整Mac T2/T1/T3和真实原生控制/双窗/sheet仍需当前控制台正常解锁；公网Preview固定闭包7/34项不同且现有账号无合法写入/发布权；M1–M4需实体手机，队友试用需另一位参与者，评分校准需真实成功与真人复核。上述均分栏，不将配对或L1合同当业务任务通过。详见[最终执行看板](./astra-autonomous-test-repair-plan-2026-10-10.md#12-执行看板与续接格式)及[交付包](./astra-stage-delivery-and-phone-pack-2026-10-10.md)。
 
 
-2026-10-11 最新控制出口：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。
+2026-10-11 历史SSE稳定点：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。

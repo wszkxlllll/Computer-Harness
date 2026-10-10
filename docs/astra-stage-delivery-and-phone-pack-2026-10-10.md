@@ -1,12 +1,14 @@
 # 当前阶段交付与集中补验包
 
-2026-10-11 当前续接：用户已正常解锁，任务继续执行。产品SSE修复冻结b08268c，当前五项CI全绿（38082393162）；原生补丁0ccc9ee的独立CaptureFix app仍待正常屏幕录制/辅助功能授权。A01冻结120/0；A02 cap60/6/66、revision1预占60/4/64，实际58/3，A03 cap12/3/15、首reserve8/2/10、实际2/1，合计184次（main180/risk4）。169已知响应2982210tokens，15请求usage未知、金额未知。真实CMD+A覆盖城市输入已独立核图；完整T1三产品、T3三车次与T2保存重开仍未完成，不同版重复同因。正常认证controller已完成真实模型Run、请求中取消及独立暂停/纠正/恢复；精确批准去重、reject零执行、correct旧approval失效、SSE断开恢复及真实同名preview否定链已独检。隔离PR23修复cb6aacf经Sol157/157，依赖draft [PR27](https://github.com/wszkxlllll/Computer-Harness/pull/27)已交付；真实A01重评仍inconclusive/false，业务缺iMac/配置与真人评分缺失分别保留。最新服务与实测以[账本](./astra-autonomous-execution-ledger-2026-10-10.md)为准。
+2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端。平台CMD/META及onclick建议采集修复取得真实正例；完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正均未通过，三轮出口不降标。唯一high T1正确CMD+L后暴露原生焦点证明缺口；产品282d528的独立focus_proof与TS严格消费已完成离线修复，catalog仍partial、不凭截图或DOM失焦放行。Sol独立TS298项、原生347项/2 ignored及fmtcheck通过，作者typecheck/native check/debug build通过；组合CaptureFix候选未执行，正常屏幕录制与辅助功能授权仍待用户批准。stock无法验证新增proof，真实修复成功尚未签收。
+
+正常认证controller同Run已证paused后零新派发、correct投影、resume与最终纠正标记；精确批准去重/reject零执行/旧approval失效/SSE重连及同名preview并发、取消恢复、自然过期否定链通过，仍分列API协议、Web按钮与实体手机。A01–A04累计222main/6risk/228物理请求，210已知usage共3955751tokens、18请求usage未知、金额未知；A04 actual42/2/44、cap96/6/102、reserve80/4/84。隔离评估器cb6aacf/PR27经Sol157项独检，真实false-success重评仍inconclusive/false，业务缺项与真人评分缺失独立保留。当前源码/CI及服务事实以PR26、执行看板和账本为准。
 
 以下1866/72、main3及锁屏结论属于10月10日历史交付稳定点，不能作为当前进程、调用或阻塞状态。
 
 本包配合[执行计划](./astra-autonomous-test-repair-plan-2026-10-10.md)和[实际账本](./astra-autonomous-execution-ledger-2026-10-10.md)。它是尚未关闭出口的续接说明，不代表完整任务或实体手机已通过。产品源码/build冻结17ec145；测试修复a491076当前五项CI全绿，后续仅文档；PR24两处最小UI增量经Sol独立40项通过；Luna最终组合1866项Vitest/72项TAP、typecheck/Webbuild通过。
 
-## 已有成果及实际限制
+## 10月10日历史成果及限制（当前结论见顶部）
 
 - 已保留历史dirty；本轮5个显式产品/计数提交及1个测试修复提交、最终组合1866项Vitest和72项TAP通过；当前PR23隔离head136项通过。
 - 正常本机配对批准、Web Run创建、stock原生窗口截图成立。后续专用headless Chrome独立admin/client contexts正常UI配对批准、刷新去重、无效码及390px视口通过；公网两独立HTTP会话配对/认证/CSRF/隔离撤销通过。均不冒Provider/Computer业务或真实手机。
@@ -20,9 +22,19 @@
 
 构建入口：`pnpm run typecheck`、`pnpm test`、`pnpm --filter @computer-harness/web build`。正常Host启动参数保持`--env-file <本地私有env>`、`--socket <实际stock socket>`、`--model glm-5.3-flash`、`--output <本轮私有Run目录>`、`--port 4317 --origin http://localhost:4317`。实际Host管理地址为`http://localhost:4317/connect`。端口/Origin必须严格一致；不要把localhost配对URL当手机可达URL。
 
-自主付费入口继续同一`scripts/autonomous/batch-host.mjs`。A01-private最终120/0已冻结，不能重新初始化或再派发；当前使用独立A02-private，cap60/6/66、revision1预占60/4/64，actual58/3。完整mainenv与overlay分开加载、绝对batch root和真实TTY命令已持久保存，后续只替换任务/目标/必要参数；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。历史GLM timeout180000ms与low是有记录的每Run调优；当前正常受控Host已恢复90s low，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
+自主付费入口继续同一`scripts/autonomous/batch-host.mjs`。A01-private最终120/0已冻结，不能重新初始化或再派发；当前使用独立A04-private，cap96/6/102、revision1预占80/4/84，actual42/2/44；A02、A03也已结束且历史保持。完整mainenv与overlay分开加载、绝对batch root和真实TTY命令已持久保存，后续只替换任务/目标/必要参数；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。历史GLM timeout180000ms与low是有记录的每Run调优；当前正常受控Host已恢复90s low，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
 
 完整本地任务卡在忽略目录`runs/astra-autonomous-20261010-sol-luna/task-cards/`，T1/T2/T3均各baseline、independent-repeat、variant。T2正文196B/UTF-8/LF/finalLF，三卡唯一新路径；文件存在则重新准备唯一卡，不能覆盖。T3已冻结路线/日期/2成人二等座/三结果与客户端预算降低节点，未开放票价须写未知，不能捏造携程结果。关闭重开由Harness完成，人工重绑只列补证。
+
+## 当前组合候选与最小恢复动作
+
+焦点修复产品提交为`282d5288312bc1f55ad2b3129a074b5b3574f46f`，原生focus-only源码提交为`0cfb382c183c7f6981c2402be0d8ff734c47d360`。两个独立补丁均在repo `patches/cua-driver/`，对clean d114按capture→focus应用重放后的三个源文件与构建输入逐字节一致；原stock保持0.22.2。详情见[F071焦点修复](./a-line-sync/fixes/F-20261011-071-macos-browser-focus-proof.md)。
+
+组合候选为`/Users/guoyuhang/Desktop/大创/Computer-Harness-three-track-integration/.tools/cua-driver/CuaDriverCaptureFix.app`，显示名`Capture and Focus Fix Local Candidate`，独立bundleID `com.trycua.driver.capturefix.local.20261011`；signed binary SHA-256 `4f3f99d9ef6c91da9203ca202e70a2b2cc5682b784dd5d92921bcf5fbc414ebc`，CDHash `91531a0d8e6c8a68c6173c7d7a5da7d2811746c7`。Sol独立strict验签通过，未启动、未安装或改TCC。
+
+唯一桌面系统介入是给这个明确候选开启“系统设置→隐私与安全性→屏幕与系统音频录制”及“辅助功能”两项正常权限。已有解锁不替代新应用权限；无需手机操作。批准后由智能体正常启动候选、先零Provider核精确sheet捕获/比例与地址栏focus_proof，再继续完整原卡及独立复验/变体，不能把离线测试算作真实T1/T2/T3通过。当前stock无新proof仍拒绝地址栏type，保护保持有效。
+
+当前保留正常low Host20858（4317，90s、40请求/步，A04正式护栏）及stock4254/socket `/private/tmp/a01-cua-luna.sock`；旧high Host18761已退出。Sol独立核首页、local session与认证Run列表均200，Run列表0/无在途；历史终态轨迹保留。当前Computer dist SHA256 `9fc76ac695cb8aad89d847adcb34e07ab58409c8c660f8490e80c7fdca291a1a`，Host entry及Web bundle与上次构建相同；不据文件hash推断整个进程缓存。自有reader、probe、caffeinate已关闭，stock与专用TextEdit证据现场保留；不动未知个人窗口。正常新配对凭据只在私有0600文件，公开包没有token。
 
 ## 手机集中补验（手机可用且同版电脑任务出口通过后）
 
@@ -48,7 +60,7 @@ M1相机/移动浏览器、M2真实触摸、M3后台/真实手机网络、M4尺�
 
 当前产品提交可独立审查，原b1e44e1与历史dirty快照保持。回退服务需先取消确认归属的自有Run、核未知副作用、停止自有Host后再切匹配构建；不能对当前含历史dirty树直接reset/clean。私有截图/轨迹/计数位于忽略runs目录，不纳入PR。PR23继续隔离，不将pending/缺真人审核变为success。
 
-## 最终候选构建与PR取舍
+## 10月10日历史候选构建与PR取舍
 
 产品源码17ec145a57f742b8e65d4f6c5b368f9777b5aae0；本机476项dist实际闭包SHA-256 `f17dd74bad35aea6286f16e083f277f6a5e5a1978a8420104e0f228b9c991c0d`，manifest在本地baseline/runtime-build-manifest-17ec145.json。正常Host PID87588于18:38:43启动（现已正常退出；显式既有Relay配置的新Host89224通过公网HTTP配对E2E，无在途Run），源码内容与随后17ec145提交相同；entry hash `07b2c43a961c81ca0b3cc47adfd973bdfcba44c5c148df2bc751ee90a3096fd5`。Web bundle index-BxSWOU01.js hash `7df7b87809af3262ce48b0f55c2619b923c001ad74103e5d19312dad24c29d99`。完整闭包不等于每个文件已加载进该PID，未通过inspector读取模块缓存。
 
@@ -77,7 +89,7 @@ T3完整任务：携程公开页比较上海虹桥→杭州东2026年10月17日0
 正常公网Relay协议已补证：两独立合法HTTP会话申请/电脑确认/领取会话全部成功；缺错CSRF403、非法字段Run400、两自有设备独立撤销成立，无Provider/Computer业务。首CI Windows单项retry测试race由a491076最小测试barrier修复，Sol Runtime137项复验通过；该head最新CI五项全绿，首失败保留。
 
 
-## 最终交付与保留服务
+## 10月10日历史交付与保留服务（PID已更替）
 
 草稿[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)已附当前聊天；正常Git transport不可达时使用已授权GitHub Git Data API保原SHA同步，非force更新分支，无历史重写。当前生产内容17ec145、测试a491076，[当前代码CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38046814449)五项成功；最终文档head/CI以PR实时记录为准。
 
@@ -85,7 +97,7 @@ T3完整任务：携程公开页比较上海虹桥→杭州东2026年10月17日0
 
 公网当前origin对应Preview服务。实际固定闭包34项中27同/7异：Relay package.json、protocol dist/index.js/package.json、relay-connector dist/routing.js/package.json、voice dist/run-notices.js/package.json。Preview current/父目录/releases/Web dist不可由现有SSH账号写入，sudo无非交互规则、本地无部署workflow/helper；未写远端或改服务。另一个可写stable目录不属于当前origin，未拿它冒同版发布。继续发布需服务所有者提供正常合法发布路径；健康/HTTP配对不等于闭包同版。
 
-剩余分别为：正在执行的Mac完整T2/T1/T3及真实控制/双窗/sheet；原生新候选正常OS授权；Preview合法发布权；实体手机M1–M4；另一位队友试用；成功成果与真人复核后的评测校准。正常解锁后继续所有可自主任务；单项外部条件不停止其余工作，离线/配对/远端交付不能替代真实任务验收。
+当前剩余：T1/T2/T3完整原卡及三轮未通过；stock缺新焦点proof且原生sheet捕获错误，组合候选实际运行需正常屏幕录制/辅助功能授权。T3网页模型参数/旧ref失败独立保留，不归入TCC或手机。Preview同版发布需服务所有者合法发布路径；M1–M4需实体手机；队友试用和评分需另一位真人与真实成果。解锁已完成，无需再次为离线或配对任务解锁；不以局部协议/离线通过替代业务验收。
 
 
-2026-10-11 最新控制出口：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。
+2026-10-11 历史SSE稳定点：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。

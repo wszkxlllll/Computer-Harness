@@ -179,3 +179,28 @@ SSE终态独检补齐：读取完整after-seq proof，HTTP200的1–28终态、2
 
 
 A03真实纠正独检：实际读proof与原trajectory，correct清pending后fresh-sequence旧request approve409 STALE_REQUEST；旧action无任何execution started/completed。正常abort终态cancelled，monitor24.29s见终态。A03 2main/1risk，三份usage39297；总184请求、169已知usage2982210、15未知。签收纠正失效与取消，不作恢复后完整业务/手机通过。
+
+
+2026-10-11 onclick最小修独检：全文核bdf6e7a两文件，实际336/336及最终fixture47/47通过，diffcheck0。真实onclick函数与generic fallback/name在collector和pre-dispatch对称，纯cursor/非函数/handler移除、错name/几何、嵌套同帧歧义/native或ARIA disabled均拒绝/不可执行，未泛化所有li。实际读取ab2c3d4a零Provider完整proof并view after-selection原PNG，出发上海虹桥保留、原建议消失且到达面板打开；正常DOM ref click确有变化，不是直接handler/state写。正式DeterministicGroundingSelector消费同一after-type catalog和原完整T3 goal，187→16且合法generic DOM ref唯一在hotset，私有sol-onclick-real-frame-hotset-proof.json。全部诊断不计T3成果，原生保存仍待candidate TCC。
+
+
+2026-10-11 A04真实T3独检：修后CMD+A与onclick建议真实执行成立；两次缺elementRef与复用过期ref均被严格拒绝，未发现需要继续放宽或加提示的合同缺陷。正常abort后seq100 cancelled，12main/0risk；未通过完整业务。下一完整T1采用同版现Host与原卡、正式续预占80/4/84，直接监控额外覆盖两次非法参数/ref无action进展，实际历史seq60/64回放可取消、有效读取/动作反例不误停。bdf6e7a当前远端匹配且五CI全绿。
+
+
+A04 T1 low独检：真实配置页导航/滚动有正例，但仅Mac mini，Air/iMac未访问；灰显配置选项不能以模型推断当已选中配置。两轮only-call反馈在实际91/98/100请求trace selected/projected均保留，darwin来源可靠；最终拆为单hotkey pending106的恢复与abort竞争事实保留，Runtime108 cancelled。10main+1risk，A04累计22/1/23。完整T1失败独立于原生TCC；先补非重复真实控制/preview反例，再唯一high完整原卡新变量，范围与出口不降标。
+
+
+2026-10-11 preview生命周期真实补证：A04正常Host/API、自有同标题纯色窗，并发preview实际200/409 WINDOW_PREVIEW_BUSY；client AbortError后首重试409 BUSY、第二次200恢复。refresh与in-flight真实命中409 WINDOW_TARGET_STALE；有效preview自然两分钟过期后create409 WINDOW_PREVIEW_REQUIRED且无Run/Provider。Sol核三张PNG0600/1568×1181并view原图，计数22/1/23与Run集合前后相同、cleanupErrors=[]。自有Node超时timer未立即退出后精确SIGTERM并确认退出，Chrome资源已正常关闭，正常Host/stock未动。proof `A04-private/window-preview-lifecycle/window-preview-lifecycle-a1f1f103-a04a-4560-9a80-396dbfa6e5e0.json`。same_title_replacement测试先refresh且proof已过期，其脚本assertion标签虽为identity，仅计refresh stale；真实同CGID复用、畸形PNG仍只L1，未冒完整preview出口。
+## 2026-10-11 Chrome 地址栏焦点归因（修复进行中）
+
+Sol独立核high T1 seq149的CMD+L回执与注册PNG：URL确实蓝选；随后两次type均被拒绝，零输入。因此没有把这条新失败归为模型规划失败。零Provider正常ManagedBrowserHost/stock SDK对照使用自有精确PID/window，CMD+L前后身份及surface一致，CDP document.hasFocus从true变false、activeElement仍BODY，DOM complete且无focused候选；原生get_window_state显式elements_complete=false，结构没有focused/editable证明，UIA只能partial。内容框存在，故第一false条件明确是readBrowserChromeFocus的complete要求，其后focused候选也为0。自有资源正常清理，零Provider、零业务正文输入。私有证据为A04-private/t1-high-focus-probe-be1b882a-e3ad-4865-9bd2-bb9b9806fd0f.json及544f1a12对照。
+
+固定d114原生get_window_state.rs明确保留elements_complete=false：结构仅投影actionable节点，AX子读取未知不能证明完整域；AXNode/输出亦未携带focused/editable。TS却要求完整UIA、唯一聚焦地址栏及对应指纹，属于生产能力与消费合同缺口。保持其fail-closed，不将catalog标完整或仅凭图/DOM无焦点放行。Luna正在最小实现独立、精确窗口绑定的原生focus_proof及TS严格消费；SDK现有callTool structuredJson可透传，无需另造产品入口。尚未签收修复或真实地址栏type成功，新candidate实际运行仍需正常OS权限。
+
+## 2026-10-11 焦点修复独检完成
+
+产品282d528、native focus-only 0cfb382通过静态安全复核：proof要求snapshot与响应相同、精确PID/window/AX元素PID与ancestry、前台/AXFocusedWindow、真实enabled和AXValue settable、完整包含screen-point几何，并CFEqual重读同一焦点元素及身份/几何；TS仅可靠darwin接受，保留可信内容框/地址栏语义、DOM同tab/generation与无focused验证。proof不加入公开catalog，旧complete路径、one-shot和live fingerprint不变，Guard不变。作者与检查者仍分离。
+
+Sol独立Computer284+SDK14=298项通过；native完整lib347通过/2 ignored，fmtcheck、diffcheck0；作者typecheck/check/debug build通过。新负例覆盖错snapshot/身份/前台/几何/坐标域/内容区、缺编辑/聚焦/ancestry、DOM冲突、未知/非Mac平台及live变化；one-shot复用零type。两repo补丁在clean d114重放后与构建三源文件逐字节相同。独立验签确认候选独立bundleID及SHA4f3f99d9…/CDHash91531a0d…，stock未替换，候选未执行。先临时stock bundleID包装已在执行前纠正，不构成权限复用。
+
+本签收仅源码/离线测试与候选构建。stock原生没有新增proof，候选真实capture/focus仍需正常两项TCC授权；完整T1/T2/T3及三轮没有通过。正常controller同Run暂停零派发、纠正恢复、SSE与preview局部实证单列，未冒实体手机/真人评分。全部请求对账228物理/210已知usage/18未知，费用金额未知。

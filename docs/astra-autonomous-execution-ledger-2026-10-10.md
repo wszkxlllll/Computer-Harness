@@ -36,6 +36,10 @@
 
 仅为SSE已修后尚未覆盖的审批中纠正使旧request失效、正常取消/断线矩阵，以及实际DOM修复后的验证保留小额；不得重复已通过reject或同版同因业务。公开initializeBatch正常初始化，独立root `A03-private`、batch A03、reservation controller-matrix-dom-fix；cap12main/3risk/15total，首reserve8/2/10，当前actual2main/1risk/3total、sequence3，state0600。A01最终120/0与A02稳定58/3/61保持，不重置历史。正常Host15648已从正式A03模板启动，90s low；最新Run已终态，无在途。
 
+## 当前完整查询批次 A04
+
+明确新变量为a8dad6d可信Mac平台快捷键合同和bdf6e7a真实onclick建议候选修复；完整T3与a8后尚未复验的原完整T1各保留合理40请求空间，不用A03小余量截断。公开initializeBatch合法初始化独立A04-private，batch A04/reservation T3-T1-platform-onclick；cap96main/6risk/102total，首reserve40/2/42，actual0/sequence0，state/anchor/audit均0600，Sol实际读核。历史A01 120/0、A02 58/3、A03 2/1（共184请求）全部保持；同因无进展直接取消，不以新批次允许无限重复。正常新Host将使用新dist/max40/90s low与正常新pair，原卡字段和native外部边界保持。
+
 ## 本轮事件
 
 | 时间 | 版本 / 阶段 / 入口 | 事实与结果 | 调用 / 介入 / 下一步 |
@@ -212,3 +216,40 @@ Planning正式对照 `run-1791658406322-7e2a3f10-282`终态cancelled：13request
 
 
 2026-10-11 A03纠正旧审批失效：Run `run-1791663014351-5cf61e79-976`，正常correct202后snapshot running/seq25、pending cleared；旧request按fresh sequence approve得到409 STALE_REQUEST，Sol独立关联action started/completed均0。随后正常abort202、seq31 finished/cancelled；直接监控24.29s见终态，未另发取消。A03实际2main/1risk，三份已知usage39297tokens。A01–A03合计180main/4risk/184请求，169已知响应prompt2934789/completion47421/total2982210tokens，15请求usage未知。正常Host15648保留，无在途；接下来生产SDK零Provider重现站名建议DOM，不能记T3成果。
+
+
+2026-10-11 Ctrip建议DOM根因与修复：零Provider正常SDK click/CMD+A/type获得展开页，真实建议父li的onclick为函数、无role/tabIndex，原collector漏项；cursor外观不构成可交互证据。冻结bdf6e7a仅两文件，collector/live resolver对称以真实onclick推generic角色及bounded文本，aria-disabled状态与既有执行拒绝一致；身份、几何、fingerprint及Guard保持。作者47/47/build/typecheck通过，Sol四套件336/336、最终真实textContent fixture47/47复验通过。正常同版SDK真实建议DOM ref click后原出发建议消失并自动打开到达面板，Sol独立view截图；原T3完整goal下正式selector187候选→16热集含唯一合法DOM建议。所有自有诊断资源finally收束、零Provider；最初选择器含出发/到达歧义、误将innerText换行当textContent空格的诊断拒绝保留，不作产品失败。此补证不计T3业务完成，原完整卡新变量复测继续。
+
+
+2026-10-11 A04完整T3新变量实测：通过公开初始化接口建立独立96/6/102批次，原A01–A03历史184请求保留；初预占40/2/42。新同版Host17219、正常新配对，Run `run-1791663845338-dbaf6a68-23a` 完整原卡202创建。实际CMD+A覆盖城市、onclick建议DOM click均completed，平台与建议采集两修取得真实正例。随后模型两次click_element空对象（seq60/64）与一次复用已执行、后续新观察已失效的旧ref（seq68），严格工具schema要求elementRef且反馈完整，属于模型参数/陈旧引用错误。Sol正常认证abort202，runtime seq100 cancelled；12main/0risk，11 HTTP200有usage、末请求cancelled无usage。T3三车次来源、预算纠正、原生保存重开仍未完成，不同版盲跑或追加提示。累计截至该终态192main/4risk/196请求、180已知响应，16请求usage未知，金额未知。
+
+A04已正式续预占80/4/84 revision1、cap不变、actual和hash链保留；完整原T1卡 `run-1791664047938-3793ed3c-9ea` 同Host/认证session复用、Apple /mac/起、switchWindows:true，202创建，正在执行。Sol直接监控只读本地轨迹/PNG、精确认证API取消；补两次非法参数/ref且无中间action的循环阈值，原T3 seq60/64回放命中，正常读取与有效action反例不误停，私有证明 `A04-private/sol-private-monitor-rejection-proof.json`。当前bdf6e7a远端/PR26 head一致，CI38083477507五项全绿。
+
+
+2026-10-11 A04完整T1 low对照终态：Run `run-1791664047938-3793ed3c-9ea` 实际进入Mac mini公开配置、内存及存储段；Sol逐次fresh PNG核公开导航/普通滚动并批准，导航loading后陈旧购买坐标正常reject，不代教模型业务步骤。模型两轮memory_write_fact+CTRL+L组合被only-call审批边界拒绝，实际后续request trace均完整selected/projected该反馈，可靠darwin平台及Mac快捷键合同存在。Sol正常abort202，runtime108 cancelled；取消竞争时模型已拆成单独hotkey到pending106，保留恢复事实，不称永久循环。只有Mac mini页面，缺Air/iMac，完整三产品T1失败；配置部分灰显，模型推断不能代真实选中配置证明。10main+1risk共11响应usage254185tokens；A04实际22/1/23，全部批次202main/5risk/207请求，191已知usage3501623tokens、16未知，金额未知。
+
+随后先补未覆盖的真实控制/预览反例；only-call/Mac完整合同若无缺陷归模型遵循，不追加同义prompt。用户既有授权下仅允许一次公开每Run high推理完整原T1卡40请求作新变量，不改全局默认或Guard；不为耗尽余额无差别重跑。T1/T3真实业务失败与TCC、实体手机、发布权限和真人条件分别记录。
+
+
+A04 T1追加重试事实：seq99收到GLM_INVALID_TOOL_CALL（_harnessEffect unsupported field、无工具执行），90s配置下retryMode=feedback 1/1真实派发seq100，seq101返回合法单独hotkey并进入pending106，后被已发送abort取消。此处实际反馈重试恢复成立，包含于10main及11份usage，不能代Mac快捷键正确或完整业务成功。
+
+
+2026-10-11 preview生命周期真实补证：A04正常Host/API、自有同标题纯色窗，并发preview实际200/409 WINDOW_PREVIEW_BUSY；client AbortError后首重试409 BUSY、第二次200恢复。refresh与in-flight真实命中409 WINDOW_TARGET_STALE；有效preview自然两分钟过期后create409 WINDOW_PREVIEW_REQUIRED且无Run/Provider。Sol核三张PNG0600/1568×1181并view原图，计数22/1/23与Run集合前后相同、cleanupErrors=[]。自有Node超时timer未立即退出后精确SIGTERM并确认退出，Chrome资源已正常关闭，正常Host/stock未动。proof `A04-private/window-preview-lifecycle/window-preview-lifecycle-a1f1f103-a04a-4560-9a80-396dbfa6e5e0.json`。same_title_replacement测试先refresh且proof已过期，其脚本assertion标签虽为identity，仅计refresh stale；真实同CGID复用、畸形PNG仍只L1，未冒完整preview出口。
+
+2026-10-11 同Run真实暂停/纠正/恢复：首Run `run-1791664903812-4bc22929-dfc` 两次main后已完成，控制脚本启动过晚，保留为未覆盖控制的准备失败。随后正常认证API Run `run-1791664974965-68104cdd-a03` 在模型请求后进入paused；2.035秒暂停窗口内零新请求/零action，正常correct写入唯一最终标记，再resume并由模型最终报告该标记，runtime seq16 succeeded。两份恢复后实际出站context均selected/projected该纠正。报告仍含旧的“没有纠正”句，保留其自相矛盾限制；此处仅签收状态控制与纠正投影，不计业务完成。第二Run三次main（包含一次非法纯文本finish反馈重试），proof `A04-private/pause-correction-control-proof.json`。两个Run合计5main、86810已知tokens。
+
+2026-10-11 唯一high完整T1对照：新正常受控Host18761加载bdf6e7a产品，私有配置仅low→high，其余90s/8192tokens/40steps保持；实际fetch_invoked记录thinking enabled/reasoningEffort high，完整原卡不变，正常新配对。Run `run-1791665189276-a50c89bc-8d9` 进入Mac mini配置，fresh PNG证M6、16GB已含、6999元；存储段灰显，没有256GB已含证明，不以模型推断签收配置。正常Guard风险复核超时后fallback待审，Sol仅核当前公开配置导航并批准exact request；未下单。
+
+该Run seq149 CMD+L、seq151 completed，注册PNG显示Chrome地址栏蓝选URL；随后两次type分别被BROWSER_CHROME_FOCUS_UNCONFIRMED与DOM_INPUT_FOCUS_MISMATCH拒绝，均零键盘输入，三张截图逐字节相同。Sol直接监控203.98秒命中无进展并正常abort，seq181 cancelled。缺Air/iMac及完整三产品比较，T1仍失败；正确Mac快捷键后的焦点确认缺口不能归作单纯模型遵循，正在零Provider核native focused/UIA完整性/内容框与CDP activeElement，不新增paid。proof `A04-private/t1-high-focus-usage-attribution-proof.json`。
+
+截至此终态A04 actual42main/2risk/44、预占80/4/84、cap96/6/102不变；A01–A04合计222main/6risk/228物理请求。210份已知usage共prompt3896757/completion58994/total3955751tokens，18请求usage未知、金额未知。high本Run16请求中14份已知usage367318tokens、2请求usage未知；28是已知响应的额外未知字段数，不能记成28个未知请求。当前所有Run终态，无paid在途；Host18761与stock4254保留，焦点归因仍为自主待办，尚不阶段关闭。
+
+2026-10-11 焦点生产缺陷离线修复完成：正常SDK零Provider实证CMD+L前后同精确PID/window，CDP网页hasFocus true→false，而native catalog始终elements_complete=false、无focused/editable字段，首false条件与固定d114 producer源码吻合。冻结产品282d5288312bc1f55ad2b3129a074b5b3574f46f，仅2 TS、独立native patch及2份说明；native focus-only源码0cfb382c183c7f6981c2402be0d8ff734c47d360。独立proof绑定snapshot/PID/CGID、AX元素PID及ancestry、前台与AXFocusedWindow、真实enabled/editable、screen-point完整包含几何；CFEqual与身份/几何再读拒绝读取竞态。TS仅可信darwin、现有正地址栏语义及DOM无focused接受，不把catalog标完整、不公开proof ref、不改变一次权限或实时指纹/Guard。
+
+作者Computer284项/typecheck/native check/模块2项/debug build通过；Sol独立Computer284+SDK14=298项、完整native347 passed/2 ignored、fmtcheck及diffcheck通过。首次CFEqual返回u8编译错误与错误越界fixture已最小修正；cargo PATH缺仅为入口错误，复用既有隔离1.97.1工具链，未新安装。两独立repo patch对clean d114按capture→focus正常应用后，与构建三个源文件逐字节一致。
+
+组合candidate复用原CaptureFix app路径及独立bundleID，signed binary SHA256 4f3f99d9ef6c91da9203ca202e70a2b2cc5682b784dd5d92921bcf5fbc414ebc、CDHash91531a0d8e6c8a68c6173c7d7a5da7d2811746c7，Sol strict验签通过。首临时包误用stock bundleID已在未执行前纠正；stock/OS授权未动。候选未启动，两项正常TCC仍待用户批准；stock不能验证新增focus_proof，离线修复不冒真实业务成功。当前无新增paid，228请求与全部历史保持，最终用量逐条对账见私有A04-private/sol-final-current-usage-proof.json。
+
+2026-10-11 最后服务/覆盖审计：旧high Host18761正常退出，复用持久模板恢复90s low新构建Host20858，stock4254与原socket保持。Sol独立GET /、/api/local/session、正常认证/api/runs全部200，新Host Run列表0/活动0；历史五个A04 Run终态均保留本地轨迹。只读consoleLocked=false；候选未启动，reader/probe/caffeinate均已清理，专用TextEdit证据现场保留，不操作未知个人窗口。当前Computer dist SHA256 9fc76ac695cb8aad89d847adcb34e07ab58409c8c660f8490e80c7fdca291a1a、Host entry07b2c43a…、Web bundle7df7b878…；这是实际构建文件指纹，不冒所有模块已逐一读取进程缓存。证据A04-private/sol-final-service-build-proof.json。
+
+产品282d528已保原SHA非force同步PR26，五项CI按当前head记录、不沿用旧green。最后审计区分：完整T1/T2/T3三轮真实未通过；组合候选capture/focus复验需两项正常TCC；部分原生双窗/sheet和实际CGID复用仍无现场证明。已证控制/预览局部与L1分栏；Preview同版发布需服务所有者合法权限，实体手机M1–M4与另一位真人试用/评分独立。已充分归因的网页模型参数/旧引用/业务缺项保留失败，不再同因付费追题。Windows/Linux已移出责任；当前剩余没有可在不新增同因paid、无真实外部授权下继续关闭的明确源码/材料缺陷。最终文档与PR说明同步后阶段交付，不宣称Astra完成。
