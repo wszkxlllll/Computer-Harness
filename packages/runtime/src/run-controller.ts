@@ -2313,9 +2313,47 @@ export class RunController {
     } else {
       terminalActionEvent = await this.commitEvent({ type: "action.execution.failed", receipt });
     }
+    let actionOutput: JsonValue | undefined;
+    if (receipt.status === "completed") {
+      actionOutput = actionReceiptOutput(receipt);
+      // When window switching is enabled, expose a fresh inventory alongside
+      // the completed action if the driver reports newly opened windows, or if
+      // the model has not listed windows yet. The driver message only triggers
+      // this read; it does not establish ownership or authorize a transition.
+      // A matching dialog still requires an explicit switch_window call and a
+      // fresh observation.
+      if (action.kind !== "wait" && action.kind !== "switch_window" && this.windowSwitchAvailable() &&
+          (this.latestWindowOptions === undefined || receipt.message?.includes("\n\n🪟 Action opened new window(s):") === true) &&
+          this.computer.listWindows !== undefined) {
+        try {
+          const inventory = await this.refreshWindowOptions(context.session);
+          if (inventory.options.some((option) => !option.isCurrent)) {
+            actionOutput = {
+              ...(actionOutput as Record<string, JsonValue>),
+              windowInventory: {
+                currentWindow: inventory.options.find((option) => option.isCurrent)?.windowRef ?? null,
+                options: inventory.options.map((option) => ({
+                  windowRef: option.windowRef,
+                  ...(option.appName === undefined ? {} : { appName: option.appName }),
+                  ...(option.title === undefined ? {} : { title: option.title }),
+                  isCurrent: option.isCurrent,
+                })),
+                truncated: inventory.truncated,
+                omittedCount: inventory.omittedCount,
+                guidance: "This fresh inventory does not establish that another window is related to the action. Use switch_window only for a listed window that visibly matches the dialog; then wait for a fresh observation before acting.",
+              },
+            };
+          }
+        } catch {
+          this.throwIfAborted();
+          // The action is already durably completed. A failed advisory read
+          // must not replay it or invalidate its exact target.
+        }
+      }
+    }
     const result: ToolResult =
       receipt.status === "completed"
-        ? { callId: call.id, status: "completed", output: actionReceiptOutput(receipt) }
+        ? { callId: call.id, status: "completed", output: actionOutput! }
         : {
             callId: call.id,
             status: "failed",

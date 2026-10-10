@@ -452,7 +452,6 @@ function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId,
     const listLine = catalogText?.split("\n").find((line) => line.startsWith("- list_windows("));
     const switchLine = catalogText?.split("\n").find((line) => line.startsWith("- switch_window("));
     if (catalogText === undefined || listDescription === undefined || switchDescription === undefined ||
-        listDescription.length > 180 || switchDescription.length > 180 ||
         !listLine?.endsWith(listDescription) || !switchLine?.endsWith(switchDescription) ||
         !listDescription.startsWith("List {windows,truncated,omittedCount}") ||
         !listDescription.includes("untrusted") || !listDescription.includes("survive observations") ||

@@ -638,7 +638,13 @@ function qwenToolCatalog(tools: readonly ModelToolSpec[], coordinateMode: QwenCo
   const lines = ["Available tools (semantic guidance; Runtime validates exact arguments):"];
   for (const tool of tools) {
     const argumentsText = compactToolArguments(tool, coordinateMode);
-    const description = tool.description.replace(/\s+/gu, " ").trim().slice(0, 180);
+    const normalizedDescription = tool.description.replace(/\s+/gu, " ").trim();
+    // These opt-in tools carry the safety contract for opaque native-window
+    // references. Truncating it can remove the instruction to inspect/switch
+    // after a dialog appears, so retain their complete descriptions.
+    const description = tool.name === "list_windows" || tool.name === "switch_window"
+      ? normalizedDescription
+      : normalizedDescription.slice(0, 180);
     lines.push(`- ${tool.name}(${argumentsText}): ${description}`);
   }
   return lines.join("\n");

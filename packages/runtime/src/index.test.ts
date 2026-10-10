@@ -4063,6 +4063,186 @@ describe("RunController model-directed window switching", () => {
     arguments: { windowRef },
   });
 
+  it("returns a fresh opaque inventory after a native action without claiming an alternate is related", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("open-dialog")] },
+      { type: "finish", summary: "inspected the new window options" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("open the dialog and inspect it")).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(1);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      const completed = controller.getEvents().find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("open-dialog" as ToolCallId));
+      expect(completed?.result.output).toMatchObject({
+        windowInventory: {
+          currentWindow: "opaque-current",
+          options: [
+            { windowRef: "opaque-current", isCurrent: true },
+            { windowRef: "opaque-target", isCurrent: false },
+          ],
+          guidance: expect.stringContaining("does not establish that another window is related"),
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark the post-action inventory as a new option when it contains only the current window", async () => {
+    const registry = windowSwitchRegistry();
+    class CurrentOnlyComputer extends WindowSwitchComputer {
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        return { options: [{ windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true }], truncated: false, omittedCount: 0 };
+      }
+    }
+    const computer = new CurrentOnlyComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("ordinary-action")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("perform one action")).resolves.toBe("succeeded");
+      const completed = controller.getEvents().find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("ordinary-action" as ToolCallId));
+      expect(completed?.result.output).not.toHaveProperty("windowInventory");
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes after the driver's opened-window notice, expires old refs, and permits only an explicit fresh switch", async () => {
+    const registry = windowSwitchRegistry();
+    class WindowNoticeComputer extends WindowSwitchComputer {
+      private inventoryGeneration = 0;
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        this.inventoryGeneration += 1;
+        const suffix = this.inventoryGeneration === 1 ? "old" : "fresh";
+        this.targetWindowRef = `${suffix}-target`;
+        return {
+          options: [
+            { windowRef: `${suffix}-current`, appName: "Editor", title: "Draft", isCurrent: true },
+            { windowRef: `${suffix}-target`, appName: "TextEdit", title: "Save", isCurrent: false },
+          ],
+          truncated: false,
+          omittedCount: 0,
+        };
+      }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        if (action.kind === "click") {
+          signal.throwIfAborted();
+          this.calls.push("execute:click");
+          return { actionId: action.actionId, status: "completed" as const, message: "Pressed CMD+S\n\n🪟 Action opened new window(s): Save" };
+        }
+        return super.execute(session, action, signal);
+      }
+    }
+    const computer = new WindowNoticeComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("initial-inventory")] },
+      { type: "tool_calls", calls: [clickCall("open-save-sheet")] },
+      { type: "tool_calls", calls: [switchWindowCall("stale-switch", "old-target")] },
+      { type: "tool_calls", calls: [switchWindowCall("fresh-switch", "fresh-target")] },
+      { type: "finish", summary: "observed the selected window" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("open and inspect the save dialog")).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(2);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual([
+        "execute:click",
+        "execute:switch_window:fresh-target",
+      ]);
+      const events = controller.getEvents();
+      const saveResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("open-save-sheet" as ToolCallId));
+      expect(saveResult?.result.output).toMatchObject({
+        windowInventory: {
+          options: [
+            { windowRef: "fresh-current", isCurrent: true },
+            { windowRef: "fresh-target", title: "Save", isCurrent: false },
+          ],
+        },
+      });
+      expect(JSON.stringify(saveResult?.result.output)).not.toContain("old-target");
+      expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === ("stale-switch" as ToolCallId))).toBe(true);
+      const observations = events.filter((event) => event.type === "observation.created");
+      expect(observations).toHaveLength(3);
+      const switchStarted = events.find((event): event is Extract<RuntimeEvent, { type: "action.execution.started" }> =>
+        event.type === "action.execution.started" && event.action.kind === "switch_window");
+      expect(switchStarted?.action).toMatchObject({ kind: "switch_window", windowRef: "fresh-target", basedOn: observations[1]?.observation.id });
+      expect(events.some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not expose stale or partial refs when the post-action inventory refresh fails", async () => {
+    const registry = windowSwitchRegistry();
+    class FailingRefreshComputer extends WindowSwitchComputer {
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        if (this.inventoryCalls > 1) throw new Error("inventory unavailable");
+        return { options: [
+          { windowRef: "old-current", appName: "Editor", title: "Draft", isCurrent: true },
+          { windowRef: "old-target", appName: "TextEdit", title: "Save", isCurrent: false },
+        ], truncated: false, omittedCount: 0 };
+      }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        if (action.kind === "click") {
+          signal.throwIfAborted();
+          this.calls.push("execute:click");
+          return { actionId: action.actionId, status: "completed" as const, message: "Pressed CMD+S\n\n🪟 Action opened new window(s): Save" };
+        }
+        return super.execute(session, action, signal);
+      }
+    }
+    const computer = new FailingRefreshComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("old-list")] },
+      { type: "tool_calls", calls: [clickCall("open-save-sheet-refresh-fails")] },
+      { type: "tool_calls", calls: [switchWindowCall("old-ref-after-refresh-failed", "old-target")] },
+      { type: "finish", summary: "refresh failed; kept existing target" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("open and inspect the save dialog")).resolves.toBe("succeeded");
+      const events = controller.getEvents();
+      const actionResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("open-save-sheet-refresh-fails" as ToolCallId));
+      expect(actionResult?.result.output).not.toHaveProperty("windowInventory");
+      expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === ("old-ref-after-refresh-failed" as ToolCallId))).toBe(true);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps listed refs across an ordinary observation and commits an isolated target transition", async () => {
     const registry = windowSwitchRegistry();
     const computer = new WindowSwitchComputer();
