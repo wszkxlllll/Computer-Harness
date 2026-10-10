@@ -800,7 +800,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       clearInterval(heartbeat);
       if (expiration !== undefined) clearTimeout(expiration);
       subscription.close();
-      streams.delete(dispose);
+      streams.delete(terminate);
       streamCount = Math.max(0, streamCount - 1);
       if (streams.size === 0) deviceStreams.delete(session.sessionKey);
       if (deviceStreams.size === 0) activeStreams.delete(session.deviceId);

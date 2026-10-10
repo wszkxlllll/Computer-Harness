@@ -783,6 +783,98 @@ describe("Host HTTP boundary", () => {
     }
   });
 
+  it("releases SSE admission slots on close and abort while preserving per-device limits", async () => {
+    let closedSubscriptions = 0;
+    const api: RemoteRunApi = {
+      ...fakeApi(),
+      subscribe: () => ({ close: () => { closedSubscriptions += 1; } }),
+    };
+    const host = createHostServer({ api, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin, port: 0 });
+    const connections: Array<{ reader: ReadableStreamDefaultReader<Uint8Array>; controller: AbortController }> = [];
+    let hostClosed = false;
+    try {
+      const localCsrf = jsonResponse<{ csrfToken: string }>(await host.server.inject({
+        method: "GET", url: "/api/local/session", headers: { origin: localOrigin },
+      })).csrfToken;
+      async function pairDevice(clientName: string) {
+        const challenge = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+          method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+        }));
+        const token = new URL(challenge.pairingUrl).searchParams.get("token")!;
+        const pair = jsonResponse<{ requestId: string }>(await host.server.inject({
+          method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName },
+        }));
+        await host.server.inject({
+          method: "POST", url: "/api/local/pairing/requests/" + pair.requestId + "/confirm",
+          headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+        });
+        const paired = await host.server.inject({
+          method: "POST", url: "/api/pair/requests/" + pair.requestId + "/session", headers: { origin: relayOrigin }, payload: {},
+        });
+        return String(paired.headers["set-cookie"]).split(";")[0];
+      }
+
+      const firstDeviceCookie = await pairDevice("SSE limit device A");
+      const secondDeviceCookie = await pairDevice("SSE limit device B");
+      const address = new URL(await host.listen());
+      async function connect(cookie: string) {
+        const controller = new AbortController();
+        const response = await fetch(new URL("/api/runs/" + runId + "/events", address), {
+          headers: { origin: relayOrigin, cookie, accept: "text/event-stream" }, signal: controller.signal,
+        });
+        if (response.status !== 200) return { status: response.status, controller } as const;
+        const reader = response.body!.getReader();
+        const first = await reader.read();
+        expect(new TextDecoder().decode(first.value)).toContain(": connected");
+        const connection = { status: response.status as const, controller, reader };
+        connections.push(connection);
+        return connection;
+      }
+
+      const deviceA = [
+        await connect(firstDeviceCookie),
+        await connect(firstDeviceCookie),
+        await connect(firstDeviceCookie),
+      ];
+      expect(deviceA.map((connection) => connection.status)).toEqual([200, 200, 200]);
+      expect((await connect(firstDeviceCookie)).status).toBe(429);
+      const deviceB = await connect(secondDeviceCookie);
+      expect(deviceB.status).toBe(200);
+
+      const first = deviceA[0];
+      const second = deviceA[1];
+      const third = deviceA[2];
+      if (first.status !== 200 || second.status !== 200 || third.status !== 200 || deviceB.status !== 200) {
+        throw new Error("SSE test connections were not admitted as expected");
+      }
+      await first.reader.cancel();
+      second.controller.abort();
+      await second.reader.cancel().catch(() => undefined);
+      await third.reader.cancel();
+      for (let attempt = 0; closedSubscriptions < 3 && attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(closedSubscriptions).toBe(3);
+
+      const reopened = await connect(firstDeviceCookie);
+      expect(reopened.status).toBe(200);
+      if (reopened.status !== 200) throw new Error("SSE slot was not released after close/abort");
+      hostClosed = true;
+      await host.close();
+      expect(closedSubscriptions).toBe(5);
+      await expect(Promise.race([
+        Promise.all([deviceB.reader.read(), reopened.reader.read()]),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Host cleanup did not close SSE streams")), 2_000)),
+      ])).resolves.toMatchObject([{ done: true }, { done: true }]);
+    } finally {
+      await Promise.all(connections.map(async ({ controller, reader }) => {
+        controller.abort();
+        await reader.cancel().catch(() => undefined);
+      }));
+      if (!hostClosed) await host.close();
+    }
+  });
+
   it("rechecks the paired session after async snapshot lookup before admitting an SSE subscription", async () => {
     let enteredGetRun: () => void = () => undefined;
     let releaseGetRun: (run: RemoteRunSnapshot | undefined) => void = () => undefined;
