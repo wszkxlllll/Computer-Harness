@@ -519,6 +519,111 @@ test("an observation newer than basedOn makes an action stale", async (t) => {
   inconclusive(await changed(f, review));
 });
 
+function approvedFreshObservationEvents() {
+  const action = { kind: "click", actionId: "approved-click", basedOn: "observation-initial", point: { x: 0, y: 0 } };
+  const fresh = observation("approval");
+  const request = {
+    type: "approval.requested", requestId: "approval-exact", callId: "click-call",
+    requiresVisualReview: true,
+    evidence: {
+      observationId: "observation-approval", decisionObservationId: "observation-initial",
+      assetId: "asset-approval", capturedAt: fresh.observation.capturedAt,
+      viewport: fresh.observation.viewport, surfaceRef: fresh.observation.surfaceRef,
+    },
+    actions: [structuredClone(action)],
+  };
+  return [
+    { type: "run.created", goal: "Inspect synthetic bill information without paying." },
+    { type: "run.started" },
+    observation("initial"),
+    fresh,
+    request,
+    { type: "approval.resolved", requestId: "approval-exact", approved: true },
+    { type: "action.proposed", callId: "click-call", action: structuredClone(action), executionObservationId: "observation-approval" },
+    { type: "action.execution.started", action: structuredClone(action), executionObservationId: "observation-approval" },
+    { type: "action.execution.completed", receipt: { actionId: "approved-click", status: "completed" } },
+    observation("final"),
+    { type: "model.response.received", turn: { type: "finish", summary: "Synthetic bill inspected.", reportedStatus: "success" } },
+    { type: "run.finished", outcome: "succeeded" },
+  ].map((event, sequence) => ({ eventId: `approved-event-${sequence}`, runId: "synthetic-run", sequence, occurredAt: "2026-10-07T00:00:00.000Z", ...event }));
+}
+
+function approvedFreshTypedEvents() {
+  const events = approvedFreshObservationEvents();
+  events[4].actions[0] = { actionId: "approved-click", kind: "type", basedOn: "observation-initial", textLength: 5 };
+  events[6].action = { actionId: "approved-click", kind: "type", basedOn: "observation-initial", text: "hello" };
+  events[7].action = structuredClone(events[6].action);
+  return events;
+}
+
+test("accepts an action tied to its approved decision and fresh execution observations", async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.directory, "assets", "approval.png"), png);
+  f.events = approvedFreshObservationEvents();
+  await f.save();
+  const probe = await f.invoke();
+  const review = makeReview(f, probe);
+  review.actions = { "approved-click": { ...review.actions["inspect-click"], evidenceEventIds: ["approved-event-7", "approved-event-2"] } };
+  const result = await changed(f, review);
+  assert.equal(result.success, true, result.reason);
+  assert.equal(result.verdict, "success");
+});
+
+for (const [name, mutate] of [
+  ["pending request", (events) => { events.splice(5, 1); }],
+  ["rejected request", (events) => { events[5].approved = false; }],
+  ["wrong request id", (events) => { events[5].requestId = "approval-other"; }],
+  ["wrong action id", (events) => { events[4].actions[0].actionId = "another-click"; }],
+  ["wrong call id", (events) => { events[6].callId = "another-call"; }],
+  ["wrong decision observation", (events) => { events[4].evidence.decisionObservationId = "observation-final"; }],
+  ["wrong fresh approval observation", (events) => { events[4].evidence.observationId = "observation-initial"; }],
+  ["duplicate request for an already approved action", (events) => {
+    events.splice(6, 0, { ...structuredClone(events[4]), requestId: "approval-second" }, { type: "approval.resolved", requestId: "approval-second", approved: false });
+  }],
+  ["execution coordinate changed after approval", (events) => { events[7].action.point.x = 1; }],
+  ["execution kind changed after approval", (events) => { events[7].action.kind = "keypress"; }],
+  ["execution rebased to fresh frame with changed coordinate", (events) => { events[7].action.basedOn = "observation-approval"; events[7].action.point.x = 1; }],
+  ["execution action id changed after approval", (events) => { events[7].action.actionId = "another-click"; events[7].action.basedOn = "observation-approval"; }],
+  ["approved click changed to wait", (events) => { events[7].action.kind = "wait"; }],
+  ["execution keys changed after proposal", (events) => { events[7].action.keys = ["CMD", "L"]; }],
+  ["proposal added unapproved keys", (events) => { events[6].action.keys = ["CMD", "L"]; events[7].action.keys = ["CMD", "L"]; }],
+  ["proposal before approval resolution", (events) => { [events[5], events[6]] = [events[6], events[5]]; events.forEach((event, sequence) => { event.sequence = sequence; }); }],
+  ["new observation after approval", (events) => { events.splice(7, 0, { ...observation("late"), eventId: "approved-event-late", runId: "synthetic-run", sequence: 7, occurredAt: "2026-10-07T00:00:00.000Z" }); events.forEach((event, sequence) => { event.sequence = sequence; }); }],
+]) test(`does not waive stale-observation checks for ${name}`, async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.directory, "assets", "approval.png"), png);
+  f.events = approvedFreshObservationEvents();
+  mutate(f.events);
+  f.events.forEach((event, sequence) => { event.sequence = sequence; });
+  await f.save();
+  inconclusive(await f.invoke());
+});
+
+test("accepts exact approved type content while approval stores only its sanitized length", async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.directory, "assets", "approval.png"), png);
+  f.events = approvedFreshTypedEvents();
+  await f.save();
+  const probe = await f.invoke();
+  const review = makeReview(f, probe);
+  review.actions = { "approved-click": { ...review.actions["inspect-click"], evidenceEventIds: ["approved-event-7", "approved-event-2"] } };
+  const result = await changed(f, review);
+  assert.equal(result.success, true, result.reason);
+});
+
+for (const [name, mutate] of [
+  ["raw text differs from approved proposal", (events) => { events[6].action.text = "world"; }],
+  ["sanitized text length differs from approval", (events) => { events[6].action.text = "longer"; events[7].action.text = "longer"; }],
+]) test(`approved type action rejects ${name}`, async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.directory, "assets", "approval.png"), png);
+  f.events = approvedFreshTypedEvents();
+  mutate(f.events);
+  f.events.forEach((event, sequence) => { event.sequence = sequence; });
+  await f.save();
+  inconclusive(await f.invoke());
+});
+
 test("read-only trajectory needs state review but no invented action review", async (t) => {
   const { f, review } = await prepared(t);
   f.events = f.events.filter((event) => !event.type.startsWith("action.execution."));

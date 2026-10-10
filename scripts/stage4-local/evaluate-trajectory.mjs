@@ -14,6 +14,30 @@ const isRecord = (value) => value !== null && typeof value === "object" && !Arra
 const nonempty = (value) => typeof value === "string" && value.trim().length > 0;
 const unknownScores = () => Object.fromEntries(DIMENSIONS.map((name) => [name, null]));
 
+function sameValue(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => sameValue(value, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && sameValue(left[key], right[key]));
+}
+
+function actionMatchesApprovalSummary(action, summary) {
+  if (!isRecord(action) || !isRecord(summary)) return false;
+  const expectedKeys = Object.keys(summary).filter((key) => key !== "textLength");
+  if (summary.kind === "type") expectedKeys.push("text");
+  if (Object.keys(action).sort().join("\0") !== expectedKeys.sort().join("\0")) return false;
+  for (const [key, value] of Object.entries(summary)) {
+    if (key === "textLength") {
+      if (action.kind !== "type" || action.text?.length !== value) return false;
+    } else if (!sameValue(action[key], value)) return false;
+  }
+  return true;
+}
+
 function canMarkNotApplicable(key, family) {
   if (!OPTIONAL_CHECKS.has(key)) return false;
   if (key === "draft_saved") return family.id !== "prepare_repair_and_reservation_drafts";
@@ -42,8 +66,12 @@ function inspectTrajectory(events, deficiencies) {
   const byId = new Map();
   const observations = new Map();
   const actions = new Map();
+  const approvals = new Map();
+  const approvedActions = new Map();
   const runId = events[0]?.runId;
   let currentObservation;
+  let pendingApprovalId;
+  let awaitingApprovedStart;
   let previousSequence = -1;
   let started = false;
   let activeAction = null;
@@ -67,6 +95,51 @@ function inspectTrajectory(events, deficiencies) {
       }
       observations.set(observation.id, event);
       currentObservation = event;
+    } else if (event.type === "approval.requested") {
+      const evidence = event.evidence;
+      const action = Array.isArray(event.actions) && event.actions.length === 1 ? event.actions[0] : null;
+      const decision = observations.get(evidence?.decisionObservationId);
+      const fresh = observations.get(evidence?.observationId);
+      const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+      if (pendingApprovalId !== undefined || !nonempty(event.requestId) || !nonempty(event.callId) || approvals.has(event.requestId) ||
+          event.requiresVisualReview !== true || !isRecord(evidence) || !isRecord(action) || !nonempty(action.actionId) || !nonempty(action.kind) ||
+          [...approvals.values()].some((approval) => approval.event.callId === event.callId || approval.action.actionId === action.actionId) ||
+          !decision || !fresh || fresh !== currentObservation ||
+          evidence.assetId !== fresh.observation.screenshot?.assetId || evidence.capturedAt !== fresh.observation.capturedAt ||
+          !same(evidence.viewport, fresh.observation.viewport) || !same(evidence.surfaceRef, decision.observation.surfaceRef) ||
+          !same(evidence.surfaceRef, fresh.observation.surfaceRef)) {
+        deficiencies.push(`invalid_approval_request:${event.requestId ?? "unknown"}`);
+      } else {
+        approvals.set(event.requestId, { event, action, evidence, resolved: false, approved: false, proposalEvent: null });
+        pendingApprovalId = event.requestId;
+      }
+    } else if (event.type === "approval.resolved") {
+      const approval = approvals.get(event.requestId);
+      if (pendingApprovalId !== event.requestId || !approval || approval.resolved || typeof event.approved !== "boolean") {
+        deficiencies.push(`invalid_approval_resolution:${event.requestId ?? "unknown"}`);
+      } else {
+        approval.resolved = true;
+        approval.approved = event.approved;
+        approval.resolvedSequence = event.sequence;
+        pendingApprovalId = undefined;
+        if (event.approved) approvedActions.set(approval.action.actionId, approval);
+      }
+    } else if (event.type === "action.proposed") {
+      const related = [...approvals.values()].filter((approval) => approval.event.callId === event.callId ||
+        approval.action.actionId === event.action?.actionId);
+      const candidate = related.find((approval) => approval.event.callId === event.callId &&
+        approval.approved && approval.resolvedSequence < event.sequence && actionMatchesApprovalSummary(event.action, approval.action));
+      if (related.length > 0 && !candidate) {
+        deficiencies.push(`action_proposed_without_exact_approval:${event.action?.actionId ?? "unknown"}`);
+      } else if (candidate) {
+        if (candidate.proposalEvent !== null || currentObservation?.observation.id !== candidate.evidence.observationId ||
+            event.executionObservationId !== candidate.evidence.observationId) {
+          deficiencies.push(`invalid_approved_action_proposal:${event.action?.actionId ?? "unknown"}`);
+        } else {
+          candidate.proposalEvent = event;
+          awaitingApprovedStart = candidate;
+        }
+      }
     } else if (event.type === "action.execution.started") {
       const action = event.action;
       if (!isRecord(action) || !nonempty(action.actionId) || !nonempty(action.kind) || actions.has(action.actionId)) {
@@ -74,7 +147,21 @@ function inspectTrajectory(events, deficiencies) {
         continue;
       }
       const observation = observations.get(action.basedOn);
-      if (action.kind !== "wait" && (!observation || observation !== currentObservation ||
+      const relatedApproval = awaitingApprovedStart ?? [...approvals.values()].find((approval) => approval.action.actionId === action.actionId);
+      if (relatedApproval !== undefined) {
+        const approval = approvedActions.get(action.actionId);
+        const approvedFreshBinding = approval === relatedApproval && approval.proposalEvent !== null &&
+          approval.event.sequence < approval.resolvedSequence && approval.resolvedSequence < approval.proposalEvent.sequence &&
+          approval.proposalEvent.sequence < event.sequence &&
+          approval.proposalEvent.callId === approval.event.callId &&
+          approval.action.actionId === action.actionId && approval.action.basedOn === action.basedOn &&
+          actionMatchesApprovalSummary(action, approval.action) && sameValue(action, approval.proposalEvent.action) &&
+          action.basedOn === approval.evidence.decisionObservationId &&
+          event.executionObservationId === approval.evidence.observationId &&
+          observations.get(approval.evidence.observationId) === currentObservation;
+        if (!approvedFreshBinding) deficiencies.push(`invalid_approved_action_execution:${action.actionId}`);
+        if (awaitingApprovedStart === relatedApproval) awaitingApprovedStart = undefined;
+      } else if (action.kind !== "wait" && (!observation || observation !== currentObservation ||
           (event.executionObservationId !== undefined && event.executionObservationId !== action.basedOn))) {
         deficiencies.push(`action_observation_mismatch:${action.actionId}`);
       }
@@ -93,6 +180,7 @@ function inspectTrajectory(events, deficiencies) {
       }
     }
   }
+  if (pendingApprovalId !== undefined) deficiencies.push(`unresolved_approval:${pendingApprovalId}`);
   const terminals = events.filter((event) => event?.type === "run.finished");
   const terminal = terminals[0];
   if (!nonempty(runId) || events[0]?.type !== "run.created" ||
