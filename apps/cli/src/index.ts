@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
@@ -455,6 +455,9 @@ async function runEnvironmentLeaseRecovery(rawArgs: readonly string[]): Promise<
 
 export function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConfig {
   const qwenEndpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
+  const rawGlmRequestTimeoutMs = options.model === "glm-5.3-flash" ? process.env.GLM_REQUEST_TIMEOUT_MS : undefined;
+  const glmRequestTimeoutMs = rawGlmRequestTimeoutMs === undefined ? undefined : Number(rawGlmRequestTimeoutMs.trim());
+  validateGlmRequestTimeoutMs(glmRequestTimeoutMs);
   const managedBrowserInitialTarget = options.grounding === "dom-catalog-v1" || options.grounding === "hybrid-catalog-v1";
   const managedBrowserCompanion = options.windowSwitch
     && !options.tui
@@ -509,6 +512,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
       || process.env.GLM_THINKING === "low" || process.env.GLM_THINKING === "high" || process.env.GLM_THINKING === "max"
       ? process.env.GLM_THINKING
       : "enabled",
+    ...(glmRequestTimeoutMs === undefined ? {} : { glmRequestTimeoutMs }),
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };

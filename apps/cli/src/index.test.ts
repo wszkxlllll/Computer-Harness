@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseArgs, toResolvedRunConfig } from "./index.js";
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("CLI window-switch configuration", () => {
   it("keeps desktop runs opt-in while allowing the switch flag without a bound window", () => {
@@ -102,5 +104,41 @@ describe("CLI window-switch configuration", () => {
       "--osworld-bridge", "http://fixture.invalid",
       "--window-switch",
     ])).toThrow("--window-switch requires --computer cua");
+  });
+});
+
+describe("CLI GLM request-timeout configuration", () => {
+  const options = parseArgs([
+    "--goal", "Inspect the open task",
+    "--model", "glm-5.3-flash",
+    "--computer", "cua",
+    "--cua-socket", "fixture.sock",
+  ]);
+
+  it("leaves the runtime default unset when the environment override is absent", () => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", undefined);
+    expect(toResolvedRunConfig(options, "Inspect the open task")).not.toHaveProperty("glmRequestTimeoutMs");
+  });
+
+  it("forwards a valid environment override as a number", () => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", "180000");
+    expect(toResolvedRunConfig(options, "Inspect the open task").glmRequestTimeoutMs).toBe(180000);
+  });
+
+  it.each(["241000", "not-a-number"])("rejects invalid environment overrides (%s)", (value) => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", value);
+    expect(() => toResolvedRunConfig(options, "Inspect the open task")).toThrow(/request timeout/u);
+  });
+
+  it("does not apply a GLM-only override to Qwen runs", () => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", "not-a-number");
+    const qwenOptions = parseArgs([
+      "--goal", "Inspect the open task",
+      "--model", "qwen3.8-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--qwen-coordinate-mode", "normalized_1000",
+    ]);
+    expect(toResolvedRunConfig(qwenOptions, "Inspect the open task")).not.toHaveProperty("glmRequestTimeoutMs");
   });
 });

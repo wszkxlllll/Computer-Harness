@@ -10,7 +10,7 @@ import {
 } from "./batch-fetch-guard.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const usage = "Usage: node scripts/autonomous/batch-host.mjs --batch-root <private-dir> --batch-id <id> --reservation-id <id> [--initialize | --host-args <...>]";
+const usage = "Usage: node scripts/autonomous/batch-host.mjs --batch-root <private-dir> --batch-id <id> --reservation-id <id> [--entry host|cli] [--initialize] -- <entry args...>";
 
 function parse(args) {
   const values = new Map();
@@ -27,7 +27,9 @@ function parse(args) {
   }
   const root = values.get("--batch-root"), batchId = values.get("--batch-id"), reservationId = values.get("--reservation-id");
   if (typeof root !== "string" || resolve(root) !== root || typeof batchId !== "string" || typeof reservationId !== "string") throw new Error(usage);
-  return { root, batchId, reservationId, initialize: values.get("--initialize") === true, hostArgs };
+  const entry = values.get("--entry") ?? "host";
+  if (entry !== "host" && entry !== "cli") throw new Error("ENTRY_REFUSED");
+  return { root, batchId, reservationId, entry, initialize: values.get("--initialize") === true, hostArgs };
 }
 
 const options = parse(process.argv.slice(2));
@@ -38,8 +40,8 @@ if (options.initialize) {
   process.exit(0);
 }
 
-const hostEntry = resolve(repositoryRoot, "apps/host/dist/index.js");
-if (fs.realpathSync(hostEntry) !== hostEntry) throw new Error("HOST_ENTRY_REFUSED");
+const entryPath = resolve(repositoryRoot, "apps", options.entry, "dist/index.js");
+if (fs.realpathSync(entryPath) !== entryPath) throw new Error("ENTRY_PATH_REFUSED");
 if (options.hostArgs.length === 0) throw new Error(usage);
 const guard = createDurableFetchGuard({
   root: options.root,
@@ -49,5 +51,5 @@ const guard = createDurableFetchGuard({
 });
 installGuard(globalThis, guard);
 process.once("exit", () => guard.close());
-process.argv = [process.execPath, hostEntry, ...options.hostArgs];
-await import(pathToFileURL(hostEntry).href);
+process.argv = [process.execPath, entryPath, ...options.hostArgs];
+await import(pathToFileURL(entryPath).href);
