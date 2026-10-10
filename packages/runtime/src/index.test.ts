@@ -1274,6 +1274,16 @@ describe("RunController S2-2 happy path", () => {
 
   it("admits retry only when the remaining retry window strictly exceeds delay plus configured reserve", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let retryTimerRegistered!: () => void;
+    const retryTimerScheduled = new Promise<void>((resolve) => {
+      retryTimerRegistered = resolve;
+    });
+    let retryFailureCommitted = false;
+    const originalSetTimeout = globalThis.setTimeout;
+    const retryTimerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+      if (delay === 500 && retryFailureCommitted) retryTimerRegistered();
+      return originalSetTimeout(callback, delay, ...args);
+    });
     try {
       const boundaryProvider = new PreparedScriptedProvider("same_input_retry");
       const boundary = await makeController(boundaryProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
@@ -1287,15 +1297,20 @@ describe("RunController S2-2 happy path", () => {
       const admittedProvider = new PreparedScriptedProvider("same_input_retry");
       const admitted = await makeController(admittedProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
         providerAttemptReserveMs: 119_499,
+        onEventCommitted: (event) => {
+          if (event.type === "model.request.failed") retryFailureCommitted = true;
+        },
       });
       const running = admitted.controller.start("one millisecond of reserve headroom admits retry");
-      await waitUntil(() => admittedProvider.generateCalls === 1);
+      await retryTimerScheduled;
+      expect(admittedProvider.generateCalls).toBe(1);
       await vi.advanceTimersByTimeAsync(500);
       await expect(running).resolves.toBe("succeeded");
       expect(admittedProvider.generateCalls).toBe(2);
       expect(admitted.controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, outcome: "succeeded" });
       await rm(admitted.directory, { recursive: true, force: true });
     } finally {
+      retryTimerSpy.mockRestore();
       vi.useRealTimers();
     }
   });
