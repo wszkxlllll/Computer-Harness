@@ -70,6 +70,8 @@
 | 19:10 正常headless UI闭环 | 产品`17ec145`本地Web / S2/S4 | 专用Chrome154新profile、独立admin/client contexts：可见链接申请→电脑批准→connected；客户端刷新前后pending均1。390×844无横向溢出；无效码提示过期且pending/device均0。摘要`baseline/headless-web-pairing-summary-20261010.json` SHA `f7a2b5c9…d9ee8b`；Sol实际读摘要并查看脱敏截图 | 零Run/Provider；3个自有测试device经正常UI撤销，headless/profile已关闭。测试本地JS hash7df7b878，不冒公网当前资产同版或实体手机 |
 | 19:12 公网Preview同版发布边界 | S6 / 既有严格SSH只读 | 实际Host origin对应Preview服务；当前34项固定闭包27相同/7不同。Preview根/current父/releases/Web dist均不可写，sudo -n -l无可用非交互规则，本地无部署workflow/helper；历史激活操作属root管理 | 未写远端/切服务/发布可写但不同origin的stable。正常公网HTTP配对通过与同版发布分栏；剩余为服务所有者合法发布权限，不能由TCP/健康替代 |
 
-## 当前未关闭出口
+## 当前范围决定与未关闭出口
 
-本轮可自主完成的接管、离线修复/检查、正常公网HTTP认证配对、隔离headless UI、评测器真实失败导入、PR取舍、非force远端交付与手机包已完成。剩余具体外部条件：Mac当前console正常解锁后完整T2/T1/T3三轮与真实控制/同名双窗/sheet；对应Windows/Linux可达原生桌面（ubuntu-vm一次正常SSH超时）；Preview服务所有者发布权限以安装同版闭包；实体手机M1–M4；另一位队友试用；真实成功任务及真人审核以完成评分校准。不将任何一项并作“等手机”，不以L1或配对通过关闭任务成果。详细逐项状态见执行计划看板。
+2026-10-10 用户决定本项目只负责 macOS 电脑端、Web/Relay 与手机客户端，并覆盖原三线计划中的 Windows/Linux 平台目标。历史 Windows/Linux 事件、实现与跨平台 CI 结果保留；不继续承担其实现、修复、原生实测、环境寻找或交付，也不将其列为当前待办、阻塞或完成条件。
+
+本轮可自主完成的接管、离线修复/检查、正常公网HTTP认证配对、隔离headless UI、评测器真实失败导入、PR取舍、非force远端交付与手机包已完成。剩余具体外部条件：Mac当前console正常解锁后完整T2/T1/T3三轮与真实控制/同名双窗/sheet；Preview服务所有者发布权限以安装同版闭包；实体手机M1–M4；另一位队友试用；真实成功任务及真人审核以完成评分校准。不将任何一项并作“等手机”，不以L1或配对通过关闭任务成果。详细逐项状态见执行计划看板。
