@@ -47,7 +47,8 @@ export function classifyGlmRequest(url, init) {
   try { body = JSON.parse(request.body); } catch { fail("FETCH_BODY_REFUSED"); }
   if (!plain(body) || body.model !== "glm-5.3-flash" || body.max_tokens !== 8192 || body.stream !== false ||
       !plain(body.thinking) || body.thinking.type !== "enabled" ||
-      (body.reasoning_effort !== undefined && body.reasoning_effort !== "low") || !Array.isArray(body.tools) || body.tools.length === 0) fail("FETCH_PROFILE_REFUSED");
+      (body.reasoning_effort !== undefined && body.reasoning_effort !== "low" && body.reasoning_effort !== "high") ||
+      !Array.isArray(body.tools) || body.tools.length === 0) fail("FETCH_PROFILE_REFUSED");
   const names = body.tools.map((tool) => {
     if (!plain(tool) || tool.type !== "function" || !plain(tool.function) || typeof tool.function.name !== "string") fail("FETCH_TOOLS_REFUSED");
     return tool.function.name;

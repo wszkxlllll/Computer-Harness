@@ -37,6 +37,18 @@ test("reserves a main and risk ceiling before the normal Run and enforces both g
   assert.deepEqual(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual, { total: 42, main: 40, risk: 2 });
 });
 
+test("allows the bounded GLM high reasoning profile and rejects max or unknown effort before delegation", async (t) => {
+  const f = await fixture(t);
+  await f.guard.fetch(GLM_ENDPOINT, request(["click"], { reasoning_effort: "high" }));
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual, { total: 1, main: 1, risk: 0 });
+
+  await assert.rejects(f.guard.fetch(GLM_ENDPOINT, request(["click"], { reasoning_effort: "max" })), /FETCH_PROFILE_REFUSED/);
+  await assert.rejects(f.guard.fetch(GLM_ENDPOINT, request(["click"], { reasoning_effort: "unexpected" })), /FETCH_PROFILE_REFUSED/);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual, { total: 1, main: 1, risk: 0 });
+});
+
 test("synchronous throw, rejection and timeout consume durable slots without refund", async (t) => {
   const f = await fixture(t, { reservation: { total: 3, main: 3, risk: 0 } });
   let attempt = 0;
