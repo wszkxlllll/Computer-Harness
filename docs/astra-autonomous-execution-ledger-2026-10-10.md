@@ -272,3 +272,9 @@ A04通过既有正式接口续预占96/6/102 revision2，硬cap不变。首完�
 重试入口 `run-1791696459320-6fc309ed-4c7` 因旧模板entryArgs保留旧window16074而误绑定，Sol发现actualargv后直接SIGINT；3main、2keypress、cancelled。既有私有模板最小改为target单一字段生成socket/PID/window参数，exec前一致性断言，不另建runner。新fresh目标22394/16120的完整T2 `run-1791696712658-6d50a2f8-a7c` 8main、7GUI动作：输入原六行、CMD+S产生新Save及精确fresh windowRef，但后续两次点击仍指父窗同639,284且无新相关窗口/同图；修后monitor及时取消。两次完整卡均未生成指定文件，保存/关闭/重开未通过。所有三Run已cancelled，unknownSideEffects均none_recorded、cleanupDiagnostics为空；不以posted回执当界面成功。停止同版paid，继续零Provider修精确AXSheet→AXParent阻塞modal证据与现有Surface push/pop接通。
 
 此稳定点A04 actual60main/2risk/62、全部历史240main/6risk/246物理请求；225份已知usage合计4243328tokens，21请求usage未知、金额未知。新增三Run分别118069/31416/138092tokens，均各有1取消请求usage未知。T1/T2/T3完整原卡仍未通过；录屏/辅助功能已经实际授予，不能继续列为当前待用户条件。
+
+
+2026-10-11 A05有界续接决定：A04保持cap96main/6risk/102与actual60/2/62不变，原A01–A04合计246物理请求完整保留。新增精确AXSheet/AXParent自动生命周期修复，以及此前已真实验真的capture/focus修复，提供完整原卡重验的新技术变量；A04余36main不足一轮40请求，故用正式initializeBatch API新建独立A05，cap120main/6risk/126、首预占40/2/42，reservationId=T2-attached-sheet-repair。A05仅用于这些修复后的未验收完整任务，保直接无进展取消及生产Guard；必须先零Provider生命周期独检通过才发起模型Run，不因新增批次宣称T1/T2/T3已通过，不重置旧计数或突破任何旧cap。
+
+
+2026-10-11 sheet零Provider验真闭环：初私有probe缺Runtime detect选项/旧关闭ID构造错误保留，未冒产品失败或通过。Sol接管正确probe后取得严格关系正例与实际y330→352动画失配；最小TS一次只读重采修复后，b06d1024真实parent16174→child16187→parent自动push/pop通过，旧ref零输入拒绝，全部cleanup正常。新候选签名与两项权限实际连续可用，stock4254仍原样。Sol自有caffeinate28423有界1800秒，供本轮测试结束正常清理。桌面已交回唯一Luna，A05初始化actual0；原246请求不变。完整T1/T2/T3仍待原卡业务验收。

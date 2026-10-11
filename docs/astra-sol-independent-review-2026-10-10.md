@@ -217,3 +217,6 @@ Sol已独立读取候选注册PNG/metadata、真实SDK输入guard结果及三条
 
 
 2026-10-11 attached-sheet离线冻结独检：Sol集中只读核原生checked AXChildren（成功空数组与读取失败分开）、直接SPI父子ID、AXParent CFEqual、父子AX/WindowServer几何及尾读前台/焦点。TS使用真实Mac partial库存的baseline差分，只将唯一新窗与精确关系证明匹配，仍保留complete=false；既有push/pop、旧refs失效、unknown保持及Runtime/Trajectory admission source限制一致。独立session8006执行tsc-b及Computer/Surface/Runtime/Trajectory/Protocol相关28文件837测试全部通过；作者session3723同范围通过，native新增专用表1/1通过（未重复旧完整baseline）。当前源码冻结可进入可复现第三patch、候选构建及真实0Provider parent→sheet→parent；此签收不代表生命周期或完整T2业务通过，历史请求仍246、无新增paid。
+
+
+2026-10-11 Sol独立真实生命周期签收：Luna暂停全部GUI后由Sol唯一接管。正确公开SDK合同在新空白16174首次遇实际sheet动画inventory y330/proof y352，严格拒绝，未手动handoff或代保存。Luna仅TS增加一次身份/关系/焦点全部已过且仅几何变化的80ms只读重采；同PID/CGID/parent、唯一候选、非截断、全严格几何不变，二次仍不稳/换ID/多窗拒绝。Sol独立Computer291通过及最终真实377×218帧4例通过。真实b06d1024生命周期自动push至16187、精确sheet截图754×436、ESC实际派发子窗、checked-none自动pop父generation3；旧child观察拒绝，native输入数2→2，cleanup=[]，零Provider。桌面随后交回唯一Luna执行A05完整T2，Sol停止GUI。当前blank无业务文字、无保存文件；此局部验真不关闭完整T2。

@@ -222,6 +222,7 @@ type FixtureWindow = {
   isOnScreen?: boolean;
   ownerPid?: number;
   ownerWindowId?: number;
+  omitOwnerEvidence?: boolean;
   minimized?: boolean;
   windowClass?: string;
 };
@@ -251,6 +252,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let closeExtraWindowAfterClick = false;
   let secondExtraWindow: typeof extraWindow | undefined;
   let secondExtraWindowAfterClick: typeof extraWindow | undefined;
+  let secondExtraWindowOnListCall: { call: number; value: NonNullable<typeof extraWindow> } | undefined;
   let extraWindowOnListCall: { call: number; value: NonNullable<typeof extraWindow> } | undefined;
   let foregroundRefusal = false;
   let foregroundRefusalMessage = "foreground_unavailable: Windows did not activate exact target HWND 0x162e (actual foreground HWND 0x223d); no mouse input was sent";
@@ -320,6 +322,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
           return result({ isError: true, text: "fixture list_windows failure" });
         }
         if (extraWindowOnListCall?.call === listWindowsCallCount) extraWindow = extraWindowOnListCall.value;
+        if (secondExtraWindowOnListCall?.call === listWindowsCallCount) secondExtraWindow = secondExtraWindowOnListCall.value;
         const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
         return result({ structuredJson: JSON.stringify({ complete: windowInventoryComplete, truncated: windowInventoryTruncated, windows: unavailable ? [] : [
           ...(omitBoundWindow ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds, z_index: 1, is_on_screen: true }]),
@@ -332,7 +335,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
             z_index: extraWindow.zIndex,
             is_on_screen: extraWindow.isOnScreen ?? true,
             ...(extraWindow.minimized === undefined ? {} : { is_minimized: extraWindow.minimized }),
-            owner_pid: extraWindow.ownerPid ?? extraWindow.pid,
+            ...(extraWindow.omitOwnerEvidence === true ? {} : { owner_pid: extraWindow.ownerPid ?? extraWindow.pid }),
             ...(extraWindow.ownerWindowId === undefined ? {} : { owner_window_id: extraWindow.ownerWindowId }),
             ...(extraWindow.windowClass === undefined ? {} : { window_class: extraWindow.windowClass }),
           }]),
@@ -344,7 +347,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
             bounds: secondExtraWindow.bounds ?? bounds,
             z_index: secondExtraWindow.zIndex ?? 0,
             is_on_screen: secondExtraWindow.isOnScreen ?? true,
-            owner_pid: secondExtraWindow.ownerPid ?? secondExtraWindow.pid,
+            ...(secondExtraWindow.omitOwnerEvidence === true ? {} : { owner_pid: secondExtraWindow.ownerPid ?? secondExtraWindow.pid }),
             ...(secondExtraWindow.ownerWindowId === undefined ? {} : { owner_window_id: secondExtraWindow.ownerWindowId }),
             ...(secondExtraWindow.minimized === undefined ? {} : { is_minimized: secondExtraWindow.minimized }),
             ...(secondExtraWindow.windowClass === undefined ? {} : { window_class: secondExtraWindow.windowClass }),
@@ -478,6 +481,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     setPlatform(value: unknown) { platform = value; },
     degradeActionOnCall(callNumber: number) { actionDegradedCallNumber = callNumber; },
     setSecondExtraWindow(value: typeof extraWindow) { secondExtraWindow = value; },
+    setSecondExtraWindowOnListCall(call: number, value: NonNullable<typeof extraWindow>) { secondExtraWindowOnListCall = { call, value }; },
     setExtraWindowAfterClick(value: NonNullable<typeof extraWindow>) { extraWindowAfterClick = value; },
     closeExtraWindowAfterNextClick() { closeExtraWindowAfterClick = true; },
     setSecondExtraWindowAfterClick(value: NonNullable<typeof extraWindow>) { secondExtraWindowAfterClick = value; },
@@ -1100,6 +1104,107 @@ describe("CuaDriverComputer", () => {
         surfaceId: before.surfaceRef.surfaceId,
         kind: "native_window",
       }));
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "settles to the exact AX geometry", settle: true, changeWindowId: false, addSecondWindow: false, pushed: true, proofReads: 2 },
+    { label: "remains geometrically unstable", settle: false, changeWindowId: false, addSecondWindow: false, pushed: false, proofReads: 2 },
+    { label: "changes the candidate identity", settle: true, changeWindowId: true, addSecondWindow: false, pushed: false, proofReads: 1 },
+    { label: "adds another fresh window", settle: true, changeWindowId: false, addSecondWindow: true, pushed: false, proofReads: 1 },
+  ])("rechecks one macOS AXSheet geometry mismatch and fails closed when it $label", async ({ label, settle, changeWindowId, addSecondWindow, pushed, proofReads }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-sheet-geometry-recheck-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setWindowInventoryComplete(false);
+    const stableBounds = { x: 402, y: 352, width: 377, height: 218 };
+    const transientBounds = { ...stableBounds, y: 330 };
+    const candidate = { pid: fake.target.pid, windowId: 9300, appName: "TextEdit", title: "保存", bounds: transientBounds, zIndex: 2, isOnScreen: true, omitOwnerEvidence: true };
+    const proof = {
+      pid: fake.target.pid,
+      window_id: fake.target.windowId,
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+      snapshot_id: "geometry-recheck-snapshot",
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1",
+        snapshot_id: "geometry-recheck-snapshot",
+        pid: fake.target.pid,
+        parent_window_id: fake.target.windowId,
+        parent_owner_pid: fake.target.pid,
+        parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
+        direct_children_status: "success",
+        direct_child_count: 1,
+        status: "sheet",
+        frontmost_pid: fake.target.pid,
+        focused_window_id: candidate.windowId,
+        sheet: {
+          role: "AXSheet",
+          pid: fake.target.pid,
+          window_id: candidate.windowId,
+          owner_pid: fake.target.pid,
+          ax_parent_pid: fake.target.pid,
+          ax_parent_window_id: fake.target.windowId,
+          ax_parent_verified: true,
+          bounds: stableBounds,
+        },
+      },
+    };
+    fake.setWindowGroundingState(fake.target.windowId, proof);
+    fake.setExtraWindowAfterClick(candidate);
+    fake.setWindowImageSize(candidate.windowId, stableBounds.width, stableBounds.height);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin",
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target],
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const beforeObservationId = `mac-sheet-geometry-before-${label}` as ObservationId;
+      const before = await computer.observe(session, beforeObservationId, signal);
+      const receipt = await computer.execute(session, {
+        actionId: `mac-sheet-geometry-action-${label}` as ActionId,
+        basedOn: beforeObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+      const retryListCall = fake.getListWindowsCallCount() + 4;
+      if (settle) {
+        const settled = {
+          ...candidate,
+          windowId: changeWindowId ? candidate.windowId + 1 : candidate.windowId,
+          bounds: stableBounds,
+        };
+        fake.setExtraWindowOnListCall(retryListCall, settled);
+        if (addSecondWindow) fake.setSecondExtraWindowOnListCall(retryListCall, {
+          ...candidate, windowId: candidate.windowId + 2, title: "Other fresh window", bounds: stableBounds,
+        });
+      }
+      const candidates = await computer.detectNewWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([]);
+      expect(fake.calls.filter((call) => call.name === "get_window_state" && call.input?.window_id === fake.target.windowId &&
+        call.input?.include_screenshot === false)).toHaveLength(proofReads);
+      const after = await computer.observe(session, `mac-sheet-geometry-after-${label}` as ObservationId, signal);
+      if (pushed) {
+        expect(after.surfaceRef).toMatchObject({
+          kind: "native_window",
+          parentSurfaceId: before.surfaceRef.surfaceId,
+          admissionSource: "macos_attached_sheet_proof",
+        });
+      } else {
+        expect(after.surfaceRef).toEqual(before.surfaceRef);
+      }
     } finally {
       if (session !== undefined) await computer.close(session);
       await rm(directory, { recursive: true, force: true });

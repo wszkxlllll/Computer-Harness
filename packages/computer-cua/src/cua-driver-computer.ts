@@ -141,6 +141,7 @@ type TransientRootVerification =
 
 type MacAttachedSheetState =
   | { readonly status: "sheet"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }> }
+  | { readonly status: "geometry_unstable" }
   | { readonly status: "none" }
   | { readonly status: "unknown"; readonly reason: string };
 
@@ -197,12 +198,15 @@ async function readMacAttachedSheetState(
       candidate.isOnScreen !== true || candidate.minimized === true ||
       !Number.isFinite(bounds?.x) || !Number.isFinite(bounds?.y) ||
       !Number.isFinite(bounds?.width) || !Number.isFinite(bounds?.height) ||
-      !sameWindowGeometry(candidate.bounds, {
-        x: bounds!.x as number, y: bounds!.y as number,
-        width: bounds!.width as number, height: bounds!.height as number,
-      })) {
+      (bounds!.width as number) <= 0 || (bounds!.height as number) <= 0 ||
+      !Number.isFinite(candidate.bounds.width) || !Number.isFinite(candidate.bounds.height) ||
+      candidate.bounds.width <= 0 || candidate.bounds.height <= 0) {
     return { status: "unknown", reason: "native AXSheet proof does not exactly match the unique fresh surfaced candidate" };
   }
+  if (!sameWindowGeometry(candidate.bounds, {
+    x: bounds!.x as number, y: bounds!.y as number,
+    width: bounds!.width as number, height: bounds!.height as number,
+  })) return { status: "geometry_unstable" };
   return { status: "sheet", evidence: {
     kind: "native_window",
     nativeWindow: asNativeWindowIdentity(candidate.target),
@@ -2556,8 +2560,53 @@ export class CuaDriverComputer implements Computer {
       const exactInventoryRow = rawFreshRows.length === 1 ? rawFreshRows[0] : undefined;
       if (exactInventoryRow !== undefined && exactInventoryRow.target.pid === ownerTarget.pid &&
           exactInventoryRow.target.windowId !== ownerTarget.windowId) {
-        const candidate = exactInventoryRow;
-        const attached = await readMacAttachedSheetState(current.driver, current.label, freshParentBinding, exactInventoryRow, signal);
+        let candidate = exactInventoryRow;
+        let attached = await readMacAttachedSheetState(current.driver, current.label, freshParentBinding, exactInventoryRow, signal);
+        if (attached.status === "geometry_unstable") {
+          // AX and WindowServer can publish the same native sheet at slightly
+          // different positions while the system panel is settling. Retry one
+          // bounded, read-only cycle; never repeat the action or reuse proof.
+          await waitWithAbort(80, signal);
+          const parentStillCurrent = sameSurfaceRef(parentRef, current.surfaceRegistry.activeSurface) &&
+            sameSurfaceRef(parentRef, baseline.parentSurfaceRef) &&
+            isCurrentSurfaceRef(current.surfaceRegistry, parentRef) &&
+            isExecutableSurfaceRef(current.surfaceRegistry, parentRef) &&
+            windowIdentityKey(activeWindowBinding(current)?.target ?? { pid: 0, windowId: 0 }) ===
+              windowIdentityKey(baseline.parentBinding.target);
+          if (parentStillCurrent) {
+            try {
+              const retryParentBinding = await discoverWindow(current.driver, current.label, baseline.parentBinding.target, signal);
+              if (sameWindowGeometry(retryParentBinding.bounds, baseline.parentBinding.bounds)) {
+                const retryInventory = await readDiff();
+                const retryRows = retryInventory.sourceInventory.windows.filter((window) =>
+                  !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+                const retryCandidate = retryRows.length === 1 ? retryRows[0] : undefined;
+                if (retryCandidate !== undefined &&
+                    windowIdentityKey(retryCandidate.target) === windowIdentityKey(candidate.target) &&
+                    retryCandidate.target.pid === ownerTarget.pid && retryInventory.sourceInventory.truncated !== true &&
+                    sameSurfaceRef(parentRef, current.surfaceRegistry.activeSurface) &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, parentRef) && isExecutableSurfaceRef(current.surfaceRegistry, parentRef)) {
+                  const retryAttached = await readMacAttachedSheetState(
+                    current.driver, current.label, retryParentBinding, retryCandidate, signal,
+                  );
+                  if (retryAttached.status === "sheet") {
+                    freshParentBinding = retryParentBinding;
+                    inventory = retryInventory;
+                    candidate = retryCandidate;
+                    attached = retryAttached;
+                  }
+                }
+              }
+            } catch (error) {
+              signal.throwIfAborted();
+              if (driverErrorDetails(error).tag === "Transport") {
+                current.active = false;
+                throw error;
+              }
+              // A failed fresh read cannot authorize the old geometry.
+            }
+          }
+        }
         if (attached.status === "sheet") {
           const proofInventory: CuaWindowInventory = {
             windows: inventory.sourceInventory.windows.map((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target)
@@ -2571,7 +2620,7 @@ export class CuaDriverComputer implements Computer {
             foregroundWindowId: candidate.target.windowId,
           };
           const enrichedCandidate = {
-            ...exactInventoryRow,
+            ...candidate,
             ownerPid: ownerTarget.pid,
             ownerWindowId: ownerTarget.windowId,
           };
