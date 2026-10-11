@@ -10,6 +10,22 @@ const runId = "run-123456" as RunId;
 const assetId = "asset-123456" as AssetId;
 const targetToken = "T".repeat(32);
 
+function containsPrivateWindowIdentityKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsPrivateWindowIdentityKey);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, child]) =>
+    /^(?:pid|windowid|socketpath)$/iu.test(key) || containsPrivateWindowIdentityKey(child));
+}
+
+describe("window identity serialization assertions", () => {
+  it("checks nested key names without treating opaque token values as private fields", () => {
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ token: "fixture-pID-windowId-socketPath-opaque" }] })).toBe(false);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { pid: 451 } } }] })).toBe(true);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { windowId: 894 } } }] })).toBe(true);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { socketPath: "/private/socket" } } }] })).toBe(true);
+  });
+});
+
 function snapshot(sequence = 0): RemoteRunSnapshot {
   return {
     runId,
@@ -337,7 +353,7 @@ describe("Host HTTP boundary", () => {
       expect(choicesResponse.statusCode).toBe(200);
       const choices = jsonResponse<{ candidates: Array<Record<string, unknown>>; expiresAt: string }>(choicesResponse);
       expect(choices.candidates).toEqual([{ token: targetToken, appName: "Fixture app", title: "Fixture window" }]);
-      expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+      expect(containsPrivateWindowIdentityKey(choices)).toBe(false);
 
       const missingPreviewCsrf = await host.server.inject({
         method: "POST", url: "/api/windows/preview", headers: { origin: relayOrigin, cookie }, payload: { candidateToken: targetToken },
@@ -356,7 +372,7 @@ describe("Host HTTP boundary", () => {
       expect(windowPreview.statusCode).toBe(200);
       expect(windowPreview.headers["cache-control"]).toContain("no-store");
       expect(jsonResponse(windowPreview)).toMatchObject({ appName: "Fixture app", title: "Fixture window", relationship: { kind: "owned_child", rootRole: "dialog", parentTitle: "Parent window" }, mediaType: "image/png", viewport: { width: 320, height: 240 } });
-      expect(JSON.stringify(windowPreview.json())).not.toMatch(/pid|windowId|socketPath/iu);
+      expect(containsPrivateWindowIdentityKey(windowPreview.json())).toBe(false);
 
       const bridgePreview = await host.relayHandler.request({
         type: "bridge.request", requestId: "bridge-window-preview", method: "POST", path: "/api/windows/preview",
@@ -364,7 +380,7 @@ describe("Host HTTP boundary", () => {
       });
       expect(bridgePreview.statusCode).toBe(200);
       expect(bridgePreview.body).toMatchObject({ appName: "Fixture app", title: "Fixture window", relationship: { kind: "owned_child", rootRole: "dialog", parentTitle: "Parent window" }, mediaType: "image/png" });
-      expect(JSON.stringify(bridgePreview.body)).not.toMatch(/pid|windowId|socketPath/iu);
+      expect(containsPrivateWindowIdentityKey(bridgePreview.body)).toBe(false);
 
       const handoffPreview = await host.server.inject({
         method: "POST", url: `/api/runs/${runId}/window-candidates/preview`,
@@ -709,7 +725,7 @@ describe("Host HTTP boundary", () => {
         sessionToken: secret.sessionToken,
       });
       expect(bridgeWindows.statusCode).toBe(200);
-      expect(JSON.stringify(bridgeWindows.body)).not.toMatch(/pid|windowId/iu);
+      expect(containsPrivateWindowIdentityKey(bridgeWindows.body)).toBe(false);
       expect(host.relayHandler.authorizeSession("other-device", secret.sessionToken)).toBe(false);
       expect(host.relayHandler.authorizeSession(deviceId, "not-a-session")).toBe(false);
     } finally {
