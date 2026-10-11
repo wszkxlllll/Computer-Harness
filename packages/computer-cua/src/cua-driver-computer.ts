@@ -2408,7 +2408,7 @@ export class CuaDriverComputer implements Computer {
           windowIdentityKey(activeBinding.target) !== windowIdentityKey(baseline.parentBinding.target)) {
         throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet has no exact active parent binding");
       }
-      const nestedInventory = await listWindowInventory(
+      let nestedInventory = await listWindowInventory(
         current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe,
       );
       if (nestedInventory.truncated === true) {
@@ -2416,18 +2416,96 @@ export class CuaDriverComputer implements Computer {
       }
       const newRows = nestedInventory.windows.filter((window) =>
         !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
-      const nestedCandidate = newRows.length === 1 && newRows[0]!.target.pid === activeBinding.target.pid
+      let nestedCandidate = newRows.length === 1 && newRows[0]!.target.pid === activeBinding.target.pid
         ? newRows[0]
         : undefined;
       if (nestedCandidate !== undefined) {
-        const freshParent = await discoverWindow(current.driver, current.label, activeBinding.target, signal);
+        let freshParent = await discoverWindow(current.driver, current.label, activeBinding.target, signal);
         const storedParent = current.windowBindings.get(windowIdentityKey(activeBinding.target));
         if (storedParent === undefined || !sameWindowGeometry(freshParent.bounds, storedParent.bounds)) {
           throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet parent geometry changed");
         }
-        const attached = await readMacAttachedSheetState(
+        let attached = await readMacAttachedSheetState(
           current.driver, current.label, freshParent, nestedCandidate, signal, asCuaWindowTarget(rootNative),
         );
+        if (attached.status === "geometry_unstable") {
+          // Only an otherwise fully verified, exact nested sheet may receive
+          // one bounded geometry-only reread. Do not replay the action or use
+          // the old AX proof after the wait.
+          await waitWithAbort(80, signal);
+          const activeNow = current.surfaceRegistry.activeSurface;
+          const activeSurfaceNow = activeNow === undefined ? undefined : current.surfaceRegistry.surfaces.get(activeNow.surfaceId);
+          const rootNow = activeSurfaceNow?.parentSurfaceId === rootRef.surfaceId
+            ? current.surfaceRegistry.surfaces.get(rootRef.surfaceId)
+            : undefined;
+          const rootBinding = current.windowBindings.get(windowIdentityKey(asCuaWindowTarget(rootNative)));
+          const parentStillCurrent = sameSurfaceRef(activeBeforeReconcile, activeNow) &&
+            sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
+            isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+            isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+            activeSurfaceNow?.kind === "native_window" &&
+            activeSurfaceNow.admissionSource === "macos_attached_sheet_proof" &&
+            activeSurfaceNow.parentSurfaceId === rootRef.surfaceId && rootNow !== undefined &&
+            isCurrentSurfaceRef(current.surfaceRegistry, rootRef) &&
+            windowIdentityKey(activeWindowBinding(current)?.target ?? { pid: 0, windowId: 0 }) ===
+              windowIdentityKey(baseline.parentBinding.target) &&
+            windowIdentityKey(activeBinding.target) === windowIdentityKey(baseline.parentBinding.target) &&
+            rootBinding !== undefined && windowIdentityKey(rootBinding.target) === windowIdentityKey(asCuaWindowTarget(rootNative));
+          if (parentStillCurrent) {
+            try {
+              const retryInventory = await listWindowInventory(
+                current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe,
+              );
+              const retryRows = retryInventory.windows.filter((window) =>
+                !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+              const retryCandidate = retryInventory.truncated !== true && retryRows.length === 1
+                ? retryRows[0]
+                : undefined;
+              if (retryCandidate !== undefined &&
+                  windowIdentityKey(retryCandidate.target) === windowIdentityKey(nestedCandidate.target) &&
+                  retryCandidate.target.pid === activeBinding.target.pid &&
+                  retryCandidate.target.windowId === nestedCandidate.target.windowId &&
+                  sameSurfaceRef(activeBeforeReconcile, current.surfaceRegistry.activeSurface) &&
+                  isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                  isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile)) {
+                const retryParent = await discoverWindow(current.driver, current.label, activeBinding.target, signal);
+                if (sameWindowGeometry(retryParent.bounds, freshParent.bounds) &&
+                    sameWindowGeometry(retryParent.bounds, storedParent.bounds) &&
+                    sameSurfaceRef(activeBeforeReconcile, current.surfaceRegistry.activeSurface) &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                    isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile)) {
+                  const retryAttached = await readMacAttachedSheetState(
+                    current.driver, current.label, retryParent, retryCandidate, signal, asCuaWindowTarget(rootNative),
+                  );
+                  const stackStillCurrent = baseline.completed === true &&
+                    sameSurfaceRef(activeBeforeReconcile, current.surfaceRegistry.activeSurface) &&
+                    sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                    isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                    current.surfaceRegistry.surfaces.get(activeBeforeReconcile.surfaceId)?.parentSurfaceId === rootRef.surfaceId &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, rootRef) &&
+                    windowIdentityKey(activeWindowBinding(current)?.target ?? { pid: 0, windowId: 0 }) ===
+                      windowIdentityKey(baseline.parentBinding.target) &&
+                    windowIdentityKey(retryCandidate.target) === windowIdentityKey(nestedCandidate.target) &&
+                    retryInventory.truncated !== true;
+                  if (retryAttached.status === "sheet" && stackStillCurrent) {
+                    nestedInventory = retryInventory;
+                    nestedCandidate = retryCandidate;
+                    freshParent = retryParent;
+                    attached = retryAttached;
+                  }
+                }
+              }
+            } catch (error) {
+              signal.throwIfAborted();
+              if (driverErrorDetails(error).tag === "Transport") {
+                current.active = false;
+                throw error;
+              }
+              // A failed fresh read cannot authorize stale geometry.
+            }
+          }
+        }
         if (attached.status !== "sheet") {
           throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", attached.status === "unknown"
             ? attached.reason

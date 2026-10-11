@@ -251,8 +251,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let extraWindowAfterClick: typeof extraWindow | undefined;
   let closeExtraWindowAfterClick = false;
   let secondExtraWindow: typeof extraWindow | undefined;
+  let thirdExtraWindow: typeof extraWindow | undefined;
   let secondExtraWindowAfterClick: typeof extraWindow | undefined;
   let secondExtraWindowOnListCall: { call: number; value: NonNullable<typeof extraWindow> } | undefined;
+  let thirdExtraWindowOnListCall: { call: number; value: NonNullable<typeof extraWindow> } | undefined;
   let extraWindowOnListCall: { call: number; value: NonNullable<typeof extraWindow> } | undefined;
   let foregroundRefusal = false;
   let foregroundRefusalMessage = "foreground_unavailable: Windows did not activate exact target HWND 0x162e (actual foreground HWND 0x223d); no mouse input was sent";
@@ -263,6 +265,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let activationTargetHwnd: number | undefined;
   let activationForegroundHwnd: number | undefined;
   let groundingStateByWindowId = new Map<number, Record<string, unknown>>();
+  let groundingStateSequenceByWindowId = new Map<number, { values: readonly Record<string, unknown>[]; index: number }>();
   const windowImageSizes = new Map<number, { width: number; height: number }>();
   let actionToolCallCount = 0;
   let failActionCallNumber: number | undefined;
@@ -323,6 +326,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         }
         if (extraWindowOnListCall?.call === listWindowsCallCount) extraWindow = extraWindowOnListCall.value;
         if (secondExtraWindowOnListCall?.call === listWindowsCallCount) secondExtraWindow = secondExtraWindowOnListCall.value;
+        if (thirdExtraWindowOnListCall?.call === listWindowsCallCount) thirdExtraWindow = thirdExtraWindowOnListCall.value;
         const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
         return result({ structuredJson: JSON.stringify({ complete: windowInventoryComplete, truncated: windowInventoryTruncated, windows: unavailable ? [] : [
           ...(omitBoundWindow ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds, z_index: 1, is_on_screen: true }]),
@@ -351,6 +355,19 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
             ...(secondExtraWindow.ownerWindowId === undefined ? {} : { owner_window_id: secondExtraWindow.ownerWindowId }),
             ...(secondExtraWindow.minimized === undefined ? {} : { is_minimized: secondExtraWindow.minimized }),
             ...(secondExtraWindow.windowClass === undefined ? {} : { window_class: secondExtraWindow.windowClass }),
+          }]),
+          ...(thirdExtraWindow === undefined ? [] : [{
+            pid: thirdExtraWindow.pid,
+            window_id: thirdExtraWindow.windowId,
+            title: thirdExtraWindow.title,
+            app_name: thirdExtraWindow.appName,
+            bounds: thirdExtraWindow.bounds ?? bounds,
+            z_index: thirdExtraWindow.zIndex ?? 0,
+            is_on_screen: thirdExtraWindow.isOnScreen ?? true,
+            ...(thirdExtraWindow.omitOwnerEvidence === true ? {} : { owner_pid: thirdExtraWindow.ownerPid ?? thirdExtraWindow.pid }),
+            ...(thirdExtraWindow.ownerWindowId === undefined ? {} : { owner_window_id: thirdExtraWindow.ownerWindowId }),
+            ...(thirdExtraWindow.minimized === undefined ? {} : { is_minimized: thirdExtraWindow.minimized }),
+            ...(thirdExtraWindow.windowClass === undefined ? {} : { window_class: thirdExtraWindow.windowClass }),
           }]),
         ] }) });
       }
@@ -400,7 +417,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         const state = groundingStateSequence === undefined
           ? groundingState
           : groundingStateSequence[Math.min(groundingStateIndex++, groundingStateSequence.length - 1)];
-        const responseState = (windowId === undefined ? undefined : groundingStateByWindowId.get(windowId)) ?? state ?? {};
+        const perWindowSequence = windowId === undefined ? undefined : groundingStateSequenceByWindowId.get(windowId);
+        const responseState = perWindowSequence === undefined
+          ? (windowId === undefined ? undefined : groundingStateByWindowId.get(windowId)) ?? state ?? {}
+          : perWindowSequence.values[Math.min(perWindowSequence.index++, perWindowSequence.values.length - 1)] ?? {};
         return result({
           images: input.include_screenshot === true ? fallbackImages ?? [] : [],
           degraded: responseState.degraded === true,
@@ -471,6 +491,9 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     setWindowInventoryTruncated(value: boolean) { windowInventoryTruncated = value; },
     setExtraWindow(value: typeof extraWindow) { extraWindow = value; },
     setWindowGroundingState(windowId: number, value: Record<string, unknown>) { groundingStateByWindowId.set(windowId, value); },
+    setWindowGroundingStateSequence(windowId: number, values: readonly Record<string, unknown>[]) {
+      groundingStateSequenceByWindowId.set(windowId, { values, index: 0 });
+    },
     setWindowImageSize(windowId: number, width: number, height: number) { windowImageSizes.set(windowId, { width, height }); },
     failActionOnCall(callNumber: number, text: string, errorCode?: string, structuredJson?: string) {
       failActionCallNumber = callNumber;
@@ -483,6 +506,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     setPlatform(value: unknown) { platform = value; },
     degradeActionOnCall(callNumber: number) { actionDegradedCallNumber = callNumber; },
     setSecondExtraWindow(value: typeof extraWindow) { secondExtraWindow = value; },
+    setThirdExtraWindowOnListCall(call: number, value: NonNullable<typeof extraWindow>) { thirdExtraWindowOnListCall = { call, value }; },
     setSecondExtraWindowOnListCall(call: number, value: NonNullable<typeof extraWindow>) { secondExtraWindowOnListCall = { call, value }; },
     setExtraWindowAfterClick(value: NonNullable<typeof extraWindow>) { extraWindowAfterClick = value; },
     closeExtraWindowAfterNextClick() { closeExtraWindowAfterClick = true; },
@@ -1250,6 +1274,133 @@ describe("CuaDriverComputer", () => {
       }, signal)).status).toBe("refused");
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(callsBeforeOldSaveRef);
     } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "settles only the inventory geometry", retry: "settle" as const, pushed: true },
+    { label: "remains unstable after the single retry", retry: "unstable" as const, pushed: false },
+    { label: "changes the fresh candidate identity", retry: "candidate" as const, pushed: false },
+    { label: "changes the exact AX parent", retry: "parent" as const, pushed: false },
+    { label: "cannot read the fresh inventory", retry: "read-failure" as const, pushed: false },
+    { label: "finds multiple fresh candidates", retry: "multiple" as const, pushed: false },
+    { label: "aborts during the bounded wait", retry: "abort-wait" as const, pushed: false },
+  ])("rechecks a nested AXSheet once only when $label", async ({ retry, pushed }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-nested-sheet-geometry-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setWindowInventoryComplete(false);
+    const save = {
+      pid: fake.target.pid, windowId: 9250, appName: "TextEdit", title: "Save",
+      bounds: { x: 357, y: 298, width: 408, height: 267 }, zIndex: 2, isOnScreen: true,
+    };
+    const gotoInventoryBounds = { x: 331, y: 235, width: 460, height: 345 };
+    const gotoAxBounds = { ...gotoInventoryBounds, y: 259 };
+    const goto = {
+      pid: fake.target.pid, windowId: 9251, appName: "TextEdit", title: "Go to",
+      bounds: gotoInventoryBounds, zIndex: 3, isOnScreen: true,
+    };
+    const rootProof = (status: "sheet" | "none") => ({
+      pid: fake.target.pid, window_id: fake.target.windowId,
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+      snapshot_id: `nested-retry-root-${status}`, attached_sheet_snapshot_id: `nested-retry-root-${status}`,
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1", snapshot_id: `nested-retry-root-${status}`,
+        pid: fake.target.pid, parent_window_id: fake.target.windowId, parent_role: "AXWindow",
+        parent_owner_pid: fake.target.pid, parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
+        direct_children_status: "success", direct_child_count: status === "sheet" ? 1 : 0,
+        status, frontmost_pid: fake.target.pid,
+        focused_window_id: status === "sheet" ? save.windowId : fake.target.windowId,
+        ...(status === "sheet" ? { sheet: {
+          role: "AXSheet", pid: fake.target.pid, window_id: save.windowId, owner_pid: fake.target.pid,
+          ax_parent_pid: fake.target.pid, ax_parent_window_id: fake.target.windowId, ax_parent_verified: true,
+          bounds: save.bounds,
+        } } : {}),
+      },
+    });
+    const nestedProof = (parentId = fake.target.windowId) => ({
+      pid: fake.target.pid, window_id: save.windowId, window_bounds: save.bounds,
+      snapshot_id: "nested-retry-catalog", degraded: true, elements_complete: false,
+      attached_sheet_snapshot_id: "nested-retry-relation",
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1", snapshot_id: "nested-retry-relation",
+        pid: fake.target.pid, parent_window_id: save.windowId, parent_role: "AXSheet",
+        parent_ax_parent_verified: true, parent_ax_parent_window_id: parentId,
+        parent_owner_pid: fake.target.pid, parent_bounds: save.bounds,
+        direct_children_status: "success", direct_child_count: 1, status: "sheet",
+        frontmost_pid: fake.target.pid, focused_window_id: goto.windowId,
+        sheet: {
+          role: "AXSheet", pid: fake.target.pid, window_id: goto.windowId,
+          owner_pid: fake.target.pid, ax_parent_pid: fake.target.pid,
+          ax_parent_window_id: save.windowId, ax_parent_verified: true, bounds: gotoAxBounds,
+        },
+      },
+    });
+    fake.setWindowGroundingState(fake.target.windowId, rootProof("sheet"));
+    fake.setWindowGroundingState(save.windowId, nestedProof());
+    fake.setWindowImageSize(save.windowId, save.bounds.width, save.bounds.height);
+    fake.setWindowImageSize(goto.windowId, gotoAxBounds.width, gotoAxBounds.height);
+    fake.setExtraWindowAfterClick(save);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory,
+      windowTarget: fake.target, windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target], grounding: "off", driverFactory: () => fake.driver,
+    });
+    const controller = new AbortController();
+    const signal = controller.signal;
+    let abortTimer: ReturnType<typeof setTimeout> | undefined;
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const rootBefore = await computer.observe(session, `nested-retry-root-${retry}` as ObservationId, signal);
+      const saveReceipt = await computer.execute(session, {
+        actionId: `nested-retry-save-${retry}` as ActionId,
+        basedOn: `nested-retry-root-${retry}` as ObservationId,
+        kind: "click", point: { x: 10, y: 10 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(saveReceipt.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      const saveObservation = await computer.observe(session, `nested-retry-save-active-${retry}` as ObservationId, signal);
+      expect(saveObservation.surfaceRef).toMatchObject({
+        parentSurfaceId: rootBefore.surfaceRef.surfaceId, admissionSource: "macos_attached_sheet_proof",
+      });
+      fake.setSecondExtraWindowAfterClick(goto);
+      const gotoReceipt = await computer.execute(session, {
+        actionId: `nested-retry-goto-${retry}` as ActionId,
+        basedOn: `nested-retry-save-active-${retry}` as ObservationId,
+        kind: "click", point: { x: 15, y: 15 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(gotoReceipt.status).toBe("completed");
+      const retryListCall = fake.getListWindowsCallCount() + 3;
+      if (retry === "settle") fake.setSecondExtraWindowOnListCall(retryListCall, { ...goto, bounds: gotoAxBounds });
+      if (retry === "candidate") fake.setSecondExtraWindowOnListCall(retryListCall, { ...goto, windowId: goto.windowId + 1, bounds: gotoAxBounds });
+      if (retry === "parent") fake.setWindowGroundingStateSequence(save.windowId, [nestedProof(), nestedProof(fake.target.windowId + 1)]);
+      if (retry === "read-failure") fake.failListWindowsOnCall(retryListCall);
+      if (retry === "multiple") fake.setThirdExtraWindowOnListCall(retryListCall, {
+        ...goto, windowId: goto.windowId + 2, title: "Second fresh sheet", bounds: gotoAxBounds,
+      });
+      if (retry === "abort-wait") abortTimer = setTimeout(() => controller.abort(), 15);
+      if (pushed) await computer.detectNewWindowHandoffCandidates(session, signal);
+      else await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toThrow();
+      if (abortTimer !== undefined) clearTimeout(abortTimer);
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(2);
+      const detectionProofReads = fake.calls.filter((call) => call.name === "get_window_state" &&
+        call.input?.window_id === save.windowId && call.input?.include_screenshot === false).length;
+      expect(detectionProofReads).toBe(retry === "candidate" || retry === "read-failure" || retry === "multiple" || retry === "abort-wait" ? 1 : 2);
+      const after = await computer.observe(session, `nested-retry-after-${retry}` as ObservationId,
+        retry === "abort-wait" ? new AbortController().signal : signal);
+      if (pushed) {
+        expect(after.surfaceRef).toMatchObject({
+          kind: "native_window", parentSurfaceId: saveObservation.surfaceRef.surfaceId,
+          admissionSource: "macos_attached_sheet_proof",
+        });
+      } else {
+        expect(after.surfaceRef).toEqual(saveObservation.surfaceRef);
+      }
+    } finally {
+      if (abortTimer !== undefined) clearTimeout(abortTimer);
       if (session !== undefined) await computer.close(session);
       await rm(directory, { recursive: true, force: true });
     }
