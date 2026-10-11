@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "role": "operator_reference_only_not_model_human_review",
+  "date": "2026-10-11",
+  "scoringPerformed": false,
+  "sourceFacts": {
+    "M01": {
+      "sourceUrl": "https://www.pumch.cn/detail/12497.html",
+      "method": "read official text",
+      "publicationDate": "2017.12.09",
+      "ordinaryClinic": "门诊楼5层",
+      "specialClinic": "门诊楼5层",
+      "internationalClinic": "国际部门诊3层",
+      "campusMapping": "该位置正文没有明确标注东单/西单，不从页脚推断",
+      "freshness": "旧页面，须保留来源日期；运行时重新核对"
+    },
+    "M02": {
+      "method": "actual browser click chain and desktop table+image",
+      "sourceUrl": "https://www.pumch.cn/news_visitinfo.html",
+      "investigationRange": [
+        "2026-10-11",
+        "2026-10-17"
+      ],
+      "investigationV1Date": "2026-10-14",
+      "investigationV1MorningDoctors": [
+        "柴晓峰",
+        "张化冰",
+        "卢琳",
+        "周颋",
+        "赵维纲",
+        "肖新华",
+        "池玥"
+      ],
+      "futureExpected": "逐Run同时间可见桌面表头及目标格独立摘录，以上不是长期固定答案",
+      "sourceCaveat": "以实际出诊信息为准，非实时余号"
+    },
+    "M03": {
+      "sourceUrls": [
+        "https://www.pumch.cn/medical_notice.html",
+        "https://www.pumch.cn/nosocomial.html"
+      ],
+      "method": "read and actual browser text",
+      "facts": [
+        "首次注册建档需本人有效身份证明原件；医保患者报到需社保卡/医保码，否则本次就诊全额自费",
+        "非医保患者可通过App或各楼层自助机报到",
+        "按预约候诊时段来院，报到条/导诊单指导诊区；页面不提供该合成用户真实预约时段",
+        "缴费后导诊单说明取药/检查地点；暂不支持跨院区取药",
+        "东单北京市东城区帅府园1号；西单北京市西城区大木仓胡同41号"
+      ],
+      "notClaimed": [
+        "没有真实建档/预约/缴费",
+        "没有合成患者真实科室楼层/个人费用"
+      ]
+    },
+    "CP01": {
+      "sourceUrl": "https://95598.csg.cn/ucs/sr/wt/priceInfoImg/1030600.jpg",
+      "method": "actual browser region selection and original official image read",
+      "title": "广东省佛山市居民、农业电价价目表",
+      "effectiveStartShown": "2021-12-01",
+      "unit": "分/千瓦时（含税）",
+      "residentialDeliveredTierPrice": [
+        "59.886875",
+        "64.886875",
+        "89.886875"
+      ],
+      "agriculture": {
+        "electricPrice": "62.71",
+        "waterConservancyFund": "0.196875",
+        "reservoirMigrationFund": "—",
+        "deliveredPrice": "62.906875"
+      },
+      "notClaimed": [
+        "未核后续调价文件，不保证2026最新现行价格",
+        "不是某户真实账单/本月账期或支付状态"
+      ]
+    },
+    "CP02": {
+      "sourceUrl": "https://www.bjgas.com/tag/86.html",
+      "method": "actual browser visible resident table",
+      "category": "居民一般生活用气（炊事、生活热水）",
+      "period": "户年用气量，非月度阶梯",
+      "unit": "元/立方米",
+      "thresholds": [
+        350,
+        500
+      ],
+      "prices": [
+        "2.61",
+        "2.83",
+        "4.23"
+      ],
+      "v1": {
+        "addressJudgement": "同址，明确格式差异",
+        "volume": 25,
+        "tierVolumes": [
+          10,
+          15,
+          0
+        ],
+        "expectedYuan": "68.55",
+        "billMinusExpectedYuan": "0.45",
+        "conclusion": "金额不一致，待人工核对，不建议支付"
+      },
+      "v2": {
+        "addressJudgement": "A区/B区实质不一致",
+        "volume": 30,
+        "tierVolumes": [
+          0,
+          10,
+          20
+        ],
+        "expectedYuan": "112.90",
+        "billMinusExpectedYuan": "0.00",
+        "conclusion": "金额吻合不能覆盖地址不一致，停止缴费建议"
+      },
+      "notClaimed": [
+        "以上数值是操作者合成输入核算，不是平台账单或真人评分"
+      ]
+    },
+    "CP03": {
+      "sourceUrls": [
+        "https://zwdt.sh.gov.cn/govPortals/bsfw/item/02331d3a-d52d-45de-a42c-797b9a299f39",
+        "https://hswater.com.cn/fwcn/2622.html"
+      ],
+      "method": "read plus actual browser public text; Shanghai visual snapshot saved",
+      "shanghaiGas": {
+        "hotline": "962777",
+        "generalRepair": "非漏气一般4小时内到场；19:00至次日8:00的一般报修次日12:00前到场",
+        "appointmentSupported": false,
+        "onlinePaymentSupported": false,
+        "onlineLeakRepairSupported": false,
+        "bindingPrecondition": "管道气需缴费通知单相关信息绑定；液化气需用户卡信息绑定",
+        "clientInfo": "燃气户名、用气地址、联系方式",
+        "localDraftOnly": true
+      },
+      "huangshanWater": {
+        "hotline": "0559-2533333",
+        "response": "即时办理，接警后30分钟内赶赴现场",
+        "onlinePath": "公众号→水务服务→绑定户号→业务办理→投诉/维修→填写并提交",
+        "appointmentSupport": "未找到/未验证",
+        "platformDraftSupport": "未找到/未验证"
+      },
+      "notClaimed": [
+        "不对合成地址保证真实履约",
+        "无在线工单号/预约号；不把本地文件叫官方草稿"
+      ]
+    }
+  },
+  "humanReviewInstruction": "操作者必须另读本Run完整轨迹、回执、截图、当时官方页面及文件，填写真实事件/hash绑定人审；此文件不得原样当作评分或模型人审。",
+  "publicationProvenance": {
+    "sourceId": "member-c-d01-2026-10-11/oracle-guidance.json",
+    "sha256": "fef575fc74c3aa53d03c4c7f797216074d66a0c9d15ba3e11ece5659c1ab45b1",
+    "bytes": 5716,
+    "availability": "private/not included",
+    "interpretation": "original local frozen artifact; not a clickable published evidence link",
+    "changes": [
+      "removed internal parent-agent role wording; all operator facts and calculations unchanged"
+    ]
+  }
+}

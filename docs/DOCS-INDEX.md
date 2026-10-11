@@ -1,5 +1,10 @@
 # Computer Harness 文档索引
 
+## 成员C材料与D01阶段成果（2026-10-11）
+
+[任务1与任务2统一成果入口](./member-c-results-2026-10-11/README.md)：已有轨迹分类、重复关系与四类材料；医疗、缴费/社区两域公开入口＋本地准备冻结合同；Windows候选迁入及六项无模型初态预检。五项DOM观察/清理退出0、CP02启动失败，原构建退出码未持久化，完整业务初态与真实Run/评分/D02仍未放行。保留历史失败、未知成本和来源事实偏差，不混入evaluator PR#23代码，不用材料发布代替业务demo验收。
+
+
 ## 当前体验优化与上游跟进（2026-10-09）
 
 PR #25完整历史与手机体验改动已集成PR #22；源码head `d2ee1a3`对应四矩阵CI及ci-required全绿（run `37946804774`），没有合并main或改写作者。Node24／固定pnpm 11.19.0根build、Web build、Node自测70通过／0失败／1项本机符号链接能力跳过。Vitest 1841/1843，剩余两项CLI窄屏长中文分页5秒超时；未改timeout，不称本机全绿。独立Preview现为release `2026-10-09-pr22-d2ee1a3-v2`；本机Host 4318 `/connect`、`/api/local/session` 200且Relay WSS已建立。尚未做手机配对或业务Run。受管浏览器100%／125%GUI缩放未验收：隔离node_repl缺Node `process`全局，错误发生于SDK加载前，没有启动Edge窗口；不是产品回归。详情见[统一修复记录](./window-popup-regression-2026-10-04.md)顶部。

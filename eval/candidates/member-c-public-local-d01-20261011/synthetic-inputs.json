@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "status": "synthetic_non_official_not_real_bill",
+  "billingAssumptions": [
+    "居民一般生活用气，非壁挂炉/煤改气，按年累计量跨档",
+    "同一年度，无附加费/滞纳金，表数单位立方米；只本地核算，不付款"
+  ],
+  "CP02": {
+    "v1": {
+      "userAddress": "测试小区A区3栋2单元501",
+      "billAddress": "测试小区A区三栋2-501",
+      "annualBefore": 340,
+      "meterBefore": 1000,
+      "meterAfter": 1025,
+      "billAmountYuan": "69.00"
+    },
+    "v2": {
+      "userAddress": "测试小区A区3栋2单元501",
+      "billAddress": "测试小区B区三栋2-501",
+      "annualBefore": 490,
+      "meterBefore": 2000,
+      "meterAfter": 2030,
+      "billAmountYuan": "112.90"
+    }
+  },
+  "CP03": {
+    "realIncident": false,
+    "realCustomerDataProvided": false,
+    "contactValue": "未提供（测试，不得外发）",
+    "onlineSubmissionForbidden": true
+  }
+}
