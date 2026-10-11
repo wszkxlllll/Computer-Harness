@@ -24,6 +24,22 @@ const viewport: Viewport = { width: 16, height: 12, coordinateSpace: "physical" 
 const surfaceRef = { surfaceId: "relay-roundtrip-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
 
+function containsPrivateWindowIdentityKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsPrivateWindowIdentityKey);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, child]) =>
+    /^(?:pid|windowid|socketpath)$/iu.test(key) || containsPrivateWindowIdentityKey(child));
+}
+
+describe("window identity serialization assertions", () => {
+  it("checks nested key names without treating opaque token values as private fields", () => {
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ token: "fixture-pID-windowId-socketPath-opaque" }] })).toBe(false);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { pid: 451 } } }] })).toBe(true);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { windowId: 894 } } }] })).toBe(true);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { socketPath: "/private/socket" } } }] })).toBe(true);
+  });
+});
+
 function sessionConfig(outputDir: string): ApplicationSessionConfig {
   return {
     model: "glm-5.3-flash",
@@ -245,11 +261,11 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       const windowChoices = await webApi.listWindowTargets();
       expect(windowChoices.candidates).toHaveLength(2);
       expect(windowChoices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
-      expect(JSON.stringify(windowChoices)).not.toMatch(/pid|windowId/iu);
+      expect(containsPrivateWindowIdentityKey(windowChoices)).toBe(false);
       const selectedWindow = windowChoices.candidates[0]!;
       const preview = await webApi.previewWindowTarget(selectedWindow.token);
       expect(preview).toMatchObject({ appName: "Fixture app", title: "Fixture window", mediaType: "image/png", viewport: { width: 1, height: 1 } });
-      expect(JSON.stringify(preview)).not.toMatch(/pid|windowId|socketPath/iu);
+      expect(containsPrivateWindowIdentityKey(preview)).toBe(false);
       expect(windowPreviewCaptures).toEqual([{ pid: 451, windowId: 894 }]);
       expect(windowPreviewRequestCache).toBe("no-store");
       expect(windowPreviewResponseCacheControl).toContain("no-store");
