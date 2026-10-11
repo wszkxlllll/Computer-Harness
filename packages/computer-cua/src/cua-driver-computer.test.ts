@@ -502,12 +502,14 @@ type FixtureWindow = {
   ownerPid?: number;
   ownerWindowId?: number;
   omitOwnerEvidence?: boolean;
+  omitIsOnScreen?: boolean;
   minimized?: boolean;
   windowClass?: string;
 };
 
 function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 }, initialImage = { width: 958, height: 678 }) {
   const calls: Array<{ name: string; input?: Record<string, unknown> }> = [];
+  const listWindowsResponses: Array<Record<string, unknown>> = [];
   let bounds = { ...initialBounds };
   let image = { ...initialImage };
   let missing = false;
@@ -607,7 +609,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         if (secondExtraWindowOnListCall?.call === listWindowsCallCount) secondExtraWindow = secondExtraWindowOnListCall.value;
         if (thirdExtraWindowOnListCall?.call === listWindowsCallCount) thirdExtraWindow = thirdExtraWindowOnListCall.value;
         const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
-        return result({ structuredJson: JSON.stringify({ complete: windowInventoryComplete, truncated: windowInventoryTruncated, windows: unavailable ? [] : [
+        const response = { complete: windowInventoryComplete, truncated: windowInventoryTruncated, windows: unavailable ? [] : [
           ...(omitBoundWindow ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds, z_index: 1, is_on_screen: true }]),
           ...(extraWindow === undefined ? [] : [{
             pid: extraWindow.pid,
@@ -616,7 +618,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
             app_name: extraWindow.appName,
             bounds: extraWindow.bounds ?? bounds,
             z_index: extraWindow.zIndex,
-            is_on_screen: extraWindow.isOnScreen ?? true,
+            ...(extraWindow.omitIsOnScreen === true ? {} : { is_on_screen: extraWindow.isOnScreen ?? true }),
             ...(extraWindow.minimized === undefined ? {} : { is_minimized: extraWindow.minimized }),
             ...(extraWindow.omitOwnerEvidence === true ? {} : { owner_pid: extraWindow.ownerPid ?? extraWindow.pid }),
             ...(extraWindow.ownerWindowId === undefined ? {} : { owner_window_id: extraWindow.ownerWindowId }),
@@ -648,7 +650,9 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
             ...(thirdExtraWindow.minimized === undefined ? {} : { is_minimized: thirdExtraWindow.minimized }),
             ...(thirdExtraWindow.windowClass === undefined ? {} : { window_class: thirdExtraWindow.windowClass }),
           }]),
-        ] }) });
+        ] };
+        listWindowsResponses.push(response);
+        return result({ structuredJson: JSON.stringify(response) });
       }
       if (name === "get_accessibility_tree") {
         return result({ structuredJson: JSON.stringify({ complete: true, windows: [
@@ -755,6 +759,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     driver,
     target,
     calls,
+    listWindowsResponses,
     setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
     setMissing(value: boolean) { missing = value; },
     omitBoundWindow(value: boolean) { omitBoundWindow = value; },
@@ -1414,6 +1419,204 @@ describe("CuaDriverComputer", () => {
       }));
     } finally {
       if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("pops an admitted macOS sheet after repeated exact no-sheet proof while inventory retains it hidden", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-hidden-sheet-pop-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setWindowInventoryComplete(false);
+    const sheet = {
+      pid: fake.target.pid, windowId: 9180, appName: "TextEdit", title: "Save",
+      bounds: { x: 270, y: 250, width: 420, height: 300 }, zIndex: 2, isOnScreen: true,
+    };
+    const rootProof = (snapshot: string, status: "sheet" | "none") => ({
+      pid: fake.target.pid, window_id: fake.target.windowId,
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 }, snapshot_id: snapshot,
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1", snapshot_id: snapshot,
+        pid: fake.target.pid, parent_window_id: fake.target.windowId, parent_role: "AXWindow",
+        parent_ax_parent_verified: true, parent_ax_parent_window_id: 0,
+        parent_owner_pid: fake.target.pid, parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
+        direct_children_status: "success", direct_child_count: status === "sheet" ? 1 : 0,
+        status, frontmost_pid: fake.target.pid,
+        focused_window_id: status === "sheet" ? sheet.windowId : fake.target.windowId,
+        ...(status === "sheet" ? { sheet: {
+          role: "AXSheet", pid: fake.target.pid, window_id: sheet.windowId, owner_pid: fake.target.pid,
+          ax_parent_pid: fake.target.pid, ax_parent_window_id: fake.target.windowId,
+          ax_parent_verified: true, bounds: sheet.bounds,
+        } } : {}),
+      },
+    });
+    fake.setWindowGroundingState(fake.target.windowId, rootProof("initial-sheet", "sheet"));
+    fake.setWindowImageSize(sheet.windowId, sheet.bounds.width, sheet.bounds.height);
+    fake.setExtraWindowAfterClick(sheet);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory,
+      windowTarget: fake.target, windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    const signal = new AbortController().signal;
+    try {
+      session = await computer.open({}, signal);
+      const before = await computer.observe(session, "hidden-sheet-parent-before" as ObservationId, signal);
+      const opened = await computer.execute(session, {
+        actionId: "hidden-sheet-open" as ActionId, basedOn: "hidden-sheet-parent-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 10 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(opened.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      const active = await computer.observe(session, "hidden-sheet-active" as ObservationId, signal);
+      expect(active.surfaceRef).toMatchObject({ parentSurfaceId: before.surfaceRef.surfaceId, admissionSource: "macos_attached_sheet_proof" });
+
+      const dismiss = await computer.execute(session, {
+        actionId: "hidden-sheet-dismiss" as ActionId, basedOn: "hidden-sheet-active" as ObservationId,
+        kind: "click", point: { x: 11, y: 11 },
+      }, signal);
+      expect(dismiss.status).toBe("completed");
+      fake.setExtraWindow({ ...sheet, isOnScreen: false, omitOwnerEvidence: true });
+      fake.setWindowGroundingStateSequence(fake.target.windowId, [
+        rootProof("fresh-no-sheet-first", "none"), rootProof("fresh-no-sheet-second", "none"),
+      ]);
+      const proofReadsBeforePop = fake.calls.filter((call) => call.name === "get_window_state" &&
+        call.input?.window_id === fake.target.windowId && call.input?.include_screenshot === false).length;
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).resolves.toEqual([]);
+      const proofReadsAfterPop = fake.calls.filter((call) => call.name === "get_window_state" &&
+        call.input?.window_id === fake.target.windowId && call.input?.include_screenshot === false).length;
+      expect(proofReadsAfterPop - proofReadsBeforePop).toBe(2);
+      const finalInventory = fake.listWindowsResponses.at(-1);
+      expect(finalInventory?.complete).toBe(false);
+      const hiddenRow = (finalInventory?.windows as Array<Record<string, unknown>>).find((row) => row.window_id === sheet.windowId);
+      expect(hiddenRow).toMatchObject({ is_on_screen: false });
+      expect(hiddenRow).not.toHaveProperty("owner_pid");
+      expect(hiddenRow).not.toHaveProperty("owner_window_id");
+      expect(hiddenRow).not.toHaveProperty("is_minimized");
+      const after = await computer.observe(session, "hidden-sheet-parent-after" as ObservationId, signal);
+      expect(after.surfaceRef).toMatchObject({ surfaceId: before.surfaceRef.surfaceId, kind: "native_window" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(2);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "still-visible",
+    "visibility-unknown",
+    "duplicate-first-sample",
+    "duplicate-second-sample",
+    "owner-conflict",
+    "geometry-change",
+    "replacement-sheet",
+    "read-failure",
+    "abort",
+    "active-change",
+  ])("does not pop an attached sheet on an unsafe hidden-child recheck: %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-hidden-sheet-reject-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setWindowInventoryComplete(false);
+    const sheet = {
+      pid: fake.target.pid, windowId: 9190, appName: "TextEdit", title: "Save",
+      bounds: { x: 270, y: 250, width: 420, height: 300 }, zIndex: 2, isOnScreen: true,
+    };
+    const rootProof = (snapshot: string, status: "sheet" | "none", replacement = false) => ({
+      pid: fake.target.pid, window_id: fake.target.windowId,
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 }, snapshot_id: snapshot,
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1", snapshot_id: snapshot,
+        pid: fake.target.pid, parent_window_id: fake.target.windowId, parent_role: "AXWindow",
+        parent_ax_parent_verified: true, parent_ax_parent_window_id: 0,
+        parent_owner_pid: fake.target.pid,
+        parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
+        direct_children_status: "success", direct_child_count: status === "sheet" ? 1 : 0,
+        status, frontmost_pid: fake.target.pid,
+        focused_window_id: status === "sheet" ? sheet.windowId + (replacement ? 1 : 0) : fake.target.windowId,
+        ...(status === "sheet" ? { sheet: {
+          role: "AXSheet", pid: fake.target.pid, window_id: sheet.windowId + (replacement ? 1 : 0), owner_pid: fake.target.pid,
+          ax_parent_pid: fake.target.pid, ax_parent_window_id: fake.target.windowId,
+          ax_parent_verified: true, bounds: sheet.bounds,
+        } } : {}),
+      },
+    });
+    fake.setWindowGroundingState(fake.target.windowId, rootProof("initial-sheet", "sheet"));
+    fake.setWindowImageSize(sheet.windowId, sheet.bounds.width, sheet.bounds.height);
+    fake.setExtraWindowAfterClick(sheet);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory,
+      windowTarget: fake.target, windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    const setupSignal = new AbortController().signal;
+    let sessionClosed = false;
+    try {
+      session = await computer.open({}, setupSignal);
+      const before = await computer.observe(session, `reject-hidden-${scenario}-before` as ObservationId, setupSignal);
+      const opened = await computer.execute(session, {
+        actionId: `reject-hidden-${scenario}-open` as ActionId,
+        basedOn: `reject-hidden-${scenario}-before` as ObservationId,
+        kind: "click", point: { x: 10, y: 10 },
+      }, setupSignal, { detectNewWindowHandoff: true });
+      expect(opened.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, setupSignal);
+      const active = await computer.observe(session, `reject-hidden-${scenario}-active` as ObservationId, setupSignal);
+      const dismissed = await computer.execute(session, {
+        actionId: `reject-hidden-${scenario}-dismiss` as ActionId,
+        basedOn: `reject-hidden-${scenario}-active` as ObservationId,
+        kind: "click", point: { x: 11, y: 11 },
+      }, setupSignal);
+      expect(dismissed.status).toBe("completed");
+
+      const hidden = { ...sheet, isOnScreen: false };
+      if (scenario === "still-visible") fake.setExtraWindow(sheet);
+      else if (scenario === "visibility-unknown") fake.setExtraWindow({ ...hidden, omitIsOnScreen: true });
+      else if (scenario === "owner-conflict") fake.setExtraWindow({
+        ...hidden, ownerPid: fake.target.pid + 1, omitOwnerEvidence: false,
+      });
+      else fake.setExtraWindow(hidden);
+
+      const listCount = fake.getListWindowsCallCount();
+      if (scenario === "duplicate-first-sample") fake.setSecondExtraWindow({ ...hidden, title: "duplicate exact CGID row" });
+      if (scenario === "duplicate-second-sample") fake.setSecondExtraWindowOnListCall(listCount + 3, { ...hidden, title: "duplicate exact CGID row" });
+      if (scenario === "geometry-change") fake.setExtraWindowOnListCall(listCount + 3, { ...hidden, bounds: { ...hidden.bounds, x: hidden.bounds.x + 1 } });
+      if (scenario === "read-failure") fake.failListWindowsOnCall(listCount + 3);
+      fake.setWindowGroundingStateSequence(fake.target.windowId, [
+        rootProof("fresh-none-first", "none"),
+        rootProof("fresh-none-second", scenario === "replacement-sheet" ? "sheet" : "none", scenario === "replacement-sheet"),
+      ]);
+
+      if (scenario === "active-change") {
+        const pending = computer.detectNewWindowHandoffCandidates(session, setupSignal);
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        await computer.close(session);
+        sessionClosed = true;
+        await expect(pending).rejects.toThrow();
+      } else if (scenario === "abort") {
+        const controller = new AbortController();
+        const pending = computer.detectNewWindowHandoffCandidates(session, controller.signal);
+        setTimeout(() => controller.abort(), 10);
+        await expect(pending).rejects.toThrow();
+      } else {
+        const expectedReason: Record<string, string> = {
+          "still-visible": "the admitted child remains visible",
+          "visibility-unknown": "the admitted child remains visible",
+          "duplicate-first-sample": "multiple inventory rows match",
+          "duplicate-second-sample": "the exact hidden child, parent, or stack changed",
+          "owner-conflict": "the admitted child remains visible",
+          "geometry-change": "the exact hidden child, parent, or stack changed",
+          "replacement-sheet": "native AXSheet proof does not exactly match",
+          "read-failure": "configured CUA window target was refused",
+        };
+        await expect(computer.detectNewWindowHandoffCandidates(session, setupSignal)).rejects.toThrow(expectedReason[scenario]);
+      }
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(2);
+      expect(before.surfaceRef.surfaceId).not.toBe(active.surfaceRef.surfaceId);
+    } finally {
+      if (session !== undefined && !sessionClosed) await computer.close(session);
       await rm(directory, { recursive: true, force: true });
     }
   });

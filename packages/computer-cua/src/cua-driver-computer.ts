@@ -1766,6 +1766,9 @@ export class CuaDriverComputer implements Computer {
       }
       const childTarget = asCuaWindowTarget(child.nativeWindow);
       const childRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+      if (childRows.length > 1) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "multiple inventory rows match the admitted macOS attached child");
+      }
       const candidate = childRows.length === 1 ? childRows[0] : undefined;
       const grandparent = parent.parentSurfaceId === undefined ? undefined : current.surfaceRegistry.surfaces.get(parent.parentSurfaceId);
       const grandparentRef = grandparent === undefined ? undefined : currentSurfaceRef(current.surfaceRegistry, grandparent.surfaceId);
@@ -1787,13 +1790,94 @@ export class CuaDriverComputer implements Computer {
       }
       const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
       const parentVisible = parentRows.length === 1 && parentRows[0]!.isOnScreen === true && parentRows[0]!.minimized !== true;
-      const anotherVisibleOwnedWindow = inventory.windows.some((window) =>
+      const hasAnotherVisibleOwnedWindow = (rows: readonly CuaWindowInfo[]): boolean => rows.some((window) =>
         windowIdentityKey(window.target) !== windowIdentityKey(parentTarget) &&
         windowIdentityKey(window.target) !== windowIdentityKey(childTarget) &&
         window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
         window.isOnScreen === true && window.minimized !== true);
-      if (!parentVisible || candidate !== undefined || anotherVisibleOwnedWindow) {
+      if (!parentVisible || hasAnotherVisibleOwnedWindow(inventory.windows)) {
         throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "fresh no-sheet AX proof did not coincide with an absent child and visible exact parent");
+      }
+      if (candidate !== undefined) {
+        const storedChildBinding = current.windowBindings.get(windowIdentityKey(childTarget));
+        const exactHiddenChild = candidate.isOnScreen === false && candidate.minimized !== true &&
+          (candidate.ownerPid === undefined || candidate.ownerPid === parentTarget.pid) &&
+          (candidate.ownerWindowId === undefined || candidate.ownerWindowId === parentTarget.windowId) &&
+          storedChildBinding !== undefined && sameWindowGeometry(candidate.bounds, storedChildBinding.bounds);
+        if (!exactHiddenChild || inventory.truncated === true) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the admitted child remains visible, ambiguous, or lacks exact hidden-window geometry evidence");
+        }
+
+        const initialRef = { ...ref };
+        const initialParentRef = { ...parentRef };
+        const initialRootRef = grandparentRef === undefined ? undefined : { ...grandparentRef };
+        const initialParentGeometry = { ...parentBinding.bounds };
+        const stillSameStack = (): boolean => {
+          const activeNow = current.surfaceRegistry.activeSurface;
+          const activeChild = current.surfaceRegistry.surfaces.get(initialRef.surfaceId);
+          const parentNow = current.surfaceRegistry.surfaces.get(initialParentRef.surfaceId);
+          const rootNow = initialRootRef === undefined
+            ? undefined
+            : current.surfaceRegistry.surfaces.get(initialRootRef.surfaceId);
+          return this.session === current && current.active &&
+            sameSurfaceRef(initialRef, activeNow) && isCurrentSurfaceRef(current.surfaceRegistry, initialRef) &&
+            isExecutableSurfaceRef(current.surfaceRegistry, initialRef) &&
+            sameSurfaceRef(initialParentRef, currentSurfaceRef(current.surfaceRegistry, initialParentRef.surfaceId)) &&
+            isCurrentSurfaceRef(current.surfaceRegistry, initialParentRef) && parentNow !== undefined &&
+            activeChild?.kind === "native_window" && activeChild.admissionSource === "macos_attached_sheet_proof" &&
+            activeChild.parentSurfaceId === initialParentRef.surfaceId &&
+            (initialRootRef === undefined
+              ? parentNow.parentSurfaceId === undefined
+              : parentNow.parentSurfaceId === initialRootRef.surfaceId && rootNow !== undefined &&
+                sameSurfaceRef(initialRootRef, currentSurfaceRef(current.surfaceRegistry, initialRootRef.surfaceId)) &&
+                isCurrentSurfaceRef(current.surfaceRegistry, initialRootRef));
+        };
+
+        await waitWithAbort(80, signal);
+        signal.throwIfAborted();
+        if (!stillSameStack()) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the attached-sheet stack changed during the bounded hidden-child recheck");
+        }
+        const [retryInventory, retryParentBinding] = await Promise.all([
+          listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe),
+          discoverWindow(current.driver, current.label, parentTarget, signal),
+        ]);
+        const retryChildRows = retryInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+        const retryParentRows = retryInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+        const retryCandidate = retryChildRows.length === 1 ? retryChildRows[0] : undefined;
+        const retryParentRow = retryParentRows.length === 1 ? retryParentRows[0] : undefined;
+        if (!stillSameStack() || windowIdentityKey(retryParentBinding.target) !== windowIdentityKey(parentTarget) ||
+            retryInventory.truncated === true || retryChildRows.length !== 1 ||
+            retryParentRows.length !== 1 || retryCandidate === undefined || retryCandidate.isOnScreen !== false ||
+            retryCandidate.minimized === true ||
+            (retryCandidate.ownerPid !== undefined && retryCandidate.ownerPid !== parentTarget.pid) ||
+            (retryCandidate.ownerWindowId !== undefined && retryCandidate.ownerWindowId !== parentTarget.windowId) ||
+            !sameWindowGeometry(retryCandidate.bounds, storedChildBinding!.bounds) ||
+            retryParentRow?.isOnScreen !== true || retryParentRow.minimized === true ||
+            hasAnotherVisibleOwnedWindow(retryInventory.windows) || !sameWindowGeometry(retryParentBinding.bounds, initialParentGeometry) ||
+            !sameWindowGeometry(retryParentBinding.bounds, storedParentBinding.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact hidden child, parent, or stack changed during the bounded recheck");
+        }
+        const retryAttached = await readMacAttachedSheetState(
+          current.driver, current.label, retryParentBinding, retryCandidate, signal,
+          parent.kind === "native_window" && parent.admissionSource === "macos_attached_sheet_proof" && grandparentNative !== undefined
+            ? asCuaWindowTarget(grandparentNative)
+            : undefined,
+        );
+        if (retryAttached.status !== "none" || !stillSameStack() ||
+            !sameWindowGeometry(retryParentBinding.bounds, storedParentBinding.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", retryAttached.status === "unknown"
+            ? retryAttached.reason
+            : "a fresh exact no-sheet proof did not remain stable through the bounded recheck");
+        }
+        signal.throwIfAborted();
+        const currentParentBinding = current.windowBindings.get(windowIdentityKey(parentTarget));
+        const currentChildBinding = current.windowBindings.get(windowIdentityKey(childTarget));
+        if (!stillSameStack() || currentParentBinding === undefined || currentChildBinding === undefined ||
+            !sameWindowGeometry(currentParentBinding.bounds, initialParentGeometry) ||
+            !sameWindowGeometry(currentChildBinding.bounds, storedChildBinding.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact attached-sheet binding changed before the verified pop");
+        }
       }
       this.commitVerifiedChildPop(current, ref, parent.surfaceId, parentBinding);
       return undefined;
