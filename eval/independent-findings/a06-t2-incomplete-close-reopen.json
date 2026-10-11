@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-1791735376974-18f3898f-d44",
+  "manifestId": "astra-a01-t2-local-20261010",
+  "familyId": "local_text_save_reopen",
+  "variantId": "baseline",
+  "trajectorySha256": "8fd3c31e68902a0e09896f9c0562c3afaa1a8c8684a9128438be039cc1ade916",
+  "manifestSha256": "f47d67a060132ef7053b822cfb5d031271ce8232efd94cd7d39b9b868e3e968a",
+  "terminalEventId": "72bc20a7-1030-4626-b918-52a66fc87b1f",
+  "terminalOutcome": "cancelled",
+  "reviewerKind": "agent",
+  "reviewer": "Sol",
+  "reviewedAt": "2026-10-12T00:39:00Z",
+  "findings": [
+    {
+      "findingId": "a06-t2-incomplete-close-reopen",
+      "kind": "incomplete_task",
+      "status": "failed",
+      "field": "closed_and_reopened",
+      "reason": "The run ended cancelled after the bound-window handoff could not be confirmed. The trajectory does not establish the requested close-and-reopen verification.",
+      "sourceRefs": [
+        {
+          "kind": "observation_png",
+          "eventId": "842be4f7-e379-4fe1-abe5-2673089f3e83",
+          "observationId": "70332c87-9428-4095-a55f-badf1a1c1887",
+          "assetId": "75636527-b5da-4723-b792-083f3c6897e6",
+          "pngSha256": "3e2f97febe1b2c8442aff9a8dca77c7b0467b5c4899b1f96c8861f8bfdbaa4ec"
+        },
+        {
+          "kind": "runtime_action",
+          "eventId": "4b78e9eb-f264-4b3c-9695-f29e44b5ff4e",
+          "actionId": "7e62e10f-d5c2-45c8-94d0-373d64ab5e66",
+          "receiptEventId": "9dcce2cb-d5bd-4904-96da-55aa711be35d"
+        },
+        {
+          "kind": "terminal",
+          "eventId": "72bc20a7-1030-4626-b918-52a66fc87b1f",
+          "outcome": "cancelled"
+        }
+      ]
+    }
+  ]
+}
