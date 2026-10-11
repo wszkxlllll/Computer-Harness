@@ -189,7 +189,7 @@ export function windowSwitchTools(): readonly ToolDefinition[] {
 export function reopenSavedDocumentTool(): ComputerToolDefinition {
   return {
     name: "reopen_saved_document",
-    description: "Reopen the one exact local document authorized by the Host, only after its clean saved document was closed by a completed CMD+W and a fresh missing-window check confirmed that close. This action accepts no path or URL. Use it only from the fresh recovery observation; the one-use grant is consumed when the launch attempt begins.",
+    description: "Use this to reopen the one Host-authorized local document through the application's normal macOS open-document handler (NSWorkspace/odoc). It accepts no path or URL. Use it only from the fresh recovery observation after the clean saved document was closed by a completed CMD+W and a fresh missing-window check confirmed closure. The one-use grant is consumed when the launch attempt begins.",
     category: "computer",
     isolatedTurn: true,
     inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
