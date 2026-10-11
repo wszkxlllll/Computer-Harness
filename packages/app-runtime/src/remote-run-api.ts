@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
+import { MAX_WINDOW_PREVIEW_BYTES, normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 import type { AssetId, AssetRef, ComputerWindowCandidate, JsonValue, RunOutcome, RuntimeEvent } from "@computer-harness/protocol";
 import type { AssetReader } from "@computer-harness/runtime";
 import { inspectManagedBrowserProfile, readManagedBrowserStartupUrls } from "@computer-harness/computer-cua";
@@ -10,6 +10,7 @@ import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
 import { RunNoticeProjector, RunNoticeScheduler, type RunNoticeGeneration } from "@computer-harness/voice";
 import { approvalRequiresVisualReview, projectApprovalPreview, projectApprovalVoiceContext } from "./approval-preview.js";
+import { normalizeWindowPreviewPng, WindowPreviewImageError } from "./window-preview-image.js";
 import { filterIndistinguishableWindowTargets, filterInitialTargetWindowCandidates, hasExplicitApplicationIntent, matchGoalToWindow, targetsForExplicitApplicationIntent } from "./window-target-matcher.js";
 import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 import {
@@ -137,7 +138,6 @@ const WINDOW_DISCOVERY_TIMEOUT_MS = 15_000;
 const WINDOW_PREVIEW_TIMEOUT_MS = 8_000;
 const WINDOW_HANDOFF_REFRESH_TIMEOUT_MS = 15_000;
 const WINDOW_PREVIEW_PROOF_TTL_MS = 2 * 60_000;
-const MAX_WINDOW_PREVIEW_BYTES = 1_048_576;
 const MAX_WINDOW_TARGETS = 64;
 const MAX_GOAL_CHARS = 20_000;
 const MAX_REPLY_CHARS = 60_000;
@@ -197,7 +197,7 @@ export function createFileRemoteAssetReader(rootDir: string): AssetReader {
 
 export class RemoteRunApiError extends Error {
   public constructor(
-    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "INVALID_ASSISTANT_PREFERENCES" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "WINDOW_PREVIEW_REQUIRED" | "WINDOW_PREVIEW_UNAVAILABLE" | "WINDOW_PREVIEW_BUSY" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE" | "MANAGED_BROWSER_SETUP_REQUIRED",
+    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "INVALID_ASSISTANT_PREFERENCES" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "WINDOW_PREVIEW_REQUIRED" | "WINDOW_PREVIEW_UNAVAILABLE" | "WINDOW_PREVIEW_CAPTURE_FAILED" | "WINDOW_PREVIEW_IMAGE_TOO_LARGE" | "WINDOW_PREVIEW_BUSY" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE" | "MANAGED_BROWSER_SETUP_REQUIRED",
     message: string,
   ) {
     super(message);
@@ -412,8 +412,8 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (preview.target.pid !== target.pid || preview.target.windowId !== target.windowId) {
       throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The screenshot no longer belongs to the exact selected window. Refresh the list and inspect the current candidate.");
     }
-    if (preview.mediaType !== "image/png" || preview.data.byteLength === 0 || preview.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
-      throw new RemoteRunApiError("WINDOW_PREVIEW_UNAVAILABLE", "The exact window preview is unavailable or too large. Restore or resize it on the computer, then refresh.");
+    if (preview.mediaType !== "image/png" || preview.data.byteLength === 0) {
+      throw new RemoteRunApiError("WINDOW_PREVIEW_CAPTURE_FAILED", "The exact window preview did not contain a usable image. Restore the window, refresh, and try again.");
     }
     const appName = boundedText(preview.target.appName, 256);
     const normalizedExpectedApp = expectedAppName?.normalize("NFKC").toLocaleLowerCase();
@@ -421,7 +421,22 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (normalizedExpectedApp !== undefined && normalizedPreviewApp !== undefined && normalizedExpectedApp !== normalizedPreviewApp) {
       throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The application behind this window changed. Refresh the list and inspect the new candidate.");
     }
-    return preview;
+    try {
+      const normalized = normalizeWindowPreviewPng(preview.data, preview.viewport, signal);
+      if (normalized.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
+        throw new RemoteRunApiError("WINDOW_PREVIEW_IMAGE_TOO_LARGE", "The exact window preview exceeds the safe image transfer limit after bounded thumbnail reduction. Resize the window and refresh before trying again.");
+      }
+      return { ...preview, data: normalized.data, viewport: normalized.viewport };
+    } catch (error) {
+      if (error instanceof RemoteRunApiError) throw error;
+      if (error instanceof WindowPreviewImageError) {
+        if (error.code === "WINDOW_PREVIEW_IMAGE_TOO_LARGE") {
+          throw new RemoteRunApiError(error.code, "The exact window preview exceeds the safe image transfer limit after bounded thumbnail reduction. Resize the window and refresh before trying again.");
+        }
+        throw new RemoteRunApiError(error.code, "The exact window preview is not a usable PNG. Refresh the window list and retry its preview.");
+      }
+      throw error;
+    }
   }
 
   private async listCurrentHandoffCandidate(

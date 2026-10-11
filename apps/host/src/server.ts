@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { RemoteRunApiError, type RemoteCommand, type RemoteRunApi, type RemoteRunTarget, type RemoteWindowCandidatePreview } from "@computer-harness/app-runtime";
-import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
+import { MAX_WINDOW_PREVIEW_BYTES, normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 import type { HostRequestHandler, PairingTokenRegistration, RelayBridgeRequest } from "@computer-harness/relay-connector/protocol";
 import { MAX_WINDOW_PREVIEW_RESPONSE_BYTES, resolveAllowedApiRoute } from "@computer-harness/relay-connector/routing";
 import { VOICE_INPUT_MAX_BATCH_CHUNKS, VOICE_INPUT_MAX_CHUNK_BYTES } from "@computer-harness/voice";
@@ -961,7 +961,7 @@ function projectWindowCandidatePreviewResponse(value: RemoteWindowCandidatePrevi
       typeof record.capturedAt !== "string" || !Number.isFinite(Date.parse(record.capturedAt)) ||
       typeof record.expiresAt !== "string" || !Number.isFinite(Date.parse(record.expiresAt)) ||
       record.mediaType !== "image/png" || typeof base64 !== "string" || base64.length === 0 ||
-      base64.length > Math.ceil(1_048_576 / 3) * 4 ||
+      base64.length > Math.ceil(MAX_WINDOW_PREVIEW_BYTES / 3) * 4 ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(base64) ||
       !isExactKeys(viewportRecord, ["width", "height"]) ||
       !Number.isSafeInteger(viewportRecord.width) || !Number.isSafeInteger(viewportRecord.height) ||
@@ -971,7 +971,7 @@ function projectWindowCandidatePreviewResponse(value: RemoteWindowCandidatePrevi
   }
   const data = Buffer.from(base64, "base64");
   const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  if (data.byteLength === 0 || data.byteLength > 1_048_576 || data.toString("base64") !== base64 ||
+  if (data.byteLength === 0 || data.byteLength > MAX_WINDOW_PREVIEW_BYTES || data.toString("base64") !== base64 ||
       data.byteLength < pngSignature.length || !pngSignature.every((byte, index) => data[index] === byte)) {
     throw new HostHttpError(502, "WINDOW_PREVIEW_UNAVAILABLE", "The Host could not safely project the exact window preview.");
   }

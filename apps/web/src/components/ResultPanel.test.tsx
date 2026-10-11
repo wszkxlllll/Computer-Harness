@@ -13,6 +13,34 @@ afterEach(() => {
 });
 
 describe("run result panel", () => {
+  it.each([
+    ["succeeded", "已完成", "任务已完成，但电脑没有返回文字结果。"],
+    ["failed", "未完成", "任务没有完成。"],
+    ["cancelled", "已停止", "任务已停止。"],
+    ["budget_exhausted", "已达到本次限制", "任务未完成：已达到本次任务限制。"],
+    ["outcome_unknown", "结果待确认", "还不能确认任务是否完成。"],
+    ["future_outcome", "结果待核实", "还不能确认任务是否完成。"],
+  ])("explains a %s outcome without a text reply", (outcome, label, explanation) => {
+    const { rerender } = render(<ResultPanel outcome={outcome} error="本次操作未能完成。" />);
+    expect(screen.getByRole("region", { name: "任务结果" })).toBeTruthy();
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(screen.getByText(explanation)).toBeTruthy();
+    expect(screen.queryByText("电脑返回的内容")).toBeNull();
+    const details = document.querySelector(".result-error-details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain("本次操作未能完成。");
+
+    rerender(<ResultPanel />);
+    expect(screen.queryByRole("region", { name: "任务结果" })).toBeNull();
+  });
+
+  it("shows an error detail for a whitespace-only reply", () => {
+    render(<ResultPanel reply="   " outcome="failed" error="保存结果没有得到确认。" />);
+    expect(document.querySelector(".result-copy")).toBeNull();
+    expect(screen.getByText("任务没有完成。")).toBeTruthy();
+    expect(document.querySelector(".result-error-details")?.textContent).toContain("保存结果没有得到确认。");
+  });
+
   it("offers the full reply only when the collapsed panel actually clips it", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
       configurable: true,

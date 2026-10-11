@@ -47,7 +47,7 @@ describe("candidate-bound window preview relay routes", () => {
   it("allows only bounded preview requests bound to initial or waiting-run candidates", () => {
     const initial = resolveAllowedApiRoute("POST", "/api/windows/preview");
     const handoff = resolveAllowedApiRoute("POST", "/api/runs/run-123/window-candidates/preview");
-    expect(initial?.maxResponseBytes).toBeLessThan(2 * 1024 * 1024 + 1);
+    expect(initial?.maxResponseBytes).toBeLessThan(3 * 1024 * 1024 + 1);
     expect(handoff?.maxResponseBytes).toBe(initial?.maxResponseBytes);
     expect(resolveAllowedApiRoute("GET", "/api/windows/preview")).toBeNull();
     expect(resolveAllowedApiRoute("POST", "/api/runs/run-123/window-candidates/preview/other")).toBeNull();

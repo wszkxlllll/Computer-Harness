@@ -504,7 +504,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
       ["failed", "任务未能完成。"],
       ["cancelled", "任务已取消。"],
       ["budget_exhausted", "任务操作已达到上限。"],
-      ["outcome_unknown", "有项操作的结果无法确认，任务已暂停。"],
+      ["outcome_unknown", "任务已结束，操作结果仍待核实。"],
     ] as const;
     for (const [outcome, fallback] of unsuccessfulOutcomes) {
       expect(new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
@@ -598,7 +598,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
       type: "runtime.error",
       category: "unknown_side_effect",
       message: "Do not speak this raw error, path, or coordinate.",
-    }))).toMatchObject({ kind: "error", text: "有项操作的结果无法确认，任务已停止。" });
+    }))).toMatchObject({ kind: "error", text: "操作结果暂时无法确认，请查看当前任务状态。" });
     expect(projector.project(event(4, {
       type: "runtime.error",
       category: "partial_side_effect",
@@ -611,6 +611,23 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(projector.project(event(6, {
       type: "runtime.error", category: "monitor_diagnostic", message: "private Monitor exception",
     }))).toBeUndefined();
+  });
+
+  it("distinguishes recoverable side-effect uncertainty from a terminal unknown outcome", () => {
+    const recovering = new RunNoticeProjector(runId);
+    expect(recovering.project(event(1, {
+      type: "runtime.error", category: "unknown_side_effect", message: "private raw detail",
+    }))?.text).toBe("操作结果暂时无法确认，请查看当前任务状态。");
+    expect(recovering.project(observation(2, "recovered-observation"))).toBeUndefined();
+    expect(recovering.project(event(3, { type: "run.finished", outcome: "succeeded", summary: "recovered" }))?.text)
+      .toBe("任务已完成，可查看结果。");
+
+    const terminal = new RunNoticeProjector(runId);
+    expect(terminal.project(event(1, {
+      type: "runtime.error", category: "unknown_side_effect", message: "private raw detail",
+    }))?.text).not.toContain("任务已停止");
+    expect(terminal.project(event(2, { type: "run.finished", outcome: "outcome_unknown" }))?.text)
+      .toBe("任务结束。");
   });
 });
 

@@ -372,9 +372,9 @@ describe("CuaWindowDiscovery", () => {
     expect(calls).toContain("destroy");
   });
 
-  it("rejects image bytes beyond the preview cap and closes the temporary session", async () => {
+  it("rejects source bytes beyond the normalization cap and closes the temporary session", async () => {
     const calls: string[] = [];
-    const oversized = new Uint8Array(1_048_577);
+    const oversized = new Uint8Array(16 * 1024 * 1024 + 1);
     oversized.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
     oversized[12] = 73;
     oversized[13] = 72;
@@ -409,7 +409,7 @@ describe("CuaWindowDiscovery", () => {
     const discovery = new WindowsFixtureDiscovery({ socketPath: "fixture", driverFactory: () => driver });
 
     await expect(discovery.captureWindowPreview({ pid: 1234, windowId: 5678 }, new AbortController().signal))
-      .rejects.toThrow("bounded image size");
+      .rejects.toThrow("bounded normalization size");
     expect(calls).toContain("endSession");
     expect(calls).toContain("shutdown");
     expect(calls).toContain("destroy");

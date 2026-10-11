@@ -311,7 +311,7 @@ function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>
     case "failed": return failureAlreadyExplained ? "任务结束。" : "任务未能完成。";
     case "cancelled": return "任务已取消。";
     case "budget_exhausted": return failureAlreadyExplained ? "任务结束。" : "任务操作已达到上限。";
-    case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "有项操作的结果无法确认，任务已暂停。";
+    case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "任务已结束，操作结果仍待核实。";
   }
 }
 
@@ -323,7 +323,7 @@ function runtimeErrorVoiceText(category: string): string | undefined {
     case "budget":
       return "任务操作已达到上限，暂时停止。";
     case "unknown_side_effect":
-      return "有项操作的结果无法确认，任务已停止。";
+      return "操作结果暂时无法确认，请查看当前任务状态。";
     case "partial_side_effect":
       return "部分内容可能已经输入，结果无法确认，任务已停止。";
     case "cleanup":

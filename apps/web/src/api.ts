@@ -132,6 +132,8 @@ function errorMessageForCode(code?: string): string | undefined {
     WINDOW_SELECTION_REQUIRED: "电脑无法唯一确定要操作的窗口。请从刷新后的列表中手动选择一个窗口。",
     WINDOW_PREVIEW_REQUIRED: "请先查看这个精确窗口的实时预览，并在确认画面后再选择。",
     WINDOW_PREVIEW_UNAVAILABLE: "电脑无法安全预览这个精确窗口。请在电脑上恢复或调整目标窗口，刷新列表后重试。",
+    WINDOW_PREVIEW_CAPTURE_FAILED: "电脑没有返回可用的精确窗口预览。请刷新窗口列表后重试。",
+    WINDOW_PREVIEW_IMAGE_TOO_LARGE: "窗口预览超过安全传输限制。请调整窗口大小后刷新重试。",
     WINDOW_PREVIEW_BUSY: "另一张窗口预览仍在读取。等它完成或取消后再试。",
     WINDOW_ACTIVATION_FAILED: "电脑找到了匹配窗口，但无法将它恢复到屏幕上。任务尚未开始，请手动选择一个当前可见的窗口后重试。",
     WINDOW_DISCOVERY_FAILED: "电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。",

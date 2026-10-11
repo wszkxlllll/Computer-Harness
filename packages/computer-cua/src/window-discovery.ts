@@ -6,6 +6,7 @@ import {
   activateWindowTarget,
   listWindowInventory,
   validateWindowTarget,
+  WindowContractError,
   type CuaWindowCapture,
   type CuaWindowInfo,
   type CuaWindowInventory,
@@ -165,8 +166,8 @@ export class CuaWindowDiscovery {
       if (capture.binding.target.pid !== target.pid || capture.binding.target.windowId !== target.windowId) {
         throw new Error("window preview capture did not retain the exact candidate identity");
       }
-      if (capture.data.byteLength > MAX_WINDOW_PREVIEW_BYTES) {
-        throw new Error("window preview exceeds the bounded image size");
+      if (capture.data.byteLength > MAX_WINDOW_PREVIEW_SOURCE_BYTES) {
+        throw new WindowContractError("WINDOW_PREVIEW_IMAGE_TOO_LARGE", "window preview source exceeds the bounded normalization size");
       }
       const inventory = await listWindowInventory(driver, session, signal, undefined, true, this.options.windowRelationshipProbe, osPlatform);
       const after = requireExactPreviewCandidate(inventory, target);
@@ -327,7 +328,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const MAX_WINDOW_PREVIEW_BYTES = 1_048_576;
+/** Source bound before app-runtime performs preview-only thumbnail normalization. */
+const MAX_WINDOW_PREVIEW_SOURCE_BYTES = 16 * 1024 * 1024;
 
 function requireExactPreviewCandidate(inventory: CuaWindowInventory, target: CuaWindowTarget): CuaWindowInfo {
   const matches = inventory.windows.filter((window) => window.target.pid === target.pid && window.target.windowId === target.windowId);

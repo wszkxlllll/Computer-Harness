@@ -281,6 +281,8 @@ export interface ManagedBrowserStartupPageDiagnostic {
 export interface ManagedBrowserWindowBindingHint {
   readonly browserWindowId: number;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  /** Independently measured scale from CDP DIP bounds to local CUA window units. */
+  readonly browserBoundsToCuaScale?: number;
   readonly ownedProcessIds?: readonly number[];
   readonly onDiagnostic?: (diagnostic: ManagedBrowserWindowResolutionDiagnostic) => void;
 }
@@ -427,6 +429,8 @@ export interface ManagedBrowserPageActivity {
   /** Opaque per-document marker used only to invalidate stale actions. */
   readonly navigationKey?: string;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  /** Scale derived from stable CDP layout metrics, never from a candidate window. */
+  readonly browserBoundsToCuaScale?: number;
 }
 
 export interface ManagedBrowserNavigationReadiness {
@@ -650,6 +654,20 @@ export function selectManagedBrowserStartupActivity(
   if (!activationSucceeded || !MANAGED_BROWSER_TARGET_ID_PATTERN.test(targetId)) return undefined;
   const activity = activities.find((candidate) => candidate?.page.id === targetId);
   return activity === undefined || activity.visibilityState === "unloaded" ? undefined : activity;
+}
+
+export function createManagedBrowserWindowBindingHint(
+  selected: ManagedBrowserPageActivity,
+  ownedProcessIds: Iterable<number>,
+  onDiagnostic?: ManagedBrowserWindowBindingHint["onDiagnostic"],
+): ManagedBrowserWindowBindingHint {
+  return {
+    browserWindowId: selected.browserWindowId,
+    ...(selected.browserBounds === undefined ? {} : { browserBounds: selected.browserBounds }),
+    ...(selected.browserBoundsToCuaScale === undefined ? {} : { browserBoundsToCuaScale: selected.browserBoundsToCuaScale }),
+    ownedProcessIds: [...ownedProcessIds],
+    ...(onDiagnostic === undefined ? {} : { onDiagnostic }),
+  };
 }
 
 const MANAGED_PAGE_ACTIVITY_SCRIPT = String.raw`({
@@ -899,7 +917,7 @@ export function validateOwnedWindowResolution(
     : hint.ownedProcessIds.includes(evidence.processId);
   const boundsMatch = hint?.browserBounds === undefined
     ? true
-    : evidence.windowBounds !== undefined && managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds);
+    : evidence.windowBounds !== undefined && managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds, hint.browserBoundsToCuaScale);
   if (!evidence.ownedByHost || evidence.hostProcessId !== browserProcessId || !processOwned || evidence.processId !== resolution.target.pid || evidence.windowId !== resolution.target.windowId || evidence.windowCount !== 1 || hint?.browserWindowId !== undefined && evidence.browserWindowId !== hint.browserWindowId || !boundsMatch) {
     throw new DomGroundingUnavailableError("managed browser window resolver ownership_mismatch: host ownership was not proven");
   }
@@ -912,19 +930,65 @@ export function validateOwnedWindowResolution(
 export function managedBrowserWindowBoundsMatch(
   left: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
   right: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  browserBoundsToCuaScale = 1,
 ): boolean {
-  if (left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height) return true;
-  // CDP reports browser bounds in device-independent pixels while CUA may
-  // report physical pixels.  Compare dimensions for one common scale and
-  // deliberately ignore the small frame-origin offset.  Process ownership
-  // and uniqueness remain mandatory; geometry is only a safe disambiguator.
-  const widthScale = left.width / right.width;
-  const heightScale = left.height / right.height;
-  const scaleDelta = Math.abs(widthScale - heightScale) / Math.max(widthScale, heightScale);
-  const leftAspect = left.width / left.height;
-  const rightAspect = right.width / right.height;
-  const aspectDelta = Math.abs(leftAspect - rightAspect) / Math.max(leftAspect, rightAspect);
-  return scaleDelta <= 0.08 && aspectDelta <= 0.08;
+  if (!Number.isFinite(browserBoundsToCuaScale) || browserBoundsToCuaScale < 1 || browserBoundsToCuaScale > 8) return false;
+  if (![left.x, left.y, right.x, right.y].every(Number.isSafeInteger) ||
+      ![left.width, left.height, right.width, right.height].every((value) => Number.isSafeInteger(value) && value > 0)) return false;
+  // CDP reports DIP. Scale comes from stable page metrics, not candidate
+  // geometry. Require all four coordinates/dimensions to agree within the
+  // bounded window-frame tolerance.
+  const tolerance = 16 * browserBoundsToCuaScale;
+  return Math.abs(left.x - right.x * browserBoundsToCuaScale) <= tolerance &&
+    Math.abs(left.y - right.y * browserBoundsToCuaScale) <= tolerance &&
+    Math.abs(left.width - right.width * browserBoundsToCuaScale) <= tolerance &&
+    Math.abs(left.height - right.height * browserBoundsToCuaScale) <= tolerance;
+}
+
+/**
+ * Derive the CDP-DIP to local CUA-window scale independently of candidate
+ * window bounds. The scale must be stable across the two page metric reads.
+ */
+export function browserBoundsToCuaScaleFromPageMetrics(
+  before: unknown,
+  after: unknown,
+  platform: NodeJS.Platform = process.platform,
+): number | undefined {
+  if (platform === "darwin") return 1;
+  if (platform !== "win32" && platform !== "linux") return undefined;
+  const beforeScale = parseManagedBrowserLayoutScale(before);
+  const afterScale = parseManagedBrowserLayoutScale(after);
+  if (beforeScale === undefined || afterScale === undefined ||
+      !closeEnough(beforeScale.pageZoom, afterScale.pageZoom) ||
+      !closeEnough(beforeScale.browserBoundsToCuaScale, afterScale.browserBoundsToCuaScale)) return undefined;
+  return beforeScale.browserBoundsToCuaScale;
+}
+
+interface ManagedBrowserLayoutScale {
+  readonly pageZoom: number;
+  readonly browserBoundsToCuaScale: number;
+}
+
+function parseManagedBrowserLayoutScale(value: unknown): ManagedBrowserLayoutScale | undefined {
+  if (!isRecord(value) || !isRecord(value.visualViewport) || !isRecord(value.cssVisualViewport)) return undefined;
+  const physicalWidth = value.visualViewport.clientWidth;
+  const physicalHeight = value.visualViewport.clientHeight;
+  const cssWidth = value.cssVisualViewport.clientWidth;
+  const cssHeight = value.cssVisualViewport.clientHeight;
+  const pageZoom = value.cssVisualViewport.zoom;
+  if (![physicalWidth, physicalHeight, cssWidth, cssHeight, pageZoom].every((item) =>
+    typeof item === "number" && Number.isFinite(item) && item > 0) || (pageZoom as number) > 8) return undefined;
+  const widthScale = (physicalWidth as number) / (cssWidth as number);
+  const heightScale = (physicalHeight as number) / (cssHeight as number);
+  if (!closeEnough(widthScale, heightScale)) return undefined;
+  const browserBoundsToCuaScale = ((widthScale + heightScale) / 2) / (pageZoom as number);
+  if (!Number.isFinite(browserBoundsToCuaScale) || browserBoundsToCuaScale < 1 || browserBoundsToCuaScale > 8) return undefined;
+  return { pageZoom: pageZoom as number, browserBoundsToCuaScale };
+}
+
+function closeEnough(left: number, right: number): boolean {
+  const tolerance = Math.max(1e-6, Math.max(Math.abs(left), Math.abs(right)) * 1e-6);
+  return Math.abs(left - right) <= tolerance;
 }
 
 export class ManagedBrowserHost {
@@ -1059,12 +1123,11 @@ export class ManagedBrowserHost {
       const tabId = selected.page.id as string;
       stage = "discover_owned_processes";
       const ownedProcessIds = await discoverManagedBrowserProcessIds(ownedProcessId, profileRoot, signal);
-      const windowHint: ManagedBrowserWindowBindingHint = {
-        browserWindowId: selected.browserWindowId,
-        ...(selected.browserBounds === undefined ? {} : { browserBounds: selected.browserBounds }),
-        ownedProcessIds: [...ownedProcessIds],
-        ...(this.options.onWindowResolutionDiagnostic === undefined ? {} : { onDiagnostic: this.options.onWindowResolutionDiagnostic }),
-      };
+      const windowHint = createManagedBrowserWindowBindingHint(
+        selected,
+        ownedProcessIds,
+        this.options.onWindowResolutionDiagnostic,
+      );
       stage = "resolve_owned_window";
       const resolution = await this.options.resolveOwnedWindowTarget(ownedProcessId, signal, windowHint);
       const windowTarget = validateOwnedWindowResolution(ownedProcessId, resolution, windowHint);
@@ -2214,18 +2277,20 @@ async function listDevToolsBrowserWebSocketUrl(port: number, signal: AbortSignal
   }
 }
 
-async function inspectManagedPageActivity(
+export async function inspectManagedPageActivity(
   page: ManagedBrowserDevToolsPage,
   browserWebSocketDebuggerUrl: string,
   signal: AbortSignal,
+  connect: (webSocketUrl: string, signal: AbortSignal) => Promise<Pick<LoopbackWebSocket, "command" | "close">> = LoopbackWebSocket.connect,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ManagedBrowserPageActivity | undefined> {
   const webSocketDebuggerUrl = page.webSocketDebuggerUrl;
   const targetId = page.id;
   if (typeof webSocketDebuggerUrl !== "string" || typeof targetId !== "string") return undefined;
-  let socket: LoopbackWebSocket | undefined;
-  let browserSocket: LoopbackWebSocket | undefined;
+  let socket: Pick<LoopbackWebSocket, "command" | "close"> | undefined;
+  let browserSocket: Pick<LoopbackWebSocket, "command" | "close"> | undefined;
   try {
-    browserSocket = await LoopbackWebSocket.connect(browserWebSocketDebuggerUrl, signal);
+    browserSocket = await connect(browserWebSocketDebuggerUrl, signal);
     const windowResponse = await browserSocket.command("Browser.getWindowForTarget", { targetId }, signal);
     const browserWindowId = windowResponse?.result?.windowId;
     if (!Number.isSafeInteger(browserWindowId) || browserWindowId <= 0) return undefined;
@@ -2240,8 +2305,17 @@ async function inspectManagedPageActivity(
     let visibilityState: ManagedBrowserPageActivity["visibilityState"] = "unloaded";
     let hasFocus: boolean | undefined;
     let navigationKey: string | undefined;
+    let pageMetricsBefore: unknown;
+    let pageMetricsAfter: unknown;
     try {
-      socket = await LoopbackWebSocket.connect(webSocketDebuggerUrl, signal);
+      socket = await connect(webSocketDebuggerUrl, signal);
+      if (platform === "win32" || platform === "linux") {
+        try {
+          pageMetricsBefore = await readManagedPageLayoutMetrics(socket, signal);
+        } catch (error) {
+          if (signal.aborted) throw error;
+        }
+      }
       const visibilityResponse = await socket.command("Runtime.evaluate", { expression: MANAGED_PAGE_ACTIVITY_SCRIPT, returnByValue: true, awaitPromise: false }, signal);
       const visibilityValue = visibilityResponse?.result?.result?.value;
       const candidateVisibility = isRecord(visibilityValue) ? visibilityValue.visibilityState : undefined;
@@ -2252,10 +2326,19 @@ async function inspectManagedPageActivity(
       if (isRecord(visibilityValue) && typeof visibilityValue.navigationKey === "string" && /^[0-9]+(?:\.[0-9]+)?$/u.test(visibilityValue.navigationKey)) {
         navigationKey = visibilityValue.navigationKey.slice(0, 64);
       }
-    } catch {
+      if (pageMetricsBefore !== undefined && (platform === "win32" || platform === "linux")) {
+        try {
+          pageMetricsAfter = await readManagedPageLayoutMetrics(socket, signal);
+        } catch (error) {
+          if (signal.aborted) throw error;
+        }
+      }
+    } catch (error) {
+      if (signal.aborted) throw error;
       // Browser-internal or transient page targets may reject Runtime.evaluate;
       // retain their window identity and treat them as non-active.
     }
+    const browserBoundsToCuaScale = browserBoundsToCuaScaleFromPageMetrics(pageMetricsBefore, pageMetricsAfter, platform);
     return {
       page,
       browserWindowId,
@@ -2263,6 +2346,7 @@ async function inspectManagedPageActivity(
       ...(hasFocus === undefined ? {} : { hasFocus }),
       ...(navigationKey === undefined ? {} : { navigationKey }),
       ...(browserBounds === undefined ? {} : { browserBounds }),
+      ...(browserBoundsToCuaScale === undefined ? {} : { browserBoundsToCuaScale }),
     };
   } catch (error) {
     if (signal.aborted) throw error;
@@ -2271,6 +2355,11 @@ async function inspectManagedPageActivity(
     socket?.close();
     browserSocket?.close();
   }
+}
+
+async function readManagedPageLayoutMetrics(socket: Pick<LoopbackWebSocket, "command">, signal: AbortSignal): Promise<unknown> {
+  const response = await socket.command("Page.getLayoutMetrics", {}, signal);
+  return response?.result;
 }
 
 function parseBrowserBounds(value: unknown): ManagedBrowserPageActivity["browserBounds"] {

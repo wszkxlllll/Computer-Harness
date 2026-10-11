@@ -1,4 +1,5 @@
 import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -13,7 +14,7 @@ import {
   type MonitorPolicyMode,
 } from "@computer-harness/runtime";
 import type { RuntimeEvent, ActionIntent, ActionReceipt, AssetId, AssetRef, ComputerSessionId, ComputerWindowCandidate, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId, RunOutcome, Viewport } from "@computer-harness/protocol";
-import { BoundWindowMissingError } from "@computer-harness/protocol";
+import { BoundWindowMissingError, MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
 import type { WindowTargetInfo, WindowTargetPreview } from "./application-session.js";
 import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
@@ -23,6 +24,21 @@ import { ApplicationRemoteRunApi, RemoteRunApiError, type ManagedBrowserProfileR
 
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
 const surfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
+interface FixturePngRaster { readonly width: number; readonly height: number; readonly data: Buffer; }
+interface FixturePngModule { readonly PNG: { readonly sync: { read(data: Buffer): FixturePngRaster; write(image: FixturePngRaster, options?: { readonly deflateLevel?: number }): Buffer } }; }
+const pngjs = createRequire(import.meta.url)("pngjs") as FixturePngModule;
+
+function createNoisyPng(width: number, height: number): Buffer {
+  const data = Buffer.allocUnsafe(width * height * 4);
+  let state = 0x7191a5d3;
+  for (let index = 0; index < data.length; index += 1) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    data[index] = state & 0xff;
+  }
+  return pngjs.PNG.sync.write({ width, height, data }, { deflateLevel: 1 });
+}
 
 function config(outputDir: string): ApplicationSessionConfig {
   return {
@@ -746,12 +762,12 @@ describe("ApplicationRemoteRunApi", () => {
       mediaType: "image/png",
       data: new Uint8Array([137, 80, 78, 71]),
     }) },
-    { label: "an oversized image", makePreview: (first: WindowTargetInfo): WindowTargetPreview => ({
+    { label: "a source image above the normalization cap", makePreview: (first: WindowTargetInfo): WindowTargetPreview => ({
       target: first,
       capturedAt: "2026-10-04T00:00:00.000Z",
       viewport: { width: 8, height: 8 },
       mediaType: "image/png",
-      data: new Uint8Array(1_048_577),
+      data: new Uint8Array(16 * 1024 * 1024 + 1),
     }) },
   ])("refuses a candidate preview with $label without granting a reusable proof", async ({ makePreview }) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-invalid-window-preview-"));
@@ -764,13 +780,50 @@ describe("ApplicationRemoteRunApi", () => {
     try {
       const choices = await api.listWindowTargets("device-one");
       await expect(api.previewWindowTarget("device-one", choices.candidates[0]!.token))
-        .rejects.toMatchObject({ code: expect.stringMatching(/WINDOW_(?:TARGET_STALE|PREVIEW_UNAVAILABLE)/u) });
+        .rejects.toMatchObject({ code: expect.stringMatching(/WINDOW_(?:TARGET_STALE|PREVIEW_UNAVAILABLE|PREVIEW_IMAGE_TOO_LARGE)/u) });
       await expect(api.startRun("device-one", "invalid-window-preview-proof", "Inspect the intended Notepad window", {
         mode: "window",
         targetToken: choices.candidates[0]!.token,
       })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
       expect(session.activeRun).toBeUndefined();
       expect(createdComputerConfigs).toEqual([]);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes a valid oversized PNG before issuing the exact candidate preview proof", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-thumbnail-"));
+    const first = { pid: 721, windowId: 7211, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const source = createNoisyPng(2_048, 1_200);
+    expect(source.byteLength).toBeGreaterThan(MAX_WINDOW_PREVIEW_BYTES);
+    const { api, session, setWindows } = createFixture(outputDir, {
+      summary: "The selected window task completed.",
+      windowPreviewOverride: {
+        target: first,
+        capturedAt: "2026-10-06T00:00:00.000Z",
+        viewport: { width: 2_048, height: 1_200 },
+        mediaType: "image/png",
+        data: source,
+      },
+    });
+    setWindows([first, { ...first, pid: 722, windowId: 7221 }]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      expect(choices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
+      const preview = await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
+      const thumbnail = Buffer.from(preview.dataBase64, "base64");
+      const decoded = pngjs.PNG.sync.read(thumbnail);
+      expect(thumbnail.byteLength).toBeLessThanOrEqual(MAX_WINDOW_PREVIEW_BYTES);
+      expect(preview.viewport).toEqual({ width: decoded.width, height: decoded.height });
+      await expect(api.startRun("device-one", "thumbnail-wrong-proof", "Inspect the intended Notepad window", {
+        mode: "window", targetToken: choices.candidates[0]!.token, previewToken: "X".repeat(32),
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+      await expect(api.startRun("device-one", "thumbnail-exact-proof", "Inspect the intended Notepad window", {
+        mode: "window", targetToken: choices.candidates[0]!.token, previewToken: preview.previewToken,
+      })).resolves.toBeDefined();
+      await session.waitForActiveRun();
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });

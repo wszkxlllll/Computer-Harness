@@ -149,7 +149,7 @@ describe("HostRelayConnector", () => {
     const hostId = "connector_preview_limit";
     const credential = randomBytes(32).toString("base64url");
     const relay = await startFakeRelay();
-    const oversizedPreview = "A".repeat(2 * 1024 * 1024);
+    const oversizedPreview = "A".repeat(3 * 1024 * 1024 + 1);
     const requestHandler = vi.fn(async () => ({ statusCode: 200, body: { dataBase64: oversizedPreview } }));
     const connector = new HostRelayConnector({
       relayUrl: relay.origin,

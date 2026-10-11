@@ -9,6 +9,9 @@ export type ToolCallId = Brand<string, "ToolCallId">;
 export type EventId = Brand<string, "EventId">;
 export type AssetId = Brand<string, "AssetId">;
 
+/** Maximum raw PNG size accepted for a window-candidate preview. */
+export const MAX_WINDOW_PREVIEW_BYTES = 2 * 1024 * 1024;
+
 /** A run-scoped, generation-checked address for the exact UI surface captured by an Observation. */
 /** `unknown` is reserved for legacy trajectory decoding; live producers must never emit it. */
 export type SurfaceKind = "desktop" | "native_window" | "browser_tab" | "dom" | "overlay" | "unknown";
