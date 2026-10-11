@@ -194,6 +194,54 @@ describe("F045 strict completed bound-window missing boundary", () => {
   });
 });
 
+describe("native AXTextArea format metadata", () => {
+  it("projects only valid macOS non-Web AXTextArea format counts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-text-format-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin",
+      socketPath: "fixture",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      grounding: "uia-catalog-v1",
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const observeElement = async (id: string, element: Record<string, unknown>) => {
+        fake.setGroundingState({ snapshot_id: `s-${id}`, elements_complete: true, elements: [element] });
+        const result = await computer.observe(session, id as ObservationId, signal);
+        return result.grounding?.elements[0];
+      };
+
+      expect(await observeElement("text-format-valid", {
+        role: "AXTextArea", name: "Document", frame: { x: 100, y: 100, width: 300, height: 160 },
+        text_format: { source: "ax-cfstring-v1", status: "complete", utf8_bytes: 8, code_point_count: 3, line_feed_count: 1, trailing_line_feed_count: 1, carriage_return_count: 0 },
+      })).toMatchObject({ textFormat: { source: "ax-cfstring-v1", status: "complete", utf8Bytes: 8, codePointCount: 3, lineFeedCount: 1, trailingLineFeedCount: 1, carriageReturnCount: 0 } });
+
+      expect(await observeElement("text-format-over-limit", {
+        role: "AXTextArea", frame: { x: 100, y: 100, width: 300, height: 160 },
+        text_format: { source: "ax-cfstring-v1", status: "over_limit" },
+      })).toMatchObject({ textFormat: { source: "ax-cfstring-v1", status: "over_limit" } });
+
+      expect((await observeElement("text-format-web", {
+        role: "AXTextArea", frame: { x: 100, y: 100, width: 300, height: 160 }, in_web_content: true,
+        text_format: { source: "ax-cfstring-v1", status: "complete", utf8_bytes: 1, code_point_count: 1, line_feed_count: 0, trailing_line_feed_count: 0, carriage_return_count: 0 },
+      }))?.textFormat).toBeUndefined();
+      expect((await observeElement("text-format-malformed", {
+        role: "AXTextArea", frame: { x: 100, y: 100, width: 300, height: 160 },
+        text_format: { source: "ax-cfstring-v1", status: "complete", utf8_bytes: 1, code_point_count: 2, line_feed_count: 0, trailing_line_feed_count: 0, carriage_return_count: 0 },
+      }))?.textFormat).toBeUndefined();
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 function result(overrides: Partial<ToolResult> = {}): ToolResult {
   return {
     text: "ok",

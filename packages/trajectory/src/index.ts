@@ -1061,6 +1061,17 @@ const groundingOptionSchema = z.object({
   text: nonEmptyString.max(160),
   enabled: z.boolean(),
 });
+const groundingTextFormatSchema = z.discriminatedUnion("status", [
+  z.object({ source: z.literal("ax-cfstring-v1"), status: z.literal("complete"), utf8Bytes: z.number().int().nonnegative().max(16_384), codePointCount: z.number().int().nonnegative().max(16_384), lineFeedCount: z.number().int().nonnegative().max(16_384), trailingLineFeedCount: z.number().int().nonnegative().max(16_384), carriageReturnCount: z.number().int().nonnegative().max(16_384) }).strict(),
+  z.object({ source: z.literal("ax-cfstring-v1"), status: z.literal("over_limit") }).strict(),
+]).superRefine((format, context) => {
+  if (format.status !== "complete") return;
+  if (format.utf8Bytes < format.codePointCount || format.utf8Bytes > 4 * format.codePointCount ||
+      format.lineFeedCount + format.carriageReturnCount > format.codePointCount ||
+      format.trailingLineFeedCount > format.lineFeedCount) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "AXTextArea format counters are inconsistent" });
+  }
+});
 const groundingElementSchema = z.object({
   elementRef: nonEmptyString.max(96),
   role: nonEmptyString.max(64),
@@ -1072,6 +1083,11 @@ const groundingElementSchema = z.object({
   browserRegion: z.enum(["content", "chrome", "unknown"]).optional(),
   options: z.array(groundingOptionSchema).max(32).optional(),
   optionsTruncated: z.boolean().optional(),
+  textFormat: groundingTextFormatSchema.optional(),
+}).superRefine((element, context) => {
+  if (element.textFormat !== undefined && (element.source !== "uia" || element.role !== "AXTextArea" || element.browserRegion === "content")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "textFormat is restricted to native UIA AXTextArea elements" });
+  }
 });
 const groundingSelectionTraceSchema = z.object({
   strategy: z.enum(["deterministic-lexical-v1", "bounded-fusion-v1"]),

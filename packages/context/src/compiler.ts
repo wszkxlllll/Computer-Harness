@@ -524,7 +524,12 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
       const options = element.options === undefined
         ? ""
         : ` options=[${element.options.map((option) => `${compactLabel(option.text, 160)}:${option.enabled ? "enabled" : "disabled"}`).join(" | ")}]${element.optionsTruncated === true ? " optionsTruncated=true" : ""}`;
-      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}${options}`;
+      const textFormat = element.textFormat === undefined
+        ? ""
+        : element.textFormat.status === "over_limit"
+          ? " textFormat=ax-cfstring-v1/over_limit (AX CFString only; not file verification)"
+          : ` textFormat=ax-cfstring-v1/complete bytes=${element.textFormat.utf8Bytes} codePoints=${element.textFormat.codePointCount} LF=${element.textFormat.lineFeedCount} trailingLF=${element.textFormat.trailingLineFeedCount} CR=${element.textFormat.carriageReturnCount} (AX CFString format only; not file verification)`;
+      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}${options}${textFormat}`;
     }),
   ];
   const text = lines.join("\n");

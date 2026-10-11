@@ -573,6 +573,22 @@ export interface GroundingOption {
   readonly enabled: boolean;
 }
 
+/** Format-only metadata for a native AXTextArea CFString; never contains the text itself. */
+export type GroundingTextFormat =
+  | {
+      readonly source: "ax-cfstring-v1";
+      readonly status: "complete";
+      readonly utf8Bytes: number;
+      readonly codePointCount: number;
+      readonly lineFeedCount: number;
+      readonly trailingLineFeedCount: number;
+      readonly carriageReturnCount: number;
+    }
+  | {
+      readonly source: "ax-cfstring-v1";
+      readonly status: "over_limit";
+    };
+
 /**
  * A model-facing element reference. It is minted by a Computer adapter and is
  * valid only for this observation/session/target geometry. It is not a CUA
@@ -593,6 +609,8 @@ export interface GroundingElement {
   readonly options?: readonly GroundingOption[];
   /** True when more than the bounded visible-option projection was present. */
   readonly optionsTruncated?: boolean;
+  /** Present only for non-Web macOS AXTextArea CFString values. */
+  readonly textFormat?: GroundingTextFormat;
 }
 
 export type GroundingCompleteness = "complete" | "partial" | "unknown";

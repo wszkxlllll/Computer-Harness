@@ -1145,6 +1145,58 @@ describe("JsonlRunEventWriter", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("round-trips strict native AXTextArea format metadata and rejects malformed shapes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-text-format-trajectory-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+    const completeFormat = { source: "ax-cfstring-v1" as const, status: "complete" as const, utf8Bytes: 8, codePointCount: 3, lineFeedCount: 1, trailingLineFeedCount: 1, carriageReturnCount: 0 };
+    const eventData = {
+      runId,
+      type: "observation.created" as const,
+      observation: {
+        id: observationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: desktopSurfaceRef,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "asset-text-format" as AssetId, relativePath: "assets/text-format.png", mediaType: "image/png" as const, byteLength: 1 },
+        grounding: {
+          version: "uia-catalog-v1" as const,
+          source: "uia" as const,
+          observationId,
+          computerSessionId: session.id,
+          surfaceRef: desktopSurfaceRef,
+          completeness: "complete" as const,
+          degraded: false,
+          maxElements: 16,
+          elements: [{ elementRef: "uia-textarea", role: "AXTextArea", source: "uia" as const, textFormat: completeFormat }],
+        },
+      },
+    };
+    await writer.append(eventData);
+    await writer.close();
+    const replayed = (await readRuntimeEvents(filePath))[0];
+    expect(replayed).toMatchObject({ type: "observation.created", observation: { grounding: { elements: [{ textFormat: completeFormat }] } } });
+    expect(replayed).toBeDefined();
+    if (replayed?.type !== "observation.created" || replayed.observation.grounding === undefined) throw new Error("round-trip observation missing grounding");
+    const base = structuredClone(replayed);
+    expect(runtimeEventSchema.safeParse(base).success).toBe(true);
+    const malformedCount = structuredClone(base);
+    Object.assign(malformedCount.observation.grounding!.elements[0]!, { textFormat: { ...completeFormat, utf8Bytes: 2 } });
+    expect(runtimeEventSchema.safeParse(malformedCount).success).toBe(false);
+    const wrongElement = structuredClone(base);
+    Object.assign(wrongElement.observation.grounding!.elements[0]!, { role: "AXTextField" });
+    expect(runtimeEventSchema.safeParse(wrongElement).success).toBe(false);
+    const webContent = structuredClone(base);
+    Object.assign(webContent.observation.grounding!.elements[0]!, { browserRegion: "content" });
+    expect(runtimeEventSchema.safeParse(webContent).success).toBe(false);
+    const malformedOverLimit = structuredClone(base);
+    Object.assign(malformedOverLimit.observation.grounding!.elements[0]!, { textFormat: { source: "ax-cfstring-v1", status: "over_limit", utf8Bytes: 16_385 } });
+    expect(runtimeEventSchema.safeParse(malformedOverLimit).success).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("refuses to append a new writer to an existing trajectory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-"));
     const filePath = join(directory, "trajectory.jsonl");

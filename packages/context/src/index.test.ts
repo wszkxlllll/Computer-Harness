@@ -311,6 +311,38 @@ describe("DefaultContextCompiler", () => {
     expect(input.contextBudget?.groundingIncluded).toBe(true);
   });
 
+  it("projects AXTextArea format counters without claiming file verification", async () => {
+    const latest = {
+      ...observation("obs-text-format"),
+      grounding: {
+        version: "uia-catalog-v1" as const,
+        source: "uia" as const,
+        observationId: "obs-text-format" as ObservationId,
+        computerSessionId: sessionId,
+        surfaceRef: desktopSurfaceRef,
+        completeness: "complete" as const,
+        degraded: false,
+        maxElements: 16,
+        elements: [{
+          elementRef: "uia-textarea",
+          role: "AXTextArea",
+          source: "uia" as const,
+          textFormat: { source: "ax-cfstring-v1" as const, status: "complete" as const, utf8Bytes: 8, codePointCount: 3, lineFeedCount: 1, trailingLineFeedCount: 1, carriageReturnCount: 0 },
+        }],
+      },
+    };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "inspect the document format",
+      recentEvents: [event(0, { type: "observation.created", observation: latest })],
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const grounding = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("textFormat=ax-cfstring-v1")));
+    const projected = grounding?.content[0]?.type === "text" ? grounding.content[0].text : "";
+    expect(projected).toContain("bytes=8 codePoints=3 LF=1 trailingLF=1 CR=0");
+    expect(projected).toContain("AX CFString format only; not file verification");
+  });
+
   it("projects hybrid provenance and recovery trace through the same catalog", async () => {
     const latest = {
       ...observation("obs-hybrid-grounding"),

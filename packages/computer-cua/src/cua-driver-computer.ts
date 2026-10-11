@@ -1308,6 +1308,7 @@ export class CuaDriverComputer implements Computer {
           this.options.domGroundingTransport,
           signal,
           current.initialObservationPending,
+          current.platform === "darwin",
         );
         const observedBrowserTarget = grounding?.browserTarget ?? activeBrowserTarget;
         const includeDomSurface = grounding?.browserTarget !== undefined &&
@@ -3928,7 +3929,7 @@ export class CuaDriverComputer implements Computer {
     if (binding === undefined || transport === undefined || !managedBrowserTargetForBinding(current, binding) ||
         windowIdentityKey(binding.target) !== windowIdentityKey(browserTarget.windowTarget)) return undefined;
     try {
-      const uia = await readGroundingCatalog(current.driver, current.label, binding, viewport, observationId, session.id, signal, true);
+      const uia = await readGroundingCatalog(current.driver, current.label, binding, viewport, observationId, session.id, signal, true, current.platform === "darwin");
       if (uia.catalog.degraded || uia.contentRect === undefined) return undefined;
       const focused = [...uia.elements.values()].filter((item) => item.element.state?.focused === true);
       const candidate = uia.catalog.completeness === "complete"
@@ -3981,6 +3982,7 @@ export class CuaDriverComputer implements Computer {
         action.basedOn,
         session.id,
         signal,
+        current.platform === "darwin",
       );
       signal.throwIfAborted();
 
@@ -4324,9 +4326,10 @@ async function readWindowGrounding(
   domTransport: DomGroundingTransport | undefined,
   signal: AbortSignal,
   allowInitialHybridResampling = false,
+  allowMacTextFormat = false,
 ): Promise<PrivateGrounding | undefined> {
   if (mode === undefined || mode === "off") return undefined;
-  if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, false);
+  if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, false, allowMacTextFormat);
   if (mode === "dom-catalog-v1") {
     if (browserTarget === undefined || domTransport === undefined) return undefined;
     // DOM-only has no trusted producer for the browser content origin. Keep
@@ -4335,7 +4338,7 @@ async function readWindowGrounding(
     return emptyDomGrounding(observationId, computerSessionId);
   }
   let uia = mode === "hybrid-catalog-v1"
-    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, browserTarget !== undefined)
+    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, browserTarget !== undefined, allowMacTextFormat)
     : undefined;
   // Browser accessibility trees can expose toolbar nodes before the Document
   // / AXWebArea record is ready. Retry only the trusted UIA producer within a
@@ -4364,7 +4367,7 @@ async function readWindowGrounding(
             resolve({ timedOut: true });
           }, remainingMs);
         });
-        const retryPromise = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, retrySignal, true)
+        const retryPromise = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, retrySignal, true, allowMacTextFormat)
           .then((value) => ({ value }), (error: unknown) => ({ error }));
         const abortPromise = new Promise<never>((_resolve, reject) => {
           onAbort = () => reject(signal.reason ?? new Error("hybrid grounding retry aborted"));
@@ -4406,6 +4409,7 @@ async function readMultilinePrivateGroundingCatalog(
   observationId: ObservationId,
   computerSessionId: ComputerSessionDescriptor["id"],
   signal: AbortSignal,
+  allowMacTextFormat: boolean,
 ): Promise<PrivateGrounding> {
   signal.throwIfAborted();
   const timeoutController = new AbortController();
@@ -4426,7 +4430,7 @@ async function readMultilinePrivateGroundingCatalog(
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
-  const query = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, querySignal, false)
+  const query = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, querySignal, false, allowMacTextFormat)
     .then((grounding) => ({ kind: "grounding" as const, grounding }), (error: unknown) => ({ kind: "error" as const, error }));
   const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
     timer = setTimeout(() => {
@@ -4672,6 +4676,7 @@ async function readGroundingCatalog(
   computerSessionId: ComputerSessionDescriptor["id"],
   signal: AbortSignal,
   managedBrowserHybrid: boolean,
+  allowMacTextFormat: boolean,
 ): Promise<PrivateGrounding> {
   const empty = (completeness: "partial" | "unknown", degraded: boolean): PrivateGrounding => ({
     catalog: {
@@ -4707,7 +4712,7 @@ async function readGroundingCatalog(
   const rawElements = structured?.elements;
   if (!Array.isArray(rawElements)) return empty("unknown", true);
   const snapshotId = safeCuaSnapshotId(structured?.snapshot_id ?? structured?.snapshotId);
-  const parsed = rawElements.flatMap((value, index) => parseGroundingCandidate(value, index, binding, viewport, snapshotId));
+  const parsed = rawElements.flatMap((value, index) => parseGroundingCandidate(value, index, binding, viewport, snapshotId, allowMacTextFormat));
   parsed.sort((left, right) => left.priority - right.priority || left.sortKey.localeCompare(right.sortKey));
   const selected = parsed.slice(0, GROUNDING_MAX_ELEMENTS);
   const selectedRecords = selected.map((candidate) => ({
@@ -4970,6 +4975,7 @@ function parseGroundingCandidate(
   binding: CuaWindowBinding,
   viewport: Viewport,
   snapshotId?: string,
+  allowMacTextFormat = false,
 ): GroundingCandidate[] {
   const item = parseStructuredRecord(value);
   if (item === undefined) return [];
@@ -4998,6 +5004,9 @@ function parseGroundingCandidate(
   const name = boundedGroundingLabel(item.name ?? item.label ?? item.title, 160);
   const description = boundedGroundingLabel(item.description ?? item.help_text, 240);
   const state = groundingState(item);
+  const textFormat = allowMacTextFormat && item.in_web_content !== true && item.browserRegion !== "content" && role === "AXTextArea"
+    ? parseGroundingTextFormat(item.text_format)
+    : undefined;
   const elementToken = boundedGroundingToken(item.element_token ?? item.elementToken);
   const itemSnapshotId = safeCuaSnapshotId(item.snapshot_id ?? item.snapshotId) ?? snapshotId;
   const element: Omit<GroundingElement, "elementRef"> = {
@@ -5007,6 +5016,7 @@ function parseGroundingCandidate(
     bbox: { ...clipped, coordinateSpace: "physical" },
     ...(state === undefined ? {} : { state }),
     source: "uia",
+    ...(textFormat === undefined ? {} : { textFormat }),
   };
   const uiaIdentityFingerprint = element.source === "uia"
     ? makeUiaTargetFingerprint(element, binding)
@@ -5076,6 +5086,34 @@ function groundingState(item: Record<string, unknown>): GroundingElement["state"
     ...(selected === undefined ? {} : { selected }),
     ...(valuePresent ? { valuePresent: true } : {}),
   };
+}
+
+function parseGroundingTextFormat(value: unknown): GroundingElement["textFormat"] | undefined {
+  const item = parseStructuredRecord(value);
+  if (item === undefined || item.source !== "ax-cfstring-v1") return undefined;
+  const keys = Object.keys(item).sort();
+  if (item.status === "over_limit") {
+    return keys.length === 2 && keys[0] === "source" && keys[1] === "status"
+      ? { source: "ax-cfstring-v1", status: "over_limit" }
+      : undefined;
+  }
+  const expectedKeys = ["carriage_return_count", "code_point_count", "line_feed_count", "source", "status", "trailing_line_feed_count", "utf8_bytes"];
+  if (item.status !== "complete" || keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) return undefined;
+  const utf8Bytes = boundedFormatCount(item.utf8_bytes, 16_384);
+  const codePointCount = boundedFormatCount(item.code_point_count, 16_384);
+  const lineFeedCount = boundedFormatCount(item.line_feed_count, 16_384);
+  const trailingLineFeedCount = boundedFormatCount(item.trailing_line_feed_count, 16_384);
+  const carriageReturnCount = boundedFormatCount(item.carriage_return_count, 16_384);
+  if (utf8Bytes === undefined || codePointCount === undefined || lineFeedCount === undefined ||
+      trailingLineFeedCount === undefined || carriageReturnCount === undefined ||
+      utf8Bytes < codePointCount || utf8Bytes > 4 * codePointCount ||
+      lineFeedCount > codePointCount || trailingLineFeedCount > lineFeedCount ||
+      lineFeedCount + carriageReturnCount > codePointCount) return undefined;
+  return { source: "ax-cfstring-v1", status: "complete", utf8Bytes, codePointCount, lineFeedCount, trailingLineFeedCount, carriageReturnCount };
+}
+
+function boundedFormatCount(value: unknown, maximum: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : undefined;
 }
 
 function parseGroundingFrame(value: unknown): CuaWindowGeometry | undefined {
