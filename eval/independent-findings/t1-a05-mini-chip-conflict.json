@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-1791731184145-e28eb930-653",
+  "manifestId": "astra-a01-t1-complete-card-20261011",
+  "trajectorySha256": "327c5d9eaf4e57b9cc6fa973d8364d7924d6e99177e96b613687e453663c1bf2",
+  "manifestSha256": "69ea6cb6f2aeb90fd24422eb4703d6ff5130e67279ab75bd5f46e576144bac14",
+  "terminalEventId": "79ba9019-76ff-4d29-91ed-a48028dbb009",
+  "terminalOutcome": "succeeded",
+  "reviewerKind": "agent",
+  "reviewer": "Sol",
+  "reviewedAt": "2026-10-11T15:43:02.539098Z",
+  "findings": [
+    {
+      "findingId": "t1-mini-chip-source-conflict",
+      "kind": "source_conflict",
+      "status": "failed",
+      "field": "Mac mini chip/model configuration",
+      "reason": "The final report states M4 (8-core CPU / 8-core GPU), while the same-run public product observation identifies M6 and M5 Pro chips. This contradicts the reported M4 base configuration.",
+      "claimRef": {
+        "kind": "model_claim",
+        "eventId": "028f6d15-0f6c-4d00-8323-32e140835e26",
+        "excerpt": "M4（8 核 CPU / 8 核 GPU）"
+      },
+      "sourceRefs": [
+        {
+          "kind": "observation_grounding",
+          "eventId": "b3386bd3-1f3e-4e02-a869-90643eee10e5",
+          "observationId": "4a8e2a5c-ba56-4625-af31-e2e628999422",
+          "assetId": "e846262b-0a29-4de1-aeb5-995f9d67295f",
+          "pngSha256": "c511d0518ef74b6ce50fe389d490eaafb06f864bd85ab3bbd6514f39fd40d3e4",
+          "elementRef": "uia-9c7132aefa2e-50",
+          "elementNameSha256": "56fa3c5c1999a5662796f182db089560fb714b1c102c94b2d43405e17c3662cf"
+        }
+      ]
+    }
+  ],
+  "familyId": "public_apple_three_product_comparison",
+  "variantId": "baseline"
+}

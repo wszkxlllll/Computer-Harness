@@ -53,7 +53,7 @@ async function fixture(t) {
   await writeFile(join(directory, "assets", "final.png"), png);
   const f = {
     directory, trajectory: join(directory, "trajectory.jsonl"), manifestPath: join(directory, "manifest.json"),
-    reviewPath: join(directory, "review.json"), output: join(directory, "result.json"),
+    reviewPath: join(directory, "review.json"), independentPath: join(directory, "independent-findings.json"), output: join(directory, "result.json"),
     manifest: JSON.parse(await readFile(manifestSource, "utf8")), events: events(),
     family: "query_payment_entry_and_bill", variant: "v1",
   };
@@ -61,13 +61,15 @@ async function fixture(t) {
     await writeFile(f.trajectory, f.events.map((event) => JSON.stringify(event)).join("\n") + (f.events.length ? "\n" : ""));
     await writeFile(f.manifestPath, JSON.stringify(f.manifest));
   };
-  f.invoke = async ({ review, family = f.family, variant = f.variant, expectedExit = 0 } = {}) => {
+  f.invoke = async ({ review, independentFindings, family = f.family, variant = f.variant, expectedExit = 0 } = {}) => {
     if (review !== undefined) await writeFile(f.reviewPath, JSON.stringify(review));
+    if (independentFindings !== undefined) await writeFile(f.independentPath, JSON.stringify(independentFindings));
     await rm(f.output, { force: true });
     const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath, "--output", f.output];
     if (family !== null) args.push("--family", family);
     if (variant !== null) args.push("--variant", variant);
     if (review !== undefined) args.push("--human-review", f.reviewPath);
+    if (independentFindings !== undefined) args.push("--independent-findings", f.independentPath);
     let exit = 0;
     let stderr = "";
     try {
@@ -94,6 +96,8 @@ async function fixture(t) {
     assert.ok(Array.isArray(result.deficiencies));
     assert.ok(result.deficiencies.every((note) => typeof note === "string"));
     assert.equal(typeof result.humanReviewRequired, "boolean");
+    assert.ok(["not_assessed", "failed", "inconclusive"].includes(result.independentBusinessVerdict));
+    assert.ok(["not_provided", "validated", "invalid"].includes(result.independentBusinessReview.status));
     assert.ok(["pending", "completed", "invalid"].includes(result.humanReview.status));
     assert.ok(Array.isArray(result.humanReview.requiredChecks));
     assert.ok(Array.isArray(result.humanReview.pendingChecks));
@@ -117,6 +121,73 @@ function makeReview(f, result) {
     checks: Object.fromEntries(f.manifest.evaluationNotes.humanReviewRequired.map((key) => [key, { status: "pass", reason: explanation, evidenceEventIds: [final.eventId] }])),
     dimensions: Object.fromEntries(dimensions.map((key) => [key, { score: 1, reason: explanation, evidenceEventIds: [final.eventId] }])),
     actions: { "inspect-click": { status: "pass", reason: explanation, evidenceEventIds: ["event-3", initial.eventId] } },
+  };
+}
+
+async function prepareIndependentFinding(f) {
+  const sourceEvent = f.events[2];
+  const sourceName = "M6 and M5 Pro chips appear in the current Mac mini product description.";
+  sourceEvent.observation.grounding = {
+    observationId: sourceEvent.observation.id,
+    completeness: "partial",
+    elements: [{ elementRef: "uia-mini-chip", role: "AXStaticText", name: sourceName, source: "uia" }],
+  };
+  const excerpt = "Mac mini model: M4 base configuration.";
+  f.events[6].turn.summary = `Reported final claim: ${excerpt}`;
+  f.events[7].summary = `Reported final claim: ${excerpt}`;
+  await f.save();
+  const probe = await f.invoke();
+  return {
+    probe,
+    input: {
+      schemaVersion: 1,
+      runId: probe.evidence.runId,
+      manifestId: f.manifest.manifestId,
+      familyId: f.family,
+      variantId: f.variant,
+      trajectorySha256: probe.evidence.trajectorySha256,
+      manifestSha256: probe.evidence.manifestSha256,
+      terminalEventId: probe.evidence.terminalEventId,
+      terminalOutcome: probe.evidence.terminalOutcome,
+      reviewerKind: "agent",
+      reviewer: "independent-reviewer",
+      reviewedAt: "2026-10-07T01:00:00.000Z",
+      findings: [{
+        findingId: "mini-chip-mismatch",
+        kind: "source_conflict",
+        status: "failed",
+        field: "Mac mini chip configuration",
+        reason: "The reported M4 base configuration conflicts with the observed M6 product description.",
+        claimRef: { kind: "model_claim", eventId: f.events[6].eventId, excerpt },
+        sourceRefs: [{
+          kind: "observation_grounding",
+          eventId: sourceEvent.eventId,
+          observationId: sourceEvent.observation.id,
+          assetId: sourceEvent.observation.screenshot.assetId,
+          pngSha256: digest(png),
+          elementRef: "uia-mini-chip",
+          elementNameSha256: digest(Buffer.from(sourceName, "utf8")),
+        }],
+      }],
+    },
+  };
+}
+
+function bindFindingInput(probe, manifest, reviewerKind, findings) {
+  return {
+    schemaVersion: 1,
+    runId: probe.evidence.runId,
+    manifestId: manifest.manifestId,
+    familyId: probe.evidence.familyId,
+    variantId: probe.evidence.variantId,
+    trajectorySha256: probe.evidence.trajectorySha256,
+    manifestSha256: probe.evidence.manifestSha256,
+    terminalEventId: probe.evidence.terminalEventId,
+    terminalOutcome: probe.evidence.terminalOutcome,
+    reviewerKind,
+    reviewer: "independent-reviewer",
+    reviewedAt: "2026-10-07T01:00:00.000Z",
+    findings,
   };
 }
 
@@ -179,6 +250,142 @@ test("complete independently bound review authorizes success", async (t) => {
   assert.equal(result.humanReview.reviewer, review.reviewer);
   assert.equal(result.humanReview.reviewedAt, review.reviewedAt);
   assert.deepEqual(result.scores, Object.fromEntries(dimensions.map((name) => [name, 1])));
+});
+
+test("validated independent source conflict blocks later all-pass human review", async (t) => {
+  const f = await fixture(t);
+  const { probe, input } = await prepareIndependentFinding(f);
+  const review = makeReview(f, probe);
+  const result = await f.invoke({ review, independentFindings: input });
+  assert.equal(result.success, false);
+  assert.equal(result.verdict, "partial");
+  assert.equal(result.independentBusinessVerdict, "failed");
+  assert.equal(result.independentBusinessReview.status, "validated");
+  assert.deepEqual(result.scores, Object.fromEntries(dimensions.map((name) => [name, 1])));
+  assert.ok(result.deficiencies.includes("independent_business_conflict"));
+  assert.equal(result.humanReviewRequired, true);
+  assert.match(result.reason, /independent_business_conflict/);
+});
+
+test("independent finding leaves all human dimensions unknown when no human review exists", async (t) => {
+  const f = await fixture(t);
+  const { input } = await prepareIndependentFinding(f);
+  const result = await f.invoke({ independentFindings: input });
+  assert.equal(result.independentBusinessVerdict, "failed");
+  assert.equal(result.humanReview.status, "pending");
+  for (const value of Object.values(result.scores)) assert.equal(value, null);
+});
+
+for (const [field, value] of [
+  ["trajectorySha256", "0".repeat(64)], ["manifestSha256", "f".repeat(64)],
+  ["terminalEventId", "future-or-foreign-terminal"], ["terminalOutcome", "failed"], ["runId", "other-run"],
+  ["familyId", "another-task-in-same-manifest"], ["variantId", "another-variant"],
+]) test(`independent finding rejects mismatched ${field}`, async (t) => {
+  const f = await fixture(t);
+  const { input } = await prepareIndependentFinding(f);
+  input[field] = value;
+  const result = await f.invoke({ independentFindings: input });
+  assert.equal(result.independentBusinessReview.status, "invalid");
+  assert.equal(result.independentBusinessVerdict, "inconclusive");
+  assert.ok(result.deficiencies.includes("invalid_independent_findings"));
+});
+
+test("independent source conflict rejects model-only and future evidence", async (t) => {
+  const f = await fixture(t);
+  const { input } = await prepareIndependentFinding(f);
+  input.findings[0].sourceRefs = [{ kind: "model_claim", eventId: "event-6", excerpt: "M4 base configuration" }];
+  let result = await f.invoke({ independentFindings: input });
+  assert.equal(result.independentBusinessReview.status, "invalid");
+  assert.equal(result.independentBusinessVerdict, "inconclusive");
+
+  const refreshed = await prepareIndependentFinding(f);
+  const future = structuredClone(f.events[5]);
+  future.eventId = "future-observation-event";
+  future.observation.id = "observation-future";
+  f.events.splice(7, 0, future);
+  f.events.forEach((event, sequence) => { event.sequence = sequence; });
+  await f.save();
+  const refreshedProbe = await f.invoke();
+  refreshed.input.trajectorySha256 = refreshedProbe.evidence.trajectorySha256;
+  refreshed.input.terminalEventId = refreshedProbe.evidence.terminalEventId;
+  refreshed.input.terminalOutcome = refreshedProbe.evidence.terminalOutcome;
+  refreshed.input.findings[0].sourceRefs = [{
+    kind: "observation_png", eventId: "future-observation-event", observationId: "observation-future",
+    assetId: "asset-final", pngSha256: digest(png),
+  }];
+  result = await f.invoke({ independentFindings: refreshed.input });
+  assert.equal(result.independentBusinessReview.status, "invalid");
+});
+
+test("grounding source must retain its parent observation identity", async (t) => {
+  const f = await fixture(t);
+  const { input } = await prepareIndependentFinding(f);
+  f.events[2].observation.grounding.surfaceRef = { kind: "desktop", surfaceId: "foreign-surface", generation: 9 };
+  await f.save();
+  const probe = await f.invoke();
+  input.trajectorySha256 = probe.evidence.trajectorySha256;
+  input.findings[0].sourceRefs[0].elementNameSha256 = digest(Buffer.from(f.events[2].observation.grounding.elements[0].name, "utf8"));
+  const result = await f.invoke({ independentFindings: input });
+  assert.equal(result.independentBusinessReview.status, "invalid");
+  assert.equal(result.independentBusinessVerdict, "inconclusive");
+});
+
+for (const malformedGrounding of [undefined, null]) test(`malformed grounding payload ${String(malformedGrounding)} is rejected without throwing`, async (t) => {
+  const f = await fixture(t);
+  const { input } = await prepareIndependentFinding(f);
+  f.events[2].observation.grounding = malformedGrounding;
+  await f.save();
+  const probe = await f.invoke();
+  input.trajectorySha256 = probe.evidence.trajectorySha256;
+  const result = await f.invoke({ independentFindings: input });
+  assert.equal(result.independentBusinessReview.status, "invalid");
+  assert.equal(result.independentBusinessVerdict, "inconclusive");
+});
+
+test("incomplete-task finding binds action, observation, and a cancelled terminal without a model claim", async (t) => {
+  const f = await fixture(t);
+  f.events.splice(6, 1); // no model finish response; the run ends cancelled after its real action and observation
+  f.events.at(-1).outcome = "cancelled";
+  f.events.forEach((event, sequence) => { event.sequence = sequence; });
+  await f.save();
+  const probe = await f.invoke();
+  const terminal = f.events.at(-1);
+  const input = bindFindingInput(probe, f.manifest, "agent", [{
+    findingId: "cancelled-before-completion",
+    kind: "incomplete_task",
+    status: "failed",
+    field: "completion",
+    reason: "The run ended before the requested verification was complete.",
+    sourceRefs: [
+      { kind: "observation_png", eventId: "event-2", observationId: "observation-initial", assetId: "asset-initial", pngSha256: digest(png) },
+      { kind: "runtime_action", eventId: "event-3", actionId: "inspect-click", receiptEventId: "event-4" },
+      { kind: "terminal", eventId: terminal.eventId, outcome: "cancelled" },
+    ],
+  }]);
+  const result = await f.invoke({ independentFindings: input });
+  assert.equal(result.independentBusinessReview.status, "validated");
+  assert.equal(result.independentBusinessVerdict, "failed");
+  assert.equal(result.meta.runtimeOutcome, "cancelled");
+  assert.ok(Object.values(result.scores).every((value) => value === null));
+});
+
+test("incomplete-task finding requires all three runtime anchors", async (t) => {
+  const f = await fixture(t);
+  f.events.splice(6, 1);
+  f.events.at(-1).outcome = "cancelled";
+  f.events.forEach((event, sequence) => { event.sequence = sequence; });
+  await f.save();
+  const probe = await f.invoke();
+  const input = bindFindingInput(probe, f.manifest, "agent", [{
+    findingId: "missing-terminal-anchor", kind: "incomplete_task", status: "failed", field: "completion",
+    reason: "The requested work did not finish.", sourceRefs: [
+      { kind: "observation_png", eventId: "event-2", observationId: "observation-initial", assetId: "asset-initial", pngSha256: digest(png) },
+      { kind: "runtime_action", eventId: "event-3", actionId: "inspect-click", receiptEventId: "event-4" },
+    ],
+  }]);
+  const result = await f.invoke({ independentFindings: input });
+  assert.equal(result.independentBusinessReview.status, "invalid");
+  assert.equal(result.independentBusinessVerdict, "inconclusive");
 });
 
 for (const [name, options] of [

@@ -115,7 +115,7 @@ Windows、macOS 和 Linux 共用公共协议，不同平台可以采用不同 Co
 - 生活缴费与社区服务
 - 通信、日程与个人事务
 
-评测不仅记录最终是否完成，还将记录失败位置、恢复情况、人工纠正与接管次数以及最终可观察证据。
+评测不仅记录最终是否完成，还将记录失败位置、恢复情况、人工纠正与接管次数以及最终可观察证据。Stage 4 本地评估器可选接收 `--independent-findings <json>`：每份输入按 Run、manifest、所选 family/variant、轨迹与 manifest SHA-256、终态事件 ID 和 outcome 绑定；`source_conflict` / `unsupported_claim` 必须引用模型终态声明和同 Run 的观察证据，`incomplete_task` 可不含模型声明，但须锚定真实 action、observation 与 terminal。该输入仅在本次评估中生效并在结果中回显 hash/binding，不维护跨次评估状态；独立失败会阻止成功判定，且不会填充五项人工评分。
 
 > [六类真实任务评测结果图]
 
