@@ -1,15 +1,18 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
-import type { ActionId, ActionIntent, ModelTurn, ObservationId } from "@computer-harness/protocol";
+import type { ActionId, ActionIntent, ModelTurn, ObservationId, ToolCall } from "@computer-harness/protocol";
 import { BoundWindowMissingError } from "@computer-harness/protocol";
 import { CuaDriverComputer as ProductionCuaDriverComputer, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, windowSwitchTools, type ComputerSession, type ContextCompiler, type ModelInput, type ProviderAdapter } from "../../runtime/src/index.js";
 import { FileAssetStore, JsonlRunEventWriter } from "../../trajectory/src/index.js";
+import { readRuntimeEvents, reduceRuntimeEvents } from "../../trajectory/src/index.js";
+import { reopenSavedDocumentTool } from "../../runtime/src/computer-tools.js";
 import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { captureWindow, captureWindowWithRetry as productionCaptureWindowWithRetry, listWindowInventory, listWindowTargets } from "./window-contract.js";
 
@@ -9042,6 +9045,413 @@ describe("window repair integration boundaries", () => {
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
       await computer.close(session);
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["matching-pid", "wrong-pid", "changed-file", "wrong-identity", "missing-proof", "launch-error", "capture-failure", "ctime-only", "delayed-document", "no-document-timeout", "changed-app-identity", "abort-during-settle", "postlaunch-size", "postlaunch-mtime", "postlaunch-inode"] as const)("reopens only the one saved clean document after its completed close and exact recovery handoff (%s)", async (scenario) => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "computer-harness-reopen-document-")));
+    const outputPath = join(directory, "one-run-output.txt");
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const reopenedWindowId = fake.target.windowId + 2;
+    fake.setExtraWindow({ ...recoveryTarget, appName: "TextEdit", title: "Prepared recovery blank" });
+    const executableUrl = pathToFileURL(await realpath(process.execPath)).href;
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin",
+      socketPath: "fixture",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      recoveryWindowTarget: recoveryTarget,
+      recoverBoundWindowMissing: true,
+      reopenSavedDocumentGrant: { path: outputPath, expectedExecutableUrl: executableUrl },
+      windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, recoveryTarget],
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const rawDriver = fake.driver as unknown as {
+      callTool(name: string, input: string, options?: unknown): Promise<ToolResult>;
+    };
+    const originalCallTool = rawDriver.callTool.bind(fake.driver);
+    let documentPresent = false;
+    let documentWindowId = fake.target.windowId;
+    let expectedDocumentProofReads = 0;
+    let launchAttempted = false;
+    let postLaunchListCalls = 0;
+    let abortTimer: ReturnType<typeof setTimeout> | undefined;
+    const actionController = new AbortController();
+    let suppressProof = false;
+    let identityMismatch = false;
+    const launchCalls: Array<Record<string, unknown>> = [];
+    const processIdentity = { seconds: 17, microseconds: 23 };
+    const makeIdentityProof = (windowId: number, expectedDocument: boolean) => {
+      const isDocument = expectedDocument && documentPresent && windowId === documentWindowId;
+      return result({ structuredJson: JSON.stringify({
+        _private_document_proof: {
+          version: "macos-document-identity-v1",
+          snapshot_id: `proof-${windowId}-${isDocument ? "doc" : "blank"}`,
+          status: isDocument ? "identity_verified" : "unstable",
+          tail_revalidated: isDocument,
+          target: { pid: fake.target.pid, window_id: windowId, process_start: processIdentity },
+          application_identity: {
+            status: "verified",
+            target: {
+              pid: fake.target.pid, window_id: windowId, process_start: processIdentity,
+              bundle_id: "com.apple.TextEdit", executable_url: identityMismatch ? "file:///tmp/unexpected-editor" : executableUrl,
+            },
+            instances: [{
+              pid: fake.target.pid, process_start: processIdentity,
+              bundle_id: "com.apple.TextEdit", executable_url: executableUrl,
+            }],
+          },
+          frontmost_pid: fake.target.pid,
+          focused_window_id: windowId,
+          window: {
+            role: "AXWindow", pid: fake.target.pid, owner_pid: fake.target.pid, window_id: windowId,
+            bounds: { x: 100, y: 120, width: 960, height: 680 },
+          },
+          ...(isDocument ? {
+            document: { status: "ok", type: "cf_url", matches_expected: true },
+            document_domain: { status: "complete_for_ax_windows", matching_window_ids: [windowId] },
+            edited: {
+              source: "ax_close_button",
+              close_button: {
+                status: "verified", role: "AXButton", subrole: "AXCloseButton", pid: fake.target.pid,
+                window_id: windowId, ax_window_id: windowId, ax_window_matches_target: true,
+              },
+              value: { status: "ok", type: "cf_boolean", value: false },
+            },
+          } : {
+            document: { status: "missing", matches_expected: false },
+            document_domain: { status: "complete_for_ax_windows", matching_window_ids: [] },
+          }),
+        },
+      }) });
+    };
+    rawDriver.callTool = async (name, inputJson, options) => {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      if (name === "list_windows" && launchAttempted && (scenario === "delayed-document" || scenario === "abort-during-settle")) {
+        postLaunchListCalls += 1;
+        if (scenario === "delayed-document" && postLaunchListCalls === 2) {
+          fake.setExtraWindow({ pid: fake.target.pid, windowId: reopenedWindowId, appName: "TextEdit", title: "one-run-output.txt" });
+          documentPresent = true;
+        }
+      }
+      if (name === "get_window_state" && input.document_identity_query !== undefined) {
+        if (suppressProof) return result({ structuredJson: "{}" });
+        const windowId = typeof input.window_id === "number" ? input.window_id : fake.target.windowId;
+        const query = input.document_identity_query as Record<string, unknown>;
+        if (scenario === "delayed-document" && launchAttempted && postLaunchListCalls === 1) {
+          return result({ isError: true, text: "the stale inventory row is no longer queryable" });
+        }
+        if (typeof query.expected_document_url === "string") {
+          expectedDocumentProofReads += 1;
+          if (scenario === "abort-during-settle" && launchAttempted && abortTimer === undefined) {
+            abortTimer = setTimeout(() => actionController.abort(new Error("test aborted during document settle")), 10);
+          }
+        }
+        return makeIdentityProof(windowId, typeof query.expected_document_url === "string");
+      }
+      if (name === "hotkey" && Array.isArray(input.keys) && input.keys.some((key) => String(key).toUpperCase() === "W")) {
+        const response = await originalCallTool(name, inputJson, options);
+        fake.omitBoundWindow(true);
+        return response;
+      }
+      if (name === "launch_app") {
+        launchCalls.push(input);
+        launchAttempted = true;
+        fake.omitBoundWindow(false);
+        if (scenario !== "delayed-document") {
+          fake.setExtraWindow({ pid: fake.target.pid, windowId: reopenedWindowId, appName: "TextEdit", title: "one-run-output.txt" });
+        }
+        documentWindowId = reopenedWindowId;
+        documentPresent = scenario !== "delayed-document" && scenario !== "no-document-timeout" && scenario !== "abort-during-settle";
+        if (scenario === "changed-app-identity") identityMismatch = true;
+        if (scenario === "launch-error") throw new Error("synthetic launch transport loss");
+        if (scenario === "ctime-only") await chmod(outputPath, 0o600);
+        if (scenario === "postlaunch-size") {
+          const before = await stat(outputPath);
+          await writeFile(outputPath, "changed size after launch\n", "utf8");
+          const after = await stat(outputPath);
+          expect(after.ino).toBe(before.ino);
+          expect(after.size).not.toBe(before.size);
+        }
+        if (scenario === "postlaunch-mtime") {
+          const before = await stat(outputPath);
+          await writeFile(outputPath, "X".repeat(before.size), "utf8");
+          await utimes(outputPath, new Date(1_000), new Date(5_000));
+          const after = await stat(outputPath);
+          expect(after.ino).toBe(before.ino);
+          expect(after.size).toBe(before.size);
+          expect(after.mtimeMs).not.toBe(before.mtimeMs);
+        }
+        if (scenario === "postlaunch-inode") {
+          const replacementPath = join(directory, "postlaunch-replacement.txt");
+          const original = await stat(outputPath);
+          await writeFile(replacementPath, "X".repeat(original.size), "utf8");
+          await utimes(replacementPath, new Date(10_000), new Date(10_000));
+          await rename(replacementPath, outputPath);
+          const replacement = await stat(outputPath);
+          expect(replacement.ino).not.toBe(original.ino);
+          expect(replacement.size).toBe(original.size);
+          expect(replacement.mtimeMs).toBe(original.mtimeMs);
+        }
+        if (scenario === "capture-failure") fake.driver.verifyState = async () => result({ isError: true, text: "synthetic post-launch capture failure" });
+        return result({ structuredJson: JSON.stringify({ pid: fake.target.pid + (scenario === "wrong-pid" ? 1 : 0) }) });
+      }
+      return originalCallTool(name, inputJson, options);
+    };
+
+    const signal = actionController.signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await writeFile(outputPath, "Host-authorized one-run document\n", "utf8");
+      if (scenario === "postlaunch-inode") await utimes(outputPath, new Date(10_000), new Date(10_000));
+      documentPresent = true;
+      await computer.observe(session, "saved-document-view" as ObservationId, signal);
+      const beforeClose = await computer.execute(session, {
+        actionId: "reopen-before-close" as ActionId,
+        basedOn: "saved-document-view" as ObservationId,
+        kind: "reopen_saved_document",
+      }, signal);
+      expect(beforeClose).toMatchObject({ status: "refused", driverCode: "DOCUMENT_REOPEN_NOT_READY" });
+      expect(launchCalls).toHaveLength(0);
+      const closeReceipt = await computer.execute(session, {
+        actionId: "saved-document-close" as ActionId,
+        basedOn: "saved-document-view" as ObservationId,
+        kind: "keypress", keys: ["CMD", "W"],
+      }, signal, { detectNewWindowHandoff: true });
+      expect(closeReceipt.status).toBe("completed");
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toBeInstanceOf(BoundWindowMissingError);
+      const candidates = await computer.listWindowHandoffCandidates(session, signal);
+      expect(candidates).toHaveLength(1);
+      session = await computer.handoffWindow(session, candidates[0]!, signal);
+      await computer.observe(session, "recovery-blank-view" as ObservationId, signal);
+
+      expectedDocumentProofReads = 0;
+      if (scenario === "changed-file") {
+        const replacementPath = join(directory, "replacement.txt");
+        await writeFile(replacementPath, "unexpected replacement with a different size\n", "utf8");
+        await rename(replacementPath, outputPath);
+      }
+      if (scenario === "wrong-identity") identityMismatch = true;
+      if (scenario === "missing-proof") suppressProof = true;
+
+      const reopenPromise = computer.execute(session, {
+        actionId: "reopen-saved-document" as ActionId,
+        basedOn: "recovery-blank-view" as ObservationId,
+        kind: "reopen_saved_document",
+      }, signal);
+      if (scenario === "abort-during-settle") {
+        await expect(reopenPromise).rejects.toThrow("test aborted during document settle");
+        expect(launchCalls).toHaveLength(1);
+        return;
+      }
+      const receipt = await reopenPromise;
+      if (scenario === "changed-file" || scenario === "wrong-identity" || scenario === "missing-proof") {
+        expect(receipt).toMatchObject({ status: "refused", driverCode: "DOCUMENT_REOPEN_PREFLIGHT_FAILED" });
+        expect(launchCalls).toHaveLength(0);
+        return;
+      }
+      if (scenario === "wrong-pid" || scenario === "launch-error" || scenario === "capture-failure" || scenario === "no-document-timeout" || scenario === "changed-app-identity" || scenario === "postlaunch-size" || scenario === "postlaunch-mtime" || scenario === "postlaunch-inode") {
+        expect(receipt).toMatchObject({ status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN" });
+        expect(launchCalls).toHaveLength(1);
+        if (scenario === "no-document-timeout") expect(expectedDocumentProofReads).toBeGreaterThan(1);
+        if (scenario === "changed-app-identity") expect(expectedDocumentProofReads).toBe(0);
+        expect(fake.calls.some((call) => call.name === "verifyState" && call.input?.window_id === reopenedWindowId)).toBe(false);
+        const retry = await computer.execute(session, {
+          actionId: "reopen-saved-document-retry" as ActionId,
+          basedOn: "recovery-blank-view" as ObservationId,
+          kind: "reopen_saved_document",
+        }, signal);
+        expect(retry.status).toBe("refused");
+        expect(launchCalls).toHaveLength(1);
+        return;
+      }
+      if (receipt.status !== "completed") throw new Error(`expected reopen to complete, received ${receipt.status}: ${receipt.message ?? receipt.driverCode ?? "no details"}`);
+      expect(receipt.sessionAfter).toBeDefined();
+      expect(fake.calls.filter((call) => call.name === "verifyState").some((call) => call.input?.window_id === reopenedWindowId)).toBe(true);
+      expect(launchCalls).toHaveLength(1);
+      if (scenario === "delayed-document") expect(postLaunchListCalls).toBeGreaterThan(1);
+      expect(launchCalls[0]).toMatchObject({ bundle_id: "com.apple.TextEdit", urls: [pathToFileURL(outputPath).href] });
+      const staleAction = await computer.execute(receipt.sessionAfter!, {
+        actionId: "reopened-stale-observation-click" as ActionId,
+        basedOn: "saved-document-view" as ObservationId,
+        kind: "click", point: { x: 10, y: 10 },
+      }, signal);
+      expect(staleAction.status).toBe("refused");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      const reopenedView = await computer.observe(receipt.sessionAfter!, "reopened-document-view" as ObservationId, signal);
+      expect(reopenedView.screenshot.data).toBeInstanceOf(Uint8Array);
+    } finally {
+      if (abortTimer !== undefined) clearTimeout(abortTimer);
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("runs the saved-document reopen through Runtime and reduces the new-window transition", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "computer-harness-reopen-runtime-")));
+    const outputPath = join(directory, "runtime-output.txt");
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const reopenedWindowId = fake.target.windowId + 2;
+    fake.setExtraWindow({ ...recoveryTarget, appName: "TextEdit", title: "Prepared recovery blank" });
+    const executableUrl = pathToFileURL(await realpath(process.execPath)).href;
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory,
+      windowTarget: fake.target, recoveryWindowTarget: recoveryTarget, recoverBoundWindowMissing: true,
+      reopenSavedDocumentGrant: { path: outputPath, expectedExecutableUrl: executableUrl },
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, recoveryTarget], grounding: "off", driverFactory: () => fake.driver,
+    });
+    const rawDriver = fake.driver as unknown as { callTool(name: string, input: string, options?: unknown): Promise<ToolResult> };
+    const originalCallTool = rawDriver.callTool.bind(fake.driver);
+    let documentPresent = false;
+    let documentWindowId = fake.target.windowId;
+    let recoveryWindowRef: string | undefined;
+    let launchCount = 0;
+    const compiledWindowTitles: Array<string | undefined> = [];
+    const processIdentity = { seconds: 41, microseconds: 9 };
+    const makeIdentityProof = (windowId: number, expectedDocument: boolean) => {
+      const isDocument = expectedDocument && documentPresent && windowId === documentWindowId;
+      return result({ structuredJson: JSON.stringify({ _private_document_proof: {
+        version: "macos-document-identity-v1", snapshot_id: `runtime-proof-${windowId}-${isDocument ? "doc" : "blank"}`,
+        status: isDocument ? "identity_verified" : "unstable", tail_revalidated: isDocument,
+        target: { pid: fake.target.pid, window_id: windowId, process_start: processIdentity },
+        application_identity: { status: "verified", target: {
+          pid: fake.target.pid, window_id: windowId, process_start: processIdentity,
+          bundle_id: "com.apple.TextEdit", executable_url: executableUrl,
+        }, instances: [{ pid: fake.target.pid, process_start: processIdentity,
+          bundle_id: "com.apple.TextEdit", executable_url: executableUrl }] },
+        frontmost_pid: fake.target.pid, focused_window_id: windowId,
+        window: { role: "AXWindow", pid: fake.target.pid, owner_pid: fake.target.pid, window_id: windowId,
+          bounds: { x: 100, y: 120, width: 960, height: 680 } },
+        ...(isDocument ? {
+          document: { status: "ok", type: "cf_url", matches_expected: true },
+          document_domain: { status: "complete_for_ax_windows", matching_window_ids: [windowId] },
+          edited: { source: "ax_close_button", close_button: {
+            status: "verified", role: "AXButton", subrole: "AXCloseButton", pid: fake.target.pid,
+            window_id: windowId, ax_window_id: windowId, ax_window_matches_target: true,
+          }, value: { status: "ok", type: "cf_boolean", value: false } },
+        } : {
+          document: { status: "missing", matches_expected: false },
+          document_domain: { status: "complete_for_ax_windows", matching_window_ids: [] },
+        }),
+      } }) });
+    };
+    rawDriver.callTool = async (name, inputJson, options) => {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      if (name === "get_window_state" && input.document_identity_query !== undefined) {
+        const windowId = typeof input.window_id === "number" ? input.window_id : fake.target.windowId;
+        const query = input.document_identity_query as Record<string, unknown>;
+        return makeIdentityProof(windowId, typeof query.expected_document_url === "string");
+      }
+      if (name === "hotkey" && Array.isArray(input.keys) && input.keys.some((key) => String(key).toUpperCase() === "W")) {
+        const response = await originalCallTool(name, inputJson, options);
+        fake.omitBoundWindow(true);
+        return response;
+      }
+      if (name === "launch_app") {
+        launchCount += 1;
+        fake.setExtraWindow({ pid: fake.target.pid, windowId: reopenedWindowId, appName: "TextEdit", title: "runtime-output.txt" });
+        documentWindowId = reopenedWindowId;
+        documentPresent = true;
+        return result({ structuredJson: JSON.stringify({ pid: fake.target.pid }) });
+      }
+      return originalCallTool(name, inputJson, options);
+    };
+    const originalObserve = computer.observe.bind(computer);
+    let initialObserve = true;
+    computer.observe = async (session, observationId, signal) => {
+      if (initialObserve) {
+        initialObserve = false;
+        await writeFile(outputPath, "Host-saved test document\n", "utf8");
+        documentPresent = true;
+      }
+      return originalObserve(session, observationId, signal);
+    };
+    const originalListWindows = computer.listWindows.bind(computer);
+    computer.listWindows = async (...args) => {
+      const inventory = await originalListWindows(...args);
+      recoveryWindowRef = inventory.options.find((option) => option.isCurrent === false)?.windowRef;
+      return inventory;
+    };
+    const registry = createDefaultToolRegistry();
+    registry.registerMany(windowSwitchTools());
+    registry.register(reopenSavedDocumentTool());
+    const calls: ToolCall[] = [
+      { id: "runtime-close" as never, name: "hotkey", arguments: { keys: ["CMD", "W"] } },
+      { id: "runtime-list" as never, name: "list_windows", arguments: {} },
+      { id: "runtime-switch" as never, name: "switch_window", arguments: {} },
+      { id: "runtime-reopen" as never, name: "reopen_saved_document", arguments: {} },
+      { id: "runtime-click" as never, name: "click", arguments: { x: 10, y: 10 } },
+    ];
+    let turnIndex = 0;
+    let controller!: RunController;
+    const provider: ProviderAdapter = {
+      id: "reopen-runtime-provider",
+      async generate(_input, { signal }): Promise<ModelTurn> {
+        signal.throwIfAborted();
+        if (turnIndex < calls.length) {
+          const call = calls[turnIndex++]!;
+          if (call.name === "switch_window") {
+            const listEvent = [...controller.getEvents()].reverse().find((event) => event.type === "tool.call.completed" && event.result.callId === "runtime-list");
+            const output = listEvent?.type === "tool.call.completed" ? listEvent.result.output : undefined;
+            if (typeof output === "object" && output !== null && !Array.isArray(output) && Array.isArray((output as Record<string, unknown>).windows)) {
+              const row = ((output as Record<string, unknown>).windows as unknown[])[0];
+              if (typeof row === "object" && row !== null && "windowRef" in row && typeof row.windowRef === "string") {
+                recoveryWindowRef = row.windowRef;
+              }
+            }
+            if (recoveryWindowRef === undefined) throw new Error("Runtime did not expose the fresh recovery windowRef");
+            return { type: "tool_calls", calls: [{ ...call, arguments: { windowRef: recoveryWindowRef } }] };
+          }
+          return { type: "tool_calls", calls: [call] };
+        }
+        return { type: "finish", summary: "The saved document was reopened and inspected." };
+      },
+    };
+    const contextCompiler: ContextCompiler = {
+      async compile(input, signal) {
+        signal.throwIfAborted();
+        compiledWindowTitles.push(input.windowSwitchState?.currentWindow?.title);
+        return { system: input.goal, messages: [{ role: "user", content: [{ type: "text", text: input.goal }] }], tools: registry.modelTools("main", { enabledToolNames: ["hotkey", "list_windows", "switch_window", "reopen_saved_document", "click"] }) };
+      },
+    };
+    const runId = "reopen-runtime-trajectory" as never;
+    controller = new RunController({
+      runId, provider, computer, contextCompiler, toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(12, 12),
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), runId),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      windowHandoff: "confirm-v1", windowSwitch: "opened-windows-v1", recoverBoundWindowMissing: true,
+      enabledToolNames: ["hotkey", "list_windows", "switch_window", "reopen_saved_document", "click"],
+      features: { planning: "off", memory: "off", batching: "off" },
+    });
+    try {
+      await expect(controller.start("Reopen the one saved document after its clean close.")).resolves.toBe("succeeded");
+      expect(launchCount).toBe(1);
+      expect(compiledWindowTitles).toContain("Prepared recovery blank");
+      expect(compiledWindowTitles[4]).not.toBe("Prepared recovery blank");
+      expect(compiledWindowTitles.at(-1)).not.toBe("Prepared recovery blank");
+      expect(fake.calls.some((call) => call.name === "verifyState" && call.input?.window_id === reopenedWindowId)).toBe(true);
+      const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      const reopenAction = events.find((event) => event.type === "action.proposed" && event.callId === "runtime-reopen");
+      if (reopenAction?.type !== "action.proposed") throw new Error("Runtime did not persist the reopen action proposal");
+      const reopenActionId = reopenAction.action.actionId;
+      expect(events.some((event) => event.type === "action.execution.completed" && event.receipt.actionId === reopenActionId)).toBe(true);
+      expect(events.filter((event) => event.type === "observation.created").length).toBeGreaterThanOrEqual(3);
+      const reduced = reduceRuntimeEvents(events, runId);
+      expect(reduced.status).toBe("finished");
+      expect(reduced.latestObservationId).not.toBeUndefined();
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
       await rm(directory, { recursive: true, force: true });
     }
   });

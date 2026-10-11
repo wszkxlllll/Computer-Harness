@@ -21,6 +21,8 @@ export type ComputerBackendConfig =
       /** Exact Host-prepared Darwin recovery window; never model-discovered as an arbitrary peer. */
       recoveryWindowTarget?: { pid: number; windowId: number };
       recoverBoundWindowMissing?: boolean;
+      /** Host grant for one absent output file, eligible only after this Run saves it and closes its exact clean document. */
+      reopenSavedDocumentGrant?: { path: string; expectedExecutableUrl: string };
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
       /** Explicit per-Run permission to discover and switch among opened windows. */
@@ -92,6 +94,7 @@ export function prepareComputerRunAssembly(
       if (grounding !== "off") allowedComputerTools.add("click_element");
       if (managedGrounding) allowedComputerTools.add("select_option");
       if (windowSwitch === "opened-windows-v1") allowedComputerTools.add("switch_window");
+      if (effectiveConfig.reopenSavedDocumentGrant !== undefined) allowedComputerTools.add("reopen_saved_document");
       return registry.list()
         .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
         .map((definition) => definition.name);
@@ -288,6 +291,7 @@ export async function createComputer(
       ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
       ...(config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: config.recoveryWindowTarget }),
       ...(config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: config.recoverBoundWindowMissing }),
+      ...(config.reopenSavedDocumentGrant === undefined ? {} : { reopenSavedDocumentGrant: config.reopenSavedDocumentGrant }),
       ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
       ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
       ...(config.windowSwitch === undefined ? {} : { windowSwitch: config.windowSwitch }),

@@ -314,7 +314,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         unresolvedActionId: event.action.actionId,
         unresolvedActionKind: event.action.kind,
       };
-      if (event.action.kind === "switch_window") delete nextSnapshot.latestObservationId;
+      if (event.action.kind === "switch_window" || event.action.kind === "reopen_saved_document") delete nextSnapshot.latestObservationId;
       return nextSnapshot;
     case "action.execution.completed":
     case "action.execution.failed":
@@ -348,13 +348,15 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         );
       }
       {
-        const switchingWindow = snapshot.unresolvedActionKind === "switch_window";
+        const targetTransition = snapshot.unresolvedActionKind === "switch_window" ||
+          snapshot.unresolvedActionKind === "reopen_saved_document";
+        const transitionName = snapshot.unresolvedActionKind;
         const sessionAfter = "sessionAfter" in event.receipt ? event.receipt.sessionAfter : undefined;
-        if (event.type === "action.execution.completed" && switchingWindow && sessionAfter === undefined) {
-          throw new Error("a completed switch_window action requires sessionAfter");
+        if (event.type === "action.execution.completed" && targetTransition && sessionAfter === undefined) {
+          throw new Error(`a completed ${transitionName} action requires sessionAfter`);
         }
-        if (sessionAfter !== undefined && (event.type !== "action.execution.completed" || !switchingWindow)) {
-          throw new Error("sessionAfter is valid only on a completed switch_window receipt");
+        if (sessionAfter !== undefined && (event.type !== "action.execution.completed" || !targetTransition)) {
+          throw new Error("sessionAfter is valid only on a completed target transition receipt");
         }
         let nextComputerSession = snapshot.computerSession;
         let nextActiveSurfaceRef = snapshot.activeSurfaceRef;
@@ -364,11 +366,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         let nextLegacySessionAliases = snapshot.legacyComputerSessionAliases;
         if (sessionAfter !== undefined) {
           if (snapshot.computerSession === undefined || sessionAfter.backend !== snapshot.computerSession.backend) {
-            throw new Error("switch_window sessionAfter must retain the active ComputerSession backend");
+            throw new Error(`${transitionName} sessionAfter must retain the active ComputerSession backend`);
           }
           if (sessionAfter.id !== snapshot.computerSession.id) {
             if (!isDecoderMarkedLegacyEvent(event)) {
-              throw new Error("switch_window sessionAfter must retain the active ComputerSession identity");
+              throw new Error(`${transitionName} sessionAfter must retain the active ComputerSession identity`);
             }
             const aliasSurfaceRef = legacyUnknownSurfaceRef(String(snapshot.runId), String(sessionAfter.id));
             const aliasTracking = trackSurfaceRef(snapshot, aliasSurfaceRef);
@@ -393,7 +395,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         const withoutUnresolvedAction = { ...snapshot };
         delete withoutUnresolvedAction.unresolvedActionId;
         delete withoutUnresolvedAction.unresolvedActionKind;
-        if (switchingWindow) delete withoutUnresolvedAction.latestObservationId;
+        if (targetTransition) delete withoutUnresolvedAction.latestObservationId;
         return {
           ...withoutUnresolvedAction,
           status: "running",
@@ -1220,6 +1222,7 @@ const actionIntentSchema = z.discriminatedUnion("kind", [
   }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
   z.object({ ...actionBaseSchema, kind: z.literal("switch_window"), windowRef: nonEmptyString.max(128) }),
+  z.object({ ...actionBaseSchema, kind: z.literal("reopen_saved_document") }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
 ]);
 const actionReceiptSchema = z.object({
@@ -1330,6 +1333,7 @@ const actionGuardSummarySchema = z.discriminatedUnion("kind", [
   z.object({ ...actionBaseSchema, kind: z.literal("scroll"), point: pointSchema, direction: z.enum(["up", "down", "left", "right"]), ticks: z.number().int().positive() }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
   z.object({ ...actionBaseSchema, kind: z.literal("switch_window"), windowRef: nonEmptyString.max(128) }),
+  z.object({ ...actionBaseSchema, kind: z.literal("reopen_saved_document") }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
 ]);
 const eventBaseSchema = {

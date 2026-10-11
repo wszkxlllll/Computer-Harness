@@ -103,6 +103,9 @@ export function validateActionIntent(
         throw new Error("switch_window.windowRef must be a non-empty opaque reference of at most 128 characters");
       }
       return;
+    case "reopen_saved_document":
+      requireCapability(context.capabilities.screenshot, action.kind, "screenshot");
+      return;
     default:
       return assertNever(action);
   }

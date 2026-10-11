@@ -2572,7 +2572,7 @@ export class RunController {
       const executeOptions: ComputerExecuteOptions = executionObservationId === undefined ? {} : { executionObservationId };
       const rawReceipt = await this.computer.execute(context.session, action, this.abortController.signal, {
         ...executeOptions,
-        ...(action.kind !== "switch_window" && this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
+        ...(action.kind !== "switch_window" && action.kind !== "reopen_saved_document" && this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
       });
       receipt = normalizeActionReceiptForAction(
         action,
@@ -2623,6 +2623,10 @@ export class RunController {
     } else if (action.kind === "switch_window") {
       this.invalidateTargetAfterFailedSwitch();
     }
+    if (action.kind === "reopen_saved_document" && receipt.status === "completed") {
+      if (receipt.sessionAfter === undefined) throw new Error("completed reopen_saved_document did not return sessionAfter");
+      this.resetAfterTargetTransition(receipt.sessionAfter, true, true);
+    }
 
     let terminalActionEvent: RuntimeEvent;
     if (receipt.status === "completed") {
@@ -2639,7 +2643,7 @@ export class RunController {
       // this read; it does not establish ownership or authorize a transition.
       // A matching dialog still requires an explicit switch_window call and a
       // fresh observation.
-      if (action.kind !== "wait" && action.kind !== "switch_window" && this.windowSwitchAvailable() &&
+      if (action.kind !== "wait" && action.kind !== "switch_window" && action.kind !== "reopen_saved_document" && this.windowSwitchAvailable() &&
           (this.latestWindowOptions === undefined || receipt.message?.includes("\n\n🪟 Action opened new window(s):") === true) &&
           this.computer.listWindows !== undefined) {
         try {
@@ -2787,6 +2791,24 @@ export class RunController {
       }
       const sessionAfter = receipt.sessionAfter;
       if (sessionAfter === undefined) throw new Error("completed switch_window did not return sessionAfter");
+      await this.observeAndCommit(sessionAfter, { requireSessionViewportMatch: true });
+      return;
+    }
+    if (action.kind === "reopen_saved_document") {
+      if (receipt.status !== "completed") {
+        if (receipt.status === "refused") {
+          // A refusal is guaranteed to precede the one-shot launch attempt.
+          // Reobserve the current recovery blank so the Provider can replan;
+          // an attempted launch is instead reported as partial/unknown and
+          // terminates without offering the capability again.
+          await this.observeAndCommit(context.session);
+          return;
+        }
+        await this.commitRunFinished({ outcome: "outcome_unknown" });
+        return;
+      }
+      const sessionAfter = receipt.sessionAfter;
+      if (sessionAfter === undefined) throw new Error("completed reopen_saved_document did not return sessionAfter");
       await this.observeAndCommit(sessionAfter, { requireSessionViewportMatch: true });
       return;
     }
@@ -3677,18 +3699,19 @@ function normalizeActionReceiptForAction(
     throw new Error("Computer receipt message must be a string");
   }
   const hasSessionAfter = Object.hasOwn(value, "sessionAfter");
-  if (hasSessionAfter && (action.kind !== "switch_window" || value.status !== "completed")) {
-    throw new Error("sessionAfter is valid only on a completed switch_window action");
+  const targetTransition = action.kind === "switch_window" || action.kind === "reopen_saved_document";
+  if (hasSessionAfter && (!targetTransition || value.status !== "completed")) {
+    throw new Error("sessionAfter is valid only on a completed target transition action");
   }
-  if (action.kind === "switch_window" && value.status === "completed" && !hasSessionAfter) {
-    throw new Error("completed switch_window receipt is missing sessionAfter");
+  if (targetTransition && value.status === "completed" && !hasSessionAfter) {
+    throw new Error(`completed ${action.kind} receipt is missing sessionAfter`);
   }
 
   const hasSafeRecovery = Object.hasOwn(value, "safeRecovery");
   let safeRecovery: NonNullable<Extract<ActionReceipt, { status: "partial" }>["safeRecovery"]> | undefined;
   if (hasSafeRecovery) {
     const candidate = (value as { safeRecovery?: unknown }).safeRecovery;
-    if (value.status !== "partial" || action.kind === "switch_window" || action.kind === "wait" ||
+    if (value.status !== "partial" || action.kind === "switch_window" || action.kind === "reopen_saved_document" || action.kind === "wait" ||
         executionSurfaceRef === undefined || !isValidSurfaceRef(executionSurfaceRef) ||
         executionSurfaceRef.kind !== "native_window" || typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
       throw new Error("safeRecovery is valid only for a partial ordinary GUI action on a verified native child Surface");
@@ -3736,12 +3759,17 @@ function normalizeActionReceiptForAction(
   };
   if (!hasSessionAfter) return base as import("@computer-harness/protocol").ActionReceipt;
 
+  const canReturnSessionAfter = action.kind === "switch_window" || action.kind === "reopen_saved_document";
+  if (!canReturnSessionAfter || value.status !== "completed") {
+    throw new Error("sessionAfter is valid only on a completed target transition action");
+  }
+
   const sessionAfter = normalizeComputerSessionDescriptor((value as { sessionAfter?: unknown }).sessionAfter);
   if (sessionAfter.id !== currentSession.id || sessionAfter.backend !== currentSession.backend) {
-    throw new Error("switch_window sessionAfter must retain the active ComputerSession identity and backend");
+    throw new Error(`${action.kind} sessionAfter must retain the active ComputerSession identity and backend`);
   }
   if (!sessionAfter.capabilities.screenshot) {
-    throw new Error("switch_window sessionAfter must support a fresh screenshot");
+    throw new Error(`${action.kind} sessionAfter must support a fresh screenshot`);
   }
   return { ...base, sessionAfter } as import("@computer-harness/protocol").ActionReceipt;
 }

@@ -359,6 +359,65 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("keeps a single-file reopen grant out of provider configuration while exposing its zero-argument tool only for that Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-reopen-grant-"));
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    if (originalPlatform === undefined || originalPlatform.configurable !== true) {
+      await rm(outputDir, { recursive: true, force: true });
+      throw new Error("test runtime does not allow restoring a temporary process.platform override");
+    }
+    let providerConfig: ResolvedRunConfig | undefined;
+    let modelToolNames: string[] = [];
+    let computerConfig: import("./computers.js").ComputerBackendConfig | undefined;
+    try {
+      Object.defineProperty(process, "platform", { ...originalPlatform, value: "darwin" });
+      expect(createDefaultToolRegistry().get("reopen_saved_document")).toBeUndefined();
+      const reopenPath = join(outputDir, "one-run-output.txt");
+      const handle = await createRun({
+        ...config(outputDir),
+        computer: {
+          kind: "cua", socketPath: "fixture.sock", screenshotDir: join(outputDir, "screenshots"),
+          windowTarget: { pid: 42, windowId: 84 }, recoveryWindowTarget: { pid: 42, windowId: 85 },
+          windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 42, windowId: 85 }],
+          recoverBoundWindowMissing: true,
+          reopenSavedDocumentGrant: { path: reopenPath, expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+        },
+        windowSwitch: "opened-windows-v1",
+        windowHandoff: "confirm-v1",
+        recoverBoundWindowMissing: true,
+      }, {
+        createProvider: (options) => {
+          providerConfig = options.config;
+          return {
+            id: "reopen-grant-provider",
+            async generate(input) {
+              modelToolNames = input.tools.map((tool) => tool.name);
+              return { type: "finish", summary: "Grant tool visibility checked." };
+            },
+          };
+        },
+        createComputer: ({ config: value }) => {
+          computerConfig = value;
+          const computer = fakeComputer({ open: 0, observe: 0, close: 0 });
+          const open = computer.open.bind(computer);
+          computer.open = async (...args) => ({ ...await open(...args), platform: "darwin" });
+          computer.listWindows = async () => ({ options: [], truncated: false, omittedCount: 0 });
+          return Promise.resolve(computer);
+        },
+      });
+      const outcome = await handle.start();
+      if (outcome !== "succeeded") throw new Error(`reopen-grant fixture ended ${outcome}: ${JSON.stringify(await handle.report())}`);
+      expect(computerConfig).toMatchObject({ reopenSavedDocumentGrant: { path: reopenPath } });
+      expect(providerConfig?.computer).not.toHaveProperty("reopenSavedDocumentGrant");
+      expect(modelToolNames).toContain("reopen_saved_document");
+      await handle.close();
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      expect(process.platform).toBe(originalPlatform.value);
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the default Planning and Memory module tools and Context path working", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-default-modules-"));
     let request = 0;

@@ -223,8 +223,8 @@ test("rejects loopback CDP lookalikes, query data, unsafe methods and redirects"
   assert.deepEqual(JSON.parse(fs.readFileSync(join(f.root, "counter.json"), "utf8")).actual, { total: 0, main: 0, risk: 0 });
 });
 
-test("the complete default Host main-tool vocabulary is classified as main", async (t) => {
-  const names = ["click", "double_click", "right_click", "type", "keypress", "hotkey", "scroll", "drag", "wait", "switch_window", "list_windows", "click_element", "select_option", "task_create", "task_update", "task_list", "task_get", "execution_segment_set", "memory_get", "memory_write_fact", "memory_mark_fact_needs_check", "memory_search", "memory_upsert_entity", "memory_list", "memory_invalidate_entity", "terminate", "interact"];
+test("the Host-approved main-tool vocabulary, including the opt-in reopen action, is classified as main", async (t) => {
+  const names = ["click", "double_click", "right_click", "type", "keypress", "hotkey", "scroll", "drag", "wait", "switch_window", "list_windows", "reopen_saved_document", "click_element", "select_option", "task_create", "task_update", "task_list", "task_get", "execution_segment_set", "memory_get", "memory_write_fact", "memory_mark_fact_needs_check", "memory_search", "memory_upsert_entity", "memory_list", "memory_invalidate_entity", "terminate", "interact"];
   const f = await fixture(t);
   await f.guard.fetch(GLM_ENDPOINT, request(names));
   assert.equal(f.calls.length, 1);

@@ -9,6 +9,7 @@ const VALUE_OPTIONS = new Set([
   "--cua-window-id",
   "--cua-recovery-window-pid",
   "--cua-recovery-window-id",
+  "--reopen-saved-document",
   "--managed-browser-url",
   "--managed-browser-profile-mode",
   "--managed-browser-profile-label",

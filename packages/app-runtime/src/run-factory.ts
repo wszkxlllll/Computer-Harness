@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, QwenTextEmbeddingProvider, type MemoryEmbeddingProvider, type MemoryRunModule } from "@computer-harness/memory";
 import { createExecutionSegmentTools, createPlanningRunModule, FilePlanStore, type PlanningRunModule } from "@computer-harness/planning";
@@ -11,6 +11,7 @@ import {
   RunController,
   createDefaultToolRegistry,
   windowSwitchTools,
+  reopenSavedDocumentTool,
   type ActionPolicy,
   type CleanupDiagnostic,
   type CleanupOperation,
@@ -59,6 +60,17 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
         !scopes.some((target) => identity(target) === identity(recoveryTarget)) ||
         identity(primaryTarget) === identity(recoveryTarget)) {
       throw new Error("bound-window recovery requires exactly the Host-authorized primary and recovery window targets");
+    }
+  }
+  if (input.computer.kind === "cua" && input.computer.reopenSavedDocumentGrant !== undefined) {
+    const grant = input.computer.reopenSavedDocumentGrant;
+    if (input.recoverBoundWindowMissing !== true || process.platform !== "darwin" ||
+        input.windowSwitch !== "opened-windows-v1" || input.computer.windowTarget === undefined ||
+        input.computer.recoveryWindowTarget === undefined || input.computer.managedBrowserCompanion === true ||
+        input.computer.managedBrowserUrl !== undefined || input.computer.grounding === "dom-catalog-v1" ||
+        input.computer.grounding === "hybrid-catalog-v1" || !isAbsoluteHostPath(grant.path) ||
+        !isCanonicalExecutableFileUrl(grant.expectedExecutableUrl)) {
+      throw new Error("saved-document reopen requires an exact Darwin native recovery Run and one absolute Host file grant");
     }
   }
   for (const value of [input.contextMaxInputTokens, input.contextMaxWireInputTokens]) {
@@ -204,6 +216,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       throw new Error("windowSwitch opened-windows-v1 requires a Computer with listWindows support");
     }
     if (config.windowSwitch === "opened-windows-v1") tools.registerMany(windowSwitchTools());
+    if (config.computer.kind === "cua" && config.computer.reopenSavedDocumentGrant !== undefined) {
+      tools.register(reopenSavedDocumentTool());
+    }
 
     if (config.riskGuard === "layered" && config.riskModel !== "off" && config.riskModel !== "same") {
       await mkdir(resolve(config.outputDir, "risk-review"), { recursive: true });
@@ -610,11 +625,27 @@ function withoutAssistantPreferences(config: ResolvedRunConfig): ResolvedRunConf
     managedBrowserCompanion: _runOnlyBrowserCompanion,
     managedBrowserProfileRoot: _hostOnlyProfileRoot,
     managedBrowserProfileLabel: _hostOnlyProfileLabel,
+    reopenSavedDocumentGrant: _hostOnlySavedDocumentGrant,
     ...computer
   } = factoryConfig.computer;
   if (_hostOnlyTargetScope === undefined && _runOnlyBrowserCompanion === undefined && _hostOnlyProfileRoot === undefined &&
-      _hostOnlyProfileLabel === undefined) return factoryConfig;
+      _hostOnlyProfileLabel === undefined && _hostOnlySavedDocumentGrant === undefined) return factoryConfig;
   return { ...factoryConfig, computer };
+}
+
+function isAbsoluteHostPath(value: string): boolean {
+  return typeof value === "string" && value.length > 0 && isAbsolute(value) && !value.includes("\0");
+}
+
+function isCanonicalExecutableFileUrl(value: string): boolean {
+  if (typeof value !== "string" || value.length === 0) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "file:" && url.hostname === "" && url.search === "" && url.hash === "" &&
+      url.pathname.startsWith("/") && url.href === value;
+  } catch {
+    return false;
+  }
 }
 
 function generatedRunId(): RunId {

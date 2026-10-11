@@ -52,6 +52,35 @@ describe("CLI window-switch configuration", () => {
     });
   });
 
+  it("grants one absolute saved-document path only with the exact native recovery scope", () => {
+    const baseArgs = [
+      "--goal", "Inspect the task after its saved document closes",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      "--cua-recovery-window-pid", "43", "--cua-recovery-window-id", "85",
+    ];
+    const options = parseArgs([...baseArgs, "--grounding", "uia-catalog-v1", "--reopen-saved-document", "/tmp/one-run-output.txt"]);
+    const config = toResolvedRunConfig(options, options.goal!);
+
+    expect(config.computer).toMatchObject({
+      kind: "cua",
+      grounding: "uia-catalog-v1",
+      reopenSavedDocumentGrant: {
+        path: "/tmp/one-run-output.txt",
+        expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+      },
+    });
+    expect(() => parseArgs([
+      "--goal", "Inspect the task", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock",
+      "--reopen-saved-document", "/tmp/one-run-output.txt",
+    ])).toThrow(/recovery|window-switch/u);
+    expect(() => parseArgs([...baseArgs, "--reopen-saved-document", "relative/output.txt"])).toThrow(/absolute file path/u);
+  });
+
   it("assembles the real CLI recovery config with the effective native window-switch setting", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-cli-recovery-assembly-"));
     const options = parseArgs([

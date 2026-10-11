@@ -868,6 +868,12 @@ export type SwitchWindowAction = GuiActionBase & {
   windowRef: string;
 };
 
+/** Host-authorized, single-file recovery action. The file identity never
+ * crosses the model-facing protocol; the Computer adapter owns the grant. */
+export type ReopenSavedDocumentAction = GuiActionBase & {
+  kind: "reopen_saved_document";
+};
+
 export type ActionIntent =
   | (GuiActionBase & { kind: "click"; point: Point })
   | (GuiActionBase & { kind: "double_click"; point: Point })
@@ -884,6 +890,7 @@ export type ActionIntent =
     })
   | (GuiActionBase & { kind: "drag"; from: Point; to: Point })
   | SwitchWindowAction
+  | ReopenSavedDocumentAction
   | { actionId: ActionId; kind: "wait"; durationMs: number };
 
 /** Redacted action shape persisted by the Guard; typed text remains only in the ToolCall/action execution path. */
@@ -897,7 +904,7 @@ export type ActionReceipt =
       status: "completed";
       driverCode?: string;
       message?: string;
-      /** Present only on a completed `switch_window`; it carries the updated
+      /** Present only on a completed target transition; it carries the updated
        * active-target viewport/capabilities while retaining the same ComputerSession id. */
       sessionAfter?: ComputerSessionDescriptor;
     }

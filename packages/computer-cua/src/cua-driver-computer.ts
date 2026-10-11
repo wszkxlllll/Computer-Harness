@@ -1,7 +1,8 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { BoundWindowMissingError } from "@computer-harness/protocol";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import type {
   ActionIntent,
@@ -127,6 +128,199 @@ function takeSurfaceTransitionReason(current: PrivateSession): SurfaceTransition
 
 function positiveWindowId(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value && typeof (value as NodeJS.ErrnoException).code === "string";
+}
+
+function processStart(value: unknown): { seconds: number; microseconds: number } | undefined {
+  const record = parseStructuredRecord(value);
+  return record !== undefined && Number.isSafeInteger(record.seconds) && Number.isSafeInteger(record.microseconds) &&
+    (record.seconds as number) >= 0 && (record.microseconds as number) >= 0
+    ? { seconds: record.seconds as number, microseconds: record.microseconds as number }
+    : undefined;
+}
+
+async function fileIdentityPin(path: string): Promise<FileIdentityPin> {
+  const info = await lstat(path, { bigint: true });
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error("the Host-granted output must be a regular non-symlink file");
+  return {
+    dev: info.dev.toString(), ino: info.ino.toString(), size: info.size.toString(),
+    mtimeNs: info.mtimeNs.toString(), ctimeNs: info.ctimeNs.toString(),
+  };
+}
+
+function sameFileIdentity(left: FileIdentityPin, right: FileIdentityPin): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function samePostLaunchFileIdentity(left: FileIdentityPin, right: FileIdentityPin): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs;
+}
+
+function parseDocumentIdentityProof(
+  result: { readonly isError?: boolean; readonly structuredJson?: string },
+  target: CuaWindowTarget,
+  bounds: CuaWindowGeometry,
+  expectedExecutableUrl: string,
+  expectedDocumentUrl?: string,
+): { readonly identity: VerifiedApplicationIdentity; readonly snapshotId: string; readonly cleanDocument: boolean } | undefined {
+  if (result.isError === true) return undefined;
+  const state = parseStructuredRecord(result.structuredJson);
+  const proof = parseStructuredRecord(state?._private_document_proof);
+  const app = parseStructuredRecord(proof?.application_identity);
+  const topTarget = parseStructuredRecord(proof?.target);
+  const appTarget = parseStructuredRecord(app?.target);
+  const window = parseStructuredRecord(proof?.window);
+  const windowBounds = parseGroundingFrame(window?.bounds);
+  const appStart = processStart(appTarget?.process_start);
+  const topStart = processStart(topTarget?.process_start);
+  if (proof?.version !== "macos-document-identity-v1" || typeof proof.snapshot_id !== "string" || proof.snapshot_id.length === 0 ||
+      app?.status !== "verified" || topTarget?.pid !== target.pid || topTarget.window_id !== target.windowId ||
+      appTarget?.pid !== target.pid || appTarget.window_id !== target.windowId ||
+      appTarget.bundle_id !== "com.apple.TextEdit" || appTarget.executable_url !== expectedExecutableUrl ||
+      appStart === undefined || topStart === undefined || appStart.seconds !== topStart.seconds || appStart.microseconds !== topStart.microseconds ||
+      !Array.isArray(app.instances) || app.instances.length !== 1 || !isRecord(app.instances[0])) return undefined;
+  const instance = app.instances[0];
+  const instanceStart = processStart(instance.process_start);
+  if (instance.pid !== target.pid || instance.bundle_id !== "com.apple.TextEdit" || instance.executable_url !== expectedExecutableUrl ||
+      instanceStart === undefined || instanceStart.seconds !== appStart.seconds || instanceStart.microseconds !== appStart.microseconds ||
+      proof.frontmost_pid !== target.pid || proof.focused_window_id !== target.windowId ||
+      window?.role !== "AXWindow" || window.pid !== target.pid || window.window_id !== target.windowId ||
+      window.owner_pid !== target.pid || windowBounds === undefined || !sameWindowGeometry(windowBounds, bounds)) return undefined;
+  const identity: VerifiedApplicationIdentity = {
+    pid: target.pid, windowId: target.windowId, processStart: appStart,
+    bundleId: "com.apple.TextEdit", executableUrl: expectedExecutableUrl,
+  };
+  if (expectedDocumentUrl === undefined) {
+    return { identity, snapshotId: proof.snapshot_id, cleanDocument: false };
+  }
+  if (proof.status !== "identity_verified" || proof.tail_revalidated !== true) return undefined;
+  const document = parseStructuredRecord(proof.document);
+  const domain = parseStructuredRecord(proof.document_domain);
+  const edited = parseStructuredRecord(proof.edited);
+  const closeButton = parseStructuredRecord(edited?.close_button);
+  const editedValue = parseStructuredRecord(edited?.value);
+  if (document?.status !== "ok" || document.type !== "cf_url" && document.type !== "cf_string" ||
+      document.matches_expected !== true || domain?.status !== "complete_for_ax_windows" ||
+      !Array.isArray(domain.matching_window_ids) || domain.matching_window_ids.length !== 1 || domain.matching_window_ids[0] !== target.windowId ||
+      edited?.source !== "ax_close_button" || closeButton?.status !== "verified" || closeButton.role !== "AXButton" ||
+      closeButton.subrole !== "AXCloseButton" || closeButton.pid !== target.pid || closeButton.window_id !== target.windowId ||
+      closeButton.ax_window_id !== target.windowId || closeButton.ax_window_matches_target !== true ||
+      editedValue?.status !== "ok" || editedValue.type !== "cf_boolean" || editedValue.value !== false) return undefined;
+  return { identity, snapshotId: proof.snapshot_id, cleanDocument: true };
+}
+
+function sameApplicationIdentity(left: VerifiedApplicationIdentity, right: VerifiedApplicationIdentity): boolean {
+  return sameApplicationProcess(left, right) && left.windowId === right.windowId;
+}
+
+function sameApplicationProcess(left: VerifiedApplicationIdentity, right: VerifiedApplicationIdentity): boolean {
+  return left.pid === right.pid &&
+    left.processStart.seconds === right.processStart.seconds && left.processStart.microseconds === right.processStart.microseconds &&
+    left.bundleId === right.bundleId && left.executableUrl === right.executableUrl;
+}
+
+async function prepareReopenSavedDocumentGrant(grant: ReopenSavedDocumentGrant): Promise<{
+  readonly path: string;
+  readonly fileUrl: string;
+  readonly canonicalExecutableUrl: string;
+  readonly parentIdentity: { readonly dev: string; readonly ino: string };
+}> {
+  if (!isAbsolute(grant.path) || grant.path.includes("\0") || resolve(grant.path) !== grant.path || basename(grant.path).length === 0) {
+    throw new Error("saved-document grant path must be one canonical absolute file path");
+  }
+  const parent = dirname(grant.path);
+  const canonicalParent = await realpath(parent);
+  if (canonicalParent !== parent) throw new Error("saved-document grant parent must already be canonical");
+  const parentInfo = await lstat(parent, { bigint: true });
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) throw new Error("saved-document grant parent must be a real directory");
+  try {
+    await lstat(grant.path);
+    throw new Error("saved-document grant must name an output file that is absent at Run open");
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+  let executablePath: string;
+  try {
+    const url = new URL(grant.expectedExecutableUrl);
+    if (url.protocol !== "file:" || url.hostname !== "" || url.search !== "" || url.hash !== "" || url.href !== grant.expectedExecutableUrl) {
+      throw new Error("invalid file URL");
+    }
+    executablePath = fileURLToPath(url);
+  } catch {
+    throw new Error("saved-document grant requires a canonical TextEdit executable file URL");
+  }
+  const canonicalExecutableUrl = pathToFileURL(await realpath(executablePath)).href;
+  if (canonicalExecutableUrl !== grant.expectedExecutableUrl) throw new Error("saved-document executable identity is not canonical");
+  return {
+    path: grant.path,
+    fileUrl: pathToFileURL(grant.path).href,
+    canonicalExecutableUrl,
+    parentIdentity: { dev: parentInfo.dev.toString(), ino: parentInfo.ino.toString() },
+  };
+}
+
+async function queryDocumentIdentity(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  bounds: CuaWindowGeometry,
+  expectedExecutableUrl: string,
+  signal: AbortSignal,
+  expectedDocumentUrl?: string,
+): Promise<{ readonly identity: VerifiedApplicationIdentity; readonly snapshotId: string; readonly cleanDocument: boolean } | undefined> {
+  const result = await readDocumentIdentityResult(driver, session, target, signal, expectedDocumentUrl);
+  return parseDocumentIdentityProof(result, target, bounds, expectedExecutableUrl, expectedDocumentUrl);
+}
+
+async function readDocumentIdentityResult(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+  expectedDocumentUrl?: string,
+) {
+  const result = await callTool(driver, "get_window_state", {
+    pid: target.pid,
+    window_id: target.windowId,
+    include_screenshot: false,
+    max_depth: 0,
+    max_elements: 0,
+    document_identity_query: expectedDocumentUrl === undefined ? {} : { expected_document_url: expectedDocumentUrl },
+    session,
+  }, signal);
+  return result;
+}
+
+function hasExplicitApplicationIdentityConflict(
+  result: { readonly isError?: boolean; readonly structuredJson?: string },
+  target: CuaWindowTarget,
+  expectedExecutableUrl: string,
+  expectedIdentity: VerifiedApplicationIdentity,
+): boolean {
+  if (result.isError === true) return false;
+  const state = parseStructuredRecord(result.structuredJson);
+  const proof = parseStructuredRecord(state?._private_document_proof);
+  const app = parseStructuredRecord(proof?.application_identity);
+  if (proof?.version !== "macos-document-identity-v1" || app?.status !== "verified") return false;
+  const appTarget = parseStructuredRecord(app.target);
+  const appStart = processStart(appTarget?.process_start);
+  if (typeof appTarget?.pid !== "number" || appTarget.window_id !== target.windowId ||
+      typeof appTarget.bundle_id !== "string" || typeof appTarget.executable_url !== "string" || appStart === undefined) return false;
+  if (appTarget.pid !== expectedIdentity.pid || appTarget.bundle_id !== expectedIdentity.bundleId ||
+      appTarget.executable_url !== expectedExecutableUrl || appStart.seconds !== expectedIdentity.processStart.seconds ||
+      appStart.microseconds !== expectedIdentity.processStart.microseconds) return true;
+  if (!Array.isArray(app.instances) || app.instances.length !== 1 || !isRecord(app.instances[0])) return true;
+  const instance = app.instances[0];
+  const instanceStart = processStart(instance.process_start);
+  if (typeof instance.pid !== "number" || typeof instance.bundle_id !== "string" ||
+      typeof instance.executable_url !== "string" || instanceStart === undefined) return false;
+  return instance.pid !== expectedIdentity.pid || instance.bundle_id !== expectedIdentity.bundleId ||
+    instance.executable_url !== expectedExecutableUrl || instanceStart.seconds !== expectedIdentity.processStart.seconds ||
+    instanceStart.microseconds !== expectedIdentity.processStart.microseconds;
 }
 
 type OverlayVerification =
@@ -811,6 +1005,50 @@ export type CuaWindowDeliveryMode = "background" | "foreground";
 export type CuaGroundingMode = "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
 export type CuaWindowSwitchMode = "off" | "opened-windows-v1";
 
+export interface ReopenSavedDocumentGrant {
+  /** One Host-selected absolute path; never sent to the model. */
+  readonly path: string;
+  /** Canonical executable URL frozen by the Host for com.apple.TextEdit. */
+  readonly expectedExecutableUrl: string;
+}
+
+interface FileIdentityPin {
+  readonly dev: string;
+  readonly ino: string;
+  readonly size: string;
+  readonly mtimeNs: string;
+  readonly ctimeNs: string;
+}
+
+interface VerifiedApplicationIdentity {
+  readonly pid: number;
+  readonly windowId: number;
+  readonly processStart: { readonly seconds: number; readonly microseconds: number };
+  readonly bundleId: "com.apple.TextEdit";
+  readonly executableUrl: string;
+}
+
+interface VerifiedDocumentIdentity {
+  readonly snapshotId: string;
+  readonly observationId: ObservationId;
+  readonly identity: VerifiedApplicationIdentity;
+  readonly fileUrl: string;
+  readonly windowGeometry: CuaWindowGeometry;
+  readonly fileIdentity: FileIdentityPin;
+}
+
+interface PrivateReopenSavedDocumentState {
+  readonly path: string;
+  readonly fileUrl: string;
+  readonly canonicalExecutableUrl: string;
+  readonly parentIdentity: { readonly dev: string; readonly ino: string };
+  readonly primaryIdentity: VerifiedApplicationIdentity;
+  savedDocument?: VerifiedDocumentIdentity;
+  closedSourceActionId?: ActionIntent["actionId"];
+  recoveryReady: boolean;
+  attempted: boolean;
+}
+
 // Keep the adapter side bounded but larger than the model-facing hot set. The
 // Runtime selector narrows this to at most 16 before Observation persistence;
 // the private ref map still retains every safe candidate here for the current
@@ -850,6 +1088,8 @@ export interface CuaDriverComputerOptions {
   /** Exact Host-prepared recovery window, restricted to the opt-in missing-bound recovery flow. */
   recoveryWindowTarget?: CuaWindowTarget;
   recoverBoundWindowMissing?: boolean;
+  /** Explicit one-file reopen grant; Darwin native-window Runs only. */
+  reopenSavedDocumentGrant?: ReopenSavedDocumentGrant;
   /** Injected host-only read-only relationship evidence; absent/failed means manual transient handling. */
   windowRelationshipProbe?: WindowRelationshipProbe;
   /** Host-supplied managed-browser transport; never discovered by this adapter. */
@@ -880,6 +1120,8 @@ interface PrivateSession {
   /** Fresh inventory immediately before an opted-in foreground GUI action. */
   preActionWindowBaseline: {
     readonly actionId: ActionIntent["actionId"];
+    readonly sourceObservationId: ObservationId;
+    readonly closeShortcut: boolean;
     completed: boolean;
     readonly targetKeys: ReadonlySet<string>;
     readonly complete: boolean;
@@ -905,6 +1147,7 @@ interface PrivateSession {
   /** True only when the last completed action produced a pre/post inventory diff. */
   proactiveHandoffCandidatesReady: boolean;
   recoveryWindowIdentity?: CuaWindowInfo;
+  reopenSavedDocument?: PrivateReopenSavedDocumentState;
   /** Adapter-private active managed tab; never serialized to Runtime. */
   browserTarget?: ManagedBrowserTarget;
   /** Run-owned managed target survives switching to native windows. */
@@ -1066,6 +1309,13 @@ export class CuaDriverComputer implements Computer {
     if (this.options.recoverBoundWindowMissing !== true && this.options.recoveryWindowTarget !== undefined) {
       throw new Error("recoveryWindowTarget requires recoverBoundWindowMissing opt-in");
     }
+    if (this.options.reopenSavedDocumentGrant !== undefined &&
+        (this.options.recoverBoundWindowMissing !== true || (this.options.platform ?? process.platform) !== "darwin" ||
+         this.options.windowDeliveryMode !== "foreground" || this.options.windowTarget === undefined ||
+         this.options.recoveryWindowTarget === undefined || this.options.windowTarget.pid !== this.options.recoveryWindowTarget.pid ||
+         this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1")) {
+      throw new Error("saved-document reopen requires a Darwin foreground native recovery Run for one exact TextEdit process");
+    }
     if (this.options.grounding !== undefined && !["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"].includes(this.options.grounding)) {
       throw new Error("grounding must be off, uia-catalog-v1, dom-catalog-v1 or hybrid-catalog-v1");
     }
@@ -1114,6 +1364,10 @@ export class CuaDriverComputer implements Computer {
       let surfaceRegistry = createSurfaceRegistry(label);
       const windowBindings = new Map<string, CuaWindowBinding>();
       let recoveryWindowIdentity: CuaWindowInfo | undefined;
+      const reopenGrant = this.options.reopenSavedDocumentGrant === undefined
+        ? undefined
+        : await prepareReopenSavedDocumentGrant(this.options.reopenSavedDocumentGrant);
+      let reopenSavedDocument: PrivateReopenSavedDocumentState | undefined;
       if (this.options.recoverBoundWindowMissing === true) {
         if (platform !== "darwin") throw new Error("bound-window recovery is currently supported only on Darwin");
         const inventory = await listWindowInventory(driver, label, signal, undefined, true, this.options.windowRelationshipProbe, this.options.platform ?? process.platform);
@@ -1145,6 +1399,21 @@ export class CuaDriverComputer implements Computer {
         const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, platform));
         windowBinding = capture.binding;
         viewport = capture.viewport;
+        if (reopenGrant !== undefined) {
+          if (platform !== "darwin") throw new Error("saved-document reopen is currently supported only on Darwin");
+          const appProof = await queryDocumentIdentity(driver, label, capture.binding.target, capture.binding.bounds,
+            reopenGrant.canonicalExecutableUrl, signal);
+          if (appProof === undefined || appProof.identity.pid !== this.options.windowTarget.pid ||
+              appProof.identity.windowId !== this.options.windowTarget.windowId) {
+            throw new Error("Host-granted TextEdit process identity could not be uniquely verified at Run open");
+          }
+          reopenSavedDocument = {
+            ...reopenGrant,
+            primaryIdentity: appProof.identity,
+            recoveryReady: false,
+            attempted: false,
+          };
+        }
         const peer = registerNativePeer(surfaceRegistry, asNativeWindowIdentity(capture.binding.target));
         if (peer.decision !== "applied") throw new Error(`CUA initial native Surface could not be registered: ${peer.reason}`);
         const active = activatePeer(peer.state, peer.value, {
@@ -1198,6 +1467,7 @@ export class CuaDriverComputer implements Computer {
         foregroundMismatchWindowId: undefined,
         proactiveHandoffCandidatesReady: false,
         ...(recoveryWindowIdentity === undefined ? {} : { recoveryWindowIdentity }),
+        ...(reopenSavedDocument === undefined ? {} : { reopenSavedDocument }),
         ...(this.options.browserTarget === undefined ? {} : {
           ...(browserIsInitialTarget ? { browserTarget: this.options.browserTarget! } : {}),
           managedBrowserTarget: this.options.browserTarget,
@@ -1293,6 +1563,37 @@ export class CuaDriverComputer implements Computer {
           resolveCapturePlatform(this.options.platform, current.platform),
         );
         const liveBinding = capture.binding;
+        const reopenState = current.reopenSavedDocument;
+        if (reopenState !== undefined && current.platform === "darwin" &&
+            windowIdentityKey(liveBinding.target) === windowIdentityKey(this.options.windowTarget!)) {
+          try {
+            const parentInfo = await lstat(dirname(reopenState.path), { bigint: true });
+            const fileIdentity = await fileIdentityPin(reopenState.path);
+            const pathStillPinned = parentInfo.isDirectory() && !parentInfo.isSymbolicLink() &&
+              parentInfo.dev.toString() === reopenState.parentIdentity.dev && parentInfo.ino.toString() === reopenState.parentIdentity.ino;
+            const documentProof = pathStillPinned
+              ? await queryDocumentIdentity(current.driver, current.label, liveBinding.target, liveBinding.bounds,
+                reopenState.canonicalExecutableUrl, signal, reopenState.fileUrl)
+              : undefined;
+            if (documentProof?.cleanDocument === true &&
+                sameApplicationIdentity(documentProof.identity, reopenState.primaryIdentity)) {
+              reopenState.savedDocument = {
+                snapshotId: documentProof.snapshotId,
+                observationId,
+                identity: documentProof.identity,
+                fileUrl: reopenState.fileUrl,
+                windowGeometry: { ...liveBinding.bounds },
+                fileIdentity,
+              };
+            } else {
+              delete reopenState.savedDocument;
+            }
+          } catch {
+            // A private file/document proof failure only withholds the
+            // one-shot reopen grant; it never changes the normal observation.
+            delete reopenState.savedDocument;
+          }
+        }
         const previousBinding = current.windowBindings.get(windowIdentityKey(liveBinding.target));
         if (previousBinding !== undefined && !sameWindowGeometry(previousBinding.bounds, liveBinding.bounds)) {
           const geometrySurface = surfaceRefForWindow(current, liveBinding.target);
@@ -2618,6 +2919,22 @@ export class CuaDriverComputer implements Computer {
           !baseline.completed || confirmingUnknownAction || baseline.parentSurfaceRef.parentSurfaceId !== undefined ||
           !this.canUseManualWindowHandoff(current)) throw error;
       current.missingParent = { sourceActionId: baseline.actionId, reason: "bound_window_missing", candidates: new Map(), epoch: 0, confirming: false };
+      const reopenState = current.reopenSavedDocument;
+      const saved = reopenState?.savedDocument;
+      if (reopenState !== undefined && saved !== undefined && baseline.sourceObservationId === saved.observationId &&
+          baseline.closeShortcut &&
+          saved.identity.windowId === baseline.parentBinding.target.windowId &&
+          reopenState.closedSourceActionId === undefined) {
+        try {
+          const currentFileIdentity = await fileIdentityPin(reopenState.path);
+          if (sameFileIdentity(currentFileIdentity, saved.fileIdentity)) {
+            reopenState.closedSourceActionId = baseline.actionId;
+          }
+        } catch {
+          // A missing source window is not a saved-document reopen permit
+          // unless the Host-pinned output is still the exact clean file.
+        }
+      }
       this.clearTargetObservationState(current, baseline.parentSurfaceRef);
       throw new BoundWindowMissingError(baseline.actionId);
     }
@@ -3013,6 +3330,20 @@ export class CuaDriverComputer implements Computer {
       if (current.missingParent !== missing || missing.candidates.get(candidate.handoffToken!) !== issued) {
         throw new WindowContractError("WINDOW_HANDOFF_STALE", "missing-window confirmation expired during transition");
       }
+      const reopenState = current.reopenSavedDocument;
+      if (reopenState !== undefined && missing.reason === "bound_window_missing" &&
+          missing.sourceActionId === reopenState.closedSourceActionId && reopenState.savedDocument !== undefined &&
+          windowIdentityKey(candidate) === windowIdentityKey(this.options.recoveryWindowTarget!)) {
+        const recoveryBinding = activeWindowBinding(current);
+        const recoveryProof = recoveryBinding === undefined
+          ? undefined
+          : await queryDocumentIdentity(current.driver, current.label, recoveryBinding.target, recoveryBinding.bounds,
+            reopenState.canonicalExecutableUrl, signal);
+        if (recoveryProof === undefined || !sameApplicationProcess(recoveryProof.identity, reopenState.primaryIdentity)) {
+          throw new WindowContractError("WINDOW_HANDOFF_STALE", "recovery blank is not in the pinned TextEdit process");
+        }
+        reopenState.recoveryReady = true;
+      }
       delete current.missingParent;
       return result;
       } finally { missing.confirming = false; }
@@ -3371,6 +3702,156 @@ export class CuaDriverComputer implements Computer {
     }
   }
 
+  private async executeReopenSavedDocument(
+    current: PrivateSession,
+    action: Extract<ActionIntent, { readonly kind: "reopen_saved_document" }>,
+    observation: PrivateObservation,
+    signal: AbortSignal,
+  ): Promise<ActionReceipt> {
+    const state = current.reopenSavedDocument;
+    const saved = state?.savedDocument;
+    const recoveryTarget = this.options.recoveryWindowTarget;
+    const activeBinding = activeWindowBinding(current);
+    if (state === undefined || saved === undefined || recoveryTarget === undefined || !state.recoveryReady || state.attempted ||
+        state.closedSourceActionId === undefined ||
+        activeBinding === undefined || windowIdentityKey(activeBinding.target) !== windowIdentityKey(recoveryTarget) ||
+        observation.geometry === undefined || !sameWindowGeometry(observation.geometry, activeBinding.bounds)) {
+      return refused(action.actionId, "DOCUMENT_REOPEN_NOT_READY", "the saved document is not ready for the one-shot Host-authorized reopen");
+    }
+
+    // Failures here precede dispatch, so the single-use capability remains
+    // available for a fresh, corrected action.
+    try {
+      const parentInfo = await lstat(dirname(state.path), { bigint: true });
+      const currentFile = await fileIdentityPin(state.path);
+      const currentBinding = await discoverWindow(current.driver, current.label, recoveryTarget, signal);
+      const appProof = await queryDocumentIdentity(current.driver, current.label, currentBinding.target, currentBinding.bounds,
+        state.canonicalExecutableUrl, signal);
+      if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() ||
+          parentInfo.dev.toString() !== state.parentIdentity.dev || parentInfo.ino.toString() !== state.parentIdentity.ino ||
+          !sameFileIdentity(currentFile, saved.fileIdentity) ||
+          !sameWindowGeometry(currentBinding.bounds, activeBinding.bounds) || appProof === undefined ||
+          !sameApplicationProcess(appProof.identity, state.primaryIdentity)) {
+        return refused(action.actionId, "DOCUMENT_REOPEN_PREFLIGHT_FAILED", "the exact saved file or recovery window could not be reverified; no launch was attempted");
+      }
+    } catch {
+      signal.throwIfAborted();
+      return refused(action.actionId, "DOCUMENT_REOPEN_PREFLIGHT_FAILED", "the exact saved file or recovery window could not be reverified; no launch was attempted");
+    }
+
+    // Consume immediately before dispatch. Anything after this point is a
+    // verified completion or an unknown outcome; never launch a second time.
+    state.attempted = true;
+    state.recoveryReady = false;
+    let launched: Awaited<ReturnType<typeof callTool>>;
+    try {
+      launched = await callTool(current.driver, "launch_app", {
+        session: current.label,
+        bundle_id: "com.apple.TextEdit",
+        urls: [state.fileUrl],
+      }, signal);
+    } catch {
+      signal.throwIfAborted();
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+    if (launched.isError) {
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+    const launchValue = parseStructuredRecord(launched.structuredJson);
+    if (launchValue?.pid !== state.primaryIdentity.pid) {
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+
+    try {
+      const verificationSignal = AbortSignal.any([signal, AbortSignal.timeout(1_500)]);
+      const verificationAttempts = 8;
+      let reopened: CuaWindowInfo | undefined;
+      for (let attempt = 0; attempt < verificationAttempts; attempt += 1) {
+        verificationSignal.throwIfAborted();
+        if (!samePostLaunchFileIdentity(await fileIdentityPin(state.path), saved.fileIdentity)) throw new Error("file identity changed");
+        verificationSignal.throwIfAborted();
+        const inventory = await listWindowInventory(current.driver, current.label, verificationSignal, state.primaryIdentity.pid, true,
+          this.options.windowRelationshipProbe, "darwin");
+        verificationSignal.throwIfAborted();
+        if (inventory.truncated === true) throw new Error("document verification inventory was truncated");
+        const matches: CuaWindowInfo[] = [];
+        for (const info of inventory.windows) {
+          if (info.target.pid !== state.primaryIdentity.pid || info.isOnScreen !== true || info.minimized === true) continue;
+          const appResult = await readDocumentIdentityResult(current.driver, current.label, info.target, verificationSignal);
+          verificationSignal.throwIfAborted();
+          const appProof = parseDocumentIdentityProof(appResult, info.target, info.bounds, state.canonicalExecutableUrl);
+          if (appProof === undefined) {
+            if (hasExplicitApplicationIdentityConflict(appResult, info.target, state.canonicalExecutableUrl, state.primaryIdentity)) {
+              throw new Error("TextEdit application identity changed during document verification");
+            }
+            continue;
+          }
+          if (!sameApplicationProcess(appProof.identity, state.primaryIdentity)) {
+            throw new Error("TextEdit application identity changed during document verification");
+          }
+          const documentResult = await readDocumentIdentityResult(current.driver, current.label, info.target, verificationSignal, state.fileUrl);
+          verificationSignal.throwIfAborted();
+          const proof = parseDocumentIdentityProof(documentResult, info.target, info.bounds, state.canonicalExecutableUrl, state.fileUrl);
+          if (proof?.cleanDocument === true && sameApplicationProcess(proof.identity, state.primaryIdentity)) matches.push(info);
+        }
+        if (matches.length > 1) throw new Error("saved document matched multiple TextEdit windows");
+        if (matches.length === 1) {
+          reopened = matches[0]!;
+          break;
+        }
+        if (attempt + 1 < verificationAttempts) await delayWithAbort(100, verificationSignal);
+      }
+      if (reopened === undefined) throw new Error("saved document was not verified before the bounded launch-settle deadline");
+      verificationSignal.throwIfAborted();
+      if (!samePostLaunchFileIdentity(await fileIdentityPin(state.path), saved.fileIdentity)) throw new Error("file identity changed");
+      verificationSignal.throwIfAborted();
+      const target = reopened.target;
+      let sessionAfter: ComputerSessionDescriptor;
+      if (windowIdentityKey(target) !== windowIdentityKey(activeBinding.target)) {
+        sessionAfter = await this.transitionWindow(current, target, signal, {
+          onScreenOnly: true,
+          staleCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN",
+          staleMessage: "saved document identity changed before the verified transition",
+          authorizedTargets: [{ pid: target.pid, windowId: target.windowId }],
+          ...(reopened.appName === undefined ? {} : { expectedAppName: reopened.appName }),
+          ...(reopened.title === undefined ? {} : { expectedTitle: reopened.title }),
+        });
+      } else {
+        const capture = await captureWindowWithRetry(current.driver, current.label, target, signal,
+          this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, current.platform));
+        const oldRef = current.surfaceRegistry.activeSurface;
+        if (oldRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, oldRef)) throw new Error("recovery Surface changed after document launch");
+        const advanced = advanceSurfaceGeneration(current.surfaceRegistry, oldRef);
+        if (advanced.decision !== "applied") throw new Error("recovery Surface generation could not advance");
+        const activated = activatePeer(advanced.state, advanced.value, {
+          nativeWindow: asNativeWindowIdentity(target), identityVerified: true, captureVerified: true,
+        });
+        if (activated.decision !== "applied") throw new Error("reopened document Surface could not be activated");
+        current.surfaceRegistry = activated.state;
+        current.windowBindings.set(windowIdentityKey(capture.binding.target), capture.binding);
+        current.descriptor = { ...current.descriptor, viewport: capture.viewport };
+        noteSurfaceTransition(current, "peer_switch");
+        this.clearTargetObservationState(current, oldRef, activated.value);
+        sessionAfter = current.descriptor;
+      }
+      const finalBinding = activeWindowBinding(current);
+      const finalProof = finalBinding === undefined
+        ? undefined
+        : await queryDocumentIdentity(current.driver, current.label, finalBinding.target, finalBinding.bounds,
+          state.canonicalExecutableUrl, signal, state.fileUrl);
+      if (finalProof?.cleanDocument !== true || !sameApplicationProcess(finalProof.identity, state.primaryIdentity) ||
+          !samePostLaunchFileIdentity(await fileIdentityPin(state.path), saved.fileIdentity)) {
+        throw new Error("saved document changed after transition");
+      }
+      delete state.savedDocument;
+      return { actionId: action.actionId, status: "completed", sessionAfter,
+        message: "The Host-authorized saved document was reopened and its exact TextEdit window was captured." };
+    } catch {
+      signal.throwIfAborted();
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+  }
+
   public async execute(
     session: ComputerSessionDescriptor,
     action: ActionIntent,
@@ -3425,6 +3906,10 @@ export class CuaDriverComputer implements Computer {
     if (action.kind === "switch_window") {
       delete current.lastInspectedExistingTransientRootRef;
       return this.executeWindowSwitch(current, action, signal);
+    }
+    if (action.kind === "reopen_saved_document") {
+      delete current.lastInspectedExistingTransientRootRef;
+      return this.executeReopenSavedDocument(current, action, decisionObservation!, signal);
     }
     try {
       await this.reconcileActiveTransientChild(current, signal);
@@ -3825,6 +4310,10 @@ export class CuaDriverComputer implements Computer {
         }
         current.preActionWindowBaseline = {
           actionId: action.actionId,
+          sourceObservationId: action.basedOn,
+          closeShortcut: action.kind === "keypress" && action.keys.length === 2 &&
+            action.keys.some((key) => key.toUpperCase() === "W") &&
+            action.keys.some((key) => key.toUpperCase() === "CMD" || key.toUpperCase() === "META"),
           completed: false,
           targetKeys: visibleKeys,
           complete: visibleInventory.complete,
@@ -4317,7 +4806,7 @@ function isBrowserShortcut(action: ActionIntent, key: string, platform: NodeJS.P
 }
 
 function actionRequest(
-  action: Exclude<ActionIntent, { kind: "wait" } | SwitchWindowAction>,
+  action: Exclude<ActionIntent, { kind: "wait" } | SwitchWindowAction | { kind: "reopen_saved_document" }>,
   session: string,
   windowBinding?: CuaWindowBinding,
   configuredDeliveryMode?: CuaWindowDeliveryMode,
@@ -5502,6 +5991,22 @@ async function awaitWithDeadline<T>(work: () => Promise<T>, deadline: number, op
 
 function delay(durationMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+function delayWithAbort(durationMs: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, durationMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("operation aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  }).then(() => signal.throwIfAborted());
 }
 
 async function waitForCleanupPoll(deadline: number): Promise<void> {

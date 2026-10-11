@@ -298,6 +298,7 @@ export type GuiActionDraft =
   | { kind: "scroll"; point: Point; direction: "up" | "down" | "left" | "right"; ticks: number }
   | { kind: "drag"; from: Point; to: Point }
   | { kind: "switch_window"; windowRef: string }
+  | { kind: "reopen_saved_document" }
   | { kind: "wait"; durationMs: number };
 
 export interface ToolExecutionContext {

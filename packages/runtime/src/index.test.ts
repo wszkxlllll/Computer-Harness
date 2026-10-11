@@ -59,6 +59,7 @@ import {
   windowSwitchTools,
 } from "./index.js";
 import { currentObservationAssessmentBinding } from "./observation-assessment.js";
+import { reopenSavedDocumentTool } from "./computer-tools.js";
 
 const runId = "runtime-test" as RunId;
 const sessionId = "fake-computer" as ComputerSessionId;
@@ -4379,7 +4380,7 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it.each(["extra-ref-field", "wait-action", "sibling-wrong-parent", "sibling-same-surface", "sibling-untrusted-source", "sibling-untrusted-old-source", "macos-sheet-wrong-kind"] as const)(
+  it.each(["extra-ref-field", "wait-action", "reopen-action", "sibling-wrong-parent", "sibling-same-surface", "sibling-untrusted-source", "sibling-untrusted-old-source", "macos-sheet-wrong-kind"] as const)(
     "rejects invalid safe recovery evidence for %s",
     async (scenario) => {
     const childSurface: SurfaceRef = {
@@ -4433,16 +4434,25 @@ describe("RunController S2-4 failure boundaries", () => {
     }
     const actionCall: ToolCall = scenario === "wait-action"
       ? { id: "invalid-recovery-action" as ToolCallId, name: "wait", arguments: { durationMs: 10 } }
+      : scenario === "reopen-action"
+        ? { id: "invalid-recovery-action" as ToolCallId, name: "reopen_saved_document", arguments: {} }
       : clickCall("invalid-recovery-action");
     const computer = new InvalidRecoveryComputer();
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [actionCall] },
       { type: "finish", summary: "must not continue", reportedStatus: "success" },
     ]);
-    const registry = scenario === "wait-action" ? waitRegistry() : clickRegistry();
+    let registry: ToolRegistry;
+    if (scenario === "wait-action") registry = waitRegistry();
+    else if (scenario === "reopen-action") {
+      registry = new ToolRegistry();
+      registry.register(reopenSavedDocumentTool());
+    } else registry = clickRegistry();
     const { controller, directory } = await makeController(provider, computer, registry);
 
-    await expect(controller.start("reject malformed safe recovery")).resolves.toBe("outcome_unknown");
+    const outcome = await controller.start("reject malformed safe recovery");
+    if (scenario === "reopen-action") expect(computer.calls).toContain("execute:reopen_saved_document");
+    expect(outcome).toBe("outcome_unknown");
     expect(provider.inputs).toHaveLength(1);
     expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(1);
     const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));

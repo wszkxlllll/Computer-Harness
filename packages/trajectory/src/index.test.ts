@@ -189,7 +189,7 @@ describe("switch_window session receipt contract", () => {
       type: "action.execution.completed",
       receipt: { actionId: clickActionId, status: "completed", sessionAfter: switchedSession },
     });
-    expect(() => reduceRuntimeEvents([...runningEvents(), clickStarted, clickWithAfter], runId)).toThrow(/only on a completed switch_window/u);
+    expect(() => reduceRuntimeEvents([...runningEvents(), clickStarted, clickWithAfter], runId)).toThrow(/only on a completed target transition receipt/u);
 
     const mismatchedAction = event(6, {
       type: "action.execution.completed",
@@ -208,6 +208,63 @@ describe("switch_window session receipt contract", () => {
       receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, id: "another-session" as ComputerSessionId } },
     });
     expect(() => reduceRuntimeEvents([...runningEvents(), switchStarted, wrongSession], runId)).toThrow(/active ComputerSession identity/u);
+  });
+
+  it("accepts sessionAfter only on a completed reopen_saved_document receipt", () => {
+    const reopenStarted = event(5, {
+      type: "action.execution.started",
+      action: { actionId, basedOn: observationId, kind: "reopen_saved_document" },
+    });
+    const missingAfter = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed" },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), reopenStarted, missingAfter], runId)).toThrow(/requires sessionAfter/u);
+
+    const completed = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: switchedSession },
+    });
+    const transition = reduceRuntimeEvents([...runningEvents(), reopenStarted, completed], runId);
+    expect(transition.computerSession).toEqual(switchedSession);
+    expect(transition.latestObservationId).toBeUndefined();
+    expect(transition.stepCount).toBe(1);
+
+    const fresh = event(7, {
+      type: "observation.created",
+      observation: {
+        id: "observation-after-reopen" as ObservationId,
+        runId,
+        computerSessionId: switchedSession.id,
+        surfaceRef: desktopSurfaceRef,
+        capturedAt: "2026-01-01T00:00:08.000Z",
+        viewport: switchedSession.viewport,
+        screenshot: { assetId: "asset-after-reopen" as AssetId, relativePath: "assets/reopened.png", mediaType: "image/png", byteLength: 1 },
+      },
+    });
+    expect(reduceRunEvent(transition, fresh).latestObservationId).toBe("observation-after-reopen");
+
+    const failedWithAfter = {
+      eventId: "reopen-failed-with-session-after" as EventId,
+      runId,
+      sequence: 7,
+      occurredAt: "2026-01-01T00:00:06.000Z",
+      type: "action.execution.failed" as const,
+      receipt: { actionId, status: "failed" as const, sessionAfter: switchedSession },
+    };
+    expect(runtimeEventSchema.safeParse(failedWithAfter).success).toBe(false);
+
+    const wrongBackend = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, backend: "other-backend" } },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), reopenStarted, wrongBackend], runId)).toThrow(/active ComputerSession backend/u);
+
+    const wrongSession = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, id: "another-session" as ComputerSessionId } },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), reopenStarted, wrongSession], runId)).toThrow(/active ComputerSession identity/u);
   });
 });
 

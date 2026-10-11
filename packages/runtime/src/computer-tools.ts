@@ -184,6 +184,20 @@ export function windowSwitchTools(): readonly ToolDefinition[] {
   return [listWindowsTool(), switchWindowTool()];
 }
 
+/** A single-file Host grant opts into this zero-argument tool explicitly. It
+ * is never included in the default Computer vocabulary. */
+export function reopenSavedDocumentTool(): ComputerToolDefinition {
+  return {
+    name: "reopen_saved_document",
+    description: "Reopen the one exact local document authorized by the Host, only after its clean saved document was closed by a completed CMD+W and a fresh missing-window check confirmed that close. This action accepts no path or URL. Use it only from the fresh recovery observation; the one-use grant is consumed when the launch attempt begins.",
+    category: "computer",
+    isolatedTurn: true,
+    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+    validate: (args) => { parseEmptyObject(args, "reopen_saved_document"); },
+    toAction: () => ({ kind: "reopen_saved_document" }),
+  };
+}
+
 function switchWindowTool(): ComputerToolDefinition {
   return {
     name: "switch_window",

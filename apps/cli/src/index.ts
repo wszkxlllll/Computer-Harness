@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome } from "@computer-harness/protocol";
@@ -32,6 +32,7 @@ export interface CliOptions {
   cuaWindowTarget?: { pid: number; windowId: number };
   cuaRecoveryWindowTarget?: { pid: number; windowId: number };
   recoverBoundWindowMissing: boolean;
+  reopenSavedDocumentPath?: string;
   osworldBridge?: string;
   output: string;
   maxSteps: number;
@@ -83,6 +84,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   const tui = argv.includes("--tui");
   const windowSwitch = argv.includes("--window-switch");
   const recoverBoundWindowMissing = argv.includes("--recover-bound-window-missing");
+  const reopenSavedDocumentPath = value("--reopen-saved-document");
   const modelValue = value("--model");
   const model = resolveCliModel(modelValue, doctor || prepareManagedBrowserProfileValue) as ModelName;
   const monitorValue = value("--monitor") ?? "off";
@@ -121,6 +123,12 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     computer,
     doctor,
   });
+  if (reopenSavedDocumentPath !== undefined && (!isAbsolute(reopenSavedDocumentPath) || reopenSavedDocumentPath.trim() !== reopenSavedDocumentPath)) {
+    throw new Error("--reopen-saved-document requires one exact absolute file path");
+  }
+  if (reopenSavedDocumentPath !== undefined && (!recoverBoundWindowMissing || computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch || tui || argv.includes("--interactive") || value("--managed-browser-url") !== undefined)) {
+    throw new Error("--reopen-saved-document requires a native CUA Run with --window-switch and the exact primary/recovery targets");
+  }
   if (recoverBoundWindowMissing && (computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch)) {
     throw new Error("--recover-bound-window-missing requires CUA, both exact window targets, and --window-switch");
   }
@@ -244,6 +252,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     ...(cuaWindowTarget === undefined ? {} : { cuaWindowTarget }),
     ...(cuaRecoveryWindowTarget === undefined ? {} : { cuaRecoveryWindowTarget }),
     recoverBoundWindowMissing,
+    ...(reopenSavedDocumentPath === undefined ? {} : { reopenSavedDocumentPath }),
     ...(osworldBridge === undefined ? {} : { osworldBridge }),
     output,
     maxSteps,
@@ -501,6 +510,12 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
             ? { windowSwitchAllowedTargets: [options.cuaWindowTarget, options.cuaRecoveryWindowTarget] }
             : {}),
           ...(options.recoverBoundWindowMissing ? { recoverBoundWindowMissing: true } : {}),
+          ...(options.reopenSavedDocumentPath === undefined ? {} : {
+            reopenSavedDocumentGrant: {
+              path: options.reopenSavedDocumentPath,
+              expectedExecutableUrl: pathToFileURL("/System/Applications/TextEdit.app/Contents/MacOS/TextEdit").href,
+            },
+          }),
           grounding: options.grounding === "auto" ? "off" : options.grounding,
           ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
           managedBrowserProfileMode: options.managedBrowserProfileMode,

@@ -322,6 +322,7 @@ describe("OsworldComputer", () => {
     expect(mapActionIntent({ ...base, kind: "drag", from: { x: 1, y: 2 }, to: { x: 3, y: 4 } }, viewport)).toEqual({ kind: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4 });
     expect(mapActionIntent({ actionId: actionId("wait"), kind: "wait", durationMs: 10 }, viewport)).toEqual({ kind: "wait", durationMs: 10 });
     expect(() => mapActionIntent({ ...base, kind: "switch_window", windowRef: "opaque-ref" }, viewport)).toThrow(/unavailable on OSWorld/iu);
+    expect(() => mapActionIntent({ ...base, kind: "reopen_saved_document" }, viewport)).toThrow(/unavailable on OSWorld/iu);
   });
 
   it("rejects a key that the OSWorld description does not advertise", () => {

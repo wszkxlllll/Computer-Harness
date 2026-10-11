@@ -382,6 +382,7 @@ function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): str
     keypress: "键盘操作",
     select_option: "选择操作",
     switch_window: "切换窗口操作",
+    reopen_saved_document: "重新打开文档操作",
     wait: "等待操作",
   };
   const riskLabels = categories.map((category) => categoryLabels[category]);

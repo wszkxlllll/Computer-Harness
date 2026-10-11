@@ -7,7 +7,7 @@ export const GLM_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completio
 export const DEFAULT_BATCH_LIMITS = Object.freeze({ total: 132, main: 120, risk: 12 });
 export const DEFAULT_RUN_RESERVATION = Object.freeze({ total: 42, main: 40, risk: 2 });
 const MAIN_TOOLS = new Set([
-  "click", "double_click", "right_click", "type", "keypress", "hotkey", "scroll", "drag", "wait", "switch_window", "list_windows",
+  "click", "double_click", "right_click", "type", "keypress", "hotkey", "scroll", "drag", "wait", "switch_window", "list_windows", "reopen_saved_document",
   "click_element", "select_option", "task_create", "task_update", "task_list", "task_get", "execution_segment_set",
   "memory_get", "memory_write_fact", "memory_mark_fact_needs_check", "memory_search", "memory_upsert_entity",
   "memory_list", "memory_invalidate_entity", "terminate", "interact",
