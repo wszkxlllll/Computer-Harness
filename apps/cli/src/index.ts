@@ -513,7 +513,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
           ...(options.reopenSavedDocumentPath === undefined ? {} : {
             reopenSavedDocumentGrant: {
               path: options.reopenSavedDocumentPath,
-              expectedExecutableUrl: pathToFileURL("/System/Applications/TextEdit.app/Contents/MacOS/TextEdit").href,
+              expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
             },
           }),
           grounding: options.grounding === "auto" ? "off" : options.grounding,
