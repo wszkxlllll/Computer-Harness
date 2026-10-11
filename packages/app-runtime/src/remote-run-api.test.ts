@@ -28,6 +28,20 @@ interface FixturePngRaster { readonly width: number; readonly height: number; re
 interface FixturePngModule { readonly PNG: { readonly sync: { read(data: Buffer): FixturePngRaster; write(image: FixturePngRaster, options?: { readonly deflateLevel?: number }): Buffer } }; }
 const pngjs = createRequire(import.meta.url)("pngjs") as FixturePngModule;
 
+function containsWindowIdentityKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsWindowIdentityKey);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, child]) => /pid|windowid/iu.test(key) || containsWindowIdentityKey(child));
+}
+
+describe("window target identity serialization assertions", () => {
+  it("checks nested keys without treating opaque token values as identity fields", () => {
+    expect(containsWindowIdentityKey({ candidates: [{ token: "opaque-HpId-windowId-token" }] })).toBe(false);
+    expect(containsWindowIdentityKey({ nested: [{ target: { pid: 42 } }] })).toBe(true);
+    expect(containsWindowIdentityKey({ candidates: [{ windowId: 7 }] })).toBe(true);
+  });
+});
+
 function createNoisyPng(width: number, height: number): Buffer {
   const data = Buffer.allocUnsafe(width * height * 4);
   let state = 0x7191a5d3;
@@ -387,7 +401,7 @@ describe("ApplicationRemoteRunApi", () => {
       const choices = await api.listWindowTargets("device-one");
       expect(choices.candidates).toHaveLength(2);
       expect(choices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
-      expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(choices)).toBe(false);
 
       await expect(api.startRun("device-one", "preview-required-no-proof", "Inspect the intended Notepad window", {
         mode: "window",
@@ -1334,7 +1348,7 @@ describe("ApplicationRemoteRunApi", () => {
     try {
       const choices = await api.listWindowTargets("device-one");
       expect(choices.candidates).toHaveLength(1);
-      expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(choices)).toBe(false);
       const [first, repeated] = await Promise.all([
         api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token),
         api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token),
@@ -1350,7 +1364,7 @@ describe("ApplicationRemoteRunApi", () => {
       expect(completed.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
       expect(modelInputs[0]?.tools.map((tool) => tool.name)).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
       expect(JSON.stringify(modelInputs[0])).not.toMatch(/list_windows|switch_window/iu);
-      expect(JSON.stringify(completed)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(completed)).toBe(false);
       expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: 42, windowId: 1001 }, windowDeliveryMode: "foreground" });
       await expect(api.startRun("device-one", "start-reuse-target", "Try the same target again", choices.candidates[0]!.token))
         .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
@@ -1597,7 +1611,7 @@ describe("ApplicationRemoteRunApi", () => {
       ]);
       expect(repeated.runId).toBe(first.runId);
       expect(first.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
-      expect(JSON.stringify(first)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(first)).toBe(false);
       await session.waitForActiveRun();
       expect(createdComputerConfigs[0]).toMatchObject({
         windowTarget: { pid: 42, windowId: 1001 },
@@ -1947,7 +1961,7 @@ describe("ApplicationRemoteRunApi", () => {
         { appName: "WPS Office", title: "Report.docx" },
       ]);
       expect(choices.omittedAmbiguousCount).toBeUndefined();
-      expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(choices)).toBe(false);
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
