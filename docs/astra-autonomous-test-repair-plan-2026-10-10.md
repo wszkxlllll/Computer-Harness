@@ -101,8 +101,8 @@
 | 编号 | 用户未来需要做的动作 | 我提前完成的准备 |
 | --- | --- | --- |
 | M1 | 用真实手机相机扫码/打开链接，确认移动端连接；电脑批准可由我处理 | 正常配对页、可达地址、版本与失效提示、可复制备用链接 |
-| M2 | 手机提交完整任务，查看截图/进度/成果并实际触摸批准、拒绝、暂停恢复、取消和纠正 | 已验离线控制合同与正常配对UI；完整任务及真实Runtime控制需先补齐候选驱动权限与Mac完整成果，再用最短手机序列复验 |
-| M3 | 手机后台/锁屏后恢复、真实刷新及 Wi-Fi/蜂窝切换；另同时关闭 Wi-Fi 和移动数据至少 12 秒后恢复，检查不重复执行 | 已完成客户端断线/重连、去重、状态恢复与安全边界的L1合同；真实Runtime任务恢复仍待候选驱动获准后补验 |
+| M2 | 手机提交完整任务，查看截图/进度/成果并实际触摸批准、拒绝、暂停恢复、取消和纠正 | 已验离线控制合同与正常配对UI；候选两项权限及真实控制协议已证，仍需Mac完整成果，再用最短手机序列复验 |
+| M3 | 手机后台/锁屏后恢复、真实刷新及 Wi-Fi/蜂窝切换；另同时关闭 Wi-Fi 和移动数据至少 12 秒后恢复，检查不重复执行 | 已完成客户端断线/重连、去重、状态恢复与安全边界的L1合同；真实controller恢复已证，实体手机恢复另行补验 |
 | M4 | 核真实手机尺寸、触摸目标、滚动/截图显示；若本轮涉及语音，再核手机麦克风和实际播报 | 桌面窄视口、Web组件/音频协议测试与必要修复；语音不额外扩大必做范围 |
 
 队友独立试用需要另一位实际参与者，是单独的人类条件。普通本机系统交互优先自主处理，只有 OS/账号明确要求真人且确实无法代理时才报告具体动作。
@@ -122,14 +122,14 @@
 | 阶段 | 当前状态 | 本轮完成出口 |
 | --- | --- | --- |
 | S0 接管与版本 | 完成；历史dirty保留、账本/版本/stock0.22.2/服务归属已核 | 环境/归属与新批次 |
-| S1 离线基线 | 历史完整组合17ec145：Luna114文件1866 Vitest+72 TAP/typecheck/Webbuild；Sol40项UI独检、a491076 Runtime137项独检。onclick产品bdf6e7a定向Sol336项/真实fixture47项及五项CI通过；当前焦点产品282d528独检TS298项/native347项/2 ignored、typecheck/build通过，当前head CI以PR实时状态为准 | 首失败与修复保留，历史完整suite不冒当前重跑 |
+| S1 离线基线 | 历史完整组合17ec145：Luna114文件1866 Vitest+72 TAP/typecheck/Webbuild；Sol40项UI独检、a491076 Runtime137项独检。onclick产品bdf6e7a定向Sol336项/真实fixture47项及五项CI通过；焦点282d528独检TS298项/native347项/2 ignored；attached-sheet edfe800相关837项、动画修正da0fedf Computer291项及真实帧4例独检通过；da0fedf五项CI全绿 | 首失败与修复保留，历史完整suite不冒当前重跑 |
 | S2 Web/Runtime入口 | 正常Web Run/stock截图；两独立公网HTTP会话配对、CSRF与隔离撤销通过；headless独立contexts正常UI批准/刷新去重/无效码/390px通过 | Provider/Computer业务与真实手机未通过；公网部署闭包未同版 |
-| S3 Mac T2 | 用户已解锁；完整196B正文有真实截图正例，但完整保存关闭重开、独立重复和变体仍缺 | 已证includeChildWindows=true父族捕获错域；原生false补丁离线345项/Sol13项，独立CaptureFix app首图被TCC拒绝，等待正常OS屏幕录制/辅助功能授权；stock未替换 |
-| S4 T1/T3/控制 | a8dad6d平台与bdf6e7a onclick修复取得真实正例；完整T1三产品与T3三车次仍未通过。A04唯一high T1正确CMD+L后命中Chrome焦点证明生产缺口，原生/TS最小修复282d528离线通过，paid停止 | 正常controller同Run已证paused后零派发、纠正投影与resume最终报告；批准去重/reject零执行/correct旧approval失效/SSE恢复及同名preview并发/取消恢复/过期等实证与L1分栏。完整T2/T3保存仍受候选TCC约束，网页业务失败不归入手机/TCC |
+| S3 Mac T2 | 旧候选两项权限、真实196B输入、精确Save及自动push/pop已证；新版nested/HID离线通过，new CDHash录屏重添on待重启/辅助功能真实认证挑战；完整卡仍取消、文件不存在 | 生产PID shortcut无可见效果、正常HID产生真正同PID嵌套GoTo已实证；最小修strict HID与直接AXSheet关系，0/169派发后回读的未知副作用不重放；保存关闭重开、独立重复与变体仍缺 |
+| S4 T1/T3/控制 | a8dad6d平台与bdf6e7a onclick修复取得真实正例；完整T1三产品与T3三车次仍未通过。A04唯一high T1正确CMD+L后命中Chrome焦点证明生产缺口；原生/TS修复282d528现已真实focus/type及拒绝反例通过，完整网页业务仍未重验 | 正常controller同Run已证paused后零派发、纠正投影与resume最终报告；批准去重/reject零执行/correct旧approval失效/SSE恢复及同名preview并发/取消恢复/过期等实证与L1分栏。候选真实focus/capture已证；完整T2/T3保存待嵌套GoTo定位与完整原卡，网页业务失败不归入手机 |
 | S5 评测器 | 隔离PR23审批证据兼容cb6aacf经Sol157/157，依赖draft PR27；真实A01重评inconclusive/false，5个误报mismatch消除，业务缺iMac/配置独立保留；PR22/24取舍已核 | 真实成功样本/真人审核缺口 |
 | S6 交付与手机包 | 已显式提交、非force原SHA同步、draft PR26附聊天；构建/回退/任务模板/手机包齐备；最终文档同步核CI | Preview 7/34不同且路径root管理、无非交互发布权限，不能宣称公网同版发布 |
 
-### 总计划出口最终映射（19:12）
+### 总计划出口历史映射（10月10日19:12；当前见下方A05审计）
 
 | 总计划出口 | 本轮可自主项完成证据 | 尚未关闭的具体条件 |
 | --- | --- | --- |
@@ -137,7 +137,7 @@
 | 批次1双预算/HTTP/部署 | 最终1866+72；实际143863B/13066tokens请求、两次HTTP200；真公网HTTP认证/CSRF/非法Run400/隔离撤销 | 完整大查询任务仍待Mac真实任务链路补验；公网Preview安装匹配闭包需服务所有者合法发布权 |
 | 批次2候选/预览/共同保护 | 精确目标拒绝零输入、302项L1合同、可信选项/失败提示修复及40项独检 | macOS原生同名双窗/sheet仍待候选驱动真实复验；L1不冒真实现场 |
 | 批次3 macOS完整T2三轮 | 196B三卡、唯一abs路径、失败轨迹/真实截图/磁盘absent复核 | 用户已正常解锁；候选原生驱动TCC待正常授权，辅助不能代业务输入保存 |
-| 批次4 T1/T3三轮与控制 | 完整三轮卡/公开模板、正常headless配对UI及真实controller暂停纠正恢复/审批/SSE链；Mac快捷键及携程建议DOM真实正例 | T1三产品/T3三车次网页任务真实失败；Chrome地址栏独立焦点证明正修复。原生跨应用保存待候选权限与完整复验，手机触摸另列 |
+| 批次4 T1/T3三轮与控制 | 完整三轮卡/公开模板、正常headless配对UI及真实controller暂停纠正恢复/审批/SSE链；Mac快捷键及携程建议DOM真实正例 | T1三产品/T3三车次网页任务真实失败；Chrome地址栏独立焦点证明已真实验真。原生跨应用保存待嵌套GoTo定位与完整复验，手机触摸另列 |
 | 批次5评测器与交付 | PR23审批兼容依赖PR27/157项独检、真实失败与不完整success重评inconclusive、正常CLI报告导入；PR26及当前CI、最终包 | 无真实成功成果和真人复核，不制造评分校准；队友试用需另一人 |
 | CUA性能/升级 | stock0.22.2实际hash固定、实际延迟/超时与拒绝保存，必要SDK/CLI修复已审 | 无同任务成功样本，不宣称性能收益；low已有真实HTTP200及GUI输入观察；无成功同任务性能对照，不为版本号盲升级 |
 | 实体手机/队友 | 手机包M1–M4与最短续接步骤齐备 | 手机与另一位队友分别是外部条件 |
@@ -153,20 +153,20 @@
 2026-10-11 最新控制出口：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。
 
 
-### 2026-10-11 当前完整出口覆盖审计（A04）
+### 2026-10-11 当前完整出口覆盖审计（A05）
 
 主计划批次2原文要求“目标关闭/刷新、旧 previewToken、迟到、并发、解码失败、取消/撤销、身份复用不误确认或重复创建 Run”；批次4要求“暂停生效后零新派发；恢复使用最新要求；刷新和断线恢复不重复创建 Run/重放动作”。本表不会把局部控制或修复提升为上述完整出口。
 
 | 项目 | 已证范围 | 当前继续动作或明确缺口 |
 | --- | --- | --- |
-| T1三产品、三轮 | A04 low/high均进入Mac mini来源配置，缺Air/iMac；high正确CMD+L但焦点确认拒绝，仍失败 | 零Provider已证stock原生catalog不完整且无focused/editable字段，独立精确窗口focus_proof修复282d528已离线通过；不伪造complete/不凭截图放行，候选实际验证待正常TCC，不继续paid |
-| T3三车次、纠正、跨应用、三轮 | CMD+A和onclick城市建议真实执行；随后缺参数/旧ref，完整卡取消 | 网页业务真实未完成，不归因TCC/手机；无新合同缺陷不重跑同版。原生保存另受候选TCC约束 |
-| Mac T2、原生sheet与父窗往返 | 正文196B真实图、原生捕获错域根因及false补丁离线验证 | 候选app屏幕录制/辅助功能正常OS授权尚未收到；完整保存关闭重开/三轮及原生sheet仍缺 |
+| T1三产品、三轮 | A04 low/high均进入Mac mini来源配置，缺Air/iMac；high正确CMD+L但焦点确认拒绝，仍失败 | 零Provider已证stock原生catalog不完整且无focused/editable字段，独立精确窗口focus_proof修复282d528已离线通过；不伪造complete/不凭截图放行，候选真实地址栏focus/type及拒绝反例已证；当前先完成T2嵌套GoTo定位，再修后完整原卡 |
+| T3三车次、纠正、跨应用、三轮 | CMD+A和onclick城市建议真实执行；随后缺参数/旧ref，完整卡取消 | 网页业务真实未完成，不归因TCC/手机；无新合同缺陷不重跑同版。原生保存仍需当前GoTo修复与完整原卡验真 |
+| Mac T2、原生sheet与父窗往返 | 正文196B真实图、原生捕获错域根因及false补丁离线验证 | 旧候选两项权限、精确Save图、自动push/pop与旧ref拒绝已证；新版candidate录屏已正常重添on待重启、辅助功能真实认证挑战保留；A05完整T2在嵌套GoTo输入环节取消，保存关闭重开/三轮仍缺 |
 | 正常controller | 模型Run/请求中取消、批准去重/reject/correct旧request失效、SSE断开恢复/尾事件；A04同Run实证paused后2.035秒零新派发/零action、correct→resume、后续实际context保留纠正及最终标记 | 已证正常认证API协议与Runtime链，不冒Web按钮/手机触摸；报告旧句与纠正标记矛盾保留，不计业务任务成果 |
 | 同名候选preview | 真实两窗图可辨、refresh stale、缺/错proof、目标关闭拒绝；并发200/409 BUSY、abort后恢复、in-flight refresh stale、自然两分钟过期create拒绝，均零Provider/无新Run | 同标题替代测试被refresh/过期混杂，仅计stale；畸形PNG、精确CGID复用等不可经正常入口确定制造的边界保留L1证据，不伪造现场 |
-| 评测器、交付 | PR27精确审批证据修复157独检、实际false-success重评；PR26焦点产品282d528已非force同步，CI按当前head实时记录 | 无真实完整成功样本/真人评分；最终版本、用量及手机包仍需随稳定出口同步 |
-| 外部条件 | macOS已解锁，常规服务可自主恢复 | 新原生候选TCC、Preview合法发布权、M1–M4实体手机、真实队友试用/评分分别留栏；Windows/Linux不在责任/阻塞/完成条件 |
+| 评测器、交付 | PR27精确审批证据修复157独检、实际false-success重评；PR26产品da0fedf已非force同步，五项CI全绿（38117633419） | 无真实完整成功样本/真人评分；最终版本、用量及手机包仍需随稳定出口同步 |
+| 外部条件 | macOS已解锁，常规服务可自主恢复 | 两项候选TCC已授予并真实验证；Preview合法发布权、M1–M4实体手机、真实队友试用/评分分别留栏；Windows/Linux不在责任/阻塞/完成条件 |
 
-当前A01–A04累计222main/6risk/228实际请求，210已知响应3955751tokens、18请求usage未知；A04 cap96/6/102、正式reserve80/4/84，actual42/2/44。所有Run终态，无paid在途；Chrome焦点证明修复282d528已离线完成，候选真实验证待正常TCC；当前可自主源码/材料/安全清理已收尾，阶段交付不代表完整计划验收。每项新证据追加账本，历史计数不重置。
+正常认证controller同Run暂停零新派发、纠正恢复、精确批准去重/reject/旧approval失效/SSE及同名preview局部实证仍分列API、Web按钮与实体手机。A05原完整T2 run-1791699527821-1f9f981c-af1真实输入196B并自动接管Save；随后CMD+SHIFT+G及路径type未完成，监控取消，指定文件仍不存在。起初误认为GoTo的offscreen remote实为普通Save内容；Sol零Provider对照证实生产PID shortcut无可见效果，正常shortcut生成独立onscreen同PID GoTo AXSheet，strict HID及嵌套关系修复已离线通过（作者native349/2ignored、Sol721/typecheck）；新候选权限正常恢复中、真实nested/type未验；type的0/169来自事件派发后AX回读Unchanged，不能证明无副作用，停止paid继续精确定位。累计A01–A05为250main/6risk/256实际请求，234份已知usage合计4415027tokens、22请求usage未知，金额未知；A04冻结60/2/62，A05实际10/0/10、cap120/6/126、正式预占80/4/84 revision1，actual/sequence及原cap不变。隔离PR27/cb6aacf与157项独检、真实false-success业务缺项/真人评分缺失保持。
 
-2026-10-11 系统设置权限当前实测更正：两项正常UI“添加”均触发Touch ID/密码挑战，未输入凭据、未选择候选或更改权限；当前录屏与系统录音认证挑战留给用户本人完成。上一交付head e0923b6（产品源282d528）五项CI全绿；新文档head的CI尚未核。证据见私有 `A04-private/system-settings-tcc-ui-attempt-20261011.json`。
+2026-10-11 系统设置权限历史挑战（已由后续用户认证及实际授权覆盖）：两项正常UI“添加”均触发Touch ID/密码挑战，未输入凭据、未选择候选或更改权限；当前录屏与系统录音认证挑战留给用户本人完成。上一交付head e0923b6（产品源282d528）五项CI全绿；新文档head的CI尚未核。证据见私有 `A04-private/system-settings-tcc-ui-attempt-20261011.json`。

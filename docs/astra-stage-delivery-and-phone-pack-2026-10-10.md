@@ -1,8 +1,8 @@
 # 当前阶段交付与集中补验包
 
-2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端。平台CMD/META及onclick建议采集修复取得真实正例；完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正均未通过，三轮出口不降标。唯一high T1正确CMD+L后暴露原生焦点证明缺口；产品282d528的独立focus_proof与TS严格消费已完成离线修复，catalog仍partial、不凭截图或DOM失焦放行。Sol独立TS298项、原生347项/2 ignored及fmtcheck通过，作者typecheck/native check/debug build通过；组合CaptureFix候选尚未启动或安装；已在System Settings正常UI分别点击Screen & System Audio Recording与Accessibility的“添加”，两项均在文件选择器前要求Touch ID/密码认证，前两次已取消且未选中/启用候选；当前Screen & System Audio Recording原生认证挑战留给用户本人完成。上一交付head e0923b6（产品源282d528）五项CI全绿；本次文档head的CI尚未核。stock无法验证新增proof，真实修复成功尚未签收。
+2026-10-11 当前阶段（覆盖下方历史稳定点）：项目仅负责macOS电脑端、Web/Relay与手机客户端，Windows/Linux不属于责任或完成条件。完整T1三产品、T2指定196B保存关闭重开、T3三车次与跨应用纠正及各三轮均未通过，出口不降标。此前候选经用户两次正常原生认证取得两项权限，真实精确Save截图、地址栏独立focus_proof、一次输入及焦点变化/复用拒绝正反例已签收。此次nested/HID修复重建的新CDHash未继承权限；录屏已通过正常UI精确重添并显示on、待统一重启，辅助功能移除旧项时出现真实Touch ID/登录密码挑战，当前保持该挑战，未输入凭据、未重添或复验。产品edfe800的精确AXSheet/AXParent证明和da0fedf的单次80ms只读动画重采已离线独检；真实零Provider parent→Save自动push→ESC→checked-none自动pop及旧ref零输入拒绝通过。上一发布版本da0fedf已按原SHA非force同步PR26，五项CI全绿（run38117633419），不把历史测试数累计成当前重跑。
 
-正常认证controller同Run已证paused后零新派发、correct投影、resume与最终纠正标记；精确批准去重/reject零执行/旧approval失效/SSE重连及同名preview并发、取消恢复、自然过期否定链通过，仍分列API协议、Web按钮与实体手机。A01–A04累计222main/6risk/228物理请求，210已知usage共3955751tokens、18请求usage未知、金额未知；A04 actual42/2/44、cap96/6/102、reserve80/4/84。隔离评估器cb6aacf/PR27经Sol157项独检，真实false-success重评仍inconclusive/false，业务缺项与真人评分缺失独立保留。当前源码/CI及服务事实以PR26、执行看板和账本为准。
+正常认证controller同Run暂停零新派发、纠正恢复、精确批准去重/reject/旧approval失效/SSE及同名preview局部实证仍分列API、Web按钮与实体手机。A05原完整T2 run-1791699527821-1f9f981c-af1真实输入196B并自动接管Save；随后CMD+SHIFT+G及路径type未完成，监控取消，指定文件仍不存在。起初误认为GoTo的offscreen remote实为普通Save内容；Sol零Provider对照证实生产PID shortcut无可见效果，正常shortcut生成独立onscreen同PID GoTo AXSheet，strict HID及嵌套直接关系修复已离线通过（Luna native349/2 ignored及fmt/check/build，Sol相关721/typecheck与clean patch重放）；新候选signed SHA514de6e702c2c7449745b5a54d65f313742e307eaed12e239869137ac808b5e4、PID32348，真实nested/type验真待正常权限恢复；type的0/169来自事件派发后AX回读Unchanged，不能证明无副作用，停止paid继续精确定位。累计A01–A05为250main/6risk/256实际请求，234份已知usage合计4415027tokens、22请求usage未知，金额未知；A04冻结60/2/62，A05实际10/0/10、cap120/6/126、正式预占80/4/84 revision1，actual/sequence及原cap不变。隔离PR27/cb6aacf与157项独检、真实false-success业务缺项/真人评分缺失保持。
 
 以下1866/72、main3及锁屏结论属于10月10日历史交付稳定点，不能作为当前进程、调用或阻塞状态。
 
@@ -22,19 +22,19 @@
 
 构建入口：`pnpm run typecheck`、`pnpm test`、`pnpm --filter @computer-harness/web build`。正常Host启动参数保持`--env-file <本地私有env>`、`--socket <实际stock socket>`、`--model glm-5.3-flash`、`--output <本轮私有Run目录>`、`--port 4317 --origin http://localhost:4317`。实际Host管理地址为`http://localhost:4317/connect`。端口/Origin必须严格一致；不要把localhost配对URL当手机可达URL。
 
-自主付费入口继续同一`scripts/autonomous/batch-host.mjs`。A01-private最终120/0已冻结，不能重新初始化或再派发；当前使用独立A04-private，cap96/6/102、revision1预占80/4/84，actual42/2/44；A02、A03也已结束且历史保持。完整mainenv与overlay分开加载、绝对batch root和真实TTY命令已持久保存，后续只替换任务/目标/必要参数；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。历史GLM timeout180000ms与low是有记录的每Run调优；当前正常受控Host已恢复90s low，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
+自主付费入口继续同一`scripts/autonomous/batch-host.mjs`。A01-private最终120/0已冻结，不能重新初始化或再派发；当前使用独立A05-private，cap120/6/126、正式预占80/4/84 revision1，actual10/0/10；A04保持cap96/6/102、revision2预占96/6/102、actual60/2/62；A02、A03也已结束且历史保持。完整mainenv与overlay分开加载、绝对batch root和真实TTY命令已持久保存，后续只替换任务/目标/必要参数；续额保留actual/sequence与历史链。CLI正常foreground使用公开`--window-switch`，不加managed browser URL则不引入profile准备。历史GLM timeout180000ms与low是有记录的每Run调优；当前正常受控Host已恢复90s low，默认90s保持；low/high均已进入后续真实请求，时延只作本轮观察，不宣称稳定性能改善。
 
 完整本地任务卡在忽略目录`runs/astra-autonomous-20261010-sol-luna/task-cards/`，T1/T2/T3均各baseline、independent-repeat、variant。T2正文196B/UTF-8/LF/finalLF，三卡唯一新路径；文件存在则重新准备唯一卡，不能覆盖。T3已冻结路线/日期/2成人二等座/三结果与客户端预算降低节点，未开放票价须写未知，不能捏造携程结果。关闭重开由Harness完成，人工重绑只列补证。
 
 ## 当前组合候选与最小恢复动作
 
-焦点修复产品提交为`282d5288312bc1f55ad2b3129a074b5b3574f46f`，原生focus-only源码提交为`0cfb382c183c7f6981c2402be0d8ff734c47d360`。两个独立补丁均在repo `patches/cua-driver/`，对clean d114按capture→focus应用重放后的三个源文件与构建输入逐字节一致；原stock保持0.22.2。详情见[F071焦点修复](./a-line-sync/fixes/F-20261011-071-macos-browser-focus-proof.md)。
+上一已发布产品`da0fedff3099e13d8bd8c29b4880ed7bdefe4ae9`五项CI全绿（38117633419）；本次nested/HID修复源码以本提交为准，当前head CI另核。capture→focus→attached-sheet三个可复现补丁在repo `patches/cua-driver/`，对clean d114重放已独立逐字节核验。详情见[F071焦点修复](./a-line-sync/fixes/F-20261011-071-macos-browser-focus-proof.md)和[F072生命周期修复](./a-line-sync/fixes/F-20261011-072-macos-attached-sheet-lifecycle.md)。
 
-组合候选为`/Users/guoyuhang/Desktop/大创/Computer-Harness-three-track-integration/.tools/cua-driver/CuaDriverCaptureFix.app`，显示名`Capture and Focus Fix Local Candidate`，独立bundleID `com.trycua.driver.capturefix.local.20261011`；signed binary SHA-256 `4f3f99d9ef6c91da9203ca202e70a2b2cc5682b784dd5d92921bcf5fbc414ebc`，CDHash `91531a0d8e6c8a68c6173c7d7a5da7d2811746c7`。Sol独立strict验签通过，未启动、未安装或改TCC。
+新版组合候选仍为`.tools/cua-driver/CuaDriverCaptureFix.app`，独立bundleID `com.trycua.driver.capturefix.local.20261011`；signed SHA-256 `514de6e702c2c7449745b5a54d65f313742e307eaed12e239869137ac808b5e4`，CDHash `3965f1dee19cfab49ba2036ce767e53ea07e4cef`。Sol strict验签及clean d114三patch重放/四源文件逐字节核验通过。candidate PID32348/socket `/private/tmp/a05-capturefix-nested-20261011.sock`；新CDHash health首报两项未授权，未发模型请求或输入。旧完整候选回退包保留`/private/tmp/F-20261011-capture-childwindows.DzRfy5/rollback/CuaDriverCaptureFix-before-nested.app`，SHA3d3c783174d6e85da74a53ef9388e9ec12156aca1520fb8911fac1abefcf9f60；stock PID4254/socket `/private/tmp/a01-cua-luna.sock`原样。
 
-已实际在“系统设置→隐私与安全性”分别进入“录屏与系统录音”和“辅助功能”并点击“添加”；两个正常流程都先要求Touch ID/密码，文件选择器未打开，候选未选择/启用且权限未改变。当前录屏与系统录音的原生认证挑战留给用户本人完成；无需手机操作。用户完成原生认证后，由智能体在文件选择器中选择精确候选app，分别启用并核实两项权限，再正常启动候选；先零Provider核精确sheet捕获/比例与地址栏focus_proof，再继续完整原卡及独立复验/变体，不能把离线测试算作真实T1/T2/T3通过。stock无新proof仍拒绝地址栏type，保护保持有效。
+正常Settings录屏旧项已移除、精确重添新项on，要求退出后生效时选“以后”；辅助功能移除旧项触发原生Touch ID/登录密码挑战，当前保持供用户认证，未输入凭据、未移除/重添。用户验证后沿正常picker精确重添辅助功能并开启，统一正常重启同一冻结candidate后逐项health确认，再零Provider自动父→Save→GoTo/type AX读回/返回两层及旧ref/错焦点零输入验证；成功才原完整T2基线、复验/变体。不得重新签名、绕TCC或重放旧0/169派发未知动作。A05正式预占80/4/84 revision1、actual10/0及全部256历史保持。完整T1/T2/T3均独立未通过。
 
-low Host20858已正常停止，4317无listener；停止前首页、local session与认证Run列表均200，Run列表0/无活动Run。stock PID4254及原socket `/private/tmp/a01-cua-luna.sock` 保留；旧high Host18761已退出，历史终态轨迹保留。当前Computer dist SHA256 `9fc76ac695cb8aad89d847adcb34e07ab58409c8c660f8490e80c7fdca291a1a`，Host entry及Web bundle与上次构建相同；不据文件hash推断整个进程缓存。自有reader、probe、caffeinate已关闭，stock与专用TextEdit证据现场保留；不动未知个人窗口。正常新配对凭据只在私有0600文件，公开包没有token。
+low Host20858已停止、4317无listener，stock4254保留，所有模型Run终态，无paid在途。Luna唯一桌面操作者；前轮caffeinate28423已到期，本轮自有caffeinate30511有界1800秒、结束清理。当前服务与构建事实需在每次切版前读取，不能以本页PID永久推定进程状态；私有截图、原生AX与令牌均仅忽略目录0600，不上传PR。
 
 ## 手机集中补验（手机可用且同版电脑任务出口通过后）
 
@@ -71,7 +71,7 @@ M1相机/移动浏览器、M2真实触摸、M3后台/真实手机网络、M4尺�
 | PR22 post-input-observation-settler | 当前RunController完成receipt后立即observeAndCommit，新鲜观察及有界transient重取已有 | 没有全动作稳定settler；无真实flaky症状前不加另一层等待，不宣称稳定性能 |
 | PR24预算/网络/终态 | 当前双预算保最新GUI/权威输入、pre-HTTP拒绝、相关request/decision/attempt交换、bounded deadline/取消，以及Runtime诚实failed均保留；当前组合全通过 | 完整查询/保存任务仍无现场通过，历史CI不相加 |
 | PR24 select_option/失败提示 | 已最小恢复17ec145；可信绑定选项显隐与真实状态40项独检 | 仅参数/证据预览，不代实际操作安全或结果；不改变Guard |
-| PR24独立macos-target-topology | 精确identity/geometry注册capture、SurfaceRegistry generation/parent与transient/handoff保护已融合；不整文件覆盖当前更广实现 | 外部owned-window关系probe实际是Win32。Mac没有同等自动owned-sheet拓扑证明，新弹窗走handoff/unknown，不能列自动验收；现有AXSheet→AXParent实际关系补证尚未产品化，原生候选TCC待授权 |
+| PR24独立macos-target-topology | 精确identity/geometry注册capture、SurfaceRegistry generation/parent与transient/handoff保护已融合；不整文件覆盖当前更广实现 | 外部owned-window关系probe实际是Win32。历史取舍已由edfe800/da0fedf最小实现及真实Save自动push/pop补足；嵌套跨进程GoTo尚在定位，完整T2未通过 |
 | PR23评测器 | 隔离1f57852，136项独检；两条实际失败inconclusive/false；正常报告API导入失败保持failed/not_assessed | 无D01真实成功成果、评分校准或真人复核；不合并进产品冒成果 |
 
 当前整合分支相对main包含此前已提交产品改动与diagnostics归档；这不是本轮新写234个文件。新源码提交只包含已明确审查的产品/测试/批次计数文件，本轮历史dirty和私有runs未加入。草稿PR只做阶段审查，不宣称本项目范围已完整验收。

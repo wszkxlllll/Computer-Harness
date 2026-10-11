@@ -151,6 +151,7 @@ async function readMacAttachedSheetState(
   parent: CuaWindowBinding,
   candidate: CuaWindowInfo | undefined,
   signal: AbortSignal,
+  expectedAxParent?: CuaWindowTarget,
 ): Promise<MacAttachedSheetState> {
   const result = await callTool(driver, "get_window_state", {
     pid: parent.target.pid,
@@ -160,20 +161,35 @@ async function readMacAttachedSheetState(
     max_elements: 64,
     session,
   }, signal);
-  if (result.isError || result.degraded) return { status: "unknown", reason: "native parent AX proof query failed" };
+  if (result.isError) return { status: "unknown", reason: "native parent AX proof query failed" };
   const state = parseStructuredRecord(result.structuredJson);
   if (state === undefined || hasExplicitIdentityMismatch(state, parent.target)) {
     return { status: "unknown", reason: "native parent AX proof has no exact target identity" };
   }
   const proof = parseStructuredRecord(state.attached_sheet_proof);
+  // A degraded catalog can still carry a separately captured, exact AX
+  // relationship proof. In that case its relation snapshot is authoritative;
+  // the catalog snapshot may describe a different (partial) tree.
+  const proofSnapshotId = state.degraded === true
+    ? state.attached_sheet_snapshot_id
+    : state.snapshot_id;
+  const relationOnlyDegraded = state.degraded === true && state.elements_complete === false &&
+    typeof state.attached_sheet_snapshot_id === "string" &&
+    state.attached_sheet_snapshot_id === proof?.snapshot_id && result.degraded === true;
+  if ((result.degraded || state.degraded === true) && !relationOnlyDegraded) {
+    return { status: "unknown", reason: "degraded AX catalog has no exact attached-sheet-only snapshot proof" };
+  }
   const parentBounds = parseStructuredRecord(proof?.parent_bounds);
-  const snapshotId = state.snapshot_id;
+  const snapshotId = proofSnapshotId;
   const identityOk = proof?.version === "macos-attached-sheet-v1" &&
     typeof snapshotId === "string" && snapshotId.length > 0 && proof.snapshot_id === snapshotId &&
     proof.pid === parent.target.pid && proof.parent_window_id === parent.target.windowId &&
     proof.parent_owner_pid === parent.target.pid && proof.frontmost_pid === parent.target.pid &&
     proof.direct_children_status === "success" && Number.isSafeInteger(proof.direct_child_count) &&
     (proof.direct_child_count as number) >= 0 &&
+    (proof.parent_role === "AXWindow" || proof.parent_role === "AXSheet") &&
+    (proof.parent_role !== "AXSheet" || proof.parent_ax_parent_verified === true &&
+      expectedAxParent !== undefined && proof.parent_ax_parent_window_id === expectedAxParent.windowId) &&
     Number.isFinite(parentBounds?.x) && Number.isFinite(parentBounds?.y) &&
     Number.isFinite(parentBounds?.width) && Number.isFinite(parentBounds?.height) &&
     sameWindowGeometry(parent.bounds, {
@@ -1408,7 +1424,15 @@ export class CuaDriverComputer implements Computer {
       const childTarget = asCuaWindowTarget(child.nativeWindow);
       const childRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
       const candidate = childRows.length === 1 ? childRows[0] : undefined;
-      const attached = await readMacAttachedSheetState(current.driver, current.label, parentBinding, candidate, signal);
+      const grandparent = parent.parentSurfaceId === undefined ? undefined : current.surfaceRegistry.surfaces.get(parent.parentSurfaceId);
+      const grandparentRef = grandparent === undefined ? undefined : currentSurfaceRef(current.surfaceRegistry, grandparent.surfaceId);
+      const grandparentNative = grandparentRef === undefined ? undefined : resolveNativeWindow(current.surfaceRegistry, grandparentRef);
+      const attached = await readMacAttachedSheetState(
+        current.driver, current.label, parentBinding, candidate, signal,
+        parent.kind === "native_window" && parent.admissionSource === "macos_attached_sheet_proof" && grandparentNative !== undefined
+          ? asCuaWindowTarget(grandparentNative)
+          : undefined,
+      );
       if (attached.status === "sheet") {
         if (windowIdentityKey(asCuaWindowTarget(attached.evidence.nativeWindow)) !== windowIdentityKey(childTarget)) {
           throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "a different or replacement AXSheet is active; the current child is retained for manual handling");
@@ -2359,6 +2383,73 @@ export class CuaDriverComputer implements Computer {
     // Consume the one-shot pre-action authorization before any asynchronous
     // reconciliation or inventory/proof call; uncertain outcomes are not replayable.
     current.preActionWindowBaseline = undefined;
+    // A key chord can open a second macOS sheet while the first verified sheet
+    // is active. Reconcile that exact completed handoff before asking the
+    // parent->first-sheet proof to pop: focus may already have moved to the new
+    // direct child, so treating the old edge as absent would lose the stack.
+    const activeSurface = activeBeforeReconcile === undefined
+      ? undefined
+      : current.surfaceRegistry.surfaces.get(activeBeforeReconcile.surfaceId);
+    if (activeBeforeReconcile !== undefined && baseline?.completed === true && activeSurface?.kind === "native_window" &&
+        activeSurface.admissionSource === "macos_attached_sheet_proof" &&
+        activeSurface.parentSurfaceId !== undefined &&
+        sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
+        current.platform === "darwin" && this.options.windowDeliveryMode === "foreground" &&
+        this.options.windowSwitch === "opened-windows-v1" && baseline.truncated !== true &&
+        isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+        isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile)) {
+      const activeBinding = activeWindowBinding(current);
+      const rootSurface = current.surfaceRegistry.surfaces.get(activeSurface.parentSurfaceId);
+      const rootRef = rootSurface === undefined
+        ? undefined
+        : currentSurfaceRef(current.surfaceRegistry, rootSurface.surfaceId);
+      const rootNative = rootRef === undefined ? undefined : resolveNativeWindow(current.surfaceRegistry, rootRef);
+      if (activeBinding === undefined || rootRef === undefined || rootNative === undefined ||
+          windowIdentityKey(activeBinding.target) !== windowIdentityKey(baseline.parentBinding.target)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet has no exact active parent binding");
+      }
+      const nestedInventory = await listWindowInventory(
+        current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe,
+      );
+      if (nestedInventory.truncated === true) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet candidate inventory is truncated");
+      }
+      const newRows = nestedInventory.windows.filter((window) =>
+        !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+      const nestedCandidate = newRows.length === 1 && newRows[0]!.target.pid === activeBinding.target.pid
+        ? newRows[0]
+        : undefined;
+      if (nestedCandidate !== undefined) {
+        const freshParent = await discoverWindow(current.driver, current.label, activeBinding.target, signal);
+        const storedParent = current.windowBindings.get(windowIdentityKey(activeBinding.target));
+        if (storedParent === undefined || !sameWindowGeometry(freshParent.bounds, storedParent.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet parent geometry changed");
+        }
+        const attached = await readMacAttachedSheetState(
+          current.driver, current.label, freshParent, nestedCandidate, signal, asCuaWindowTarget(rootNative),
+        );
+        if (attached.status !== "sheet") {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", attached.status === "unknown"
+            ? attached.reason
+            : "completed nested-sheet action has no exact direct AXSheet proof");
+        }
+        const nestedTarget = asCuaWindowTarget(attached.evidence.nativeWindow);
+        if (windowIdentityKey(nestedTarget) !== windowIdentityKey(nestedCandidate.target)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested AXSheet proof does not match the unique fresh candidate");
+        }
+        const pushed = pushChild(current.surfaceRegistry, activeBeforeReconcile, attached.evidence);
+        if (pushed.decision !== "applied") {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", pushed.reason ?? "nested AXSheet admission was refused");
+        }
+        current.surfaceRegistry = pushed.state;
+        current.windowBindings.set(windowIdentityKey(nestedTarget), { target: nestedTarget, bounds: nestedCandidate.bounds });
+        noteSurfaceTransition(current, "child_push");
+        current.windowRefs.clear();
+        this.clearTargetObservationState(current, activeBeforeReconcile);
+        current.firstObservedAfterActionWindows = { actionId: baseline.actionId, targetKeys: new Set([windowIdentityKey(nestedTarget)]) };
+        return [];
+      }
+    }
     const reconciledSibling = await this.reconcileActiveTransientChild(current, signal);
     if (reconciledSibling !== undefined) return [];
     if (baseline !== undefined && sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&

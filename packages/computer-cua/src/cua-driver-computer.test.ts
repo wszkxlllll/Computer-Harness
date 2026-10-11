@@ -400,9 +400,11 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         const state = groundingStateSequence === undefined
           ? groundingState
           : groundingStateSequence[Math.min(groundingStateIndex++, groundingStateSequence.length - 1)];
+        const responseState = (windowId === undefined ? undefined : groundingStateByWindowId.get(windowId)) ?? state ?? {};
         return result({
           images: input.include_screenshot === true ? fallbackImages ?? [] : [],
-          structuredJson: JSON.stringify((windowId === undefined ? undefined : groundingStateByWindowId.get(windowId)) ?? state ?? {}),
+          degraded: responseState.degraded === true,
+          structuredJson: JSON.stringify(responseState),
         });
       }
       if (["click", "type_text", "press_key", "hotkey", "scroll", "drag"].includes(name)) {
@@ -957,6 +959,9 @@ describe("CuaDriverComputer", () => {
         snapshot_id: `mac-${status}-snapshot`,
         pid: fake.target.pid,
         parent_window_id: fake.target.windowId,
+        parent_role: "AXWindow",
+        parent_ax_parent_verified: true,
+        parent_ax_parent_window_id: 0,
         parent_owner_pid: fake.target.pid,
         parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
         direct_children_status: "success",
@@ -1110,6 +1115,146 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("pushes a nested AXSheet from a degraded exact relation snapshot and pops each direct edge", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-nested-sheet-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const save = {
+      pid: fake.target.pid, windowId: 9200, appName: "TextEdit", title: "Save",
+      bounds: { x: 357, y: 298, width: 408, height: 267 }, zIndex: 2, isOnScreen: true,
+    };
+    const goto = {
+      pid: fake.target.pid, windowId: 9201, appName: "TextEdit", title: "Go to",
+      bounds: { x: 389, y: 350, width: 460, height: 279 }, zIndex: 3, isOnScreen: true,
+    };
+    const rootProof = (status: "sheet" | "none") => ({
+      pid: fake.target.pid, window_id: fake.target.windowId,
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+      snapshot_id: `root-${status}`,
+      attached_sheet_snapshot_id: `root-${status}`,
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1", snapshot_id: `root-${status}`,
+        pid: fake.target.pid, parent_window_id: fake.target.windowId, parent_role: "AXWindow",
+        parent_ax_parent_verified: true, parent_ax_parent_window_id: 0,
+        parent_owner_pid: fake.target.pid, parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
+        direct_children_status: "success", direct_child_count: status === "sheet" ? 1 : 0,
+        status, frontmost_pid: fake.target.pid,
+        focused_window_id: status === "sheet" ? save.windowId : fake.target.windowId,
+        ...(status === "sheet" ? { sheet: {
+          role: "AXSheet", pid: fake.target.pid, window_id: save.windowId,
+          owner_pid: fake.target.pid, ax_parent_pid: fake.target.pid,
+          ax_parent_window_id: fake.target.windowId, ax_parent_verified: true, bounds: save.bounds,
+        } } : {}),
+      },
+    });
+    const nestedProof = (status: "sheet" | "none") => ({
+      pid: fake.target.pid, window_id: save.windowId, window_bounds: save.bounds,
+      // The catalog snapshot and the attached-sheet relation snapshot are
+      // separate captures. The exact relation proof must win on this path.
+      snapshot_id: `catalog-${status}`,
+      degraded: true, elements_complete: false,
+      attached_sheet_snapshot_id: `nested-${status}`,
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1", snapshot_id: `nested-${status}`,
+        pid: fake.target.pid, parent_window_id: save.windowId, parent_role: "AXSheet",
+        parent_ax_parent_verified: true, parent_ax_parent_window_id: fake.target.windowId,
+        parent_owner_pid: fake.target.pid, parent_bounds: save.bounds,
+        direct_children_status: "success", direct_child_count: status === "sheet" ? 1 : 0,
+        status, frontmost_pid: fake.target.pid,
+        focused_window_id: status === "sheet" ? goto.windowId : save.windowId,
+        ...(status === "sheet" ? { sheet: {
+          role: "AXSheet", pid: fake.target.pid, window_id: goto.windowId,
+          owner_pid: fake.target.pid, ax_parent_pid: fake.target.pid,
+          ax_parent_window_id: save.windowId, ax_parent_verified: true, bounds: goto.bounds,
+        } } : {}),
+      },
+    });
+    fake.setWindowInventoryComplete(false);
+    fake.setWindowGroundingState(fake.target.windowId, rootProof("sheet"));
+    fake.setWindowGroundingState(save.windowId, nestedProof("sheet"));
+    fake.setWindowImageSize(save.windowId, 408, 267);
+    fake.setWindowImageSize(goto.windowId, 460, 279);
+    fake.setExtraWindowAfterClick(save);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory,
+      windowTarget: fake.target, windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    const signal = new AbortController().signal;
+    try {
+      session = await computer.open({}, signal);
+      const rootBefore = await computer.observe(session, "nested-root-before" as ObservationId, signal);
+      const openSave = await computer.execute(session, {
+        actionId: "nested-open-save" as ActionId, basedOn: "nested-root-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 10 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(openSave.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      const saveObservation = await computer.observe(session, "nested-save-active" as ObservationId, signal);
+      expect(saveObservation.surfaceRef).toMatchObject({ parentSurfaceId: rootBefore.surfaceRef.surfaceId, admissionSource: "macos_attached_sheet_proof" });
+
+      fake.setSecondExtraWindowAfterClick(goto);
+      const conflictingRelation = nestedProof("sheet");
+      conflictingRelation.attached_sheet_proof.snapshot_id = "different-relation-snapshot";
+      fake.setWindowGroundingState(save.windowId, conflictingRelation);
+      const malformedNestedAction = await computer.execute(session, {
+        actionId: "nested-conflicting-relation-snapshot" as ActionId,
+        basedOn: "nested-save-active" as ObservationId,
+        kind: "click", point: { x: 14, y: 14 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(malformedNestedAction.status).toBe("completed");
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toThrow();
+      fake.setSecondExtraWindow(undefined);
+      const saveAfterRejectedProof = await computer.observe(session, "nested-save-after-conflict" as ObservationId, signal);
+      expect(saveAfterRejectedProof.surfaceRef).toMatchObject({ surfaceId: saveObservation.surfaceRef.surfaceId, kind: "native_window" });
+      fake.setWindowGroundingState(save.windowId, nestedProof("sheet"));
+      fake.setSecondExtraWindowAfterClick(goto);
+      const openGoto = await computer.execute(session, {
+        actionId: "nested-open-goto" as ActionId, basedOn: "nested-save-after-conflict" as ObservationId,
+        kind: "click", point: { x: 15, y: 15 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(openGoto.status).toBe("completed");
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const gotoObservation = await computer.observe(session, "nested-goto-active" as ObservationId, signal);
+      expect(gotoObservation.surfaceRef).toMatchObject({ parentSurfaceId: saveObservation.surfaceRef.surfaceId, admissionSource: "macos_attached_sheet_proof" });
+      const callsBeforeOldSaveRef = fake.calls.filter((call) => call.name === "click").length;
+      expect((await computer.execute(session, {
+        actionId: "nested-old-save-ref" as ActionId, basedOn: "nested-save-active" as ObservationId,
+        kind: "click", point: { x: 1, y: 1 },
+      }, signal)).status).toBe("refused");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(callsBeforeOldSaveRef);
+
+      fake.setSecondExtraWindow(undefined);
+      fake.setWindowGroundingState(save.windowId, nestedProof("none"));
+      const afterGotoPop = await computer.observe(session, "nested-save-after-goto-pop" as ObservationId, signal);
+      expect(afterGotoPop.surfaceRef).toMatchObject({ surfaceId: saveObservation.surfaceRef.surfaceId, kind: "native_window" });
+      const clicksBeforeStaleSave = fake.calls.filter((call) => call.name === "click").length;
+      expect((await computer.execute(session, {
+        actionId: "nested-stale-save-after-goto-pop" as ActionId,
+        basedOn: "nested-save-active" as ObservationId,
+        kind: "click", point: { x: 2, y: 2 },
+      }, signal)).status).toBe("refused");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(clicksBeforeStaleSave);
+      fake.setExtraWindow(undefined);
+      fake.setWindowGroundingState(fake.target.windowId, rootProof("none"));
+      const afterSavePop = await computer.observe(session, "nested-root-after-save-pop" as ObservationId, signal);
+      expect(afterSavePop.surfaceRef).toMatchObject({ surfaceId: rootBefore.surfaceRef.surfaceId, kind: "native_window" });
+      expect((await computer.execute(session, {
+        actionId: "nested-old-goto-ref" as ActionId, basedOn: "nested-goto-active" as ObservationId,
+        kind: "click", point: { x: 1, y: 1 },
+      }, signal)).status).toBe("refused");
+      expect((await computer.execute(session, {
+        actionId: "nested-old-root-ref" as ActionId, basedOn: "nested-root-before" as ObservationId,
+        kind: "click", point: { x: 1, y: 1 },
+      }, signal)).status).toBe("refused");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(callsBeforeOldSaveRef);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     { label: "settles to the exact AX geometry", settle: true, changeWindowId: false, addSecondWindow: false, pushed: true, proofReads: 2 },
     { label: "remains geometrically unstable", settle: false, changeWindowId: false, addSecondWindow: false, pushed: false, proofReads: 2 },
@@ -1133,6 +1278,7 @@ describe("CuaDriverComputer", () => {
         snapshot_id: "geometry-recheck-snapshot",
         pid: fake.target.pid,
         parent_window_id: fake.target.windowId,
+        parent_role: "AXWindow",
         parent_owner_pid: fake.target.pid,
         parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
         direct_children_status: "success",

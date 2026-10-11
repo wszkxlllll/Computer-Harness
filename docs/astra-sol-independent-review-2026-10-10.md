@@ -1,6 +1,6 @@
 # Sol 独立检查记录
 
-本轮协调/检查由 Sol 承担，Luna 为唯一产品源码及现场执行者；检查未操作 GUI、请求模型、重启服务或修改业务源码。因并发槽已被已完成历史代理占用，单独 Sol 检查代理创建失败，作者与检查者仍分离。
+本轮协调/检查由 Sol 承担，Luna 为唯一产品源码及现场执行者；首次离线检查未操作 GUI、请求模型、重启服务或修改业务源码；后续经明确互斥交接的独立零Provider GUI验证按下方实际记录分列，未代写产品源码。因并发槽已被已完成历史代理占用，单独 Sol 检查代理创建失败，作者与检查者仍分离。
 
 ## 17:38：S0/S1前静态检查
 
@@ -220,3 +220,31 @@ Sol已独立读取候选注册PNG/metadata、真实SDK输入guard结果及三条
 
 
 2026-10-11 Sol独立真实生命周期签收：Luna暂停全部GUI后由Sol唯一接管。正确公开SDK合同在新空白16174首次遇实际sheet动画inventory y330/proof y352，严格拒绝，未手动handoff或代保存。Luna仅TS增加一次身份/关系/焦点全部已过且仅几何变化的80ms只读重采；同PID/CGID/parent、唯一候选、非截断、全严格几何不变，二次仍不稳/换ID/多窗拒绝。Sol独立Computer291通过及最终真实377×218帧4例通过。真实b06d1024生命周期自动push至16187、精确sheet截图754×436、ESC实际派发子窗、checked-none自动pop父generation3；旧child观察拒绝，native输入数2→2，cleanup=[]，零Provider。桌面随后交回唯一Luna执行A05完整T2，Sol停止GUI。当前blank无业务文字、无保存文件；此局部验真不关闭完整T2。
+
+
+## 2026-10-11 A05独立复核及副作用语义更正
+
+冻结da0fedf已非force原SHA同步PR26，五项CI全绿（38117633419）。A05首入口host.env误传目录导致EISDIR、无Run/HTTP，私有模板改为文件断言后正常真实TTY启动原196B完整卡。Run `run-1791699527821-1f9f981c-af1` target22394/16174，40请求上限，实际10main/0risk、8GUI动作，cancelled/CLI exit0。正文精确六行图已独立核对，CMD+S后自动child_push至Save，证明修复实际入口生效；CMD+SHIFT+G完成后路径type报type_text_incomplete 0/169，监控于连续同Save图阈值SIGINT，第10请求取消。文件不存在，未完成保存/关闭/重开，不签收完整T2。9份已知usage prompt169811/completion1888/total171699；A05实际10/0/10、cap120/6/126、预占40/2/42，全部历史250main/6risk/256，234已知usage4415027tokens、22未知、金额未知。
+
+fresh只读证据（A04-private/t2-focused-ax-deep-read-v2.json及t2-panel-service-sdk-read.json）：focused AXTextField enabled/focused、AXValue settable，AXWindow属性unsupported，SPI16204；AXParent为AXSplitGroup(SPI16204)→AXSheet(SPI16203)，Save父文稿16174。CG16204真实owner22422 Open and Save Panel Service，当前onscreen=false；独立SDK状态ax_unresolved，不能据名称/owner建议当可输入surface。现exact_target会沿父链将此field归Save16203；foreground type实际向22394调用SLEventPostToPid/void fallback，再AX readback Unchanged生成delivered0，不能证明事件未发或实际无副作用。Runtime原summary unknownSideEffects=none_recorded如实保留，仅表示未记录，不是无副作用证明；未知路径不自动重放。继续新自有空白、零Provider核活跃GoTo关系/实际输入owner与capture，必要严谨修复，停止同版paid。候选两项权限已授予，不再列当前TCC阻塞。
+
+
+当前关系语义补正：上述focused TextField/AXSplitGroup→Save链可能只是普通Save的内嵌remote内容，不证明新GoTo层。field位于Save顶部、AXValue长度8，模型原轨迹亦明确CMD+SHIFT+G未见弹窗；后续正常精确Save ESC一次completed且旧Save目标not found。继续新空白前后对照，不能为未证GoTo伪造独立surface或自动接管。
+
+
+2026-10-11 Sol独立shortcut二分与正式续额：Luna暂停无在途后桌面互斥交Sol，0Provider复用正常SDK精确Save16228。生产CMD+SHIFT+G completed但PNG前后同SHA c6562f6885739703073ebfc34a6a29dffe1359be190dcf72502c71887f95df21，AXFocusedWindow/field不变；仅此后一次正常System Events shortcut作诊断，产生真正同PID onscreen AXSheet16235，Save direct AXChildren新增该sheet、focus16235。精确920×558 PNG仅GoTo本身，Sol及root分别view；普通Save remote AXSplitGroup16229非GoTo，不以跨进程名字/库存猜owner。证据`A04-private/sol-save-route-compare-63f7b8bb-b893-4091-93f1-413eb2e5bac6.json`；GoTo正常精确ESC回Save，Save再正常精确ESC回空白父16222，cleanup均[]，未写路径或保存。Sol停止GUI并明确交回Luna。当前根因是生产foreground无element hotkey使用NSMenu PID no-auth路线未产生可见效果，正常HID有效；真正GoTo属于Save直接AXSheet子窗，现producer只允许AXWindow parent。Luna实施最小strict exact-focus HID及AXSheet parent关系修复，Guard/unknown不重放保持，不新增cross-process surface。
+
+A05已通过extendBatchReservation正式续预占80main/4risk/84 revision1，actual10/0/10及sequence10、硬cap120/6/126与全部256历史不变；为修后完整40请求保空间，没有派发新Provider。下次正式任务以真实候选验证通过为条件，不以续额当修复通过。
+
+
+2026-10-11 独立评测器新轨迹消费：Sol在隔离PR27/cb6aacf使用既有T2 manifest消费A05真实run-1791699527821-1f9f981c-af1，CLI exit0、verdict=inconclusive/success=false，唯一deficiency=human_review_missing；初末真实PNG锚点bound，无新增Mac admissionSource或动作关联误报。产物忽略目录pr23-real-evidence/t2-a05-nested-shortcut-failure-assessment.json。未填写真人评分或制造success；指定成果文件不存在/保存关闭重开未成的业务失败独立保留，不能由缺人审掩盖。零Provider。
+
+
+2026-10-11 嵌套Save→GoTo消费链离线独检：Sol对冻结TS最小改动运行Computer/Surface/窗口合同、Runtime、Trajectory相关20文件721/721，全仓typecheck退出0，四产品文件diffcheck无误；源码hash记录于私有A04-private/sol-nested-ts-independent-review.json。degraded元素catalog不升级complete，关系仅用独立snapshot精确绑定；完成动作的fresh baseline/唯一新库存/当前精确parent/直接AXSheet proof满足才自动push，pop仍需明确checked-none及精确父focus，旧Save/GoTo/root代际拒绝保持。Luna当前native完整lib349通过/2 ignored、fmt退出0，check/build及真实candidate生命周期尚待本轮完成，不继承旧native测试或将离线通过算完整业务通过。
+
+私有直接取消监控只将已completed当前动作的真实macos_attached_sheet_proof child_push/pop及精确父子lineage作为surface进度；移除凭Save标题新窗重置。四零Provider回放通过：严格nested重置，title-only/Duplicate、未completed transition、重复no-input拒绝均继续取消；产物A04-private/sol-monitor-nested-transition-replay.json。无GUI/模型请求，全部历史仍256；旧type派发未知副作用不重放。
+
+
+2026-10-11 nested/HID候选冻结与正常权限恢复：Luna当前native完整lib349 passed/2 ignored，fmt/check/build全部exit0；Sol相关20文件721/typecheck/diffcheck、clean d114依次三patch check/apply与四源文件逐字节匹配通过。第三patch SHA2e624c66251e1c2785fe43a452556ac73b7b29b76ddc725af37ee2ee1b8d432e；raw binary5a55c3b8a1b82d517fa455fab6487b137bd495c95627b405ec1f698753995bf3。新版独立candidate strict签名通过，signed SHA514de6e702c2c7449745b5a54d65f313742e307eaed12e239869137ac808b5e4、CDHash3965f1dee19cfab49ba2036ce767e53ea07e4cef、PID32348/socket a05-capturefix-nested；旧完整app回退SHA3d3c…保留，stock4254原样。
+
+新CDHash真实health报录屏与辅助功能均not granted；不以旧on当当前授权。Luna正常Settings UI已移除旧录屏项、普通picker精确重添新候选，新行on且重启提示选择“以后”；辅助功能移除精确旧项时出现“隐私与安全性正在尝试解锁系统设置，使用触控ID或输入密码”真实原生挑战。当前挑战保留、未输入凭据、未移除/重添Accessibility，没有其它GUI/模型请求；root已请求用户本人认证。候选不再重包/变更CDHash。验证后正常重添辅助功能并统一重启，再health与零Provider真实nested/type/guard验真；本轮离线修复不能当完整T2通过。所有Run终态、实际请求256及A05 actual10/0/10/正式预占80/4/84 revision1不变。
