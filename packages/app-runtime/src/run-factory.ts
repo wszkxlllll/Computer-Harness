@@ -32,6 +32,35 @@ import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunDependencies, type RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
+  const computerRecoveryOptIn = input.computer.kind === "cua" && input.computer.recoverBoundWindowMissing === true;
+  if (input.recoverBoundWindowMissing === true !== computerRecoveryOptIn) {
+    throw new Error("bound-window recovery requires matching Run and CUA computer opt-ins");
+  }
+  if (input.recoverBoundWindowMissing === true) {
+    if (process.platform !== "darwin" || input.windowSwitch !== "opened-windows-v1" ||
+        (input.windowHandoff !== undefined && input.windowHandoff !== "confirm-v1")) {
+      throw new Error("bound-window recovery requires a Darwin CUA run with exact native window switching and no managed-browser companion");
+    }
+    if (input.computer.kind !== "cua") throw new Error("bound-window recovery requires a CUA computer");
+    const cuaConfig = input.computer;
+    if ((cuaConfig.windowSwitch !== undefined && cuaConfig.windowSwitch !== "opened-windows-v1") || cuaConfig.windowTarget === undefined ||
+        cuaConfig.recoveryWindowTarget === undefined || cuaConfig.managedBrowserCompanion === true ||
+        cuaConfig.managedBrowserUrl !== undefined || cuaConfig.grounding === "dom-catalog-v1" ||
+        cuaConfig.grounding === "hybrid-catalog-v1" || input.grounding === "dom-catalog-v1" ||
+        input.grounding === "hybrid-catalog-v1") {
+      throw new Error("bound-window recovery requires a Darwin CUA run with exact native window switching and no managed-browser companion");
+    }
+    const primaryTarget = cuaConfig.windowTarget;
+    const recoveryTarget = cuaConfig.recoveryWindowTarget;
+    const scopes = cuaConfig.windowSwitchAllowedTargets;
+    const identity = (target: { readonly pid: number; readonly windowId: number }) => `${target.pid}:${target.windowId}`;
+    if (scopes?.length !== 2 || new Set(scopes.map(identity)).size !== 2 ||
+        !scopes.some((target) => identity(target) === identity(primaryTarget)) ||
+        !scopes.some((target) => identity(target) === identity(recoveryTarget)) ||
+        identity(primaryTarget) === identity(recoveryTarget)) {
+      throw new Error("bound-window recovery requires exactly the Host-authorized primary and recovery window targets");
+    }
+  }
   for (const value of [input.contextMaxInputTokens, input.contextMaxWireInputTokens]) {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
   }
@@ -205,7 +234,8 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(config.contextMaxWireInputTokens === undefined ? {} : { maxWireInputTokens: config.contextMaxWireInputTokens }),
     });
     const contextCompiler = projectModuleContext(baseContextCompiler, runId, planningModule, memoryModule);
-    const enabledToolNames = computerAssembly.enabledToolNames(tools);
+    const configuredToolNames = computerAssembly.enabledToolNames(tools);
+    const enabledToolNames = configuredToolNames;
     controller = new RunController({
       runId,
       provider,
@@ -224,6 +254,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       batching: config.batching,
       windowHandoff: config.windowHandoff ?? "off",
       windowSwitch: config.windowSwitch ?? "off",
+      recoverBoundWindowMissing: config.recoverBoundWindowMissing === true,
       ...(config.assistantPreferences === undefined ? {} : { assistantPreferences: config.assistantPreferences }),
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,

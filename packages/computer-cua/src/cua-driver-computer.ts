@@ -746,6 +746,15 @@ function targetAllowedByHostScope(
   return allowedTargets === undefined || allowedTargets.some((allowed) => windowIdentityKey(allowed) === windowIdentityKey(target));
 }
 
+function samePinnedRecoveryIdentity(pinned: CuaWindowInfo, fresh: CuaWindowInfo): boolean {
+  return windowIdentityKey(pinned.target) === windowIdentityKey(fresh.target) &&
+    pinned.bounds.x === fresh.bounds.x && pinned.bounds.y === fresh.bounds.y &&
+    pinned.bounds.width === fresh.bounds.width && pinned.bounds.height === fresh.bounds.height &&
+    pinned.appName === fresh.appName && pinned.title === fresh.title &&
+    pinned.ownerPid === fresh.ownerPid && pinned.ownerWindowId === fresh.ownerWindowId &&
+    pinned.windowClass === fresh.windowClass;
+}
+
 function windowRefusalCode(code: string | undefined, message: string, structuredNoInputEvidence = false): string {
   // CUA 0.22.2 reports the exact-HWND foreground refusal in Tool text rather
   // than a dedicated error code. Require explicit evidence that it sent no
@@ -838,6 +847,9 @@ export interface CuaDriverComputerOptions {
    * When set, returning to the Run-owned browser also requires its HWND here.
    */
   windowSwitchAllowedTargets?: readonly CuaWindowTarget[];
+  /** Exact Host-prepared recovery window, restricted to the opt-in missing-bound recovery flow. */
+  recoveryWindowTarget?: CuaWindowTarget;
+  recoverBoundWindowMissing?: boolean;
   /** Injected host-only read-only relationship evidence; absent/failed means manual transient handling. */
   windowRelationshipProbe?: WindowRelationshipProbe;
   /** Host-supplied managed-browser transport; never discovered by this adapter. */
@@ -877,6 +889,7 @@ interface PrivateSession {
   } | undefined;
   missingParent?: {
     readonly sourceActionId: ActionIntent["actionId"];
+    readonly reason: "bound_window_missing";
     candidates: Map<string, ComputerWindowCandidate>;
     epoch: number;
     confirming: boolean;
@@ -891,6 +904,7 @@ interface PrivateSession {
   foregroundMismatchWindowId: number | undefined;
   /** True only when the last completed action produced a pre/post inventory diff. */
   proactiveHandoffCandidatesReady: boolean;
+  recoveryWindowIdentity?: CuaWindowInfo;
   /** Adapter-private active managed tab; never serialized to Runtime. */
   browserTarget?: ManagedBrowserTarget;
   /** Run-owned managed target survives switching to native windows. */
@@ -1037,6 +1051,21 @@ export class CuaDriverComputer implements Computer {
     }
     if (this.options.windowTarget !== undefined) validateWindowTarget(this.options.windowTarget);
     for (const target of this.options.windowSwitchAllowedTargets ?? []) validateWindowTarget(target);
+    if (this.options.recoveryWindowTarget !== undefined) validateWindowTarget(this.options.recoveryWindowTarget);
+    if (this.options.recoverBoundWindowMissing === true && (this.options.windowSwitch !== "opened-windows-v1" ||
+        this.options.windowTarget === undefined || this.options.recoveryWindowTarget === undefined ||
+        this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1" ||
+        this.options.windowSwitchAllowedTargets?.length !== 2 ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(this.options.windowTarget!)) ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(this.options.recoveryWindowTarget!)) ||
+        windowIdentityKey(this.options.windowTarget) === windowIdentityKey(this.options.recoveryWindowTarget) ||
+        !targetAllowedByHostScope(this.options.windowTarget, this.options.windowSwitchAllowedTargets) ||
+        !targetAllowedByHostScope(this.options.recoveryWindowTarget, this.options.windowSwitchAllowedTargets))) {
+      throw new Error("bound-window recovery requires distinct exact primary/recovery targets, window switching, and Host authorization for both");
+    }
+    if (this.options.recoverBoundWindowMissing !== true && this.options.recoveryWindowTarget !== undefined) {
+      throw new Error("recoveryWindowTarget requires recoverBoundWindowMissing opt-in");
+    }
     if (this.options.grounding !== undefined && !["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"].includes(this.options.grounding)) {
       throw new Error("grounding must be off, uia-catalog-v1, dom-catalog-v1 or hybrid-catalog-v1");
     }
@@ -1084,6 +1113,17 @@ export class CuaDriverComputer implements Computer {
       let windowBinding: CuaWindowBinding | undefined;
       let surfaceRegistry = createSurfaceRegistry(label);
       const windowBindings = new Map<string, CuaWindowBinding>();
+      let recoveryWindowIdentity: CuaWindowInfo | undefined;
+      if (this.options.recoverBoundWindowMissing === true) {
+        if (platform !== "darwin") throw new Error("bound-window recovery is currently supported only on Darwin");
+        const inventory = await listWindowInventory(driver, label, signal, undefined, true, this.options.windowRelationshipProbe, this.options.platform ?? process.platform);
+        if (inventory.truncated === true) throw new Error("recovery target identity could not be pinned from a truncated fresh inventory");
+        const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(this.options.recoveryWindowTarget!));
+        if (matches.length !== 1 || matches[0]!.isOnScreen !== true || matches[0]!.minimized === true) {
+          throw new Error("Host-prepared recovery target was not uniquely visible at Run open");
+        }
+        recoveryWindowIdentity = matches[0];
+      }
       if (this.options.windowTarget === undefined) {
         const size = await callTool(driver, "get_screen_size", { session: label }, signal);
         const dimensions = readStructuredDimensions(size);
@@ -1157,6 +1197,7 @@ export class CuaDriverComputer implements Computer {
         newHandoffCandidates: [],
         foregroundMismatchWindowId: undefined,
         proactiveHandoffCandidatesReady: false,
+        ...(recoveryWindowIdentity === undefined ? {} : { recoveryWindowIdentity }),
         ...(this.options.browserTarget === undefined ? {} : {
           ...(browserIsInitialTarget ? { browserTarget: this.options.browserTarget! } : {}),
           managedBrowserTarget: this.options.browserTarget,
@@ -2237,7 +2278,9 @@ export class CuaDriverComputer implements Computer {
         this.options.windowSwitchAllowedTargets,
         current.platform,
       ));
-    const candidates: ComputerWindowCandidate[] = projectSelectableWindowCandidates(candidatePool, binding.target, current.platform, undefined, undefined, true).windows
+    const recoveryIdentity = missing?.reason === "bound_window_missing" ? current.recoveryWindowIdentity : undefined;
+    const eligiblePool = recoveryIdentity === undefined ? candidatePool : candidatePool.filter((window) => samePinnedRecoveryIdentity(recoveryIdentity, window));
+    const candidates: ComputerWindowCandidate[] = projectSelectableWindowCandidates(eligiblePool, binding.target, current.platform, undefined, undefined, true).windows
       .map((window) => {
         const relationship = windowCandidateRelationship(
           window,
@@ -2320,12 +2363,21 @@ export class CuaDriverComputer implements Computer {
     const boundPeer = activePeerTarget(current);
     if (boundPeer !== undefined && !inventory.some((window) => windowIdentityKey(window.target) === windowIdentityKey(boundPeer))) {
       const activeRef = current.surfaceRegistry.activeSurface;
-      if (activeRef !== undefined) {
-        const invalidated = markSurfaceUnknown(current.surfaceRegistry, activeRef);
-        if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
+      const preserveForFormalDetection = this.options.recoverBoundWindowMissing === true &&
+        this.options.windowSwitch === "opened-windows-v1" &&
+        this.options.windowDeliveryMode === "foreground" &&
+        (this.options.platform ?? current.platform ?? process.platform) === "darwin" &&
+        actionBaseline?.completed === true && baselineStillBound &&
+        actionBaseline.parentSurfaceRef.parentSurfaceId === undefined &&
+        this.canUseManualWindowHandoff(current);
+      if (!preserveForFormalDetection) {
+        if (activeRef !== undefined) {
+          const invalidated = markSurfaceUnknown(current.surfaceRegistry, activeRef);
+          if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
+        }
+        current.windowRefs.clear();
+        this.clearTargetObservationState(current, activeRef);
       }
-      current.windowRefs.clear();
-      this.clearTargetObservationState(current, activeRef);
       throw new WindowContractError("WINDOW_TARGET_NOT_FOUND", "current bound window is missing from the opened-window inventory");
     }
     const childWindowKeys = new Set([...current.surfaceRegistry.surfaces.values()]
@@ -2565,7 +2617,7 @@ export class CuaDriverComputer implements Computer {
       if (!(error instanceof WindowContractError) || error.code !== "WINDOW_TARGET_NOT_FOUND" ||
           !baseline.completed || confirmingUnknownAction || baseline.parentSurfaceRef.parentSurfaceId !== undefined ||
           !this.canUseManualWindowHandoff(current)) throw error;
-      current.missingParent = { sourceActionId: baseline.actionId, candidates: new Map(), epoch: 0, confirming: false };
+      current.missingParent = { sourceActionId: baseline.actionId, reason: "bound_window_missing", candidates: new Map(), epoch: 0, confirming: false };
       this.clearTargetObservationState(current, baseline.parentSurfaceRef);
       throw new BoundWindowMissingError(baseline.actionId);
     }
@@ -2942,6 +2994,15 @@ export class CuaDriverComputer implements Computer {
       // the undefined broad inventory scope or an old-parent child bypass.
       missing.confirming = true; // Serialize refresh/confirm before the first await or side effect.
       try {
+      if (this.options.recoverBoundWindowMissing === true && missing.reason === "bound_window_missing") {
+        const pinned = current.recoveryWindowIdentity;
+        const freshInventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+        const freshMatches = freshInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate));
+        if (pinned === undefined || freshInventory.truncated === true || freshMatches.length !== 1 ||
+            !samePinnedRecoveryIdentity(pinned, freshMatches[0]!)) {
+          throw new WindowContractError("WINDOW_HANDOFF_STALE", "Host-pinned recovery window identity changed after listing; no activation was attempted");
+        }
+      }
       const result = await this.transitionWindow(current, candidate, signal, {
         onScreenOnly: true, staleCode: "WINDOW_HANDOFF_STALE", authorizedTargets: [{ pid: candidate.pid, windowId: candidate.windowId }],
         missingPermit: { boundary: missing, epoch: missing.epoch, issued },

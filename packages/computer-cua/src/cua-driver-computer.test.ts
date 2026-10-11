@@ -5,9 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
-import type { ActionId, ActionIntent, ObservationId } from "@computer-harness/protocol";
+import type { ActionId, ActionIntent, ModelTurn, ObservationId } from "@computer-harness/protocol";
 import { BoundWindowMissingError } from "@computer-harness/protocol";
 import { CuaDriverComputer as ProductionCuaDriverComputer, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
+import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, windowSwitchTools, type ComputerSession, type ContextCompiler, type ModelInput, type ProviderAdapter } from "../../runtime/src/index.js";
+import { FileAssetStore, JsonlRunEventWriter } from "../../trajectory/src/index.js";
 import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { captureWindow, captureWindowWithRetry as productionCaptureWindowWithRetry, listWindowInventory, listWindowTargets } from "./window-contract.js";
 
@@ -27,6 +29,232 @@ const ONE_BY_ONE_PNG = Buffer.from(
 installFakeCuaSdkModuleForTests();
 
 describe("F045 strict completed bound-window missing boundary", () => {
+  it("preserves an exact completed root binding through the advisory inventory so Runtime can formally detect recovery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-runtime-advisory-list-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    fake.setExtraWindow({ ...recoveryTarget, appName: "TextEdit", title: "Prepared recovery blank" });
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin",
+      socketPath: "fixture",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      recoveryWindowTarget: recoveryTarget,
+      recoverBoundWindowMissing: true,
+      windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, recoveryTarget],
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const order: string[] = [];
+    const recoveryCandidates: unknown[] = [];
+    let openedSession: ComputerSession | undefined;
+    const originalOpen = computer.open.bind(computer);
+    computer.open = async (...args) => {
+      openedSession = await originalOpen(...args);
+      return openedSession;
+    };
+    const originalListWindows = computer.listWindows.bind(computer);
+    computer.listWindows = async (...args) => {
+      order.push("advisory-list");
+      try {
+        return await originalListWindows(...args);
+      } catch (error) {
+        order[order.length - 1] = `advisory-list:${(error as { code?: string }).code ?? "unknown"}`;
+        throw error;
+      }
+    };
+    const originalDetect = computer.detectNewWindowHandoffCandidates.bind(computer);
+    computer.detectNewWindowHandoffCandidates = async (...args) => {
+      order.push("formal-detect");
+      return originalDetect(...args);
+    };
+    const originalCandidates = computer.listWindowHandoffCandidates.bind(computer);
+    computer.listWindowHandoffCandidates = async (...args) => {
+      order.push("recovery-candidates");
+      const candidates = await originalCandidates(...args);
+      recoveryCandidates.push(...candidates);
+      return candidates;
+    };
+    const originalCallTool = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, input, signal) => {
+      const response = await originalCallTool(name, input, signal);
+      if (name === "hotkey") fake.omitBoundWindow(true);
+      return response;
+    };
+
+    const registry = createDefaultToolRegistry();
+    registry.registerMany(windowSwitchTools());
+    let thirdRequestStarted!: (input: ModelInput) => void;
+    const thirdRequest = new Promise<ModelInput>((resolve) => { thirdRequestStarted = resolve; });
+    let generateCount = 0;
+    const provider: ProviderAdapter = {
+      id: "f045-runtime-advisory-provider",
+      async generate(_input, { signal }): Promise<ModelTurn> {
+        generateCount += 1;
+        if (generateCount === 1) return { type: "tool_calls", calls: [{ id: "completed-close" as never, name: "hotkey", arguments: { keys: ["CMD", "W"] } }] };
+        if (generateCount === 2) return { type: "tool_calls", calls: [{ id: "recovery-list" as never, name: "list_windows", arguments: {} }] };
+        thirdRequestStarted(_input);
+        return new Promise<ModelTurn>((_resolve, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    };
+    const contextCompiler: ContextCompiler = {
+      async compile(input, signal) {
+        signal.throwIfAborted();
+        return { system: input.goal, messages: [{ role: "user", content: [{ type: "text", text: input.goal }] }], tools: [] };
+      },
+    };
+    const controller = new RunController({
+      runId: "f045-runtime-advisory-list" as never,
+      provider,
+      computer,
+      contextCompiler,
+      toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(8, 8),
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), "f045-runtime-advisory-list" as never),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["hotkey", "list_windows", "switch_window"],
+      features: { planning: "off", memory: "off", batching: "off" },
+    });
+    const running = controller.start("Close the current owned document once, then inspect the prepared recovery target.");
+    try {
+      const thirdInput = await Promise.race([
+        thirdRequest,
+        running.then((outcome) => { throw new Error(`Run ended before recovery candidate selection: ${outcome}`); }),
+      ]);
+      expect(thirdInput.system).toContain("Close the current owned document");
+      expect(JSON.stringify(recoveryCandidates)).toContain("Prepared recovery blank");
+      expect(order).toEqual(["advisory-list:WINDOW_TARGET_NOT_FOUND", "formal-detect", "recovery-candidates"]);
+      expect(controller.getEvents().filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing")).toBe(false);
+      const originalObservation = controller.getEvents().find((event) => event.type === "observation.created")?.observation.id;
+      expect(openedSession).toBeDefined();
+      expect(originalObservation).toBeDefined();
+      const clicksBeforeStaleInput = fake.calls.filter((call) => call.name === "click").length;
+      const staleInput = await computer.execute(openedSession!, {
+        actionId: "recovery-stale-root-input" as ActionId,
+        basedOn: originalObservation!,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, new AbortController().signal);
+      expect(staleInput.status).toBe("refused");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(clicksBeforeStaleInput);
+      controller.cancel("end the integration fixture after recovery candidates are offered");
+      await expect(running).resolves.toBe("cancelled");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["recovery-disabled", "baseline-not-completed"] as const)("still invalidates a missing target when the advisory exception is %s", async (mode) => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-advisory-negative-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    fake.setExtraWindow({ ...recoveryTarget, appName: "TextEdit", title: "Prepared recovery blank" });
+    const recoveryEnabled = mode !== "recovery-disabled";
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin",
+      socketPath: "fixture",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      ...(recoveryEnabled ? {
+        recoveryWindowTarget: recoveryTarget,
+        recoverBoundWindowMissing: true,
+        windowSwitchAllowedTargets: [fake.target, recoveryTarget],
+      } : {}),
+      windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1",
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, `advisory-negative-${mode}` as ObservationId, signal);
+      if (mode === "recovery-disabled") {
+        expect((await computer.execute(session, {
+          actionId: `advisory-negative-${mode}` as ActionId,
+          basedOn: `advisory-negative-${mode}` as ObservationId,
+          kind: "click",
+          point: { x: 10, y: 20 },
+        }, signal, { detectNewWindowHandoff: true })).status).toBe("completed");
+      }
+      fake.omitBoundWindow(true);
+      await expect(computer.listWindows(session, signal)).rejects.toMatchObject({ code: "WINDOW_TARGET_NOT_FOUND" });
+      await expect(computer.observe(session, `advisory-negative-after-${mode}` as ObservationId, signal)).rejects.toThrow(/identity was invalidated/iu);
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.not.toBeInstanceOf(BoundWindowMissingError);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["dom", "browserTarget"] as const)("rejects managed-browser configuration for native-only recovery (%s)", mode => {
+    const fake = windowDriver();
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const base: CuaDriverComputerOptions = {
+      platform: "darwin",
+      socketPath: "fixture",
+      screenshotDir: "/tmp/recovery-config-test",
+      windowTarget: fake.target,
+      recoveryWindowTarget: recoveryTarget,
+      recoverBoundWindowMissing: true,
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, recoveryTarget],
+      grounding: "off",
+    };
+    expect(() => new ProductionCuaDriverComputer(mode === "dom"
+      ? { ...base, grounding: "dom-catalog-v1" }
+      : { ...base, browserTarget: {
+          kind: "managed-chromium", browser: "chromium", profileId: "fixture",
+          windowTarget: fake.target, tabId: "tab", generation: "1", delivery: "loopback-cdp",
+        } })).toThrow(/distinct exact primary\/recovery targets/u);
+  });
+
+  it("pins the exact recovery row from a partial inventory and rejects a changed row before activation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-f045-recovery-pin-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const peer = { pid: fake.target.pid, windowId: fake.target.windowId + 1, appName: "Editor", title: "Prepared blank" };
+    fake.setWindowInventoryComplete(false);
+    fake.setExtraWindow(peer);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      recoveryWindowTarget: { pid: peer.pid, windowId: peer.windowId }, recoverBoundWindowMissing: true,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target, { pid: peer.pid, windowId: peer.windowId }],
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    const session = await computer.open({}, signal);
+    try {
+      // Run-open pinning accepts a uniquely identified, non-truncated partial
+      // catalog; later action discovery has its own strict completeness gate.
+      fake.setWindowInventoryComplete(true);
+      await computer.observe(session, "recovery-pin-before" as ObservationId, signal);
+      const action: ActionIntent = { actionId: "recovery-pin-action" as ActionId, basedOn: "recovery-pin-before" as ObservationId, kind: "click", point: { x: 10, y: 20 } };
+      expect((await computer.execute(session, action, signal, { detectNewWindowHandoff: true })).status).toBe("completed");
+      fake.omitBoundWindow(true);
+      await expect(computer.detectNewWindowHandoffCandidates(session, signal)).rejects.toBeInstanceOf(BoundWindowMissingError);
+      const candidate = (await computer.listWindowHandoffCandidates(session, signal))[0]!;
+      expect(candidate).toMatchObject({ pid: peer.pid, windowId: peer.windowId, title: peer.title, appName: peer.appName });
+      fake.setExtraWindow({ ...peer, title: "Reused window number" });
+      const activations = fake.calls.filter(call => call.name === "bring_to_front").length;
+      await expect(computer.handoffWindow(session, candidate, signal)).rejects.toMatchObject({ code: "WINDOW_HANDOFF_STALE" });
+      expect(fake.calls.filter(call => call.name === "bring_to_front")).toHaveLength(activations);
+    } finally { await computer.close(session); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("keeps a missing target locked, rotates same-pair tokens and accepts clone only at the current epoch", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-f045-missing-"));
     const fake = windowDriver();

@@ -18,6 +18,9 @@ export type ComputerBackendConfig =
       screenshotDir: string;
       /** Explicit host-only opt-in; omitted keeps primary desktop behavior. */
       windowTarget?: { pid: number; windowId: number };
+      /** Exact Host-prepared Darwin recovery window; never model-discovered as an arbitrary peer. */
+      recoveryWindowTarget?: { pid: number; windowId: number };
+      recoverBoundWindowMissing?: boolean;
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
       /** Explicit per-Run permission to discover and switch among opened windows. */
@@ -283,6 +286,8 @@ export async function createComputer(
       socketPath: config.socketPath,
       screenshotDir: config.screenshotDir,
       ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
+      ...(config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: config.recoveryWindowTarget }),
+      ...(config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: config.recoverBoundWindowMissing }),
       ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
       ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
       ...(config.windowSwitch === undefined ? {} : { windowSwitch: config.windowSwitch }),
@@ -373,6 +378,8 @@ class ManagedBrowserComputer implements Computer {
         browserTarget: record.target,
         domGroundingTransport: host.createTransport(),
         ...(initialTarget === undefined ? {} : { windowTarget: initialTarget }),
+        ...(this.options.config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: this.options.config.recoveryWindowTarget }),
+        ...(this.options.config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: this.options.config.recoverBoundWindowMissing }),
         ...(this.options.config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: this.options.config.windowDeliveryMode }),
         ...(this.options.config.grounding === undefined ? {} : { grounding: this.options.config.grounding }),
         ...(this.options.config.windowSwitch === undefined ? {} : { windowSwitch: this.options.config.windowSwitch }),

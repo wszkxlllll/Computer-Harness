@@ -114,6 +114,47 @@ function recoveryReportBaseEvents(runId: RunId): RuntimeEvent[] {
 }
 
 describe("app-runtime RunHandle", () => {
+  it("requires matching Run and CUA recovery opt-ins with the exact opened-window scope", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-recovery-config-gate-"));
+    const primary = { pid: 101, windowId: 501 };
+    const recovery = { pid: 101, windowId: 502 };
+    const cua = {
+      kind: "cua" as const,
+      socketPath: "/tmp/cua-recovery-fixture.sock",
+      screenshotDir: join(outputDir, "screenshots"),
+      windowTarget: primary,
+      recoveryWindowTarget: recovery,
+      recoverBoundWindowMissing: true,
+      windowSwitch: "opened-windows-v1" as const,
+      windowSwitchAllowedTargets: [primary, recovery],
+    };
+    try {
+      await expect(createRun({ ...config(outputDir), recoverBoundWindowMissing: true }, {}))
+        .rejects.toThrow(/matching Run and CUA computer opt-ins/u);
+      await expect(createRun({ ...config(outputDir), computer: cua }, {}))
+        .rejects.toThrow(/matching Run and CUA computer opt-ins/u);
+      await expect(createRun({ ...config(outputDir), computer: cua, recoverBoundWindowMissing: true }, {}))
+        .rejects.toThrow(/exact native window switching/u);
+      const nativeRecoveryConfig = {
+        ...config(outputDir),
+        computer: cua,
+        recoverBoundWindowMissing: true,
+        windowSwitch: "opened-windows-v1" as const,
+      };
+      await expect(createRun({
+        ...nativeRecoveryConfig,
+        computer: { ...cua, windowSwitch: "off" },
+      }, {})).rejects.toThrow(/exact native window switching/u);
+      await expect(createRun({ ...nativeRecoveryConfig, computer: { ...cua, managedBrowserUrl: "https://example.invalid" } }, {}))
+        .rejects.toThrow(/exact native window switching/u);
+      await expect(createRun({ ...nativeRecoveryConfig, computer: { ...cua, grounding: "hybrid-catalog-v1" } }, {}))
+        .rejects.toThrow(/exact native window switching/u);
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an invalid resolved GLM timeout before creating Run resources", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-glm-timeout-config-gate-"));
     const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));

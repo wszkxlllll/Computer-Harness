@@ -130,6 +130,8 @@ export interface RunControllerDependencies {
   windowHandoff?: "off" | "confirm-v1";
   /** Explicit per-Run opt-in for model-directed switches among opened windows. */
   windowSwitch?: "off" | "opened-windows-v1";
+  /** Darwin-only, Host-pinned recovery after a completed close loses the primary binding. */
+  recoverBoundWindowMissing?: boolean;
 }
 
 export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close" | "planning_module.close" | "memory_module.close";
@@ -325,6 +327,16 @@ export class RunController {
   private readonly computer: Computer;
   private readonly windowHandoff: "off" | "confirm-v1";
   private readonly windowSwitch: "off" | "opened-windows-v1";
+  private readonly recoverBoundWindowMissing: boolean;
+  private recoveryStage: "list" | "select" | "waiting" | undefined;
+  private recoverySourceActionId: ActionId | undefined;
+  private recoveryRequestCount = 0;
+  private recoveryAttempted = false;
+  private recoveryControlInFlight = false;
+  private pendingRecoveryBoundaryOnResume = false;
+  private deferredRecoveryCall: ToolCall | undefined;
+  private recoveryStartSequence = 0;
+  private readonly recoveryCandidateRefs = new Map<string, ComputerWindowCandidate>();
   private activeComputerSession: ComputerSession | undefined;
   private readonly contextCompiler: ContextCompiler;
   private readonly toolRegistry: ToolRegistry;
@@ -397,6 +409,7 @@ export class RunController {
     this.computer = dependencies.computer;
     this.windowHandoff = dependencies.windowHandoff ?? "off";
     this.windowSwitch = dependencies.windowSwitch ?? "off";
+    this.recoverBoundWindowMissing = dependencies.recoverBoundWindowMissing === true;
     this.contextCompiler = dependencies.contextCompiler;
     this.toolRegistry = dependencies.toolRegistry;
     this.policy = dependencies.policy;
@@ -510,6 +523,9 @@ export class RunController {
   }
 
   public async listWindowHandoffCandidates(signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.recoveryControlInFlight) {
+      throw new Error("window candidate discovery is owned by the active bound-window recovery phase");
+    }
     if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.listWindowHandoffCandidates === undefined) {
       throw new Error("no window handoff is waiting for candidate discovery");
     }
@@ -521,6 +537,9 @@ export class RunController {
   }
 
   public async listNewWindowHandoffCandidates(signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+    if (this.recoveryControlInFlight) {
+      throw new Error("new-window discovery is owned by the active bound-window recovery phase");
+    }
     if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.listWindowHandoffCandidates === undefined) {
       throw new Error("no window handoff is waiting for candidate discovery");
     }
@@ -531,6 +550,9 @@ export class RunController {
   }
 
   public handoffWindow(candidate: ComputerWindowCandidate, expectedRequestId?: string): Promise<void> {
+    if (this.recoveryControlInFlight) {
+      return Promise.reject(new Error("manual window handoff is unavailable while the bounded recovery phase is active"));
+    }
     return this.enqueueCommand((resolve, reject) => ({
       kind: "window_handoff",
       candidate,
@@ -574,11 +596,70 @@ export class RunController {
     return this.windowSwitch === "opened-windows-v1" && this.computer.listWindows !== undefined;
   }
 
+  private boundWindowRecoveryToolsAllowedByRun(): boolean {
+    const list = this.toolRegistry.getForAudience("list_windows", this.toolAudience);
+    const select = this.toolRegistry.getForAudience("switch_window", this.toolAudience);
+    return list !== undefined && list.category === "side" && this.enabledCategories.has(list.category) &&
+      select !== undefined && select.category === "computer" && this.enabledCategories.has(select.category) &&
+      (this.enabledToolNames === undefined || this.enabledToolNames.has(list.name) && this.enabledToolNames.has(select.name));
+  }
+
   private modelEnabledToolNames(): string[] {
+    if (this.isBoundWindowRecoveryActive()) {
+      const tool = this.recoveryStage === "list" ? "list_windows" : this.recoveryStage === "select" ? "switch_window" : undefined;
+      return tool === undefined || !this.isToolEnabled(tool) ? [] : [tool];
+    }
     const names = this.enabledToolNames === undefined
       ? this.toolRegistry.list().map((definition) => definition.name)
       : [...this.enabledToolNames];
     return names.filter((name) => this.isToolEnabled(name));
+  }
+
+  private isBoundWindowRecoveryActive(): boolean {
+    return this.recoveryStage === "list" || this.recoveryStage === "select";
+  }
+
+  private recoveryContextEvents(): readonly RuntimeEvent[] {
+    const relevant = this.events.filter((event) => event.sequence > this.recoveryStartSequence);
+    const listCallIds = new Set(relevant.flatMap((event) =>
+      event.type === "tool.call.received" && event.call.name === "list_windows" ? [event.call.id] : [],
+    ));
+    return relevant.filter((event) =>
+      (event.type === "tool.call.received" && event.call.name === "list_windows") ||
+      (event.type === "model.response.received" && event.turn.type === "tool_calls" &&
+        event.turn.calls.some((call) => listCallIds.has(call.id))) ||
+      ((event.type === "tool.call.completed" || event.type === "tool.call.failed") && listCallIds.has(event.result.callId)),
+    );
+  }
+
+  private recoveryBoundaryIsCurrent(): boolean {
+    if (this.snapshot.status === "running") {
+      return this.recoveryAttempted && this.recoverySourceActionId !== undefined && this.snapshot.pendingWindowHandoff === undefined;
+    }
+    return this.snapshot.status === "waiting_window" &&
+      this.snapshot.pendingWindowHandoff?.reasonCode === "bound_window_missing" &&
+      this.snapshot.pendingWindowHandoff.sourceActionId === this.recoverySourceActionId;
+  }
+
+  private async stopBoundWindowRecoveryAtManualBoundary(): Promise<void> {
+    this.recoveryStage = "waiting";
+    this.recoveryCandidateRefs.clear();
+    if (this.snapshot.status === "paused") {
+      // A correction can be drained in the same batch as pause. Defer the
+      // existing handoff event until resume because the reducer correctly
+      // rejects ordinary handoff events while paused.
+      this.pendingRecoveryBoundaryOnResume = true;
+      return;
+    }
+    if (this.snapshot.status === "running" && this.recoverySourceActionId !== undefined && this.snapshot.pendingWindowHandoff === undefined) {
+      await this.commitEvent({
+        type: "computer.window.handoff.requested",
+        sourceActionId: this.recoverySourceActionId,
+        reasonCode: "bound_window_missing",
+      });
+    }
+    this.pendingRecoveryBoundaryOnResume = false;
+    this.recoveryControlInFlight = false;
   }
 
   private requestBudget(): { remaining: number; limit: number } | undefined {
@@ -606,11 +687,15 @@ export class RunController {
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
       this.activeComputerSession = session;
+      if (this.recoverBoundWindowMissing && session.platform !== "darwin") {
+        throw new Error("bound-window recovery is supported only for Darwin computer sessions");
+      }
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 
       while (this.snapshot.status !== "finished") {
-        if (this.snapshot.status === "paused" || this.snapshot.status === "waiting_user" || this.snapshot.status === "waiting_approval" || this.snapshot.status === "waiting_window") {
+        if (this.snapshot.status === "paused" || this.snapshot.status === "waiting_user" || this.snapshot.status === "waiting_approval" ||
+            this.snapshot.status === "waiting_window" && !this.isBoundWindowRecoveryActive()) {
           await this.waitForControlCommand();
           session = this.activeComputerSession ?? session;
           if ((this.snapshot.status as string) === "running") {
@@ -619,7 +704,18 @@ export class RunController {
             // before consuming any deferred decision or tool turn.
             const controlEffects = await this.drainCommands();
             this.throwIfAborted();
-            await this.refreshAfterUserInput(session);
+            if (this.recoveryControlInFlight) {
+              if (controlEffects.correction || this.pendingRecoveryBoundaryOnResume) {
+                if (this.deferredRecoveryCall !== undefined) {
+                  const deferred = this.deferredRecoveryCall;
+                  this.deferredRecoveryCall = undefined;
+                  await this.rejectToolCall(deferred.id, "recovery selection was superseded by pause or user correction");
+                }
+                await this.stopBoundWindowRecoveryAtManualBoundary();
+              }
+            } else {
+              await this.refreshAfterUserInput(session);
+            }
             if (controlEffects.correction) {
               this.approvedPendingApproval = undefined;
             }
@@ -648,9 +744,10 @@ export class RunController {
           continue;
         }
         if (beforeTurn.correction) {
+          if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
           continue;
         }
-        await this.refreshAfterUserInput(session);
+        if (!this.isBoundWindowRecoveryActive()) await this.refreshAfterUserInput(session);
         this.throwIfAborted();
         if (this.actionBudgetExhausted && this.actionBudgetCloseTurnsRemaining <= 0) {
           await this.commitEvent({
@@ -698,20 +795,22 @@ export class RunController {
           const context = await this.contextCompiler.compile(
             {
               runId: this.runId,
-              goal,
-              recentEvents: this.events,
+              goal: this.isBoundWindowRecoveryActive()
+                ? `${goal}\n\nHarness recovery control: the previously bound window was closed after a completed action. Use only the offered list_windows or switch_window control. Do not repeat the completed action or perform ordinary GUI work until a fresh observation is supplied.`
+                : goal,
+              recentEvents: this.isBoundWindowRecoveryActive() ? this.recoveryContextEvents() : this.events,
               ...(requestBudget === undefined ? {} : { requestBudget }),
-              enabledCategories: [...this.enabledCategories],
+              enabledCategories: this.isBoundWindowRecoveryActive() ? ["side", "computer"] : [...this.enabledCategories],
               enabledToolNames: this.modelEnabledToolNames(),
-              ...(this.planningEnabled ? { plan: this.snapshot.plan } : {}),
-              ...(this.snapshot.executionSegment === undefined ? {} : { executionSegment: this.snapshot.executionSegment }),
-              ...(this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
-              ...(this.snapshot.computerSession === undefined ? {} : { computerSession: this.snapshot.computerSession }),
-              ...(windowSwitchState === undefined ? {} : { windowSwitchState }),
-              features: this.features,
-              ...(this.assistantPreferences === undefined ? {} : { assistantPreferences: this.assistantPreferences }),
-              ...(this.monitorPendingGuidance === undefined ? {} : { monitorGuidance: this.monitorPendingGuidance }),
-               ...(this.latestObservation === undefined ? {} : { latestObservation: this.observationForContext(this.latestObservation) }),
+              ...(this.isBoundWindowRecoveryActive() ? {} : this.planningEnabled ? { plan: this.snapshot.plan } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && this.snapshot.executionSegment !== undefined ? { executionSegment: this.snapshot.executionSegment } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && this.snapshot.computerSession !== undefined ? { computerSession: this.snapshot.computerSession } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && windowSwitchState !== undefined ? { windowSwitchState } : {}),
+              features: this.isBoundWindowRecoveryActive() ? { planning: "off", memory: "off", batching: "off" } : this.features,
+              ...(!this.isBoundWindowRecoveryActive() && this.assistantPreferences !== undefined ? { assistantPreferences: this.assistantPreferences } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && this.monitorPendingGuidance !== undefined ? { monitorGuidance: this.monitorPendingGuidance } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && this.latestObservation !== undefined ? { latestObservation: this.observationForContext(this.latestObservation) } : {}),
             },
             this.abortController.signal,
           );
@@ -723,7 +822,10 @@ export class RunController {
           // observation if needed, and compile again from the new facts.
           const afterCompile = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused" || afterCompile.correction) {
-            if (afterCompile.correction) await this.refreshAfterUserInput(session);
+            if (afterCompile.correction) {
+              if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
+              else await this.refreshAfterUserInput(session);
+            }
             continue;
           }
           let requestContext = context;
@@ -746,7 +848,10 @@ export class RunController {
             // work.  Re-check the command barrier before any network attempt.
             const afterPrepare = await this.drainCommands();
             if ((this.snapshot.status as string) === "paused" || afterPrepare.correction) {
-              if (afterPrepare.correction) await this.refreshAfterUserInput(session);
+              if (afterPrepare.correction) {
+                if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
+                else await this.refreshAfterUserInput(session);
+              }
               decisionInvalidated = true;
             }
           }
@@ -772,6 +877,14 @@ export class RunController {
             }
             const attempt = retryCount + 1;
             const requestId = this.idFactory.eventId();
+            if (this.isBoundWindowRecoveryActive()) {
+              if (this.recoveryRequestCount >= 2) {
+                await this.stopBoundWindowRecoveryAtManualBoundary();
+                decisionInvalidated = true;
+                break;
+              }
+              this.recoveryRequestCount += 1;
+            }
             const providerRequestContext = { runId: this.runId, requestId, decisionId, attempt };
             requestIdForResponse = requestId;
             const preparedRequest = prepared === undefined ? undefined : {
@@ -802,7 +915,7 @@ export class RunController {
               const nextRetryCount = retryCount + 1;
               const retryDelayMs = providerRetryDelayMs(nextRetryCount);
               const retryWindowRemaining = MAX_PROVIDER_RETRY_WINDOW_MS - (Date.now() - retryWindowStartedAt);
-              const retry = !this.isAborted()
+              const retry = !this.isBoundWindowRecoveryActive() && !this.isAborted()
                 && details.retryable === true
                 && retryCount < MAX_PROVIDER_RETRIES
                 && retryWindowRemaining > retryDelayMs + this.providerAttemptReserveMs;
@@ -816,6 +929,11 @@ export class RunController {
                 ...details,
               });
               if (!retry) {
+                if (this.isBoundWindowRecoveryActive() && !this.isAborted()) {
+                  await this.stopBoundWindowRecoveryAtManualBoundary();
+                  decisionInvalidated = true;
+                  break;
+                }
                 outcome = this.snapshot.unresolvedActionId !== undefined ? "outcome_unknown" : this.isAborted() ? "cancelled" : "failed";
                 if (outcome === "failed") providerFailureSummary = this.providerFailureProgressSummary();
                 providerFailed = true;
@@ -825,7 +943,10 @@ export class RunController {
               await waitBeforeProviderRetry(this.abortController.signal, retryCount);
               const retryEffects = await this.drainCommands();
               if ((this.snapshot.status as string) === "paused" || retryEffects.correction) {
-                if (retryEffects.correction) await this.refreshAfterUserInput(session);
+                if (retryEffects.correction) {
+                  if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
+                  else await this.refreshAfterUserInput(session);
+                }
                 decisionInvalidated = true;
                 break;
               }
@@ -837,7 +958,10 @@ export class RunController {
                   localRequestPreparation = false;
                   const afterRetryPrepare = await this.drainCommands();
                   if ((this.snapshot.status as string) === "paused" || afterRetryPrepare.correction) {
-                    if (afterRetryPrepare.correction) await this.refreshAfterUserInput(session);
+                    if (afterRetryPrepare.correction) {
+                      if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
+                      else await this.refreshAfterUserInput(session);
+                    }
                     decisionInvalidated = true;
                     break;
                   }
@@ -868,10 +992,12 @@ export class RunController {
             // The turn is stashed only after that drain, so carry the batch
             // marker forward instead of allowing the stale turn to execute
             // after a later resume.
+            if (afterResponse.correction && this.recoveryControlInFlight) await this.stopBoundWindowRecoveryAtManualBoundary();
             this.pendingModelTurn = { turn, invalidated: afterResponse.correction };
             continue;
           }
           if (afterResponse.correction) {
+            if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
             if (turn.type === "tool_calls") {
               await this.rejectModelTurn(turn, "superseded by user correction");
             }
@@ -880,6 +1006,15 @@ export class RunController {
           }
         }
         if (turn.type === "finish") {
+          if (this.isBoundWindowRecoveryActive()) {
+            if (turn.reportedStatus === "failure") {
+              outcome = await this.commitRunFinished({ outcome: "failed", summary: turn.summary, reportedStatus: "failure" });
+            } else {
+              await this.stopBoundWindowRecoveryAtManualBoundary();
+            }
+            if (turn.reportedStatus !== "failure") continue;
+            break;
+          }
           const beforeFinish = await this.drainCommands();
           if ((this.snapshot.status as string) === "paused") {
             // Keep the same correction marker for a finish turn as for a
@@ -926,6 +1061,10 @@ export class RunController {
           break;
         }
         if (turn.type === "user_input_required") {
+          if (this.isBoundWindowRecoveryActive()) {
+            await this.stopBoundWindowRecoveryAtManualBoundary();
+            continue;
+          }
           if (this.finalRequestConsumed()) {
             outcome = await this.commitRunFinished({ outcome: "budget_exhausted" });
             break;
@@ -1110,7 +1249,10 @@ export class RunController {
       this.throwIfAborted();
       const command = await this.commandInbox.take(this.abortController.signal);
       try {
-        await this.applyCommand(command);
+        const effects = await this.applyCommand(command);
+        if (effects.correction && this.recoveryControlInFlight) {
+          await this.stopBoundWindowRecoveryAtManualBoundary();
+        }
         command.resolve();
       } catch (error) {
         command.reject(error);
@@ -1289,6 +1431,9 @@ export class RunController {
         await this.commitEvent({ type: "run.resumed" });
         return { correction: false };
       case "window_handoff":
+        if (this.recoveryControlInFlight) {
+          throw new Error("manual window handoff is unavailable while the bounded recovery phase is active");
+        }
         if (this.snapshot.status !== "waiting_window" || this.activeComputerSession === undefined || this.computer.handoffWindow === undefined) {
           throw new Error("no window handoff is awaiting confirmation");
         }
@@ -1317,6 +1462,9 @@ export class RunController {
           return { correction: true };
         }
       case "ignore_new_window":
+        if (this.recoveryControlInFlight) {
+          throw new Error("manual window decisions are unavailable while the bounded recovery phase is active");
+        }
         if (this.snapshot.status !== "waiting_window" || this.snapshot.pendingWindowHandoff?.reasonCode !== "new_window_detected" ||
             this.activeComputerSession === undefined) {
           throw new Error("only a proactively detected window may be ignored; foreground mismatch requires choosing a target or aborting");
@@ -1538,6 +1686,11 @@ export class RunController {
   }
 
   private isToolEnabled(name: string): boolean {
+    if (this.isBoundWindowRecoveryActive()) {
+      const expected = this.recoveryStage === "list" ? "list_windows" : this.recoveryStage === "select" ? "switch_window" : undefined;
+      return name === expected && this.windowSwitchAvailable() &&
+        (this.enabledToolNames === undefined || this.enabledToolNames.has(name));
+    }
     if ((name === "list_windows" || name === "switch_window") && !this.windowSwitchAvailable()) return false;
     // Keep the Run's configured upper bound intact across window switches;
     // only the current session and observed Surface determine availability.
@@ -1784,6 +1937,8 @@ export class RunController {
       ids.add(call.id);
     }
 
+    if (this.isBoundWindowRecoveryActive()) return this.processBoundWindowRecoveryCalls(session, calls);
+
     const preflight: PreflightEntry[] = [];
     for (const call of calls) {
       const definition = this.toolRegistry.getForAudience(call.name, this.toolAudience);
@@ -1991,6 +2146,162 @@ export class RunController {
     });
   }
 
+  private async processBoundWindowRecoveryCalls(session: ComputerSession, calls: readonly ToolCall[]): Promise<CommandEffects> {
+    const expectedName = this.recoveryStage === "list" ? "list_windows" : this.recoveryStage === "select" ? "switch_window" : undefined;
+    for (const call of calls) {
+      this.callStates.set(call.id, "received");
+      await this.commitEvent({ type: "tool.call.received", call });
+    }
+    if (calls.length !== 1 || expectedName === undefined || calls[0]?.name !== expectedName) {
+      for (const call of calls) await this.rejectToolCall(call.id, "bound-window recovery permits only the currently offered list_windows or switch_window call, by itself");
+      await this.stopBoundWindowRecoveryAtManualBoundary();
+      return { correction: false };
+    }
+    const call = calls[0]!;
+    if (!this.recoveryBoundaryIsCurrent()) {
+      await this.rejectToolCall(call.id, "the completed-close recovery boundary is no longer current");
+      await this.stopBoundWindowRecoveryAtManualBoundary();
+      return { correction: false };
+    }
+    const definition = this.toolRegistry.getForAudience(call.name, this.toolAudience);
+    if (definition === undefined || definition.name !== expectedName || !this.enabledCategories.has(definition.category) || !this.isToolEnabled(definition.name)) {
+      await this.rejectToolCall(call.id, "the existing window recovery tool is unavailable");
+      await this.stopBoundWindowRecoveryAtManualBoundary();
+      return { correction: false };
+    }
+    try {
+      definition.validate(call.arguments);
+    } catch (error) {
+      await this.rejectToolCall(call.id, `invalid recovery tool arguments: ${errorMessage(error)}`);
+      await this.stopBoundWindowRecoveryAtManualBoundary();
+      return { correction: false };
+    }
+    const policy = await this.policy.evaluateToolCall({ call, tool: definition, snapshot: this.snapshot });
+    if (!this.recoveryBoundaryIsCurrent()) {
+      await this.rejectToolCall(call.id, "the completed-close recovery boundary changed while the tool was being checked");
+      await this.stopBoundWindowRecoveryAtManualBoundary();
+      return { correction: false };
+    }
+    if (policy.decision !== "allow") {
+      await this.rejectToolCall(call.id, policy.decision === "deny" ? policy.reason : `recovery handoff requires unavailable approval: ${policy.reason}`);
+      await this.stopBoundWindowRecoveryAtManualBoundary();
+      return { correction: false };
+    }
+    if (call.name === "switch_window") {
+      const actionBudget = this.policy.checkActionBudget(this.snapshot);
+      if (!actionBudget.allowed) {
+        await this.rejectToolCall(call.id, actionBudget.reason ?? "computer action budget exhausted");
+        await this.stopBoundWindowRecoveryAtManualBoundary();
+        return { correction: false };
+      }
+    }
+    let targetTransitionReturned = false;
+    let callTerminalCommitted = false;
+    try {
+      if (call.name === "list_windows") {
+        if (this.computer.listWindowHandoffCandidates === undefined) throw new Error("window recovery discovery is unavailable");
+        if (definition.category !== "side" || !("execute" in definition)) throw new Error("list_windows is not registered as a side tool");
+        const candidates = await this.computer.listWindowHandoffCandidates(session, this.abortController.signal);
+        if (!this.recoveryBoundaryIsCurrent()) {
+          await this.rejectToolCall(call.id, "the completed-close recovery boundary changed during window discovery");
+          await this.stopBoundWindowRecoveryAtManualBoundary();
+          return { correction: false };
+        }
+        if (candidates.length > 1) throw new Error("pinned recovery identity returned multiple window candidates");
+        this.recoveryCandidateRefs.clear();
+        const options: ComputerWindowOption[] = candidates.map((candidate) => {
+          const windowRef = `recovery-${this.idFactory.eventId()}`;
+          this.recoveryCandidateRefs.set(windowRef, candidate);
+          return {
+            windowRef,
+            ...(candidate.appName === undefined ? {} : { appName: candidate.appName }),
+            ...(candidate.title === undefined ? {} : { title: candidate.title }),
+            isCurrent: false,
+          };
+        });
+        const output = await definition.execute(call.arguments, {
+          runId: this.runId,
+          session,
+          signal: this.abortController.signal,
+          listWindows: async () => ({ options, truncated: false, omittedCount: 0 }),
+        });
+        await this.commitEvent({ type: "tool.call.completed", result: { callId: call.id, status: "completed", output } });
+        this.callStates.set(call.id, "completed");
+        callTerminalCommitted = true;
+        this.recoveryStage = options.length === 0 ? "waiting" : "select";
+        if (options.length === 0) await this.stopBoundWindowRecoveryAtManualBoundary();
+        return { correction: false };
+      }
+
+      const args = call.arguments;
+      const windowRef = typeof args === "object" && args !== null && !Array.isArray(args) && typeof args.windowRef === "string"
+        ? args.windowRef
+        : undefined;
+      const candidate = windowRef === undefined ? undefined : this.recoveryCandidateRefs.get(windowRef);
+      if (candidate === undefined || this.computer.handoffWindow === undefined) throw new Error("switch_window requires a current recovery windowRef from list_windows");
+      if (!this.recoveryBoundaryIsCurrent()) {
+        await this.rejectToolCall(call.id, "the completed-close recovery boundary changed before window selection");
+        await this.stopBoundWindowRecoveryAtManualBoundary();
+        return { correction: false };
+      }
+      // Policy evaluation and model generation are asynchronous. Drain any
+      // pause/correction that arrived during them immediately before the
+      // adapter's potentially activating handoff operation.
+      const controlEffects = await this.drainCommands();
+      this.throwIfAborted();
+      if (this.snapshot.status === "paused") {
+        this.deferredRecoveryCall = call;
+        await this.stopBoundWindowRecoveryAtManualBoundary();
+        return { correction: false };
+      }
+      if (controlEffects.correction || !this.recoveryBoundaryIsCurrent()) {
+        await this.rejectToolCall(call.id, "recovery selection was superseded before window activation");
+        await this.stopBoundWindowRecoveryAtManualBoundary();
+        return { correction: false };
+      }
+      const sessionAfter = await this.computer.handoffWindow(session, candidate, this.abortController.signal);
+      targetTransitionReturned = true;
+      this.resetAfterTargetTransition(sessionAfter, true, true, {
+        ...(candidate.appName === undefined ? {} : { appName: candidate.appName }),
+        ...(candidate.title === undefined ? {} : { title: candidate.title }),
+      });
+      await this.commitEvent({ type: "tool.call.completed", result: { callId: call.id, status: "completed", output: { switched: true } } });
+      this.callStates.set(call.id, "completed");
+      callTerminalCommitted = true;
+      // The private recovery phase kept the reducer in `running`. Once the
+      // exact adapter transition has succeeded, commit the ordinary handoff
+      // pair so the existing reducer, audit trail, and observation lifecycle
+      // remain authoritative.
+      await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: this.recoverySourceActionId!, reasonCode: "bound_window_missing" });
+      try {
+        await this.commitEvent({ type: "computer.window.handoff.completed", target: { pid: candidate.pid, windowId: candidate.windowId }, session: sessionAfter });
+      } catch (error) {
+        this.abortController.abort(new Error("recovery window handoff could not be recorded", { cause: error }));
+        throw error;
+      }
+      this.recoveryStage = undefined;
+      this.recoverySourceActionId = undefined;
+      this.recoveryCandidateRefs.clear();
+      await this.observeAndCommit(sessionAfter, { requireSessionViewportMatch: true });
+      this.recoveryControlInFlight = false;
+      this.recoverySourceActionId = undefined;
+      return { correction: true };
+    } catch (error) {
+      if (targetTransitionReturned) {
+        await this.commitEvent({ type: "runtime.error", category: "window_recovery_failed", message: errorMessage(error) });
+        await this.commitRunFinished({ outcome: "failed" });
+        return { correction: false };
+      }
+      if (!callTerminalCommitted) {
+        const result: ToolResult = { callId: call.id, status: "failed", error: { code: "WINDOW_RECOVERY_FAILED", message: errorMessage(error) } };
+        await this.commitEvent({ type: "tool.call.failed", result });
+        this.callStates.set(call.id, "failed");
+      }
+      await this.stopBoundWindowRecoveryAtManualBoundary();
+      return { correction: false };
+    }
+  }
+
   private async executePendingEntries(pendingTurn: PendingToolTurn): Promise<CommandEffects> {
     for (let index = pendingTurn.nextIndex; index < pendingTurn.entries.length; index += 1) {
       const entry = pendingTurn.entries[index];
@@ -2026,6 +2337,11 @@ export class RunController {
           entry.preparedAction,
           () => this.rejectPendingEntries(pendingTurn.entries, index + 1, "window handoff requested; remaining ToolCalls were not executed"),
         );
+        // A completed action that opened the private recovery phase is a hard
+        // source-turn boundary even though the reducer remains `running`.
+        // Its suffix was rejected by the handoff callback; do not flush old
+        // target monitor help or continue dispatching remaining entries.
+        if (this.recoveryControlInFlight) return { correction: false };
       } else if (entry.definition.category === "control") {
         await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
@@ -2492,7 +2808,19 @@ export class RunController {
         this.throwIfAborted();
         if (error instanceof BoundWindowMissingError && error.sourceActionId === action.actionId) {
           await beforeWindowHandoff?.();
-          await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "bound_window_missing" });
+          if (this.recoverBoundWindowMissing && !this.recoveryAttempted && this.windowSwitchAvailable() &&
+              this.boundWindowRecoveryToolsAllowedByRun() &&
+              this.computer.listWindowHandoffCandidates !== undefined && this.computer.handoffWindow !== undefined) {
+            this.recoveryAttempted = true;
+            this.recoveryControlInFlight = true;
+            this.recoveryStage = "list";
+            this.recoverySourceActionId = action.actionId;
+            this.recoveryRequestCount = 0;
+            this.recoveryCandidateRefs.clear();
+            this.recoveryStartSequence = this.events.at(-1)?.sequence ?? 0;
+          } else {
+            await this.commitEvent({ type: "computer.window.handoff.requested", sourceActionId: action.actionId, reasonCode: "bound_window_missing" });
+          }
           return;
         }
         const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;

@@ -87,6 +87,8 @@ export interface ResolvedRunConfig {
   windowHandoff?: "off" | "confirm-v1";
   /** Model-selected switching among already-open windows; off by default. */
   windowSwitch?: "off" | "opened-windows-v1";
+  /** Narrow Darwin recovery target for a completed close followed by a missing bound window. */
+  recoverBoundWindowMissing?: boolean;
   riskModel: AppRuntimeRiskModel;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;

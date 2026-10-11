@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRun } from "@computer-harness/app-runtime";
+import type { Computer } from "@computer-harness/runtime";
 import { parseArgs, toResolvedRunConfig } from "./index.js";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -17,6 +22,110 @@ describe("CLI window-switch configuration", () => {
     expect(optedInConfig.windowSwitch).toBe("opened-windows-v1");
     expect(optedInConfig.computer).not.toHaveProperty("windowTarget");
     expect(optedInConfig.computer).not.toHaveProperty("managedBrowserUrl");
+  });
+
+  it("passes the exact recovery target pair through the explicit native recovery opt-in", () => {
+    const baseArgs = [
+      "--goal", "Inspect the task after its window closes",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      "--cua-recovery-window-pid", "43", "--cua-recovery-window-id", "85",
+    ];
+
+    const options = parseArgs(baseArgs);
+    const config = toResolvedRunConfig(options, "Inspect the task after its window closes");
+
+    expect(options.recoverBoundWindowMissing).toBe(true);
+    expect(options.cuaWindowTarget).toEqual({ pid: 42, windowId: 84 });
+    expect(options.cuaRecoveryWindowTarget).toEqual({ pid: 43, windowId: 85 });
+    expect(config.windowSwitch).toBe("opened-windows-v1");
+    expect(config.computer).toMatchObject({
+      kind: "cua",
+      recoverBoundWindowMissing: true,
+      windowTarget: { pid: 42, windowId: 84 },
+      recoveryWindowTarget: { pid: 43, windowId: 85 },
+      windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 43, windowId: 85 }],
+    });
+  });
+
+  it("assembles the real CLI recovery config with the effective native window-switch setting", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-cli-recovery-assembly-"));
+    const options = parseArgs([
+      "--goal", "Inspect the task after its window closes",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--output", outputDir,
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      "--cua-recovery-window-pid", "43", "--cua-recovery-window-id", "85",
+    ]);
+    const config = toResolvedRunConfig(options, options.goal!);
+    expect(config.computer).not.toHaveProperty("windowSwitch");
+
+    let effectiveComputerConfig: unknown;
+    const computer: Computer = {
+      async open() { throw new Error("assembly test must not open a computer session"); },
+      async observe() { throw new Error("assembly test must not observe"); },
+      async execute() { throw new Error("assembly test must not execute"); },
+      async close() {},
+      async listWindows() { return { options: [], truncated: false, omittedCount: 0 }; },
+    };
+    const provider = {
+      id: "fixture-provider",
+      async generate() { throw new Error("assembly test must not generate a model turn"); },
+    };
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    if (platformDescriptor === undefined || platformDescriptor.configurable !== true) {
+      await rm(outputDir, { recursive: true, force: true });
+      throw new Error("test runtime does not allow restoring a temporary process.platform override");
+    }
+
+    try {
+      Object.defineProperty(process, "platform", { ...platformDescriptor, value: "darwin" });
+      const handle = await createRun(config, {
+        createProvider: async () => provider,
+        createComputer: async ({ config: computerConfig }) => {
+          effectiveComputerConfig = computerConfig;
+          return computer;
+        },
+      });
+      expect(effectiveComputerConfig).toMatchObject({
+        kind: "cua",
+        windowSwitch: "opened-windows-v1",
+        windowDeliveryMode: "foreground",
+        recoverBoundWindowMissing: true,
+        windowTarget: { pid: 42, windowId: 84 },
+        recoveryWindowTarget: { pid: 43, windowId: 85 },
+        windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 43, windowId: 85 }],
+      });
+      await handle.close();
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+      expect(process.platform).toBe(platformDescriptor.value);
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["missing recovery target", ["--cua-recovery-window-pid", "43"]],
+    ["duplicate exact target", ["--cua-recovery-window-pid", "42", "--cua-recovery-window-id", "84"]],
+  ] as const)("rejects recovery configuration with a %s", (_label, recoveryArgs) => {
+    expect(() => parseArgs([
+      "--goal", "Inspect the task",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      ...recoveryArgs,
+    ])).toThrow(/recovery|distinct|provided together/u);
   });
 
   it("projects standalone persistent-profile settings locally without a Host API dependency", () => {

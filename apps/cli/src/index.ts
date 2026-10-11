@@ -30,6 +30,8 @@ export interface CliOptions {
   computer: "cua" | "osworld";
   cuaSocket?: string;
   cuaWindowTarget?: { pid: number; windowId: number };
+  cuaRecoveryWindowTarget?: { pid: number; windowId: number };
+  recoverBoundWindowMissing: boolean;
   osworldBridge?: string;
   output: string;
   maxSteps: number;
@@ -80,6 +82,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   const goal = value("--goal");
   const tui = argv.includes("--tui");
   const windowSwitch = argv.includes("--window-switch");
+  const recoverBoundWindowMissing = argv.includes("--recover-bound-window-missing");
   const modelValue = value("--model");
   const model = resolveCliModel(modelValue, doctor || prepareManagedBrowserProfileValue) as ModelName;
   const monitorValue = value("--monitor") ?? "off";
@@ -112,6 +115,25 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   const cuaWindowPidValue = value("--cua-window-pid");
   const cuaWindowIdValue = value("--cua-window-id");
   const cuaWindowTarget = resolveCuaWindowTargetOptions({ pid: cuaWindowPidValue, windowId: cuaWindowIdValue, computer, doctor });
+  const cuaRecoveryWindowTarget = resolveCuaWindowTargetOptions({
+    pid: value("--cua-recovery-window-pid"),
+    windowId: value("--cua-recovery-window-id"),
+    computer,
+    doctor,
+  });
+  if (recoverBoundWindowMissing && (computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch)) {
+    throw new Error("--recover-bound-window-missing requires CUA, both exact window targets, and --window-switch");
+  }
+  if (recoverBoundWindowMissing && (tui || groundingValue === "dom-catalog-v1" || groundingValue === "hybrid-catalog-v1" || value("--managed-browser-url") !== undefined)) {
+    throw new Error("--recover-bound-window-missing is available only for a native Darwin CUA window Run");
+  }
+  if (!recoverBoundWindowMissing && cuaRecoveryWindowTarget !== undefined) {
+    throw new Error("--cua-recovery-window-pid/--cua-recovery-window-id require --recover-bound-window-missing");
+  }
+  if (cuaWindowTarget !== undefined && cuaRecoveryWindowTarget !== undefined &&
+      cuaWindowTarget.pid === cuaRecoveryWindowTarget.pid && cuaWindowTarget.windowId === cuaRecoveryWindowTarget.windowId) {
+    throw new Error("recovery and primary CUA targets must be distinct exact windows");
+  }
   if (groundingValue === "uia-catalog-v1" && (computer !== "cua" || cuaWindowTarget === undefined)) {
     throw new Error("--grounding uia-catalog-v1 requires --computer cua and an explicit --cua-window-pid/--cua-window-id target");
   }
@@ -220,6 +242,8 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     computer,
     ...(cuaSocket === undefined ? {} : { cuaSocket }),
     ...(cuaWindowTarget === undefined ? {} : { cuaWindowTarget }),
+    ...(cuaRecoveryWindowTarget === undefined ? {} : { cuaRecoveryWindowTarget }),
+    recoverBoundWindowMissing,
     ...(osworldBridge === undefined ? {} : { osworldBridge }),
     output,
     maxSteps,
@@ -472,6 +496,11 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
+          ...(options.cuaRecoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: options.cuaRecoveryWindowTarget }),
+          ...(options.recoverBoundWindowMissing && options.cuaWindowTarget !== undefined && options.cuaRecoveryWindowTarget !== undefined
+            ? { windowSwitchAllowedTargets: [options.cuaWindowTarget, options.cuaRecoveryWindowTarget] }
+            : {}),
+          ...(options.recoverBoundWindowMissing ? { recoverBoundWindowMissing: true } : {}),
           grounding: options.grounding === "auto" ? "off" : options.grounding,
           ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
           managedBrowserProfileMode: options.managedBrowserProfileMode,
@@ -501,7 +530,9 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
     riskTimeoutMs: options.riskTimeoutMs,
     cleanupDeadlineMs: options.cleanupDeadlineMs,
     monitor: options.monitor,
+    windowHandoff: options.recoverBoundWindowMissing || options.windowSwitch ? "confirm-v1" : "off",
     windowSwitch: options.windowSwitch ? "opened-windows-v1" : "off",
+    ...(options.recoverBoundWindowMissing ? { recoverBoundWindowMissing: true } : {}),
     grounding: options.grounding === "auto" ? "off" : options.grounding,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
