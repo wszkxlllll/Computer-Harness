@@ -106,7 +106,7 @@ export type TransientChildEvidence =
       readonly rootRole: "menu" | "popup" | "dialog";
       readonly rootSemanticsVerified: true;
       readonly frontmostEvidence: "exact_foreground" | "unique_owned_stack";
-      readonly admissionSource?: "owned_transient_window_root_proof" | "win32_relationship_probe";
+      readonly admissionSource?: "owned_transient_window_root_proof" | "win32_relationship_probe" | "macos_attached_sheet_proof";
     } | {
       /** An exact Win32 owner stack can prove a child without assigning a UIA root role. */
       readonly kind: "native_window";
@@ -730,7 +730,7 @@ function sameChildEvidence(
           evidence.frontmostEvidence === "unique_owned_stack" && evidence.admissionSource === "win32_relationship_probe"
         : evidence.frontmostEvidence === "unique_owned_stack" ||
           evidence.frontmostEvidence === "exact_foreground" && evidence.admissionSource === "win32_relationship_probe");
-    const relationshipProof = relationOnly && evidence.relationshipProof === evidence.frontmostEvidence &&
+  const relationshipProof = relationOnly && evidence.relationshipProof === evidence.frontmostEvidence &&
       evidence.admissionSource === "win32_relationship_probe";
     return parentWindow !== undefined && sameNativeWindow(evidence.owner, parentWindow) &&
       sameNativeWindow(evidence.nativeWindow, child.nativeWindow) && rootRole === child.rootRole &&

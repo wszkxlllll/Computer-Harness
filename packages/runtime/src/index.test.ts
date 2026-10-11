@@ -3509,7 +3509,7 @@ describe("RunController S2-4 failure boundaries", () => {
     }
   });
 
-  it.each(["parent", "owned-sibling"] as const)(
+  it.each(["parent", "owned-sibling", "macos-sheet"] as const)(
     "continues from a partial transient receipt only after its %s recovery Surface is freshly observed",
     async (recoveryRoute) => {
     const childSurface: SurfaceRef = {
@@ -3517,21 +3517,21 @@ describe("RunController S2-4 failure boundaries", () => {
       generation: 1,
       kind: "native_window",
       parentSurfaceId: "recovery-parent" as SurfaceId,
-      admissionSource: "win32_relationship_probe",
+      admissionSource: recoveryRoute === "macos-sheet" ? "macos_attached_sheet_proof" : "win32_relationship_probe",
     };
     const parentSurface: SurfaceRef = {
       surfaceId: "recovery-parent" as SurfaceId,
       generation: 3,
       kind: "native_window",
       parentSurfaceId: "recovery-grandparent" as SurfaceId,
-      admissionSource: "win32_relationship_probe",
+      admissionSource: recoveryRoute === "macos-sheet" ? "macos_attached_sheet_proof" : "win32_relationship_probe",
     };
     const siblingSurface: SurfaceRef = {
       surfaceId: "recovery-sibling" as SurfaceId,
       generation: 1,
       kind: "native_window",
       parentSurfaceId: parentSurface.surfaceId,
-      admissionSource: "win32_relationship_probe",
+      admissionSource: recoveryRoute === "macos-sheet" ? "macos_attached_sheet_proof" : "win32_relationship_probe",
     };
     const recoverySurface = recoveryRoute === "parent" ? parentSurface : siblingSurface;
     class RecoverableChildComputer extends FakeComputer {
@@ -3642,7 +3642,7 @@ describe("RunController S2-4 failure boundaries", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it.each(["extra-ref-field", "wait-action", "sibling-wrong-parent", "sibling-same-surface", "sibling-untrusted-source", "sibling-untrusted-old-source"] as const)(
+  it.each(["extra-ref-field", "wait-action", "sibling-wrong-parent", "sibling-same-surface", "sibling-untrusted-source", "sibling-untrusted-old-source", "macos-sheet-wrong-kind"] as const)(
     "rejects invalid safe recovery evidence for %s",
     async (scenario) => {
     const childSurface: SurfaceRef = {
@@ -3650,7 +3650,9 @@ describe("RunController S2-4 failure boundaries", () => {
       generation: 1,
       kind: "native_window",
       parentSurfaceId: `invalid-recovery-parent-${scenario}` as SurfaceId,
-      ...(scenario === "sibling-untrusted-old-source" ? {} : { admissionSource: "win32_relationship_probe" as const }),
+      ...(scenario === "sibling-untrusted-old-source" ? {} : scenario === "macos-sheet-wrong-kind"
+        ? { admissionSource: "macos_attached_sheet_proof" as const }
+        : { admissionSource: "win32_relationship_probe" as const }),
     };
     const parentSurfaceId = childSurface.parentSurfaceId;
     if (parentSurfaceId === undefined) throw new Error("expected the recovery fixture child to have a parent Surface");
@@ -3669,13 +3671,15 @@ describe("RunController S2-4 failure boundaries", () => {
       public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
         signal.throwIfAborted();
         this.calls.push(`execute:${action.kind}`);
-        const isSiblingRecovery = scenario.startsWith("sibling-");
+        const isSiblingRecovery = scenario.startsWith("sibling-") || scenario === "macos-sheet-wrong-kind";
         const siblingSurface: SurfaceRef = {
           surfaceId: scenario === "sibling-same-surface" ? childSurface.surfaceId : `invalid-sibling-${scenario}` as SurfaceId,
           generation: 1,
-          kind: "native_window",
+          kind: scenario === "macos-sheet-wrong-kind" ? "browser_tab" : "native_window",
           parentSurfaceId: scenario === "sibling-wrong-parent" ? `wrong-parent-${scenario}` as SurfaceId : requiredParentSurfaceId,
-          ...(scenario === "sibling-untrusted-source" ? {} : { admissionSource: "win32_relationship_probe" as const }),
+          ...(scenario === "sibling-untrusted-source" ? {} : scenario === "macos-sheet-wrong-kind"
+            ? { admissionSource: "macos_attached_sheet_proof" as const }
+            : { admissionSource: "win32_relationship_probe" as const }),
         };
         const surfaceRef = scenario === "extra-ref-field"
           ? { ...parentSurface, extra: "unexpected" }

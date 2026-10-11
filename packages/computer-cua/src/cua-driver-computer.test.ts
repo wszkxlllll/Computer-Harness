@@ -243,6 +243,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let abortAfterCapture: AbortController | undefined;
   let listWindowsCallCount = 0;
   let windowInventoryComplete = true;
+  let windowInventoryTruncated = false;
   let missingAfterListCall: number | undefined;
   let failedListWindowsCall: number | undefined;
   let extraWindow: FixtureWindow | undefined;
@@ -320,7 +321,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         }
         if (extraWindowOnListCall?.call === listWindowsCallCount) extraWindow = extraWindowOnListCall.value;
         const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
-        return result({ structuredJson: JSON.stringify({ complete: windowInventoryComplete, windows: unavailable ? [] : [
+        return result({ structuredJson: JSON.stringify({ complete: windowInventoryComplete, truncated: windowInventoryTruncated, windows: unavailable ? [] : [
           ...(omitBoundWindow ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds, z_index: 1, is_on_screen: true }]),
           ...(extraWindow === undefined ? [] : [{
             pid: extraWindow.pid,
@@ -371,10 +372,18 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         ] }) });
       }
       if (name === "get_window_state") {
-        if (input.include_screenshot === true && fallbackRefusal === undefined) return result({
-          images: fallbackImages ?? (input.max_depth === 1 && input.max_elements === 1 ? [{ mimeType: "image/png", dataBase64: pngWithDimensions(image.width, image.height) }] : []),
-          structuredJson: JSON.stringify({ pid: target.pid, window_id: target.windowId, window_bounds: bounds, screenshot_frame_valid: true, screenshot_scale: 2, screenshot_width: image.width, screenshot_height: image.height, screenshot_mime_type: "image/png" }),
-        });
+        if (input.include_screenshot === true && fallbackRefusal === undefined) {
+          const requestedWindowId = typeof input.window_id === "number" ? input.window_id : target.windowId;
+          const requestedWindow = requestedWindowId === target.windowId ? undefined :
+            extraWindow?.windowId === requestedWindowId ? extraWindow :
+              secondExtraWindow?.windowId === requestedWindowId ? secondExtraWindow : undefined;
+          const requestedBounds = requestedWindow?.bounds ?? bounds;
+          const requestedImage = windowImageSizes.get(requestedWindowId) ?? image;
+          return result({
+            images: fallbackImages ?? (input.max_depth === 1 && input.max_elements === 1 ? [{ mimeType: "image/png", dataBase64: pngWithDimensions(requestedImage.width, requestedImage.height) }] : []),
+            structuredJson: JSON.stringify({ pid: target.pid, window_id: requestedWindowId, window_bounds: requestedBounds, screenshot_frame_valid: true, screenshot_scale: 2, screenshot_width: requestedImage.width, screenshot_height: requestedImage.height, screenshot_mime_type: "image/png" }),
+          });
+        }
         if (abortGrounding) throw Object.assign(new Error("grounding aborted"), { name: "AbortError" });
         if (fallbackRefusal !== undefined) {
           return result({
@@ -454,6 +463,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     abortAfterNextCapture(controller: AbortController) { abortAfterCapture = controller; },
     setMissingAfterListCall(value: number | undefined) { missingAfterListCall = value; },
     setWindowInventoryComplete(value: boolean) { windowInventoryComplete = value; },
+    setWindowInventoryTruncated(value: boolean) { windowInventoryTruncated = value; },
     setExtraWindow(value: typeof extraWindow) { extraWindow = value; },
     setWindowGroundingState(windowId: number, value: Record<string, unknown>) { groundingStateByWindowId.set(windowId, value); },
     setWindowImageSize(windowId: number, width: number, height: number) { windowImageSizes.set(windowId, { width, height }); },
@@ -916,6 +926,242 @@ describe("CuaDriverComputer", () => {
       expect(after.surfaceRef).toEqual(before.surfaceRef);
       await computer.close(session);
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("admits and pops only an exact foreground macOS AXSheet proof", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-attached-sheet-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const sheet = {
+      pid: fake.target.pid,
+      windowId: 9100,
+      appName: "TextEdit",
+      title: "Save",
+      bounds: { x: 270, y: 250, width: 420, height: 300 },
+      zIndex: 2,
+      isOnScreen: true,
+    };
+    const sheetProof = (status: "sheet" | "none") => ({
+      pid: fake.target.pid,
+      window_id: fake.target.windowId,
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+      snapshot_id: `mac-${status}-snapshot`,
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1",
+        snapshot_id: `mac-${status}-snapshot`,
+        pid: fake.target.pid,
+        parent_window_id: fake.target.windowId,
+        parent_owner_pid: fake.target.pid,
+        parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
+        direct_children_status: "success",
+        direct_child_count: status === "sheet" ? 1 : 0,
+        status,
+        frontmost_pid: fake.target.pid,
+        focused_window_id: status === "sheet" ? sheet.windowId : fake.target.windowId,
+        ...(status === "sheet" ? { sheet: {
+          role: "AXSheet",
+          pid: fake.target.pid,
+          window_id: sheet.windowId,
+          owner_pid: fake.target.pid,
+          ax_parent_pid: fake.target.pid,
+          ax_parent_window_id: fake.target.windowId,
+          ax_parent_verified: true,
+          bounds: sheet.bounds,
+        } } : {}),
+      },
+    });
+    fake.setWindowGroundingState(fake.target.windowId, sheetProof("sheet"));
+    fake.setWindowInventoryComplete(false);
+    fake.setWindowImageSize(sheet.windowId, 420, 300);
+    fake.setExtraWindowAfterClick(sheet);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin",
+      socketPath: "test-socket",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target],
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = await computer.observe(session, "mac-sheet-before" as ObservationId, signal);
+      const receipt = await computer.execute(session, {
+        actionId: "mac-sheet-open" as ActionId,
+        basedOn: "mac-sheet-before" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+      expect(await computer.detectNewWindowHandoffCandidates(session, signal)).toEqual([]);
+      const sheetObservation = await computer.observe(session, "mac-sheet-active" as ObservationId, signal);
+      expect(sheetObservation.surfaceRef).toMatchObject({
+        kind: "native_window",
+        parentSurfaceId: before.surfaceRef.surfaceId,
+        admissionSource: "macos_attached_sheet_proof",
+      });
+
+      const noSheetWhileChildVisible = sheetProof("none");
+      fake.setWindowGroundingState(fake.target.windowId, noSheetWhileChildVisible);
+      await expect(computer.observe(session, "mac-sheet-none-query-conflict" as ObservationId, signal))
+        .rejects.toMatchObject({ code: "TRANSIENT_SURFACE_UNKNOWN" });
+      fake.setWindowGroundingState(fake.target.windowId, sheetProof("sheet"));
+      const retainedSheet = await computer.observe(session, "mac-sheet-retained" as ObservationId, signal);
+      expect(retainedSheet.surfaceRef).toEqual(sheetObservation.surfaceRef);
+
+      fake.setExtraWindow(undefined);
+      fake.setWindowGroundingState(fake.target.windowId, sheetProof("none"));
+      const parentObservation = await computer.observe(session, "mac-sheet-popped" as ObservationId, signal);
+      expect(parentObservation.surfaceRef).toEqual(expect.objectContaining({
+        surfaceId: before.surfaceRef.surfaceId,
+        kind: "native_window",
+      }));
+      const clickCountBeforeStaleRef = fake.calls.filter((call) => call.name === "click").length;
+      expect((await computer.execute(session, {
+        actionId: "mac-sheet-old-ref" as ActionId,
+        basedOn: "mac-sheet-active" as ObservationId,
+        kind: "click",
+        point: { x: 5, y: 5 },
+      }, signal)).status).toBe("refused");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(clickCountBeforeStaleRef);
+
+      const staleCandidate = { ...sheet, windowId: 9101, title: "Stale proof candidate" };
+      fake.setExtraWindowAfterClick(staleCandidate);
+      const staleState = sheetProof("sheet");
+      staleState.attached_sheet_proof.snapshot_id = "different-snapshot";
+      staleState.attached_sheet_proof.focused_window_id = staleCandidate.windowId;
+      staleState.attached_sheet_proof.sheet!.window_id = staleCandidate.windowId;
+      staleState.attached_sheet_proof.sheet!.bounds = staleCandidate.bounds;
+      fake.setWindowGroundingState(fake.target.windowId, staleState);
+      const staleReceipt = await computer.execute(session, {
+        actionId: "mac-sheet-stale-proof" as ActionId,
+        basedOn: "mac-sheet-popped" as ObservationId,
+        kind: "click",
+        point: { x: 12, y: 22 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(staleReceipt.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      const staleObservation = await computer.observe(session, "mac-sheet-stale-proof-stays-parent" as ObservationId, signal);
+      expect(staleObservation.surfaceRef).toEqual(expect.objectContaining({
+        surfaceId: before.surfaceRef.surfaceId,
+        kind: "native_window",
+      }));
+
+      fake.setExtraWindow(undefined);
+      const firstAmbiguous = { ...sheet, windowId: 9102, title: "First fresh window" };
+      const secondAmbiguous = { ...sheet, windowId: 9103, title: "Second fresh window" };
+      fake.setExtraWindowAfterClick(firstAmbiguous);
+      fake.setSecondExtraWindowAfterClick(secondAmbiguous);
+      const ambiguousState = sheetProof("sheet");
+      ambiguousState.attached_sheet_proof.focused_window_id = firstAmbiguous.windowId;
+      ambiguousState.attached_sheet_proof.sheet!.window_id = firstAmbiguous.windowId;
+      ambiguousState.attached_sheet_proof.sheet!.bounds = firstAmbiguous.bounds;
+      fake.setWindowGroundingState(fake.target.windowId, ambiguousState);
+      const ambiguousReceipt = await computer.execute(session, {
+        actionId: "mac-sheet-ambiguous-candidates" as ActionId,
+        basedOn: "mac-sheet-stale-proof-stays-parent" as ObservationId,
+        kind: "click",
+        point: { x: 14, y: 24 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(ambiguousReceipt.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      const ambiguousObservation = await computer.observe(session, "mac-sheet-ambiguous-stays-parent" as ObservationId, signal);
+      expect(ambiguousObservation.surfaceRef).toEqual(expect.objectContaining({
+        surfaceId: before.surfaceRef.surfaceId,
+        kind: "native_window",
+      }));
+
+      fake.setExtraWindow(undefined);
+      fake.setSecondExtraWindow(undefined);
+      const wrongParentCandidate = { ...sheet, windowId: 9104, title: "Wrong parent proof candidate" };
+      fake.setExtraWindowAfterClick(wrongParentCandidate);
+      const wrongParentState = sheetProof("sheet");
+      wrongParentState.attached_sheet_proof.focused_window_id = wrongParentCandidate.windowId;
+      wrongParentState.attached_sheet_proof.sheet!.window_id = wrongParentCandidate.windowId;
+      wrongParentState.attached_sheet_proof.sheet!.bounds = wrongParentCandidate.bounds;
+      wrongParentState.attached_sheet_proof.sheet!.ax_parent_window_id = wrongParentCandidate.windowId + 1;
+      fake.setWindowGroundingState(fake.target.windowId, wrongParentState);
+      const wrongParentReceipt = await computer.execute(session, {
+        actionId: "mac-sheet-wrong-parent" as ActionId,
+        basedOn: "mac-sheet-ambiguous-stays-parent" as ObservationId,
+        kind: "click",
+        point: { x: 16, y: 26 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(wrongParentReceipt.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      const wrongParentObservation = await computer.observe(session, "mac-sheet-wrong-parent-stays-parent" as ObservationId, signal);
+      expect(wrongParentObservation.surfaceRef).toEqual(expect.objectContaining({
+        surfaceId: before.surfaceRef.surfaceId,
+        kind: "native_window",
+      }));
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "without opened-window authorization", windowSwitch: "off" as const, truncated: false },
+    { label: "from a truncated pre-action inventory", windowSwitch: "opened-windows-v1" as const, truncated: true },
+  ])("does not auto-push an AXSheet $label", async ({ windowSwitch, truncated }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-macos-sheet-boundary-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setWindowInventoryComplete(false);
+    fake.setWindowInventoryTruncated(truncated);
+    const candidate = { pid: fake.target.pid, windowId: 9200, appName: "TextEdit", title: "Save", bounds: { x: 270, y: 250, width: 420, height: 300 }, zIndex: 2, isOnScreen: true };
+    fake.setExtraWindowAfterClick(candidate);
+    fake.setWindowGroundingState(fake.target.windowId, {
+      pid: fake.target.pid,
+      window_id: fake.target.windowId,
+      window_bounds: { x: 100, y: 120, width: 960, height: 680 },
+      snapshot_id: "boundary-snapshot",
+      attached_sheet_proof: {
+        version: "macos-attached-sheet-v1",
+        snapshot_id: "boundary-snapshot",
+        pid: fake.target.pid,
+        parent_window_id: fake.target.windowId,
+        parent_owner_pid: fake.target.pid,
+        parent_bounds: { x: 100, y: 120, width: 960, height: 680 },
+        direct_children_status: "success",
+        direct_child_count: 1,
+        status: "sheet",
+        frontmost_pid: fake.target.pid,
+        focused_window_id: candidate.windowId,
+        sheet: {
+          role: "AXSheet", pid: fake.target.pid, window_id: candidate.windowId,
+          owner_pid: fake.target.pid, ax_parent_pid: fake.target.pid,
+          ax_parent_window_id: fake.target.windowId, ax_parent_verified: true, bounds: candidate.bounds,
+        },
+      },
+    });
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory,
+      windowTarget: fake.target, windowDeliveryMode: "foreground", windowSwitch,
+      windowSwitchAllowedTargets: [fake.target], grounding: "off", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = await computer.observe(session, `mac-sheet-boundary-${windowSwitch}-${truncated}` as ObservationId, signal);
+      const receipt = await computer.execute(session, {
+        actionId: `mac-sheet-boundary-action-${windowSwitch}-${truncated}` as ActionId,
+        basedOn: `mac-sheet-boundary-${windowSwitch}-${truncated}` as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal, { detectNewWindowHandoff: true });
+      expect(receipt.status).toBe("completed");
+      await computer.detectNewWindowHandoffCandidates(session, signal);
+      const after = await computer.observe(session, `mac-sheet-boundary-after-${windowSwitch}-${truncated}` as ObservationId, signal);
+      expect(after.surfaceRef).toEqual(before.surfaceRef);
+    } finally {
+      if (session !== undefined) await computer.close(session);
       await rm(directory, { recursive: true, force: true });
     }
   });

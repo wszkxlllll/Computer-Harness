@@ -806,7 +806,8 @@ function validateSurfaceTransition(
 
   const childPush = to.parentSurfaceId === from.surfaceId;
   const trustedNativeTransient = (surface: SurfaceRef): boolean => surface.kind === "native_window" &&
-    (surface.admissionSource === "owned_transient_window_root_proof" || surface.admissionSource === "win32_relationship_probe");
+    (surface.admissionSource === "owned_transient_window_root_proof" || surface.admissionSource === "win32_relationship_probe" ||
+      surface.admissionSource === "macos_attached_sheet_proof");
   const siblingChildPush = from.kind === "native_window" && to.kind === "native_window" &&
     from.parentSurfaceId !== undefined && from.parentSurfaceId === to.parentSurfaceId &&
     from.surfaceId !== to.surfaceId && snapshot.surfaceParentsById[fromId] === String(from.parentSurfaceId) &&
@@ -828,7 +829,7 @@ function validateSurfaceTransition(
       }
       if ((to.kind === "overlay" && to.admissionSource !== "same_hwnd_overlay_root_proof") ||
           (to.kind === "native_window" && to.admissionSource !== "owned_transient_window_root_proof" &&
-            to.admissionSource !== "win32_relationship_probe")) {
+            to.admissionSource !== "win32_relationship_probe" && to.admissionSource !== "macos_attached_sheet_proof")) {
         throw new Error("transient child_push requires its exact adapter admission source");
       }
       return;
@@ -838,7 +839,8 @@ function validateSurfaceTransition(
       }
       if ((from.kind === "overlay" && from.admissionSource !== "same_hwnd_overlay_root_proof") ||
           (from.kind === "native_window" && from.parentSurfaceId !== undefined &&
-            from.admissionSource !== "owned_transient_window_root_proof" && from.admissionSource !== "win32_relationship_probe")) {
+            from.admissionSource !== "owned_transient_window_root_proof" && from.admissionSource !== "win32_relationship_probe" &&
+            from.admissionSource !== "macos_attached_sheet_proof")) {
         throw new Error("transient child_pop requires its exact adapter admission source");
       }
       return;
@@ -1004,7 +1006,7 @@ const surfaceRefSchema = z.object({
   generation: z.number().int().nonnegative(),
   kind: z.enum(["desktop", "native_window", "browser_tab", "dom", "overlay", "unknown"]),
   parentSurfaceId: nonEmptyString.max(128).optional(),
-  admissionSource: z.enum(["same_hwnd_overlay_root_proof", "owned_transient_window_root_proof", "win32_relationship_probe"]).optional(),
+  admissionSource: z.enum(["same_hwnd_overlay_root_proof", "owned_transient_window_root_proof", "win32_relationship_probe", "macos_attached_sheet_proof"]).optional(),
 }).superRefine((value, context) => {
   if (value.kind === "unknown" ? value.generation !== 0 : value.generation < 1) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["generation"], message: "only a legacy unknown Surface may use generation 0" });
@@ -1013,7 +1015,7 @@ const surfaceRefSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["parentSurfaceId"], message: "Surface cannot be its own parent" });
   }
   if ((value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
-      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe") &&
+      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe" || value.admissionSource === "macos_attached_sheet_proof") &&
         (value.kind !== "native_window" || value.parentSurfaceId === undefined))) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["admissionSource"], message: "admission source does not match its transient Surface kind/parent" });
   }
@@ -1764,9 +1766,10 @@ function requiresLegacyUnknownSurface(value: unknown): boolean {
   if (value.parentSurfaceId !== undefined && (typeof value.parentSurfaceId !== "string" ||
       value.parentSurfaceId.trim().length === 0 || value.parentSurfaceId === value.surfaceId)) return true;
   if (value.admissionSource !== undefined && value.admissionSource !== "same_hwnd_overlay_root_proof" &&
-      value.admissionSource !== "owned_transient_window_root_proof" && value.admissionSource !== "win32_relationship_probe") return true;
+      value.admissionSource !== "owned_transient_window_root_proof" && value.admissionSource !== "win32_relationship_probe" &&
+      value.admissionSource !== "macos_attached_sheet_proof") return true;
   if ((value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
-      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe") &&
+      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe" || value.admissionSource === "macos_attached_sheet_proof") &&
         (value.kind !== "native_window" || value.parentSurfaceId === undefined))) return true;
   if (value.kind === "unknown") return value.generation !== 0 || value.parentSurfaceId !== undefined;
   if (value.kind !== "desktop" && value.kind !== "native_window" && value.kind !== "browser_tab" && value.kind !== "dom" && value.kind !== "overlay") return true;

@@ -3377,9 +3377,11 @@ function normalizeActionReceiptForAction(
       safeRecovery = { kind: "transient_parent_restored", surfaceRef: recovery.surfaceRef };
     } else if (recovery.kind === "transient_owned_surface_reconciled") {
       const trustedAdmissionSource = recovery.surfaceRef.admissionSource === "owned_transient_window_root_proof" ||
-        recovery.surfaceRef.admissionSource === "win32_relationship_probe";
+        recovery.surfaceRef.admissionSource === "win32_relationship_probe" ||
+        recovery.surfaceRef.admissionSource === "macos_attached_sheet_proof";
       const trustedOriginalAdmissionSource = executionSurfaceRef.admissionSource === "owned_transient_window_root_proof" ||
-        executionSurfaceRef.admissionSource === "win32_relationship_probe";
+        executionSurfaceRef.admissionSource === "win32_relationship_probe" ||
+        executionSurfaceRef.admissionSource === "macos_attached_sheet_proof";
       if (executionSurfaceRef.parentSurfaceId === undefined ||
           recovery.surfaceRef.surfaceId === executionSurfaceRef.surfaceId ||
           recovery.surfaceRef.parentSurfaceId !== executionSurfaceRef.parentSurfaceId ||
@@ -3505,10 +3507,12 @@ function isValidSurfaceRef(value: unknown): value is SurfaceRef {
   const sourceValid = candidate.admissionSource === undefined ||
     candidate.admissionSource === "same_hwnd_overlay_root_proof" ||
     candidate.admissionSource === "owned_transient_window_root_proof" ||
-    candidate.admissionSource === "win32_relationship_probe";
+    candidate.admissionSource === "win32_relationship_probe" ||
+    candidate.admissionSource === "macos_attached_sheet_proof";
   const sourceMatchesKind = candidate.admissionSource === undefined ||
     candidate.admissionSource === "same_hwnd_overlay_root_proof" && candidate.kind === "overlay" ||
-    (candidate.admissionSource === "owned_transient_window_root_proof" || candidate.admissionSource === "win32_relationship_probe") &&
+    (candidate.admissionSource === "owned_transient_window_root_proof" || candidate.admissionSource === "win32_relationship_probe" ||
+      candidate.admissionSource === "macos_attached_sheet_proof") &&
       candidate.kind === "native_window" && candidate.parentSurfaceId !== undefined;
   return typeof candidate.surfaceId === "string" && candidate.surfaceId.length > 0 && candidate.surfaceId.length <= 128 &&
     Number.isSafeInteger(candidate.generation) && Number(candidate.generation) > 0 &&
@@ -3548,7 +3552,8 @@ function isTrustedUnknownActionSurfaceTransition(
   if (previous === undefined || previous.surfaceId === next.surfaceId || transitionReason === undefined) return false;
   const trustedTransient = (surface: SurfaceRef) => surface.kind === "native_window" &&
     (surface.admissionSource === "owned_transient_window_root_proof" ||
-      surface.admissionSource === "win32_relationship_probe");
+      surface.admissionSource === "win32_relationship_probe" ||
+      surface.admissionSource === "macos_attached_sheet_proof");
   if (transitionReason === "child_push") {
     return trustedTransient(next) &&
       (next.parentSurfaceId === previous.surfaceId ||

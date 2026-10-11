@@ -139,6 +139,83 @@ type TransientRootVerification =
   | { readonly status: "unavailable"; readonly rootRole?: "menu" | "popup" | "dialog" | "window"; readonly queryFailed?: boolean }
   | { readonly status: "contradictory"; readonly reason: string };
 
+type MacAttachedSheetState =
+  | { readonly status: "sheet"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }> }
+  | { readonly status: "none" }
+  | { readonly status: "unknown"; readonly reason: string };
+
+async function readMacAttachedSheetState(
+  driver: CuaDriverLike,
+  session: string,
+  parent: CuaWindowBinding,
+  candidate: CuaWindowInfo | undefined,
+  signal: AbortSignal,
+): Promise<MacAttachedSheetState> {
+  const result = await callTool(driver, "get_window_state", {
+    pid: parent.target.pid,
+    window_id: parent.target.windowId,
+    include_screenshot: false,
+    max_depth: 8,
+    max_elements: 64,
+    session,
+  }, signal);
+  if (result.isError || result.degraded) return { status: "unknown", reason: "native parent AX proof query failed" };
+  const state = parseStructuredRecord(result.structuredJson);
+  if (state === undefined || hasExplicitIdentityMismatch(state, parent.target)) {
+    return { status: "unknown", reason: "native parent AX proof has no exact target identity" };
+  }
+  const proof = parseStructuredRecord(state.attached_sheet_proof);
+  const parentBounds = parseStructuredRecord(proof?.parent_bounds);
+  const snapshotId = state.snapshot_id;
+  const identityOk = proof?.version === "macos-attached-sheet-v1" &&
+    typeof snapshotId === "string" && snapshotId.length > 0 && proof.snapshot_id === snapshotId &&
+    proof.pid === parent.target.pid && proof.parent_window_id === parent.target.windowId &&
+    proof.parent_owner_pid === parent.target.pid && proof.frontmost_pid === parent.target.pid &&
+    proof.direct_children_status === "success" && Number.isSafeInteger(proof.direct_child_count) &&
+    (proof.direct_child_count as number) >= 0 &&
+    Number.isFinite(parentBounds?.x) && Number.isFinite(parentBounds?.y) &&
+    Number.isFinite(parentBounds?.width) && Number.isFinite(parentBounds?.height) &&
+    sameWindowGeometry(parent.bounds, {
+      x: parentBounds!.x as number, y: parentBounds!.y as number,
+      width: parentBounds!.width as number, height: parentBounds!.height as number,
+    });
+  if (!identityOk) return { status: "unknown", reason: "native parent AX proof is stale, incomplete, or bound to different geometry" };
+  if (proof!.status === "none") {
+    return proof!.focused_window_id === parent.target.windowId && proof!.sheet === undefined
+      ? { status: "none" }
+      : { status: "unknown", reason: "native no-sheet proof does not show the exact parent focused" };
+  }
+  const sheet = parseStructuredRecord(proof!.sheet);
+  const bounds = parseStructuredRecord(sheet?.bounds);
+  if (proof!.status !== "sheet" || sheet?.role !== "AXSheet" || sheet.ax_parent_verified !== true ||
+      sheet.pid !== parent.target.pid || sheet.owner_pid !== parent.target.pid ||
+      sheet.ax_parent_pid !== parent.target.pid || sheet.ax_parent_window_id !== parent.target.windowId ||
+      !Number.isSafeInteger(sheet.window_id) || (sheet.window_id as number) <= 0 ||
+      sheet.window_id === parent.target.windowId || (proof!.direct_child_count as number) < 1 ||
+      proof!.focused_window_id !== sheet.window_id || candidate === undefined ||
+      candidate.target.pid !== sheet.pid || candidate.target.windowId !== sheet.window_id ||
+      candidate.isOnScreen !== true || candidate.minimized === true ||
+      !Number.isFinite(bounds?.x) || !Number.isFinite(bounds?.y) ||
+      !Number.isFinite(bounds?.width) || !Number.isFinite(bounds?.height) ||
+      !sameWindowGeometry(candidate.bounds, {
+        x: bounds!.x as number, y: bounds!.y as number,
+        width: bounds!.width as number, height: bounds!.height as number,
+      })) {
+    return { status: "unknown", reason: "native AXSheet proof does not exactly match the unique fresh surfaced candidate" };
+  }
+  return { status: "sheet", evidence: {
+    kind: "native_window",
+    nativeWindow: asNativeWindowIdentity(candidate.target),
+    owner: asNativeWindowIdentity(parent.target),
+    rootRole: "dialog",
+    visible: true,
+    rootSemanticsVerified: true,
+    interactionPolicy: "modal",
+    frontmostEvidence: "exact_foreground",
+    admissionSource: "macos_attached_sheet_proof",
+  } };
+}
+
 type UnknownTransientReplacementAttempt =
   | { readonly decision: "recovered"; readonly surfaceRef: SurfaceRef }
   | { readonly decision: "retry" }
@@ -1311,6 +1388,45 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "transient Surface parent identity is unavailable");
     }
     const parentTarget = asCuaWindowTarget(parentNative);
+    if (child.kind === "native_window" && child.admissionSource === "macos_attached_sheet_proof") {
+      if (current.platform !== "darwin" || this.options.windowDeliveryMode !== "foreground" ||
+          this.options.windowSwitch !== "opened-windows-v1" || !isCurrentSurfaceRef(current.surfaceRegistry, parentRef)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS attached-sheet lifecycle lost its authorized current parent context");
+      }
+      const [inventory, parentBinding] = await Promise.all([
+        listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe),
+        discoverWindow(current.driver, current.label, parentTarget, signal),
+      ]);
+      const storedParentBinding = current.windowBindings.get(windowIdentityKey(parentTarget));
+      if (storedParentBinding === undefined || !sameWindowGeometry(parentBinding.bounds, storedParentBinding.bounds)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact parent window geometry changed during attached-sheet reconciliation");
+      }
+      const childTarget = asCuaWindowTarget(child.nativeWindow);
+      const childRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+      const candidate = childRows.length === 1 ? childRows[0] : undefined;
+      const attached = await readMacAttachedSheetState(current.driver, current.label, parentBinding, candidate, signal);
+      if (attached.status === "sheet") {
+        if (windowIdentityKey(asCuaWindowTarget(attached.evidence.nativeWindow)) !== windowIdentityKey(childTarget)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "a different or replacement AXSheet is active; the current child is retained for manual handling");
+        }
+        return undefined;
+      }
+      if (attached.status !== "none") {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", attached.status === "unknown" ? attached.reason : "attached-sheet state is unknown");
+      }
+      const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+      const parentVisible = parentRows.length === 1 && parentRows[0]!.isOnScreen === true && parentRows[0]!.minimized !== true;
+      const anotherVisibleOwnedWindow = inventory.windows.some((window) =>
+        windowIdentityKey(window.target) !== windowIdentityKey(parentTarget) &&
+        windowIdentityKey(window.target) !== windowIdentityKey(childTarget) &&
+        window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
+        window.isOnScreen === true && window.minimized !== true);
+      if (!parentVisible || candidate !== undefined || anotherVisibleOwnedWindow) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "fresh no-sheet AX proof did not coincide with an absent child and visible exact parent");
+      }
+      this.commitVerifiedChildPop(current, ref, parent.surfaceId, parentBinding);
+      return undefined;
+    }
     let childAbsent = false;
     if (child.kind === "overlay") {
       const verification = await verifySameHwndOverlay(current.driver, current.label, parentTarget, signal);
@@ -2409,7 +2525,7 @@ export class CuaDriverComputer implements Computer {
     const exactInventoryForAutoPush = baseline.complete && inventory.complete;
     let pushedChild = false;
     const supportsTransientUia = this.options.grounding === "uia-catalog-v1" || this.options.grounding === "hybrid-catalog-v1";
-    const provisionalCandidate = inventory.potentialOwnedTransientChild;
+    const provisionalCandidate = current.platform === "darwin" ? undefined : inventory.potentialOwnedTransientChild;
     const parentRef = current.surfaceRegistry.activeSurface;
     let nonBlockingAuxiliaryKey: string | undefined;
     if (exactInventoryForAutoPush && supportsTransientUia && parentRef !== undefined && surfaced.length === 0) {
@@ -2427,6 +2543,63 @@ export class CuaDriverComputer implements Computer {
           this.clearTargetObservationState(current, parentRef);
         } else if (pushed.decision === "manual") {
           throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", `${pushed.reason}; same-HWND menu transition requires manual handling`);
+        }
+      }
+    }
+    if (!pushedChild && current.platform === "darwin" && this.options.windowSwitch === "opened-windows-v1" &&
+        this.options.windowDeliveryMode === "foreground" && parentRef !== undefined &&
+        baseline.truncated !== true && inventory.sourceInventory.truncated !== true &&
+        sameSurfaceRef(parentRef, baseline.parentSurfaceRef) && isCurrentSurfaceRef(current.surfaceRegistry, parentRef) &&
+        isExecutableSurfaceRef(current.surfaceRegistry, parentRef)) {
+      const rawFreshRows = inventory.sourceInventory.windows.filter((window) =>
+        !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+      const exactInventoryRow = rawFreshRows.length === 1 ? rawFreshRows[0] : undefined;
+      if (exactInventoryRow !== undefined && exactInventoryRow.target.pid === ownerTarget.pid &&
+          exactInventoryRow.target.windowId !== ownerTarget.windowId) {
+        const candidate = exactInventoryRow;
+        const attached = await readMacAttachedSheetState(current.driver, current.label, freshParentBinding, exactInventoryRow, signal);
+        if (attached.status === "sheet") {
+          const proofInventory: CuaWindowInventory = {
+            windows: inventory.sourceInventory.windows.map((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target)
+              ? { ...window, ownerPid: ownerTarget.pid, ownerWindowId: ownerTarget.windowId }
+              : window),
+            complete: false,
+            completeAttestation: "negative",
+            ...(inventory.sourceInventory.truncated === undefined ? {} : { truncated: inventory.sourceInventory.truncated }),
+            ...(inventory.sourceInventory.source === undefined ? {} : { source: inventory.sourceInventory.source }),
+            foregroundPid: candidate.target.pid,
+            foregroundWindowId: candidate.target.windowId,
+          };
+          const enrichedCandidate = {
+            ...exactInventoryRow,
+            ownerPid: ownerTarget.pid,
+            ownerWindowId: ownerTarget.windowId,
+          };
+          const stageOne = assessOwnedTransientWindowAdmission({
+            parent: ownerTarget,
+            candidate: enrichedCandidate,
+            inventory: proofInventory,
+            surfacedWindowCount: rawFreshRows.length,
+            baselineComplete: false,
+            baselineTruncated: false,
+            parentSurfaceCurrent: true,
+          });
+          if (stageOne.decision === "admitted") {
+            const pushed = pushChild(current.surfaceRegistry, parentRef, attached.evidence);
+            if (pushed.decision === "applied") {
+              current.surfaceRegistry = pushed.state;
+              noteSurfaceTransition(current, "child_push");
+              pushedChild = true;
+              current.windowBindings.set(windowIdentityKey(enrichedCandidate.target), {
+                target: enrichedCandidate.target,
+                bounds: enrichedCandidate.bounds,
+              });
+              current.windowRefs.clear();
+              this.clearTargetObservationState(current, parentRef);
+            } else if (pushed.decision === "manual") {
+              throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", pushed.reason);
+            }
+          }
         }
       }
     }

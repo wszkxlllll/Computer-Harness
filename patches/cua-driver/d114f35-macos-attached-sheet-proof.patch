@@ -1,0 +1,650 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+index fa720fa..41730b5 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+@@ -142,6 +142,85 @@ struct CGSizeValue {
+ 
+ use core_foundation::{array::CFArray, base::TCFType, string::CFString as CFStr};
+ 
++/// Copy an AX element-array attribute without collapsing read failures or
++/// malformed results into an empty collection. Returned elements are retained
++/// and must be released by the caller.
++///
++/// # Safety
++/// `element` must remain valid for the duration of the AX call.
++pub unsafe fn copy_element_array_attr_checked(
++    element: AXUIElementRef,
++    attr_name: &str,
++) -> Result<Vec<AXUIElementRef>, AXError> {
++    let attr = CFStr::new(attr_name);
++    let mut value: CFTypeRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value);
++        }
++        return Err(if error == kAXErrorSuccess {
++            kAXErrorFailure
++        } else {
++            error
++        });
++    }
++    if core_foundation::base::CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
++        CFRelease(value);
++        return Err(kAXErrorFailure);
++    }
++    let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
++    let ax_type_id = AXUIElementGetTypeID();
++    let mut children = Vec::with_capacity(array.len() as usize);
++    for index in 0..array.len() {
++        let Some(item_ref) = array.get(index) else {
++            for child in children {
++                CFRelease(child as CFTypeRef);
++            }
++            return Err(kAXErrorFailure);
++        };
++        let item = *item_ref;
++        if item.is_null() || core_foundation::base::CFGetTypeID(item) != ax_type_id {
++            for child in children {
++                CFRelease(child as CFTypeRef);
++            }
++            return Err(kAXErrorFailure);
++        }
++        CFRetain(item);
++        children.push(item as AXUIElementRef);
++    }
++    Ok(children)
++}
++
++/// Copy a required AX string attribute and preserve missing/type/read failures.
++///
++/// # Safety
++/// `element` must remain valid for the duration of the AX call.
++pub unsafe fn copy_string_attr_checked(
++    element: AXUIElementRef,
++    attr_name: &str,
++) -> Result<String, AXError> {
++    let attr = CFStr::new(attr_name);
++    let mut value: CFTypeRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value);
++        }
++        return Err(if error == kAXErrorSuccess {
++            kAXErrorFailure
++        } else {
++            error
++        });
++    }
++    if core_foundation::base::CFGetTypeID(value) != CFStr::type_id() {
++        CFRelease(value);
++        return Err(kAXErrorFailure);
++    }
++    let string = CFStr::wrap_under_create_rule(value as _).to_string();
++    Ok(string)
++}
++
+ /// Whether an AX attribute is currently writable on this element.
+ ///
+ /// # Safety
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+index d169a4c..14d1dad 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+@@ -236,6 +236,429 @@ fn same_bounds(left: &crate::windows::WindowBounds, right: &crate::windows::Wind
+         && left.height == right.height
+ }
+ 
++#[derive(Debug, Clone)]
++struct AttachedSheetChildFacts {
++    pid: i32,
++    window_id: u32,
++    owner_pid: i32,
++    ax_parent_pid: i32,
++    ax_parent_window_id: u32,
++    ax_parent_verified: bool,
++    visible: bool,
++    bounds: crate::windows::WindowBounds,
++    ax_frame: [f64; 4],
++}
++
++#[derive(Debug, Clone)]
++struct AttachedSheetProofFacts {
++    snapshot_id: String,
++    pid: i32,
++    parent_window_id: u32,
++    parent_ax_matches: usize,
++    parent_role: Option<String>,
++    parent_owner_pid: i32,
++    parent_bounds: crate::windows::WindowBounds,
++    parent_ax_frame: [f64; 4],
++    direct_children_status: &'static str,
++    direct_child_count: usize,
++    direct_child_roles: Vec<Option<String>>,
++    sheets: Vec<AttachedSheetChildFacts>,
++    frontmost_pid: Option<i32>,
++    focused_window_id: Option<u32>,
++    parent_tail_revalidated: bool,
++    children_tail_revalidated: bool,
++    focus_tail_revalidated: bool,
++    child_tail_revalidated: bool,
++}
++
++fn build_attached_sheet_proof_payload(facts: &AttachedSheetProofFacts) -> Option<Value> {
++    if facts.snapshot_id.trim().is_empty()
++        || facts.pid <= 0
++        || facts.parent_window_id == 0
++        || facts.parent_ax_matches != 1
++        || facts.parent_role.as_deref() != Some("AXWindow")
++        || facts
++            .sheets
++            .iter()
++            .any(|sheet| sheet.window_id == 0 || sheet.window_id == facts.parent_window_id)
++        || facts.parent_owner_pid != facts.pid
++        || !valid_positive_rect(
++            facts.parent_bounds.x,
++            facts.parent_bounds.y,
++            facts.parent_bounds.width,
++            facts.parent_bounds.height,
++        )
++        || facts.direct_children_status != "success"
++        || facts.direct_child_count != facts.direct_child_roles.len()
++        || facts.direct_child_roles.iter().any(Option::is_none)
++        || facts.frontmost_pid != Some(facts.pid)
++        || !facts.parent_tail_revalidated
++        || !facts.children_tail_revalidated
++        || !facts.focus_tail_revalidated
++        || facts
++            .direct_child_roles
++            .iter()
++            .flatten()
++            .filter(|role| role.as_str() == "AXSheet")
++            .count()
++            != facts.sheets.len()
++    {
++        return None;
++    }
++    let [parent_x, parent_y, parent_width, parent_height] = facts.parent_ax_frame;
++    if !valid_positive_rect(parent_x, parent_y, parent_width, parent_height)
++        || parent_x != facts.parent_bounds.x
++        || parent_y != facts.parent_bounds.y
++        || parent_width != facts.parent_bounds.width
++        || parent_height != facts.parent_bounds.height
++    {
++        return None;
++    }
++    let (status, sheet_json) = match facts.sheets.as_slice() {
++        [] if facts.focused_window_id == Some(facts.parent_window_id) => ("none", None),
++        [sheet]
++            if facts.focused_window_id == Some(sheet.window_id)
++                && sheet.pid == facts.pid
++                && sheet.owner_pid == facts.pid
++                && sheet.ax_parent_pid == facts.pid
++                && sheet.ax_parent_window_id == facts.parent_window_id
++                && sheet.ax_parent_verified
++                && sheet.visible
++                && facts.child_tail_revalidated =>
++        {
++            let [x, y, width, height] = sheet.ax_frame;
++            if !valid_positive_rect(x, y, width, height)
++                || x != sheet.bounds.x
++                || y != sheet.bounds.y
++                || width != sheet.bounds.width
++                || height != sheet.bounds.height
++            {
++                return None;
++            }
++            (
++                "sheet",
++                Some(serde_json::json!({
++                    "role": "AXSheet",
++                    "pid": sheet.pid,
++                    "window_id": sheet.window_id,
++                    "owner_pid": sheet.owner_pid,
++                    "ax_parent_pid": sheet.ax_parent_pid,
++                    "ax_parent_window_id": sheet.ax_parent_window_id,
++                    "ax_parent_verified": true,
++                    "bounds": { "x": sheet.bounds.x, "y": sheet.bounds.y, "width": sheet.bounds.width, "height": sheet.bounds.height }
++                })),
++            )
++        }
++        _ => return None,
++    };
++    let mut proof = serde_json::json!({
++        "version": "macos-attached-sheet-v1",
++        "snapshot_id": facts.snapshot_id,
++        "pid": facts.pid,
++        "parent_window_id": facts.parent_window_id,
++        "parent_owner_pid": facts.parent_owner_pid,
++        "parent_bounds": { "x": facts.parent_bounds.x, "y": facts.parent_bounds.y, "width": facts.parent_bounds.width, "height": facts.parent_bounds.height },
++        "direct_children_status": "success",
++        "direct_child_count": facts.direct_child_count,
++        "status": status,
++        "frontmost_pid": facts.pid,
++        "focused_window_id": facts.focused_window_id,
++    });
++    if let Some(sheet) = sheet_json {
++        proof["sheet"] = sheet;
++    }
++    Some(proof)
++}
++
++/// Independently attest one exact app window's direct AXSheet relationship.
++/// AXChildren failures, unclassifiable child roles, ambiguous sheets, stale
++/// identities, or WindowServer disagreement produce no proof.
++fn attached_sheet_proof(pid: i32, window_id: u32, snapshot_id: &str) -> Option<Value> {
++    use crate::ax::bindings::{
++        copy_element_array_attr_checked, copy_element_attr, copy_string_attr_checked,
++        kAXErrorSuccess, AXUIElementCreateApplication, AXUIElementGetPid,
++    };
++    use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
++
++    if crate::apps::frontmost_pid() != Some(pid)
++        || crate::windows::resolve_window_owner(pid, window_id)
++            != crate::windows::WindowOwner::SamePid
++    {
++        return None;
++    }
++    let parent_bounds = crate::windows::window_bounds_by_id(window_id)?;
++    let parent_owner_pid = match crate::windows::resolve_window_owner(pid, window_id) {
++        crate::windows::WindowOwner::SamePid => pid,
++        _ => return None,
++    };
++
++    unsafe {
++        let app = AXUIElementCreateApplication(pid);
++        if app.is_null() {
++            return None;
++        }
++        let windows = match copy_element_array_attr_checked(app, "AXWindows") {
++            Ok(windows) => windows,
++            Err(_) => {
++                CFRelease(app as CFTypeRef);
++                return None;
++            }
++        };
++        let mut matching_parent = Vec::new();
++        let mut parent_roles_read = true;
++        for candidate in &windows {
++            if crate::ax::bindings::ax_get_window_id(*candidate) == Some(window_id) {
++                match copy_string_attr_checked(*candidate, "AXRole") {
++                    Ok(role) if role == "AXWindow" => matching_parent.push(*candidate),
++                    _ => parent_roles_read = false,
++                }
++            }
++        }
++        if !parent_roles_read || matching_parent.len() != 1 {
++            for candidate in windows {
++                CFRelease(candidate as CFTypeRef);
++            }
++            CFRelease(app as CFTypeRef);
++            return None;
++        }
++        let parent = matching_parent[0];
++        let mut parent_pid = 0;
++        let parent_pid_ok =
++            AXUIElementGetPid(parent, &mut parent_pid) == kAXErrorSuccess && parent_pid == pid;
++        let parent_ax_frame = crate::ax::bindings::element_screen_rect(parent);
++        let children = match copy_element_array_attr_checked(parent, "AXChildren") {
++            Ok(children) => children,
++            Err(_) => {
++                for candidate in windows {
++                    CFRelease(candidate as CFTypeRef);
++                }
++                CFRelease(app as CFTypeRef);
++                return None;
++            }
++        };
++        let mut roles = Vec::with_capacity(children.len());
++        let mut sheets = Vec::new();
++        let mut role_read_failed = false;
++        for child in &children {
++            let role = match copy_string_attr_checked(*child, "AXRole") {
++                Ok(role) if !role.trim().is_empty() => role,
++                Ok(_) => {
++                    role_read_failed = true;
++                    break;
++                }
++                Err(_) => {
++                    role_read_failed = true;
++                    break;
++                }
++            };
++            roles.push(Some(role.clone()));
++            if role != "AXSheet" {
++                continue;
++            }
++            let child_parent = copy_element_attr(*child, "AXParent");
++            let parent_verified = child_parent
++                .map(|value| CFEqual(value as CFTypeRef, parent as CFTypeRef) != 0)
++                .unwrap_or(false);
++            if let Some(value) = child_parent {
++                CFRelease(value as CFTypeRef);
++            }
++            let mut child_pid = 0;
++            let child_pid_ok = AXUIElementGetPid(*child, &mut child_pid) == kAXErrorSuccess;
++            let child_window_id = crate::ax::bindings::ax_get_window_id(*child);
++            let child_window_id = match child_window_id {
++                Some(value) if value != window_id => value,
++                _ => {
++                    sheets.push((
++                        *child,
++                        AttachedSheetChildFacts {
++                            pid: child_pid,
++                            window_id: child_window_id.unwrap_or(0),
++                            owner_pid: -1,
++                            ax_parent_pid: -1,
++                            ax_parent_window_id: 0,
++                            ax_parent_verified: false,
++                            visible: false,
++                            bounds: crate::windows::WindowBounds {
++                                x: f64::NAN,
++                                y: f64::NAN,
++                                width: 0.0,
++                                height: 0.0,
++                            },
++                            ax_frame: [f64::NAN, f64::NAN, 0.0, 0.0],
++                        },
++                    ));
++                    continue;
++                }
++            };
++            let child_window = crate::windows::window_info_by_id(child_window_id);
++            let child_owner_pid = match crate::windows::resolve_window_owner(pid, child_window_id) {
++                crate::windows::WindowOwner::SamePid => pid,
++                crate::windows::WindowOwner::ForeignPid { owner_pid, .. } => owner_pid,
++                crate::windows::WindowOwner::Unknown => -1,
++            };
++            let child_bounds = child_window
++                .as_ref()
++                .map(|window| window.bounds.clone())
++                .unwrap_or(crate::windows::WindowBounds {
++                    x: f64::NAN,
++                    y: f64::NAN,
++                    width: 0.0,
++                    height: 0.0,
++                });
++            let child_ax_frame = crate::ax::bindings::element_screen_rect(*child).unwrap_or([
++                f64::NAN,
++                f64::NAN,
++                0.0,
++                0.0,
++            ]);
++            let child_parent_pid = if parent_verified { pid } else { -1 };
++            sheets.push((
++                *child,
++                AttachedSheetChildFacts {
++                    pid: if child_pid_ok { child_pid } else { -1 },
++                    window_id: child_window_id,
++                    owner_pid: child_owner_pid,
++                    ax_parent_pid: child_parent_pid,
++                    ax_parent_window_id: if parent_verified { window_id } else { 0 },
++                    ax_parent_verified: parent_verified,
++                    visible: child_window
++                        .as_ref()
++                        .is_some_and(|window| window.is_on_screen),
++                    bounds: child_bounds,
++                    ax_frame: child_ax_frame,
++                },
++            ));
++        }
++        if role_read_failed || !parent_pid_ok {
++            for child in children {
++                CFRelease(child as CFTypeRef);
++            }
++            for candidate in windows {
++                CFRelease(candidate as CFTypeRef);
++            }
++            CFRelease(app as CFTypeRef);
++            return None;
++        }
++        let frontmost_before = crate::apps::frontmost_pid();
++        let focused_before = crate::ax::bindings::focused_window_id_of_pid(pid);
++        let parent_frame_ok = parent_ax_frame.is_some_and(|frame| {
++            frame[0] == parent_bounds.x
++                && frame[1] == parent_bounds.y
++                && frame[2] == parent_bounds.width
++                && frame[3] == parent_bounds.height
++        });
++        let parent_relation_ok = crate::windows::resolve_window_owner(pid, window_id)
++            == crate::windows::WindowOwner::SamePid;
++
++        // Tail-read direct children and parent/focus identity while retained
++        // AX proxies are still alive. A changed or unreadable fact is unknown.
++        let fresh_windows = copy_element_array_attr_checked(app, "AXWindows");
++        let fresh_parent_bounds = crate::windows::window_bounds_by_id(window_id);
++        let fresh_parent_frame = crate::ax::bindings::element_screen_rect(parent);
++        let parent_tail_revalidated = fresh_windows.as_ref().is_ok_and(|fresh| {
++            let matches: Vec<_> = fresh
++                .iter()
++                .filter(|candidate| {
++                    crate::ax::bindings::ax_get_window_id(**candidate) == Some(window_id)
++                })
++                .collect();
++            matches.len() == 1 && CFEqual(*matches[0] as CFTypeRef, parent as CFTypeRef) != 0
++        }) && crate::windows::resolve_window_owner(pid, window_id)
++            == crate::windows::WindowOwner::SamePid
++            && fresh_parent_bounds
++                .as_ref()
++                .is_some_and(|fresh| same_bounds(&parent_bounds, fresh))
++            && fresh_parent_frame.is_some_and(|frame| Some(frame) == parent_ax_frame);
++        if let Ok(fresh) = fresh_windows {
++            for candidate in fresh {
++                CFRelease(candidate as CFTypeRef);
++            }
++        }
++        let fresh_children = copy_element_array_attr_checked(parent, "AXChildren");
++        let children_tail_revalidated =
++            fresh_children.as_ref().is_ok_and(|fresh| {
++                if fresh.len() != children.len() {
++                    return false;
++                }
++                fresh.iter().zip(children.iter()).zip(roles.iter()).all(
++                    |((next, previous), role)| {
++                        role.as_ref().is_some_and(|expected| {
++                            copy_string_attr_checked(*next, "AXRole")
++                                .is_ok_and(|actual| actual == *expected)
++                        }) && CFEqual(*next as CFTypeRef, *previous as CFTypeRef) != 0
++                    },
++                )
++            });
++        if let Ok(fresh) = fresh_children {
++            for child in fresh {
++                CFRelease(child as CFTypeRef);
++            }
++        }
++        let child_tail_revalidated = if sheets.len() == 1 {
++            let (sheet_element, sheet) = &sheets[0];
++            let fresh_owner = crate::windows::resolve_window_owner(pid, sheet.window_id);
++            let fresh_window = crate::windows::window_info_by_id(sheet.window_id);
++            let fresh_frame = crate::ax::bindings::element_screen_rect(*sheet_element);
++            let mut fresh_pid = 0;
++            let fresh_pid_matches = AXUIElementGetPid(*sheet_element, &mut fresh_pid)
++                == kAXErrorSuccess
++                && fresh_pid == pid;
++            fresh_owner == crate::windows::WindowOwner::SamePid
++                && fresh_pid_matches
++                && fresh_window.as_ref().is_some_and(|window| {
++                    window.is_on_screen && same_bounds(&sheet.bounds, &window.bounds)
++                })
++                && fresh_frame.is_some_and(|frame| frame == sheet.ax_frame)
++                && crate::ax::bindings::ax_get_window_id(*sheet_element) == Some(sheet.window_id)
++                && copy_element_attr(*sheet_element, "AXParent").is_some_and(|fresh_parent| {
++                    let same = CFEqual(fresh_parent as CFTypeRef, parent as CFTypeRef) != 0;
++                    CFRelease(fresh_parent as CFTypeRef);
++                    same
++                })
++        } else {
++            true
++        };
++        // Keep focus as the final OS read after all parent and child tail checks.
++        let frontmost_after = crate::apps::frontmost_pid();
++        let focused_after = crate::ax::bindings::focused_window_id_of_pid(pid);
++        let focus_tail_revalidated = frontmost_before == Some(pid)
++            && frontmost_after == frontmost_before
++            && focused_after == focused_before;
++        let focused_window_id = focused_after;
++        let facts = AttachedSheetProofFacts {
++            snapshot_id: snapshot_id.to_owned(),
++            pid,
++            parent_window_id: window_id,
++            parent_ax_matches: matching_parent.len(),
++            parent_role: Some("AXWindow".to_owned()),
++            parent_owner_pid,
++            parent_bounds: parent_bounds.clone(),
++            parent_ax_frame: parent_ax_frame.unwrap_or([f64::NAN, f64::NAN, 0.0, 0.0]),
++            direct_children_status: "success",
++            direct_child_count: children.len(),
++            direct_child_roles: roles,
++            sheets: sheets.iter().map(|(_, facts)| facts.clone()).collect(),
++            frontmost_pid: frontmost_after,
++            focused_window_id,
++            parent_tail_revalidated: parent_frame_ok
++                && parent_relation_ok
++                && parent_tail_revalidated,
++            children_tail_revalidated,
++            focus_tail_revalidated,
++            child_tail_revalidated,
++        };
++        let proof = build_attached_sheet_proof_payload(&facts);
++        for child in children {
++            CFRelease(child as CFTypeRef);
++        }
++        for candidate in windows {
++            CFRelease(candidate as CFTypeRef);
++        }
++        CFRelease(app as CFTypeRef);
++        proof
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ fn build_focus_proof_payload(
+     pid: i32,
+@@ -713,6 +1136,16 @@ impl Tool for GetWindowStateTool {
+                 .trim_end_matches(":0")
+                 .to_string();
+             structured["snapshot_id"] = serde_json::json!(snapshot_id);
++            let attached_snapshot_id = snapshot_id.clone();
++            let attached_sheet = tokio::task::spawn_blocking(move || {
++                attached_sheet_proof(pid, window_id, &attached_snapshot_id)
++            })
++            .await
++            .ok()
++            .flatten();
++            if let Some(proof) = attached_sheet {
++                structured["attached_sheet_proof"] = proof;
++            }
+             if chromium_browser_window(pid) {
+                 let proof = tokio::task::spawn_blocking(move || {
+                     focused_element_proof(pid, window_id, &snapshot_id)
+@@ -1335,6 +1768,108 @@ mod tests {
+     use crate::ax::tree::AXNode;
+     use cua_driver_core::element_query::project_elements_for_query;
+ 
++    fn attached_sheet_facts() -> AttachedSheetProofFacts {
++        AttachedSheetProofFacts {
++            snapshot_id: "snapshot-1".into(),
++            pid: 22394,
++            parent_window_id: 16120,
++            parent_ax_matches: 1,
++            parent_role: Some("AXWindow".into()),
++            parent_owner_pid: 22394,
++            parent_bounds: crate::windows::WindowBounds {
++                x: 268.0,
++                y: 188.0,
++                width: 586.0,
++                height: 488.0,
++            },
++            parent_ax_frame: [268.0, 188.0, 586.0, 488.0],
++            direct_children_status: "success",
++            direct_child_count: 1,
++            direct_child_roles: vec![Some("AXSheet".into())],
++            sheets: vec![AttachedSheetChildFacts {
++                pid: 22394,
++                window_id: 16151,
++                owner_pid: 22394,
++                ax_parent_pid: 22394,
++                ax_parent_window_id: 16120,
++                ax_parent_verified: true,
++                visible: true,
++                bounds: crate::windows::WindowBounds {
++                    x: 357.0,
++                    y: 298.0,
++                    width: 408.0,
++                    height: 267.0,
++                },
++                ax_frame: [357.0, 298.0, 408.0, 267.0],
++            }],
++            frontmost_pid: Some(22394),
++            focused_window_id: Some(16151),
++            parent_tail_revalidated: true,
++            children_tail_revalidated: true,
++            focus_tail_revalidated: true,
++            child_tail_revalidated: true,
++        }
++    }
++
++    #[test]
++    fn attached_sheet_proof_requires_exact_unique_fresh_parent_child_and_focus() {
++        let proof = build_attached_sheet_proof_payload(&attached_sheet_facts()).unwrap();
++        assert_eq!(proof["version"], "macos-attached-sheet-v1");
++        assert_eq!(proof["snapshot_id"], "snapshot-1");
++        assert_eq!(proof["status"], "sheet");
++        assert_eq!(proof["sheet"]["window_id"], 16151);
++
++        let mut none = attached_sheet_facts();
++        none.sheets.clear();
++        none.direct_child_roles.clear();
++        none.direct_child_count = 0;
++        none.focused_window_id = Some(none.parent_window_id);
++        assert_eq!(
++            build_attached_sheet_proof_payload(&none).unwrap()["status"],
++            "none"
++        );
++
++        let mut multi = attached_sheet_facts();
++        multi.sheets.push(multi.sheets[0].clone());
++        multi.direct_child_roles.push(Some("AXSheet".into()));
++        multi.direct_child_count += 1;
++
++        let mut failures = vec![multi];
++        let mut unreadable_role = attached_sheet_facts();
++        unreadable_role.direct_child_roles[0] = None;
++        failures.push(unreadable_role);
++        let mut wrong_parent = attached_sheet_facts();
++        wrong_parent.sheets[0].ax_parent_verified = false;
++        failures.push(wrong_parent);
++        let mut wrong_owner = attached_sheet_facts();
++        wrong_owner.sheets[0].owner_pid += 1;
++        failures.push(wrong_owner);
++        let mut wrong_focus = attached_sheet_facts();
++        wrong_focus.focused_window_id = Some(wrong_focus.parent_window_id);
++        failures.push(wrong_focus);
++        let mut invalid_identity = attached_sheet_facts();
++        invalid_identity.sheets[0].window_id = 0;
++        failures.push(invalid_identity);
++        let mut geometry_mismatch = attached_sheet_facts();
++        geometry_mismatch.sheets[0].ax_frame[0] += 1.0;
++        failures.push(geometry_mismatch);
++        let mut stale_parent = attached_sheet_facts();
++        stale_parent.parent_tail_revalidated = false;
++        failures.push(stale_parent);
++        let mut stale_children = attached_sheet_facts();
++        stale_children.children_tail_revalidated = false;
++        failures.push(stale_children);
++        let mut stale_focus = attached_sheet_facts();
++        stale_focus.focus_tail_revalidated = false;
++        failures.push(stale_focus);
++        let mut stale_sheet = attached_sheet_facts();
++        stale_sheet.child_tail_revalidated = false;
++        failures.push(stale_sheet);
++        assert!(failures
++            .iter()
++            .all(|facts| build_attached_sheet_proof_payload(facts).is_none()));
++    }
++
+     fn node(
+         idx: Option<usize>,
+         role: &str,

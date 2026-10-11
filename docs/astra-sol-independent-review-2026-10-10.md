@@ -207,3 +207,13 @@ Sol独立Computer284+SDK14=298项通过；native完整lib347通过/2 ignored，f
 
 
 2026-10-11 本机权限UI状态补记：Sol已核脱敏AX记录/服务和计数投影；GUI挑战为操作者实证，未另抢桌面。操作者正常进入System Settings两项隐私权限并点击“添加”，二者均触发Touch ID/密码挑战；前两次取消，当前录屏与系统录音挑战留在屏幕供用户本人完成。未输入凭据、候选未选择/启用、权限未改；没有保存截图，脱敏AX结果记录于私有 `A04-private/system-settings-tcc-ui-attempt-20261011.json`。此前“未执行候选/授权待用户”的当前状态应解读为权限尚未获批，而非没有尝试正常UI。上一交付head e0923b6（产品源282d528）五项CI全绿；新文档head尚未核CI。
+
+
+## 2026-10-11 候选真实验真及sheet生命周期最小修复放行
+
+Sol已独立读取候选注册PNG/metadata、真实SDK输入guard结果及三条T2 trajectory；录屏与辅助功能已通过正常UI实际启用，candidate截图/地址栏焦点proof/一次输入及拒绝反例通过。完整T2仍未保存、关重开；首Run私有monitor误判已修并真实轨迹回放，错误target模板已单来源化，后续正确fresh Run按两次无进展取消。当前A04 60main/2risk/62，历史246；无paid在途。
+
+已放行Luna最小补充版本化AXSheet→AXParent独立关系证明并接既有SurfaceRegistry push/pop：必须真实验证直接AXChildren唯一sheet、AXParent CFEqual、父子SPI/AX/WindowServer identity与几何、当前前台/焦点、当前父baseline和已授权switchWindows。仅成功完整directchildren读取可给checked-none并pop；错误、身份变化、多个sheet、无关系或非当前父均unknown/manual，旧refs按既有generation失效。不得以samePID、新出现、标题或伪完整inventory自动授权，不将Mac附件关系冒充Win32 foreground字段。先定向安全回归及真实0Provider parent→sheet→parent，再冻结和完整原卡；停止无修复paid重复。
+
+
+2026-10-11 attached-sheet离线冻结独检：Sol集中只读核原生checked AXChildren（成功空数组与读取失败分开）、直接SPI父子ID、AXParent CFEqual、父子AX/WindowServer几何及尾读前台/焦点。TS使用真实Mac partial库存的baseline差分，只将唯一新窗与精确关系证明匹配，仍保留complete=false；既有push/pop、旧refs失效、unknown保持及Runtime/Trajectory admission source限制一致。独立session8006执行tsc-b及Computer/Surface/Runtime/Trajectory/Protocol相关28文件837测试全部通过；作者session3723同范围通过，native新增专用表1/1通过（未重复旧完整baseline）。当前源码冻结可进入可复现第三patch、候选构建及真实0Provider parent→sheet→parent；此签收不代表生命周期或完整T2业务通过，历史请求仍246、无新增paid。

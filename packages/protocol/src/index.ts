@@ -17,7 +17,8 @@ export type SurfaceKind = "desktop" | "native_window" | "browser_tab" | "dom" | 
 export type SurfaceAdmissionSource =
   | "same_hwnd_overlay_root_proof"
   | "owned_transient_window_root_proof"
-  | "win32_relationship_probe";
+  | "win32_relationship_probe"
+  | "macos_attached_sheet_proof";
 
 export type SurfaceTransitionReason =
   | "initial_observation"

@@ -261,3 +261,14 @@ A04 T1追加重试事实：seq99收到GLM_INVALID_TOOL_CALL（_harnessEffect uns
 - 随后再次进入Screen & System Audio Recording > Add，当前原生Touch ID/密码挑战留在界面供用户本人完成；没有保存截图，live AX挑战文本与脱敏事件记录见忽略目录 `A04-private/system-settings-tcc-ui-attempt-20261011.json`（0600）。候选未启动/安装。
 - 实际低Host PID20858在认证前已停止，4317无监听；正常认证会话查询 `/api/runs` 为200、0条、0活动，未创建Run/未发Provider。stock PID4254与 `/private/tmp/a01-cua-luna.sock` 保留。A04计数维持42main/2risk/44；本次未使用caffeinate。所有历史Run终态。
 - 上一交付head e0923b6（产品源282d528）五项CI全绿；新文档head的CI尚未核，单独记录，不继承代码head绿灯。
+
+
+## 2026-10-11 用户两次正常认证后候选实测与完整T2失败
+
+用户分别完成原生认证后，Luna通过正常System Settings文件选择器添加精确CaptureFix独立app，并实际核实屏幕与系统音频录制、辅助功能均开启；未输入密码、未改TCC数据库。候选PID22781在独立socket正常启动，stock4254保留。此事实取代上节当前待认证状态，历史挑战不改写。Sol独立签收真实0Provider：地址栏AX焦点proof/private fingerprint正确；独立Save sheet754×436仅含377×218自身画面；生产SDK地址栏type成功，一次权限复用和焦点转移后type均DOM_INPUT_FOCUS_MISMATCH拒绝。私有证据 `A04-private/sol-candidate-capture-focus-review.json`，不计完整业务成功。
+
+A04通过既有正式接口续预占96/6/102 revision2，硬cap不变。首完整T2 `run-1791695959513-f08801ff-9e8` 7main：原196B六行输入正确，随后产生副本及Save，旧私有monitor仅按父窗PNG误取消；属于监控误判，不归模型不切sheet。修复monitor按同sourceActionId新Save重置，无关系/副本不豁免，真实该轨迹及两条旧无进展轨迹0Provider回放分别不取消/取消/取消。
+
+重试入口 `run-1791696459320-6fc309ed-4c7` 因旧模板entryArgs保留旧window16074而误绑定，Sol发现actualargv后直接SIGINT；3main、2keypress、cancelled。既有私有模板最小改为target单一字段生成socket/PID/window参数，exec前一致性断言，不另建runner。新fresh目标22394/16120的完整T2 `run-1791696712658-6d50a2f8-a7c` 8main、7GUI动作：输入原六行、CMD+S产生新Save及精确fresh windowRef，但后续两次点击仍指父窗同639,284且无新相关窗口/同图；修后monitor及时取消。两次完整卡均未生成指定文件，保存/关闭/重开未通过。所有三Run已cancelled，unknownSideEffects均none_recorded、cleanupDiagnostics为空；不以posted回执当界面成功。停止同版paid，继续零Provider修精确AXSheet→AXParent阻塞modal证据与现有Surface push/pop接通。
+
+此稳定点A04 actual60main/2risk/62、全部历史240main/6risk/246物理请求；225份已知usage合计4243328tokens，21请求usage未知、金额未知。新增三Run分别118069/31416/138092tokens，均各有1取消请求usage未知。T1/T2/T3完整原卡仍未通过；录屏/辅助功能已经实际授予，不能继续列为当前待用户条件。
