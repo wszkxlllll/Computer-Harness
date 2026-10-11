@@ -32,10 +32,11 @@ describe("default Computer tools", () => {
     expect(type?.description).toContain("soft-wrapped visual lines are not paragraph boundaries");
     expect(type?.description).toContain("Windows desktop-wide CUA multiline input is not supported by this path");
     expect(type?.description).toContain("other platforms keep their native multiline typing route");
+    expect(type?.description).toContain("On macOS, omit elementRef and use the native focused-control typing route");
     expect(type?.inputSchema).toMatchObject({
       properties: {
-        text: { type: "string", description: expect.stringContaining("appends at its end regardless of caret or selection") },
-        elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("does not replace a selection") },
+        text: { type: "string", description: expect.stringContaining("On macOS, omit elementRef") },
+        elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("Omit on macOS") },
       },
       required: ["text"],
       additionalProperties: false,
@@ -85,6 +86,18 @@ describe("default Computer tools", () => {
         elements: [{ ...observation.grounding.elements[0]!, source: "dom" as const }] },
     };
     expect(() => type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, { ...context, observation: domObservation })).toThrow(/UIA_REQUIRED/iu);
+
+    const darwinContext = { ...context, session: { platform: "darwin" } as never };
+    expect(() => type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, darwinContext))
+      .toThrow(/omit elementRef and use native focused-control typing on macOS/iu);
+    expect(() => type.toAction({ text: "single line", elementRef: "uia-current-1" }, darwinContext))
+      .toThrow(/omit elementRef and use native focused-control typing on macOS/iu);
+    expect(type.toAction({ text: "first\nsecond" }, { ...darwinContext, observation })).toEqual({ kind: "type", text: "first\nsecond" });
+
+    const windowsContext = { ...context, session: { platform: "win32" } as never };
+    expect(type.toAction({ text: "first\nsecond" }, { ...windowsContext, observation })).toEqual({
+      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+    });
   });
 
   it("validates and maps canonical arguments without provider-specific logic", () => {
