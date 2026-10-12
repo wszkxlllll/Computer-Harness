@@ -1,5 +1,11 @@
 # Astra 三线总计划：目标与完整验收
 
+2026-10-12 11:53 本轮修复完成并停止（用户要求本轮完成后停止，最新状态以本段为准）：F089已精确27文件提交并原SHA推送 `e7bce7f7792b455d02212c717a34206412002d14`；来源引用finish默认关闭，可经正常CLI/Host显式配置，Runtime只引用本Run已持久化Observation中的保留grounding并规范渲染结果，未知/推断明确标记。它验证来源与输出绑定一致性，不机械判断SKU语义或事实真值，不计T1业务通过。作者最终452/452，Sol独检239/239与Root独检213/213互补合452；主工作区tsc-b exit0，24源文件与冻结pin全部一致。当前HEAD CI38201158820已由Root于03:52:50Z实际核completed/success，4 verify及ci-required共5job全部success，不继承旧cb93五绿。详见[F089](./a-line-sync/fixes/F-20261012-089-source-linked-finish.md)及[来源引用审查](./astra-source-linked-finish-review-2026-10-12.md)。
+
+本轮未新增真实Provider请求或GUI业务。A07仍actual61main/0risk/61、reserve120/6/126 rev2；累计498actual=490main+8risk、468known合8,600,579tokens、30unknown，金额未知。95b CLI L2 experiment的T2完整基线/独立repeat/原variant三轮限定通过；正常Web首录入1134B而原卡1133B，已取消并保留轨迹/文稿，不算原卡通过。新表单实际AX值曾逐字核1133B/尾1LF，尚未再次Start；不再启动新Web/paid轮。T1业务、T3完整闭环及其复验/变体、真人五维、实体手机/语音与Preview远端部署仍缺，T3只读设计保留，未实施。
+
+收尾资源已核：所有既有Run终态后，自有Host26665与Relay26276逐UID/start/完整argv确认，各一次SIGTERM、ps gone且原PTY均exit0；Root keeper26995已由Root精确停止，不续保活。native98330、stock4254、归属未证debug21139及旧成果/错误路径文件未动。隔离T1工作树保留供审阅。六入口仅同步本地最终状态，不新增提交循环；本轮修复与CI已完成，现停止工作；不再启动任何后续任务。
+
 更新：2026-10-10，Asia/Shanghai。本文件整理 Astra 计划的目标、顺序和完成条件。2026-10-10 用户决定将本项目范围限定为 macOS 电脑端、Web/Relay 与手机客户端，并覆盖原三线计划中的 Windows/Linux 平台目标；原始阶段与诊断过程见 [10 月 6 日计划](./three-track-execution-plan-2026-10-06.md)和[历史验收台账](./three-track-acceptance-ledger-2026-10-06.md)。实际自主执行方式由[自主测试修复计划](./astra-autonomous-test-repair-plan-2026-10-10.md)规定，两份文件分别管理“最终要完成什么”和“现在怎样完成”，不建立竞争队列。
 
 ## 1. 目标、协作与当前起点

@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+2026-10-12 本地重新核对：[目录、源码与实际成果验证](./astra-local-directory-verification-2026-10-12.md)。当前e7bce7f；T2 CLI实验模式三轮已限定通过，旧F1–F4已修；正常Web/default Host、T1/T3及手机/部署出口分别保留。
+
 ## 使用、构建与许可
 
 [项目概览与手机体验说明](../README.md)注明公共 Demo Relay 尚未开放，并提供 Windows 本机 Host 启动前置、平台状态、安全边界和许可入口；[开发者上手](./getting-started.md)补充模型、CUA、OSWorld和排错步骤。项目许可见根目录[LICENSE](../LICENSE)，直接依赖与 CUA notices 见[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
