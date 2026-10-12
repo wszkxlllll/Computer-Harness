@@ -293,6 +293,7 @@ interface ObservationFingerprint {
   readonly byteLength: number;
   readonly viewport: ObservationFrame["viewport"];
   readonly digest: string;
+  readonly authorizedSavedDocumentEvidence?: Pick<NonNullable<ObservationFrame["authorizedSavedDocumentEvidence"]>, "source" | "status">;
 }
 
 interface LatestObservationFingerprint {
@@ -3086,6 +3087,11 @@ export class RunController {
       const code = isLegacyUnknownSurfaceRef(capture.surfaceRef) ? "LEGACY_SURFACE_UNRESOLVED" : "SURFACE_REF_INVALID";
       throw new ObservationCaptureError(new Error(`${code}: Computer capture did not identify one current, executable Surface incarnation`));
     }
+    if (capture.authorizedSavedDocumentEvidence !== undefined &&
+        (capture.authorizedSavedDocumentEvidence.observationId !== observationId ||
+         !sameSurfaceRef(capture.authorizedSavedDocumentEvidence.surfaceRef, capture.surfaceRef))) {
+      throw new ObservationCaptureError(new Error("AUTHORIZED_SAVED_DOCUMENT_EVIDENCE_MISMATCH: Host evidence is not bound to this exact Observation and Surface"));
+    }
     if (options.safeRecovery !== undefined) {
       const expectedTransition = options.safeRecovery.kind === "transient_parent_restored"
         ? "child_pop"
@@ -3131,6 +3137,9 @@ export class RunController {
       viewport: capture.viewport,
       screenshot: asset,
       ...(grounding === undefined ? {} : { grounding }),
+      ...(capture.authorizedSavedDocumentEvidence === undefined ? {} : {
+        authorizedSavedDocumentEvidence: capture.authorizedSavedDocumentEvidence,
+      }),
     };
     const previousSurfaceRef = this.snapshot.activeSurfaceRef;
     if (previousSurfaceRef === undefined || !sameSurfaceRef(previousSurfaceRef, capture.surfaceRef)) {
@@ -3830,6 +3839,12 @@ function fingerprintObservation(
     byteLength: capture.screenshot.data.byteLength,
     viewport: { ...capture.viewport },
     digest: createHash("sha256").update(capture.screenshot.data).digest("hex"),
+    ...(capture.authorizedSavedDocumentEvidence === undefined ? {} : {
+      authorizedSavedDocumentEvidence: {
+        source: capture.authorizedSavedDocumentEvidence.source,
+        status: capture.authorizedSavedDocumentEvidence.status,
+      },
+    }),
   };
 }
 
@@ -3841,6 +3856,7 @@ function sameObservationFingerprint(left: ObservationFingerprint, right: Observa
     && left.viewport.width === right.viewport.width
     && left.viewport.height === right.viewport.height
     && left.viewport.coordinateSpace === right.viewport.coordinateSpace
+    && JSON.stringify(left.authorizedSavedDocumentEvidence) === JSON.stringify(right.authorizedSavedDocumentEvidence)
     && left.digest === right.digest;
 }
 

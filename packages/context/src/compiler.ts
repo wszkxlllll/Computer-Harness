@@ -9,7 +9,7 @@ import type {
 } from "@computer-harness/runtime";
 import { createHash } from "node:crypto";
 import { currentObservationAssessmentBinding, decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
-import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
+import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, SurfaceRef, ToolCallId, ToolResult } from "@computer-harness/protocol";
 import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
@@ -69,10 +69,27 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("latestObservation must match the latest observation.created event");
     }
     const latestObservation = input.latestObservation ?? latestEventObservation;
+    const authorizedDocumentEvidence = latestObservation?.authorizedSavedDocumentEvidence;
+    if (authorizedDocumentEvidence !== undefined &&
+        (latestObservation === undefined || latestObservation.runId !== input.runId ||
+         authorizedDocumentEvidence.observationId !== latestObservation.id ||
+         !sameObservationSurfaceRef(authorizedDocumentEvidence.surfaceRef, latestObservation.surfaceRef))) {
+      throw new Error("authorizedSavedDocumentEvidence must match the exact current Observation and Surface");
+    }
     const capturedAt = latestObservation === undefined ? undefined : canonicalCapturedAt(latestObservation.capturedAt);
+    const authorizedDocumentEvidenceText = authorizedDocumentEvidence === undefined
+      ? undefined
+      : authorizedDocumentEvidence.status === "authorized_file_absent"
+        ? "Host read-only observation: the exact Host-authorized output file was absent at this observation. This is file-state evidence only; it does not verify document contents or task success."
+        : authorizedDocumentEvidence.status === "verified_clean_current_document"
+          ? "Host read-only observation: the current clean document is bound to the Host-authorized output file. This verifies document binding only, not file contents, bytes, line endings, or task success."
+          : "Host read-only observation: the Host-authorized output/document binding could not be verified at this observation. Do not infer file presence, document contents, or task success.";
     const observationMetadataText = latestObservation === undefined
       ? undefined
-      : `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`;
+      : [
+          `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`,
+          ...(authorizedDocumentEvidenceText === undefined ? [] : [authorizedDocumentEvidenceText]),
+        ].join("\n");
     const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
     const windowSwitchStateText = formatWindowSwitchState(input.computerSession, input.windowSwitchState, latestObservation?.grounding, latestObservation?.viewport);
     const windowSwitchStateTokens = windowSwitchStateText === undefined ? 0 : estimateTextTokens(windowSwitchStateText);
@@ -441,6 +458,11 @@ export class DefaultContextCompiler implements ContextCompiler {
       contextBudget: budget,
     };
   }
+}
+
+function sameObservationSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
+  return left.surfaceId === right.surfaceId && left.generation === right.generation && left.kind === right.kind &&
+    left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
 }
 
 function validateInputBudgets(text: number | undefined, wire: number | undefined): void {

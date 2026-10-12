@@ -687,6 +687,16 @@ export interface ObservationFrame {
   viewport: Viewport;
   screenshot: AssetRef;
   readonly grounding?: GroundingCatalog;
+  /** Host-produced, read-only status for one explicitly authorized saved file. */
+  readonly authorizedSavedDocumentEvidence?: AuthorizedSavedDocumentEvidence;
+}
+
+/** A bounded file/document binding fact; it never attests to document contents. */
+export interface AuthorizedSavedDocumentEvidence {
+  readonly source: "host-authorized-file-and-native-proof-v1";
+  readonly status: "authorized_file_absent" | "verified_clean_current_document" | "unverified";
+  readonly observationId: ObservationId;
+  readonly surfaceRef: SurfaceRef;
 }
 
 /** Exact persisted observation shown with one computer-action approval. */
@@ -713,6 +723,8 @@ export interface ObservationCapture {
     data: Uint8Array;
   };
   readonly grounding?: GroundingCatalog;
+  /** Optional Host fact available only for a single-file saved-document grant. */
+  readonly authorizedSavedDocumentEvidence?: AuthorizedSavedDocumentEvidence;
 }
 
 export type DeclaredActionEffect =

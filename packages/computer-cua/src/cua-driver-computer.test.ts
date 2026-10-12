@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, realpath, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rename, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -6,9 +6,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
-import type { ActionId, ActionIntent, ModelTurn, ObservationId, ToolCall } from "@computer-harness/protocol";
+import type { ActionId, ActionIntent, ModelTurn, ObservationId, RuntimeEvent, ToolCall } from "@computer-harness/protocol";
 import { BoundWindowMissingError } from "@computer-harness/protocol";
-import { CuaDriverComputer as ProductionCuaDriverComputer, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
+import { CuaDriverComputer as ProductionCuaDriverComputer, inspectAuthorizedOutputFileIdentity, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, windowSwitchTools, type ComputerSession, type ContextCompiler, type ModelInput, type ProviderAdapter } from "../../runtime/src/index.js";
 import { FileAssetStore, JsonlRunEventWriter } from "../../trajectory/src/index.js";
 import { readRuntimeEvents, reduceRuntimeEvents } from "../../trajectory/src/index.js";
@@ -9175,6 +9175,16 @@ describe("CuaDriverComputer", () => {
 });
 
 describe("window repair integration boundaries", () => {
+  it("classifies only ENOENT as absent and keeps permission or other IO failures unverified", async () => {
+    const enoent = Object.assign(new Error("missing"), { code: "ENOENT" });
+    const eacces = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    const eio = Object.assign(new Error("io failure"), { code: "EIO" });
+    const reader = (error: Error) => async (_path: string) => Promise.reject(error);
+    await expect(inspectAuthorizedOutputFileIdentity("/private/output.txt", reader(enoent))).resolves.toEqual({ status: "absent" });
+    await expect(inspectAuthorizedOutputFileIdentity("/private/output.txt", reader(eacces))).resolves.toEqual({ status: "unverified" });
+    await expect(inspectAuthorizedOutputFileIdentity("/private/output.txt", reader(eio))).resolves.toEqual({ status: "unverified" });
+  });
+
   it.each(["confirmed", "owner_changed", "unrelated"] as const)("checks temporary exact-owner Host authorization: %s", async (scenario) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-owner-boundary-"));
     const fake = windowDriver();
@@ -9252,8 +9262,9 @@ describe("window repair integration boundaries", () => {
     }
   });
 
-  it.each(["matching-pid", "wrong-pid", "changed-file", "wrong-identity", "missing-proof", "launch-error", "capture-failure", "ctime-only", "delayed-document", "no-document-timeout", "changed-app-identity", "abort-during-settle", "postlaunch-size", "postlaunch-mtime", "postlaunch-inode"] as const)("reopens only the one saved clean document after its completed close and exact recovery handoff (%s)", async (scenario) => {
+  it.each(["matching-pid", "wrong-pid", "changed-file", "wrong-identity", "missing-proof", "launch-error", "capture-failure", "ctime-only", "delayed-document", "no-document-timeout", "changed-app-identity", "abort-during-settle", "postlaunch-size", "postlaunch-mtime", "postlaunch-inode", "unverified-initial-proof", "parent-changed-during-observation"] as const)("reopens only the one saved clean document after its completed close and exact recovery handoff (%s)", async (scenario) => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "computer-harness-reopen-document-")));
+    const movedParent = `${directory}-moved`;
     const outputPath = join(directory, "one-run-output.txt");
     const fake = windowDriver();
     fake.setPlatform("darwin");
@@ -9287,6 +9298,8 @@ describe("window repair integration boundaries", () => {
     let abortTimer: ReturnType<typeof setTimeout> | undefined;
     const actionController = new AbortController();
     let suppressProof = false;
+    let swapParentAfterProof = false;
+    let parentWasSwapped = false;
     let identityMismatch = false;
     const launchCalls: Array<Record<string, unknown>> = [];
     const processIdentity = { seconds: 17, microseconds: 23 };
@@ -9347,6 +9360,14 @@ describe("window repair integration boundaries", () => {
         if (suppressProof) return result({ structuredJson: "{}" });
         const windowId = typeof input.window_id === "number" ? input.window_id : fake.target.windowId;
         const query = input.document_identity_query as Record<string, unknown>;
+        if (swapParentAfterProof) {
+          const proof = makeIdentityProof(windowId, typeof query.expected_document_url === "string");
+          swapParentAfterProof = false;
+          await rename(directory, movedParent);
+          await symlink(movedParent, directory);
+          parentWasSwapped = true;
+          return proof;
+        }
         if (scenario === "delayed-document" && launchAttempted && postLaunchListCalls === 1) {
           return result({ isError: true, text: "the stale inventory row is no longer queryable" });
         }
@@ -9412,10 +9433,35 @@ describe("window repair integration boundaries", () => {
     let session: ComputerSession | undefined;
     try {
       session = await computer.open({}, signal);
+      suppressProof = scenario === "unverified-initial-proof";
+      if (scenario === "parent-changed-during-observation") {
+        const stableParentObservation = await computer.observe(session, "authorized-output-stable-parent" as ObservationId, signal);
+        expect(stableParentObservation.authorizedSavedDocumentEvidence?.status).toBe("authorized_file_absent");
+      }
+      swapParentAfterProof = scenario === "parent-changed-during-observation";
+      const absentOutputObservation = await computer.observe(session, "authorized-output-absent" as ObservationId, signal);
+      expect(absentOutputObservation.authorizedSavedDocumentEvidence).toMatchObject({
+        source: "host-authorized-file-and-native-proof-v1",
+        status: scenario === "unverified-initial-proof" || scenario === "parent-changed-during-observation" ? "unverified" : "authorized_file_absent",
+        observationId: "authorized-output-absent",
+        surfaceRef: absentOutputObservation.surfaceRef,
+      });
+      suppressProof = false;
+      if (parentWasSwapped) {
+        await unlink(directory);
+        await rename(movedParent, directory);
+        parentWasSwapped = false;
+      }
       await writeFile(outputPath, "Host-authorized one-run document\n", "utf8");
       if (scenario === "postlaunch-inode") await utimes(outputPath, new Date(10_000), new Date(10_000));
       documentPresent = true;
-      await computer.observe(session, "saved-document-view" as ObservationId, signal);
+      const savedDocumentObservation = await computer.observe(session, "saved-document-view" as ObservationId, signal);
+      expect(savedDocumentObservation.authorizedSavedDocumentEvidence).toMatchObject({
+        source: "host-authorized-file-and-native-proof-v1",
+        status: "verified_clean_current_document",
+        observationId: "saved-document-view",
+        surfaceRef: savedDocumentObservation.surfaceRef,
+      });
       const beforeClose = await computer.execute(session, {
         actionId: "reopen-before-close" as ActionId,
         basedOn: "saved-document-view" as ObservationId,
@@ -9433,7 +9479,8 @@ describe("window repair integration boundaries", () => {
       const candidates = await computer.listWindowHandoffCandidates(session, signal);
       expect(candidates).toHaveLength(1);
       session = await computer.handoffWindow(session, candidates[0]!, signal);
-      await computer.observe(session, "recovery-blank-view" as ObservationId, signal);
+      const recoveryObservation = await computer.observe(session, "recovery-blank-view" as ObservationId, signal);
+      expect(recoveryObservation.authorizedSavedDocumentEvidence).toBeUndefined();
 
       expectedDocumentProofReads = 0;
       if (scenario === "changed-file") {
@@ -9492,6 +9539,26 @@ describe("window repair integration boundaries", () => {
       expect(reopenedView.screenshot.data).toBeInstanceOf(Uint8Array);
     } finally {
       if (abortTimer !== undefined) clearTimeout(abortTimer);
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+      await rm(movedParent, { recursive: true, force: true });
+    }
+  });
+
+  it("omits authorized saved-document evidence when the singleton Host grant is absent", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "computer-harness-no-authorized-document-grant-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", grounding: "off", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      expect((await computer.observe(session, "no-authorized-grant" as ObservationId, signal)).authorizedSavedDocumentEvidence).toBeUndefined();
+    } finally {
       if (session !== undefined) await computer.close(session);
       await rm(directory, { recursive: true, force: true });
     }
@@ -9645,6 +9712,18 @@ describe("window repair integration boundaries", () => {
       expect(compiledWindowTitles.at(-1)).not.toBe("Prepared recovery blank");
       expect(fake.calls.some((call) => call.name === "verifyState" && call.input?.window_id === reopenedWindowId)).toBe(true);
       const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      const observations = events.filter((event): event is Extract<RuntimeEvent, { type: "observation.created" }> => event.type === "observation.created");
+      const authorizedObservation = observations.find((event) => event.observation.authorizedSavedDocumentEvidence?.status === "verified_clean_current_document");
+      expect(authorizedObservation?.observation.authorizedSavedDocumentEvidence).toMatchObject({
+        source: "host-authorized-file-and-native-proof-v1",
+        status: "verified_clean_current_document",
+        observationId: authorizedObservation?.observation.id,
+        surfaceRef: authorizedObservation?.observation.surfaceRef,
+      });
+      expect(observations.some((event) => event.observation.authorizedSavedDocumentEvidence?.status === "authorized_file_absent")).toBe(false);
+      expect(observations.some((event) => event.observation.authorizedSavedDocumentEvidence !== undefined &&
+        (event.observation.authorizedSavedDocumentEvidence.observationId !== event.observation.id ||
+         event.observation.authorizedSavedDocumentEvidence.surfaceRef.surfaceId !== event.observation.surfaceRef.surfaceId))).toBe(false);
       const reopenAction = events.find((event) => event.type === "action.proposed" && event.callId === "runtime-reopen");
       if (reopenAction?.type !== "action.proposed") throw new Error("Runtime did not persist the reopen action proposal");
       const reopenActionId = reopenAction.action.actionId;

@@ -7,6 +7,7 @@ import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "
 import type {
   ActionIntent,
   ActionReceipt,
+  AuthorizedSavedDocumentEvidence,
   ComputerSessionDescriptor,
   ComputerWindowCandidate,
   ComputerWindowCandidateRelationship,
@@ -151,6 +152,23 @@ async function fileIdentityPin(path: string): Promise<FileIdentityPin> {
   };
 }
 
+type AuthorizedOutputFileIdentityRead =
+  | { readonly status: "present"; readonly identity: FileIdentityPin }
+  | { readonly status: "absent" }
+  | { readonly status: "unverified" };
+
+/** @internal The reader parameter keeps ENOENT distinct from every other IO failure. */
+export async function inspectAuthorizedOutputFileIdentity(
+  path: string,
+  readIdentity: (path: string) => Promise<FileIdentityPin> = fileIdentityPin,
+): Promise<AuthorizedOutputFileIdentityRead> {
+  try {
+    return { status: "present", identity: await readIdentity(path) };
+  } catch (error) {
+    return isNodeError(error) && error.code === "ENOENT" ? { status: "absent" } : { status: "unverified" };
+  }
+}
+
 function sameFileIdentity(left: FileIdentityPin, right: FileIdentityPin): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
     left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
@@ -261,6 +279,14 @@ async function prepareReopenSavedDocumentGrant(grant: ReopenSavedDocumentGrant):
     canonicalExecutableUrl,
     parentIdentity: { dev: parentInfo.dev.toString(), ino: parentInfo.ino.toString() },
   };
+}
+
+async function authorizedOutputParentIsPinned(state: PrivateReopenSavedDocumentState): Promise<boolean> {
+  const parent = dirname(state.path);
+  if (await realpath(parent) !== parent) return false;
+  const info = await lstat(parent, { bigint: true });
+  return info.isDirectory() && !info.isSymbolicLink() &&
+    info.dev.toString() === state.parentIdentity.dev && info.ino.toString() === state.parentIdentity.ino;
 }
 
 async function queryDocumentIdentity(
@@ -1564,34 +1590,65 @@ export class CuaDriverComputer implements Computer {
         );
         const liveBinding = capture.binding;
         const reopenState = current.reopenSavedDocument;
+        let authorizedSavedDocumentEvidenceStatus: AuthorizedSavedDocumentEvidence["status"] | undefined;
         if (reopenState !== undefined && current.platform === "darwin" &&
             windowIdentityKey(liveBinding.target) === windowIdentityKey(this.options.windowTarget!)) {
+          authorizedSavedDocumentEvidenceStatus = "unverified";
+          delete reopenState.savedDocument;
           try {
-            const parentInfo = await lstat(dirname(reopenState.path), { bigint: true });
-            const fileIdentity = await fileIdentityPin(reopenState.path);
-            const pathStillPinned = parentInfo.isDirectory() && !parentInfo.isSymbolicLink() &&
-              parentInfo.dev.toString() === reopenState.parentIdentity.dev && parentInfo.ino.toString() === reopenState.parentIdentity.ino;
-            const documentProof = pathStillPinned
-              ? await queryDocumentIdentity(current.driver, current.label, liveBinding.target, liveBinding.bounds,
-                reopenState.canonicalExecutableUrl, signal, reopenState.fileUrl)
-              : undefined;
-            if (documentProof?.cleanDocument === true &&
-                sameApplicationIdentity(documentProof.identity, reopenState.primaryIdentity)) {
+            signal.throwIfAborted();
+            if (!(await authorizedOutputParentIsPinned(reopenState))) throw new Error("authorized output parent changed");
+            const fileState = await inspectAuthorizedOutputFileIdentity(reopenState.path);
+            if (fileState.status === "unverified") throw new Error("authorized output file state could not be verified");
+            const beforeFileIdentity = fileState.status === "present" ? fileState.identity : undefined;
+            const fileWasAbsent = fileState.status === "absent";
+            const documentProof = await queryDocumentIdentity(
+              current.driver,
+              current.label,
+              liveBinding.target,
+              liveBinding.bounds,
+              reopenState.canonicalExecutableUrl,
+              signal,
+              fileWasAbsent ? undefined : reopenState.fileUrl,
+            );
+            signal.throwIfAborted();
+            const parentStillPinned = await authorizedOutputParentIsPinned(reopenState);
+            if (!parentStillPinned || documentProof === undefined ||
+                !sameApplicationIdentity(documentProof.identity, reopenState.primaryIdentity)) {
+              throw new Error("authorized document or parent proof was not stable");
+            }
+            if (fileWasAbsent) {
+              let remainsAbsent = false;
+              try {
+                await lstat(reopenState.path, { bigint: true });
+              } catch (error) {
+                if (isNodeError(error) && error.code === "ENOENT") remainsAbsent = true;
+                else throw error;
+              }
+              if (!remainsAbsent) throw new Error("authorized file appeared during observation");
+              authorizedSavedDocumentEvidenceStatus = "authorized_file_absent";
+            } else {
+              const afterFileIdentity = await fileIdentityPin(reopenState.path);
+              if (beforeFileIdentity === undefined || !sameFileIdentity(beforeFileIdentity, afterFileIdentity) ||
+                  documentProof.cleanDocument !== true) {
+                throw new Error("authorized file/document binding changed during observation");
+              }
               reopenState.savedDocument = {
                 snapshotId: documentProof.snapshotId,
                 observationId,
                 identity: documentProof.identity,
                 fileUrl: reopenState.fileUrl,
                 windowGeometry: { ...liveBinding.bounds },
-                fileIdentity,
+                fileIdentity: afterFileIdentity,
               };
-            } else {
-              delete reopenState.savedDocument;
+              authorizedSavedDocumentEvidenceStatus = "verified_clean_current_document";
             }
-          } catch {
+          } catch (error) {
+            if (signal.aborted) throw error;
             // A private file/document proof failure only withholds the
             // one-shot reopen grant; it never changes the normal observation.
             delete reopenState.savedDocument;
+            authorizedSavedDocumentEvidenceStatus = "unverified";
           }
         }
         const previousBinding = current.windowBindings.get(windowIdentityKey(liveBinding.target));
@@ -1718,6 +1775,14 @@ export class CuaDriverComputer implements Computer {
           ...(surfaceTransitionReason === undefined ? {} : { surfaceTransitionReason }),
           screenshot: { mediaType: "image/png", data: capture.data },
           ...(boundGrounding === undefined ? {} : { grounding: boundGrounding }),
+          ...(authorizedSavedDocumentEvidenceStatus === undefined ? {} : {
+            authorizedSavedDocumentEvidence: {
+              source: "host-authorized-file-and-native-proof-v1",
+              status: authorizedSavedDocumentEvidenceStatus,
+              observationId,
+              surfaceRef,
+            },
+          }),
         };
       } catch (error) {
         const details = driverErrorDetails(error);

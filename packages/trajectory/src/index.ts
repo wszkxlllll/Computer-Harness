@@ -1123,6 +1123,12 @@ const groundingCatalogSchema = z.object({
   elements: z.array(groundingElementSchema).max(256),
   selection: groundingSelectionTraceSchema.optional(),
 });
+const authorizedSavedDocumentEvidenceSchema = z.object({
+  source: z.literal("host-authorized-file-and-native-proof-v1"),
+  status: z.enum(["authorized_file_absent", "verified_clean_current_document", "unverified"]),
+  observationId: nonEmptyString,
+  surfaceRef: surfaceRefSchema,
+}).strict();
 const observationSchema = z.object({
   id: nonEmptyString,
   runId: nonEmptyString,
@@ -1132,6 +1138,21 @@ const observationSchema = z.object({
   viewport: viewportSchema,
   screenshot: assetRefSchema,
   grounding: groundingCatalogSchema.optional(),
+  authorizedSavedDocumentEvidence: authorizedSavedDocumentEvidenceSchema.optional(),
+}).superRefine((observation, context) => {
+  const evidence = observation.authorizedSavedDocumentEvidence;
+  if (evidence !== undefined && (evidence.observationId !== observation.id ||
+      evidence.surfaceRef.surfaceId !== observation.surfaceRef.surfaceId ||
+      evidence.surfaceRef.generation !== observation.surfaceRef.generation ||
+      evidence.surfaceRef.kind !== observation.surfaceRef.kind ||
+      evidence.surfaceRef.parentSurfaceId !== observation.surfaceRef.parentSurfaceId ||
+      evidence.surfaceRef.admissionSource !== observation.surfaceRef.admissionSource)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["authorizedSavedDocumentEvidence"],
+      message: "authorized saved-document evidence must match the exact Observation and Surface",
+    });
+  }
 });
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([

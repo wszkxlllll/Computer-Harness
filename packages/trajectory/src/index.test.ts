@@ -1218,6 +1218,12 @@ describe("JsonlRunEventWriter", () => {
         capturedAt: "2026-01-01T00:00:00.000Z",
         viewport: session.viewport,
         screenshot: { assetId: "asset-text-format" as AssetId, relativePath: "assets/text-format.png", mediaType: "image/png" as const, byteLength: 1 },
+        authorizedSavedDocumentEvidence: {
+          source: "host-authorized-file-and-native-proof-v1" as const,
+          status: "verified_clean_current_document" as const,
+          observationId,
+          surfaceRef: desktopSurfaceRef,
+        },
         grounding: {
           version: "uia-catalog-v1" as const,
           source: "uia" as const,
@@ -1235,10 +1241,29 @@ describe("JsonlRunEventWriter", () => {
     await writer.close();
     const replayed = (await readRuntimeEvents(filePath))[0];
     expect(replayed).toMatchObject({ type: "observation.created", observation: { grounding: { elements: [{ textFormat: completeFormat }] } } });
+    expect(replayed).toMatchObject({ type: "observation.created", observation: { authorizedSavedDocumentEvidence: {
+      source: "host-authorized-file-and-native-proof-v1", status: "verified_clean_current_document", observationId, surfaceRef: desktopSurfaceRef,
+    } } });
     expect(replayed).toBeDefined();
     if (replayed?.type !== "observation.created" || replayed.observation.grounding === undefined) throw new Error("round-trip observation missing grounding");
     const base = structuredClone(replayed);
     expect(runtimeEventSchema.safeParse(base).success).toBe(true);
+    const wrongEvidenceObservation = structuredClone(base);
+    if (wrongEvidenceObservation.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(wrongEvidenceObservation.observation.authorizedSavedDocumentEvidence!, { observationId: "other-observation" });
+    expect(runtimeEventSchema.safeParse(wrongEvidenceObservation).success).toBe(false);
+    const wrongEvidenceSurface = structuredClone(base);
+    if (wrongEvidenceSurface.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(wrongEvidenceSurface.observation.authorizedSavedDocumentEvidence!, { surfaceRef: domSurfaceRef });
+    expect(runtimeEventSchema.safeParse(wrongEvidenceSurface).success).toBe(false);
+    const unsupportedEvidenceSource = structuredClone(base);
+    if (unsupportedEvidenceSource.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(unsupportedEvidenceSource.observation.authorizedSavedDocumentEvidence!, { source: "model-asserted" });
+    expect(runtimeEventSchema.safeParse(unsupportedEvidenceSource).success).toBe(false);
+    const unsupportedEvidenceStatus = structuredClone(base);
+    if (unsupportedEvidenceStatus.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(unsupportedEvidenceStatus.observation.authorizedSavedDocumentEvidence!, { status: "saved-successfully" });
+    expect(runtimeEventSchema.safeParse(unsupportedEvidenceStatus).success).toBe(false);
     const malformedCount = structuredClone(base);
     Object.assign(malformedCount.observation.grounding!.elements[0]!, { textFormat: { ...completeFormat, utf8Bytes: 2 } });
     expect(runtimeEventSchema.safeParse(malformedCount).success).toBe(false);

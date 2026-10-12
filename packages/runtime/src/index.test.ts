@@ -144,6 +144,28 @@ class FakeComputer implements Computer {
   }
 }
 
+class AuthorizedDocumentEvidenceComputer extends FakeComputer {
+  private captureIndex = 0;
+
+  public constructor(private readonly statuses: readonly ("authorized_file_absent" | "verified_clean_current_document" | "unverified")[]) {
+    super(true);
+  }
+
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+    const capture = await super.observe(session, observationId, signal);
+    const status = this.statuses[this.captureIndex++] ?? this.statuses.at(-1)!;
+    return {
+      ...capture,
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status,
+        observationId,
+        surfaceRef: capture.surfaceRef,
+      },
+    };
+  }
+}
+
 class WindowSwitchComputer extends FakeComputer {
   public inventoryCalls = 0;
   public failTargetObservation = false;
@@ -4758,6 +4780,32 @@ describe("RunController Monitor online consumer", () => {
       block.type === "tool_result" && block.result.callId === "monitor-repeat-2" && block.result.status === "rejected" &&
       block.result.error.code === "TOOL_REJECTED")))).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("keeps same-status host evidence stable across Observation IDs but treats a status change as new evidence", async () => {
+    for (const scenario of [
+      { name: "same-status", statuses: ["authorized_file_absent", "authorized_file_absent", "authorized_file_absent"] as const, executeCount: 1 },
+      { name: "changed-status", statuses: ["authorized_file_absent", "verified_clean_current_document", "verified_clean_current_document"] as const, executeCount: 2 },
+    ]) {
+      const provider = new ScriptedProvider([
+        { type: "tool_calls", calls: [clickCall(`${scenario.name}-1`)] },
+        { type: "tool_calls", calls: [clickCall(`${scenario.name}-2`)] },
+        { type: "finish", summary: "replanned" },
+      ]);
+      const computer = new AuthorizedDocumentEvidenceComputer(scenario.statuses);
+      const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+        features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+      });
+      await expect(created.controller.start(`preserve ${scenario.name} host evidence semantics`)).resolves.toBe("succeeded");
+      const events = created.controller.getEvents();
+      const observations = events.filter((event) => event.type === "observation.created").map((event) => event.observation);
+      expect(observations[0]?.authorizedSavedDocumentEvidence?.observationId).toBe(observations[0]?.id);
+      expect(observations[1]?.authorizedSavedDocumentEvidence?.observationId).toBe(observations[1]?.id);
+      expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(scenario.executeCount);
+      expect(events.filter((event) => event.type === "tool.call.rejected" && event.callId === `${scenario.name}-2`).length)
+        .toBe(scenario.executeCount === 1 ? 1 : 0);
+      await rm(created.directory, { recursive: true, force: true });
+    }
   });
 
   it("does not block repeats when transition evidence is changed/unknown or Monitor is shadow/off", async () => {

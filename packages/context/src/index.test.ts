@@ -150,11 +150,70 @@ describe("DefaultContextCompiler", () => {
     const rawObservationText = rawObservationMessage?.content.filter((block) => block.type === "text").map((block) => block.text).join(" ") ?? "";
     expect(rawObservationText).toContain(`Observation ID ${first.id}`);
     expect(rawObservationText).toContain(`capturedAt ${first.capturedAt}`);
+    expect(rawObservationText).not.toContain("Host read-only observation");
     expect(recent.contextBudget?.trace?.projectedEventIds).toContain("event-2");
     expect(raw.contextBudget?.trace?.stablePrefixHash).toBe(recent.contextBudget?.trace?.stablePrefixHash);
     expect(raw.contextBudget?.trace?.historyEstimatedTokens).toBeGreaterThan(
       estimateEventTokens(raw.contextBudget?.trace?.selectedEventIds.flatMap((eventId) => events.filter((item) => item.eventId === eventId)) ?? []),
     );
+  });
+
+  it("projects only exact current Host file evidence and describes its limits", async () => {
+    const latest = {
+      ...observation("authorized-document-current"),
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status: "verified_clean_current_document" as const,
+        observationId: "authorized-document-current" as ObservationId,
+        surfaceRef: desktopSurfaceRef,
+      },
+    };
+    const events = [event(0, { type: "observation.created", observation: latest })];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const input = await compiler.compile({ runId, goal: "inspect the current document", recentEvents: events, latestObservation: latest }, new AbortController().signal);
+    const observationMessage = input.messages.find((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId));
+    const text = observationMessage?.content.filter((block) => block.type === "text").map((block) => block.text).join("\n") ?? "";
+    expect(text).toContain("Host read-only observation");
+    expect(text).toContain("bound to the Host-authorized output file");
+    expect(text).toContain("not file contents, bytes, line endings, or task success");
+    expect(text).not.toMatch(/file:\/\/|authorized-output\.txt|Host-authorized one-run document/u);
+
+    await expect(compiler.compile({
+      runId,
+      goal: "inspect the current document",
+      recentEvents: events,
+      latestObservation: { ...latest, authorizedSavedDocumentEvidence: { ...latest.authorizedSavedDocumentEvidence, observationId: "other-observation" as ObservationId } },
+    }, new AbortController().signal)).rejects.toThrow(/exact current Observation and Surface/u);
+
+    const absent = {
+      ...observation("authorized-document-absent"),
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status: "authorized_file_absent" as const,
+        observationId: "authorized-document-absent" as ObservationId,
+        surfaceRef: desktopSurfaceRef,
+      },
+    };
+    const absentInput = await compiler.compile({
+      runId, goal: "inspect the current document", recentEvents: [event(1, { type: "observation.created", observation: absent })], latestObservation: absent,
+    }, new AbortController().signal);
+    expect(JSON.stringify(absentInput.messages)).toContain("exact Host-authorized output file was absent at this observation");
+    expect(JSON.stringify(absentInput.messages)).not.toContain("authorized-document-absent.txt");
+
+    const unverified = {
+      ...observation("authorized-document-unverified"),
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status: "unverified" as const,
+        observationId: "authorized-document-unverified" as ObservationId,
+        surfaceRef: desktopSurfaceRef,
+      },
+    };
+    const unverifiedInput = await compiler.compile({
+      runId, goal: "inspect the current document", recentEvents: [event(2, { type: "observation.created", observation: unverified })], latestObservation: unverified,
+    }, new AbortController().signal);
+    expect(JSON.stringify(unverifiedInput.messages)).toContain("could not be verified at this observation");
+    expect(JSON.stringify(unverifiedInput.messages)).not.toMatch(/file:\/\/|private-output|secret-path/u);
   });
 
   it("keeps current Observation/action assessment IDs in the dynamic observation message", async () => {
