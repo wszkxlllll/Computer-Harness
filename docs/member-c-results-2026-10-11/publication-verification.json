@@ -6,6 +6,7 @@
   "newWindowsRuns": 0,
   "modelRequests": 0,
   "environmentFingerprintsChecked": false,
+  "recordKind": "historical_first_publication_2026-10-11; byte bindings describe that publication, not files after later updates",
   "contractPublicationLock": {
     "filesChecked": 19,
     "status": "passed"

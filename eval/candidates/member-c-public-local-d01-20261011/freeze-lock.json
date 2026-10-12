@@ -6,6 +6,8 @@
   "businessRuns": 0,
   "changePolicy": "改变任务/输入/判据/计划配置需更新冻结版本与字节锁；运行日期和输出目录在具体实例中展开并独立hash，不改原manifest。",
   "lockKind": "publication_byte_lock_original_contract_version_unchanged",
+  "publicationUpdatedOn": "2026-10-12",
+  "publicationUpdateScope": "README latest preflight/code-patch references only; original manifests, Goals and all other contract files unchanged; not a new patched-runtime freeze",
   "source": {
     "sourceId": "member-c-d01-2026-10-11/freeze-lock.json",
     "sha256": "fff08272660a9d37b44d5c19a8d16233c8e20a20e23b027988caa94138f5b6be",
@@ -28,8 +30,8 @@
   "files": [
     {
       "path": "README.md",
-      "bytes": 13030,
-      "sha256": "0f06cc702c2c1e93179fc27b793a46ee4d9dcd2fd80edf07b8db911751be2a17"
+      "bytes": 13613,
+      "sha256": "4ccec673123c2bb86a0f665ed1e604c07db46bb7f40c7c7d5fe2ad097fe8db83"
     },
     {
       "path": "medical-task-cards.md",
