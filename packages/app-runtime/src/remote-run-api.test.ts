@@ -331,6 +331,18 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
   }
 }
 
+function temporarilySetProcessPlatform(platform: NodeJS.Platform): () => void {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  if (originalPlatform === undefined || originalPlatform.configurable !== true) {
+    throw new Error("test runtime does not allow restoring a temporary process.platform override");
+  }
+  Object.defineProperty(process, "platform", { ...originalPlatform, value: platform });
+  return () => {
+    Object.defineProperty(process, "platform", originalPlatform);
+    expect(process.platform).toBe(originalPlatform.value);
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -374,6 +386,7 @@ describe("ApplicationRemoteRunApi", () => {
       nativeRecoveryProfile,
       managedBrowserProfileCoordinator: { getDefaultSession, acquireForRun: async () => async () => undefined },
     });
+    const restorePlatform = temporarilySetProcessPlatform("darwin");
     try {
       const choices = await api.listWindowTargets("device-native");
       expect(choices.nativeRecoveryProfile).toEqual({ profileId: nativeRecoveryProfile.profileId, label: "Host TextEdit recovery" });
@@ -385,14 +398,35 @@ describe("ApplicationRemoteRunApi", () => {
       }
       expect(createdComputerConfigs).toHaveLength(0);
 
+      for (const invalidGoal of [" \n\t ", "x".repeat(20_001)]) {
+        let thrown: unknown;
+        try {
+          void api.startRun("device-native", `native-profile-invalid-goal-${invalidGoal.length}`, invalidGoal, {
+            mode: "native-recovery", profileId: nativeRecoveryProfile.profileId,
+          });
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toMatchObject({ code: "INVALID_COMMAND" });
+      }
+      expect(createdComputerConfigs).toHaveLength(0);
+
+      const exactGoal = "\nSave the itinerary to /tmp/unique-output.txt\n\n";
       const started = await api.startRun(
         "device-native",
         "native-profile-once",
-        "Save the itinerary to /tmp/unique-output.txt",
+        exactGoal,
         { mode: "native-recovery", profileId: nativeRecoveryProfile.profileId },
       );
       expect(getDefaultSession).not.toHaveBeenCalled();
-      expect(started.goal).toContain("/tmp/unique-output.txt");
+      expect(started.goal).toBe(exactGoal);
+      expect(session.activeRun?.config.goal).toBe(exactGoal);
+      await expect(api.startRun(
+        "device-native",
+        "native-profile-once",
+        exactGoal.slice(0, -1),
+        { mode: "native-recovery", profileId: nativeRecoveryProfile.profileId },
+      )).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
       expect(createdComputerConfigs[0]).toMatchObject({
         kind: "cua",
         windowTarget: nativeRecoveryProfile.primaryTarget,
@@ -417,8 +451,12 @@ describe("ApplicationRemoteRunApi", () => {
       expect(createdComputerConfigs[1]).not.toHaveProperty("reopenSavedDocumentGrant");
       expect(createdComputerConfigs[1]).not.toHaveProperty("windowSwitchAllowedTargets");
     } finally {
-      await session.close();
-      await rm(outputDir, { recursive: true, force: true });
+      try {
+        await session.close();
+      } finally {
+        restorePlatform();
+        await rm(outputDir, { recursive: true, force: true });
+      }
     }
   });
 
@@ -439,6 +477,7 @@ describe("ApplicationRemoteRunApi", () => {
       initialWindows: [primary, recovery],
       nativeRecoveryProfile: profile,
     });
+    const restorePlatform = temporarilySetProcessPlatform("darwin");
     profile.primaryTarget.windowId = 9999;
     profile.outputPath = join(outputDir, "mutated-output.txt");
     try {
@@ -449,8 +488,44 @@ describe("ApplicationRemoteRunApi", () => {
         reopenSavedDocumentGrant: { path: join(outputDir, "unique-output.txt") },
       });
     } finally {
-      await session.close();
-      await rm(outputDir, { recursive: true, force: true });
+      try {
+        await session.close();
+      } finally {
+        restorePlatform();
+        await rm(outputDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("keeps the real Run factory Darwin-only for a Host native recovery profile", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-platform-gate-"));
+    const primary = { pid: 91, windowId: 2501, appName: "TextEdit", title: "Untitled" };
+    const recovery = { pid: 91, windowId: 2502, appName: "TextEdit", title: "Untitled" };
+    const profile = {
+      profileId: "Opaque_Profile_3344556677",
+      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
+      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
+      outputPath: join(outputDir, "unique-output.txt"),
+      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Finished",
+      initialWindows: [primary, recovery],
+      nativeRecoveryProfile: profile,
+    });
+    const restorePlatform = temporarilySetProcessPlatform("linux");
+    try {
+      await expect(api.startRun("device-native", "native-profile-non-darwin", "Save", {
+        mode: "native-recovery", profileId: profile.profileId,
+      })).rejects.toThrow(/Darwin CUA run/u);
+      expect(createdComputerConfigs).toEqual([]);
+    } finally {
+      try {
+        await session.close();
+      } finally {
+        restorePlatform();
+        await rm(outputDir, { recursive: true, force: true });
+      }
     }
   });
 

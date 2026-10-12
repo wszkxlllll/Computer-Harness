@@ -500,7 +500,6 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     assistantPreferencesInput?: RunAssistantPreferencesSnapshot,
     runNoticeContentEnabledInput = false,
   ): Promise<RemoteRunSnapshot> {
-    const cleanGoal = validateText(goal, MAX_GOAL_CHARS, "goal");
     const cleanCommandId = validateIdentifier(commandId, "commandId");
     if (typeof runNoticeContentEnabledInput !== "boolean") {
       return Promise.reject(new RemoteRunApiError("INVALID_COMMAND", "runNoticeContentEnabled must be a boolean."));
@@ -540,6 +539,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     } catch (error) {
       return Promise.reject(error);
     }
+    const cleanGoal = validateText(goal, MAX_GOAL_CHARS, "goal", target.mode === "native-recovery");
     const key = deviceId + "\u0000" + cleanCommandId;
     const companionSessionMode = target.mode === "browser" || target.mode === "native-recovery" || target.switchWindows !== true
       ? undefined
@@ -1997,11 +1997,12 @@ function boundedText(value: string | undefined, maxChars: number): string | unde
   return clean.length === 0 ? undefined : clean;
 }
 
-function validateText(value: string, maxChars: number, name: string): string {
+function validateText(value: string, maxChars: number, name: string, preserveWhitespace = false): string {
   if (typeof value !== "string") throw new RemoteRunApiError("INVALID_COMMAND", name + " must be text");
   const clean = value.trim();
-  if (clean.length === 0 || clean.length > maxChars) throw new RemoteRunApiError("INVALID_COMMAND", name + " must contain 1 to " + String(maxChars) + " characters");
-  return clean;
+  const result = preserveWhitespace ? value : clean;
+  if (clean.length === 0 || result.length > maxChars) throw new RemoteRunApiError("INVALID_COMMAND", name + " must contain 1 to " + String(maxChars) + " characters");
+  return result;
 }
 
 function validateIdentifier(value: string, name: string): string {

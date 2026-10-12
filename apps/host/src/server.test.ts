@@ -145,12 +145,13 @@ describe("Host HTTP boundary", () => {
       }
       expect(startRun).not.toHaveBeenCalled();
 
+      const exactGoal = "  Save the file to /tmp/itinerary.txt\n正文末行。\n\n";
       const started = await host.server.inject({
         method: "POST", url: "/api/runs", headers,
-        payload: { commandId: "native-profile-valid", goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId } },
+        payload: { commandId: "native-profile-valid", goal: exactGoal, target: { mode: "native-recovery", profileId } },
       });
       expect(started.statusCode).toBe(202);
-      expect(startRun).toHaveBeenCalledWith(expect.any(String), "native-profile-valid", "Save the file to /tmp/itinerary.txt", { mode: "native-recovery", profileId }, undefined, false);
+      expect(startRun).toHaveBeenCalledWith(expect.any(String), "native-profile-valid", exactGoal, { mode: "native-recovery", profileId }, undefined, false);
     } finally {
       await host.close();
     }

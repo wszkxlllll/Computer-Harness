@@ -59,8 +59,8 @@ export function GoalComposer({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const value = goal.trim();
-    if (!value || !canStart || disabled || busy || voiceActive) return;
+    const value = targetMode === "native-recovery" ? goal : goal.trim();
+    if (!value.trim() || !canStart || disabled || busy || voiceActive) return;
     if (targetMode === "window") {
       const targetToken = targetPicker.selectedToken;
       if (!targetToken) return;

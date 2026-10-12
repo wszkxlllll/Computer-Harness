@@ -120,7 +120,8 @@ describe("home run-target selection", () => {
     renderHome();
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
-    fireEvent.change(goal, { target: { value: "Save my itinerary" } });
+    const exactGoal = "  Save my itinerary\n正文末行。\n\n";
+    fireEvent.change(goal, { target: { value: exactGoal } });
     chooseStartMode(/电脑预设文稿/);
     await screen.findByText("将使用电脑预先指定的两个文稿窗口和本地输出文件。");
     const startButton = screen.getByRole("button", { name: "开始任务" });
@@ -128,7 +129,7 @@ describe("home run-target selection", () => {
     fireEvent.click(startButton);
 
     await waitFor(() => expect(createRun).toHaveBeenCalledWith(
-      "Save my itinerary",
+      exactGoal,
       expect.any(String),
       { mode: "native-recovery", profileId },
       defaultAssistantPreferences,

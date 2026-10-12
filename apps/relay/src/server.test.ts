@@ -340,7 +340,7 @@ describe("local outbound relay transport", () => {
       { commandId: "cmd_browser_blank", goal: "start with a blank managed browser", target: { mode: "browser", url: "   " } },
       { commandId: "cmd_browser_about_blank", goal: "start with a blank managed browser", target: { mode: "browser", url: "about:blank" } },
       { commandId: "cmd_browser", goal: "start in the managed browser", target: { mode: "browser", url: "https://example.com/trips" } },
-      { commandId: "cmd_native_recovery", goal: "start with the Host-owned native recovery profile", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" } },
+      { commandId: "cmd_native_recovery", goal: "  start with the Host-owned native recovery profile\n正文末行。\n\n", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" } },
       { commandId: "cmd_legacy", goal: "start with the selected window", targetToken: opaqueTargetToken },
     ];
     for (const body of acceptedRunStarts) {
