@@ -993,7 +993,84 @@ describe("app-runtime RunHandle", () => {
         expect(report.summary).toMatchObject({ windowSwitch: "opened-windows-v1", runtimeOutcome: scenario.outcome, finalComputerTarget: null });
         expect(report.snapshot.latestObservationId).toBeUndefined();
         await writeRunReport(report, outputDir);
-        expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain("Final target: unknown after a model-selected window switch began");
+        expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain("Final target: unknown after a model-selected target transition began");
+      } finally {
+        await rm(outputDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("invalidates a reported target only after reopen dispatch and restores it after a newer handoff", async () => {
+    const scenarios: ReadonlyArray<{ id: string; refusalCode?: string; newerHandoff?: boolean }> = [
+      { id: "not-ready-refusal", refusalCode: "DOCUMENT_REOPEN_NOT_READY" },
+      { id: "preflight-refusal", refusalCode: "DOCUMENT_REOPEN_PREFLIGHT_FAILED" },
+      { id: "generic-refusal", refusalCode: "OTHER_REFUSAL" },
+      { id: "reopen-started" },
+      { id: "newer-handoff", newerHandoff: true },
+    ];
+    for (const scenario of scenarios) {
+      const outputDir = await mkdtemp(join(tmpdir(), `harness-app-reopen-final-target-${scenario.id}-`));
+      const runId = `reopen-final-target-${scenario.id}` as RunId;
+      const session = {
+        id: `${runId}-session` as import("@computer-harness/protocol").ComputerSessionId,
+        backend: "fixture",
+        viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: "2026-10-01T02:00:03.000Z",
+      };
+      const originalTarget = { pid: 2345, windowId: 6789 };
+      const nextTarget = { pid: 3456, windowId: 7890 };
+      const observationId = `${runId}-recovery-observation` as import("@computer-harness/protocol").ObservationId;
+      const callId = `${runId}-reopen-call` as ToolCallId;
+      const actionId = `${runId}-reopen-action` as import("@computer-harness/protocol").ActionId;
+      const action = { actionId, basedOn: observationId, kind: "reopen_saved_document" as const };
+      const call = { id: callId, name: "reopen_saved_document", arguments: {} };
+      const events: RuntimeEvent[] = [
+        ...recoveryReportBaseEvents(runId),
+        { eventId: `${runId}-event-5` as EventId, runId, sequence: 5, occurredAt: "2026-10-01T02:00:05.000Z", type: "computer.window.handoff.requested", sourceActionId: `${runId}-initial-handoff`, reasonCode: "bound_window_missing" },
+        { eventId: `${runId}-event-6` as EventId, runId, sequence: 6, occurredAt: "2026-10-01T02:00:06.000Z", type: "computer.window.handoff.completed", target: originalTarget, session },
+        ...[
+          { eventId: `${runId}-event-7` as EventId, runId, sequence: 7, occurredAt: "2026-10-01T02:00:07.000Z", type: "observation.created" as const, observation: {
+            id: observationId,
+            runId,
+            computerSessionId: session.id,
+            surfaceRef: { ...fixtureSurfaceRef, surfaceId: `${runId}-surface` as SurfaceId },
+            capturedAt: "2026-10-01T02:00:07.000Z",
+            viewport: session.viewport,
+            screenshot: { assetId: `${runId}-asset` as import("@computer-harness/protocol").AssetId, relativePath: "screenshots/current.png", mediaType: "image/png" as const, byteLength: 1 },
+          } },
+          { eventId: `${runId}-event-8` as EventId, runId, sequence: 8, occurredAt: "2026-10-01T02:00:08.000Z", type: "tool.call.received" as const, call },
+          { eventId: `${runId}-event-9` as EventId, runId, sequence: 9, occurredAt: "2026-10-01T02:00:09.000Z", type: "action.proposed" as const, callId, action },
+          { eventId: `${runId}-event-10` as EventId, runId, sequence: 10, occurredAt: "2026-10-01T02:00:10.000Z", type: "action.execution.started" as const, action },
+          ...(scenario.refusalCode !== undefined ? [
+            { eventId: `${runId}-event-11` as EventId, runId, sequence: 11, occurredAt: "2026-10-01T02:00:11.000Z", type: "action.execution.failed" as const, receipt: { actionId, status: "refused" as const, driverCode: scenario.refusalCode, message: "fixture refusal" } },
+            { eventId: `${runId}-event-12` as EventId, runId, sequence: 12, occurredAt: "2026-10-01T02:00:12.000Z", type: "tool.call.failed" as const, result: { callId, status: "failed" as const, error: { code: scenario.refusalCode, message: "fixture refusal" } } },
+            { eventId: `${runId}-event-13` as EventId, runId, sequence: 13, occurredAt: "2026-10-01T02:00:13.000Z", type: "run.finished" as const, outcome: "failed" as const },
+          ] : scenario.newerHandoff ? [
+            { eventId: `${runId}-event-11` as EventId, runId, sequence: 11, occurredAt: "2026-10-01T02:00:11.000Z", type: "action.execution.completed" as const, receipt: { actionId, status: "completed" as const, sessionAfter: session } },
+            { eventId: `${runId}-event-12` as EventId, runId, sequence: 12, occurredAt: "2026-10-01T02:00:12.000Z", type: "computer.window.handoff.requested" as const, sourceActionId: actionId, reasonCode: "bound_window_missing" as const },
+            { eventId: `${runId}-event-13` as EventId, runId, sequence: 13, occurredAt: "2026-10-01T02:00:13.000Z", type: "computer.window.handoff.completed" as const, target: nextTarget, session },
+            { eventId: `${runId}-event-14` as EventId, runId, sequence: 14, occurredAt: "2026-10-01T02:00:14.000Z", type: "run.finished" as const, outcome: "succeeded" as const },
+          ] : [
+            { eventId: `${runId}-event-11` as EventId, runId, sequence: 11, occurredAt: "2026-10-01T02:00:11.000Z", type: "run.finished" as const, outcome: "outcome_unknown" as const },
+          ]),
+        ],
+      ];
+      try {
+        await writeFile(join(outputDir, "trajectory.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+        const report = await buildRunReport({
+          ...config(outputDir),
+          runId,
+          windowSwitch: "opened-windows-v1",
+          computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } },
+        }, runId, [], []);
+        if (scenario.refusalCode === "DOCUMENT_REOPEN_NOT_READY" || scenario.refusalCode === "DOCUMENT_REOPEN_PREFLIGHT_FAILED") {
+          expect(report.summary.finalComputerTarget).toEqual({ mode: "window", ...originalTarget });
+        } else if (scenario.refusalCode !== undefined || scenario.id === "reopen-started") {
+          expect(report.summary.finalComputerTarget).toBeNull();
+        } else {
+          expect(report.summary.finalComputerTarget).toEqual({ mode: "window", ...nextTarget });
+        }
       } finally {
         await rm(outputDir, { recursive: true, force: true });
       }
