@@ -224,6 +224,12 @@ function isValidRunTarget(value: unknown): boolean {
       isValidWindowTargetToken(value.targetToken) &&
       (value.previewToken === undefined || isValidWindowTargetToken(value.previewToken));
   }
+  if (value.mode === "native-recovery") {
+    const profileId = value.profileId;
+    return !Object.hasOwn(value, "switchWindows") &&
+      hasExactKeys(value, ["mode", "profileId"]) &&
+      isValidIdentifier(profileId) && profileId.length >= 16;
+  }
   if (value.mode === "browser") {
     if (hasOptionalSwitchWindows(value, ["mode"])) return true;
     if (hasOptionalSwitchWindows(value, ["mode", "url"])) return isValidBrowserStartUrl(value.url);

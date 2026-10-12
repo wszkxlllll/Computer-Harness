@@ -36,13 +36,14 @@ function snapshot(sequence = 0): RemoteRunSnapshot {
   };
 }
 
-function fakeApi(): RemoteRunApi {
+function fakeApi(nativeRecoveryProfile?: { readonly profileId: string; readonly label: string }): RemoteRunApi {
   return {
     listRuns: () => [snapshot()],
     getRun: (_deviceId, id) => id === runId ? snapshot(0) : undefined,
     listWindowTargets: async () => ({
       candidates: [{ token: targetToken, appName: "Fixture app", title: "Fixture window" }],
       expiresAt: "2026-09-26T00:10:00.000Z",
+      ...(nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile }),
     }),
     previewWindowTarget: async (_deviceId, candidateToken) => Object.assign({
       previewToken: "P".repeat(32),
@@ -98,6 +99,63 @@ function jsonResponse<T>(response: { json(): T }): T {
 }
 
 describe("Host HTTP boundary", () => {
+  it("exposes only the opaque native profile id and accepts only its exact selector shape", async () => {
+    const profileId = "Opaque_Profile_1234567890";
+    const api = fakeApi({ profileId, label: "Host TextEdit recovery" });
+    const startRun = vi.fn(api.startRun);
+    const host = createHostServer({ api: { ...api, startRun }, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin });
+    try {
+      const localCsrf = jsonResponse<{ csrfToken: string }>(await host.server.inject({
+        method: "GET", url: "/api/local/session", headers: { origin: localOrigin },
+      })).csrfToken;
+      const pairing = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+        method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+      }));
+      const token = new URL(pairing.pairingUrl).searchParams.get("token")!;
+      const pairRequest = jsonResponse<{ requestId: string }>(await host.server.inject({
+        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Recovery profile fixture" },
+      }));
+      await host.server.inject({
+        method: "POST", url: `/api/local/pairing/requests/${pairRequest.requestId}/confirm`,
+        headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+      });
+      const paired = await host.server.inject({
+        method: "POST", url: `/api/pair/requests/${pairRequest.requestId}/session`, headers: { origin: relayOrigin }, payload: {},
+      });
+      const pairedBody = jsonResponse<{ csrfToken: string }>(paired);
+      const cookie = String(paired.headers["set-cookie"]).split(";")[0];
+      const headers = { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken };
+
+      const choices = await host.server.inject({ method: "GET", url: "/api/windows", headers: { origin: relayOrigin, cookie } });
+      expect(jsonResponse(choices).nativeRecoveryProfile).toEqual({ profileId, label: "Host TextEdit recovery" });
+      expect(containsPrivateWindowIdentityKey(jsonResponse(choices))).toBe(false);
+
+      const extraRawFields = await host.server.inject({
+        method: "POST", url: "/api/runs", headers,
+        payload: { commandId: "native-profile-extra", goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId, pid: 77, windowId: 1101 } },
+      });
+      expect(extraRawFields.statusCode).toBe(400);
+
+      for (const switchWindows of [true, false]) {
+        const targetExtra = await host.server.inject({
+          method: "POST", url: "/api/runs", headers,
+          payload: { commandId: `native-profile-switch-${switchWindows}`, goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId, switchWindows } },
+        });
+        expect(targetExtra.statusCode).toBe(400);
+      }
+      expect(startRun).not.toHaveBeenCalled();
+
+      const started = await host.server.inject({
+        method: "POST", url: "/api/runs", headers,
+        payload: { commandId: "native-profile-valid", goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId } },
+      });
+      expect(started.statusCode).toBe(202);
+      expect(startRun).toHaveBeenCalledWith(expect.any(String), "native-profile-valid", "Save the file to /tmp/itinerary.txt", { mode: "native-recovery", profileId }, undefined, false);
+    } finally {
+      await host.close();
+    }
+  });
+
   it("exposes only the authenticated managed-profile contract and keeps commands idempotent", async () => {
     const operationId = "11111111-1111-4111-8111-111111111111";
     let state: ManagedBrowserProfileStateView = {

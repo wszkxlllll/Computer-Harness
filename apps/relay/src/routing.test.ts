@@ -127,6 +127,31 @@ describe("relay API route allowlist", () => {
     }
   });
 
+  it("accepts only the opaque native recovery profile selector", () => {
+    const route = resolveAllowedApiRoute("POST", "/api/runs");
+    expect(route).not.toBeNull();
+    const base = { commandId: "native_recovery_start", goal: "Save the supplied local document" };
+    const profileId = "Opaque_Profile_1234567890";
+    const request = (target: Record<string, unknown>) => ({ ...base, target });
+
+    expect(isValidApiRequestBody(route!, request({ mode: "native-recovery", profileId }))).toBe(true);
+    for (const target of [
+      { mode: "native-recovery", profileId, switchWindows: true },
+      { mode: "native-recovery", profileId, switchWindows: false },
+      { mode: "native-recovery", profileId, pid: 1234 },
+      { mode: "native-recovery", profileId, windowId: 5678 },
+      { mode: "native-recovery", profileId, path: "/private/document.txt" },
+      { mode: "native-recovery", profileId, grant: { path: "/private/document.txt" } },
+      { mode: "native-recovery" },
+      { mode: "native-recovery", profileId: 1234 },
+      { mode: "native-recovery", profileId: "short" },
+      { mode: "native-recovery", profileId: "contains spaces" },
+      { mode: "native-recovery", profileId, unexpected: true },
+    ]) {
+      expect(isValidApiRequestBody(route!, request(target)), JSON.stringify(target)).toBe(false);
+    }
+  });
+
   it("accepts only the shared versioned assistant-preferences snapshot on legacy and tagged starts", () => {
     const route = resolveAllowedApiRoute("POST", "/api/runs");
     expect(route).not.toBeNull();

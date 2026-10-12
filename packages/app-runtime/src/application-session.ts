@@ -58,6 +58,13 @@ export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   managedBrowserProfileRoot?: string;
   /** Run-only opt-in projected onto the CUA Computer at the Host boundary. */
   managedBrowserCompanion?: boolean;
+  /** Host-only single-run native recovery profile projection. */
+  nativeRecovery?: {
+    readonly primaryTarget: ApplicationSessionWindowTarget;
+    readonly recoveryTarget: ApplicationSessionWindowTarget;
+    readonly outputPath: string;
+    readonly expectedExecutableUrl: string;
+  };
 };
 
 /** Per-Run non-feature input kept separate from computer and Guard overrides. */
@@ -206,6 +213,7 @@ export class ApplicationSession {
       managedBrowserProfileLabel,
       managedBrowserProfileRoot,
       managedBrowserCompanion,
+      nativeRecovery,
       ...featureConfig
     } = featureOverrides;
     const config: ResolvedRunConfig = {
@@ -250,6 +258,32 @@ export class ApplicationSession {
       config.computer = {
         ...computer,
         ...(managedBrowserCompanion ? { managedBrowserCompanion: true } : {}),
+      };
+    }
+    if (nativeRecovery !== undefined) {
+      if (config.computer.kind !== "cua") throw new Error("native recovery profile requires the CUA computer");
+      if (featureConfig.grounding !== "uia-catalog-v1" || featureConfig.windowSwitch !== "opened-windows-v1" ||
+          featureConfig.windowHandoff !== "confirm-v1" || managedBrowserCompanion === true || managedBrowserUrl !== undefined) {
+        throw new Error("native recovery profile requires exact native window switching with UIA grounding and no managed-browser companion");
+      }
+      config.recoverBoundWindowMissing = true;
+      config.windowHandoff = "confirm-v1";
+      config.windowSwitch = "opened-windows-v1";
+      config.grounding = "uia-catalog-v1";
+      const { managedBrowserCompanion: _existingCompanion, managedBrowserUrl: _existingManagedBrowserUrl, ...nativeComputer } = config.computer;
+      config.computer = {
+        ...nativeComputer,
+        windowTarget: nativeRecovery.primaryTarget,
+        recoveryWindowTarget: nativeRecovery.recoveryTarget,
+        recoverBoundWindowMissing: true,
+        reopenSavedDocumentGrant: {
+          path: nativeRecovery.outputPath,
+          expectedExecutableUrl: nativeRecovery.expectedExecutableUrl,
+        },
+        windowDeliveryMode: "foreground",
+        windowSwitch: "opened-windows-v1",
+        windowSwitchAllowedTargets: [nativeRecovery.primaryTarget, nativeRecovery.recoveryTarget],
+        grounding: "uia-catalog-v1",
       };
     }
     const lease = this.owner.acquire(this.environmentIdentity, runId);

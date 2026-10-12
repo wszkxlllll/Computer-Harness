@@ -139,6 +139,7 @@ function errorMessageForCode(code?: string): string | undefined {
     WINDOW_DISCOVERY_FAILED: "电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。",
     RUN_BUSY: "电脑暂时无法开始新任务：现有任务尚未结束，或资源收尾尚未确认。请刷新任务列表后再试。",
     INVALID_TARGET: "目标信息无效。请检查窗口选择或 http://、https:// 地址后重试。",
+    NATIVE_RECOVERY_PROFILE_CONSUMED: "电脑预设文稿任务已使用，或启动结果暂无法确认。请在电脑端检查任务状态，确认无误后再准备新的本地文稿任务。",
     MANAGED_BROWSER_UNAVAILABLE: "电脑上的受管理浏览器当前不可用。请在电脑端检查 Harness 状态后重试。",
     MANAGED_BROWSER_PROFILE_UNAVAILABLE: "受管浏览器配置当前被占用，或上次异常退出留下了运行标记。任务尚未启动。请停止使用它的浏览器和 Harness Host，再在电脑运行 scripts/mobile.ps1 recover-browser-profile。该命令只归档运行标记，不会删除登录数据。",
     MANAGED_BROWSER_SETUP_REQUIRED: "受管浏览器的本机登录状态尚未准备好。请先在设置中准备浏览器，再开始此任务。",
@@ -220,10 +221,11 @@ function validateWindowCandidatePreview(value: unknown): WindowCandidatePreview 
 
 function validateWindowTargetList(value: unknown): WindowTargetList {
   const record = windowRecord(value, "电脑返回的窗口列表格式无效。");
-  if (!hasExactKeys(record, ["candidates", "expiresAt"], ["omittedAmbiguousCount"]) ||
+  if (!hasExactKeys(record, ["candidates", "expiresAt"], ["omittedAmbiguousCount", "nativeRecoveryProfile"]) ||
       !Array.isArray(record.candidates) || record.candidates.length > 64 ||
       typeof record.expiresAt !== "string" || !Number.isFinite(Date.parse(record.expiresAt)) ||
-      record.omittedAmbiguousCount !== undefined && (!Number.isSafeInteger(record.omittedAmbiguousCount) || Number(record.omittedAmbiguousCount) < 0)) {
+      record.omittedAmbiguousCount !== undefined && (!Number.isSafeInteger(record.omittedAmbiguousCount) || Number(record.omittedAmbiguousCount) < 0) ||
+      record.nativeRecoveryProfile !== undefined && !isNativeRecoveryProfileSummary(record.nativeRecoveryProfile)) {
     throw new Error("电脑返回的窗口列表格式无效。");
   }
   const candidates = record.candidates.map(validateWindowTarget);
@@ -240,7 +242,22 @@ function validateWindowTargetList(value: unknown): WindowTargetList {
     }),
     expiresAt: record.expiresAt,
     ...(record.omittedAmbiguousCount === undefined ? {} : { omittedAmbiguousCount: Number(record.omittedAmbiguousCount) }),
+    ...(record.nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile: validateNativeRecoveryProfileSummary(record.nativeRecoveryProfile) }),
   };
+}
+
+function isNativeRecoveryProfileSummary(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return hasExactKeys(record, ["profileId", "label"]) &&
+    typeof record.profileId === "string" && /^[A-Za-z0-9_-]{16,128}$/u.test(record.profileId) &&
+    typeof record.label === "string" && record.label.length > 0 && record.label.length <= 80;
+}
+
+function validateNativeRecoveryProfileSummary(value: unknown): { profileId: string; label: string } {
+  if (!isNativeRecoveryProfileSummary(value)) throw new Error("电脑返回的文稿任务信息无效，请刷新窗口列表后重试。");
+  const record = value as { profileId: string; label: string };
+  return { profileId: record.profileId, label: record.label };
 }
 
 function validateWindowTarget(value: unknown): WindowCandidate {

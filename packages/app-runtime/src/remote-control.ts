@@ -37,6 +37,17 @@ export interface RemoteWindowTargetSet {
   readonly expiresAt: string;
   /** Duplicate app/title identities withheld because the phone cannot distinguish them safely. */
   readonly omittedAmbiguousCount?: number;
+  /** One Host-configured native recovery option, exposed only as an opaque id. */
+  readonly nativeRecoveryProfile?: { readonly profileId: string; readonly label: string };
+}
+
+/** Host-owned exact native recovery configuration; never accepted from a client request. */
+export interface HostNativeRecoveryProfile {
+  readonly profileId: string;
+  readonly primaryTarget: { readonly pid: number; readonly windowId: number };
+  readonly recoveryTarget: { readonly pid: number; readonly windowId: number };
+  readonly outputPath: string;
+  readonly expectedExecutableUrl: string;
 }
 
 export interface RemoteWindowCandidatePreview {
@@ -57,6 +68,7 @@ export type RemoteRunTarget =
   | { readonly mode: "auto"; readonly switchWindows?: boolean }
   | { readonly mode: "desktop"; readonly switchWindows?: boolean }
   | { readonly mode: "window"; readonly targetToken: string; readonly previewToken?: string; readonly switchWindows?: boolean }
+  | { readonly mode: "native-recovery"; readonly profileId: string }
   | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string; readonly switchWindows?: boolean };
 /** A bare token remains accepted for existing clients. */
 export type RemoteRunTargetInput = string | RemoteRunTarget;

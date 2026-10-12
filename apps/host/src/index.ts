@@ -21,6 +21,7 @@ import { ManagedBrowserProfileService } from "./managed-browser-profile-service.
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 import { resolveHostWindowSelector } from "./window-selection-config.js";
+import { resolveNativeRecoveryProfileConfig } from "./native-recovery-profile-config.js";
 
 interface HostArguments {
   envFile: string;
@@ -49,6 +50,7 @@ async function main(): Promise<void> {
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
   const windowSelector = resolveHostWindowSelector(process.env);
+  const nativeRecoveryProfile = resolveNativeRecoveryProfileConfig();
   if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=${config.glmRequestTimeoutMs} requestTimeoutSource=${process.env.GLM_REQUEST_TIMEOUT_MS === undefined ? "default" : "environment"} endpointSource=${config.glmEndpoint === undefined ? "default" : "environment"}\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
@@ -91,6 +93,7 @@ async function main(): Promise<void> {
     runNotices: { enabled: true, dynamicContentEnabled: true },
     managedBrowserProfile,
     managedBrowserProfileCoordinator: managedBrowserProfileService,
+    ...(nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile }),
     ...(windowSelector === undefined ? {} : { windowSelector }),
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),

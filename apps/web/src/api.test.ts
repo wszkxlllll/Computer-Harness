@@ -34,6 +34,16 @@ describe("API error presentation", () => {
       code: "host_unavailable",
     });
   });
+
+  it("uses user-facing copy when the computer has already consumed its preset document task", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: "NATIVE_RECOVERY_PROFILE_CONSUMED", message: "internal profile detail" } }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    )));
+
+    await expect(createRun("Save the itinerary", "command-document", { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" }))
+      .rejects.toMatchObject({ message: "电脑预设文稿任务已使用，或启动结果暂无法确认。请在电脑端检查任务状态，确认无误后再准备新的本地文稿任务。" });
+  });
 });
 
 describe("managed-browser profile Settings API contract", () => {
@@ -153,6 +163,23 @@ describe("explicit window-target run contract", () => {
 
     await expect(listWindowTargets()).resolves.toEqual(result);
     expect(fetchMock).toHaveBeenCalledWith("/api/windows", expect.objectContaining({ credentials: "same-origin", cache: "no-store" }));
+  });
+
+  it("accepts only the opaque Host native-profile summary and rejects raw identity fields", async () => {
+    const profileId = "Opaque_Profile_1234567890";
+    const validResponse = {
+      candidates: [],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      nativeRecoveryProfile: { profileId, label: "Host TextEdit recovery" },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(validResponse), { status: 200 })));
+    await expect(listWindowTargets()).resolves.toMatchObject({ nativeRecoveryProfile: validResponse.nativeRecoveryProfile });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      ...validResponse,
+      nativeRecoveryProfile: { ...validResponse.nativeRecoveryProfile, pid: 77 },
+    }), { status: 200 })));
+    await expect(listWindowTargets()).rejects.toThrow("窗口列表格式无效");
   });
 
   it("starts with the explicitly chosen opaque window token", async () => {
