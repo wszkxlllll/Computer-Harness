@@ -9,6 +9,20 @@ import { parseArgs, toResolvedRunConfig } from "./index.js";
 afterEach(() => vi.unstubAllEnvs());
 
 describe("CLI window-switch configuration", () => {
+  it("keeps the source-linked contract opt-in and validates an explicit bounded JSON contract", () => {
+    const baseArgs = ["--goal", "Inspect the fixture", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock"];
+    const contract = { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", label: "CPU model", required: true }] };
+    const ordinary = toResolvedRunConfig(parseArgs(baseArgs), "Inspect the fixture");
+    const optedIn = toResolvedRunConfig(parseArgs([...baseArgs, "--source-linked-finish-contract", JSON.stringify(contract)]), "Inspect the fixture");
+    expect(ordinary).not.toHaveProperty("sourceLinkedFinish");
+    expect(optedIn.sourceLinkedFinish).toEqual(contract);
+    expect(() => parseArgs([...baseArgs, "--source-linked-finish-contract", "{"])).toThrow(/valid JSON/u);
+    expect(() => parseArgs([...baseArgs, "--source-linked-finish-contract", JSON.stringify({
+      ...contract,
+      fields: [{ ...contract.fields[0], answer: "M6" }],
+    })])).toThrow(/invalid or duplicate field/u);
+  });
+
   it("keeps desktop runs opt-in while allowing the switch flag without a bound window", () => {
     const baseArgs = ["--goal", "Inspect the open task", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock"];
     const defaultOptions = parseArgs(baseArgs);

@@ -292,6 +292,14 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect((progressProperties.kind as Record<string, unknown>).enum).toEqual(["milestone", "blocked"]);
   });
 
+  it("passes a source-linked finish reference report through the native terminate adapter", async () => {
+    const resultEvidence = { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "unknown", reason: "not_observed" }] };
+    const client = new Client(response("terminate", { status: "success", text: "Observed finish", resultEvidence }));
+    const turn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal });
+    expect(turn).toMatchObject({ type: "finish", summary: "Observed finish", resultEvidence });
+    expect(client.postCount).toBe(1);
+  });
+
   it("drops invalid optional assessments while preserving a valid tool call", async () => {
     const client = new Client(response("click", { x: 400, y: 300, observationAssessment: {
       observationId: "obs", actionId: "action", actionOutcome: "certain", evidence: "visible",

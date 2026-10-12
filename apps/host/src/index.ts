@@ -22,6 +22,7 @@ import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 import { resolveHostWindowSelector } from "./window-selection-config.js";
 import { resolveNativeRecoveryProfileConfig } from "./native-recovery-profile-config.js";
+import { resolveHostSourceLinkedFinishContract } from "./source-linked-finish-config.js";
 
 interface HostArguments {
   envFile: string;
@@ -183,6 +184,7 @@ function parseArguments(argv: readonly string[]): HostArguments {
     const item = argv[index]!;
     if (item === "--help" || item === "-h") {
       process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
+      process.stdout.write("Optional Run result contract: HARNESS_SOURCE_LINKED_FINISH_CONTRACT may contain a bounded source-linked-finish-v1 JSON field contract.\n");
       process.exit(0);
     }
     if (!item.startsWith("--")) throw new Error("Host arguments must use named options.");
@@ -236,8 +238,10 @@ function createSessionConfig(
   const qwenModel = args.model === "qwen3.8-flash";
   const baseUrl = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
   const glmEndpoint = process.env.GLM_BASE_URL;
+  const sourceLinkedFinish = resolveHostSourceLinkedFinishContract();
   return {
     model,
+    ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }),
     computer: {
       kind: "cua",
       socketPath: args.socket,

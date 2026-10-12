@@ -28,6 +28,8 @@ import type {
   RunOutcome,
   RuntimeEvent,
   RuntimeEventData,
+  SourceLinkedFinishContract,
+  SourceLinkedFinishReport,
   ToolCall,
   ToolCallId,
   ToolResult,
@@ -74,6 +76,7 @@ import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyPropos
 import { DeterministicGroundingSelector, type GroundingSelector, type GroundingSelectionQuery, type GroundingStructuredToolHint } from "./grounding-selector.js";
 import { finishSummaryRejectionReason } from "./finish-summary.js";
 import { currentObservationAssessmentBinding, parseObservationAssessment } from "./observation-assessment.js";
+import { canonicalizeSourceLinkedFinish, isWellFormedSourceLinkedFinishReport, validateSourceLinkedFinishContract } from "./source-linked-finish.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
@@ -132,6 +135,7 @@ export interface RunControllerDependencies {
   windowSwitch?: "off" | "opened-windows-v1";
   /** Darwin-only, Host-pinned recovery after a completed close loses the primary binding. */
   recoverBoundWindowMissing?: boolean;
+  sourceLinkedFinish?: SourceLinkedFinishContract;
 }
 
 export type CleanupOperation = "event_writer.flush" | "event_writer.close" | "computer.close" | "computer.dispose" | "provider.close" | "planning_module.close" | "memory_module.close";
@@ -329,6 +333,7 @@ export class RunController {
   private readonly windowHandoff: "off" | "confirm-v1";
   private readonly windowSwitch: "off" | "opened-windows-v1";
   private readonly recoverBoundWindowMissing: boolean;
+  private readonly sourceLinkedFinish: SourceLinkedFinishContract | undefined;
   private recoveryStage: "list" | "select" | "waiting" | undefined;
   private recoverySourceActionId: ActionId | undefined;
   private recoveryRequestCount = 0;
@@ -411,6 +416,7 @@ export class RunController {
     this.windowHandoff = dependencies.windowHandoff ?? "off";
     this.windowSwitch = dependencies.windowSwitch ?? "off";
     this.recoverBoundWindowMissing = dependencies.recoverBoundWindowMissing === true;
+    this.sourceLinkedFinish = validateSourceLinkedFinishContract(dependencies.sourceLinkedFinish);
     this.contextCompiler = dependencies.contextCompiler;
     this.toolRegistry = dependencies.toolRegistry;
     this.policy = dependencies.policy;
@@ -810,6 +816,7 @@ export class RunController {
               ...(!this.isBoundWindowRecoveryActive() && windowSwitchState !== undefined ? { windowSwitchState } : {}),
               features: this.isBoundWindowRecoveryActive() ? { planning: "off", memory: "off", batching: "off" } : this.features,
               ...(!this.isBoundWindowRecoveryActive() && this.assistantPreferences !== undefined ? { assistantPreferences: this.assistantPreferences } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && this.sourceLinkedFinish !== undefined ? { sourceLinkedFinish: this.sourceLinkedFinish } : {}),
               ...(!this.isBoundWindowRecoveryActive() && this.monitorPendingGuidance !== undefined ? { monitorGuidance: this.monitorPendingGuidance } : {}),
               ...(!this.isBoundWindowRecoveryActive() && this.latestObservation !== undefined ? { latestObservation: this.observationForContext(this.latestObservation) } : {}),
             },
@@ -979,6 +986,11 @@ export class RunController {
 
           this.throwIfAborted();
           turn = this.validateTurnObservationAssessment(turn);
+          if (turn.type === "finish" && turn.resultEvidence !== undefined &&
+              (this.sourceLinkedFinish === undefined || !isWellFormedSourceLinkedFinishReport(turn.resultEvidence))) {
+            const { resultEvidence: _unsolicitedEvidence, ...normalizedFinish } = turn;
+            turn = normalizedFinish;
+          }
           await this.commitEvent({
             type: "model.response.received",
             turn,
@@ -1007,9 +1019,54 @@ export class RunController {
           }
         }
         if (turn.type === "finish") {
+          let sourceLinkedFinish: ReturnType<typeof canonicalizeSourceLinkedFinish> | undefined;
+          const resolveSourceLinkedFinish = (): ReturnType<typeof canonicalizeSourceLinkedFinish> => {
+            let responseSequence: number | undefined;
+            for (let index = this.events.length - 1; index >= 0; index -= 1) {
+              const event = this.events[index];
+              if (event?.type === "model.response.received") {
+                responseSequence = event.sequence;
+                break;
+              }
+            }
+            if (responseSequence === undefined || this.sourceLinkedFinish === undefined) throw new Error("finish response event or opt-in contract is missing");
+            return canonicalizeSourceLinkedFinish(
+              turn.resultEvidence,
+              this.sourceLinkedFinish,
+              this.events,
+              this.runId,
+              responseSequence,
+              turn.summary,
+            );
+          };
+          const rejectSourceLinkedFinish = async (error: unknown): Promise<RunOutcome> => {
+            await this.commitEvent({
+              type: "runtime.error",
+              category: "source_linked_finish_invalid",
+              message: error instanceof Error ? error.message.slice(0, 300) : "source-linked finish report was rejected",
+            });
+            return this.commitRunFinished({
+              outcome: "failed",
+              summary: "Source-linked result evidence was rejected; completion remains unverified.",
+              ...(Buffer.byteLength(turn.summary, "utf8") <= 16_384 ? { reportedSummary: turn.summary } : {}),
+            });
+          };
           if (this.isBoundWindowRecoveryActive()) {
             if (turn.reportedStatus === "failure") {
-              outcome = await this.commitRunFinished({ outcome: "failed", summary: turn.summary, reportedStatus: "failure" });
+              if (this.sourceLinkedFinish !== undefined) {
+                try {
+                  sourceLinkedFinish = resolveSourceLinkedFinish();
+                } catch (error) {
+                  outcome = await rejectSourceLinkedFinish(error);
+                  break;
+                }
+              }
+              outcome = await this.commitRunFinished({
+                outcome: "failed",
+                summary: sourceLinkedFinish?.summary ?? turn.summary,
+                reportedStatus: "failure",
+                ...(sourceLinkedFinish === undefined ? {} : { resultEvidence: sourceLinkedFinish.resultEvidence, reportedSummary: turn.summary }),
+              });
             } else {
               await this.stopBoundWindowRecoveryAtManualBoundary();
             }
@@ -1026,6 +1083,14 @@ export class RunController {
           }
           if (beforeFinish.correction) {
             continue;
+          }
+          if (this.sourceLinkedFinish !== undefined) {
+            try {
+              sourceLinkedFinish = resolveSourceLinkedFinish();
+            } catch (error) {
+              outcome = await rejectSourceLinkedFinish(error);
+              break;
+            }
           }
           // Provider adapters validate explicit terminate controls. Runtime
           // applies the same check when a provider supplies a structured
@@ -1056,8 +1121,9 @@ export class RunController {
           outcome = turn.reportedStatus === "failure" ? "failed" : "succeeded";
           outcome = await this.commitRunFinished({
             outcome,
-            summary: turn.summary,
+            summary: sourceLinkedFinish?.summary ?? turn.summary,
             ...(turn.reportedStatus === undefined ? {} : { reportedStatus: turn.reportedStatus }),
+            ...(sourceLinkedFinish === undefined ? {} : { resultEvidence: sourceLinkedFinish.resultEvidence, reportedSummary: turn.summary }),
           });
           break;
         }
@@ -3248,7 +3314,13 @@ export class RunController {
     return `${prefix}已保留 ${completed} 个非等待 GUI 动作完成回执，${count("refused")} 个拒绝回执，${count("failed")} 个失败回执；完成回执不等于目标已达成。${postActionScreenshot}未自动重放 GUI 动作。`;
   }
 
-  private async commitRunFinished(data: { outcome: RunOutcome; summary?: string; reportedStatus?: "success" | "failure" }): Promise<RunOutcome> {
+  private async commitRunFinished(data: {
+    outcome: RunOutcome;
+    summary?: string;
+    reportedStatus?: "success" | "failure";
+    resultEvidence?: import("@computer-harness/protocol").SourceLinkedFinishEvidence;
+    reportedSummary?: string;
+  }): Promise<RunOutcome> {
     let outcome = data.outcome;
     const summary = data.summary ?? (outcome === "budget_exhausted"
       ? "运行预算已达到上限，任务完成未确认。已保留的执行回执不等于目标已核实；请对照原要求检查缺失结果。"
@@ -3271,6 +3343,8 @@ export class RunController {
       outcome,
       ...(summary === undefined ? {} : { summary }),
       ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
+      ...(data.resultEvidence === undefined ? {} : { resultEvidence: data.resultEvidence }),
+      ...(data.reportedSummary === undefined ? {} : { reportedSummary: data.reportedSummary }),
     });
     this.groundingCandidates.clear();
     this.groundingRecoveryHint = undefined;

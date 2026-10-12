@@ -821,6 +821,69 @@ export interface ObservationAssessment {
   };
 }
 
+/** Host-authored, finite schema for an opt-in source-linked finish. */
+export interface SourceLinkedFinishContract {
+  readonly version: "source-linked-finish-v1";
+  readonly fields: readonly {
+    readonly fieldId: string;
+    readonly label: string;
+    readonly required: boolean;
+  }[];
+}
+
+/** Untrusted finish report. A source-bound field carries references only. */
+export interface SourceLinkedFinishReport {
+  readonly version: "source-linked-finish-v1";
+  readonly fields: readonly (
+    | {
+        readonly fieldId: string;
+        readonly disposition: "source_bound";
+        readonly sources: readonly { readonly observationId: ObservationId; readonly elementRef: string }[];
+      }
+    | { readonly fieldId: string; readonly disposition: "inference"; readonly reason: string }
+    | {
+        readonly fieldId: string;
+        readonly disposition: "unknown";
+        readonly reason: "not_observed" | "no_grounding" | "ambiguous_source" | "conflicting_sources" | "source_unavailable";
+      }
+  )[];
+}
+
+/** Runtime-rendered source facts; never copied from model-provided values or quotes. */
+export interface SourceLinkedFinishEvidence {
+  readonly version: "source-linked-finish-v1";
+  readonly fields: readonly (
+    | {
+        readonly fieldId: string;
+        readonly label: string;
+        readonly disposition: "source_bound";
+        readonly sources: readonly {
+          readonly observationId: ObservationId;
+          readonly capturedAt: string;
+          readonly surfaceRef: SurfaceRef;
+          readonly elementRef: string;
+          readonly source: GroundingElementSource;
+          readonly role: string;
+          readonly name?: string;
+          readonly description?: string;
+          readonly state?: GroundingElementState;
+          readonly options?: readonly GroundingOption[];
+          readonly optionsTruncated?: boolean;
+          readonly textFormat?: GroundingTextFormat;
+          readonly excerpt: string;
+        }[];
+        readonly reviewRequired: boolean;
+      }
+    | { readonly fieldId: string; readonly label: string; readonly disposition: "inference"; readonly reason: string }
+    | {
+        readonly fieldId: string;
+        readonly label: string;
+        readonly disposition: "unknown";
+        readonly reason: "not_observed" | "no_grounding" | "ambiguous_source" | "conflicting_sources" | "source_unavailable";
+      }
+  )[];
+}
+
 export type ModelTurn =
   | {
       type: "tool_calls";
@@ -842,6 +905,7 @@ export type ModelTurn =
       /** Structured termination status supplied by providers that expose it. */
       reportedStatus?: "success" | "failure";
       observationAssessment?: ObservationAssessment;
+      resultEvidence?: SourceLinkedFinishReport;
       usage?: ModelUsage;
     };
 
@@ -1128,7 +1192,7 @@ export interface ContextTrace {
   runId: RunId;
   stablePrefixHash: string;
   fixedBlocks: readonly {
-    name: "system" | "goal" | "tools" | "plan" | "execution_segment" | "memory";
+    name: "system" | "goal" | "tools" | "plan" | "execution_segment" | "memory" | "source_linked_finish";
     estimatedTokens: number;
     included: boolean;
   }[];
@@ -1265,6 +1329,10 @@ export type RuntimeEventData =
       outcome: RunOutcome;
       summary?: string;
       reportedStatus?: "success" | "failure";
+      /** Runtime-canonical source evidence; present only when explicitly enabled for this Run. */
+      resultEvidence?: SourceLinkedFinishEvidence;
+      /** Original free-form model report when a canonical source-linked summary is present. */
+      reportedSummary?: string;
     };
 
 export type RuntimeEvent = RuntimeEventBase & RuntimeEventData;

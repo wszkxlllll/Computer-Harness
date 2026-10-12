@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
-import type { RunOutcome } from "@computer-harness/protocol";
+import type { RunOutcome, SourceLinkedFinishContract } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
+import { parseSourceLinkedFinishContractJson } from "@computer-harness/app-runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
 import { runApplicationTui, type TuiFeatureSelection } from "./tui.js";
 import { runCuaDoctor } from "./doctor-command.js";
@@ -32,6 +33,7 @@ export interface CliOptions {
   cuaWindowTarget?: { pid: number; windowId: number };
   cuaRecoveryWindowTarget?: { pid: number; windowId: number };
   recoverBoundWindowMissing: boolean;
+  sourceLinkedFinish?: SourceLinkedFinishContract;
   reopenSavedDocumentPath?: string;
   osworldBridge?: string;
   output: string;
@@ -85,6 +87,9 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   const windowSwitch = argv.includes("--window-switch");
   const recoverBoundWindowMissing = argv.includes("--recover-bound-window-missing");
   const reopenSavedDocumentPath = value("--reopen-saved-document");
+  const rawSourceLinkedFinish = value("--source-linked-finish-contract");
+  let sourceLinkedFinish: SourceLinkedFinishContract | undefined;
+  if (rawSourceLinkedFinish !== undefined) sourceLinkedFinish = parseSourceLinkedFinishContractJson(rawSourceLinkedFinish);
   const modelValue = value("--model");
   const model = resolveCliModel(modelValue, doctor || prepareManagedBrowserProfileValue) as ModelName;
   const monitorValue = value("--monitor") ?? "off";
@@ -252,6 +257,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     ...(cuaWindowTarget === undefined ? {} : { cuaWindowTarget }),
     ...(cuaRecoveryWindowTarget === undefined ? {} : { cuaRecoveryWindowTarget }),
     recoverBoundWindowMissing,
+    ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }),
     ...(reopenSavedDocumentPath === undefined ? {} : { reopenSavedDocumentPath }),
     ...(osworldBridge === undefined ? {} : { osworldBridge }),
     output,
@@ -313,6 +319,7 @@ async function main(): Promise<void> {
     process.stdout.write("TUI-only: --grounding auto selects UIA for native windows, DOM + UIA for a selected Harness-managed browser, and off for desktop.\n");
     process.stdout.write("TUI-only: --window-selection jev requires --allow-window-title-sharing and TYPESAFE_API_KEY; default is local.\n");
     process.stdout.write("Run option: --window-switch opts into switching among listed opened windows in a CUA session, including the primary desktop. In TUI, choose features with F; app names and titles go to the main Provider.\n");
+    process.stdout.write("Run option: --source-linked-finish-contract <json> explicitly requires a bounded source-linked-finish-v1 field contract for this Run.\n");
     process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
     return;
@@ -548,6 +555,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
     windowHandoff: options.recoverBoundWindowMissing || options.windowSwitch ? "confirm-v1" : "off",
     windowSwitch: options.windowSwitch ? "opened-windows-v1" : "off",
     ...(options.recoverBoundWindowMissing ? { recoverBoundWindowMissing: true } : {}),
+    ...(options.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: options.sourceLinkedFinish }),
     grounding: options.grounding === "auto" ? "off" : options.grounding,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),

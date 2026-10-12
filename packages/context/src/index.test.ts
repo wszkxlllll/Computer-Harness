@@ -87,6 +87,7 @@ describe("DefaultContextCompiler", () => {
       "",
       "",
       "",
+      "",
       constrained.messages[1]?.content[0]?.type === "text" ? constrained.messages[1].content[0].text : "",
     ].join("\n").length / 4));
     expect(final.system).toBe(ordinary.system);

@@ -1,6 +1,6 @@
 import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryRunModule, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
 import type { PlanStore, PlanningRunModule } from "@computer-harness/planning";
-import type { RunAssistantPreferencesSnapshot, RunId, RunOutcome } from "@computer-harness/protocol";
+import type { RunAssistantPreferencesSnapshot, RunId, RunOutcome, SourceLinkedFinishContract } from "@computer-harness/protocol";
 import type {
   ActionPolicy,
   AssetReader,
@@ -79,6 +79,8 @@ export interface ResolvedRunConfig {
   contextMaxWireInputTokens?: number;
   /** Frozen, provider-neutral answer preferences for this Run only. */
   assistantPreferences?: RunAssistantPreferencesSnapshot;
+  /** Explicit finite output field contract; absent preserves ordinary free-form finish behavior. */
+  sourceLinkedFinish?: SourceLinkedFinishContract;
   riskProfile: "experiment" | "live-interactive";
   riskGuard: "off" | "layered";
   /** Defaults to off; DOM/hybrid require an explicit HTTP(S) URL or about:blank. */

@@ -5,6 +5,7 @@ import type {
   ModelUsage,
   ModelTurn,
   ObservationAssessment,
+  SourceLinkedFinishReport,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -619,7 +620,7 @@ function readUsage(value: unknown): ModelUsage | undefined {
 
 type MappedQwen38Call =
   | { type: "call"; call: ToolCall }
-  | { type: "finish"; summary: string; reportedStatus: "success" | "failure" }
+  | { type: "finish"; summary: string; reportedStatus: "success" | "failure"; resultEvidence?: SourceLinkedFinishReport }
   | { type: "user_input_required"; question: string };
 
 function qwen38FunctionTools(input: ModelInput, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): Record<string, unknown>[] {
@@ -868,7 +869,12 @@ function mapQwen38ToolCall(
     if (typeof args.text !== "string" || !isActionableFinishSummary(args.text)) {
       throw new QwenProviderError(`${value.name} requires user-facing result text, not only a status label`, "QWEN_INVALID_TOOL_CALL");
     }
-    return { type: "finish", summary: args.text.trim(), reportedStatus: args.status };
+    return {
+      type: "finish",
+      summary: args.text.trim(),
+      reportedStatus: args.status,
+      ...(args.resultEvidence === undefined ? {} : { resultEvidence: args.resultEvidence as unknown as SourceLinkedFinishReport }),
+    };
   }
   if (tool.control === "user_input_required") {
     if (typeof args.text !== "string" || args.text.trim().length === 0) throw new QwenProviderError(`${value.name} requires text`, "QWEN_INVALID_TOOL_CALL");

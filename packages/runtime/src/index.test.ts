@@ -27,6 +27,7 @@ import type {
   ToolCallId,
   Viewport,
   RuntimeEventDraft,
+  SourceLinkedFinishContract,
 } from "@computer-harness/protocol";
 import {
   type AssetStore,
@@ -819,6 +820,7 @@ async function makeController(
     windowSwitch?: "off" | "opened-windows-v1";
     recoverBoundWindowMissing?: boolean;
     providerAttemptReserveMs?: number;
+    sourceLinkedFinish?: SourceLinkedFinishContract;
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -852,6 +854,7 @@ async function makeController(
     ...(overrides.windowSwitch === undefined ? {} : { windowSwitch: overrides.windowSwitch }),
     ...(overrides.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: overrides.recoverBoundWindowMissing }),
     ...(overrides.providerAttemptReserveMs === undefined ? {} : { providerAttemptReserveMs: overrides.providerAttemptReserveMs }),
+    ...(overrides.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: overrides.sourceLinkedFinish }),
   });
   return { controller, computer: activeComputer, directory };
 }
@@ -2047,6 +2050,43 @@ describe("RunController S2-2 happy path", () => {
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, summary: "model says done", outcome: "succeeded", modelUsage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 } });
   });
 
+  it("keeps ordinary unconfigured finish compatible by ignoring unsolicited malformed evidence", async () => {
+    const malformedFinish = {
+      type: "finish",
+      summary: "ordinary finish still succeeds",
+      resultEvidence: { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "source_bound", value: "M6" }] },
+    } as unknown as ModelTurn;
+    const provider = new ScriptedProvider([malformedFinish]);
+    const { controller, directory } = await makeController(provider);
+    await expect(controller.start("finish normally without opt-in")).resolves.toBe("succeeded");
+    const response = controller.getEvents().find((event) => event.type === "model.response.received");
+    expect(response?.type === "model.response.received" && response.turn.type === "finish" ? response.turn : undefined).toEqual({
+      type: "finish",
+      summary: "ordinary finish still succeeds",
+    });
+    expect(controller.getEvents().some((event) => event.type === "run.finished" && "resultEvidence" in event)).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("turns malformed opted-in evidence into one controlled failed terminal and a replayable trajectory", async () => {
+    const malformedFinish = {
+      type: "finish",
+      summary: "model asserted a value",
+      resultEvidence: { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "source_bound", value: "M4", sources: [{ observationId: "obs", elementRef: "ref" }] }] },
+    } as unknown as ModelTurn;
+    const provider = new ScriptedProvider([malformedFinish]);
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(5, 3), {
+      sourceLinkedFinish: { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", label: "CPU", required: true }] },
+    });
+    await expect(created.controller.start("finish with invalid proof")).resolves.toBe("failed");
+    expect(provider.inputs).toHaveLength(1);
+    expect(created.controller.getEvents().filter((event) => event.type === "runtime.error" && event.category === "source_linked_finish_invalid")).toHaveLength(1);
+    expect(created.controller.getEvents().find((event) => event.type === "run.finished")).toMatchObject({ outcome: "failed" });
+    const replayed = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(replayed.find((event) => event.type === "run.finished")).toMatchObject({ outcome: "failed" });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("carries a provider continuation from one ModelTurn into the next context", async () => {
     const provider = new ScriptedProvider([
       {
@@ -2919,6 +2959,39 @@ describe("RunController command inbox and control semantics", () => {
     expect(controller.getSnapshot()).toMatchObject({ summary: "corrected finish" });
     expect(created.controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
     expect(created.computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("drains pause and correction commands before rejecting an invalid opt-in finish", async () => {
+    let controller!: RunController;
+    let commandsDone: Promise<void> | undefined;
+    let notifyReady!: () => void;
+    const ready = new Promise<void>((resolve) => { notifyReady = resolve; });
+    const provider = new ScriptedProvider(
+      [
+        { type: "finish", summary: "stale finish without required evidence" },
+        { type: "finish", summary: "corrected finish", resultEvidence: { version: "source-linked-finish-v1", fields: [{ fieldId: "availability", disposition: "unknown", reason: "not_observed" }] } },
+      ],
+      (count) => {
+        if (count === 1) {
+          commandsDone = Promise.all([controller.pause("inspect pending result"), controller.submitUserInput("Continue with the current page")]).then(() => undefined);
+          notifyReady();
+        }
+      },
+    );
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(5, 3), {
+      sourceLinkedFinish: { version: "source-linked-finish-v1", fields: [{ fieldId: "availability", label: "Availability", required: true }] },
+    });
+    controller = created.controller;
+    const running = controller.start("inspect availability");
+    await ready;
+    await expect(commandsDone).resolves.toBeUndefined();
+    await waitUntil(() => controller.getSnapshot().status === "paused");
+    await expect(controller.resume()).resolves.toBeUndefined();
+    await expect(running).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(controller.getSnapshot()).toMatchObject({ summary: "Availability: Unknown (not_observed)" });
+    expect(controller.getEvents().filter((event) => event.type === "runtime.error" && event.category === "source_linked_finish_invalid")).toHaveLength(0);
     await rm(created.directory, { recursive: true, force: true });
   });
 

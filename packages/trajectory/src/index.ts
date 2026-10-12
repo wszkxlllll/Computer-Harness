@@ -15,6 +15,7 @@ import type {
   RunId,
   RunOutcome,
   RunStatus,
+  SourceLinkedFinishEvidence,
   PlanState,
   ExecutionSegment,
   MemoryState,
@@ -60,6 +61,8 @@ export interface RunSnapshot {
   endedAt?: string;
   summary?: string;
   reportedStatus?: "success" | "failure";
+  resultEvidence?: SourceLinkedFinishEvidence;
+  reportedSummary?: string;
   modelUsage?: ModelUsage;
   plan: PlanState;
   executionSegment?: ExecutionSegment;
@@ -585,6 +588,8 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         endedAt: event.occurredAt,
         ...(event.summary === undefined ? {} : { summary: event.summary }),
         ...(event.reportedStatus === undefined ? {} : { reportedStatus: event.reportedStatus }),
+        ...(event.resultEvidence === undefined ? {} : { resultEvidence: event.resultEvidence }),
+        ...(event.reportedSummary === undefined ? {} : { reportedSummary: event.reportedSummary }),
       };
     }
     default:
@@ -1195,6 +1200,74 @@ const toolCallSchema = z.object({
     summary: nonEmptyString.max(240),
   }).optional(),
 });
+const sourceLinkedUnknownReasonSchema = z.enum(["not_observed", "no_grounding", "ambiguous_source", "conflicting_sources", "source_unavailable"]);
+const sourceLinkedFinishReportFieldSchema = z.discriminatedUnion("disposition", [
+  z.object({
+    fieldId: nonEmptyString.max(64),
+    disposition: z.literal("source_bound"),
+    sources: z.array(z.object({ observationId: nonEmptyString.max(128), elementRef: nonEmptyString.max(96) }).strict()).min(1).max(4),
+  }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), disposition: z.literal("inference"), reason: nonEmptyString.max(240) }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), disposition: z.literal("unknown"), reason: sourceLinkedUnknownReasonSchema }).strict(),
+]);
+const sourceLinkedFinishReportSchema = z.object({
+  version: z.literal("source-linked-finish-v1"),
+  fields: z.array(sourceLinkedFinishReportFieldSchema).max(32),
+}).strict();
+const sourceLinkedFinishEvidenceSourceSchema = z.object({
+  observationId: nonEmptyString.max(128),
+  capturedAt: nonEmptyString,
+  surfaceRef: z.object({
+    surfaceId: nonEmptyString.max(128),
+    generation: z.number().int().nonnegative(),
+    kind: z.enum(["desktop", "native_window", "browser_tab", "dom", "overlay", "unknown"]),
+    parentSurfaceId: nonEmptyString.max(128).optional(),
+    admissionSource: z.enum(["same_hwnd_overlay_root_proof", "owned_transient_window_root_proof", "win32_relationship_probe", "macos_attached_sheet_proof"]).optional(),
+  }).strict().superRefine((value, context) => {
+    if (value.kind === "unknown" ? value.generation !== 0 : value.generation < 1) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["generation"], message: "invalid Surface generation" });
+    }
+    if (value.parentSurfaceId === value.surfaceId ||
+        (value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
+        ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe" || value.admissionSource === "macos_attached_sheet_proof") &&
+          (value.kind !== "native_window" || value.parentSurfaceId === undefined))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "invalid Surface parent or admission source" });
+    }
+  }),
+  elementRef: nonEmptyString.max(96),
+  source: z.enum(["uia", "dom"]),
+  role: nonEmptyString.max(64),
+  name: z.string().max(160).optional(),
+  description: z.string().max(240).optional(),
+  state: z.object({
+    enabled: z.boolean().optional(),
+    focused: z.boolean().optional(),
+    editable: z.boolean().optional(),
+    expanded: z.boolean().optional(),
+    selected: z.boolean().optional(),
+    valuePresent: z.boolean().optional(),
+  }).strict().optional(),
+  options: z.array(z.object({ text: nonEmptyString.max(160), enabled: z.boolean() }).strict()).max(32).optional(),
+  optionsTruncated: z.boolean().optional(),
+  textFormat: groundingTextFormatSchema.optional(),
+  excerpt: z.string().min(1).max(2_048),
+}).strict();
+const sourceLinkedFinishEvidenceFieldSchema = z.discriminatedUnion("disposition", [
+  z.object({
+    fieldId: nonEmptyString.max(64),
+    label: nonEmptyString.max(80),
+    disposition: z.literal("source_bound"),
+    sources: z.array(sourceLinkedFinishEvidenceSourceSchema).min(1).max(4),
+    reviewRequired: z.boolean(),
+  }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), label: nonEmptyString.max(80), disposition: z.literal("inference"), reason: nonEmptyString.max(240) }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), label: nonEmptyString.max(80), disposition: z.literal("unknown"), reason: sourceLinkedUnknownReasonSchema }).strict(),
+]);
+const sourceLinkedFinishEvidenceSchema = z.object({
+  version: z.literal("source-linked-finish-v1"),
+  fields: z.array(sourceLinkedFinishEvidenceFieldSchema).max(32),
+}).strict();
+
 const modelTurnSchema = z.union([
   z.object({
     type: z.literal("tool_calls"),
@@ -1210,6 +1283,7 @@ const modelTurnSchema = z.union([
     summary: nonEmptyString,
     reportedStatus: z.enum(["success", "failure"]).optional(),
     observationAssessment: observationAssessmentSchema.optional(),
+    resultEvidence: sourceLinkedFinishReportSchema.optional(),
     usage: modelUsageSchema.optional(),
   }),
 ]);
@@ -1369,7 +1443,7 @@ const contextTraceSchema = z.object({
   runId: nonEmptyString,
   stablePrefixHash: nonEmptyString,
   fixedBlocks: z.array(z.object({
-    name: z.enum(["system", "goal", "tools", "plan", "execution_segment", "memory"]),
+    name: z.enum(["system", "goal", "tools", "plan", "execution_segment", "memory", "source_linked_finish"]),
     estimatedTokens: z.number().int().nonnegative(),
     included: z.boolean(),
   })),
@@ -1676,10 +1750,20 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     outcome: z.enum(["succeeded", "failed", "cancelled", "budget_exhausted", "outcome_unknown"]),
     summary: z.string().optional(),
     reportedStatus: z.enum(["success", "failure"]).optional(),
+    resultEvidence: sourceLinkedFinishEvidenceSchema.optional(),
+    reportedSummary: z.string().optional(),
   }),
 ]);
 
 export const runtimeEventSchema = runtimeEventUnionSchema.superRefine((event, context) => {
+  if (event.type === "run.finished" && event.resultEvidence !== undefined) {
+    const summaryBytes = Buffer.byteLength(event.summary ?? "", "utf8");
+    const evidenceBytes = Buffer.byteLength(JSON.stringify(event.resultEvidence), "utf8");
+    const reportedBytes = Buffer.byteLength(event.reportedSummary ?? "", "utf8");
+    if (summaryBytes > 16_384 || evidenceBytes > 64_000 || reportedBytes > 16_384 || summaryBytes + evidenceBytes + reportedBytes > 96_000) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["resultEvidence"], message: "source-linked finish exceeds its persisted size limit" });
+    }
+  }
   if (event.schemaVersion === 2) {
     const refs: Array<{ path: (string | number)[]; value: z.infer<typeof surfaceRefSchema> }> = [];
     if (event.type === "observation.created") {

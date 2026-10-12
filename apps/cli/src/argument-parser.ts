@@ -38,6 +38,7 @@ const VALUE_OPTIONS = new Set([
   "--fixture-result",
   "--monitor",
   "--grounding",
+  "--source-linked-finish-contract",
   "--window-selection",
 ]);
 

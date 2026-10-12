@@ -25,6 +25,7 @@ import type {
   PreparedRequestEstimate as ProtocolPreparedRequestEstimate,
   PreparedRequestMetadata,
   RunAssistantPreferencesSnapshot,
+  SourceLinkedFinishContract,
   RunId,
   SurfaceRef,
   RiskCategory,
@@ -198,6 +199,7 @@ export interface ContextCompileInput {
   features?: RunFeatureConfig;
   monitorGuidance?: MonitorGuidance;
   assistantPreferences?: RunAssistantPreferencesSnapshot;
+  sourceLinkedFinish?: SourceLinkedFinishContract;
   /** Current serializable binding and its capabilities, independent of the
    * latest screenshot viewport. */
   computerSession?: ComputerSessionDescriptor;

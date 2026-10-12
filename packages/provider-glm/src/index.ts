@@ -5,6 +5,7 @@ import type {
   ModelUsage,
   ModelTurn,
   ObservationAssessment,
+  SourceLinkedFinishReport,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -760,7 +761,12 @@ function mapControlCall(control: ControlKind, argumentsValue: JsonValue, name: s
     if (typeof args.text !== "string" || !isActionableFinishSummary(args.text)) {
       throw new GlmProviderError("GLM terminate requires user-facing result text, not only a status label", "GLM_INVALID_TOOL_CALL");
     }
-    return { type: "finish", summary: args.text.trim(), reportedStatus: args.status };
+    return {
+      type: "finish",
+      summary: args.text.trim(),
+      reportedStatus: args.status,
+      ...(args.resultEvidence === undefined ? {} : { resultEvidence: args.resultEvidence as unknown as SourceLinkedFinishReport }),
+    };
   }
   if (typeof args.text !== "string" || args.text.trim().length === 0) throw new GlmProviderError("GLM interact requires text", "GLM_INVALID_TOOL_CALL");
   return { type: "user_input_required", question: args.text };

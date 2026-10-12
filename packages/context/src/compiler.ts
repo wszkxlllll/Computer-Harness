@@ -5,11 +5,12 @@ import type {
   ContextCompiler,
   ContextBudgetReport,
   MemoryRecallService,
+  ModelToolSpec,
   RunFeatureConfig,
 } from "@computer-harness/runtime";
 import { createHash } from "node:crypto";
 import { currentObservationAssessmentBinding, decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
-import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, SurfaceRef, ToolCallId, ToolResult } from "@computer-harness/protocol";
+import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, SourceLinkedFinishContract, SurfaceRef, ToolCallId, ToolResult } from "@computer-harness/protocol";
 import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
@@ -112,7 +113,13 @@ export class DefaultContextCompiler implements ContextCompiler {
       ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
     });
     const allowedTools = finishOnly ? baseTools.filter((tool) => tool.category === "control" && tool.name === "terminate") : baseTools;
-    const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(allowedTools) : allowedTools;
+    const actionDecoratedTools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(allowedTools) : allowedTools;
+    const tools = input.sourceLinkedFinish === undefined
+      ? actionDecoratedTools
+      : addSourceLinkedFinishSchema(actionDecoratedTools);
+    const sourceLinkedFinishText = input.sourceLinkedFinish === undefined
+      ? undefined
+      : formatSourceLinkedFinishContract(input.sourceLinkedFinish);
     const systemPrompt = composeSystemPrompt(this.systemPrompt, features, input.computerSession?.platform);
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
@@ -145,6 +152,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       { name: "plan" as const, text: planText ?? "", included: planText !== undefined },
       { name: "execution_segment" as const, text: executionSegmentText ?? "", included: executionSegmentText !== undefined },
       { name: "memory" as const, text: memoryText ?? "", included: memoryText !== undefined && memoryText.length > 0 },
+      { name: "source_linked_finish" as const, text: sourceLinkedFinishText ?? "", included: sourceLinkedFinishText !== undefined },
       { name: "request_budget" as const, text: requestBudgetMessageText, included: requestBudgetMessageText.length > 0 },
     ];
     const fixedText = fixedBlocks.map((block) => block.text).join("\n");
@@ -319,6 +327,10 @@ export class DefaultContextCompiler implements ContextCompiler {
 
     if (groundingText !== undefined && groundingIncluded) {
       messages.push({ role: "user", content: [{ type: "text", text: groundingText }] });
+    }
+
+    if (sourceLinkedFinishText !== undefined) {
+      messages.push({ role: "user", content: [{ type: "text", text: sourceLinkedFinishText }] });
     }
 
     if (windowSwitchStateText !== undefined) {
@@ -594,4 +606,92 @@ function compactLabel(value: string, maxLength: number): string {
 
 function round(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function addSourceLinkedFinishSchema(tools: readonly ModelToolSpec[]): ModelToolSpec[] {
+  return tools.map((tool) => {
+    if (tool.control !== "finish") return tool;
+    const existing = isRecord(tool.inputSchema) ? tool.inputSchema : {};
+    const existingProperties = isRecord(existing.properties) ? existing.properties : {};
+    const existingRequired = Array.isArray(existing.required)
+      ? existing.required.filter((item): item is string => typeof item === "string")
+      : [];
+    return {
+      ...tool,
+      inputSchema: {
+        ...existing,
+        properties: {
+          ...existingProperties,
+          resultEvidence: {
+            type: "object",
+            properties: {
+              version: { type: "string", const: "source-linked-finish-v1" },
+              fields: {
+                type: "array",
+                maxItems: 32,
+                items: {
+                  oneOf: [
+                    {
+                      type: "object",
+                      properties: {
+                        fieldId: { type: "string", minLength: 1, maxLength: 64 },
+                        disposition: { type: "string", const: "source_bound" },
+                        sources: {
+                          type: "array", minItems: 1, maxItems: 4,
+                          items: {
+                            type: "object",
+                            properties: {
+                              observationId: { type: "string", minLength: 1, maxLength: 128 },
+                              elementRef: { type: "string", minLength: 1, maxLength: 96 },
+                            },
+                            required: ["observationId", "elementRef"],
+                            additionalProperties: false,
+                          },
+                        },
+                      },
+                      required: ["fieldId", "disposition", "sources"],
+                      additionalProperties: false,
+                    },
+                    {
+                      type: "object",
+                      properties: {
+                        fieldId: { type: "string", minLength: 1, maxLength: 64 },
+                        disposition: { type: "string", const: "inference" },
+                        reason: { type: "string", minLength: 1, maxLength: 240 },
+                      },
+                      required: ["fieldId", "disposition", "reason"],
+                      additionalProperties: false,
+                    },
+                    {
+                      type: "object",
+                      properties: {
+                        fieldId: { type: "string", minLength: 1, maxLength: 64 },
+                        disposition: { type: "string", const: "unknown" },
+                        reason: { type: "string", enum: ["not_observed", "no_grounding", "ambiguous_source", "conflicting_sources", "source_unavailable"] },
+                      },
+                      required: ["fieldId", "disposition", "reason"],
+                      additionalProperties: false,
+                    },
+                  ],
+                },
+              },
+            },
+            required: ["version", "fields"],
+            additionalProperties: false,
+          },
+        },
+        required: [...existingRequired, ...(existingRequired.includes("resultEvidence") ? [] : ["resultEvidence"])],
+        additionalProperties: false,
+      },
+    };
+  });
+}
+
+function formatSourceLinkedFinishContract(contract: SourceLinkedFinishContract): string {
+  const fields = contract.fields.map((field) => `${field.fieldId} (${field.label}; ${field.required ? "required" : "optional"})`).join(", ");
+  return `Source-linked finish is enabled for this Run. The terminate call must include resultEvidence version source-linked-finish-v1 with one entry for each required field and no duplicate or unknown field IDs. Fields: ${fields}. For source_bound, submit only observationId and elementRef references to exact elements in committed Observation grounding; never submit a value, quote, copied text, or source label. Runtime will render canonical source fields from those references. Use inference with a bounded reason only when the result is inferred, or unknown with one supported reason when the field is not established. Keep free-form terminate text as a separate model report; it does not replace the canonical source-linked result. Multiple sources are preserved for review; do not choose a winner or claim semantic agreement.`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

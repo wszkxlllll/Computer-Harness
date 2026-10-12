@@ -10,6 +10,7 @@ import {
   DefaultRuntimePolicy,
   RunController,
   createDefaultToolRegistry,
+  validateSourceLinkedFinishContract,
   windowSwitchTools,
   reopenSavedDocumentTool,
   type ActionPolicy,
@@ -33,6 +34,7 @@ import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunDependencies, type RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
+  const sourceLinkedFinish = validateSourceLinkedFinishContract(input.sourceLinkedFinish);
   const computerRecoveryOptIn = input.computer.kind === "cua" && input.computer.recoverBoundWindowMissing === true;
   if (input.recoverBoundWindowMissing === true !== computerRecoveryOptIn) {
     throw new Error("bound-window recovery requires matching Run and CUA computer opt-ins");
@@ -98,6 +100,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     : input.computer;
   const baseConfig: ResolvedRunConfig = {
     ...input,
+    ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }),
     runId,
     grounding,
     windowSwitch: input.windowSwitch ?? "off",
@@ -268,6 +271,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       onEventCommitted: eventFeed.publish,
       batching: config.batching,
       windowHandoff: config.windowHandoff ?? "off",
+      ...(config.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: config.sourceLinkedFinish }),
       windowSwitch: config.windowSwitch ?? "off",
       recoverBoundWindowMissing: config.recoverBoundWindowMissing === true,
       ...(config.assistantPreferences === undefined ? {} : { assistantPreferences: config.assistantPreferences }),

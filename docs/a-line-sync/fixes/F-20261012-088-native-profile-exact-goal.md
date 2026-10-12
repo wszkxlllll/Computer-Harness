@@ -1,6 +1,6 @@
 # F088 — preserve exact native document task text through Web
 
-The new native document profile inherited generic goal trimming in GoalComposer and RemoteRunApi. Before the first formal Web Start, inspection showed that the frozen 1133-byte task would lose its two trailing line feeds. No Run or Provider request was started with the shortened text.
+The new native document profile inherited generic goal trimming in GoalComposer and RemoteRunApi. Before the first formal Web Start, inspection showed that the frozen 1133-byte task would lose its final line feed. No Run or Provider request was started with the shortened text.
 
 Only the opt-in `native-recovery` mode now preserves the original goal. Whitespace-only input remains invalid, the original string remains bounded to 20,000 characters, and idempotency compares the exact retained text. Existing modes retain their trimming behavior. Host and Relay already forward the string without trimming; their existing boundary tests now include Chinese text, leading spaces and two trailing line feeds.
 
