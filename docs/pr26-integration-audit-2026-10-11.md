@@ -2,6 +2,56 @@
 
 审计日期：2026-10-11（Asia/Shanghai）。对象：[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)。只审查，不修改 PR、不发表评论、不部署、不调用模型或操作桌面。
 
+## 2026-10-13 集成前准备复核（尚未开始合并）
+
+用户要求先了解双方现状，再决定合并中的解耦范围。本节是准备方案，不是实施完成声明；覆盖下方旧的“直接吸收前序整改即可”的简化建议。
+
+### 版本与实际检查
+
+- 己方 PR22：`fdcf5093ffab5bb89f7948ad3a2105530cca6bb3`，已包含 PR25、PR28、修正后的 PR29 和 Web 无障碍改动。CI [38402637238](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38402637238) 五项成功。
+- 队友 PR26：仍为 `594fa8e9b38d6ec8da066da214468789756319ea`，本轮没有新推送；CI 38347772526 成功。此前审查已确认主要整改有效，但不等于两个分支集成后有效。
+- 使用 `git merge-tree --write-tree --name-only` 模拟，未进入工作树合并：当前 **41 个冲突文件**，包含 Host、Web、AppRuntime、CUA、Context、Provider、Runtime、Trajectory、Voice。相对共同祖先 PR26 共 258 文件、34351 行新增/727 行删除，其中包括大量实验记录和诊断材料，不能将这些数量全部视为生产功能变更。
+- 本轮重新查看了双方组装入口、平台 SDK 加载、输入工具、恢复控制流、文稿授权及手机目标入口、结果证据 Schema 和既有审计。没有重新运行产品测试、真实 API 或桌面任务；测试数字均明确引用上述已有版本记录。
+
+### 两边究竟分别有什么
+
+共同主干仍是一套 Provider → Runtime → Computer，ToolRegistry 提供工具，Context 提供模型输入，Event/Trajectory 保存事实，手机经 Host/Relay 控制同一个 Run。PR26 没有另建 Mac Runtime，但增加了较多 Mac 专用恢复条件。
+
+| 范围 | 己方必须保留 | 队友应吸收/分别处理 |
+| --- | --- | --- |
+| 输入与平台 | Windows `foreground-caret-v1` 私有配置、未绑定 element 的前台输入、显式 UIA 追加、对应工具说明 | Mac SDK canonical import/resolver 兼容、会话有效平台统一、Mac 不自动绑定 Windows UIA 多行引用 |
+| 窗口与浏览器 | 现有 Surface/未知副作用合同、PR28 启动超时、PR29 内容区域过滤/iframe覆盖/真实点击校验 | Mac attached sheet 证据与几何重读、关闭后绑定窗口缺失的有限恢复、DOM别名选择和后动作窗口提示 |
+| 手机与用户控制 | Web 无障碍导航、焦点/错误播报、现有语音与个性化、四类通用起点和登录 profile | 审批参数投影、取消后不再颁预览凭证、结果显示纠正；实验文稿入口另行隔离 |
+| 长程请求与结果 | 当前预算/超时、Context/Memory/Planning开关、Qwen flat_calls | 双输入预算和诊断关联的有效增量；来源绑定结果为独立可选模块，不等于语义验证 |
+
+直接用队友文件覆盖会丢失我们后加的 Windows 输入配置和工具展示覆盖，也会丢失部分无障碍代码及 PR29 的 DOM 过滤范围。这是版本分叉风险，不是声称队友主动删除了这些后续功能。反过来全选己方也会漏掉 Mac 的真实修复。
+
+### 集成时要解决的耦合与推荐边界
+
+**A / 必须处理：测试任务进入公共产品组装。** 两类 `nativeRecovery` / `nativeWebDocument` 结构几乎相同，但贯穿 Host 环境变量、Remote API、ApplicationSession、run-factory、CUA。`application-session.ts:300/311`、`remote-run-api.ts:1020` 和 `run-factory.ts` 写死携程；Host 和 CUA 文档身份校验还明确锁定 TextEdit。它不是通用跨应用能力，不能只把 URL 改为参数就宣称完成解耦。
+
+推荐先保留这些实验的历史证据和作者提交，**不把两个测试专用目标模式带进默认手机产品入口**。必要的实验配置通过单独的 Host 实验组装/测试入口使用；应用名、网址、两预设窗口和单文件授权留在实验定义，不进入共享业务判断。已有普通 window/browser/auto/desktop 起点及持久登录 profile 不受影响。Mac 文档重开如果仍依赖 TextEdit 原生证据，明确留为受限能力，不伪装成任意应用支持，也不因此放开远端路径/可执行文件权限。
+
+**B / 必须处理：工具合同在 Context 里二次定义。** PR26 `packages/context/src/compiler.ts:119/611` 的 `addSourceLinkedFinishSchema` 给 terminate 临时追加必填 `resultEvidence`，而 `defaultControlTools()` 没有同一合同。Provider 虽从最终输入消费 schema，这仍使注册表不再是完整的工具事实来源。
+
+推荐由 Runtime 的控制工具工厂提供可选来源证据版本，在 Run 组装时注册实际启用的唯一 terminate 定义；Context 只投影 Registry 并添加任务级说明，Provider 只映射。校验/来源解析复用 `source-linked-finish.ts`，不另外复制 Schema。关闭时保持原 terminate 参数、提示词和结果；不改 Qwen flat_calls 信封。已有 Guard 的工具装饰不在此轮扩大重构，但该功能不得再增加第三套定义。来源绑定只证明引用对应保留的证据，不能证明模型理解正确或业务完成。
+
+**C / 必须收住范围：平台恢复与通用 Runtime 的边界。** PR26 `run-controller.ts:697` 直接限制 Darwin，恢复阶段又维护 list/select/wait、候选引用、暂停/纠正和上下文裁剪。通用 Runtime 承接恢复阶段合理；但它不应判断 TextEdit、固定两个窗口或网址，平台支持检查优先留在 Computer/Host 组装。此次先保留已有有限状态机、预算与暂停/Abort边界，明确 Computer 提供缺失目标证据和受授权候选，Runtime 调度、提交事件。不要新建第二主循环，也不要为了移除一个平台判断发明没有消费者的能力框架。若暂不能完整移动平台检查，保留为明确受限实验，不启用 Windows 的未验证自动恢复。
+
+**D / 小范围整理：Mac 私有实现集中，删除孤立状态。** PR26 的 CUA 主文件非空行约6068，己方约4971；不仅两个平台输入分支，文档身份解析/文件身份/一次性重开也混入主类。建议把 Mac 文档证据解析与授权校验移入私有文件，保持 CuaDriverComputer 负责 Session/Observation/Surface 的协调；Windows 现有输入路径不顺手重写。不要求立即全拆平台类。`PrivateSession.platformResolution` 仅被测试反射读取、没有生产消费者，应删除持久副本，保留实际消费的有效 platform；相关测试改验行为，而不是为了保存字段新增遥测。
+
+### 推荐实施顺序与验收
+
+1. 用户确认后建立独立集成分支，以 PR22 `fdcf509` 为起点保留历史；不在运行中的 Preview 工作区直接试合并。按文件逐块解决冲突，保留双方作者，记录每项取舍。不能仅 cherry-pick 最新三提交：它们依赖更早的 Mac 协议/输入/恢复改动。
+2. 先完成机械集成和基线回归，再把 A/B/C/D 作为可核对的独立修正提交。机械合并的临时状态不部署；修正未完成不把整合视为可发布。不将本轮扩成通用插件系统/全面平台重写。
+3. 优先跑平台SDK加载、输入合同、Surface/sheet、窗口恢复和受管浏览器的 mock/合同测试；Windows caret/显式追加/单行不受影响，Mac原生type不被错误绑定UIA，DOM已隐藏控件不可回退原生绕过，未知动作不重放。
+4. 跑 Runtime/Trajectory：同一 Session，旧引用失效，completed 后恢复不重放，partial/unknown 不自动再派发，暂停/纠正/取消/审批/早终态和模型请求预算一致。恢复阶段不残留普通动作工具，不夺走用户手动选择能力。
+5. 跑 Host/Relay/Remote API/Web/Voice：无障碍焦点、状态朗读、审批原因、个性化、登录profile、预览取消、终态后新任务均保留。新增/关闭来源结果功能时，Registry→Context→两Provider的 schema 一致，无残留参数、提示词或额外模型调用。
+6. 类型检查、生产构建和远端CI通过后才申请集成版本实机验收。Windows至少携程→记事本及弹窗返回；Mac由队友跑真实Browser→TextEdit及sheet关闭/恢复。不能用一平台或fake driver结果替代另一平台实测。手机VoiceOver/语音独立验收，不能以Web单测推定真机通过。
+7. 合并完成并获部署确认后才切 Preview，保留当前release及回退；此次没有替换Preview。完整业务/手机实机不足时，仅报告集成代码通过，不宣称两个平台demo均已验收。
+
+**准备结论：可以准备受控集成，但不是立即合并/部署。** 当前没有证据要求推翻整体架构；真正要解决的是测试业务侵入公共层、工具定义来源分叉和Mac私有代码边界。每项都有具体消费者和测试目标，不以增加抽象数量衡量完成。
+
 ## 2026-10-13 PR29 补修与集成记录
 
 用户授权发布 PR26 review、通知准备集成，并修复 PR29 合入己方 PR22。PR26 [整改确认与集成通知](https://github.com/wszkxlllll/Computer-Harness/pull/26#pullrequestreview-5503620106)已发布，绑定 594fa8e；PR26 本身尚未合入。PR29 原提交 8aaf558 的作者历史保留，后续小修复为 `147234b`，纳入 `codex/runtime-surface-preview-20261003`。
