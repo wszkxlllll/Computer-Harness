@@ -1532,15 +1532,27 @@ describe("RunController confirmed window handoff", () => {
           ] },
     ]);
     const registry = windowSwitchRegistry();
+    let resolveHandoffRequested!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const handoffRequested = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveHandoffRequested = resolve;
+    });
     const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
       windowHandoff: "confirm-v1",
       windowSwitch: "opened-windows-v1",
       recoverBoundWindowMissing: true,
       enabledToolNames: ["click", "list_windows", "switch_window"],
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested") resolveHandoffRequested(event);
+      },
     });
     const running = controller.start("task remains incomplete until the closed target is recovered");
     try {
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      await Promise.race([
+        handoffRequested,
+        running.then((result) => {
+          throw new Error(`run reached ${result} before the recovery handoff was committed`);
+        }),
+      ]);
       expect(controller.getSnapshot().status).toBe("waiting_window");
       expect(controller.getSnapshot().pendingWindowHandoff?.reasonCode).toBe("bound_window_missing");
       expect(provider.inputs).toHaveLength(2);

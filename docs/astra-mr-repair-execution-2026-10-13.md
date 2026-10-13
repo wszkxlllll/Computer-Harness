@@ -81,3 +81,23 @@ Root 实际复算 16 个产品/测试文件，五个关键产品 pin 与 Sol 最
 Root 对修正后的 16 文件重新冻结，只有 `runtime/index.test.ts` 相对首轮冻结变动，SHA 为 `33d323c40a3ea64548c615ad98ed329a9fafdcde6ed933524de6e833efb75713`。完整重跑 `pnpm test` exit 0：Vitest **118 文件、2076/2076**，随后 Node 自检 **72/72**。Web 资产构建通过；这是整体离线回归，不是 Mac/Web 原卡业务通过。
 
 独立日志与带文件/日志 SHA 的收据均在忽略目录 `runs/astra-autonomous-20261010-sol-luna/MR-review-20261013-private/`：首轮 `root-full-test.log`、最终 `root-full-test-final.log`、`root-web-build.log`、`root-final-integration-verification.json`。本轮无真实 Provider 或 GUI、业务 Host/Relay；测试内回环服务器已随套件退出。历史498 actual/30 unknown不变。当前准备精确提交16产品/测试文件及本轮四份计划/审查文档，其他历史 dirty 不并批。
+
+
+### 精确提交、远端核版与当前 CI
+
+Root 只提交审定的16产品/测试及4计划审查文档，共20路径，提交 `3b8428723b3ae123d444ddd53f1b5c2a4e7adc0d`。普通 Git 远端查询25秒超时后，使用既有凭据的内存授权和GitHub Git Data API同步；逐blob、tree、commit均核对与本地相同SHA，再在远端parent仍为6c0af497时进行非force ref更新，最后GET确认remote同3b84287。未输出、落盘凭据或改写历史；精确收据 `MR-review-20261013-private/root-exact-push-receipt.json`。
+
+Root实际只读CI核查 `2026-10-13T03:58:36Z`：当前3b84287的run `38344052541` in_progress，macOS job已success，其余保留CI仍运行，尚不冒称五项全部成功。Windows/Linux仅保留既有CI，不纳入原生责任。后续现场验证在新源码/资产/环境核对与当前CI完成后进行。T3新能力已在独立 `/private/tmp/astra-t3-hybrid-3b84287` 实施，主产品/资产继续冻结；它尚未集成或验收。
+
+
+Root 后续实际CI终态 `2026-10-13T04:00:51Z`：run38344052541 completed/failure；macOS与两项Ubuntu verify均success，保留的Windows verify失败，ci-required连带失败。尚未定位失败原因，不把它视作已放行；先检查共享变更/现有自动夹具兼容性，不扩大Windows原生实施或验收责任。现场业务尚未启动。
+
+
+Root实际下载Windows失败job115121261680日志：2075 passed / 1 failed，唯一失败为既有Runtime回归 `returns the private recovery phase to normal waiting after success_finish` 的5000次setImmediate轮询未等到状态（line1543）。固定迭代与慢I/O的因果属于高可信时序推断，尚未在Windows受控复现；日志没有产品断言差异。已派Luna仅迁移该case为已提交handoff事件信号等待，保留所有行为断言，并以提前终态race失败保持可诊断；不增全局轮询/睡眠、不跳过测试、不修改产品。修正尚待作者与Sol独检。原CI失败与日志保留，不用重跑掩盖。
+
+
+### 保留 CI 的确定性等待修正
+
+Luna 只修改 `packages/runtime/src/index.test.ts` 的上述 `it.each`：通过现有 `onEventCommitted` 等待精确 `computer.window.handoff.requested`，与提前Run终态进行race；不改全局轮询、不增加sleep、不跳过测试、不改产品。Sol确认生产commitEvent在持久化、snapshot reduce及events push后才通知observer，原 status/reason、Provider两次、click一次、单handoff、mixed拒绝和cancel持久终态断言完整保留；缺事件仍由原Vitest超时失败。作者目标2/2、Runtime170/170、Runtime类型构建通过；Sol独跑Runtime170/170与diff-check通过。新test SHA-256 `b5b69c74445b97764364d661941b7250dc55f19acc8fafb4fcb0fd54a24d4d24`。Windows时序原因仍是推断，等待新CI结果，不声称原生Windows复现或工作。3b产品源码及Web资产不变。
+
+只读现场预检详见 [R5现场记录](astra-live-validation-2026-10-13.md)：91个非测试源码逐字节转译等于dist；旧业务/native进程及socket全无，native8磁盘签名有效；后续必须新启动核版。旧variant成果不可覆盖。T3仍在隔离树实现，未集成、未真实业务。
