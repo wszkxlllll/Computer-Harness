@@ -1,5 +1,13 @@
 # Computer Harness 文档索引
 
+## PR26整合审计（2026-10-11）
+
+[PR26分级问题与整合门槛](./pr26-integration-audit-2026-10-11.md)：10月13日续审 PR26 6c0af49、PR28 06b5974，双方最新 CI 全绿。PR26 仅新增文档，承认 Mac T2 受限 CLI 三轮成果，但共享恢复/平台等 review 问题尚无代码整改；可推进集成准备，暂不整包合入或替换 Preview。PR28 新增通用浏览器导航期限小修复及六项来源预检，可独立处理。产品保持 Windows/Mac，Linux 桌面暂停；队友的 Mac 分工不等于产品放弃 Windows。本轮没有修改业务源码或部署。
+
+## 当前非视觉 Web 接入（2026-10-10）
+
+[手机无障碍实施与验收](./mobile-accessibility-experience-review-2026-10-08.md)顶部已记录三线实施、审查与验证：连接／设置／导航、任务控制与动态通知、输入／选窗／截图；沿用真实 Run 与认证合同，不新增原生 App 或重做视觉风格。完整 Web 227 项、类型检查、生产构建通过，独立 Sol 审查 GO；隔离 Chrome 50/50，真实 320 CSS 像素大字审批溢出已修并复测。已 Web-only 发布独立 Preview `2026-10-10-web-accessibility-v1`，无服务重启、已有配对保留，公网产物哈希核对通过；[发布与使用步骤](./voice-preview-deploy-phone-test-2026-09-29.md)已更新。源码尚未提交／推送；iPhone VoiceOver／语音控制及独立非视觉使用仍待真机验收，截图才能确认的歧义候选仍明确限制。
+
 ## 当前体验优化与上游跟进（2026-10-09）
 
 PR #25完整历史与手机体验改动已集成PR #22；源码head `d2ee1a3`对应四矩阵CI及ci-required全绿（run `37946804774`），没有合并main或改写作者。Node24／固定pnpm 11.19.0根build、Web build、Node自测70通过／0失败／1项本机符号链接能力跳过。Vitest 1841/1843，剩余两项CLI窄屏长中文分页5秒超时；未改timeout，不称本机全绿。独立Preview现为release `2026-10-09-pr22-d2ee1a3-v2`；本机Host 4318 `/connect`、`/api/local/session` 200且Relay WSS已建立。尚未做手机配对或业务Run。受管浏览器100%／125%GUI缩放未验收：隔离node_repl缺Node `process`全局，错误发生于SDK加载前，没有启动Edge窗口；不是产品回归。详情见[统一修复记录](./window-popup-regression-2026-10-04.md)顶部。
