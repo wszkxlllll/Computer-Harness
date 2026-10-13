@@ -52,6 +52,35 @@ function expectForwarded(request: ForwardedRequest | undefined, url: string, bod
 }
 
 describe("recording client diagnostic paths", () => {
+  it("keeps Qwen outcomes and call count unchanged when every optional recording step fails", async () => {
+    const response = { model: "qwen3.8-flash", choices: [] };
+    const originalFailure = new Error("provider failure must survive recording");
+    const successInner = new FakeQwenHttpClient(response);
+    const failureInner = new FakeQwenHttpClient(undefined, originalFailure);
+    const signal = new AbortController().signal;
+    const missingDirectory = join(await mkdtemp(join(tmpdir(), "harness-qwen-recording-failure-")), "missing", "nested");
+    const successRecorder = new RecordingQwenHttpClient(join(missingDirectory, "success.jsonl"), "normalized_1000", undefined, "strict_json", successInner);
+    const failureRecorder = new RecordingQwenHttpClient(join(missingDirectory, "failure.jsonl"), "normalized_1000", undefined, "strict_json", failureInner);
+
+    await expect(successRecorder.post("fixture", { model: "qwen3.8-flash" }, {}, signal)).resolves.toBe(response);
+    const throwingBody = Object.defineProperty({}, "model", { get() { throw new Error("diagnostic projection failed"); } });
+    await expect(failureRecorder.post("fixture", throwingBody, {}, signal)).rejects.toBe(originalFailure);
+    expect(successInner.calls).toBe(1);
+    expect(failureInner.calls).toBe(1);
+
+    const getterResponse = { ok: true };
+    const getterInner = new FakeQwenHttpClient(getterResponse);
+    const getterRecorder = new RecordingQwenHttpClient(join(missingDirectory, "getter.jsonl"), "normalized_1000", undefined, "strict_json", getterInner);
+    await expect(getterRecorder.post("fixture", throwingBody, {}, signal)).resolves.toBe(getterResponse);
+    expect(getterInner.calls).toBe(1);
+
+    const unprojectableResponse = Object.defineProperty({}, "choices", { get() { throw new Error("response summary failed"); } });
+    const responseInner = new FakeQwenHttpClient(unprojectableResponse);
+    const responseRecorder = new RecordingQwenHttpClient(join(missingDirectory, "response.jsonl"), "normalized_1000", undefined, "strict_json", responseInner);
+    await expect(responseRecorder.post("fixture", { model: "qwen3.8-flash" }, {}, signal)).resolves.toBe(unprojectableResponse);
+    expect(responseInner.calls).toBe(1);
+  });
+
   it("persists only valid transport configuration fields on success and failure without changing outcomes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-glm-recorder-safe-transport-"));
     const successPath = join(directory, "success.jsonl");

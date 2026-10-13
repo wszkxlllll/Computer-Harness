@@ -32,7 +32,199 @@ const ONE_BY_ONE_PNG = Buffer.from(
 installFakeCuaSdkModuleForTests();
 
 describe("F045 strict completed bound-window missing boundary", () => {
-  it("preserves an exact completed root binding through the advisory inventory so Runtime can formally detect recovery", async () => {
+  it("keeps explicit list_windows available in confirm-v1 after a completed action with no missing target", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-confirm-explicit-list-windows-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", grounding: "off", driverFactory: () => fake.driver,
+    });
+    const discoveryOrder: string[] = [];
+    let runtimeInventoryReads = 0;
+    const originalListWindows = computer.listWindows.bind(computer);
+    computer.listWindows = async (...args) => {
+      runtimeInventoryReads += 1;
+      discoveryOrder.push("explicit-list_windows");
+      return originalListWindows(...args);
+    };
+    const originalDetect = computer.detectNewWindowHandoffCandidates.bind(computer);
+    computer.detectNewWindowHandoffCandidates = async (...args) => {
+      discoveryOrder.push("formal-diff");
+      return originalDetect(...args);
+    };
+    const originalExecute = computer.execute.bind(computer);
+    computer.execute = async (...args) => {
+      const receipt = await originalExecute(...args);
+      return receipt.status === "completed"
+        ? { ...receipt, message: "Pressed CMD+S\n\n🪟 Action opened new window(s): Save" }
+        : receipt;
+    };
+    const registry = createDefaultToolRegistry();
+    registry.registerMany(windowSwitchTools());
+    const providerCalls: string[] = [];
+    const provider: ProviderAdapter = {
+      id: "confirm-explicit-list-provider",
+      async generate(_input, { signal }): Promise<ModelTurn> {
+        signal.throwIfAborted();
+        const call = providerCalls.length;
+        providerCalls.push(String(call));
+        if (call === 0) return { type: "tool_calls", calls: [{ id: "ordinary-action" as never, name: "click", arguments: { x: 10, y: 20 } }] };
+        if (call === 1) return { type: "tool_calls", calls: [{ id: "explicit-list" as never, name: "list_windows", arguments: {} }] };
+        return { type: "finish", summary: "continued after listing the current window" };
+      },
+    };
+    const contextCompiler: ContextCompiler = {
+      async compile(input, signal) {
+        signal.throwIfAborted();
+        return {
+          system: input.goal,
+          messages: [{ role: "user", content: [{ type: "text", text: input.goal }] }],
+          tools: registry.modelTools("main", { enabledToolNames: ["click", "list_windows", "switch_window"] }),
+        };
+      },
+    };
+    const runId = "confirm-explicit-list-windows" as never;
+    const controller = new RunController({
+      runId, provider, computer, contextCompiler, toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(8, 8),
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), runId),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      windowHandoff: "confirm-v1", windowSwitch: "opened-windows-v1",
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+      features: { planning: "off", memory: "off", batching: "off" },
+    });
+    try {
+      expect(await controller.start("perform an action, then inspect the current window list")).toBe("succeeded");
+      expect(runtimeInventoryReads).toBe(1);
+      expect(providerCalls).toHaveLength(3);
+      expect(discoveryOrder).toEqual(["formal-diff", "explicit-list_windows"]);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.completed" && event.result.callId === ("explicit-list" as never))).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the ordinary Runtime handoff path after a completed close, then observes the exact selected target", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-ordinary-runtime-window-recovery-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const candidateTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    fake.setExtraWindow({ ...candidateTarget, appName: "TextEdit", title: "Fresh recovery window" });
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, candidateTarget], grounding: "off", driverFactory: () => fake.driver,
+    });
+    const discoveryOrder: string[] = [];
+    const originalDetect = computer.detectNewWindowHandoffCandidates.bind(computer);
+    computer.detectNewWindowHandoffCandidates = async (...args) => {
+      discoveryOrder.push("formal-diff");
+      return originalDetect(...args);
+    };
+    const originalCandidates = computer.listWindowHandoffCandidates.bind(computer);
+    computer.listWindowHandoffCandidates = async (...args) => {
+      discoveryOrder.push("explicit-candidate-list");
+      return originalCandidates(...args);
+    };
+    const originalHandoff = computer.handoffWindow.bind(computer);
+    computer.handoffWindow = async (...args) => {
+      discoveryOrder.push("explicit-handoff");
+      return originalHandoff(...args);
+    };
+    const originalCallTool = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, input, signal) => {
+      const response = await originalCallTool(name, input, signal);
+      if (name === "hotkey") fake.omitBoundWindow(true);
+      return response;
+    };
+
+    const registry = createDefaultToolRegistry();
+    registry.registerMany(windowSwitchTools());
+    let resolveWaitingWindow!: (event: RuntimeEvent) => void;
+    const waitingWindow = new Promise<RuntimeEvent>((resolve) => { resolveWaitingWindow = resolve; });
+    let providerCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "ordinary-window-recovery-provider",
+      async generate(_input, { signal }): Promise<ModelTurn> {
+        signal.throwIfAborted();
+        providerCalls += 1;
+        return providerCalls === 1
+          ? { type: "tool_calls", calls: [{ id: "ordinary-completed-close" as never, name: "hotkey", arguments: { keys: ["CMD", "W"] } }] }
+          : { type: "finish", summary: "continued after the selected window was freshly observed" };
+      },
+    };
+    const contextCompiler: ContextCompiler = {
+      async compile(input, signal) {
+        signal.throwIfAborted();
+        return {
+          system: input.goal,
+          messages: [{ role: "user", content: [{ type: "text", text: input.goal }] }],
+          tools: registry.modelTools("main", { enabledToolNames: ["hotkey", "list_windows", "switch_window"] }),
+        };
+      },
+    };
+    const runId = "ordinary-runtime-window-recovery" as never;
+    const controller = new RunController({
+      runId, provider, computer, contextCompiler, toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(8, 8),
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), runId),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      windowHandoff: "confirm-v1", windowSwitch: "opened-windows-v1",
+      enabledToolNames: ["hotkey", "list_windows", "switch_window"],
+      features: { planning: "off", memory: "off", batching: "off" },
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing") resolveWaitingWindow(event);
+      },
+    });
+    const running = controller.start("Close the current document once, then select the fresh recovery window.");
+    try {
+      const requestEvent = await Promise.race([
+        waitingWindow,
+        running.then((outcome) => { throw new Error(`Run ended before explicit window selection: ${outcome}`); }),
+      ]);
+      if (requestEvent.type !== "computer.window.handoff.requested") throw new Error("expected a bound-window handoff request");
+      expect(controller.getSnapshot().status).toBe("waiting_window");
+      const eventsAtRequest = controller.getEvents();
+      const completedAction = eventsAtRequest.filter((event) => event.type === "action.execution.completed");
+      const completedTool = eventsAtRequest.filter((event) => event.type === "tool.call.completed" && event.result.callId === ("ordinary-completed-close" as never));
+      expect(completedAction).toHaveLength(1);
+      expect(completedTool).toHaveLength(1);
+      expect(completedAction[0]!.sequence).toBeLessThan(completedTool[0]!.sequence);
+      expect(completedTool[0]!.sequence).toBeLessThan(requestEvent.sequence);
+      const candidates = await controller.listWindowHandoffCandidates(new AbortController().signal);
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toMatchObject({ pid: candidateTarget.pid, windowId: candidateTarget.windowId, title: "Fresh recovery window" });
+      await controller.handoffWindow(candidates[0]!, requestEvent.sourceActionId);
+      expect(await running).toBe("succeeded");
+      expect(discoveryOrder).toEqual(["formal-diff", "explicit-candidate-list", "explicit-handoff"]);
+      expect(providerCalls).toBe(2);
+      expect(fake.calls.filter((call) => call.name === "hotkey")).toHaveLength(1);
+      const observations = controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations).toHaveLength(2);
+      expect(observations[1]?.observation.computerSessionId).toBe(observations[0]?.observation.computerSessionId);
+      const selectedObservation = observations[1]!.observation;
+      const initialObservation = observations[0]!.observation;
+      expect(selectedObservation.surfaceRef).toMatchObject({ kind: "native_window", generation: expect.any(Number) });
+      expect(selectedObservation.surfaceRef.surfaceId).not.toBe(initialObservation.surfaceRef.surfaceId);
+      expect(selectedObservation.surfaceRef.generation).toBeGreaterThan(0);
+      const targetTransition = controller.getEvents().find((event) => event.type === "computer.surface.transitioned" &&
+        event.to.surfaceId === selectedObservation.surfaceRef.surfaceId && event.to.generation === selectedObservation.surfaceRef.generation);
+      expect(targetTransition).toMatchObject({ to: selectedObservation.surfaceRef });
+      expect(fake.calls.filter((call) => call.name === "bring_to_front").at(-1)?.input)
+        .toMatchObject({ pid: candidateTarget.pid, window_id: candidateTarget.windowId });
+      expect(fake.calls.some((call) => call.name === "verifyState" && call.input?.window_id === candidateTarget.windowId)).toBe(true);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("lets Runtime's formal diff establish the missing-window recovery boundary before private recovery", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-f045-runtime-advisory-list-"));
     const fake = windowDriver();
     fake.setPlatform("darwin");
@@ -62,12 +254,7 @@ describe("F045 strict completed bound-window missing boundary", () => {
     const originalListWindows = computer.listWindows.bind(computer);
     computer.listWindows = async (...args) => {
       order.push("advisory-list");
-      try {
-        return await originalListWindows(...args);
-      } catch (error) {
-        order[order.length - 1] = `advisory-list:${(error as { code?: string }).code ?? "unknown"}`;
-        throw error;
-      }
+      return originalListWindows(...args);
     };
     const originalDetect = computer.detectNewWindowHandoffCandidates.bind(computer);
     computer.detectNewWindowHandoffCandidates = async (...args) => {
@@ -135,7 +322,7 @@ describe("F045 strict completed bound-window missing boundary", () => {
       ]);
       expect(thirdInput.system).toContain("Close the current owned document");
       expect(JSON.stringify(recoveryCandidates)).toContain("Prepared recovery blank");
-      expect(order).toEqual(["advisory-list:WINDOW_TARGET_NOT_FOUND", "formal-detect", "recovery-candidates"]);
+      expect(order).toEqual(["formal-detect", "recovery-candidates"]);
       expect(controller.getEvents().filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
       expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing")).toBe(false);
       const originalObservation = controller.getEvents().find((event) => event.type === "observation.created")?.observation.id;
@@ -556,6 +743,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let typeTextThrownError: Error | undefined;
   let extraWindowAfterTypeText: typeof extraWindow | undefined;
   let platform: unknown = "win32";
+  let healthReport: unknown;
+  let healthResultOverride: Partial<ToolResult> | undefined;
   const target = { pid: 1234, windowId: 5678 };
   const driver = {
     async startSession() { calls.push({ name: "startSession" }); return { active: true, revived: false } as never; },
@@ -589,7 +778,12 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     async callTool(name: string, inputJson: string) {
       const input = JSON.parse(inputJson) as Record<string, unknown>;
       calls.push({ name, input });
-      if (name === "health_report") return result({ structuredJson: JSON.stringify({ schema_version: "1", platform, driver_version: cuaSdkVersionForPlatform() }) });
+      if (name === "health_report") return healthResultOverride === undefined
+        ? result({ structuredJson: JSON.stringify(healthReport ?? {
+          schema_version: "1", platform,
+          driver_version: cuaSdkVersionForPlatform(platform === "win32" || platform === "darwin" || platform === "linux" ? platform : process.platform),
+        }) })
+        : result(healthResultOverride);
       if (name === "bring_to_front") {
         if (activationToolResult !== undefined) return result(activationToolResult);
         return activationRefusal
@@ -788,6 +982,8 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     setExtraWindowAfterTypeText(value: NonNullable<typeof extraWindow>) { extraWindowAfterTypeText = value; },
     failListWindowsOnCall(callNumber: number | undefined) { failedListWindowsCall = callNumber; },
     setPlatform(value: unknown) { platform = value; },
+    setHealthReport(value: unknown) { healthReport = value; },
+    setHealthResult(value: Partial<ToolResult>) { healthResultOverride = value; },
     degradeActionOnCall(callNumber: number) { actionDegradedCallNumber = callNumber; },
     setSecondExtraWindow(value: typeof extraWindow) { secondExtraWindow = value; },
     setThirdExtraWindowOnListCall(call: number, value: NonNullable<typeof extraWindow>) { thirdExtraWindowOnListCall = { call, value }; },
@@ -922,10 +1118,117 @@ describe("CuaDriverComputer", () => {
     });
     try {
       const session = await unknownComputer.open({}, new AbortController().signal);
-      expect(session).not.toHaveProperty("platform");
+      expect(session.platform).toBe(process.platform);
       await unknownComputer.close(session);
     } finally {
       await rm(unknownDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["missing health", "missing"],
+    ["degraded health", "degraded"],
+    ["schema mismatch", "schema"],
+    ["SDK mismatch", "sdk"],
+    ["configured platform conflict", "conflict"],
+  ] as const)("uses one configured Darwin platform contract when health is %s", async (_label, scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), `computer-harness-platform-contract-${scenario}-`));
+    const fake = windowDriver();
+    if (scenario === "missing") fake.setHealthResult({ isError: true, text: "health unavailable" });
+    if (scenario === "degraded") fake.setHealthResult({ degraded: true, structuredJson: JSON.stringify({ schema_version: "1", platform: "win32", driver_version: cuaSdkVersionForPlatform("win32") }) });
+    if (scenario === "schema") fake.setHealthReport({ schema_version: "2", platform: "win32", driver_version: cuaSdkVersionForPlatform("win32") });
+    if (scenario === "sdk") fake.setHealthReport({ schema_version: "1", platform: "win32", driver_version: "0.0.0-mismatch" });
+    if (scenario === "conflict") fake.setHealthReport({ schema_version: "1", platform: "win32", driver_version: cuaSdkVersionForPlatform("win32") });
+    const computer = new ProductionCuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, platform: "darwin", windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, new AbortController().signal);
+      expect(session.platform).toBe("darwin");
+      const resolution = (computer as unknown as { session: { platformResolution: {
+        source: string; configured?: string; health: { status: string; reportedPlatform?: string; driverVersion?: string }; conflict: boolean;
+      } } }).session.platformResolution;
+      expect(resolution).toMatchObject({ source: "configured", configured: "darwin", conflict: scenario === "conflict" });
+      expect(resolution.health.status).toBe(scenario === "missing" ? "unavailable" : scenario === "degraded" ? "degraded" : scenario === "schema" || scenario === "sdk" ? "invalid" : "valid");
+      if (scenario === "conflict") expect(resolution.health.reportedPlatform).toBe("win32");
+      const signal = new AbortController().signal;
+      const observationId = `platform-contract-${scenario}` as ObservationId;
+      await computer.observe(session, observationId, signal);
+      const action = await computer.execute(session, {
+        actionId: `platform-contract-${scenario}` as ActionId,
+        basedOn: observationId,
+        kind: "keypress",
+        keys: ["CMD", "L"],
+      }, signal);
+      expect(action.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "hotkey")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Darwin tool mapping, same-control batching, and CUA dispatch on one session platform", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-darwin-platform-batch-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setGroundingState({ snapshot_id: "s00000001", elements_complete: true, elements: [
+      { role: "Document", name: "Document", frame: { x: 140, y: 160, width: 700, height: 420 }, element_token: "fixture-editor-token" },
+    ] });
+    const computer = new ProductionCuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, platform: "darwin", windowTarget: fake.target,
+      windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver,
+    });
+    const registry = createDefaultToolRegistry();
+    let providerCall = 0;
+    const provider: ProviderAdapter = {
+      id: "darwin-platform-batch-provider",
+      async generate(_input, { signal }): Promise<ModelTurn> {
+        signal.throwIfAborted();
+        if (providerCall++ === 0) return { type: "tool_calls", calls: [
+          { id: "darwin-batch-click" as never, name: "click", arguments: { x: 300, y: 320 } },
+          { id: "darwin-batch-type" as never, name: "type", arguments: { text: "first\nsecond" } },
+        ] };
+        return { type: "finish", summary: "typed using the native Darwin route" };
+      },
+    };
+    const contextCompiler: ContextCompiler = {
+      async compile(input, signal) {
+        signal.throwIfAborted();
+        return {
+          system: input.goal,
+          messages: [{ role: "user", content: [{ type: "text", text: input.goal }] }],
+          tools: registry.modelTools("main", { enabledToolNames: ["click", "type"] }),
+        };
+      },
+    };
+    const runId = "darwin-platform-batch" as never;
+    const controller = new RunController({
+      runId, provider, computer, contextCompiler, toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(4, 4),
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), runId),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      enabledToolNames: ["click", "type"], batching: "same-control-input-v1",
+      features: { planning: "off", memory: "off", batching: "same-control-input-v1" },
+    });
+    try {
+      expect(await controller.start("click the editor and type two lines")).toBe("succeeded");
+      expect(controller.getEvents().filter((event) => event.type === "action.execution.started")).toHaveLength(2);
+      const typeEvent = controller.getEvents().find((event) => event.type === "action.execution.started" && event.action.kind === "type");
+      const startedTypeAction = typeEvent?.type === "action.execution.started" ? typeEvent.action : undefined;
+      expect(startedTypeAction).toMatchObject({ kind: "type", text: "first\nsecond" });
+      expect(startedTypeAction).not.toHaveProperty("groundingRef");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      expect(fake.calls.find((call) => call.name === "type_text")?.input).toMatchObject({
+        text: "first\nsecond", delivery_mode: "foreground",
+      });
+      expect(fake.calls.some((call) => call.name === "press_key")).toBe(false);
+      expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -7472,7 +7775,7 @@ describe("CuaDriverComputer", () => {
   it.each(["wrong-snapshot", "wrong-pid", "wrong-window", "wrong-target-window", "wrong-frontmost", "wrong-bounds", "outside-bounds", "wrong-coordinates", "wrong-version", "inside-content", "disabled", "not-editable", "not-focused", "no-ancestry", "wrong-name", "dom-focused", "dom-partial", "non-macos", "unknown-platform"] as const)("does not use an untrusted macOS focus proof: %s", async (scenario) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-macos-focus-negative-"));
     const fake = windowDriver({ x: 100, y: 120, width: 960, height: 680 }, { width: 958, height: 678 });
-    fake.setPlatform(scenario === "non-macos" ? "linux" : scenario === "unknown-platform" ? "unknown" : "darwin");
+    fake.setPlatform(scenario === "non-macos" ? "win32" : scenario === "unknown-platform" ? "unknown" : "darwin");
     const proof: Record<string, unknown> = {
       version: "macos-focused-element-v1", snapshot_id: "s12345678", pid: fake.target.pid, window_id: fake.target.windowId,
       frontmost_pid: fake.target.pid, focused_window_id: fake.target.windowId, coordinate_space: "macos-screen-points",
@@ -7495,19 +7798,32 @@ describe("CuaDriverComputer", () => {
     if (scenario === "not-focused") item.focused = false;
     if (scenario === "no-ancestry") item.ancestry_verified = false;
     if (scenario === "wrong-name") item.name = "Find in page";
+    if (scenario === "unknown-platform") proof.snapshot_id = "s87654321";
     fake.setGroundingState({ pid: fake.target.pid, window_id: fake.target.windowId, snapshot_id: "s12345678", elements_complete: false,
       elements: [{ role: "AXWebArea", name: "Page", frame: { x: 100, y: 200, width: 960, height: 600 }, enabled: true }], focus_proof: proof });
     const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
     const transport = createMockDomGroundingTransport({ complete: scenario !== "dom-partial", tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario === "dom-focused" ? [{ tagName: "input", ariaRole: "textbox", name: "Page input", frame: { x: 200, y: 300, width: 100, height: 30 }, visible: true, interactive: true, state: { enabled: true, editable: true, focused: true } }] : [] });
-    const computer = new ProductionCuaDriverComputer({ socketPath: "test", screenshotDir: directory, platform: "darwin", windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const computer = new ProductionCuaDriverComputer({ socketPath: "test", screenshotDir: directory, ...(scenario === "non-macos" || scenario === "unknown-platform" ? {} : { platform: "darwin" as const }), windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
     const signal = new AbortController().signal;
     try {
       const session = await computer.open({}, signal);
       const basedOn = "macos-focus-negative" as ObservationId;
       await computer.observe(session, basedOn, signal);
-      expect(await computer.execute(session, { kind: "keypress", actionId: "mac-location-negative" as ActionId, basedOn, keys: ["CMD", "L"] }, signal)).toMatchObject({ status: "completed" });
-      expect(await computer.execute(session, { kind: "type", actionId: "mac-location-negative-type" as ActionId, basedOn, text: "https://example.test/" }, signal)).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
-      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      expect(await computer.execute(session, { kind: "keypress", actionId: "mac-location-negative" as ActionId, basedOn, keys: [session.platform === "darwin" ? "CMD" : "CTRL", "L"] }, signal)).toMatchObject({ status: "completed" });
+      const typed = await computer.execute(session, { kind: "type", actionId: "mac-location-negative-type" as ActionId, basedOn, text: "https://example.test/" }, signal);
+      if (scenario === "non-macos") {
+        expect(session.platform).toBe("win32");
+        expect(typed).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
+        expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      } else {
+        if (scenario === "unknown-platform") {
+          expect(session.platform).toBe(process.platform);
+          expect((computer as unknown as { session: { platformResolution: { source: string; health: { status: string; reportedPlatform?: string } } } }).session.platformResolution)
+            .toMatchObject({ source: "host", health: { status: "invalid" } });
+        }
+        expect(typed).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
+        expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+      }
       await computer.close(session);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
@@ -8632,7 +8948,7 @@ describe("CuaDriverComputer", () => {
     fake.setGroundingState({ snapshot_id: "s00000001", elements_complete: true, elements: [
       { role: "Document", name: "Document", frame: { x: 140, y: 160, width: 700, height: 420 }, element_token: "platform-target-token" },
     ] });
-    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
+    const computer = new ProductionCuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
     const signal = new AbortController().signal;
     try {
       const session = await computer.open({}, signal);

@@ -2704,14 +2704,12 @@ export class RunController {
     let actionOutput: JsonValue | undefined;
     if (receipt.status === "completed") {
       actionOutput = actionReceiptOutput(receipt);
-      // When window switching is enabled, expose a fresh inventory alongside
-      // the completed action if the driver reports newly opened windows, or if
-      // the model has not listed windows yet. The driver message only triggers
-      // this read; it does not establish ownership or authorize a transition.
-      // A matching dialog still requires an explicit switch_window call and a
-      // fresh observation.
+      // Seed the model-directed inventory only when this Run has not obtained
+      // one yet. Once window handoff detection is enabled, its formal post-action
+      // diff must run before any advisory listWindows read; an absent bound
+      // window is a recovery boundary, not a display-message hint.
       if (action.kind !== "wait" && action.kind !== "switch_window" && action.kind !== "reopen_saved_document" && this.windowSwitchAvailable() &&
-          (this.latestWindowOptions === undefined || receipt.message?.includes("\n\n🪟 Action opened new window(s):") === true) &&
+          this.windowHandoff !== "confirm-v1" && this.latestWindowOptions === undefined &&
           this.computer.listWindows !== undefined) {
         try {
           const inventory = await this.refreshWindowOptions(context.session);

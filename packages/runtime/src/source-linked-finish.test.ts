@@ -65,9 +65,8 @@ describe("source-linked finish validation", () => {
       11,
     );
     expect(canonical.summary).toContain("M6 12-core CPU");
-    expect(canonical.summary).toContain("enabled=false");
-    expect(canonical.summary).toContain("selected=false");
-    expect(canonical.summary).toContain("disabled");
+    expect(canonical.summary).toContain("当时已禁用");
+    expect(canonical.summary).toContain("当时未选中");
     expect(canonical.resultEvidence.fields[0]).toMatchObject({
       disposition: "source_bound",
       sources: [{ capturedAt: "2026-10-12T00:00:01.000Z", state: { enabled: false, selected: false } }],
@@ -82,7 +81,82 @@ describe("source-linked finish validation", () => {
       runId,
       1,
     );
-    expect(canonical.summary).toContain("model-reported reason: conflicting_sources");
+    expect(canonical.summary).toContain("提交方说明来源有冲突；系统未独立比对");
+  });
+
+  it("renders a Chinese user result with time and uncertainty limits while preserving raw evidence", () => {
+    const contract = validateSourceLinkedFinishContract({ version: "source-linked-finish-v1", fields: [
+      { fieldId: "cpu", label: "处理器型号", required: true },
+      { fieldId: "selection", label: "选中状态", required: true },
+      { fieldId: "matches", label: "候选信息", required: true },
+      { fieldId: "estimate", label: "推断信息", required: true },
+      { fieldId: "availability", label: "供货状态", required: true },
+      { fieldId: "sourceStatus", label: "来源状态", required: true },
+      { fieldId: "partialOptions", label: "选项信息", required: true },
+    ] })!;
+    const event = observationEvent({ elements: [
+      { elementRef: "cpu", role: "StaticText", source: "uia", name: "M6 12-core CPU", state: { enabled: false, selected: false } },
+      { elementRef: "selection", role: "Button", source: "uia", name: "16 GB", state: { enabled: false, selected: false }, options: [{ text: "16 GB", enabled: false }], optionsTruncated: true },
+      { elementRef: "match-a", role: "StaticText", source: "uia", name: "Store A model", state: { enabled: true } },
+      { elementRef: "match-b", role: "StaticText", source: "dom", name: "Store B model", state: { enabled: true } },
+      { elementRef: "partial-options", role: "ComboBox", source: "uia", name: "Capacity", optionsTruncated: true },
+    ] });
+    const canonical = canonicalizeSourceLinkedFinish(finishReport([
+      { fieldId: "cpu", disposition: "source_bound", sources: [{ observationId: "observation-1", elementRef: "cpu" }] },
+      { fieldId: "selection", disposition: "source_bound", sources: [{ observationId: "observation-1", elementRef: "selection" }] },
+      { fieldId: "matches", disposition: "source_bound", sources: [
+        { observationId: "observation-1", elementRef: "match-a" },
+        { observationId: "observation-1", elementRef: "match-b" },
+      ] },
+      { fieldId: "estimate", disposition: "inference", reason: "inferred from the visible SKU label" },
+      { fieldId: "availability", disposition: "unknown", reason: "not_observed" },
+      { fieldId: "sourceStatus", disposition: "unknown", reason: "source_unavailable" },
+      { fieldId: "partialOptions", disposition: "source_bound", sources: [{ observationId: "observation-1", elementRef: "partial-options" }] },
+    ]), contract, [event], runId, 11);
+
+    expect(canonical.summary).toContain("处理器型号：");
+    expect(canonical.summary).toContain("界面观察记录于");
+    expect(canonical.summary).toContain("尚未证实为当前状态");
+    expect(canonical.summary).toContain("未选中");
+    expect(canonical.summary).toContain("已禁用");
+    expect(canonical.summary).toContain("多个来源，需复核");
+    expect(canonical.summary).toContain("列表不完整");
+    expect(canonical.summary).toContain("选项信息：界面文字“Capacity”；选项列表不完整");
+    expect(canonical.summary).toContain("推断（未核实；提交方说明原文：inferred from the visible SKU label）");
+    expect(canonical.summary).toContain("未知（未在引用的观察中看到相关信息）");
+    expect(canonical.summary).toContain("来源状态：未知（所引用来源不可用）");
+    expect(canonical.summary).not.toContain("来源状态：有效");
+    expect(canonical.summary).not.toContain("role=");
+    expect(canonical.summary).not.toContain("source=uia");
+    expect(canonical.resultEvidence.fields).toMatchObject([
+      { fieldId: "cpu", disposition: "source_bound", sources: [{ role: "StaticText", source: "uia", state: { enabled: false, selected: false }, capturedAt: "2026-10-12T00:00:01.000Z" }] },
+      { fieldId: "selection", disposition: "source_bound", sources: [{ state: { enabled: false, selected: false }, options: [{ text: "16 GB", enabled: false }], optionsTruncated: true }] },
+      { fieldId: "matches", disposition: "source_bound", reviewRequired: true, sources: [{ name: "Store A model" }, { name: "Store B model" }] },
+      { fieldId: "estimate", disposition: "inference", reason: "inferred from the visible SKU label" },
+      { fieldId: "availability", disposition: "unknown", reason: "not_observed" },
+      { fieldId: "sourceStatus", disposition: "unknown", reason: "source_unavailable" },
+      { fieldId: "partialOptions", disposition: "source_bound", sources: [{ name: "Capacity", optionsTruncated: true }] },
+    ]);
+  });
+
+  it("reports an incomplete options list even when no option values were captured", () => {
+    const event = observationEvent({ elements: [
+      { elementRef: "partial-options", role: "ComboBox", source: "uia", name: "Capacity", optionsTruncated: true },
+    ] });
+    const canonical = canonicalizeSourceLinkedFinish(
+      finishReport([{ fieldId: "cpu", disposition: "source_bound", sources: [{ observationId: "observation-1", elementRef: "partial-options" }] }]),
+      contract,
+      [event],
+      runId,
+      11,
+    );
+
+    expect(canonical.summary).toContain("选项列表不完整");
+    expect(canonical.resultEvidence.fields[0]).toMatchObject({
+      disposition: "source_bound",
+      sources: [{ name: "Capacity", optionsTruncated: true }],
+    });
+    expect(canonical.resultEvidence.fields[0]?.disposition === "source_bound" && canonical.resultEvidence.fields[0].sources[0]).not.toHaveProperty("options");
   });
 
   it("rejects an empty canonical result when all contract fields are optional", () => {

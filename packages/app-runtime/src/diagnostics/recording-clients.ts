@@ -167,40 +167,53 @@ export class RecordingQwenHttpClient implements QwenHttpClient {
   }
 
   public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
-    this.requestNumber += 1;
+    const requestNumber = ++this.requestNumber;
     const startedAt = Date.now();
-    const trustedModel = trustedProviderModel(body.model);
-    const requestTools = providerRequestToolProjection(body);
     try {
       const response = await this.inner.post(url, body, headers, signal);
-      await appendFile(this.path, `${JSON.stringify({
-        provider: "qwen",
-        request: this.requestNumber,
-        latencyMs: Date.now() - startedAt,
-        requestedModel: trustedModel,
-        coordinateMode: this.coordinateMode,
-        thinkingMode: this.thinkingMode ?? null,
-        outputMode: this.outputMode,
-        toolNames: requestTools.toolNames,
-        response: summarizeProviderResponse(response, {
-          allowedToolNames: requestTools.allowedToolNames,
-          structuredContentExpected: providerRequestRequiresStructuredContent(body),
-          ...(trustedModel === null ? {} : { trustedModel }),
-        }),
-      })}\n`, "utf8");
+      await this.recordSafely(() => {
+        const trustedModel = trustedProviderModel(body.model);
+        const requestTools = providerRequestToolProjection(body);
+        return {
+          provider: "qwen",
+          request: requestNumber,
+          latencyMs: Date.now() - startedAt,
+          requestedModel: trustedModel,
+          coordinateMode: this.coordinateMode,
+          thinkingMode: this.thinkingMode ?? null,
+          outputMode: this.outputMode,
+          toolNames: requestTools.toolNames,
+          response: summarizeProviderResponse(response, {
+            allowedToolNames: requestTools.allowedToolNames,
+            structuredContentExpected: providerRequestRequiresStructuredContent(body),
+            ...(trustedModel === null ? {} : { trustedModel }),
+          }),
+        };
+      });
       return response;
     } catch (error) {
-      await appendFile(this.path, `${JSON.stringify({
-        provider: "qwen",
-        request: this.requestNumber,
-        latencyMs: Date.now() - startedAt,
-        requestedModel: trustedModel,
-        coordinateMode: this.coordinateMode,
-        thinkingMode: this.thinkingMode ?? null,
-        outputMode: this.outputMode,
-        transportError: summarizeTransportError(error),
-      })}\n`, "utf8");
+      await this.recordSafely(() => {
+        const trustedModel = safeQwenDiagnostic(() => trustedProviderModel(body.model));
+        return {
+          provider: "qwen",
+          request: requestNumber,
+          latencyMs: Date.now() - startedAt,
+          requestedModel: trustedModel ?? null,
+          coordinateMode: this.coordinateMode,
+          thinkingMode: this.thinkingMode ?? null,
+          outputMode: this.outputMode,
+          transportError: summarizeTransportError(error),
+        };
+      });
       throw error;
     }
   }
+
+  private async recordSafely(project: () => Record<string, unknown>): Promise<void> {
+    try { await appendFile(this.path, `${JSON.stringify(project())}\n`, "utf8"); } catch { /* optional diagnostics cannot change the provider outcome */ }
+  }
+}
+
+function safeQwenDiagnostic<T>(project: () => T): T | undefined {
+  try { return project(); } catch { return undefined; }
 }

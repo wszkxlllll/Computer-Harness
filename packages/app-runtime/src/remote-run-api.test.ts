@@ -13,7 +13,7 @@ import {
   type ActionPolicyDecision,
   type MonitorPolicyMode,
 } from "@computer-harness/runtime";
-import type { RuntimeEvent, ActionIntent, ActionReceipt, AssetId, AssetRef, ComputerSessionId, ComputerWindowCandidate, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId, RunOutcome, Viewport } from "@computer-harness/protocol";
+import type { GroundingCatalog, ObservationId, RuntimeEvent, ActionIntent, ActionReceipt, AssetId, AssetRef, ComputerSessionId, ComputerWindowCandidate, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId, RunOutcome, Viewport } from "@computer-harness/protocol";
 import { BoundWindowMissingError, MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
 import type { WindowTargetInfo, WindowTargetPreview } from "./application-session.js";
 import type { WindowSelectionStrategy } from "./window-selection-jev.js";
@@ -87,6 +87,7 @@ function fixtureComputer(
   handoffCandidates: readonly ComputerWindowCandidate[] = [],
   listHandoffCandidates?: (signal: AbortSignal) => Promise<readonly ComputerWindowCandidate[]> | readonly ComputerWindowCandidate[],
   missingHandoff?: (candidate: ComputerWindowCandidate) => void,
+  groundingOptions?: readonly string[],
 ): Computer {
   let sequence = 0;
   let lastAction: ActionIntent | undefined;
@@ -99,7 +100,7 @@ function fixtureComputer(
   };
   return {
     async open() { return session; },
-    async observe() {
+    async observe(_session, observationId: ObservationId) {
       sequence += 1;
       onObserve(String(session.id));
       return {
@@ -107,6 +108,17 @@ function fixtureComputer(
         viewport: screen,
         surfaceRef,
         screenshot: { mediaType: "image/png" as const, data: new Uint8Array([3, 1, 4, sequence]) },
+        ...(groundingOptions === undefined ? {} : { grounding: {
+          version: "grounding-catalog-v2",
+          source: "dom",
+          observationId,
+          computerSessionId: session.id,
+          surfaceRef,
+          completeness: "partial",
+          degraded: false,
+          maxElements: 16,
+          elements: [{ elementRef: "dom-ref", role: "combobox", source: "dom", name: "Fixture variant", bbox: { x: 1, y: 1, width: 4, height: 3 }, state: { enabled: true }, options: groundingOptions.map((text) => ({ text, enabled: true })) }],
+        } satisfies GroundingCatalog }),
       };
     },
     async execute(_session, action) {
@@ -176,6 +188,7 @@ function createFixture(
     windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
     allWindows?: readonly WindowTargetInfo[];
     windowPreviewOverride?: WindowTargetPreview;
+    windowPreviewCapture?: (target: WindowTargetInfo, signal: AbortSignal) => Promise<WindowTargetPreview> | WindowTargetPreview;
     windowDiscoveryAvailable?: boolean;
     onActivateWindow?: (target: { pid: number; windowId: number }, showWindow: (window: WindowTargetInfo) => void) => void;
     managedBrowserProfile?: { readonly profileLabel: string; readonly profileRoot: string };
@@ -196,6 +209,7 @@ function createFixture(
     windowHandoffCandidates?: readonly ComputerWindowCandidate[];
     listWindowHandoffCandidates?: (signal: AbortSignal) => Promise<readonly ComputerWindowCandidate[]> | readonly ComputerWindowCandidate[];
     missingHandoff?: (candidate: ComputerWindowCandidate) => void;
+    groundingOptions?: readonly string[];
     nativeRecoveryProfile?: import("./remote-control.js").HostNativeRecoveryProfile;
     initialWindows?: readonly WindowTargetInfo[];
     listWindowsOverride?: (signal: AbortSignal) => Promise<readonly WindowTargetInfo[]>;
@@ -251,10 +265,11 @@ function createFixture(
         windowDiscoveryCalls.push({ type: "activate", pid: target.pid, windowId: target.windowId });
         options.onActivateWindow?.(target, (window) => { windows = [...windows.filter((item) => item.pid !== window.pid || item.windowId !== window.windowId), window]; });
       },
-      captureWindowPreview: async (target) => {
+      captureWindowPreview: async (target, signal) => {
         windowPreviewCalls.push({ pid: target.pid, windowId: target.windowId });
         const selected = windows.find((window) => window.pid === target.pid && window.windowId === target.windowId);
         if (selected === undefined) throw new Error("preview target is stale");
+        if (options.windowPreviewCapture !== undefined) return options.windowPreviewCapture(selected, signal);
         if (options.windowPreviewOverride !== undefined) return options.windowPreviewOverride;
         return {
           target: selected,
@@ -281,6 +296,7 @@ function createFixture(
           options.windowHandoffCandidates,
           options.listWindowHandoffCandidates,
           options.missingHandoff,
+          options.groundingOptions,
         );
       },
       ...(options.guardDecisions === undefined ? {} : {
@@ -354,6 +370,78 @@ function deferred<T>() {
 }
 
 describe("ApplicationRemoteRunApi", () => {
+  it("projects real filtered visible and redacted option approvals identically through GET and SSE", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-option-preview-contract-"));
+    const visibleText = "Observed fixture variant";
+    const secretText = "token=PRIVATE_SYNTHETIC_SECRET";
+    const calls: ToolCall[] = [visibleText, secretText].map((optionText, index) => ({
+      id: `option-approval-${index}` as ToolCallId,
+      name: "select_option",
+      arguments: { elementRef: "dom-ref", optionText },
+    }));
+    const { api, session } = createFixture(outputDir, {
+      summary: "The fixture approvals were rejected.",
+      turnFactory: (turnNumber, _input, events) => {
+        const call = calls[turnNumber - 1];
+        return call === undefined ? { type: "finish", summary: "Done" } : { type: "tool_calls", calls: [call] };
+      },
+      guardDecisions: [fixtureGuardDecision("require_approval", "Review this option."), fixtureGuardDecision("require_approval", "Review this option.")],
+      groundingOptions: [visibleText, secretText],
+    });
+    const streamedPendingRequest = (runId: string, requestId: string): Record<string, unknown> => {
+      const events: unknown[] = [];
+      const subscription = api.subscribe("device-one", runId, 0, (event) => events.push(event));
+      subscription.close();
+      const pendingEvent = events.filter((event) => {
+        if (typeof event !== "object" || event === null || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.pending_request" && "request" in data && typeof data.request === "object" && data.request !== null && "requestId" in data.request && data.request.requestId === requestId;
+      }).at(-1) as { data: { request: Record<string, unknown> } } | undefined;
+      if (pendingEvent === undefined) throw new Error("pending approval SSE event was not found");
+      return pendingEvent.data.request;
+    };
+    try {
+      const started = await api.startRun("device-one", "option-preview-contract", "Select a fixture variant", { mode: "browser", url: "about:blank" });
+      await waitFor(() => ["waiting_approval", "finished"].includes(api.getRun("device-one", started.runId)?.status ?? ""), "Run did not reach a terminal or approval state");
+      expect(api.getRun("device-one", started.runId)?.status).toBe("waiting_approval");
+      const visibleGet = api.getRun("device-one", started.runId)!;
+      const visibleRequest = visibleGet.pendingRequest;
+      if (visibleRequest?.kind !== "approval") throw new Error("expected visible option approval request");
+      const visibleSse = streamedPendingRequest(started.runId, visibleRequest.requestId);
+      expect(visibleSse.requestId).toBe(visibleRequest.requestId);
+      expect((visibleSse.preview as { actions: unknown[] }).actions[0]).toEqual(visibleRequest.preview?.actions[0]);
+      expect(visibleRequest.preview?.actions[0]).toMatchObject({ groundingRef: "dom-ref", optionText: visibleText, optionCharacterCount: [...visibleText].length, optionTextStatus: "visible" });
+      expect(JSON.stringify(visibleGet)).not.toContain(secretText);
+      expect(visibleRequest.preview?.actions[0]).not.toHaveProperty("arguments");
+      expect(JSON.stringify(visibleSse)).not.toContain(secretText);
+      await api.submitCommand("device-one", started.runId, { commandId: "reject-visible-option", expectedSequence: visibleGet.sequence, type: "reject", requestId: visibleRequest.requestId });
+      await waitFor(() => {
+        const request = api.getRun("device-one", started.runId)?.pendingRequest;
+        return request?.kind === "approval" && request.requestId !== visibleRequest.requestId;
+      }, "Run did not request redacted option approval");
+
+      const redactedGet = api.getRun("device-one", started.runId)!;
+      const redactedRequest = redactedGet.pendingRequest;
+      if (redactedRequest?.kind !== "approval") throw new Error("expected redacted option approval request");
+      const redactedSse = streamedPendingRequest(started.runId, redactedRequest.requestId);
+      expect(redactedSse.requestId).toBe(redactedRequest.requestId);
+      expect((redactedSse.preview as { actions: unknown[] }).actions[0]).toEqual(redactedRequest.preview?.actions[0]);
+      expect(redactedRequest.preview?.actions[0]).toMatchObject({ optionCharacterCount: [...secretText].length, optionTextStatus: "redacted" });
+      expect(redactedRequest.preview?.actions[0]).toHaveProperty("groundingRef", "dom-ref");
+      expect(redactedRequest.preview?.actions[0]).not.toHaveProperty("optionText");
+      expect(redactedRequest.preview?.actions[0]).not.toHaveProperty("arguments");
+      expect(JSON.stringify(redactedGet)).not.toContain(secretText);
+      expect(JSON.stringify(redactedSse)).not.toContain(secretText);
+      await api.submitCommand("device-one", started.runId, { commandId: "reject-redacted-option", expectedSequence: redactedGet.sequence, type: "reject", requestId: redactedRequest.requestId });
+      await session.waitForActiveRun();
+    } finally {
+      session.activeRun?.controller.cancel("option preview contract test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps native recovery absent unless the Host supplies a configured profile", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-absent-"));
     const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "Ordinary Run finished." });
@@ -794,6 +882,171 @@ describe("ApplicationRemoteRunApi", () => {
       expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
       expect(windowPreviewCalls).toHaveLength(1);
     } finally {
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "caller cancellation", stage: "before-list", listOffset: 1, abort: (controller: AbortController) => controller.abort(new DOMException("preview cancelled", "AbortError")) },
+    { label: "the eight-second deadline", stage: "before-list", listOffset: 1, abort: (controller: AbortController) => controller.abort(new DOMException("preview deadline", "TimeoutError")) },
+    { label: "caller cancellation", stage: "after-list", listOffset: 2, abort: (controller: AbortController) => controller.abort(new DOMException("preview cancelled", "AbortError")) },
+    { label: "the eight-second deadline", stage: "after-list", listOffset: 2, abort: (controller: AbortController) => controller.abort(new DOMException("preview deadline", "TimeoutError")) },
+  ])("does not mint a handoff preview proof after $label at the $stage gate while the list operation is settling", async ({ label, stage, listOffset, abort }) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-preview-abort-gate-"));
+    const root = { pid: 715, windowId: 7151, appName: "WPS Office", title: "Budget.docx" };
+    const candidate = { pid: 716, windowId: 7161, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const duplicateCandidate = { ...candidate, pid: 717, windowId: 7171 };
+    const gate = deferred<readonly ComputerWindowCandidate[]>();
+    const timeoutController = new AbortController();
+    let restoreTimeoutSpy: (() => void) | undefined;
+    let listCalls = 0;
+    let gatedListCall: number | undefined;
+    const click: ToolCall = {
+      id: "handoff-preview-abort-gate-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+    };
+    const { api, session, windowPreviewCalls, setWindows } = createFixture(outputDir, {
+      summary: "Done.",
+      windowHandoff: "confirm-v1",
+      listWindowHandoffCandidates: () => {
+        listCalls += 1;
+        return listCalls === gatedListCall ? gate.promise : [candidate, duplicateCandidate];
+      },
+      turnFactory: (turnNumber) => turnNumber === 1
+        ? { type: "tool_calls", calls: [click] }
+        : { type: "finish", summary: "Done." },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "The foreground target changed before input.",
+      }),
+    });
+    setWindows([root, candidate, duplicateCandidate]);
+    const callerController = new AbortController();
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const rootChoice = initial.candidates.find((choice) => choice.appName === root.appName);
+      if (rootChoice === undefined) throw new Error("root window was not listed");
+      const started = await api.startRun("device-one", `handoff-preview-abort-${label.replaceAll(" ", "-")}`, "Continue in the dialog", {
+        mode: "window", targetToken: rootChoice.token,
+      });
+      await waitFor(() => api.getRun("device-one", started.runId)?.pendingRequest?.kind === "window_handoff",
+        "Run did not request window handoff");
+      const waiting = api.getRun("device-one", started.runId)!;
+      const pending = waiting.pendingRequest;
+      if (pending?.kind !== "window_handoff") throw new Error("expected a handoff request");
+      const candidateToken = pending.candidates[0]?.token;
+      if (candidateToken === undefined) throw new Error("handoff candidate token was not published");
+      const requestId = pending.requestId;
+      gatedListCall = listCalls + listOffset;
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds) => {
+        expect(milliseconds).toBe(8_000);
+        return timeoutController.signal;
+      });
+      restoreTimeoutSpy = () => timeoutSpy.mockRestore();
+
+      const previewPromise = api.previewWindowHandoffCandidate("device-one", started.runId, requestId, candidateToken,
+        label === "caller cancellation" ? callerController.signal : undefined);
+      let previewSettled = false;
+      void previewPromise.then(() => { previewSettled = true; }, () => { previewSettled = true; });
+      await waitFor(() => listCalls >= gatedListCall!, `${stage} handoff candidate check did not start`);
+      if (label === "caller cancellation") abort(callerController);
+      else abort(timeoutController);
+      await Promise.resolve();
+      expect(previewSettled).toBe(false);
+      await expect(api.previewWindowHandoffCandidate("device-one", started.runId, requestId, candidateToken))
+        .rejects.toMatchObject({ code: "WINDOW_PREVIEW_BUSY" });
+
+      gate.resolve([candidate, duplicateCandidate]);
+      await expect(previewPromise).rejects.toMatchObject({ name: label === "caller cancellation" ? "AbortError" : "TimeoutError" });
+      restoreTimeoutSpy();
+      restoreTimeoutSpy = undefined;
+      expect(windowPreviewCalls).toEqual(stage === "before-list" ? [] : [{ pid: candidate.pid, windowId: candidate.windowId }]);
+      const afterAbort = api.getRun("device-one", started.runId)?.pendingRequest;
+      expect(afterAbort?.kind).toBe("window_handoff");
+      if (afterAbort?.kind !== "window_handoff") throw new Error("the original handoff request was not preserved after abort");
+      expect(afterAbort.requestId).toBe(requestId);
+      expect(afterAbort.candidates.some((item) => item.token === candidateToken && item.title === candidate.title)).toBe(true);
+
+      const retry = await api.previewWindowHandoffCandidate("device-one", started.runId, requestId, candidateToken);
+      expect(retry.previewToken).toMatch(/^[A-Za-z0-9_-]{32}$/u);
+      const afterRetry = api.getRun("device-one", started.runId)?.pendingRequest;
+      expect(afterRetry?.kind).toBe("window_handoff");
+      if (afterRetry?.kind !== "window_handoff") throw new Error("the original handoff request was not preserved after retry");
+      expect(afterRetry.requestId).toBe(requestId);
+      expect(afterRetry.candidates.some((item) => item.token === candidateToken && item.title === candidate.title)).toBe(true);
+      expect(windowPreviewCalls).toHaveLength(stage === "before-list" ? 1 : 2);
+    } finally {
+      restoreTimeoutSpy?.();
+      gate.resolve([candidate, duplicateCandidate]);
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an ordinary candidate preview busy until an abort-insensitive capture settles, then permits the exact candidate retry", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-preview-capture-abort-gate-"));
+    const first = { pid: 717, windowId: 7171, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const capture = deferred<WindowTargetPreview>();
+    let captureCalls = 0;
+    const { api, session, windowPreviewCalls, setWindows } = createFixture(outputDir, {
+      summary: "Done.",
+      windowPreviewCapture: (target) => {
+        captureCalls += 1;
+        if (captureCalls === 1) return capture.promise;
+        return {
+          target,
+          capturedAt: "2026-10-04T00:00:00.000Z",
+          viewport: { width: 8, height: 8 },
+          mediaType: "image/png",
+          data: new Uint8Array([137, 80, 78, 71]),
+        };
+      },
+    });
+    const other = { ...first, pid: first.pid + 1, windowId: first.windowId + 1 };
+    setWindows([first, other]);
+    const controller = new AbortController();
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const firstChoice = choices.candidates[0]!;
+      const previewPromise = api.previewWindowTarget("device-one", firstChoice.token, controller.signal);
+      let previewSettled = false;
+      void previewPromise.then(() => { previewSettled = true; }, () => { previewSettled = true; });
+      await waitFor(() => captureCalls === 1, "ordinary preview capture did not start");
+      controller.abort(new DOMException("preview cancelled", "AbortError"));
+      await Promise.resolve();
+      expect(previewSettled).toBe(false);
+      await expect(api.previewWindowTarget("device-one", firstChoice.token)).rejects.toMatchObject({ code: "WINDOW_PREVIEW_BUSY" });
+      capture.resolve({
+        target: first,
+        capturedAt: "2026-10-04T00:00:00.000Z",
+        viewport: { width: 8, height: 8 },
+        mediaType: "image/png",
+        data: new Uint8Array([137, 80, 78, 71]),
+      });
+      await expect(previewPromise).rejects.toBeDefined();
+      expect(windowPreviewCalls).toEqual([{ pid: first.pid, windowId: first.windowId }]);
+      const retry = await api.previewWindowTarget("device-one", firstChoice.token);
+      expect(retry.appName).toBe(first.appName);
+      expect(retry.title).toBe(first.title);
+      expect(retry.previewToken).toMatch(/^[A-Za-z0-9_-]{32}$/u);
+      expect(windowPreviewCalls).toHaveLength(2);
+    } finally {
+      capture.resolve({
+        target: first,
+        capturedAt: "2026-10-04T00:00:00.000Z",
+        viewport: { width: 8, height: 8 },
+        mediaType: "image/png",
+        data: new Uint8Array([137, 80, 78, 71]),
+      });
       if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
       await session.waitForActiveRun().catch(() => undefined);
       await session.close();

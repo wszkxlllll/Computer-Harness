@@ -12,6 +12,10 @@ import {
   ApplicationSession,
   createFileRemoteAssetReader,
   type ApplicationSessionConfig,
+  type RemotePendingRequest,
+  type RemoteRunEvent,
+  type RemoteRunSnapshot,
+  type RemoteSubscription,
 } from "@computer-harness/app-runtime";
 import { InProcessEnvironmentOwner } from "@computer-harness/app-runtime";
 import { HostRelayConnector } from "@computer-harness/relay-connector";
@@ -336,6 +340,84 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       expect(completed.reply).toBe("The fixture task completed through the paired Web client.");
       expect(completed.latestAssetId).toBeTruthy();
 
+      // Transport-only seam: the API fixture below is already filtered. The
+      // producer-to-API filtering contract is exercised in remote-run-api.test.
+      const originalGetRun = api.getRun.bind(api);
+      const originalSubscribe = api.subscribe.bind(api);
+      const transportRequests = new Map<string, RemotePendingRequest>();
+      for (const [scenario, action] of [
+        ["visible", { operation: "select_option", kind: "select_option", groundingRef: "dom-ref", optionText: "Observed fixture variant", optionCharacterCount: 24, optionTextStatus: "visible" }],
+        ["redacted", { operation: "select_option", kind: "select_option", groundingRef: "dom-ref", optionCharacterCount: 24, optionTextStatus: "redacted" }],
+      ] as const) {
+        const requestId = `transport-${scenario}-request`;
+        transportRequests.set(scenario, {
+          requestId,
+          kind: "approval",
+          reason: "Review fixture option.",
+          requiresVisualReview: false,
+          preview: { actions: [action] },
+        });
+      }
+      api.getRun = async (deviceId, runId) => {
+        const scenario = runId === "transport-visible" ? "visible" : runId === "transport-redacted" ? "redacted" : undefined;
+        if (scenario === undefined) return originalGetRun(deviceId, runId);
+        return {
+          runId,
+          goal: "Transport filtered approval preview",
+          status: "waiting_approval",
+          sequence: 7,
+          pendingRequest: transportRequests.get(scenario),
+          capabilities: { pause: false, resume: false, abort: false, correct: false, approval: true, windowHandoff: false },
+        } satisfies RemoteRunSnapshot;
+      };
+      api.subscribe = (deviceId, runId, afterSequence, listener): RemoteSubscription => {
+        const scenario = runId === "transport-visible" ? "visible" : runId === "transport-redacted" ? "redacted" : undefined;
+        if (scenario === undefined) return originalSubscribe(deviceId, runId, afterSequence, listener);
+        const request = transportRequests.get(scenario)!;
+        const event: RemoteRunEvent = {
+          type: "run.event",
+          runId: runId as RemoteRunEvent["runId"],
+          sequence: 8,
+          data: { type: "run.pending_request", request },
+        };
+        if (afterSequence < event.sequence) listener(event);
+        return { close() {} };
+      };
+      try {
+        for (const scenario of ["visible", "redacted"] as const) {
+          const runId = `transport-${scenario}`;
+          const getSnapshot = await webApi.getRun(runId);
+          const getRequest = getSnapshot.pendingRequest;
+          expect(getRequest?.requestId).toBe(`transport-${scenario}-request`);
+          const action = getRequest?.kind === "approval" ? getRequest.preview?.actions[0] : undefined;
+          const response = await globalThis.fetch(webApi.runEventsUrl(runId, 0));
+          expect(response.status).toBe(200);
+          const reader = response.body?.getReader();
+          if (reader === undefined) throw new Error("Relay SSE response has no body");
+          let eventText = "";
+          try {
+            while (!eventText.includes("data: {")) {
+              const chunk = await Promise.race([reader.read(), new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Relay SSE event timed out")), 2_000))]);
+              if (chunk.done) break;
+              eventText += new TextDecoder().decode(chunk.value);
+            }
+          } finally {
+            await reader.cancel();
+          }
+          const dataLine = eventText.split("\n").find((line) => line.startsWith("data: "));
+          if (dataLine === undefined) throw new Error("Relay SSE did not contain a run event");
+          const streamed = JSON.parse(dataLine.slice("data: ".length)) as { type: string; data: { request: { requestId: string; preview: { actions: unknown[] } } } };
+          expect(streamed.type).toBe("run.event");
+          expect(streamed.data.request.requestId).toBe(getRequest?.requestId);
+          expect(streamed.data.request.preview.actions[0]).toEqual(action);
+          expect(eventText).not.toContain("PRIVATE_SYNTHETIC_SECRET");
+          if (scenario === "redacted") expect(action).not.toHaveProperty("optionText");
+        }
+      } finally {
+        api.getRun = originalGetRun;
+        api.subscribe = originalSubscribe;
+      }
+
       const assetResponse = await globalThis.fetch(webApi.runAssetUrl(accepted.runId, completed.latestAssetId!));
       expect(assetResponse.status).toBe(200);
       expect(assetResponse.headers.get("content-type")).toContain("image/png");
@@ -353,5 +435,5 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       await relay.close().catch(() => undefined);
       await rm(outputDir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });

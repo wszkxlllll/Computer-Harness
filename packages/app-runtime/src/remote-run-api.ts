@@ -368,6 +368,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (candidate.previewRequired !== true) throw new RemoteRunApiError("INVALID_TARGET", "This candidate does not require a preview; select it from the refreshed window list.");
     const captureSignal = boundedPreviewSignal(signal);
     const preview = await this.captureWindowPreview({ pid: candidate.pid, windowId: candidate.windowId }, candidate.appName, captureSignal);
+    captureSignal.throwIfAborted();
     if (this.windowCandidates.get(deviceId) !== targetSet || targetSet.expiresAt <= this.now() ||
         targetSet.candidates.get(candidateToken) !== candidate) {
       throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window list changed while the preview was being captured. Refresh and preview the current candidate.");
@@ -401,8 +402,11 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     if (candidate.previewRequired !== true) throw new RemoteRunApiError("INVALID_TARGET", "This candidate does not require a preview; use the current window request.");
     const captureSignal = boundedPreviewSignal(signal);
     const before = await this.listCurrentHandoffCandidate(record, candidate, requestId, captureSignal);
+    captureSignal.throwIfAborted();
     const preview = await this.captureWindowPreview({ pid: candidate.candidate.pid, windowId: candidate.candidate.windowId }, candidate.candidate.appName, captureSignal);
+    captureSignal.throwIfAborted();
     const after = await this.listCurrentHandoffCandidate(record, candidate, requestId, captureSignal);
+    captureSignal.throwIfAborted();
     if (!sameComputerCandidate(before, after)) {
       throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window changed during preview. Refresh the task and inspect the new candidate.");
     }
@@ -435,8 +439,10 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     try {
       preview = await this.session.captureWindowTargetPreview(target, signal);
     } catch {
+      signal.throwIfAborted();
       throw new RemoteRunApiError("WINDOW_PREVIEW_UNAVAILABLE", "This exact window could not be previewed safely. Restore it on the computer, refresh the list, and try again.");
     }
+    signal.throwIfAborted();
     if (preview.target.pid !== target.pid || preview.target.windowId !== target.windowId) {
       throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The screenshot no longer belongs to the exact selected window. Refresh the list and inspect the current candidate.");
     }
@@ -480,8 +486,10 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     try {
       candidates = await record.handle.controller.listWindowHandoffCandidates(signal);
     } catch {
+      signal.throwIfAborted();
       throw new RemoteRunApiError("WINDOW_PREVIEW_UNAVAILABLE", "The waiting window candidate could not be refreshed safely. Refresh the task and try again.");
     }
+    signal.throwIfAborted();
     if (record.pendingWindowRequestId !== requestId || record.handle.controller.getSnapshot().status !== "waiting_window") {
       throw new RemoteRunApiError("STALE_REQUEST", "The window handoff request changed while it was being refreshed.");
     }
@@ -1630,6 +1638,10 @@ function publicRequest(request: RemotePendingRequest): JsonValue {
           ...(action.points === undefined ? {} : { points: action.points.map((point) => ({ x: point.x, y: point.y })) }),
           ...(action.keys === undefined ? {} : { keys: [...action.keys] }),
           ...(action.typedCharacterCount === undefined ? {} : { typedCharacterCount: action.typedCharacterCount }),
+          ...(action.groundingRef === undefined ? {} : { groundingRef: action.groundingRef }),
+          ...(action.optionText === undefined ? {} : { optionText: action.optionText }),
+          ...(action.optionCharacterCount === undefined ? {} : { optionCharacterCount: action.optionCharacterCount }),
+          ...(action.optionTextStatus === undefined ? {} : { optionTextStatus: action.optionTextStatus }),
         })),
         ...(request.preview.selectedWindowLabel === undefined ? {} : {
           selectedWindowLabel: {

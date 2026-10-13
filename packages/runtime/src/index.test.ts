@@ -2990,7 +2990,7 @@ describe("RunController command inbox and control semantics", () => {
     await expect(controller.resume()).resolves.toBeUndefined();
     await expect(running).resolves.toBe("succeeded");
     expect(provider.inputs).toHaveLength(2);
-    expect(controller.getSnapshot()).toMatchObject({ summary: "Availability: Unknown (not_observed)" });
+    expect(controller.getSnapshot()).toMatchObject({ summary: "Availability：未知（未在引用的观察中看到相关信息）" });
     expect(controller.getEvents().filter((event) => event.type === "runtime.error" && event.category === "source_linked_finish_invalid")).toHaveLength(0);
     await rm(created.directory, { recursive: true, force: true });
   });
@@ -5013,6 +5013,84 @@ describe("RunController model-directed window switching", () => {
     arguments: { windowRef },
   });
 
+  it("preserves ordinary explicit recovery when the post-action inventory first discovers the bound window vanished", async () => {
+    class VanishedWindowComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public inventoryRead = false;
+      public readonly candidate: ComputerWindowCandidate = {
+        pid: 202, windowId: 502, appName: "Editor", title: "Fresh window", handoffToken: "fresh-window-token",
+      };
+      public readonly targetSession: ComputerSession = {
+        ...this.session,
+        viewport: { width: 640, height: 480, coordinateSpace: "physical" },
+      };
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return { actionId: action.actionId, status: "completed" as const, message: "A localized display message" };
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryRead = true;
+        // Mirror CUA's ordinary-mode behavior: an incomplete inventory that
+        // proves the bound peer is absent invalidates its observation state.
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        if (this.inventoryRead) throw Object.assign(new Error("bound surface was already invalidated"), { code: "TRANSIENT_SURFACE_UNKNOWN" });
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(_session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        expect(candidate).toEqual(this.candidate);
+        return this.targetSession;
+      }
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return {
+          ...capture,
+          viewport: session.viewport,
+          surfaceRef: session === this.targetSession ? nativePeerSurfaceRef : desktopSurfaceRef,
+          ...(session === this.targetSession ? { surfaceTransitionReason: "peer_switch" as const } : {}),
+        };
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new VanishedWindowComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("ordinary-close-once")] },
+      { type: "finish", summary: "continued on the explicitly selected window" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+    });
+    const running = controller.start("complete the action, then recover the exact new window");
+    try {
+      await waitUntil(() => ["waiting_window", "waiting_user", "finished"].includes(controller.getSnapshot().status));
+      expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents() })).toBe("waiting_window");
+      const request = controller.getSnapshot().pendingWindowHandoff!;
+      expect(request.reasonCode).toBe("bound_window_missing");
+      const candidate = (await controller.listWindowHandoffCandidates(new AbortController().signal))[0]!;
+      await controller.handoffWindow(candidate, request.sourceActionId);
+      expect(await running).toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+      expect(controller.getEvents().filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+      expect(controller.getEvents().filter((event) => event.type === "computer.window.handoff.completed")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("returns a fresh opaque inventory after a native action without claiming an alternate is related", async () => {
     const registry = windowSwitchRegistry();
     const computer = new WindowSwitchComputer();
@@ -5077,7 +5155,7 @@ describe("RunController model-directed window switching", () => {
     }
   });
 
-  it("refreshes after the driver's opened-window notice, expires old refs, and permits only an explicit fresh switch", async () => {
+  it("does not treat display text as an inventory signal; an explicit refresh expires old refs before switching", async () => {
     const registry = windowSwitchRegistry();
     class WindowNoticeComputer extends WindowSwitchComputer {
       private inventoryGeneration = 0;
@@ -5112,6 +5190,7 @@ describe("RunController model-directed window switching", () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [listWindowsCall("initial-inventory")] },
       { type: "tool_calls", calls: [clickCall("open-save-sheet")] },
+      { type: "tool_calls", calls: [listWindowsCall("fresh-inventory")] },
       { type: "tool_calls", calls: [switchWindowCall("stale-switch", "old-target")] },
       { type: "tool_calls", calls: [switchWindowCall("fresh-switch", "fresh-target")] },
       { type: "finish", summary: "observed the selected window" },
@@ -5129,19 +5208,18 @@ describe("RunController model-directed window switching", () => {
         "execute:switch_window:fresh-target",
       ]);
       const events = controller.getEvents();
-      const saveResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
-        event.type === "tool.call.completed" && event.result.callId === ("open-save-sheet" as ToolCallId));
-      expect(saveResult?.result.output).toMatchObject({
-        windowInventory: {
-          options: [
+      const freshInventory = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("fresh-inventory" as ToolCallId));
+      expect(freshInventory?.result.output).toMatchObject({
+          windows: [
             { windowRef: "fresh-current", isCurrent: true },
             { windowRef: "fresh-target", title: "Save", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "open-save-sheet" },
           ],
-          firstObservedOptions: [{ windowRef: "fresh-target", title: "Save", sourceActionId: "open-save-sheet" }],
-          guidance: expect.stringContaining("does not prove creation, ownership, foreground, or relation"),
-        },
       });
-      expect(JSON.stringify(saveResult?.result.output)).not.toContain("old-target");
+      const actionResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("open-save-sheet" as ToolCallId));
+      expect(actionResult?.result.output).not.toHaveProperty("windowInventory");
+      expect(JSON.stringify(freshInventory?.result.output)).not.toContain("old-target");
       expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === ("stale-switch" as ToolCallId))).toBe(true);
       const observations = events.filter((event) => event.type === "observation.created");
       expect(observations).toHaveLength(3);
@@ -5179,6 +5257,7 @@ describe("RunController model-directed window switching", () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [listWindowsCall("old-list")] },
       { type: "tool_calls", calls: [clickCall("open-save-sheet-refresh-fails")] },
+      { type: "tool_calls", calls: [listWindowsCall("failed-refresh")] },
       { type: "tool_calls", calls: [switchWindowCall("old-ref-after-refresh-failed", "old-target")] },
       { type: "finish", summary: "refresh failed; kept existing target" },
     ]);

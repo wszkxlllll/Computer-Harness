@@ -203,6 +203,7 @@ describe("GLM provider adapter", () => {
     const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
     const type = tools.find((tool) => tool.function.name === "type");
     expect(type?.function.description).toContain("appends to the end of the target's current value regardless of caret or selection");
+    expect(type?.function.description).toContain("On macOS, omit elementRef and use the native focused-control typing route.");
     expect(type?.function.parameters).toMatchObject({ properties: {
       text: { description: expect.stringContaining("appends at its end regardless of caret or selection") },
       elementRef: { description: expect.stringContaining("does not replace a selection") },

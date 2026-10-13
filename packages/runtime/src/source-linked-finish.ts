@@ -147,15 +147,7 @@ export function canonicalizeSourceLinkedFinish(
   }
 
   const resultEvidence: SourceLinkedFinishEvidence = { version: "source-linked-finish-v1", fields: canonicalFields };
-  const summary = canonicalFields.map((field) => {
-    if (field.disposition === "source_bound") {
-      const review = field.reviewRequired ? " (multiple sources; review required)" : "";
-      return `${field.label}: ${field.sources.map((source) => source.excerpt).join(" || ")}${review}`;
-    }
-    if (field.disposition === "inference") return `${field.label}: Inference (unverified): ${field.reason}`;
-    const reasonLabel = field.reason === "conflicting_sources" ? "model-reported reason: conflicting_sources" : field.reason;
-    return `${field.label}: Unknown (${reasonLabel})`;
-  }).join("\n");
+  const summary = renderUserFacingSummary(canonicalFields);
   if (summary.trim().length === 0) throw new Error("source-linked finish report produced an empty canonical result");
   if (Buffer.byteLength(summary, "utf8") > MAX_CANONICAL_SUMMARY_BYTES ||
       Buffer.byteLength(JSON.stringify(resultEvidence), "utf8") > MAX_CANONICAL_EVIDENCE_BYTES ||
@@ -164,6 +156,52 @@ export function canonicalizeSourceLinkedFinish(
     throw new Error("canonical source-linked result exceeds the persisted summary or evidence size limit");
   }
   return { summary, resultEvidence };
+}
+
+function renderUserFacingSummary(fields: SourceLinkedFinishEvidence["fields"]): string {
+  return fields.map((field) => {
+    if (field.disposition === "source_bound") {
+      const sources = field.sources.map((source, index) => renderSourceSummary(source, index, field.sources.length > 1));
+      const review = field.reviewRequired ? "；多个来源，需复核，系统未自动判定是否一致" : "";
+      return `${field.label}：${sources.join("；")}${review}`;
+    }
+    if (field.disposition === "inference") return `${field.label}：推断（未核实；提交方说明原文：${field.reason}）`;
+    return `${field.label}：未知（${renderUnknownReason(field.reason)}）`;
+  }).join("\n");
+}
+
+function renderSourceSummary(source: CanonicalSource, index: number, numbered: boolean): string {
+  const label = numbered ? `来源${index + 1}：` : "";
+  const content: string[] = [];
+  if (source.name !== undefined) content.push(`界面文字“${source.name}”`);
+  if (source.description !== undefined) content.push(`辅助说明“${source.description}”`);
+  if (source.options !== undefined) {
+    content.push(`选项：${source.options.map((option) => `${option.text}（${option.enabled ? "当时可用" : "当时已禁用"}）`).join("、")}`);
+  }
+  if (source.optionsTruncated === true) content.push("选项列表不完整");
+  if (source.state !== undefined) {
+    const states: string[] = [];
+    if (source.state.enabled !== undefined) states.push(source.state.enabled ? "当时启用" : "当时已禁用");
+    if (source.state.focused !== undefined) states.push(source.state.focused ? "当时有焦点" : "当时未聚焦");
+    if (source.state.editable !== undefined) states.push(source.state.editable ? "当时可编辑" : "当时不可编辑");
+    if (source.state.expanded !== undefined) states.push(source.state.expanded ? "当时已展开" : "当时未展开");
+    if (source.state.selected !== undefined) states.push(source.state.selected ? "当时已选中" : "当时未选中");
+    if (source.state.valuePresent !== undefined) states.push(source.state.valuePresent ? "当时检测到值" : "当时未检测到值");
+    if (states.length > 0) content.push(`状态：${states.join("、")}`);
+  }
+  if (content.length === 0) content.push("未提供可显示文字");
+  return `${label}${content.join("；")}；界面观察记录于 ${source.capturedAt}（仅表示当时记录，尚未证实为当前状态）`;
+}
+
+function renderUnknownReason(reason: string): string {
+  switch (reason) {
+    case "not_observed": return "未在引用的观察中看到相关信息";
+    case "no_grounding": return "没有可用的界面依据";
+    case "ambiguous_source": return "来源不明确";
+    case "conflicting_sources": return "提交方说明来源有冲突；系统未独立比对";
+    case "source_unavailable": return "所引用来源不可用";
+    default: return "原因未提供";
+  }
 }
 
 function findCommittedElement(

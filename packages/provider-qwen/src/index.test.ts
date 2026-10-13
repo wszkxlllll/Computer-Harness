@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
 import type { AssetId, JsonValue, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
-import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
+import { createDefaultComputerTools, windowSwitchTools } from "../../runtime/src/computer-tools.js";
 import { FetchQwenHttpClient, Qwen38FlashAdapter, type QwenHttpClient } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
@@ -135,6 +135,59 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(hotkey?.function.description).toContain("CMD");
     expect(hotkey?.function.parameters).toMatchObject({ required: ["keys"], properties: { keys: { type: "array" } }, additionalProperties: false });
     expect(client.body?.messages).toBeDefined();
+  });
+
+  it("projects the complete shared type guidance in strict_json while keeping native_tools as function tools", async () => {
+    const typeTool = createDefaultComputerTools().modelTools().find((tool) => tool.name === "type");
+    if (typeTool === undefined) throw new Error("shared type tool is missing");
+    const longCustomTool = { ...typeTool, name: "long_custom", description: "x".repeat(2_000) };
+    const expectedMacGuidance = "On macOS, omit elementRef and use the native focused-control typing route.";
+    const expectedEndGuidance = "Do not use elementRef for ordinary single-line typing.";
+
+    const strictClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-type", name: "type", arguments: { text: "first" } }] }) } }] });
+    await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: strictClient, thinking: "disabled", outputMode: "strict_json" })
+      .generate({ ...input(), tools: [typeTool, longCustomTool] }, { signal: new AbortController().signal });
+    const strictBody = strictClient.body!;
+    const strictSystem = String((strictBody.messages as Array<{ content?: unknown }>)[0]?.content);
+    expect(strictBody).toHaveProperty("response_format");
+    expect(strictBody).not.toHaveProperty("tools");
+    expect(strictSystem).toContain(expectedMacGuidance);
+    expect(strictSystem).toContain(expectedEndGuidance);
+    expect(strictSystem).toContain("x".repeat(180));
+    expect(strictSystem).not.toContain("x".repeat(181));
+
+    const nativeClient = new Client(response("type", { text: "first" }));
+    await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: nativeClient, thinking: "disabled", outputMode: "native_tools" })
+      .generate({ ...input(), tools: [typeTool, longCustomTool] }, { signal: new AbortController().signal });
+    const nativeBody = nativeClient.body!;
+    const nativeTools = nativeBody.tools as Array<{ function: { name: string; description: string } }>;
+    expect(nativeBody).not.toHaveProperty("response_format");
+    expect(nativeTools.find((tool) => tool.function.name === "type")?.function.description).toContain(expectedMacGuidance);
+    expect(nativeTools.find((tool) => tool.function.name === "type")?.function.description).toContain(expectedEndGuidance);
+
+  });
+
+  it.each(["default", "window-switch-opt-in"] as const)("keeps the strict catalog within budget for the real %s Registry tools", async (mode) => {
+    const registry = createDefaultComputerTools();
+    if (mode === "window-switch-opt-in") registry.registerMany(windowSwitchTools());
+    const tools = registry.modelTools("main");
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-type", name: "type", arguments: { text: "first" } }] }) } }] });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "strict_json" });
+    await adapter.generate({ ...input(), tools }, { signal: new AbortController().signal });
+    const messages = client.body?.messages as Array<{ content?: unknown }>;
+    const system = String(messages[0]?.content);
+    const catalogStart = system.indexOf("Available tools (semantic guidance; Runtime validates exact arguments):");
+    const catalogEnd = system.indexOf("\nStrict output envelope", catalogStart);
+    expect(catalogStart).toBeGreaterThanOrEqual(0);
+    expect(catalogEnd).toBeGreaterThan(catalogStart);
+    const catalog = system.slice(catalogStart, catalogEnd);
+    expect(catalog.length).toBeLessThanOrEqual(12_000);
+    expect(catalog).toContain("On macOS, omit elementRef and use the native focused-control typing route.");
+    expect(catalog).toContain("Do not use elementRef for ordinary single-line typing.");
+    expect(catalog.includes("list_windows(")).toBe(mode === "window-switch-opt-in");
+    expect(catalog.includes("switch_window(")).toBe(mode === "window-switch-opt-in");
+    expect(client.body).toHaveProperty("response_format");
+    expect(client.body).not.toHaveProperty("tools");
   });
 
   it("keeps the stable strict prefix separate from dynamic history, images, catalog, and payload identity", async () => {

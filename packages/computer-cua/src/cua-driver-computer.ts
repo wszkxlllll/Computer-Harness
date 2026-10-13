@@ -4,6 +4,7 @@ import { BoundWindowMissingError } from "@computer-harness/protocol";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
+import type { ToolResult } from "./cua-sdk-contract.js";
 import type {
   ActionIntent,
   ActionReceipt,
@@ -1124,7 +1125,7 @@ export interface CuaDriverComputerOptions {
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
   driverFactory?: CuaDriverFactory;
-  /** Test seam for the pinned platform coordinate contract; defaults to process.platform. */
+  /** Controlled platform override for this session; otherwise use valid driver health, then the host platform. */
   platform?: NodeJS.Platform;
   /** Test seam for capture retry timing; production uses bounded real delays. */
   windowCaptureRetry?: WindowCaptureRetryOptions;
@@ -1133,7 +1134,9 @@ export interface CuaDriverComputerOptions {
 interface PrivateSession {
   label: string;
   driver: CuaDriverLike;
-  platform?: "win32" | "darwin" | "linux";
+  platform: CuaPlatform;
+  /** Bounded health/config evidence retained privately for session diagnostics. */
+  platformResolution: PlatformResolution;
   descriptor: ComputerSessionDescriptor;
   active: boolean;
   surfaceRegistry: SurfaceRegistryState;
@@ -1194,6 +1197,21 @@ interface PrivateSession {
   unknownActionReconciliationPending?: boolean;
   /** Exact active root re-confirmed by the most recent unknown-action diff. */
   unknownActionReconfirmedSurfaceRef?: SurfaceRef;
+}
+
+type CuaPlatform = "win32" | "darwin" | "linux";
+interface PlatformHealthEvidence {
+  readonly status: "valid" | "unavailable" | "degraded" | "invalid";
+  readonly reportedPlatform?: CuaPlatform;
+  readonly schemaVersion?: string;
+  readonly driverVersion?: string;
+}
+interface PlatformResolution {
+  readonly effective: CuaPlatform;
+  readonly source: "configured" | "health" | "host";
+  readonly configured?: CuaPlatform;
+  readonly health: PlatformHealthEvidence;
+  readonly conflict: boolean;
 }
 
 /** Resolve platform-specific capture behavior from the explicit override, the
@@ -1336,7 +1354,7 @@ export class CuaDriverComputer implements Computer {
       throw new Error("recoveryWindowTarget requires recoverBoundWindowMissing opt-in");
     }
     if (this.options.reopenSavedDocumentGrant !== undefined &&
-        (this.options.recoverBoundWindowMissing !== true || (this.options.platform ?? process.platform) !== "darwin" ||
+        (this.options.recoverBoundWindowMissing !== true ||
          this.options.windowDeliveryMode !== "foreground" || this.options.windowTarget === undefined ||
          this.options.recoveryWindowTarget === undefined || this.options.windowTarget.pid !== this.options.recoveryWindowTarget.pid ||
          this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1")) {
@@ -1384,7 +1402,11 @@ export class CuaDriverComputer implements Computer {
     try {
       await driver.startSession(sdkModule.StartSessionInput.new({ session: label }), { signal });
       sessionStarted = true;
-      const platform = await detectCuaPlatform(driver, signal);
+      const healthEvidence = await detectCuaPlatform(driver, signal);
+      // Resolve once so Runtime mapping and every CUA route share the same
+      // platform even when health is unavailable or disagrees with Host config.
+      const platformResolution = resolveSessionPlatform(this.options.platform, healthEvidence, process.platform);
+      const platform = platformResolution.effective;
       let viewport: Viewport;
       let windowBinding: CuaWindowBinding | undefined;
       let surfaceRegistry = createSurfaceRegistry(label);
@@ -1396,7 +1418,7 @@ export class CuaDriverComputer implements Computer {
       let reopenSavedDocument: PrivateReopenSavedDocumentState | undefined;
       if (this.options.recoverBoundWindowMissing === true) {
         if (platform !== "darwin") throw new Error("bound-window recovery is currently supported only on Darwin");
-        const inventory = await listWindowInventory(driver, label, signal, undefined, true, this.options.windowRelationshipProbe, this.options.platform ?? process.platform);
+        const inventory = await listWindowInventory(driver, label, signal, undefined, true, this.options.windowRelationshipProbe, platform);
         if (inventory.truncated === true) throw new Error("recovery target identity could not be pinned from a truncated fresh inventory");
         const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(this.options.recoveryWindowTarget!));
         if (matches.length !== 1 || matches[0]!.isOnScreen !== true || matches[0]!.minimized === true) {
@@ -1422,7 +1444,7 @@ export class CuaDriverComputer implements Computer {
         }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
-        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, platform));
+        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, platform);
         windowBinding = capture.binding;
         viewport = capture.viewport;
         if (reopenGrant !== undefined) {
@@ -1479,7 +1501,8 @@ export class CuaDriverComputer implements Computer {
       this.session = {
         label,
         driver,
-        ...(platform === undefined ? {} : { platform }),
+        platform,
+        platformResolution,
         descriptor,
         active: true,
         surfaceRegistry,
@@ -1586,7 +1609,7 @@ export class CuaDriverComputer implements Computer {
           captureBinding.target,
           signal,
           this.options.windowCaptureRetry,
-          resolveCapturePlatform(this.options.platform, current.platform),
+          current.platform,
         );
         const liveBinding = capture.binding;
         const reopenState = current.reopenSavedDocument;
@@ -2180,7 +2203,7 @@ export class CuaDriverComputer implements Computer {
         candidate.target,
         signal,
         this.options.windowCaptureRetry,
-        resolveCapturePlatform(this.options.platform, current.platform),
+          current.platform,
       );
       signal.throwIfAborted();
     } catch (error) {
@@ -2365,7 +2388,7 @@ export class CuaDriverComputer implements Computer {
       firstProof.parentTarget,
       signal,
       this.options.windowCaptureRetry,
-      resolveCapturePlatform(this.options.platform, current.platform),
+      current.platform,
     );
     if (!sameWindowGeometry(firstParentCapture.binding.bounds, firstProof.parentBounds)) return undefined;
     const currentInventory = await this.readCompleteWin32Inventory(current, signal);
@@ -2585,7 +2608,7 @@ export class CuaDriverComputer implements Computer {
         candidate.target,
         signal,
         this.options.windowCaptureRetry,
-        resolveCapturePlatform(this.options.platform, current.platform),
+      current.platform,
       );
       signal.throwIfAborted();
     } catch (error) {
@@ -2816,7 +2839,7 @@ export class CuaDriverComputer implements Computer {
       const preserveForFormalDetection = this.options.recoverBoundWindowMissing === true &&
         this.options.windowSwitch === "opened-windows-v1" &&
         this.options.windowDeliveryMode === "foreground" &&
-        (this.options.platform ?? current.platform ?? process.platform) === "darwin" &&
+        current.platform === "darwin" &&
         actionBaseline?.completed === true && baselineStillBound &&
         actionBaseline.parentSurfaceRef.parentSurfaceId === undefined &&
         this.canUseManualWindowHandoff(current);
@@ -3687,7 +3710,7 @@ export class CuaDriverComputer implements Computer {
     let capture: Awaited<ReturnType<typeof captureWindowWithRetry>>;
     try {
       assertTransitionCurrent();
-      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, current.platform));
+      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, current.platform);
       assertTransitionCurrent();
     } catch (error) {
       if (activationAttempted) {
@@ -3967,7 +3990,7 @@ export class CuaDriverComputer implements Computer {
         });
       } else {
         const capture = await captureWindowWithRetry(current.driver, current.label, target, signal,
-          this.options.windowCaptureRetry, resolveCapturePlatform(this.options.platform, current.platform));
+          this.options.windowCaptureRetry, current.platform);
         const oldRef = current.surfaceRegistry.activeSurface;
         if (oldRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, oldRef)) throw new Error("recovery Surface changed after document launch");
         const advanced = advanceSurfaceGeneration(current.surfaceRegistry, oldRef);
@@ -4027,7 +4050,7 @@ export class CuaDriverComputer implements Computer {
       if (executionObservationId !== this.latestObservationId) {
         return refused(action.actionId, "STALE_OBSERVATION", `action executes against stale observation ${String(executionObservationId)}`);
       }
-      if ((this.options.platform ?? current.platform ?? process.platform) === "darwin" && activeWindowBinding(current) !== undefined
+      if (current.platform === "darwin" && activeWindowBinding(current) !== undefined
         && ["click", "double_click", "right_click", "scroll", "drag"].includes(action.kind)) {
         const executionViewport = this.observations.get(String(executionObservationId))?.viewport;
         if (executionViewport === undefined || executionViewport.width !== decisionObservation.viewport.width || executionViewport.height !== decisionObservation.viewport.height || executionViewport.coordinateSpace !== decisionObservation.viewport.coordinateSpace) {
@@ -4043,7 +4066,7 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "SURFACE_REF_STALE", "action Observation is not bound to the current active Surface generation");
       }
     }
-    const shortcutPlatform = this.options.platform ?? current.platform ?? process.platform;
+    const shortcutPlatform = current.platform;
     const locationBarShortcut = isBrowserShortcut(action, "L", shortcutPlatform);
     const selectAllShortcut = isBrowserShortcut(action, "A", shortcutPlatform);
     if (action.kind !== "wait" && action.kind !== "type" && !selectAllShortcut) this.browserChromeInput = undefined;
@@ -4434,7 +4457,7 @@ export class CuaDriverComputer implements Computer {
           actionWindowBinding,
           this.options.windowDeliveryMode,
           decisionObservation?.viewport,
-          this.options.platform ?? current.platform ?? process.platform,
+          current.platform,
         );
       }
     } catch (error) {
@@ -5875,19 +5898,54 @@ function parseStructuredRecord(value: unknown): Record<string, unknown> | undefi
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-async function detectCuaPlatform(driver: CuaDriverLike, signal: AbortSignal): Promise<"win32" | "darwin" | "linux" | undefined> {
+async function detectCuaPlatform(driver: CuaDriverLike, signal: AbortSignal): Promise<PlatformHealthEvidence> {
+  let result: ToolResult;
   try {
-    const result = await callTool(driver, "health_report", {}, signal);
-    if (result.isError || result.degraded) return undefined;
-    const report = parseStructuredRecord(result.structuredJson);
-    if (report?.schema_version !== "1" || report.driver_version !== cuaSdkVersionForPlatform()) return undefined;
-    return report.platform === "win32" || report.platform === "darwin" || report.platform === "linux"
-      ? report.platform
-      : undefined;
+    result = await callTool(driver, "health_report", {}, signal);
   } catch (error) {
     if (signal.aborted) signal.throwIfAborted();
-    return undefined;
+    return { status: "unavailable" };
   }
+  if (result.isError) return { status: "unavailable" };
+  const report = parseStructuredRecord(result.structuredJson);
+  const reportedPlatform = isCuaPlatform(report?.platform) ? report.platform : undefined;
+  const schemaVersion = typeof report?.schema_version === "string" ? report.schema_version.slice(0, 64) : undefined;
+  const driverVersion = typeof report?.driver_version === "string" ? report.driver_version.slice(0, 128) : undefined;
+  const metadata = {
+    ...(reportedPlatform === undefined ? {} : { reportedPlatform }),
+    ...(schemaVersion === undefined ? {} : { schemaVersion }),
+    ...(driverVersion === undefined ? {} : { driverVersion }),
+  };
+  if (result.degraded) return { status: "degraded", ...metadata };
+  if (report?.schema_version !== "1" || reportedPlatform === undefined ||
+      report.driver_version !== cuaSdkVersionForPlatform(reportedPlatform)) return { status: "invalid", ...metadata };
+  return { status: "valid", ...metadata };
+}
+
+function resolveSessionPlatform(
+  configuredPlatform: NodeJS.Platform | undefined,
+  health: PlatformHealthEvidence,
+  hostPlatform: NodeJS.Platform,
+): PlatformResolution {
+  if (configuredPlatform !== undefined && !isCuaPlatform(configuredPlatform)) {
+    throw new Error(`unsupported configured CUA platform ${configuredPlatform}`);
+  }
+  const configured = configuredPlatform as CuaPlatform | undefined;
+  const healthPlatform = health.status === "valid" ? health.reportedPlatform : undefined;
+  const hostFallback = isCuaPlatform(hostPlatform) ? hostPlatform : undefined;
+  const effective = configured ?? healthPlatform ?? hostFallback;
+  if (effective === undefined) throw new Error(`unsupported host CUA platform ${hostPlatform}`);
+  return {
+    effective,
+    source: configured !== undefined ? "configured" : healthPlatform !== undefined ? "health" : "host",
+    ...(configured === undefined ? {} : { configured }),
+    health,
+    conflict: configured !== undefined && healthPlatform !== undefined && configured !== healthPlatform,
+  };
+}
+
+function isCuaPlatform(value: unknown): value is CuaPlatform {
+  return value === "win32" || value === "darwin" || value === "linux";
 }
 
 /**

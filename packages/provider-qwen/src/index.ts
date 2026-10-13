@@ -640,10 +640,9 @@ function qwenToolCatalog(tools: readonly ModelToolSpec[], coordinateMode: QwenCo
   for (const tool of tools) {
     const argumentsText = compactToolArguments(tool, coordinateMode);
     const normalizedDescription = tool.description.replace(/\s+/gu, " ").trim();
-    // These opt-in tools carry the safety contract for opaque native-window
-    // references. Truncating it can remove the instruction to inspect/switch
-    // after a dialog appears, so retain their complete descriptions.
-    const description = tool.name === "list_windows" || tool.name === "switch_window"
+    // These tools carry essential native-window or platform-specific input
+    // constraints. Keep their Registry descriptions complete in strict JSON.
+    const description = tool.name === "list_windows" || tool.name === "switch_window" || tool.name === "type"
       ? normalizedDescription
       : normalizedDescription.slice(0, 180);
     lines.push(`- ${tool.name}(${argumentsText}): ${description}`);
