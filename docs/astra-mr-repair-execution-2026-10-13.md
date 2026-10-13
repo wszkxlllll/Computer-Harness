@@ -101,3 +101,17 @@ Root实际下载Windows失败job115121261680日志：2075 passed / 1 failed，�
 Luna 只修改 `packages/runtime/src/index.test.ts` 的上述 `it.each`：通过现有 `onEventCommitted` 等待精确 `computer.window.handoff.requested`，与提前Run终态进行race；不改全局轮询、不增加sleep、不跳过测试、不改产品。Sol确认生产commitEvent在持久化、snapshot reduce及events push后才通知observer，原 status/reason、Provider两次、click一次、单handoff、mixed拒绝和cancel持久终态断言完整保留；缺事件仍由原Vitest超时失败。作者目标2/2、Runtime170/170、Runtime类型构建通过；Sol独跑Runtime170/170与diff-check通过。新test SHA-256 `b5b69c74445b97764364d661941b7250dc55f19acc8fafb4fcb0fd54a24d4d24`。Windows时序原因仍是推断，等待新CI结果，不声称原生Windows复现或工作。3b产品源码及Web资产不变。
 
 只读现场预检详见 [R5现场记录](astra-live-validation-2026-10-13.md)：91个非测试源码逐字节转译等于dist；旧业务/native进程及socket全无，native8磁盘签名有效；后续必须新启动核版。旧variant成果不可覆盖。T3仍在隔离树实现，未集成、未真实业务。
+
+
+### 当前修复版本 CI 放行
+
+测试等待修正已精确5路径提交 `972035044f7b05a3609a5981547ce9cfd95f1ce6`，GitHub逐blob/tree/commit同SHA、parent仍3b84287后非force ref更新，Root再次确认local/remote一致。Root于 `2026-10-13T04:15:21Z` 实际GET：当前CI `38345102253` completed/success，四个保留verify及ci-required共五job全部success；旧3b失败与日志不删。终态收据 `MR-review-20261013-private/root-9720350-ci-terminal-readonly.json`，同步收据 `root-9720350-exact-push-receipt.json`。
+
+当前产品沿3b八MR修复冻结，仅多一个已独审test-only等待修正；进入新鲜环境的零真实Provider Mac诊断，尚不计正式原卡通过。T3产品增量在隔离树进行，不并发改主源码/资产；手机专属项保持外部条件。
+
+
+## 2026-10-13 T3 主集成验证更新
+
+Host-owned `native-web-document` 实现及其普通 Web/Relay 入口、Browser 与 TextEdit 独立能力边界、一次性文稿恢复已由 Luna 实现、Sol 独立审查并导入主分支，共25个路径。Root逐文件核SHA与审查清单一致，保留9720350的CI等待修正；主目录类型检查、119文件2089项Vitest、72项Node自检及Web构建全部通过。私有证据为 `T3-integration-20261013-private/root-final-integration-verification.json`。这是离线实现与组合夹具通过，真实三线业务任务仍待现场验证。9720350的五项CI已通过；此次T3新提交需单独等待CI，不继承旧结果。本轮真实Provider调用仍为0。
+
+屏幕录制权限已完成off→on刷新，并按系统提示退出重开目标App。辅助功能刷新再次出现macOS本人认证，已请用户完成；执行者停在该实际认证面板，尚无刷新后的health或业务Run通过证据。

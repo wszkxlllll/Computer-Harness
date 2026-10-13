@@ -182,6 +182,35 @@ describe("explicit window-target run contract", () => {
     await expect(listWindowTargets()).rejects.toThrow("窗口列表格式无效");
   });
 
+  it("accepts only the opaque Host hybrid-profile summary and rejects raw identity fields", async () => {
+    const profileId = "Opaque_Hybrid_Profile_12345";
+    const validResponse = {
+      candidates: [], expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      nativeWebDocumentProfile: { profileId, label: "Host Browser and TextEdit recovery" },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(validResponse), { status: 200 })));
+    await expect(listWindowTargets()).resolves.toMatchObject({ nativeWebDocumentProfile: validResponse.nativeWebDocumentProfile });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      ...validResponse,
+      nativeWebDocumentProfile: { ...validResponse.nativeWebDocumentProfile, pid: 77 },
+    }), { status: 200 })));
+    await expect(listWindowTargets()).rejects.toThrow("窗口列表格式无效");
+  });
+
+  it("starts with only the opaque Host hybrid-profile id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-1", status: "created" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    setPhoneCsrfToken("phone-csrf");
+
+    await createRun("  Open the fixed site\n", "hybrid-command", { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345" });
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({
+      commandId: "hybrid-command", goal: "  Open the fixed site\n", target: { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345" },
+    });
+  });
+
   it("starts with the explicitly chosen opaque window token", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-1", status: "created" }), { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);

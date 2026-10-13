@@ -40,6 +40,7 @@ export interface WindowTargetList {
   expiresAt: string;
   omittedAmbiguousCount?: number;
   nativeRecoveryProfile?: { profileId: string; label: string };
+  nativeWebDocumentProfile?: { profileId: string; label: string };
 }
 
 export type RunTarget =
@@ -47,6 +48,7 @@ export type RunTarget =
   | { mode: "desktop"; switchWindows?: boolean }
   | { mode: "window"; targetToken: string; previewToken?: string; switchWindows?: boolean }
   | { mode: "native-recovery"; profileId: string }
+  | { mode: "native-web-document"; profileId: string }
   | { mode: "browser"; url?: string; switchWindows?: boolean };
 
 export type ManagedBrowserProfileStatus = "unprepared" | "preparing" | "ready" | "in_use" | "relogin_required" | "cleanup_failed";

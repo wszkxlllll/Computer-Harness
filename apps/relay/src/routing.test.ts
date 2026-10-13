@@ -152,6 +152,20 @@ describe("relay API route allowlist", () => {
     }
   });
 
+  it("accepts the separate opaque T3 hybrid selector without native identity fields", () => {
+    const route = resolveAllowedApiRoute("POST", "/api/runs")!;
+    const profileId = "Opaque_Hybrid_Profile_12345";
+    const request = (target: Record<string, unknown>) => ({ commandId: "hybrid_start", goal: "Search and save", target });
+    expect(isValidApiRequestBody(route, request({ mode: "native-web-document", profileId }))).toBe(true);
+    for (const target of [
+      { mode: "native-web-document", profileId, switchWindows: false },
+      { mode: "native-web-document", profileId, url: "https://example.test" },
+      { mode: "native-web-document", profileId, pid: 99 },
+      { mode: "native-web-document", profileId, path: "/tmp/out" },
+      { mode: "native-web-document", profileId: "short" },
+    ]) expect(isValidApiRequestBody(route, request(target)), JSON.stringify(target)).toBe(false);
+  });
+
   it("accepts only the shared versioned assistant-preferences snapshot on legacy and tagged starts", () => {
     const route = resolveAllowedApiRoute("POST", "/api/runs");
     expect(route).not.toBeNull();

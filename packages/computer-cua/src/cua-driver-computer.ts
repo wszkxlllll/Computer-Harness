@@ -1117,6 +1117,12 @@ export interface CuaDriverComputerOptions {
   recoverBoundWindowMissing?: boolean;
   /** Explicit one-file reopen grant; Darwin native-window Runs only. */
   reopenSavedDocumentGrant?: ReopenSavedDocumentGrant;
+  /** Host-issued capability joining one ephemeral Browser target to one exact native recovery pair. */
+  hybridNativeWebDocumentCapability?: {
+    readonly managedBrowserTarget: ManagedBrowserTarget;
+    readonly primaryTarget: CuaWindowTarget;
+    readonly recoveryTarget: CuaWindowTarget;
+  };
   /** Injected host-only read-only relationship evidence; absent/failed means manual transient handling. */
   windowRelationshipProbe?: WindowRelationshipProbe;
   /** Host-supplied managed-browser transport; never discovered by this adapter. */
@@ -1339,9 +1345,28 @@ export class CuaDriverComputer implements Computer {
     if (this.options.windowTarget !== undefined) validateWindowTarget(this.options.windowTarget);
     for (const target of this.options.windowSwitchAllowedTargets ?? []) validateWindowTarget(target);
     if (this.options.recoveryWindowTarget !== undefined) validateWindowTarget(this.options.recoveryWindowTarget);
+    const hybridCapability = this.options.hybridNativeWebDocumentCapability;
+    if (hybridCapability !== undefined && (this.options.browserTarget === undefined ||
+        this.options.recoverBoundWindowMissing !== true || this.options.reopenSavedDocumentGrant === undefined ||
+        this.options.grounding !== "hybrid-catalog-v1" || this.options.windowTarget === undefined ||
+        windowIdentityKey(hybridCapability.primaryTarget) !== windowIdentityKey(this.options.windowTarget) ||
+        this.options.recoveryWindowTarget === undefined ||
+        windowIdentityKey(hybridCapability.recoveryTarget) !== windowIdentityKey(this.options.recoveryWindowTarget) ||
+        this.options.browserTarget.profileId !== hybridCapability.managedBrowserTarget.profileId ||
+        this.options.browserTarget.tabId !== hybridCapability.managedBrowserTarget.tabId ||
+        this.options.browserTarget.generation !== hybridCapability.managedBrowserTarget.generation ||
+        windowIdentityKey(this.options.browserTarget.windowTarget) !== windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget) ||
+        windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget) === windowIdentityKey(this.options.windowTarget) ||
+        windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget) === windowIdentityKey(this.options.recoveryWindowTarget) ||
+        this.options.windowSwitchAllowedTargets?.length !== 2 ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(hybridCapability.primaryTarget)) ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(hybridCapability.recoveryTarget)))) {
+      throw new Error("hybrid native-web-document capability must exactly bind one managed Browser and the Host native recovery pair");
+    }
     if (this.options.recoverBoundWindowMissing === true && (this.options.windowSwitch !== "opened-windows-v1" ||
         this.options.windowTarget === undefined || this.options.recoveryWindowTarget === undefined ||
-        this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1" ||
+        (this.options.browserTarget !== undefined && hybridCapability === undefined) ||
+        (this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") && hybridCapability === undefined ||
         this.options.windowSwitchAllowedTargets?.length !== 2 ||
         !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(this.options.windowTarget!)) ||
         !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(this.options.recoveryWindowTarget!)) ||
@@ -1357,7 +1382,8 @@ export class CuaDriverComputer implements Computer {
         (this.options.recoverBoundWindowMissing !== true ||
          this.options.windowDeliveryMode !== "foreground" || this.options.windowTarget === undefined ||
          this.options.recoveryWindowTarget === undefined || this.options.windowTarget.pid !== this.options.recoveryWindowTarget.pid ||
-         this.options.browserTarget !== undefined || this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1")) {
+         (this.options.browserTarget !== undefined && hybridCapability === undefined) ||
+         (this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") && hybridCapability === undefined)) {
       throw new Error("saved-document reopen requires a Darwin foreground native recovery Run for one exact TextEdit process");
     }
     if (this.options.grounding !== undefined && !["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"].includes(this.options.grounding)) {
@@ -1372,8 +1398,10 @@ export class CuaDriverComputer implements Computer {
       const browserIsInitialTarget = this.options.windowTarget !== undefined &&
         this.options.browserTarget.windowTarget.pid === this.options.windowTarget.pid &&
         this.options.browserTarget.windowTarget.windowId === this.options.windowTarget.windowId;
+      const browserHasHybridGrant = hybridCapability !== undefined &&
+        windowIdentityKey(this.options.browserTarget.windowTarget) === windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget);
       if (!browserIsInitialTarget && (this.options.windowSwitch !== "opened-windows-v1" ||
-          !targetAllowedByHostScope(this.options.browserTarget.windowTarget, this.options.windowSwitchAllowedTargets))) {
+          (!targetAllowedByHostScope(this.options.browserTarget.windowTarget, this.options.windowSwitchAllowedTargets) && !browserHasHybridGrant))) {
         throw new DomGroundingUnavailableError("a managed browser target distinct from the initial binding requires cross-window opt-in and Host authorization");
       }
       if (this.options.domGroundingTransport === undefined) {
@@ -2739,6 +2767,10 @@ export class CuaDriverComputer implements Computer {
     }
     const candidatePool = windows
       .filter((window) => windowIdentityKey(window.target) !== windowIdentityKey(binding.target))
+      .filter((window) => this.options.hybridNativeWebDocumentCapability === undefined ||
+        (missing?.reason === "bound_window_missing"
+          ? windowIdentityKey(window.target) === windowIdentityKey(this.options.hybridNativeWebDocumentCapability.recoveryTarget)
+          : windowIdentityKey(window.target) !== windowIdentityKey(this.options.hybridNativeWebDocumentCapability.recoveryTarget)))
       .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets) ||
         window.ownerPid === binding.target.pid && window.ownerWindowId === binding.target.windowId)
       .filter((window) => !isRegisteredChildWindow(current, window.target))
@@ -2858,7 +2890,7 @@ export class CuaDriverComputer implements Computer {
         surface.kind === "native_window" && surface.parentSurfaceId !== undefined && surface.status !== "closed")
       .map((surface) => windowIdentityKey(asCuaWindowTarget(surface.nativeWindow))));
     const windows = inventory
-      .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets))
+      .filter((window) => this.isTargetSwitchAllowed(window.target))
       .filter((window) => !childWindowKeys.has(windowIdentityKey(window.target)));
     const currentKey = boundPeer === undefined ? undefined : windowIdentityKey(boundPeer);
     const projected = projectSelectableWindowCandidates(windows, boundPeer, current.platform);
@@ -3472,6 +3504,10 @@ export class CuaDriverComputer implements Computer {
     }
     validateWindowTarget(candidate);
     const missing = current.missingParent;
+    if (missing?.reason !== "bound_window_missing" && this.options.hybridNativeWebDocumentCapability !== undefined &&
+        windowIdentityKey(candidate) === windowIdentityKey(this.options.hybridNativeWebDocumentCapability.recoveryTarget)) {
+      throw new WindowContractError("WINDOW_HANDOFF_STALE", "the Host recovery blank is available only after the exact saved-document close boundary");
+    }
     if (missing !== undefined) {
       const issued = candidate.handoffToken === undefined ? undefined : missing.candidates.get(candidate.handoffToken);
       if (missing.confirming || issued === undefined || issued.pid !== candidate.pid || issued.windowId !== candidate.windowId ||
@@ -3858,7 +3894,9 @@ export class CuaDriverComputer implements Computer {
         selectedSurfaceRef: selectedRef,
         ...(this.options.windowSwitchAllowedTargets === undefined
           ? {}
-          : { authorizedTargets: this.options.windowSwitchAllowedTargets }),
+          : { authorizedTargets: this.hasHybridCapability()
+            ? [...this.options.windowSwitchAllowedTargets, this.options.hybridNativeWebDocumentCapability!.managedBrowserTarget.windowTarget]
+            : this.options.windowSwitchAllowedTargets }),
       });
       return { actionId: action.actionId, status: "completed", sessionAfter };
     } catch (error) {
@@ -3872,6 +3910,17 @@ export class CuaDriverComputer implements Computer {
       if (details.tag === "Transport") current.active = false;
       throw normalizeDriverError(error, "execute");
     }
+  }
+
+  private hasHybridCapability(): boolean {
+    return this.options.hybridNativeWebDocumentCapability !== undefined;
+  }
+
+  private isTargetSwitchAllowed(target: CuaWindowTarget): boolean {
+    const hybrid = this.options.hybridNativeWebDocumentCapability;
+    if (hybrid !== undefined && windowIdentityKey(target) === windowIdentityKey(hybrid.recoveryTarget)) return false;
+    return targetAllowedByHostScope(target, this.options.windowSwitchAllowedTargets) ||
+      (hybrid !== undefined && windowIdentityKey(target) === windowIdentityKey(hybrid.managedBrowserTarget.windowTarget));
   }
 
   private async executeReopenSavedDocument(

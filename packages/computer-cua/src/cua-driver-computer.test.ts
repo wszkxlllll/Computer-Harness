@@ -412,6 +412,72 @@ describe("F045 strict completed bound-window missing boundary", () => {
         } })).toThrow(/distinct exact primary\/recovery targets/u);
   });
 
+  it("does not infer hybrid authority from ordinary recovery plus a Browser or grant", () => {
+    const fake = windowDriver();
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "chromium", profileId: "ordinary-fixture",
+      windowTarget: { pid: fake.target.pid + 1, windowId: 42 }, tabId: "ordinary-tab", generation: "ordinary-generation", delivery: "loopback-cdp",
+    };
+    expect(() => new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: "/tmp/recovery-config-test",
+      windowDeliveryMode: "foreground", windowTarget: fake.target, recoveryWindowTarget: recoveryTarget,
+      recoverBoundWindowMissing: true, windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, recoveryTarget], grounding: "hybrid-catalog-v1", browserTarget,
+      reopenSavedDocumentGrant: { path: "/tmp/hybrid-itinerary.txt", expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+    } as unknown as CuaDriverComputerOptions)).toThrow(/Host authorization|distinct exact primary\/recovery/u);
+  });
+
+  it("keeps a Host-authorized hybrid Browser identity separate from the exact TextEdit recovery pair", () => {
+    const fake = windowDriver();
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "chromium", profileId: "ephemeral-fixture",
+      windowTarget: { pid: fake.target.pid + 1, windowId: 42 }, tabId: "tab-fixture", generation: "generation-fixture", delivery: "loopback-cdp",
+    };
+    expect(() => new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: "/tmp/recovery-config-test",
+      windowDeliveryMode: "foreground",
+      windowTarget: fake.target, recoveryWindowTarget: recoveryTarget, recoverBoundWindowMissing: true,
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target, recoveryTarget], grounding: "hybrid-catalog-v1",
+      browserTarget,
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, coordinateSpace: "physical", candidates: [] }),
+      hybridNativeWebDocumentCapability: { managedBrowserTarget: browserTarget, primaryTarget: fake.target, recoveryTarget },
+      reopenSavedDocumentGrant: { path: "/tmp/hybrid-itinerary.txt", expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+    } as unknown as CuaDriverComputerOptions)).not.toThrow();
+  });
+
+  it("rejects hybrid identity drift, extra native targets, and unmarked legacy recovery combinations", () => {
+    const fake = windowDriver();
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "chromium", profileId: "ephemeral-fixture",
+      windowTarget: { pid: fake.target.pid + 1, windowId: 42 }, tabId: "tab-fixture", generation: "generation-fixture", delivery: "loopback-cdp",
+    };
+    const capability = { managedBrowserTarget: browserTarget, primaryTarget: fake.target, recoveryTarget };
+    const base = {
+      platform: "darwin" as const, socketPath: "fixture", screenshotDir: "/tmp/recovery-config-test",
+      windowDeliveryMode: "foreground" as const,
+      windowTarget: fake.target, recoveryWindowTarget: recoveryTarget, recoverBoundWindowMissing: true,
+      windowSwitch: "opened-windows-v1" as const, windowSwitchAllowedTargets: [fake.target, recoveryTarget], grounding: "hybrid-catalog-v1" as const,
+      browserTarget,
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, coordinateSpace: "physical", candidates: [] }),
+      hybridNativeWebDocumentCapability: capability,
+      reopenSavedDocumentGrant: { path: "/tmp/hybrid-itinerary.txt", expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+    };
+    const changedPid = { ...browserTarget, windowTarget: { ...browserTarget.windowTarget, pid: browserTarget.windowTarget.pid + 2 } };
+    const changedTabGeneration = { ...browserTarget, generation: "different-generation" };
+    const thirdNativeTarget = { pid: fake.target.pid + 3, windowId: fake.target.windowId + 3 };
+    for (const options of [
+      { ...base, browserTarget: changedPid },
+      { ...base, browserTarget: changedTabGeneration },
+      { ...base, windowSwitchAllowedTargets: [fake.target, recoveryTarget, thirdNativeTarget] },
+      { ...base, hybridNativeWebDocumentCapability: undefined },
+    ]) {
+      expect(() => new ProductionCuaDriverComputer(options as unknown as CuaDriverComputerOptions)).toThrow();
+    }
+  });
+
   it("pins the exact recovery row from a partial inventory and rejects a changed row before activation", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-f045-recovery-pin-"));
     const fake = windowDriver();

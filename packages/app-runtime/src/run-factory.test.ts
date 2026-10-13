@@ -1322,6 +1322,41 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("rejects markerless native-only recovery combined with Browser/Hybrid/grant before creating Run resources", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-markerless-hybrid-rejected-"));
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    if (originalPlatform === undefined || originalPlatform.configurable !== true) {
+      await rm(outputDir, { recursive: true, force: true });
+      throw new Error("test runtime does not allow restoring a temporary process.platform override");
+    }
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    const createComputer = vi.fn(() => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })));
+    try {
+      Object.defineProperty(process, "platform", { ...originalPlatform, value: "darwin" });
+      await expect(createRun({
+        ...config(outputDir),
+        windowSwitch: "opened-windows-v1",
+        windowHandoff: "confirm-v1",
+        recoverBoundWindowMissing: true,
+        grounding: "hybrid-catalog-v1",
+        computer: {
+          kind: "cua", socketPath: "fixture.sock", screenshotDir: join(outputDir, "screenshots"),
+          windowTarget: { pid: 42, windowId: 84 }, recoveryWindowTarget: { pid: 42, windowId: 85 },
+          windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 42, windowId: 85 }],
+          recoverBoundWindowMissing: true, managedBrowserCompanion: true, managedBrowserUrl: "https://trains.ctrip.com/",
+          reopenSavedDocumentGrant: { path: join(outputDir, "output.txt"), expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+        },
+      }, { createProvider, createComputer })).rejects.toThrow(/bound-window recovery requires/iu);
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      expect(process.platform).toBe(originalPlatform.value);
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects managed DOM/Hybrid grounding without CUA, URL, or socket before Run assembly", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-dom-grounding-gate-"));
     try {

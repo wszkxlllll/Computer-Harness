@@ -39,6 +39,7 @@ export interface RemoteWindowTargetSet {
   readonly omittedAmbiguousCount?: number;
   /** One Host-configured native recovery option, exposed only as an opaque id. */
   readonly nativeRecoveryProfile?: { readonly profileId: string; readonly label: string };
+  readonly nativeWebDocumentProfile?: { readonly profileId: string; readonly label: string };
 }
 
 /** Host-owned exact native recovery configuration; never accepted from a client request. */
@@ -49,6 +50,8 @@ export interface HostNativeRecoveryProfile {
   readonly outputPath: string;
   readonly expectedExecutableUrl: string;
 }
+
+export interface HostNativeWebDocumentProfile extends HostNativeRecoveryProfile {}
 
 export interface RemoteWindowCandidatePreview {
   readonly previewToken: string;
@@ -69,6 +72,7 @@ export type RemoteRunTarget =
   | { readonly mode: "desktop"; readonly switchWindows?: boolean }
   | { readonly mode: "window"; readonly targetToken: string; readonly previewToken?: string; readonly switchWindows?: boolean }
   | { readonly mode: "native-recovery"; readonly profileId: string }
+  | { readonly mode: "native-web-document"; readonly profileId: string }
   | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string; readonly switchWindows?: boolean };
 /** A bare token remains accepted for existing clients. */
 export type RemoteRunTargetInput = string | RemoteRunTarget;

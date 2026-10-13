@@ -230,6 +230,11 @@ function isValidRunTarget(value: unknown): boolean {
       hasExactKeys(value, ["mode", "profileId"]) &&
       isValidIdentifier(profileId) && profileId.length >= 16;
   }
+  if (value.mode === "native-web-document") {
+    const profileId = value.profileId;
+    return !Object.hasOwn(value, "switchWindows") && hasExactKeys(value, ["mode", "profileId"]) &&
+      isValidIdentifier(profileId) && profileId.length >= 16;
+  }
   if (value.mode === "browser") {
     if (hasOptionalSwitchWindows(value, ["mode"])) return true;
     if (hasOptionalSwitchWindows(value, ["mode", "url"])) return isValidBrowserStartUrl(value.url);

@@ -1,4 +1,4 @@
-import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserTarget, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
 import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList, ObservationCapture, ObservationId } from "@computer-harness/protocol";
@@ -23,6 +23,7 @@ export type ComputerBackendConfig =
       recoverBoundWindowMissing?: boolean;
       /** Host grant for one absent output file, eligible only after this Run saves it and closes its exact clean document. */
       reopenSavedDocumentGrant?: { path: string; expectedExecutableUrl: string };
+      hybridNativeWebDocumentTargets?: { readonly primaryTarget: CuaWindowTarget; readonly recoveryTarget: CuaWindowTarget };
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
       /** Explicit per-Run permission to discover and switch among opened windows. */
@@ -369,11 +370,12 @@ class ManagedBrowserComputer implements Computer {
         this.options.config.windowSwitch === "opened-windows-v1";
       const initialTarget = companionMode ? this.options.config.windowTarget : record.target.windowTarget;
       const allowedTargets = this.options.config.windowSwitchAllowedTargets;
+      const hybridCapability = this.options.config.hybridNativeWebDocumentTargets;
       const scopedTargets = allowedTargets === undefined
         ? undefined
         : allowedTargets.length === 0
           ? []
-          : this.options.config.windowSwitch === "opened-windows-v1"
+          : this.options.config.windowSwitch === "opened-windows-v1" && hybridCapability === undefined
             ? uniqueTargets([...allowedTargets, record.target.windowTarget])
             : allowedTargets;
       const delegateOptions: CuaDriverComputerOptions = {
@@ -384,6 +386,8 @@ class ManagedBrowserComputer implements Computer {
         ...(initialTarget === undefined ? {} : { windowTarget: initialTarget }),
         ...(this.options.config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: this.options.config.recoveryWindowTarget }),
         ...(this.options.config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: this.options.config.recoverBoundWindowMissing }),
+        ...(this.options.config.reopenSavedDocumentGrant === undefined ? {} : { reopenSavedDocumentGrant: this.options.config.reopenSavedDocumentGrant }),
+        ...(hybridCapability === undefined ? {} : { hybridNativeWebDocumentCapability: { ...hybridCapability, managedBrowserTarget: record.target } }),
         ...(this.options.config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: this.options.config.windowDeliveryMode }),
         ...(this.options.config.grounding === undefined ? {} : { grounding: this.options.config.grounding }),
         ...(this.options.config.windowSwitch === undefined ? {} : { windowSwitch: this.options.config.windowSwitch }),

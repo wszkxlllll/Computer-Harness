@@ -36,6 +36,7 @@ import {
   type RemoteWindowCandidate,
   type RemoteWindowTargetSet,
   type HostNativeRecoveryProfile,
+  type HostNativeWebDocumentProfile,
 } from "./remote-control.js";
 
 interface ManagedRemoteRun {
@@ -119,6 +120,7 @@ type ResolvedStartTarget =
   | { readonly mode: "desktop"; readonly switchWindows: boolean }
   | { readonly mode: "window"; readonly selection: WindowTargetSelection; readonly switchWindows: boolean }
   | { readonly mode: "native-recovery"; readonly profile: HostNativeRecoveryProfile }
+  | { readonly mode: "native-web-document"; readonly profile: HostNativeWebDocumentProfile }
   | { readonly mode: "browser"; readonly sessionMode: RemoteBrowserSessionMode; readonly url: string; readonly switchWindows: boolean };
 
 export interface ManagedBrowserProfileRunCoordinator {
@@ -227,6 +229,7 @@ export interface ApplicationRemoteRunApiOptions {
   readonly windowSelector?: WindowSelectionStrategy;
   /** One optional Host-owned native recovery profile. Never supplied by a remote client. */
   readonly nativeRecoveryProfile?: HostNativeRecoveryProfile;
+  readonly nativeWebDocumentProfile?: HostNativeWebDocumentProfile;
 }
 
 /** Adapts ApplicationSession and its committed feed into a redacted remote view. */
@@ -249,7 +252,9 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
   private readonly runNotices: ApplicationRemoteRunApiOptions["runNotices"];
   private readonly windowSelector: ApplicationRemoteRunApiOptions["windowSelector"];
   private readonly nativeRecoveryProfile: ApplicationRemoteRunApiOptions["nativeRecoveryProfile"];
+  private readonly nativeWebDocumentProfile: ApplicationRemoteRunApiOptions["nativeWebDocumentProfile"];
   private consumedNativeRecoveryProfile?: { readonly deviceId: string; readonly commandId: string };
+  private consumedNativeWebDocumentProfile?: { readonly deviceId: string; readonly commandId: string };
   private startInProgress = false;
   private windowPreviewInProgress = false;
 
@@ -273,6 +278,11 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       primaryTarget: Object.freeze({ ...options.nativeRecoveryProfile.primaryTarget }),
       recoveryTarget: Object.freeze({ ...options.nativeRecoveryProfile.recoveryTarget }),
     });
+    this.nativeWebDocumentProfile = options.nativeWebDocumentProfile === undefined ? undefined : Object.freeze({
+      ...options.nativeWebDocumentProfile,
+      primaryTarget: Object.freeze({ ...options.nativeWebDocumentProfile.primaryTarget }),
+      recoveryTarget: Object.freeze({ ...options.nativeWebDocumentProfile.recoveryTarget }),
+    });
     if (this.nativeRecoveryProfile !== undefined) {
       const profile = this.nativeRecoveryProfile;
       if (!/^[A-Za-z0-9_-]{16,128}$/u.test(profile.profileId) ||
@@ -282,6 +292,16 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
           !isAbsolute(profile.outputPath) || profile.outputPath.includes("\0") || resolve(profile.outputPath) !== profile.outputPath ||
           !isCanonicalTextEditExecutableUrl(profile.expectedExecutableUrl)) {
         throw new Error("native recovery profile requires one opaque id, exact same-process windows and canonical Host file/executable paths");
+      }
+    }
+    if (this.nativeWebDocumentProfile !== undefined) {
+      const profile = this.nativeWebDocumentProfile;
+      if (!/^[A-Za-z0-9_-]{16,128}$/u.test(profile.profileId) ||
+          !validNativeTarget(profile.primaryTarget) || !validNativeTarget(profile.recoveryTarget) ||
+          profile.primaryTarget.pid !== profile.recoveryTarget.pid || profile.primaryTarget.windowId === profile.recoveryTarget.windowId ||
+          !isAbsolute(profile.outputPath) || profile.outputPath.includes("\0") || resolve(profile.outputPath) !== profile.outputPath ||
+          !isCanonicalTextEditExecutableUrl(profile.expectedExecutableUrl)) {
+        throw new Error("native web document profile requires an opaque id, exact same-process windows and canonical Host file/executable paths");
       }
     }
     if (this.managedBrowserProfile !== undefined &&
@@ -350,6 +370,9 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       expiresAt: new Date(expiresAt).toISOString(),
       ...(this.nativeRecoveryProfile === undefined || this.consumedNativeRecoveryProfile !== undefined ? {} : {
         nativeRecoveryProfile: { profileId: this.nativeRecoveryProfile.profileId, label: "Host TextEdit recovery" },
+      }),
+      ...(this.nativeWebDocumentProfile === undefined || this.consumedNativeWebDocumentProfile !== undefined ? {} : {
+        nativeWebDocumentProfile: { profileId: this.nativeWebDocumentProfile.profileId, label: "Host Browser and TextEdit recovery" },
       }),
     };
   }
@@ -525,6 +548,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     try {
       target = normalizeRemoteRunTarget(targetInput);
       managedBrowserDefaultSession = target.mode === "native-recovery"
+        || target.mode === "native-web-document"
         ? "temporary"
         : this.managedBrowserProfileCoordinator?.getDefaultSession() ?? "temporary";
       if (target.mode === "browser" && target.sessionMode === undefined) {
@@ -538,7 +562,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       if (target.mode === "browser" && target.sessionMode === "saved" && this.managedBrowserProfile === undefined) {
         throw new RemoteRunApiError("MANAGED_BROWSER_UNAVAILABLE", "This Host has no configured persistent managed-browser profile.");
       }
-      if (target.mode !== "native-recovery" && target.mode !== "browser" && target.switchWindows === true && managedBrowserDefaultSession === "saved" && this.managedBrowserProfile === undefined) {
+      if (target.mode !== "native-recovery" && target.mode !== "native-web-document" && target.mode !== "browser" && target.switchWindows === true && managedBrowserDefaultSession === "saved" && this.managedBrowserProfile === undefined) {
         throw new RemoteRunApiError("MANAGED_BROWSER_UNAVAILABLE", "This Host has no configured persistent managed-browser profile.");
       }
       if (target.mode === "desktop" && target.switchWindows === true && !this.session.supportsWindowSwitching) {
@@ -547,9 +571,9 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     } catch (error) {
       return Promise.reject(error);
     }
-    const cleanGoal = validateText(goal, MAX_GOAL_CHARS, "goal", target.mode === "native-recovery");
+    const cleanGoal = validateText(goal, MAX_GOAL_CHARS, "goal", target.mode === "native-recovery" || target.mode === "native-web-document");
     const key = deviceId + "\u0000" + cleanCommandId;
-    const companionSessionMode = target.mode === "browser" || target.mode === "native-recovery" || target.switchWindows !== true
+    const companionSessionMode = target.mode === "browser" || target.mode === "native-recovery" || target.mode === "native-web-document" || target.switchWindows !== true
       ? undefined
       : managedBrowserDefaultSession;
     const targetFingerprint = stableJson({ target, ...(companionSessionMode === undefined ? {} : { companionSessionMode }) });
@@ -570,17 +594,19 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
       return Promise.reject(new RemoteRunApiError("CAPACITY_REACHED", "The Host reached its safe start-request limit. Existing command IDs remain protected from replay; restart the Host to begin a new deduplication epoch."));
     }
     let selectedTarget: WindowTargetSelection | undefined;
-    if (target.mode === "native-recovery") {
-      if (this.nativeRecoveryProfile === undefined || target.profileId !== this.nativeRecoveryProfile.profileId) {
+    if (target.mode === "native-recovery" || target.mode === "native-web-document") {
+      const profileConfig = target.mode === "native-recovery" ? this.nativeRecoveryProfile : this.nativeWebDocumentProfile;
+      const consumedSlot = target.mode === "native-recovery" ? this.consumedNativeRecoveryProfile : this.consumedNativeWebDocumentProfile;
+      if (profileConfig === undefined || target.profileId !== profileConfig.profileId) {
         return Promise.reject(new RemoteRunApiError("INVALID_TARGET", "This Host has no matching native recovery profile."));
       }
-      const consumed = this.consumedNativeRecoveryProfile;
-      if (consumed !== undefined) {
-        return Promise.reject(new RemoteRunApiError("NATIVE_RECOVERY_PROFILE_CONSUMED", "The Host native recovery profile has already been used. Do not replay an unknown start outcome."));
+      if (consumedSlot !== undefined) {
+        return Promise.reject(new RemoteRunApiError("NATIVE_RECOVERY_PROFILE_CONSUMED", "The Host recovery profile has already been used. Do not replay an unknown start outcome."));
       }
       // Reserve the one-run profile synchronously with the idempotency request,
       // before any fresh inventory or Run factory awaits.
-      this.consumedNativeRecoveryProfile = { deviceId, commandId: cleanCommandId };
+      if (target.mode === "native-recovery") this.consumedNativeRecoveryProfile = { deviceId, commandId: cleanCommandId };
+      else this.consumedNativeWebDocumentProfile = { deviceId, commandId: cleanCommandId };
     }
     try {
       if (target.mode === "window") {
@@ -617,7 +643,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
     this.startInProgress = true;
     let profileUseLease: ManagedBrowserProfileUseLease | undefined;
-    const companionSessionMode = target.mode !== "browser" && target.mode !== "native-recovery" && target.switchWindows === true
+    const companionSessionMode = target.mode !== "browser" && target.mode !== "native-recovery" && target.mode !== "native-web-document" && target.switchWindows === true
       ? managedBrowserDefaultSession
       : undefined;
     try {
@@ -675,8 +701,8 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
         if (selectedTarget === undefined) throw new RemoteRunApiError("WINDOW_TARGET_STALE", "The window choice is invalid. Refresh the list and choose again.");
         return await this.createRun(deviceId, goal, { mode: "window", selection: selectedTarget, switchWindows: target.switchWindows === true }, assistantPreferences, runNoticeContentEnabled, profileUseLease, companionSessionMode);
       }
-      if (target.mode === "native-recovery") {
-        const profile = this.nativeRecoveryProfile;
+      if (target.mode === "native-recovery" || target.mode === "native-web-document") {
+        const profile = target.mode === "native-recovery" ? this.nativeRecoveryProfile : this.nativeWebDocumentProfile;
         if (profile === undefined || profile.profileId !== target.profileId) {
           throw new RemoteRunApiError("INVALID_TARGET", "This Host has no matching native recovery profile.");
         }
@@ -691,8 +717,11 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
         if (primaryMatches !== 1 || recoveryMatches !== 1) {
           throw new RemoteRunApiError("WINDOW_TARGET_STALE", "A configured native recovery window changed or closed. The profile was consumed; reconfigure it on the Host.");
         }
+        if (target.mode === "native-recovery") {
+          return await this.createRun(deviceId, goal, { mode: "native-recovery", profile }, assistantPreferences, runNoticeContentEnabled);
+        }
         return await this.createRun(deviceId, goal, {
-          mode: "native-recovery",
+          mode: "native-web-document",
           profile,
         }, assistantPreferences, runNoticeContentEnabled);
       }
@@ -939,7 +968,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
   ): Promise<RemoteRunSnapshot> {
     let targetLabel: RemoteWindowTargetLabel;
     let featureOverrides: ApplicationSessionRunFeatureOverrides;
-    const windowSwitch = target.mode === "native-recovery" || target.switchWindows ? "opened-windows-v1" as const : "off" as const;
+    const windowSwitch = target.mode === "native-recovery" || target.mode === "native-web-document" || target.switchWindows ? "opened-windows-v1" as const : "off" as const;
     if (target.mode === "desktop") {
       targetLabel = { appName: "Primary desktop", title: "Entire foreground desktop" };
       featureOverrides = { windowTarget: null, grounding: "off", windowSwitch };
@@ -973,6 +1002,23 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
         windowHandoff: "confirm-v1",
         grounding: "uia-catalog-v1",
         nativeRecovery: {
+          primaryTarget: { ...target.profile.primaryTarget },
+          recoveryTarget: { ...target.profile.recoveryTarget },
+          outputPath: target.profile.outputPath,
+          expectedExecutableUrl: target.profile.expectedExecutableUrl,
+        },
+      };
+    } else if (target.mode === "native-web-document") {
+      targetLabel = { appName: "TextEdit", title: "Host-configured T3 document", provenance: "starting_target" };
+      featureOverrides = {
+        windowTarget: { ...target.profile.primaryTarget },
+        windowDeliveryMode: "foreground",
+        windowSwitch: "opened-windows-v1",
+        windowHandoff: "confirm-v1",
+        grounding: "hybrid-catalog-v1",
+        managedBrowserCompanion: true,
+        managedBrowserUrl: "https://trains.ctrip.com/",
+        nativeWebDocument: {
           primaryTarget: { ...target.profile.primaryTarget },
           recoveryTarget: { ...target.profile.recoveryTarget },
           outputPath: target.profile.outputPath,
@@ -1758,6 +1804,10 @@ function normalizeRemoteRunTarget(value: RemoteRunTargetInput): RemoteRunTarget 
   if (record.mode === "native-recovery" && !Object.hasOwn(record, "switchWindows") && targetHasExactKeys(record, ["mode", "profileId"]) &&
       typeof record.profileId === "string" && /^[A-Za-z0-9_-]{16,128}$/u.test(record.profileId)) {
     return { mode: "native-recovery", profileId: record.profileId };
+  }
+  if (record.mode === "native-web-document" && !Object.hasOwn(record, "switchWindows") && targetHasExactKeys(record, ["mode", "profileId"]) &&
+      typeof record.profileId === "string" && /^[A-Za-z0-9_-]{16,128}$/u.test(record.profileId)) {
+    return { mode: "native-web-document", profileId: record.profileId };
   }
   if (record.mode === "browser" && targetHasExactKeys(record, ["mode"])) {
     return { mode: "browser", switchWindows };

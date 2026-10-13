@@ -27,3 +27,22 @@ T1 三张原卡 SHA 分别为 baseline `42485b83cc47c35ba09f77858096fd7bf61bd601
 Root 定位并修复当前 CI 的必要离线兼容失败，新 HEAD/CI 通过后，才核当前权限、解锁、daemon 新 PID/socket/health 及 TCC，并以新 scratch 与精确当前窗口身份做 MR-02 平台合同、MR-01 普通/受限恢复、MR-08 必要的一次真实预览零 Provider 诊断；记录 action/tool 序列、正式 handoff、清理 Busy 和新 observation，不重放 unknown。然后准备新 batch/reservation、严格原卡/唯一输出/监控 ready、正常 Web Start 与默认 layered 配置，分别执行 T2 baseline、独立 repeat、原 variant 的同版完整任务；T1/T3 后续另证，T3 先需隔离分支的 Host-owned hybrid capability 完成、审查、合并和零 Provider 组合验证。实体手机 M1–M4、真人评分、语音实际听感及远端 Preview 发布另列，不计电脑/Web 替代通过。
 
 截至本记录：0 次本轮 Provider 请求，0 次 GUI 动作，0 次业务 Host/Relay/daemon 启动，0 次真实预览，0 次正式原卡 Run；只有源/构建/进程/签名/卡片/旧账本的只读检查。
+
+
+## 当前CI与零Provider现场诊断授权
+
+Root实际2026-10-13T04:15:21Z核新HEAD972035044f7b05a3609a5981547ce9cfd95f1ce6已同SHA推送，CI38345102253五job全部success。测试修正仅迁移一项旧轮询等待为已提交handoff事件，产品仍是3b的八MR源码。已交Luna作为唯一现场执行者重新启动验签native8、核新PID/socket/当前health与权限，并进行新scratch的普通/受限恢复及必要预览零真实Provider诊断；此时尚未出具真实诊断通过结果。Root与隔离T3组不操作桌面或切主业务服务。
+
+
+## 新native会话健康检查：当前系统授权缺失
+
+Luna经正常 `open -n -g -a` 启动同一验签native8，socket `/private/tmp/ch-r5-45fb1c94-3710.sock`，wrapper43724/daemon43726、UID501、2026-10-13 12:16:07开始，argv带serve/该socket/no-overlay。Root独读 `R5-private/45fb1c94-3710-49ec-9765-250226de17a9/native-health.json`：driver/SDK0.22.2、darwin、session_active通过；辅助功能、屏幕录制、AX trusted均fail，overall degraded。自定义bundle identity与canonical名称不同属于既有候选标识，不能把canonical提示当作换binary的许可；当前SHA/CDHash仍匹配native8。health session已end、active=false。`desktopUnlocked=false`单字段不据此断言锁屏。
+
+此时没有窗口枚举、屏幕捕获、输入或真实Provider。实际诊断尚未执行。用户已授权必要任务权限，Luna继续准备该已验签app的正常系统授权入口；能直接完成的正常开关在授权范围内，出现Touch ID/系统密码等本人验证则停在具体界面由用户完成。不得改TCC数据库、绕过本人认证或悄换canonical旧native。Info.plist显示名为 `Capture and Document Fix Local Candidate (seventh)`，CFBundleName `CuaDriverCaptureFix`，bundle `com.trycua.driver.capturefix.local.20261011`。Root/T3组不并发操作桌面。
+
+
+## 2026-10-13 T3 主集成验证更新
+
+Host-owned `native-web-document` 实现及其普通 Web/Relay 入口、Browser 与 TextEdit 独立能力边界、一次性文稿恢复已由 Luna 实现、Sol 独立审查并导入主分支，共25个路径。Root逐文件核SHA与审查清单一致，保留9720350的CI等待修正；主目录类型检查、119文件2089项Vitest、72项Node自检及Web构建全部通过。私有证据为 `T3-integration-20261013-private/root-final-integration-verification.json`。这是离线实现与组合夹具通过，真实三线业务任务仍待现场验证。9720350的五项CI已通过；此次T3新提交需单独等待CI，不继承旧结果。本轮真实Provider调用仍为0。
+
+屏幕录制权限已完成off→on刷新，并按系统提示退出重开目标App。辅助功能刷新再次出现macOS本人认证，已请用户完成；执行者停在该实际认证面板，尚无刷新后的health或业务Run通过证据。

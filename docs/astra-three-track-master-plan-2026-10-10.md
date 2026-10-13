@@ -1,4 +1,4 @@
-> 最新执行状态（2026-10-13）：八项 MR 已修复并提交推送 3b84287；本地2076项Vitest＋72项Node、类型检查及Web构建通过。当前CI三项verify通过，一项旧异步等待测试失败；test-only确定性等待修正已由Sol独检170/170，准备新提交及CI。真实Mac／Web尚未启动，T3新能力在隔离树实施。详见 [本轮执行记录](astra-mr-repair-execution-2026-10-13.md)。
+> 最新执行状态（2026-10-13）：八项 MR 已修复提交3b84287，test-only确定性等待修正9720350已推送且当前CI五项全通过。本地完整2076项Vitest＋72项Node、类型检查和Web构建通过；现进入新环境零真实Provider Mac诊断。T3新能力在隔离树实施，正式三线业务及手机专属验收尚未完成。详见 [本轮执行记录](astra-mr-repair-execution-2026-10-13.md) 与 [现场验证记录](astra-live-validation-2026-10-13.md)。
 
 # Astra 三线总计划：目标与完整验收
 
@@ -292,3 +292,10 @@ T3：携程公开查询→macOS TextEdit 整理，途中通过客户端降低预
 
 
 2026-10-11 历史SSE稳定点：SSE b08268c修复后同版正常Host五次断开恢复/并发cap/after-seq尾事件通过；批准重复commandId只一次执行、reject零执行、correct使旧approval409/零执行、随后cancel均独检。A01–A03累计180main/4risk/184请求，169已知usage2982210tokens、15未知。正常Host15648保留，所有Run终态；继续零Provider建议DOM定位，完整T1/T2/T3及剩余现场矩阵未升级。
+
+
+## 2026-10-13 T3 主集成验证更新
+
+Host-owned `native-web-document` 实现及其普通 Web/Relay 入口、Browser 与 TextEdit 独立能力边界、一次性文稿恢复已由 Luna 实现、Sol 独立审查并导入主分支，共25个路径。Root逐文件核SHA与审查清单一致，保留9720350的CI等待修正；主目录类型检查、119文件2089项Vitest、72项Node自检及Web构建全部通过。私有证据为 `T3-integration-20261013-private/root-final-integration-verification.json`。这是离线实现与组合夹具通过，真实三线业务任务仍待现场验证。9720350的五项CI已通过；此次T3新提交需单独等待CI，不继承旧结果。本轮真实Provider调用仍为0。
+
+屏幕录制权限已完成off→on刷新，并按系统提示退出重开目标App。辅助功能刷新再次出现macOS本人认证，已请用户完成；执行者停在该实际认证面板，尚无刷新后的health或业务Run通过证据。

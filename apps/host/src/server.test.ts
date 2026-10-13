@@ -36,7 +36,10 @@ function snapshot(sequence = 0): RemoteRunSnapshot {
   };
 }
 
-function fakeApi(nativeRecoveryProfile?: { readonly profileId: string; readonly label: string }): RemoteRunApi {
+function fakeApi(
+  nativeRecoveryProfile?: { readonly profileId: string; readonly label: string },
+  nativeWebDocumentProfile?: { readonly profileId: string; readonly label: string },
+): RemoteRunApi {
   return {
     listRuns: () => [snapshot()],
     getRun: (_deviceId, id) => id === runId ? snapshot(0) : undefined,
@@ -44,6 +47,7 @@ function fakeApi(nativeRecoveryProfile?: { readonly profileId: string; readonly 
       candidates: [{ token: targetToken, appName: "Fixture app", title: "Fixture window" }],
       expiresAt: "2026-09-26T00:10:00.000Z",
       ...(nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile }),
+      ...(nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile }),
     }),
     previewWindowTarget: async (_deviceId, candidateToken) => Object.assign({
       previewToken: "P".repeat(32),
@@ -101,7 +105,8 @@ function jsonResponse<T>(response: { json(): T }): T {
 describe("Host HTTP boundary", () => {
   it("exposes only the opaque native profile id and accepts only its exact selector shape", async () => {
     const profileId = "Opaque_Profile_1234567890";
-    const api = fakeApi({ profileId, label: "Host TextEdit recovery" });
+    const hybridProfileId = "Opaque_Hybrid_Profile_12345";
+    const api = fakeApi({ profileId, label: "Host TextEdit recovery" }, { profileId: hybridProfileId, label: "Host Browser and TextEdit recovery" });
     const startRun = vi.fn(api.startRun);
     const host = createHostServer({ api: { ...api, startRun }, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin });
     try {
@@ -128,6 +133,7 @@ describe("Host HTTP boundary", () => {
 
       const choices = await host.server.inject({ method: "GET", url: "/api/windows", headers: { origin: relayOrigin, cookie } });
       expect(jsonResponse(choices).nativeRecoveryProfile).toEqual({ profileId, label: "Host TextEdit recovery" });
+      expect(jsonResponse(choices).nativeWebDocumentProfile).toEqual({ profileId: hybridProfileId, label: "Host Browser and TextEdit recovery" });
       expect(containsPrivateWindowIdentityKey(jsonResponse(choices))).toBe(false);
 
       const extraRawFields = await host.server.inject({
@@ -152,6 +158,24 @@ describe("Host HTTP boundary", () => {
       });
       expect(started.statusCode).toBe(202);
       expect(startRun).toHaveBeenCalledWith(expect.any(String), "native-profile-valid", exactGoal, { mode: "native-recovery", profileId }, undefined, false);
+
+      for (const target of [
+        { mode: "native-web-document", profileId: hybridProfileId, url: "https://example.test/" },
+        { mode: "native-web-document", profileId: hybridProfileId, pid: 77 },
+        { mode: "native-web-document", profileId: hybridProfileId, path: "/tmp/output.txt" },
+        { mode: "native-web-document", profileId: hybridProfileId, switchWindows: false },
+      ]) {
+        const invalid = await host.server.inject({ method: "POST", url: "/api/runs", headers,
+          payload: { commandId: `hybrid-invalid-${startRun.mock.calls.length}`, goal: exactGoal, target },
+        });
+        expect(invalid.statusCode).toBe(400);
+      }
+      const hybrid = await host.server.inject({ method: "POST", url: "/api/runs", headers,
+        payload: { commandId: "hybrid-profile-valid", goal: exactGoal, target: { mode: "native-web-document", profileId: hybridProfileId } },
+      });
+      expect(hybrid.statusCode).toBe(202);
+      expect(startRun).toHaveBeenCalledWith(expect.any(String), "hybrid-profile-valid", exactGoal,
+        { mode: "native-web-document", profileId: hybridProfileId }, undefined, false);
     } finally {
       await host.close();
     }

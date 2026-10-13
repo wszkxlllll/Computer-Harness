@@ -286,6 +286,9 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     if (target.mode === "native-recovery" && !Object.hasOwn(target, "switchWindows") && hasTargetKeys(["mode", "profileId"])) {
       return { mode: "native-recovery", profileId: requiredString(target, "profileId", 128) };
     }
+    if (target.mode === "native-web-document" && !Object.hasOwn(target, "switchWindows") && hasTargetKeys(["mode", "profileId"])) {
+      return { mode: "native-web-document", profileId: requiredString(target, "profileId", 128) };
+    }
     if (target.mode === "browser" && hasTargetKeys(["mode"])) return { mode: "browser", ...switchField };
     if (target.mode === "browser" && hasTargetKeys(["mode", "url"]) &&
         typeof target.url === "string" && target.url.length <= 2_048) {

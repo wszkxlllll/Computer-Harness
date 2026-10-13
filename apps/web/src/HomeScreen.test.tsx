@@ -138,6 +138,33 @@ describe("home run-target selection", () => {
     expect(listWindowTargets).toHaveBeenCalledTimes(1);
   });
 
+  it("submits the Host-owned hybrid task by opaque profile id and preserves exact goal text", async () => {
+    const profileId = "Opaque_Hybrid_Profile_12345";
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      nativeWebDocumentProfile: { profileId, label: "Host Browser and TextEdit recovery" },
+    });
+    vi.mocked(createRun).mockRejectedValue(new ApiError("fixture response", 409));
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    const exactGoal = "  Use the fixed Browser and TextEdit document\n正文末行。\n";
+    fireEvent.change(goal, { target: { value: exactGoal } });
+    chooseStartMode(/网页查询与文稿/);
+    await screen.findByText("将先打开网页，再使用电脑预设的文稿继续处理。");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      exactGoal,
+      expect.any(String),
+      { mode: "native-web-document", profileId },
+      defaultAssistantPreferences,
+      false,
+    ));
+    expect(listWindowTargets).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the local document task unavailable until the computer prepares it", async () => {
     renderHome();
     fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Save my itinerary" } });

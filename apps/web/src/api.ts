@@ -221,11 +221,12 @@ function validateWindowCandidatePreview(value: unknown): WindowCandidatePreview 
 
 function validateWindowTargetList(value: unknown): WindowTargetList {
   const record = windowRecord(value, "电脑返回的窗口列表格式无效。");
-  if (!hasExactKeys(record, ["candidates", "expiresAt"], ["omittedAmbiguousCount", "nativeRecoveryProfile"]) ||
+  if (!hasExactKeys(record, ["candidates", "expiresAt"], ["omittedAmbiguousCount", "nativeRecoveryProfile", "nativeWebDocumentProfile"]) ||
       !Array.isArray(record.candidates) || record.candidates.length > 64 ||
       typeof record.expiresAt !== "string" || !Number.isFinite(Date.parse(record.expiresAt)) ||
       record.omittedAmbiguousCount !== undefined && (!Number.isSafeInteger(record.omittedAmbiguousCount) || Number(record.omittedAmbiguousCount) < 0) ||
-      record.nativeRecoveryProfile !== undefined && !isNativeRecoveryProfileSummary(record.nativeRecoveryProfile)) {
+      record.nativeRecoveryProfile !== undefined && !isNativeRecoveryProfileSummary(record.nativeRecoveryProfile) ||
+      record.nativeWebDocumentProfile !== undefined && !isNativeRecoveryProfileSummary(record.nativeWebDocumentProfile)) {
     throw new Error("电脑返回的窗口列表格式无效。");
   }
   const candidates = record.candidates.map(validateWindowTarget);
@@ -243,6 +244,7 @@ function validateWindowTargetList(value: unknown): WindowTargetList {
     expiresAt: record.expiresAt,
     ...(record.omittedAmbiguousCount === undefined ? {} : { omittedAmbiguousCount: Number(record.omittedAmbiguousCount) }),
     ...(record.nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile: validateNativeRecoveryProfileSummary(record.nativeRecoveryProfile) }),
+    ...(record.nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile: validateNativeRecoveryProfileSummary(record.nativeWebDocumentProfile) }),
   };
 }
 

@@ -211,6 +211,7 @@ function createFixture(
     missingHandoff?: (candidate: ComputerWindowCandidate) => void;
     groundingOptions?: readonly string[];
     nativeRecoveryProfile?: import("./remote-control.js").HostNativeRecoveryProfile;
+    nativeWebDocumentProfile?: import("./remote-control.js").HostNativeWebDocumentProfile;
     initialWindows?: readonly WindowTargetInfo[];
     listWindowsOverride?: (signal: AbortSignal) => Promise<readonly WindowTargetInfo[]>;
   },
@@ -322,6 +323,7 @@ function createFixture(
     ...(options.readManagedBrowserStartupUrls === undefined ? {} : { readManagedBrowserStartupUrls: options.readManagedBrowserStartupUrls }),
     ...(options.windowSelector === undefined ? {} : { windowSelector: options.windowSelector }),
     ...(options.nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile: options.nativeRecoveryProfile }),
+    ...(options.nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile: options.nativeWebDocumentProfile }),
     ...limits,
   });
   return { api, session, createdComputerConfigs, observedComputerSessionIds, windowDiscoveryCalls, windowPreviewCalls, setWindows: (value: readonly WindowTargetInfo[]) => { windows = value; } };
@@ -532,7 +534,8 @@ describe("ApplicationRemoteRunApi", () => {
       await session.waitUntilIdleAfterTerminal();
       expect((await api.listWindowTargets("device-native")).nativeRecoveryProfile).toBeUndefined();
 
-      await api.startRun("device-native", "native-profile-ordinary-browser", "Read a website", { mode: "browser" });
+      await api.startRun("device-native", "native-profile-ordinary-browser", "  Read a website  ", { mode: "browser" });
+      expect(session.activeRun?.config.goal).toBe("Read a website");
       expect(getDefaultSession).toHaveBeenCalledTimes(1);
       expect(createdComputerConfigs[1]).not.toHaveProperty("recoverBoundWindowMissing");
       expect(createdComputerConfigs[1]).not.toHaveProperty("recoveryWindowTarget");
@@ -545,6 +548,49 @@ describe("ApplicationRemoteRunApi", () => {
         restorePlatform();
         await rm(outputDir, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("offers and consumes the separate Host T3 hybrid profile through the normal API with fixed Browser origin", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-web-document-profile-"));
+    const primary = { pid: 78, windowId: 1201, appName: "TextEdit", title: "Untitled" };
+    const recovery = { pid: 78, windowId: 1202, appName: "TextEdit", title: "Untitled" };
+    const profile = {
+      profileId: "Opaque_Hybrid_Profile_12345",
+      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
+      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
+      outputPath: join(outputDir, "unique-output.txt"),
+      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The hybrid task finished.", initialWindows: [primary, recovery], nativeWebDocumentProfile: profile,
+      managedBrowserProfileCoordinator: { getDefaultSession: vi.fn(() => "saved" as const), acquireForRun: async () => async () => undefined },
+    });
+    const restorePlatform = temporarilySetProcessPlatform("darwin");
+    try {
+      expect((await api.listWindowTargets("device-hybrid")).nativeWebDocumentProfile).toEqual({
+        profileId: profile.profileId, label: "Host Browser and TextEdit recovery",
+      });
+      const exactGoal = "Search public train options and save the result to the Host document.\n";
+      const first = await api.startRun("device-hybrid", "hybrid-profile-once", exactGoal, { mode: "native-web-document", profileId: profile.profileId });
+      expect(first.goal).toBe(exactGoal);
+      expect(session.activeRun?.config.computer).toMatchObject({
+        kind: "cua", windowTarget: profile.primaryTarget, recoveryWindowTarget: profile.recoveryTarget,
+        recoverBoundWindowMissing: true, managedBrowserCompanion: true,
+        managedBrowserUrl: "https://trains.ctrip.com/", managedBrowserProfileMode: "ephemeral",
+        hybridNativeWebDocumentTargets: { primaryTarget: profile.primaryTarget, recoveryTarget: profile.recoveryTarget },
+        reopenSavedDocumentGrant: { path: profile.outputPath, expectedExecutableUrl: profile.expectedExecutableUrl },
+      });
+      expect(createdComputerConfigs[0]).toHaveProperty("windowSwitchAllowedTargets", [profile.primaryTarget, profile.recoveryTarget]);
+      expect(createdComputerConfigs[0]).not.toHaveProperty("managedBrowserProfileRoot");
+      await expect(api.startRun("device-hybrid", "hybrid-profile-once", exactGoal, { mode: "native-web-document", profileId: profile.profileId })).resolves.toMatchObject({ runId: first.runId });
+      await expect(api.startRun("device-hybrid", "hybrid-profile-once", `${exactGoal}\n`, { mode: "native-web-document", profileId: profile.profileId })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await expect(Promise.resolve().then(() => api.startRun("device-hybrid", "hybrid-profile-whitespace", " \n\t", { mode: "native-web-document", profileId: profile.profileId }))).rejects.toMatchObject({ code: "INVALID_COMMAND" });
+      await expect(Promise.resolve().then(() => api.startRun("device-hybrid", "hybrid-profile-oversized", ` ${"x".repeat(20_000)} `, { mode: "native-web-document", profileId: profile.profileId }))).rejects.toMatchObject({ code: "INVALID_COMMAND" });
+      await expect(api.startRun("device-hybrid", "hybrid-profile-second", exactGoal, { mode: "native-web-document", profileId: profile.profileId })).rejects.toMatchObject({ code: "NATIVE_RECOVERY_PROFILE_CONSUMED" });
+      await session.waitForActiveRun();
+    } finally {
+      try { await session.close(); } finally { restorePlatform(); await rm(outputDir, { recursive: true, force: true }); }
     }
   });
 

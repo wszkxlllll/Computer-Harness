@@ -1,4 +1,4 @@
-> 最新执行状态（2026-10-13）：八项 MR 已修复并提交推送 3b84287；本地2076项Vitest＋72项Node、类型检查及Web构建通过。当前CI三项verify通过，一项旧异步等待测试失败；test-only确定性等待修正已由Sol独检170/170，准备新提交及CI。真实Mac／Web尚未启动，T3新能力在隔离树实施。详见 [本轮执行记录](astra-mr-repair-execution-2026-10-13.md)。
+> 最新执行状态（2026-10-13）：八项 MR 已修复提交3b84287，test-only确定性等待修正9720350已推送且当前CI五项全通过。本地完整2076项Vitest＋72项Node、类型检查和Web构建通过；现进入新环境零真实Provider Mac诊断。T3新能力在隔离树实施，正式三线业务及手机专属验收尚未完成。详见 [本轮执行记录](astra-mr-repair-execution-2026-10-13.md) 与 [现场验证记录](astra-live-validation-2026-10-13.md)。
 
 # Astra 自主测试与修复计划
 
@@ -354,3 +354,10 @@ fa19cbb当前五CI绿包含完整组合，源码/候选签名保持冻结；A05�
 
 
 历史状态补正（后续已由顶部当前状态覆盖，本次“已验证”之后）：正常UI已精确完成Accessibility添加，两项列表on；同签名候选已重启PID35455，真实两TCC与AX pass。health整体degraded仅因独立bundle与hardcoded canonical不等及只读capture skip，保留原字段，真实capture/nested/type尚未验。随后当前onConsole CGSSessionScreenIsLocked=true独立证实Mac实际锁屏；现在需正常解锁，不再要求重复TCC认证。远端sudo认证独立未完成，Preview仅暂存未部署；历史256/全部Run终态保持。解锁后直接零Provider生产验真→A05原完整T2，未经成果核不得签收完整业务。
+
+
+## 2026-10-13 T3 主集成验证更新
+
+Host-owned `native-web-document` 实现及其普通 Web/Relay 入口、Browser 与 TextEdit 独立能力边界、一次性文稿恢复已由 Luna 实现、Sol 独立审查并导入主分支，共25个路径。Root逐文件核SHA与审查清单一致，保留9720350的CI等待修正；主目录类型检查、119文件2089项Vitest、72项Node自检及Web构建全部通过。私有证据为 `T3-integration-20261013-private/root-final-integration-verification.json`。这是离线实现与组合夹具通过，真实三线业务任务仍待现场验证。9720350的五项CI已通过；此次T3新提交需单独等待CI，不继承旧结果。本轮真实Provider调用仍为0。
+
+屏幕录制权限已完成off→on刷新，并按系统提示退出重开目标App。辅助功能刷新再次出现macOS本人认证，已请用户完成；执行者停在该实际认证面板，尚无刷新后的health或业务Run通过证据。

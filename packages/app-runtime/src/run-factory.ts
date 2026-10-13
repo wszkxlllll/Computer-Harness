@@ -40,6 +40,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     throw new Error("bound-window recovery requires matching Run and CUA computer opt-ins");
   }
   if (input.recoverBoundWindowMissing === true) {
+    const hybridNativeWebDocument = input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined;
     if (process.platform !== "darwin" || input.windowSwitch !== "opened-windows-v1" ||
         (input.windowHandoff !== undefined && input.windowHandoff !== "confirm-v1")) {
       throw new Error("bound-window recovery requires a Darwin CUA run with exact native window switching and no managed-browser companion");
@@ -47,10 +48,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     if (input.computer.kind !== "cua") throw new Error("bound-window recovery requires a CUA computer");
     const cuaConfig = input.computer;
     if ((cuaConfig.windowSwitch !== undefined && cuaConfig.windowSwitch !== "opened-windows-v1") || cuaConfig.windowTarget === undefined ||
-        cuaConfig.recoveryWindowTarget === undefined || cuaConfig.managedBrowserCompanion === true ||
-        cuaConfig.managedBrowserUrl !== undefined || cuaConfig.grounding === "dom-catalog-v1" ||
-        cuaConfig.grounding === "hybrid-catalog-v1" || input.grounding === "dom-catalog-v1" ||
-        input.grounding === "hybrid-catalog-v1") {
+        cuaConfig.recoveryWindowTarget === undefined || (cuaConfig.managedBrowserCompanion === true && !hybridNativeWebDocument) ||
+        (cuaConfig.managedBrowserUrl !== undefined && !hybridNativeWebDocument) || cuaConfig.grounding === "dom-catalog-v1" ||
+        (cuaConfig.grounding === "hybrid-catalog-v1" && !hybridNativeWebDocument) || input.grounding === "dom-catalog-v1" ||
+        (input.grounding === "hybrid-catalog-v1" && !hybridNativeWebDocument)) {
       throw new Error("bound-window recovery requires a Darwin CUA run with exact native window switching and no managed-browser companion");
     }
     const primaryTarget = cuaConfig.windowTarget;
@@ -68,9 +69,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     const grant = input.computer.reopenSavedDocumentGrant;
     if (input.recoverBoundWindowMissing !== true || process.platform !== "darwin" ||
         input.windowSwitch !== "opened-windows-v1" || input.computer.windowTarget === undefined ||
-        input.computer.recoveryWindowTarget === undefined || input.computer.managedBrowserCompanion === true ||
-        input.computer.managedBrowserUrl !== undefined || input.computer.grounding === "dom-catalog-v1" ||
-        input.computer.grounding === "hybrid-catalog-v1" || !isAbsoluteHostPath(grant.path) ||
+        input.computer.recoveryWindowTarget === undefined || (input.computer.managedBrowserCompanion === true && input.computer.hybridNativeWebDocumentTargets === undefined) ||
+        (input.computer.managedBrowserUrl !== undefined && input.computer.hybridNativeWebDocumentTargets === undefined) || input.computer.grounding === "dom-catalog-v1" ||
+        (input.computer.grounding === "hybrid-catalog-v1" && input.computer.hybridNativeWebDocumentTargets === undefined) || !isAbsoluteHostPath(grant.path) ||
         !isCanonicalExecutableFileUrl(grant.expectedExecutableUrl)) {
       throw new Error("saved-document reopen requires an exact Darwin native recovery Run and one absolute Host file grant");
     }
@@ -86,7 +87,19 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   if (companionRequested && input.windowSwitch !== "opened-windows-v1") {
     throw new Error("managed browser companion requires the opened-windows-v1 Run opt-in");
   }
-  if (companionRequested && browserInitialGrounding) {
+  const hybridNativeWebDocumentRequested = input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined;
+  if (input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined && (input.computer.managedBrowserProfileMode !== "ephemeral" ||
+      input.computer.managedBrowserProfileLabel !== undefined || input.computer.managedBrowserProfileRoot !== undefined ||
+      input.computer.managedBrowserUrl !== "https://trains.ctrip.com/" || input.computer.managedBrowserCompanion !== true ||
+      input.computer.windowTarget === undefined || input.computer.recoveryWindowTarget === undefined ||
+      input.computer.hybridNativeWebDocumentTargets === undefined ||
+      input.computer.hybridNativeWebDocumentTargets.primaryTarget.pid !== input.computer.windowTarget.pid ||
+      input.computer.hybridNativeWebDocumentTargets.primaryTarget.windowId !== input.computer.windowTarget.windowId ||
+      input.computer.hybridNativeWebDocumentTargets.recoveryTarget.pid !== input.computer.recoveryWindowTarget.pid ||
+      input.computer.hybridNativeWebDocumentTargets.recoveryTarget.windowId !== input.computer.recoveryWindowTarget.windowId)) {
+    throw new Error("T3 hybrid requires one fixed-url ephemeral Browser and the exact Host TextEdit recovery pair");
+  }
+  if (companionRequested && browserInitialGrounding && !hybridNativeWebDocumentRequested) {
     throw new Error("managed browser companion cannot also be the initial browser target");
   }
   const prepareManagedBrowserCompanion = companionRequested && input.windowSwitch === "opened-windows-v1";
