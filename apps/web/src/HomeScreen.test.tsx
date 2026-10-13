@@ -125,125 +125,15 @@ describe("home run-target selection", () => {
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
-  it("offers the computer's preset document task only from its opaque summary", async () => {
-    const profileId = "Opaque_Profile_1234567890";
-    vi.mocked(listWindowTargets).mockResolvedValue({
-      candidates: [],
-      expiresAt: new Date(Date.now() + 600_000).toISOString(),
-      nativeRecoveryProfile: { profileId, label: "Host TextEdit recovery" },
-    });
-    vi.mocked(createRun).mockRejectedValue(new ApiError("fixture response", 409));
+  it("keeps Host-prepared recovery experiments out of the phone target choices", async () => {
     renderHome();
-
-    const goal = await screen.findByLabelText("想让电脑做什么？");
-    const exactGoal = "  Save my itinerary\n正文末行。\n\n";
-    fireEvent.change(goal, { target: { value: exactGoal } });
-    chooseStartMode(/电脑预设文稿/);
-    await screen.findByText("将使用电脑预先指定的两个文稿窗口和本地输出文件。");
-    const startButton = screen.getByRole("button", { name: "开始任务" });
-    expect((startButton as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(startButton);
-
-    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
-      exactGoal,
-      expect.any(String),
-      { mode: "native-recovery", profileId },
-      defaultAssistantPreferences,
-      false,
-    ));
-    expect(listWindowTargets).toHaveBeenCalledTimes(1);
+    await screen.findByLabelText("想让电脑做什么？");
+    openStartSelection();
+    expect(screen.getAllByRole("radio").map((radio) => (radio as HTMLInputElement).value))
+      .toEqual(["auto", "window", "browser", "desktop"]);
+    expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
-  it("submits the Host-owned hybrid task by opaque profile id and preserves exact goal text", async () => {
-    const profileId = "Opaque_Hybrid_Profile_12345";
-    vi.mocked(listWindowTargets).mockResolvedValue({
-      candidates: [],
-      expiresAt: new Date(Date.now() + 600_000).toISOString(),
-      nativeWebDocumentProfile: { profileId, label: "Host Browser and TextEdit recovery" },
-    });
-    vi.mocked(createRun).mockRejectedValue(new ApiError("fixture response", 409));
-    renderHome();
-
-    const goal = await screen.findByLabelText("想让电脑做什么？");
-    const exactGoal = "  Use the fixed Browser and TextEdit document\n正文末行。\n";
-    fireEvent.change(goal, { target: { value: exactGoal } });
-    chooseStartMode(/网页查询与文稿/);
-    await screen.findByText("将先打开网页，再使用电脑预设的文稿继续处理。");
-    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
-
-    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
-      exactGoal,
-      expect.any(String),
-      { mode: "native-web-document", profileId },
-      defaultAssistantPreferences,
-      false,
-    ));
-    expect(listWindowTargets).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the local document task unavailable until the computer prepares it", async () => {
-    renderHome();
-    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Save my itinerary" } });
-    chooseStartMode(/电脑预设文稿/);
-    await screen.findByText("电脑尚未准备本地文稿任务，请在电脑端检查设置。");
-    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(createRun).not.toHaveBeenCalled();
-  });
-
-  it("refreshes an expired document task and starts with the refreshed profile id", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-10-12T10:00:00.000Z"));
-    const profileId = "Fresh_Profile_1234567890";
-    let rejectRefresh!: (reason?: unknown) => void;
-    vi.mocked(listWindowTargets)
-      .mockResolvedValueOnce({
-        candidates: [],
-        expiresAt: new Date(Date.now() + 1_000).toISOString(),
-        nativeRecoveryProfile: { profileId: "Expired_Profile_1234567890", label: "Expired profile" },
-      })
-      .mockImplementationOnce(() => new Promise<WindowTargetList>((_resolve, reject) => { rejectRefresh = reject; }))
-      .mockResolvedValueOnce({
-        candidates: [],
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        nativeRecoveryProfile: { profileId, label: "Fresh profile" },
-      });
-    vi.mocked(createRun).mockRejectedValue(new ApiError("fixture response", 409));
-    renderHome();
-
-    fireEvent.change(screen.getByLabelText("想让电脑做什么？"), { target: { value: "Save my itinerary" } });
-    chooseStartMode(/电脑预设文稿/);
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    const startButton = screen.getByRole("button", { name: "开始任务" });
-    expect((startButton as HTMLButtonElement).disabled).toBe(false);
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(1_001); });
-    expect(screen.getByText("文稿任务已过期，请刷新后再开始。")).toBeDefined();
-    expect((startButton as HTMLButtonElement).disabled).toBe(true);
-
-    const refreshButton = screen.getByRole("button", { name: "刷新文稿任务" });
-    fireEvent.click(refreshButton);
-    expect(screen.getByText("正在刷新文稿任务…")).toBeDefined();
-    expect((refreshButton as HTMLButtonElement).disabled).toBe(true);
-    await act(async () => { rejectRefresh(new Error("Host refresh failed")); await Promise.resolve(); });
-    expect(screen.getByRole("alert").textContent).toContain("Host refresh failed");
-    expect((refreshButton as HTMLButtonElement).disabled).toBe(false);
-
-    fireEvent.click(refreshButton);
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("将使用电脑预先指定的两个文稿窗口和本地输出文件。")).toBeDefined();
-    expect((startButton as HTMLButtonElement).disabled).toBe(false);
-
-    fireEvent.click(startButton);
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(createRun).toHaveBeenCalledWith(
-      "Save my itinerary",
-      expect.any(String),
-      { mode: "native-recovery", profileId },
-      defaultAssistantPreferences,
-      false,
-    );
-    expect(listWindowTargets).toHaveBeenCalledTimes(3);
-  });
 
   it.each([
     ["auto", /自动选择/, { mode: "auto" }],

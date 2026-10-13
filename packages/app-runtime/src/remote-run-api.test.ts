@@ -248,8 +248,6 @@ function createFixture(
     listWindowHandoffCandidates?: (signal: AbortSignal) => Promise<readonly ComputerWindowCandidate[]> | readonly ComputerWindowCandidate[];
     missingHandoff?: (candidate: ComputerWindowCandidate) => void;
     groundingOptions?: readonly string[];
-    nativeRecoveryProfile?: import("./remote-control.js").HostNativeRecoveryProfile;
-    nativeWebDocumentProfile?: import("./remote-control.js").HostNativeWebDocumentProfile;
     initialWindows?: readonly WindowTargetInfo[];
     listWindowsOverride?: (signal: AbortSignal) => Promise<readonly WindowTargetInfo[]>;
   },
@@ -365,8 +363,6 @@ function createFixture(
     ...(inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile }),
     ...(options.readManagedBrowserStartupUrls === undefined ? {} : { readManagedBrowserStartupUrls: options.readManagedBrowserStartupUrls }),
     ...(options.windowSelector === undefined ? {} : { windowSelector: options.windowSelector }),
-    ...(options.nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile: options.nativeRecoveryProfile }),
-    ...(options.nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile: options.nativeWebDocumentProfile }),
     ...limits,
   });
   return { api, session, createdComputerConfigs, observedComputerSessionIds, windowDiscoveryCalls, windowPreviewCalls, setWindows: (value: readonly WindowTargetInfo[]) => { windows = value; } };
@@ -524,13 +520,18 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
-  it("keeps native recovery absent unless the Host supplies a configured profile", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-absent-"));
+  it("keeps native recovery profiles out of the remote target API", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-profile-removed-"));
     const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "Ordinary Run finished." });
     try {
-      await expect(api.startRun("device-native", "native-profile-unconfigured", "Save", {
-        mode: "native-recovery", profileId: "Opaque_Profile_1234567890",
-      })).rejects.toMatchObject({ code: "INVALID_TARGET" });
+      const targets = await api.listWindowTargets("device-native");
+      expect(targets).not.toHaveProperty("nativeRecoveryProfile");
+      expect(targets).not.toHaveProperty("nativeWebDocumentProfile");
+      for (const mode of ["native-recovery", "native-web-document"] as const) {
+        const retiredTarget = { mode, profileId: "Opaque_Profile_1234567890" } as unknown as Parameters<typeof api.startRun>[3];
+        await expect(api.startRun("device-native", `retired-${mode}`, "Save the document", retiredTarget))
+          .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      }
       expect(createdComputerConfigs).toEqual([]);
     } finally {
       await session.close();
@@ -538,294 +539,6 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
-  it("starts one Host native recovery profile through the real Run factory and keeps ordinary Runs isolated", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-profile-"));
-    const primary = { pid: 77, windowId: 1101, appName: "TextEdit", title: "Untitled" };
-    const recovery = { pid: 77, windowId: 1102, appName: "TextEdit", title: "Untitled" };
-    const nativeRecoveryProfile = {
-      profileId: "Opaque_Profile_1234567890",
-      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
-      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
-      outputPath: join(outputDir, "unique-output.txt"),
-      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-    };
-    const getDefaultSession = vi.fn(() => "temporary" as const);
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
-      summary: "The TextEdit task finished.",
-      initialWindows: [primary, recovery],
-      nativeRecoveryProfile,
-      managedBrowserProfileCoordinator: { getDefaultSession, acquireForRun: async () => async () => undefined },
-    });
-    const restorePlatform = temporarilySetProcessPlatform("darwin");
-    try {
-      const choices = await api.listWindowTargets("device-native");
-      expect(choices.nativeRecoveryProfile).toEqual({ profileId: nativeRecoveryProfile.profileId, label: "Host TextEdit recovery" });
-      expect(containsWindowIdentityKey(choices.nativeRecoveryProfile)).toBe(false);
-      for (const switchWindows of [true, false]) {
-        await expect(api.startRun("device-native", `native-profile-extra-switch-${switchWindows}`, "Save the itinerary", {
-          mode: "native-recovery", profileId: nativeRecoveryProfile.profileId, switchWindows,
-        } as Parameters<typeof api.startRun>[3])).rejects.toMatchObject({ code: "INVALID_TARGET" });
-      }
-      expect(createdComputerConfigs).toHaveLength(0);
-
-      for (const invalidGoal of [" \n\t ", "x".repeat(20_001)]) {
-        let thrown: unknown;
-        try {
-          void api.startRun("device-native", `native-profile-invalid-goal-${invalidGoal.length}`, invalidGoal, {
-            mode: "native-recovery", profileId: nativeRecoveryProfile.profileId,
-          });
-        } catch (error) {
-          thrown = error;
-        }
-        expect(thrown).toMatchObject({ code: "INVALID_COMMAND" });
-      }
-      expect(createdComputerConfigs).toHaveLength(0);
-
-      const exactGoal = "\nSave the itinerary to /tmp/unique-output.txt\n\n";
-      const started = await api.startRun(
-        "device-native",
-        "native-profile-once",
-        exactGoal,
-        { mode: "native-recovery", profileId: nativeRecoveryProfile.profileId },
-      );
-      expect(getDefaultSession).not.toHaveBeenCalled();
-      expect(started.goal).toBe(exactGoal);
-      expect(session.activeRun?.config.goal).toBe(exactGoal);
-      await expect(api.startRun(
-        "device-native",
-        "native-profile-once",
-        exactGoal.slice(0, -1),
-        { mode: "native-recovery", profileId: nativeRecoveryProfile.profileId },
-      )).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-      expect(createdComputerConfigs[0]).toMatchObject({
-        kind: "cua",
-        windowTarget: nativeRecoveryProfile.primaryTarget,
-        recoveryWindowTarget: nativeRecoveryProfile.recoveryTarget,
-        recoverBoundWindowMissing: true,
-        reopenSavedDocumentGrant: {
-          path: nativeRecoveryProfile.outputPath,
-          expectedExecutableUrl: nativeRecoveryProfile.expectedExecutableUrl,
-        },
-        windowSwitch: "opened-windows-v1",
-        windowSwitchAllowedTargets: [nativeRecoveryProfile.primaryTarget, nativeRecoveryProfile.recoveryTarget],
-        grounding: "uia-catalog-v1",
-      });
-      await session.waitForActiveRun();
-      await session.waitUntilIdleAfterTerminal();
-      expect((await api.listWindowTargets("device-native")).nativeRecoveryProfile).toBeUndefined();
-
-      await api.startRun("device-native", "native-profile-ordinary-browser", "  Read a website  ", { mode: "browser" });
-      expect(session.activeRun?.config.goal).toBe("Read a website");
-      expect(getDefaultSession).toHaveBeenCalledTimes(1);
-      expect(createdComputerConfigs[1]).not.toHaveProperty("recoverBoundWindowMissing");
-      expect(createdComputerConfigs[1]).not.toHaveProperty("recoveryWindowTarget");
-      expect(createdComputerConfigs[1]).not.toHaveProperty("reopenSavedDocumentGrant");
-      expect(createdComputerConfigs[1]).not.toHaveProperty("windowSwitchAllowedTargets");
-    } finally {
-      try {
-        await session.close();
-      } finally {
-        restorePlatform();
-        await rm(outputDir, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("offers and consumes the separate Host T3 hybrid profile through the normal API with fixed Browser origin", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-web-document-profile-"));
-    const primary = { pid: 78, windowId: 1201, appName: "TextEdit", title: "Untitled" };
-    const recovery = { pid: 78, windowId: 1202, appName: "TextEdit", title: "Untitled" };
-    const profile = {
-      profileId: "Opaque_Hybrid_Profile_12345",
-      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
-      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
-      outputPath: join(outputDir, "unique-output.txt"),
-      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-    };
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
-      summary: "The hybrid task finished.", initialWindows: [primary, recovery], nativeWebDocumentProfile: profile,
-      managedBrowserProfileCoordinator: { getDefaultSession: vi.fn(() => "saved" as const), acquireForRun: async () => async () => undefined },
-    });
-    const restorePlatform = temporarilySetProcessPlatform("darwin");
-    try {
-      expect((await api.listWindowTargets("device-hybrid")).nativeWebDocumentProfile).toEqual({
-        profileId: profile.profileId, label: "Host Browser and TextEdit recovery",
-      });
-      const exactGoal = "Search public train options and save the result to the Host document.\n";
-      const first = await api.startRun("device-hybrid", "hybrid-profile-once", exactGoal, { mode: "native-web-document", profileId: profile.profileId });
-      expect(first.goal).toBe(exactGoal);
-      expect(session.activeRun?.config.computer).toMatchObject({
-        kind: "cua", windowTarget: profile.primaryTarget, recoveryWindowTarget: profile.recoveryTarget,
-        recoverBoundWindowMissing: true, managedBrowserCompanion: true,
-        managedBrowserUrl: "https://trains.ctrip.com/", managedBrowserProfileMode: "ephemeral",
-        hybridNativeWebDocumentTargets: { primaryTarget: profile.primaryTarget, recoveryTarget: profile.recoveryTarget },
-        reopenSavedDocumentGrant: { path: profile.outputPath, expectedExecutableUrl: profile.expectedExecutableUrl },
-      });
-      expect(createdComputerConfigs[0]).toHaveProperty("windowSwitchAllowedTargets", [profile.primaryTarget, profile.recoveryTarget]);
-      expect(createdComputerConfigs[0]).not.toHaveProperty("managedBrowserProfileRoot");
-      await expect(api.startRun("device-hybrid", "hybrid-profile-once", exactGoal, { mode: "native-web-document", profileId: profile.profileId })).resolves.toMatchObject({ runId: first.runId });
-      await expect(api.startRun("device-hybrid", "hybrid-profile-once", `${exactGoal}\n`, { mode: "native-web-document", profileId: profile.profileId })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-      await expect(Promise.resolve().then(() => api.startRun("device-hybrid", "hybrid-profile-whitespace", " \n\t", { mode: "native-web-document", profileId: profile.profileId }))).rejects.toMatchObject({ code: "INVALID_COMMAND" });
-      await expect(Promise.resolve().then(() => api.startRun("device-hybrid", "hybrid-profile-oversized", ` ${"x".repeat(20_000)} `, { mode: "native-web-document", profileId: profile.profileId }))).rejects.toMatchObject({ code: "INVALID_COMMAND" });
-      await expect(api.startRun("device-hybrid", "hybrid-profile-second", exactGoal, { mode: "native-web-document", profileId: profile.profileId })).rejects.toMatchObject({ code: "NATIVE_RECOVERY_PROFILE_CONSUMED" });
-      await session.waitForActiveRun();
-    } finally {
-      try { await session.close(); } finally { restorePlatform(); await rm(outputDir, { recursive: true, force: true }); }
-    }
-  });
-
-  it("freezes the Host profile values at API construction", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-frozen-"));
-    const primary = { pid: 90, windowId: 2401, appName: "TextEdit", title: "Untitled" };
-    const recovery = { pid: 90, windowId: 2402, appName: "TextEdit", title: "Untitled" };
-    const profileId = "Opaque_Profile_2233445566";
-    const profile = {
-      profileId,
-      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
-      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
-      outputPath: join(outputDir, "unique-output.txt"),
-      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-    };
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
-      summary: "Finished",
-      initialWindows: [primary, recovery],
-      nativeRecoveryProfile: profile,
-    });
-    const restorePlatform = temporarilySetProcessPlatform("darwin");
-    profile.primaryTarget.windowId = 9999;
-    profile.outputPath = join(outputDir, "mutated-output.txt");
-    try {
-      await api.startRun("device-native", "native-profile-frozen", "Save", { mode: "native-recovery", profileId });
-      expect(createdComputerConfigs[0]).toMatchObject({
-        windowTarget: { pid: 90, windowId: 2401 },
-        recoveryWindowTarget: { pid: 90, windowId: 2402 },
-        reopenSavedDocumentGrant: { path: join(outputDir, "unique-output.txt") },
-      });
-    } finally {
-      try {
-        await session.close();
-      } finally {
-        restorePlatform();
-        await rm(outputDir, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("keeps the real Run factory Darwin-only for a Host native recovery profile", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-platform-gate-"));
-    const primary = { pid: 91, windowId: 2501, appName: "TextEdit", title: "Untitled" };
-    const recovery = { pid: 91, windowId: 2502, appName: "TextEdit", title: "Untitled" };
-    const profile = {
-      profileId: "Opaque_Profile_3344556677",
-      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
-      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
-      outputPath: join(outputDir, "unique-output.txt"),
-      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-    };
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
-      summary: "Finished",
-      initialWindows: [primary, recovery],
-      nativeRecoveryProfile: profile,
-    });
-    const restorePlatform = temporarilySetProcessPlatform("linux");
-    try {
-      await expect(api.startRun("device-native", "native-profile-non-darwin", "Save", {
-        mode: "native-recovery", profileId: profile.profileId,
-      })).rejects.toThrow(/Darwin CUA run/u);
-      expect(createdComputerConfigs).toEqual([]);
-    } finally {
-      try {
-        await session.close();
-      } finally {
-        restorePlatform();
-        await rm(outputDir, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("consumes native recovery synchronously, preserves same-command idempotency and fails closed after discovery failure", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-consume-"));
-    const primary = { pid: 88, windowId: 2201, appName: "TextEdit", title: "Untitled" };
-    const recovery = { pid: 88, windowId: 2202, appName: "TextEdit", title: "Untitled" };
-    const nativeRecoveryProfile = {
-      profileId: "Opaque_Profile_0987654321",
-      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
-      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
-      outputPath: join(outputDir, "unique-output.txt"),
-      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-    };
-    const discovery = deferred<readonly WindowTargetInfo[]>();
-    let discoveryEntered = false;
-    let discoveryCalls = 0;
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
-      summary: "The TextEdit task finished.",
-      nativeRecoveryProfile,
-      listWindowsOverride: async () => {
-        if (discoveryCalls++ === 0) { discoveryEntered = true; return discovery.promise; }
-        return [primary, recovery];
-      },
-    });
-    try {
-      const target = { mode: "native-recovery" as const, profileId: nativeRecoveryProfile.profileId };
-      for (const switchWindows of [true, false]) {
-        await expect(api.startRun("device-native", `native-profile-switch-${switchWindows}`, "Save", {
-          ...target, switchWindows,
-        } as Parameters<typeof api.startRun>[3])).rejects.toMatchObject({ code: "INVALID_TARGET" });
-      }
-      expect(createdComputerConfigs).toHaveLength(0);
-      expect(discoveryEntered).toBe(false);
-      await expect(api.startRun("device-native", "native-profile-unknown", "Save the itinerary", { ...target, profileId: "Other_Profile_1234567890" }))
-        .rejects.toMatchObject({ code: "INVALID_TARGET" });
-      const first = api.startRun("device-native", "native-profile-idempotent", "Save the itinerary", target);
-      await waitFor(() => discoveryEntered, "native recovery did not reach fresh target discovery");
-      const duplicate = api.startRun("device-native", "native-profile-idempotent", "Save the itinerary", target);
-      expect(duplicate).toBe(first);
-      await expect(api.startRun("device-native", "native-profile-second-command", "Save a different document", target))
-        .rejects.toMatchObject({ code: "NATIVE_RECOVERY_PROFILE_CONSUMED" });
-      discovery.reject(new Error("fresh native target inventory unavailable"));
-      await expect(first).rejects.toMatchObject({ code: "WINDOW_DISCOVERY_FAILED" });
-      expect((await api.listWindowTargets("device-native")).nativeRecoveryProfile).toBeUndefined();
-      await expect(api.startRun("device-native", "native-profile-after-unknown", "Save again", target))
-        .rejects.toMatchObject({ code: "NATIVE_RECOVERY_PROFILE_CONSUMED" });
-      await session.waitUntilIdleAfterTerminal();
-    } finally {
-      discovery.reject(new Error("fixture cleanup"));
-      await session.close();
-      await rm(outputDir, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects duplicate exact native recovery windows and leaves ordinary Runs without a recovery grant", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-recovery-duplicate-"));
-    const primary = { pid: 89, windowId: 2301, appName: "TextEdit", title: "Untitled" };
-    const recovery = { pid: 89, windowId: 2302, appName: "TextEdit", title: "Untitled" };
-    const nativeRecoveryProfile = {
-      profileId: "Opaque_Profile_1122334455",
-      primaryTarget: { pid: primary.pid, windowId: primary.windowId },
-      recoveryTarget: { pid: recovery.pid, windowId: recovery.windowId },
-      outputPath: join(outputDir, "unique-output.txt"),
-      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-    };
-    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
-      summary: "Finished",
-      initialWindows: [primary, recovery, recovery],
-      nativeRecoveryProfile,
-    });
-    try {
-      await expect(api.startRun("device-native", "native-profile-duplicate-target", "Save", {
-        mode: "native-recovery", profileId: nativeRecoveryProfile.profileId,
-      })).rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
-      await expect(api.startRun("device-native", "native-profile-duplicate-second", "Save again", {
-        mode: "native-recovery", profileId: nativeRecoveryProfile.profileId,
-      })).rejects.toMatchObject({ code: "NATIVE_RECOVERY_PROFILE_CONSUMED" });
-      await api.startRun("device-native", "native-profile-duplicate-ordinary", "Read a website", { mode: "browser" });
-      expect(createdComputerConfigs[0]).not.toHaveProperty("reopenSavedDocumentGrant");
-      expect(createdComputerConfigs[0]).not.toHaveProperty("recoveryWindowTarget");
-    } finally {
-      await session.close();
-      await rm(outputDir, { recursive: true, force: true });
-    }
-  });
 
   it("F045 rotates same-pair remote tokens, rejects old tokens and preserves exact source/token through structuredClone", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-remote-f045-"));

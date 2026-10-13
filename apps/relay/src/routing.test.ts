@@ -127,42 +127,14 @@ describe("relay API route allowlist", () => {
     }
   });
 
-  it("accepts only the opaque native recovery profile selector", () => {
-    const route = resolveAllowedApiRoute("POST", "/api/runs");
-    expect(route).not.toBeNull();
-    const base = { commandId: "native_recovery_start", goal: "Save the supplied local document" };
-    const profileId = "Opaque_Profile_1234567890";
-    const request = (target: Record<string, unknown>) => ({ ...base, target });
-
-    expect(isValidApiRequestBody(route!, request({ mode: "native-recovery", profileId }))).toBe(true);
-    for (const target of [
-      { mode: "native-recovery", profileId, switchWindows: true },
-      { mode: "native-recovery", profileId, switchWindows: false },
-      { mode: "native-recovery", profileId, pid: 1234 },
-      { mode: "native-recovery", profileId, windowId: 5678 },
-      { mode: "native-recovery", profileId, path: "/private/document.txt" },
-      { mode: "native-recovery", profileId, grant: { path: "/private/document.txt" } },
-      { mode: "native-recovery" },
-      { mode: "native-recovery", profileId: 1234 },
-      { mode: "native-recovery", profileId: "short" },
-      { mode: "native-recovery", profileId: "contains spaces" },
-      { mode: "native-recovery", profileId, unexpected: true },
-    ]) {
-      expect(isValidApiRequestBody(route!, request(target)), JSON.stringify(target)).toBe(false);
-    }
-  });
-
-  it("accepts the separate opaque T3 hybrid selector without native identity fields", () => {
+  it("rejects retired Host native recovery selectors from the public run API", () => {
     const route = resolveAllowedApiRoute("POST", "/api/runs")!;
-    const profileId = "Opaque_Hybrid_Profile_12345";
-    const request = (target: Record<string, unknown>) => ({ commandId: "hybrid_start", goal: "Search and save", target });
-    expect(isValidApiRequestBody(route, request({ mode: "native-web-document", profileId }))).toBe(true);
+    const request = (target: Record<string, unknown>) => ({ commandId: "retired_start", goal: "Save the supplied local document", target });
     for (const target of [
-      { mode: "native-web-document", profileId, switchWindows: false },
-      { mode: "native-web-document", profileId, url: "https://example.test" },
-      { mode: "native-web-document", profileId, pid: 99 },
-      { mode: "native-web-document", profileId, path: "/tmp/out" },
-      { mode: "native-web-document", profileId: "short" },
+      { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" },
+      { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345" },
+      { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", path: "/private/document.txt" },
+      { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345", url: "https://example.test/" },
     ]) expect(isValidApiRequestBody(route, request(target)), JSON.stringify(target)).toBe(false);
   });
 

@@ -318,10 +318,12 @@ describe("local outbound relay transport", () => {
       { commandId: "cmd_bad_browser", goal: "start a run", target: { mode: "browser", url: "ftp://example.com/" } },
       { commandId: "cmd_native_switch_true", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", switchWindows: true } },
       { commandId: "cmd_native_switch_false", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", switchWindows: false } },
+      { commandId: "cmd_native_profile", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" } },
       { commandId: "cmd_native_pid_extra", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", pid: 1234 } },
       { commandId: "cmd_native_path_extra", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", path: "/private/document.txt" } },
       { commandId: "cmd_native_missing_profile", goal: "start a run", target: { mode: "native-recovery" } },
       { commandId: "cmd_native_wrong_profile", goal: "start a run", target: { mode: "native-recovery", profileId: 1234 } },
+      { commandId: "cmd_native_web_document", goal: "start a run", target: { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345" } },
       { commandId: "cmd_hybrid_path_extra", goal: "start a run", target: { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345", path: "/private/output.txt" } },
     ];
     for (const body of invalidRunStarts) {
@@ -341,8 +343,6 @@ describe("local outbound relay transport", () => {
       { commandId: "cmd_browser_blank", goal: "start with a blank managed browser", target: { mode: "browser", url: "   " } },
       { commandId: "cmd_browser_about_blank", goal: "start with a blank managed browser", target: { mode: "browser", url: "about:blank" } },
       { commandId: "cmd_browser", goal: "start in the managed browser", target: { mode: "browser", url: "https://example.com/trips" } },
-      { commandId: "cmd_native_recovery", goal: "  start with the Host-owned native recovery profile\n正文末行。\n\n", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" } },
-      { commandId: "cmd_native_web_document", goal: "  start the fixed browser and TextEdit task\n", target: { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345" } },
       { commandId: "cmd_legacy", goal: "start with the selected window", targetToken: opaqueTargetToken },
     ];
     for (const body of acceptedRunStarts) {

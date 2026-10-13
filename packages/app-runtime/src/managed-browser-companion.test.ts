@@ -80,6 +80,7 @@ interface FixtureOptions {
   readonly textEditExecutableUrl?: string;
   readonly includeRecoveryWindow?: boolean;
   readonly hybridOutputPath?: string;
+  readonly nativeWebDocumentGrant?: { readonly outputPath: string; readonly expectedExecutableUrl: string };
 }
 
 interface FixtureMetrics {
@@ -434,6 +435,15 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
     ...(options.allowedTargets === undefined ? {} : { windowSwitchAllowedTargets: options.allowedTargets }),
     ...(options.initialGrounding === undefined ? {} : { grounding: options.initialGrounding }),
     ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
+    ...(options.nativeWebDocumentGrant === undefined ? {} : {
+      recoveryWindowTarget: RECOVERY_TARGET,
+      recoverBoundWindowMissing: true,
+      reopenSavedDocumentGrant: {
+        path: options.nativeWebDocumentGrant.outputPath,
+        expectedExecutableUrl: options.nativeWebDocumentGrant.expectedExecutableUrl,
+      },
+      hybridNativeWebDocumentTargets: { primaryTarget: options.initialTarget ?? NATIVE_TARGET, recoveryTarget: RECOVERY_TARGET },
+    }),
     ...(options.profileMode === undefined ? {} : { managedBrowserProfileMode: options.profileMode }),
     ...(options.profileLabel === undefined ? {} : { managedBrowserProfileLabel: options.profileLabel }),
     ...(options.profileRoot === undefined ? {} : { managedBrowserProfileRoot: options.profileRoot }),
@@ -456,6 +466,11 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
     riskTimeoutMs: 100,
     cleanupDeadlineMs: 500,
     ...(options.initialGrounding === undefined ? {} : { grounding: options.initialGrounding }),
+    ...(options.nativeWebDocumentGrant === undefined ? {} : {
+      windowHandoff: "confirm-v1" as const,
+      windowSwitch: "opened-windows-v1" as const,
+      recoverBoundWindowMissing: true,
+    }),
   };
   const session = new ApplicationSession({
     config,
@@ -479,73 +494,7 @@ async function runFixture(session: ApplicationSession, windowSwitch: "off" | "op
 }
 
 describe("managed browser companion through ApplicationSession and the real tool registry", () => {
-  it("runs the Host hybrid profile through ApplicationSession and production CUA without merging Browser into native recovery scope", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "hybrid-browser-textedit-runtime-"));
-    const canonicalOutputDir = await realpath(outputDir);
-    const profilePath = join(canonicalOutputDir, "itinerary.txt");
-    const executable = join(canonicalOutputDir, "TextEdit.app", "Contents", "MacOS", "TextEdit");
-    await mkdir(join(canonicalOutputDir, "TextEdit.app", "Contents", "MacOS"), { recursive: true });
-    await writeFile(executable, "fixture executable");
-    const executableUrl = pathToFileURL(executable).href;
-    const restorePlatform = temporarilySetProcessPlatform("darwin");
-    const { session, metrics } = await createFixture(outputDir, {
-      steps: [{ kind: "list", callId: "hybrid-list" }, { kind: "switch", callId: "hybrid-switch", listCallId: "hybrid-list", targetTitle: "Managed Edge" }, { kind: "finish" }],
-      companion: true, initialTarget: NATIVE_TARGET,
-      allowedTargets: [NATIVE_TARGET, RECOVERY_TARGET], initialGrounding: "hybrid-catalog-v1",
-      includeRecoveryWindow: true,
-      managedBrowserUrl: "https://trains.ctrip.com/",
-      textEditExecutableUrl: executableUrl,
-    });
-    try {
-      const hybridHandle = await session.startRun("fixed T3 fixture\n", {
-        windowTarget: NATIVE_TARGET,
-        windowDeliveryMode: "foreground",
-        windowSwitch: "opened-windows-v1",
-        windowHandoff: "confirm-v1",
-        grounding: "hybrid-catalog-v1",
-        managedBrowserCompanion: true,
-        managedBrowserUrl: "https://trains.ctrip.com/",
-        nativeWebDocument: {
-          primaryTarget: NATIVE_TARGET,
-          recoveryTarget: RECOVERY_TARGET,
-          outputPath: profilePath,
-          expectedExecutableUrl: executableUrl,
-        },
-      });
-      const hybridOutcome = await session.waitForActiveRun();
-      expect(hybridOutcome).toBe("succeeded");
-      expect(hybridHandle.controller.getSnapshot().modelRequestCount).toBe(3);
-      expect(metrics.hostOptions[0]).toMatchObject({ url: "https://trains.ctrip.com/", profileMode: "ephemeral" });
-      expect(metrics.delegateOptions[0]).toMatchObject({
-        windowTarget: NATIVE_TARGET,
-        recoveryWindowTarget: RECOVERY_TARGET,
-        windowSwitchAllowedTargets: [NATIVE_TARGET, RECOVERY_TARGET],
-        recoverBoundWindowMissing: true,
-        reopenSavedDocumentGrant: { path: profilePath },
-        hybridNativeWebDocumentCapability: {
-          primaryTarget: NATIVE_TARGET,
-          recoveryTarget: RECOVERY_TARGET,
-          managedBrowserTarget: { windowTarget: BROWSER_TARGET, profileId: "fixture-profile" },
-        },
-      });
-      expect(metrics.delegateOptions[0]?.windowSwitchAllowedTargets).not.toContainEqual(BROWSER_TARGET);
-      expect(metrics.provider.listedWindows).toHaveLength(1);
-      expect(metrics.provider.listedWindows[0]?.map((window) => window.title)).toContain("Managed Edge");
-      expect(metrics.provider.listedWindows[0]?.map((window) => window.title)).not.toContain("Prepared blank");
-      expect(metrics.domTargets).toEqual([BROWSER_TARGET]);
-      expect(metrics.bootstrap.opens).toBe(1);
-      expect(metrics.host.starts).toBe(1);
-    } finally {
-      try {
-        await session.close();
-      } finally {
-        restorePlatform();
-        await rm(outputDir, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("keeps Browser research, completed TextEdit close, exact recovery, and one reopen in one Runtime run", async () => {
+  it("keeps Browser research, completed TextEdit close, exact Host recovery, and one reopen in one direct Run", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "hybrid-browser-textedit-reopen-runtime-"));
     const canonicalOutputDir = await realpath(outputDir);
     const profilePath = join(canonicalOutputDir, "itinerary.txt");
@@ -558,6 +507,13 @@ describe("managed browser companion through ApplicationSession and the real tool
       includeRecoveryWindow: true,
       hybridOutputPath: profilePath,
       textEditExecutableUrl: executableUrl,
+      companion: true,
+      initialTarget: NATIVE_TARGET,
+      allowedTargets: [NATIVE_TARGET, RECOVERY_TARGET],
+      initialGrounding: "hybrid-catalog-v1",
+      managedBrowserUrl: "https://example.test/research",
+      profileMode: "ephemeral",
+      nativeWebDocumentGrant: { outputPath: profilePath, expectedExecutableUrl: executableUrl },
       steps: [
         { kind: "list", callId: "t3-list-browser" },
         { kind: "switch", callId: "t3-switch-browser", listCallId: "t3-list-browser", targetTitle: "Managed Edge" },
@@ -573,20 +529,12 @@ describe("managed browser companion through ApplicationSession and the real tool
       ],
     });
     try {
-      const handle = await session.startRun("Search the fixed trains page and save the itinerary in the supplied document\n", {
-        windowTarget: NATIVE_TARGET,
-        windowDeliveryMode: "foreground",
-        windowSwitch: "opened-windows-v1",
-        windowHandoff: "confirm-v1",
-        grounding: "hybrid-catalog-v1",
-        managedBrowserCompanion: true,
-        managedBrowserUrl: "https://trains.ctrip.com/",
-        nativeWebDocument: { primaryTarget: NATIVE_TARGET, recoveryTarget: RECOVERY_TARGET, outputPath: profilePath, expectedExecutableUrl: executableUrl },
-      });
+      const handle = await session.startRun("Search the explicitly selected site and save the itinerary in the Host-granted document\n");
       const outcome = await session.waitForActiveRun();
       const events = handle.controller.getEvents();
       const failures = events.filter((event) => event.type === "runtime.error" || event.type === "action.execution.failed");
       expect(outcome, JSON.stringify(failures)).toBe("succeeded");
+      expect(metrics.hostOptions[0]).toMatchObject({ url: "https://example.test/research", profileMode: "ephemeral" });
       expect(metrics.domTargets).toEqual([BROWSER_TARGET]);
       expect(metrics.delegateCalls.filter((call) => call.name === "launch_app")).toHaveLength(1);
       expect(metrics.delegateCalls.find((call) => call.name === "launch_app")?.input).toMatchObject({ urls: [pathToFileURL(profilePath).href] });
@@ -612,22 +560,24 @@ describe("managed browser companion through ApplicationSession and the real tool
     }
   });
 
-  it.each([false, true])("restores desktop/native clicks while browser clicks stay blocked (DOM capture failure: %s)", async (failDomCapture) => {
+  it.each([false, true])("keeps raw clicks bound to the exact selected window across Browser/native surfaces (DOM capture failure: %s)", async (failDomCapture) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-companion-surface-click-"));
     const fixture = await createFixture(outputDir, {
       companion: true,
+      initialTarget: NATIVE_TARGET,
+      allowedTargets: [NATIVE_TARGET],
       failDomCapture,
       steps: [
         { kind: "click", callId: "desktop-click", expectedEnabled: true },
         { kind: "list", callId: "desktop-list" },
         { kind: "switch", callId: "to-browser", listCallId: "desktop-list", targetTitle: "Managed Edge" },
-        { kind: "click", callId: "blocked-browser-click", expectedEnabled: false },
+        { kind: "click", callId: "browser-click", expectedEnabled: true },
         { kind: "list", callId: "browser-list" },
         { kind: "switch", callId: "to-native", listCallId: "browser-list", targetTitle: "Native Editor" },
         { kind: "click", callId: "native-click", expectedEnabled: true },
         { kind: "list", callId: "native-list" },
         { kind: "switch", callId: "back-to-browser", listCallId: "native-list", targetTitle: "Managed Edge" },
-        { kind: "click", callId: "blocked-browser-click-again", expectedEnabled: false },
+        { kind: "click", callId: "browser-click-again", expectedEnabled: true },
         { kind: "finish" },
       ],
     });
@@ -636,11 +586,17 @@ describe("managed browser companion through ApplicationSession and the real tool
       const failures = handle.controller.getEvents().filter((event) => event.type === "runtime.error" || event.type === "action.execution.failed");
       expect(outcome, JSON.stringify(failures)).toBe("succeeded");
       const clicks = fixture.metrics.delegateDriver.calls.filter((call) => call.name === "click");
-      expect(clicks).toHaveLength(2);
-      expect(clicks[0]?.input).toMatchObject({ target: { kind: "desktop", display_id: "primary" } });
-      expect(clicks[1]?.input).toMatchObject({ target: { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId } });
+      expect(clicks).toHaveLength(4);
+      expect(clicks[0]?.input).toMatchObject({ target: { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId } });
+      expect(clicks.map((call) => call.input?.target)).toEqual([
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+      ]);
       const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
       expect(observations.some((event) => event.observation.surfaceRef.kind === (failDomCapture ? "browser_tab" : "dom"))).toBe(true);
+      expect(observations.some((event) => event.observation.surfaceRef.kind === "native_window")).toBe(true);
     } finally {
       await fixture.session.close();
       await rm(outputDir, { recursive: true, force: true });

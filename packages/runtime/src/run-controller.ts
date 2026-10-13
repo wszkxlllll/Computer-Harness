@@ -723,9 +723,6 @@ export class RunController {
       }
       session = await this.computer.open(this.computerOpenOptions, this.abortController.signal);
       this.activeComputerSession = session;
-      if (this.recoverBoundWindowMissing && session.platform !== "darwin") {
-        throw new Error("bound-window recovery is supported only for Darwin computer sessions");
-      }
       await this.commitEvent({ type: "computer.open.completed", session });
       await this.observeAndCommit(session);
 

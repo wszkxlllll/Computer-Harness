@@ -448,6 +448,35 @@ describe("F045 strict completed bound-window missing boundary", () => {
     } as unknown as CuaDriverComputerOptions)).not.toThrow();
   });
 
+  it("keeps bound-window recovery Darwin-only at the CUA open boundary", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-recovery-platform-"));
+    const fake = windowDriver();
+    fake.setPlatform("win32");
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "win32",
+      socketPath: "fixture",
+      screenshotDir: directory,
+      windowTarget: fake.target,
+      recoveryWindowTarget: recoveryTarget,
+      recoverBoundWindowMissing: true,
+      windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target, recoveryTarget],
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      await expect(computer.open({}, new AbortController().signal))
+        .rejects.toThrow("bound-window recovery is currently supported only on Darwin");
+      expect(fake.calls.filter((call) => call.name === "startSession")).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.name === "list_windows")).toHaveLength(0);
+      expect(fake.calls.filter((call) => call.name === "endSession")).toHaveLength(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects hybrid identity drift, extra native targets, and unmarked legacy recovery combinations", () => {
     const fake = windowDriver();
     const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };

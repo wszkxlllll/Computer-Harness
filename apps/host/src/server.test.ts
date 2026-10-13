@@ -37,18 +37,13 @@ function snapshot(sequence = 0): RemoteRunSnapshot {
   };
 }
 
-function fakeApi(
-  nativeRecoveryProfile?: { readonly profileId: string; readonly label: string },
-  nativeWebDocumentProfile?: { readonly profileId: string; readonly label: string },
-): RemoteRunApi {
+function fakeApi(): RemoteRunApi {
   return {
     listRuns: () => [snapshot()],
     getRun: (_deviceId, id) => id === runId ? snapshot(0) : undefined,
     listWindowTargets: async () => ({
       candidates: [{ token: targetToken, appName: "Fixture app", title: "Fixture window" }],
       expiresAt: "2026-09-26T00:10:00.000Z",
-      ...(nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile }),
-      ...(nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile }),
     }),
     previewWindowTarget: async (_deviceId, candidateToken) => Object.assign({
       previewToken: "P".repeat(32),
@@ -104,10 +99,8 @@ function jsonResponse<T>(response: { json(): T }): T {
 }
 
 describe("Host HTTP boundary", () => {
-  it("exposes only the opaque native profile id and accepts only its exact selector shape", async () => {
-    const profileId = "Opaque_Profile_1234567890";
-    const hybridProfileId = "Opaque_Hybrid_Profile_12345";
-    const api = fakeApi({ profileId, label: "Host TextEdit recovery" }, { profileId: hybridProfileId, label: "Host Browser and TextEdit recovery" });
+  it("rejects retired native recovery target modes at the Host boundary", async () => {
+    const api = fakeApi();
     const startRun = vi.fn(api.startRun);
     const host = createHostServer({ api: { ...api, startRun }, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin });
     try {
@@ -119,7 +112,7 @@ describe("Host HTTP boundary", () => {
       }));
       const token = new URL(pairing.pairingUrl).searchParams.get("token")!;
       const pairRequest = jsonResponse<{ requestId: string }>(await host.server.inject({
-        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Recovery profile fixture" },
+        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Retired profile fixture" },
       }));
       await host.server.inject({
         method: "POST", url: `/api/local/pairing/requests/${pairRequest.requestId}/confirm`,
@@ -132,55 +125,22 @@ describe("Host HTTP boundary", () => {
       const cookie = String(paired.headers["set-cookie"]).split(";")[0];
       const headers = { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken };
 
-      const choices = await host.server.inject({ method: "GET", url: "/api/windows", headers: { origin: relayOrigin, cookie } });
-      expect(jsonResponse(choices).nativeRecoveryProfile).toEqual({ profileId, label: "Host TextEdit recovery" });
-      expect(jsonResponse(choices).nativeWebDocumentProfile).toEqual({ profileId: hybridProfileId, label: "Host Browser and TextEdit recovery" });
-      expect(containsPrivateWindowIdentityKey(jsonResponse(choices))).toBe(false);
-
-      const extraRawFields = await host.server.inject({
-        method: "POST", url: "/api/runs", headers,
-        payload: { commandId: "native-profile-extra", goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId, pid: 77, windowId: 1101 } },
-      });
-      expect(extraRawFields.statusCode).toBe(400);
-
-      for (const switchWindows of [true, false]) {
-        const targetExtra = await host.server.inject({
-          method: "POST", url: "/api/runs", headers,
-          payload: { commandId: `native-profile-switch-${switchWindows}`, goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId, switchWindows } },
-        });
-        expect(targetExtra.statusCode).toBe(400);
-      }
-      expect(startRun).not.toHaveBeenCalled();
-
-      const exactGoal = "  Save the file to /tmp/itinerary.txt\n正文末行。\n\n";
-      const started = await host.server.inject({
-        method: "POST", url: "/api/runs", headers,
-        payload: { commandId: "native-profile-valid", goal: exactGoal, target: { mode: "native-recovery", profileId } },
-      });
-      expect(started.statusCode).toBe(202);
-      expect(startRun).toHaveBeenCalledWith(expect.any(String), "native-profile-valid", exactGoal, { mode: "native-recovery", profileId }, undefined, false);
-
-      for (const target of [
-        { mode: "native-web-document", profileId: hybridProfileId, url: "https://example.test/" },
-        { mode: "native-web-document", profileId: hybridProfileId, pid: 77 },
-        { mode: "native-web-document", profileId: hybridProfileId, path: "/tmp/output.txt" },
-        { mode: "native-web-document", profileId: hybridProfileId, switchWindows: false },
-      ]) {
+      const choices = jsonResponse<Record<string, unknown>>(await host.server.inject({ method: "GET", url: "/api/windows", headers: { origin: relayOrigin, cookie } }));
+      expect(choices).not.toHaveProperty("nativeRecoveryProfile");
+      expect(choices).not.toHaveProperty("nativeWebDocumentProfile");
+      expect(containsPrivateWindowIdentityKey(choices)).toBe(false);
+      for (const [index, mode] of ["native-recovery", "native-web-document"].entries()) {
         const invalid = await host.server.inject({ method: "POST", url: "/api/runs", headers,
-          payload: { commandId: `hybrid-invalid-${startRun.mock.calls.length}`, goal: exactGoal, target },
+          payload: { commandId: `retired-profile-${index}`, goal: "Save a document", target: { mode, profileId: "Opaque_Profile_1234567890" } },
         });
         expect(invalid.statusCode).toBe(400);
       }
-      const hybrid = await host.server.inject({ method: "POST", url: "/api/runs", headers,
-        payload: { commandId: "hybrid-profile-valid", goal: exactGoal, target: { mode: "native-web-document", profileId: hybridProfileId } },
-      });
-      expect(hybrid.statusCode).toBe(202);
-      expect(startRun).toHaveBeenCalledWith(expect.any(String), "hybrid-profile-valid", exactGoal,
-        { mode: "native-web-document", profileId: hybridProfileId }, undefined, false);
+      expect(startRun).not.toHaveBeenCalled();
     } finally {
       await host.close();
     }
   });
+
 
   it("exposes only the authenticated managed-profile contract and keeps commands idempotent", async () => {
     const operationId = "11111111-1111-4111-8111-111111111111";

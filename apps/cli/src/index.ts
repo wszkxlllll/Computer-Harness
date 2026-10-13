@@ -128,17 +128,25 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     computer,
     doctor,
   });
+  const managedBrowserUrlValue = value("--managed-browser-url");
+  const managedBrowserUrl = managedBrowserUrlValue === undefined ? undefined : validateManagedBrowserUrl(managedBrowserUrlValue);
+  const hybridNativeWebDocumentRequested = recoverBoundWindowMissing
+    && groundingValue === "hybrid-catalog-v1"
+    && managedBrowserUrl !== undefined
+    && reopenSavedDocumentPath !== undefined;
   if (reopenSavedDocumentPath !== undefined && (!isAbsolute(reopenSavedDocumentPath) || reopenSavedDocumentPath.trim() !== reopenSavedDocumentPath)) {
     throw new Error("--reopen-saved-document requires one exact absolute file path");
   }
-  if (reopenSavedDocumentPath !== undefined && (!recoverBoundWindowMissing || computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch || tui || argv.includes("--interactive") || value("--managed-browser-url") !== undefined)) {
-    throw new Error("--reopen-saved-document requires a native CUA Run with --window-switch and the exact primary/recovery targets");
+  if (reopenSavedDocumentPath !== undefined && (!recoverBoundWindowMissing || computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch || tui || argv.includes("--interactive") ||
+      (managedBrowserUrl !== undefined || groundingValue === "hybrid-catalog-v1") && !hybridNativeWebDocumentRequested)) {
+    throw new Error("--reopen-saved-document requires a direct CUA Run with --window-switch and exact primary/recovery targets; hybrid browser recovery also requires an explicit URL and hybrid grounding");
   }
   if (recoverBoundWindowMissing && (computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch)) {
     throw new Error("--recover-bound-window-missing requires CUA, both exact window targets, and --window-switch");
   }
-  if (recoverBoundWindowMissing && (tui || groundingValue === "dom-catalog-v1" || groundingValue === "hybrid-catalog-v1" || value("--managed-browser-url") !== undefined)) {
-    throw new Error("--recover-bound-window-missing is available only for a native Darwin CUA window Run");
+  if (recoverBoundWindowMissing && (tui || groundingValue === "dom-catalog-v1" ||
+      ((groundingValue === "hybrid-catalog-v1" || managedBrowserUrl !== undefined) && !hybridNativeWebDocumentRequested))) {
+    throw new Error("--recover-bound-window-missing is available only for a direct native Darwin CUA Run or the exact hybrid saved-document experiment");
   }
   if (!recoverBoundWindowMissing && cuaRecoveryWindowTarget !== undefined) {
     throw new Error("--cua-recovery-window-pid/--cua-recovery-window-id require --recover-bound-window-missing");
@@ -150,8 +158,6 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   if (groundingValue === "uia-catalog-v1" && (computer !== "cua" || cuaWindowTarget === undefined)) {
     throw new Error("--grounding uia-catalog-v1 requires --computer cua and an explicit --cua-window-pid/--cua-window-id target");
   }
-  const managedBrowserUrlValue = value("--managed-browser-url");
-  const managedBrowserUrl = managedBrowserUrlValue === undefined ? undefined : validateManagedBrowserUrl(managedBrowserUrlValue);
   const managedGrounding = groundingValue === "dom-catalog-v1" || groundingValue === "hybrid-catalog-v1";
   if (managedGrounding && computer !== "cua") {
     throw new Error(`--grounding ${groundingValue} requires --computer cua and the shared CUA socket`);
@@ -159,7 +165,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   if (managedGrounding && managedBrowserUrl === undefined) {
     throw new Error(`--grounding ${groundingValue} requires --managed-browser-url <http(s)-url>`);
   }
-  if (managedGrounding && cuaWindowTarget !== undefined) {
+  if (managedGrounding && cuaWindowTarget !== undefined && !hybridNativeWebDocumentRequested) {
     throw new Error(`--grounding ${groundingValue} owns its temporary managed-browser window; omit --cua-window-pid/--cua-window-id`);
   }
   if (windowSwitch && computer !== "cua") throw new Error("--window-switch requires --computer cua");
@@ -173,6 +179,9 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   }
   if (managedBrowserProfileModeValue === "ephemeral" && managedBrowserProfileLabel !== undefined) {
     throw new Error("--managed-browser-profile-label requires --managed-browser-profile-mode persistent");
+  }
+  if (hybridNativeWebDocumentRequested && managedBrowserProfileModeValue !== "ephemeral") {
+    throw new Error("the hybrid saved-document experiment requires an ephemeral managed-browser profile");
   }
   if (prepareManagedBrowserProfileValue) {
     if (computer !== "cua") throw new Error("--prepare-managed-browser-profile requires --computer cua");
@@ -319,6 +328,7 @@ async function main(): Promise<void> {
     process.stdout.write("TUI-only: --grounding auto selects UIA for native windows, DOM + UIA for a selected Harness-managed browser, and off for desktop.\n");
     process.stdout.write("TUI-only: --window-selection jev requires --allow-window-title-sharing and TYPESAFE_API_KEY; default is local.\n");
     process.stdout.write("Run option: --window-switch opts into switching among listed opened windows in a CUA session, including the primary desktop. In TUI, choose features with F; app names and titles go to the main Provider.\n");
+    process.stdout.write("Experimental direct Run only: --recover-bound-window-missing plus exact --cua-window-* and --cua-recovery-window-* targets can use --reopen-saved-document <absolute-path>; hybrid browser recovery additionally requires --grounding hybrid-catalog-v1, an explicit --managed-browser-url, and the ephemeral profile. Not available in TUI or the phone API.\n");
     process.stdout.write("Run option: --source-linked-finish-contract <json> explicitly requires a bounded source-linked-finish-v1 field contract for this Run.\n");
     process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
@@ -499,10 +509,15 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
   const glmRequestTimeoutMs = rawGlmRequestTimeoutMs === undefined ? undefined : Number(rawGlmRequestTimeoutMs.trim());
   validateGlmRequestTimeoutMs(glmRequestTimeoutMs);
   const managedBrowserInitialTarget = options.grounding === "dom-catalog-v1" || options.grounding === "hybrid-catalog-v1";
-  const managedBrowserCompanion = options.windowSwitch
+  const hybridNativeWebDocument = options.recoverBoundWindowMissing
+    && options.grounding === "hybrid-catalog-v1"
+    && options.reopenSavedDocumentPath !== undefined
+    && options.cuaWindowTarget !== undefined
+    && options.cuaRecoveryWindowTarget !== undefined;
+  const managedBrowserCompanion = hybridNativeWebDocument || (options.windowSwitch
     && !options.tui
     && !managedBrowserInitialTarget
-    && options.managedBrowserUrl !== undefined;
+    && options.managedBrowserUrl !== undefined);
   return {
     goal,
     model: options.model,
@@ -523,6 +538,12 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
               expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
             },
           }),
+          ...(hybridNativeWebDocument ? {
+            hybridNativeWebDocumentTargets: {
+              primaryTarget: options.cuaWindowTarget!,
+              recoveryTarget: options.cuaRecoveryWindowTarget!,
+            },
+          } : {}),
           grounding: options.grounding === "auto" ? "off" : options.grounding,
           ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
           managedBrowserProfileMode: options.managedBrowserProfileMode,
@@ -581,7 +602,7 @@ function validateManagedBrowserUrl(value: string): string {
   } catch {
     throw new Error("--managed-browser-url must be an explicit http(s) URL");
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:" || parsed.hostname.length === 0) {
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.hostname.length === 0 || parsed.username.length > 0 || parsed.password.length > 0) {
     throw new Error("--managed-browser-url must be an explicit http(s) URL");
   }
   return trimmed;

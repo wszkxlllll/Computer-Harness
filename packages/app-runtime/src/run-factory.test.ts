@@ -40,6 +40,50 @@ function config(outputDir: string): ResolvedRunConfig {
   };
 }
 
+function hybridNativeRecoveryConfig(outputDir: string, managedBrowserUrl: string): ResolvedRunConfig {
+  const primary = { pid: 101, windowId: 501 };
+  const recovery = { pid: 101, windowId: 502 };
+  return {
+    ...config(outputDir),
+    windowSwitch: "opened-windows-v1",
+    windowHandoff: "confirm-v1",
+    recoverBoundWindowMissing: true,
+    grounding: "hybrid-catalog-v1",
+    computer: {
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: join(outputDir, "screenshots"),
+      windowTarget: primary,
+      recoveryWindowTarget: recovery,
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [primary, recovery],
+      recoverBoundWindowMissing: true,
+      managedBrowserCompanion: true,
+      managedBrowserUrl,
+      managedBrowserProfileMode: "ephemeral",
+      hybridNativeWebDocumentTargets: { primaryTarget: primary, recoveryTarget: recovery },
+      reopenSavedDocumentGrant: {
+        path: join(outputDir, "authorized-output.txt"),
+        expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+      },
+    },
+  };
+}
+
+async function withDarwinPlatform<T>(run: () => Promise<T>): Promise<T> {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  if (originalPlatform === undefined || originalPlatform.configurable !== true) {
+    throw new Error("test runtime does not allow restoring a temporary process.platform override");
+  }
+  Object.defineProperty(process, "platform", { ...originalPlatform, value: "darwin" });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(process, "platform", originalPlatform);
+    expect(process.platform).toBe(originalPlatform.value);
+  }
+}
+
 function fakeComputer(calls: { open: number; observe: number; close: number }): Computer {
   const viewport: Viewport = { width: 1, height: 1, coordinateSpace: "physical" };
   const session = {
@@ -204,6 +248,131 @@ describe("app-runtime RunHandle", () => {
         .rejects.toThrow(/exact native window switching/u);
       await expect(createRun({ ...nativeRecoveryConfig, computer: { ...cua, grounding: "hybrid-catalog-v1" } }, {}))
         .rejects.toThrow(/exact native window switching/u);
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "https://catalog-one.example/items?q=fixture",
+    "http://store-two.example:8080/products",
+    "about:blank",
+  ])("accepts an explicit managed-browser URL for hybrid native recovery: %s", async (managedBrowserUrl) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-hybrid-native-recovery-url-"));
+    const calls = { open: 0, observe: 0, close: 0 };
+    let computerConfig: ResolvedRunConfig["computer"] | undefined;
+    try {
+      await withDarwinPlatform(async () => {
+        const handle = await createRun(hybridNativeRecoveryConfig(outputDir, managedBrowserUrl), {
+          createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "unused" }; } }),
+          createComputer: (options) => {
+            computerConfig = options.config;
+            const computer = fakeComputer(calls);
+            return Promise.resolve({ ...computer, async listWindows() { return []; } });
+          },
+        });
+
+        expect(handle.config.computer).toMatchObject({
+          kind: "cua",
+          managedBrowserUrl,
+          managedBrowserProfileMode: "ephemeral",
+          managedBrowserCompanion: true,
+          windowTarget: { pid: 101, windowId: 501 },
+          recoveryWindowTarget: { pid: 101, windowId: 502 },
+          hybridNativeWebDocumentTargets: {
+            primaryTarget: { pid: 101, windowId: 501 },
+            recoveryTarget: { pid: 101, windowId: 502 },
+          },
+          reopenSavedDocumentGrant: {
+            path: join(outputDir, "authorized-output.txt"),
+            expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+          },
+        });
+        expect(computerConfig).toMatchObject({
+          kind: "cua",
+          managedBrowserUrl,
+          managedBrowserProfileMode: "ephemeral",
+          managedBrowserCompanion: true,
+        });
+        await handle.close();
+      });
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe hybrid recovery URLs before creating Run resources", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-hybrid-native-recovery-unsafe-url-"));
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    const createComputer = vi.fn(() => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })));
+    try {
+      await withDarwinPlatform(async () => {
+        await expect(createRun(hybridNativeRecoveryConfig(outputDir, "https://user:secret@example.test/path"), {
+          createProvider,
+          createComputer,
+        })).rejects.toThrow(/credential-free http\(s\) managedBrowserUrl/iu);
+      });
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps hybrid native recovery limited to ephemeral managed-browser profiles", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-hybrid-native-recovery-persistent-profile-"));
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    const createComputer = vi.fn(() => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })));
+    try {
+      await withDarwinPlatform(async () => {
+        const ephemeral = hybridNativeRecoveryConfig(outputDir, "https://generic.example/path");
+        if (ephemeral.computer.kind !== "cua") throw new Error("hybrid recovery fixture must use CUA");
+        await expect(createRun({
+          ...ephemeral,
+          computer: {
+            ...ephemeral.computer,
+            managedBrowserProfileMode: "persistent",
+            managedBrowserProfileLabel: "default",
+            managedBrowserProfileRoot: join(outputDir, "persistent-profile"),
+          },
+        }, { createProvider, createComputer })).rejects.toThrow(/ephemeral managed Browser/iu);
+      });
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a missing hybrid recovery URL and mismatched target pair", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-hybrid-native-recovery-target-gate-"));
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    try {
+      await withDarwinPlatform(async () => {
+        const withUrl = hybridNativeRecoveryConfig(outputDir, "https://generic.example/path");
+        const computerWithoutUrl = { ...withUrl.computer };
+        if (computerWithoutUrl.kind !== "cua") throw new Error("hybrid recovery fixture must use CUA");
+        delete computerWithoutUrl.managedBrowserUrl;
+        await expect(createRun({ ...withUrl, computer: computerWithoutUrl }, { createProvider }))
+          .rejects.toThrow(/explicit URL/iu);
+
+        const withMismatchedTarget = {
+          ...withUrl,
+          computer: {
+            ...withUrl.computer,
+            hybridNativeWebDocumentTargets: {
+              ...withUrl.computer.hybridNativeWebDocumentTargets!,
+              recoveryTarget: { pid: 101, windowId: 999 },
+            },
+          },
+        };
+        await expect(createRun(withMismatchedTarget, { createProvider }))
+          .rejects.toThrow(/exact Host-authorized window targets/iu);
+      });
+      expect(createProvider).not.toHaveBeenCalled();
       expect(await readdir(outputDir)).toEqual([]);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
@@ -1479,7 +1648,7 @@ describe("app-runtime RunHandle", () => {
           kind: "cua", socketPath: "fixture.sock", screenshotDir: join(outputDir, "screenshots"),
           windowTarget: { pid: 42, windowId: 84 }, recoveryWindowTarget: { pid: 42, windowId: 85 },
           windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 42, windowId: 85 }],
-          recoverBoundWindowMissing: true, managedBrowserCompanion: true, managedBrowserUrl: "https://trains.ctrip.com/",
+          recoverBoundWindowMissing: true, managedBrowserCompanion: true, managedBrowserUrl: "https://example.test/",
           reopenSavedDocumentGrant: { path: join(outputDir, "output.txt"), expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
         },
       }, { createProvider, createComputer })).rejects.toThrow(/bound-window recovery requires/iu);

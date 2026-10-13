@@ -92,14 +92,15 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   const hybridNativeWebDocumentRequested = input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined;
   if (input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined && (input.computer.managedBrowserProfileMode !== "ephemeral" ||
       input.computer.managedBrowserProfileLabel !== undefined || input.computer.managedBrowserProfileRoot !== undefined ||
-      input.computer.managedBrowserUrl !== "https://trains.ctrip.com/" || input.computer.managedBrowserCompanion !== true ||
+      // Keep URL policy in prepareComputerRunAssembly's shared managed-browser validator.
+      input.computer.managedBrowserUrl === undefined || input.computer.managedBrowserCompanion !== true ||
       input.computer.windowTarget === undefined || input.computer.recoveryWindowTarget === undefined ||
       input.computer.hybridNativeWebDocumentTargets === undefined ||
       input.computer.hybridNativeWebDocumentTargets.primaryTarget.pid !== input.computer.windowTarget.pid ||
       input.computer.hybridNativeWebDocumentTargets.primaryTarget.windowId !== input.computer.windowTarget.windowId ||
       input.computer.hybridNativeWebDocumentTargets.recoveryTarget.pid !== input.computer.recoveryWindowTarget.pid ||
       input.computer.hybridNativeWebDocumentTargets.recoveryTarget.windowId !== input.computer.recoveryWindowTarget.windowId)) {
-    throw new Error("T3 hybrid requires one fixed-url ephemeral Browser and the exact Host TextEdit recovery pair");
+    throw new Error("hybrid native-web recovery requires an ephemeral managed Browser, an explicit URL, and exact Host-authorized window targets");
   }
   if (companionRequested && browserInitialGrounding && !hybridNativeWebDocumentRequested) {
     throw new Error("managed browser companion cannot also be the initial browser target");

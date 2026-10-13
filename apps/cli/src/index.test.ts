@@ -95,6 +95,48 @@ describe("CLI window-switch configuration", () => {
     expect(() => parseArgs([...baseArgs, "--reopen-saved-document", "relative/output.txt"])).toThrow(/absolute file path/u);
   });
 
+  it("keeps hybrid saved-document recovery as an explicit direct-Run experiment", () => {
+    const args = [
+      "--goal", "Research the page and reopen the saved document",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      "--cua-recovery-window-pid", "43", "--cua-recovery-window-id", "85",
+      "--reopen-saved-document", "/tmp/one-run-output.txt",
+      "--grounding", "hybrid-catalog-v1",
+      "--managed-browser-url", "https://example.test/research",
+    ];
+    const options = parseArgs(args);
+    const config = toResolvedRunConfig(options, options.goal!);
+    expect(config.windowSwitch).toBe("opened-windows-v1");
+    expect(config.computer).toMatchObject({
+      kind: "cua",
+      grounding: "hybrid-catalog-v1",
+      managedBrowserCompanion: true,
+      managedBrowserUrl: "https://example.test/research",
+      managedBrowserProfileMode: "ephemeral",
+      windowTarget: { pid: 42, windowId: 84 },
+      recoveryWindowTarget: { pid: 43, windowId: 85 },
+      windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 43, windowId: 85 }],
+      recoverBoundWindowMissing: true,
+      hybridNativeWebDocumentTargets: {
+        primaryTarget: { pid: 42, windowId: 84 },
+        recoveryTarget: { pid: 43, windowId: 85 },
+      },
+      reopenSavedDocumentGrant: { path: "/tmp/one-run-output.txt" },
+    });
+
+    expect(() => parseArgs(args.filter((value, index) => !(value === "--managed-browser-url" || args[index - 1] === "--managed-browser-url"))))
+      .toThrow(/explicit URL|hybrid grounding/u);
+    expect(() => parseArgs([...args, "--managed-browser-profile-mode", "persistent", "--managed-browser-profile-label", "Travel"]))
+      .toThrow(/ephemeral/u);
+    expect(() => parseArgs([...args, "--tui"]))
+      .toThrow(/direct CUA Run|hybrid/u);
+  });
+
   it("assembles the real CLI recovery config with the effective native window-switch setting", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-cli-recovery-assembly-"));
     const options = parseArgs([
