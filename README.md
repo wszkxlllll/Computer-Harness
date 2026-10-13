@@ -92,7 +92,7 @@ Model Provider 负责理解目标并提出下一步动作；Computer Adapter 负
 
 CUA 是独立的上游 Computer-Use Driver，并不是 Computer Harness 的自研组件。本项目主要实现其上的 **Runtime、Surface 生命周期、执行控制、Context / Planning / Run Memory、风险与用户控制、Host 和多入口接入层**。
 
-Windows、macOS 和 Linux 共用公共协议，不同平台可以采用不同 Computer Adapter 和底层能力。
+Windows 和 macOS 共用公共协议与 Runtime；输入、窗口证据等平台机制分别实现，Session、Surface 与执行生命周期统一管理。
 
 > [系统架构图]
 
@@ -129,7 +129,7 @@ Windows、macOS 和 Linux 共用公共协议，不同平台可以采用不同 Co
 
 - Node.js `>=22.13.0`
 - pnpm `11.19.0`
-- 与平台配对的 CUA SDK / daemon：Windows、macOS `0.22.2`，Linux `0.32.0`
+- 与平台配对的 CUA SDK / daemon：Windows、macOS `0.22.2`
 - GLM 或 Qwen Provider Key
 
 复制本机配置：
@@ -182,8 +182,9 @@ OpenClaw 不是 Computer Harness 的运行依赖，但这些真实系统问题�
 | 平台 | 当前状态 |
 | --- | --- |
 | **Windows** | 当前验证最深入，主要 Runtime、CUA Adapter 和本地 Host 路径围绕 Windows 开发与测试 |
-| **macOS** | 公共协议和适配工作正在推进，完整真实桌面链路仍需继续验证 |
-| **Linux** | 已按平台路由 CUA `0.32.0`，仍需针对不同显示后端和权限环境继续验证 |
+| **macOS** | 窗口、sheet 与受限文稿恢复已集成，平台机制与共享 Runtime 分离；完整真实桌面链路仍需独立验收 |
+
+最新集成已通过完整离线回归与 CI，保留 Windows 输入及手机无障碍改动；当前运行的 Preview 未随源码切版。具体版本与验收边界见[集成记录](./docs/pr26-integration-audit-2026-10-11.md)。
 
 当前 Demo 和统一跨应用评测仍在整理，因此暂不发布整体成功率。
 

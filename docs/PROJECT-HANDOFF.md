@@ -1,6 +1,6 @@
 # Computer Harness：项目交接入口
 
-更新：2026-09-27。PR #15 已合并，手机界面已部署；真实任务与平台能力仍按独立证据判断。下一阶段统一由[完整产品待办与分工清单](./product-next-stage-task-list-2026-09-27.md)安排，尚未分配负责人。
+更新：2026-10-13。PR22 已集成 PR25、PR28、修正后的 PR29 和 PR26，保留 Windows 输入、语音及手机无障碍；Win/Mac 私有机制拆分、工具合同统一和实验入口隔离完成。代码 `aaac0f5` 完整 Vitest 2324/2324，交付提交 `b58cc4c` 的 CI 全部通过；Preview 未切版。详细证据见[集成与审计记录](./pr26-integration-audit-2026-10-11.md)，后续任务见[产品待办](./product-next-stage-task-list-2026-09-27.md)。下方旧检查点保留为历史，不代表当前部署或本轮实机结果。
 
 ## 1. 项目目标
 
@@ -34,9 +34,11 @@ Pi 式改造的重点是薄应用入口、明确组合根和可替换策略，�
 
 ## 4. 最新验证事实
 
-- 2026-09-27：PR #15 已合并；`4215599` 的 Windows Node 22、macOS Node 22、Linux Node 22/24 及总检查全部通过。此前 Windows 单测审批等待竞态已改为提交事件同步。新版 Web 公网资源与本地 Host 配对注册通过；详见[当前界面与审批记录](./mobile-accessible-ui-implementation-2026-09-26.md)。下列为历史检查点，不代表当前 CI 仍失败。
+- 2026-10-13：独立集成类型/构建、Web 生产构建和完整离线回归通过；Sol 源码与最后测试增量审查 GO，独立25项通过。下一步是 Windows/macOS 真实跨应用与弹窗、手机语音/VoiceOver验收；本轮没有真实 API、桌面输入或部署。以下为前期检查点。
 
-- staging 修复后新增复验：Windows Node 24 与服务器 Linux Node 24 均通过 736 项 Vitest，公网模拟链路切换前后通过；服务器已切换 release `2026-09-26-02`。修复纳入 PR #14 更新，GitHub CI 以最新 head 的检查为准。准确版本、依赖补齐过程及未覆盖项见[修复与发布记录](./mobile-staging-fixes-2026-09-26.md)。以下 725 项记录保留为先前检查点。
+- 2026-09-27：PR #15 已合并；`4215599` 的桌面与 Node 兼容 CI 及总检查全部通过。此前 Windows 单测审批等待竞态已改为提交事件同步。新版 Web 公网资源与本地 Host 配对注册通过；详见[当前界面与审批记录](./mobile-accessible-ui-implementation-2026-09-26.md)。下列为历史检查点，不代表当前 CI 仍失败。
+
+- staging 修复后新增复验：Windows Node 24 与中继服务器 Node 24 均通过 736 项 Vitest，公网模拟链路切换前后通过；服务器已切换 release `2026-09-26-02`。修复纳入 PR #14 更新，GitHub CI 以最新 head 的检查为准。准确版本、依赖补齐过程及未覆盖项见[修复与发布记录](./mobile-staging-fixes-2026-09-26.md)。以下 725 项记录保留为先前检查点。
 
 - 归档后提交前复验：Node 24.19.0 / pnpm 11.19.0，根构建及 Web 构建通过，74 个 Vitest 文件、725 项在低并发下通过，TAP 19 通过、1 项权限跳过。默认并发曾有一次 Relay 联合测试 5 秒超时，单独和低并发全量复测通过；未修改断言/超时，也未声称冷安装或远端 CI 已通过。详见[复验记录](./mobile-control-technical-report-2026-09-26.md#9-归档与分支提交前复验)。
 - Sol 独立复核了 Host/Relay、恢复锁、审批预览和 CUA 诊断等定向内容；准确范围见[审查记录](./mobile-control-review-2026-09-26.md)，不是本轮重新审完所有业务模块。

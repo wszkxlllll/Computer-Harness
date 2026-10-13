@@ -10,7 +10,7 @@
 
 协调者在独立集成工作树以 Node 24.19.0、pnpm 11.19.0 验证：根类型检查/项目构建、Web 生产构建通过；最终完整 Vitest **130 文件、2324/2324 通过**。按 `scripts/test.mjs` 清单执行的 Node 自测 **72 项：71 通过、0 失败、1 项本机文件符号链接权限跳过**，不冒充72项全部执行；构建后的 CLI help smoke 通过。依赖锁文件未变，未共享旧工作树的 dist。
 
-Sol medium 对 `fdcf509..HEAD`、`594fa8e..HEAD` 与解耦增量三向审查，源码 **GO、无可证 P0/P1/P2 阻塞项**；独立小范围 **5 文件、25/25** 通过。最后3个测试文件的增量复核也是 GO，确认未改生产规则、预算、timeout或跳过条件。上述通过范围是离线代码/合同验收，不是 Windows/Mac 真实桌面、模型 API、实体手机 VoiceOver 或业务 Demo 验收。远端状态以 [PR22 最新检查](https://github.com/wszkxlllll/Computer-Harness/pull/22)为准，不用原PR26的CI代替集成版本。
+Sol medium 对 `fdcf509..HEAD`、`594fa8e..HEAD` 与解耦增量三向审查，源码 **GO、无可证 P0/P1/P2 阻塞项**；独立小范围 **5 文件、25/25** 通过。最后3个测试文件的增量复核也是 GO，确认未改生产规则、预算、timeout或跳过条件。交付提交 `b58cc4cdcb263b4a513d3b1a08cf8fe9d2ff0205` 已推入 PR22，[CI 38418800406 五项全绿](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38418800406)。上述通过范围是离线代码/合同验收，不是 Windows/Mac 真实桌面、模型 API、实体手机 VoiceOver 或业务 Demo 验收；后续以PR22新提交的实际检查为准。
 
 失败历史保留：首轮类型检查发现自动合并重复常量/函数、inventory 类型及控制工具判别式问题；首轮37文件定向回归 **999/1025 通过、26项失败**；随后首次全仓 **2320/2324 通过、4项失败**。完整报告保留于隔离工作树忽略目录，不抹掉失败或提高全局超时。
 

@@ -2,7 +2,7 @@
 
 ## 最新队友提交复审（2026-10-13）
 
-[PR26 集成与有限解耦完成记录](./pr26-integration-audit-2026-10-11.md)：以己方PR22/PR28/修正后的PR29及无障碍基线吸收PR26 `594fa8e`，代码冻结 `aaac0f5`。Windows输入和人机控制保留；平台机制拆为四个私有模块，来源结果工具合同回归Registry，两个测试专用手机入口移出公共层、保留CLI受限实验闭环。根类型/构建、Web生产构建及完整Vitest **130文件2324/2324** 通过；Node自测71通过/0失败/1环境跳过；Sol源码与最后测试增量审查GO，独立25项通过。远端以PR22最新CI为准；本轮没有实机/API/部署或Preview切版。下方旧的准备态、未合入及部署时点按历史保留，以本条和报告顶部为准。
+[PR26 集成与有限解耦完成记录](./pr26-integration-audit-2026-10-11.md)：PR22 已吸收 PR26 `594fa8e`，保留PR28/修正后的PR29及无障碍基线，代码冻结 `aaac0f5`、交付 `b58cc4c`。Windows/macOS机制拆为四个私有模块，工具合同统一，公共实验入口隔离。完整Vitest **130文件2324/2324**、构建通过；Node自测71通过/0失败/1环境跳过；Sol两次复核GO，独立25项通过。[交付CI五项全绿](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38418800406)。本轮没有实机/API/部署或Preview切版；下一步是双端真实任务及手机验收。下方旧状态按历史保留，以本条为准。
 
 ## M01点击修复与真实GLM运行（2026-10-13）
 
@@ -14,7 +14,7 @@
 
 ## PR26早期审查（历史，以顶部复审为准）
 
-[PR26分级问题与整合门槛](./pr26-integration-audit-2026-10-11.md)：10月13日续审 PR26 6c0af49、PR28 06b5974，双方最新 CI 全绿。PR26 仅新增文档，承认 Mac T2 受限 CLI 三轮成果，但共享恢复/平台等 review 问题尚无代码整改；可推进集成准备，暂不整包合入或替换 Preview。PR28 新增通用浏览器导航期限小修复及六项来源预检，可独立处理。产品保持 Windows/Mac，Linux 桌面暂停；队友的 Mac 分工不等于产品放弃 Windows。本轮没有修改业务源码或部署。
+[PR26分级问题与整合门槛](./pr26-integration-audit-2026-10-11.md)：保留6c0af49阶段的失败、整改和Mac受限CLI证据；该阶段尚未整包合入的结论已由顶部集成完成记录覆盖。产品目标为Windows/macOS，成员分工不覆盖整个项目范围。
 
 ## 非视觉 Web 接入与原部署记录（2026-10-10）
 
@@ -68,7 +68,7 @@ PR #25完整历史与手机体验改动已集成PR #22；源码head `d2ee1a3`对
 
 历史窄路径证据：[窗口与中途播报修复（2026-10-04 早期）](./window-and-progress-repair-results-2026-10-04.md)。保留记事本菜单返回、WPS 列窗切换和播报样本，不作为本轮完整任务验收。历史失败诊断见[携程→记事本轨迹](./travel-window-and-speech-diagnosis-2026-10-03.md)，用户已确认开始/取消有声音，缺的是中途播报，不是完全静音。
 
-main 与三平台跨窗口验收：[三平台进度同步（2026-10-03）](./platform-cross-window-status-2026-10-03.md)。PR #21 已合并；本轮已吸收 main 的队友改动，PR #22 修复源码四组 CI 全绿并发布隔离 Preview。macOS/Linux 跨窗口实机仍待验收；最新部署与完整任务分项以顶部收尾入口为准。
+历史跨窗口进度：[平台进度同步（2026-10-03）](./platform-cross-window-status-2026-10-03.md)。PR #21 合并及早期CI、隔离Preview记录保留；当前Windows/macOS源码集成、部署与实机状态分别以顶部交付记录为准。
 队友 main 整合记录：[Mac 与 Runtime Surface 兼容审查](./macos-runtime-surface-integration-2026-10-03.md)。保留整合版本、冲突取舍、离线与 Windows 实机验收边界及 main 合并结果；本轮再整合后的状态以顶部收尾入口为准。
 
 A 线三聊天协作：[修复、实机测试与远端审查入口](./a-line-three-thread-coordination-2026-10-03.md)。聊天（8）负责修复、（10）负责实机测试、（6）负责远端代码更新和审查；当前共用同一 Git 分支，提交与运行版本切换须串行协调。
@@ -97,7 +97,7 @@ Surface Registry 与 Windows transient-child 当前交接：[Surface Registry �
 
 常用网站入口：[URL 选择器实施记录](./common-site-url-picker-implementation-2026-10-02.md)。Web 可选注入带标签的 URL 目录，默认空；选择只填入现有起始网址字段并须明确提交，浏览器 saved/temporary 默认值在设置中管理。
 
-下一阶段完整待办与分工入口：[产品开发、验证与稳定 Demo 清单](./product-next-stage-task-list-2026-09-27.md)。覆盖桌面执行、手机/语音、个性化、Guard、三平台、现有模块优化、评测发布及后续研究；第11节为可认领任务全集，第12节为认领规则。分工尚待用户确认。
+下一阶段完整待办与分工入口：[产品开发、验证与稳定 Demo 清单](./product-next-stage-task-list-2026-09-27.md)。覆盖桌面执行、手机/语音、个性化、Guard、Windows/macOS、现有模块优化、评测发布及后续研究；第11节为可认领任务全集，第12节为认领规则。分工尚待用户确认。
 
 语音阶段 A+B1 实施记录：[语音合同、运行通知与 Host/Web 播报](./voice-streaming-and-notices-implementation-2026-09-28.md)。Host/RemoteRunAPI 可选投影最小 `run.notice` SSE 事件，手机显式开启后，新 Run 可朗读结构化中文审批提示、已验证 milestone 摘要、问题和结果；过期审批、SSE 重放、旧快照与敏感正文均有降级边界。Web 使用可替换的 Browser `speechSynthesis` 输出并固定请求普通话，真实云端 TTS 尚未接入。阶段 B2 已实现手机录音、Host 流式 ASR 会话与 Qwen Provider，mock、真实短探针和手机链路仍需按实施记录继续验收：[阶段 B2 实施记录](./voice-recording-b2-implementation-2026-09-29.md)。
 
@@ -143,7 +143,7 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 
 最新部署与 CI 复核：[手机 staging 进度、失败归因及修复顺序](./mobile-staging-ci-audit-2026-09-26.md)。公网安卓测试使用模拟执行后端，不能替代 Windows 实机验收。
 
-部署历史：[修复、独立公网检查与部署状态](./mobile-staging-fixes-2026-09-26.md)。包含此前 staging 复验命令和回滚证据。PR #15 已合并，修复 head `4215599` 的三平台 CI 全通过；当前 Web 部署与真实验收缺口以手机 App 式界面实施记录为准。
+部署历史：[修复、独立公网检查与部署状态](./mobile-staging-fixes-2026-09-26.md)。包含此前 staging 复验命令和回滚证据。PR #15 已合并，修复 head `4215599` 的CI全通过；当前 Web 部署与真实验收缺口以手机 App 式界面实施记录为准。
 
 新成员从以下五份主文档接手；源码与测试共同维护当前事实。
 
@@ -159,11 +159,10 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 - SDK 与模块装配：[Run SDK 示例](./sdk-run-composition.md)、[Planning / Run Memory 组合](./pi-module-composition-2026-09-23.md)。
 - 手机控制：[快速操作指南](./mobile-control-guide-2026-09-26.md)、[技术与测试报告](./mobile-control-technical-report-2026-09-26.md)、[独立审查](./mobile-control-review-2026-09-26.md)、[问题与验收边界](./mobile-control-issues-2026-09-26.md)。
 - 实机验收：[窗口与出行验收清单](./deferred-live-window-acceptance-2026-09-26.md)、[CUA 坐标与输入诊断](./cua-coordinate-diagnosis-2026-09-26.md)。受控诊断入口为 `../scripts/cua-type-text-smoke.mjs`、`../scripts/cua-window-capture-probe.mjs`、`../scripts/cua-window-handoff-probe.mjs`；执行前须阅读各自 help 并取得桌面测试授权。
-- Linux CUA 实机证据：[0.32.0 配对验证摘要](./cua-linux-0320-upgrade-verification-2026-10-02.md)。这是作者在 Plasma X11 上的仓库外 SDK/daemon 验证报告，不代表当前 Runtime adapter 已接入 0.32.0；Wayland 未测试。
 - 政务与出行评测：[上海真实 Harness 试点与入口预检](./shanghai-government-travel-pilot-2026-10-01.md)。旧批次17个终态Run/10道原题的成绩不变；新增2026-10-02只读预检：SG01–SG04公开资料可读，SG05官方普通身份证办点已核实、公交链仍待验证，不当作新实机通过。历史准备：[试点准备](./travel-pilot-preparation-2026-09-20.md)、[任务卡与反馈表](./travel-task-cards-and-feedback.md)。
 - 政务与公共服务候选任务：[任务卡](./government-task-cards.md)（[candidate manifest](../eval/government/government-candidate-manifest.v0.json)）。来源为 PR #18（Yao GX / @Tangs-mo）；该 PR 说明政务域已交接。当前是未验证设计草稿，不作为活动题库或评测成绩证据。
 - 生活缴费与就医候选任务（PR #18，Yao GX / @Tangs-mo）：[社区缴费 C01–C10 宽集草稿](./community-payment-task-cards.md)（[manifest](../eval/candidates/community-payment/community-payment-candidate-manifest.v0.json)）；D01 精选的社区 CP01–CP03 与就医 M01–M03 共六族，见[社区任务卡](./community-payment-d01-task-cards.md)（[manifest](../eval/candidates/community-payment/community-payment-d01-manifest.v0.json)）和[就医任务卡](./medical-care-d01-task-cards.md)（[manifest](../eval/candidates/medical/medical-d01-manifest.v0.json)）。全部是未验证候选，不是活动题库或成绩；D01 是宽集的精选子集，不能与 C01–C10 当作独立样本。
-- OSWorld 与候选集：[环境说明](./osworld-environment-implementation.md)、[复现说明](./stage-5-osworld-reproducibility.md)、[G0 预检进度](./g0-preflight-progress-2026-09-10.md)、[候选任务清单](./harness-development-validation-candidates-2026-09-10.json)、[Linux 平台验证记录](./linux-platform-adaptation-2026-09-17.md)。
+- OSWorld 与候选集：[环境说明](./osworld-environment-implementation.md)、[复现说明](./stage-5-osworld-reproducibility.md)、[G0 预检进度](./g0-preflight-progress-2026-09-10.md)、[候选任务清单](./harness-development-validation-candidates-2026-09-10.json)。
 - [开发文档规范](./development-documentation-standard.md)约束入口、证据和历史材料的维护方式。
 - [本地缺陷复现探针](./verification/audit-39ff27f9-local-probes.mjs)作为独立验证工具保留。
 

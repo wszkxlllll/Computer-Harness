@@ -51,11 +51,10 @@ pnpm.cmd test
 
 ## 3. CUA SDK 按平台路由
 
-TypeScript workspace 同时安装两个固定版本的 SDK alias；computer-cua 按运行平台懒加载对应客户端和平台 binding。不会自动安装或启动 daemon。受支持的版本配对是 Windows/macOS 使用 SDK 与 daemon `0.22.2`，Linux 使用 SDK 与 daemon `0.32.0`；SDK 与 daemon 必须同版本且 contract 版本匹配。跨版本组合（例如 SDK `0.22.2` 连 daemon `0.32.0`）会由 doctor 标记为 `unknown`，不能作为受支持组合：
+当前上手范围为 Windows/macOS，使用 SDK 与 daemon `0.22.2` 配对。computer-cua 按运行平台懒加载对应客户端和原生 binding，不会自动安装或启动 daemon。SDK 与 daemon 必须同版本且 contract 版本匹配；跨版本组合会由 doctor 标记为 `unknown`，不能作为受支持组合。仓库保留的其他兼容依赖以锁文件和第三方声明为准，不作为本指南的安装目标：
 
 - [官方 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)
 - [官方 daemon 生命周期文档（main 分支可变参考；固定版本以 release 为准）](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/keep-running.mdx)
-- Linux `0.32.0` 的仓库内验证记录：[CUA Linux 0.32.0 升级验证](./cua-linux-0320-upgrade-verification-2026-10-02.md)。该记录覆盖 Plasma X11，不代表 Wayland 或其他 compositor 已验证。
 
 选择当前平台对应的 daemon release，并按该 release 提供的 checksum 校验下载物。不要用另一平台的 SDK alias 或把不同版本的 SDK 与 daemon 混用。
 
@@ -63,7 +62,6 @@ TypeScript workspace 同时安装两个固定版本的 SDK alias；computer-cua 
 
 - Windows：使用登录用户的真实桌面会话；服务会话、Session 0 或 RDP 切换可能改变屏幕/焦点权限。
 - macOS：按系统提示授予 Accessibility 和 Screen Recording；窗口可见不等于这些权限已生效。
-- Linux：X11、Wayland 和不同 compositor 的捕获/焦点/输入能力不同；先记录实际环境，不要把 Linux 代码构建通过写成桌面能力通过。
 
 本项目 Windows/CUA 0.22.2 窄路径实测的 daemon 入口形态是 `cua-driver serve --socket "<private-socket>"`；其他平台按对应 release 的安装/权限说明准备 daemon。release 页用于固定资产和 checksum，不把 main 文档或 release 描述当作本项目所有平台的 flag 证据：
 
@@ -83,7 +81,7 @@ node apps/cli/dist/index.js --doctor --computer cua --cua-socket "<private-socke
 
 ### CUA 探针
 
-`spikes/cua-driver` 的直接 SDK 依赖仍固定为 `0.22.2`，下列旧探针不会采用 computer-cua 的平台 alias 路由；不要用它们验证 Linux `0.32.0` daemon。当前平台配对请先使用上方 Harness `--doctor`，再按专用桌面授权执行当前 adapter 的集成验证。
+`spikes/cua-driver` 的直接 SDK 依赖固定为 `0.22.2`，下列旧探针不会采用 computer-cua 的平台 alias 路由。先使用上方 Harness `--doctor` 核对平台配对，再按专用桌面授权执行当前 adapter 的集成验证。
 
 默认探针只做只读能力检查；输出目录可能包含当前桌面截图，只能在专用桌面运行并保持本地。输入探针不是任务执行器，也不会判断点击是否符合目标：
 
@@ -147,7 +145,7 @@ Gate 2 和模型 runner 的完整参数以上述 Bridge/Stage 5 文档为准；R
 | `--tui requires an interactive terminal` | stdin/stdout 是否真实 TTY；PowerShell 重定向、CI 和普通管道不能启动 TUI |
 | 普通 Run 报 `--model is required` | Run 必须显式 `--model`；只有 doctor 使用内部占位值 |
 | Qwen 参数报 coordinate 错误 | 加 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`，并按需选择 thinking/output mode |
-| CUA socket 连接失败 | 当前平台的 SDK/daemon 版本是否配对（Windows/macOS 0.22.2、Linux 0.32.0）、socket 是否相同、桌面会话和平台权限是否有效 |
+| CUA socket 连接失败 | Windows/macOS 的 SDK/daemon 是否均为 0.22.2、socket 是否相同、桌面会话和平台权限是否有效 |
 | doctor 输出 `unknown` | 把它当作未确认边界；不要以 npm 版本、RPC envelope 或静态 tool 名单推断实际 daemon 能力 |
 | window action 被拒绝 | window PID/ID、observation 和 geometry 是否仍有效；当前不支持 keyboard、自动发现或 desktop fallback |
 | 运行后找不到“回复” | 查看 TUI 的 waiting/failure/final reply 区块与 `runs/<output>`；没有终稿时 UI 会明确显示 unknown/failure，不生成虚构答案 |
@@ -156,7 +154,7 @@ TUI 必须将焦点放在当前终端，不注册全局热键；visible input �
 
 ### 受管浏览器窗口身份
 
-受管 Edge／Chromium 启动必须同时满足进程归属、CDP 选定窗口和唯一原生窗口证据。几何核对对位置与尺寸逐项限制边框差异（最多 16 DIP），不从候选宽高比例推断缩放，不选最大或最接近的窗口。Windows／当前 X11 后端使用选定目标的两次原生 `Page.getLayoutMetrics`：物理 viewport 与 CSS viewport 的比值除以 page zoom，得到 CDP 外窗 DIP 到 CUA 原生像素的尺度，并验证横纵及前后读数一致。macOS 两边均为屏幕点，按 1:1 比较。窗口身份不使用页面脚本可改写的 `window.devicePixelRatio`；DOM 内容坐标转换仍保留其独立合同。
+受管 Edge／Chromium 启动必须同时满足进程归属、CDP 选定窗口和唯一原生窗口证据。几何核对对位置与尺寸逐项限制边框差异（最多 16 DIP），不从候选宽高比例推断缩放，不选最大或最接近的窗口。Windows 使用选定目标的两次原生 `Page.getLayoutMetrics`：物理 viewport 与 CSS viewport 的比值除以 page zoom，得到 CDP 外窗 DIP 到 CUA 原生像素的尺度，并验证横纵及前后读数一致。macOS 两边均为屏幕点，按 1:1 比较。窗口身份不使用页面脚本可改写的 `window.devicePixelRatio`；DOM 内容坐标转换仍保留其独立合同。
 
 缺失、异常或变化中的尺度证据只允许 1:1 的有界帧差；多个合法候选仍拒绝 `multiple_candidates`。当前合同针对本机受管浏览器及已选定的本机 CUA 后端，不代表 Wayland 原生、混合 DPI 或任意多屏原点已经实机验收。拒绝时保留 CDP／CUA 几何诊断，不扩大容差或改用整屏冒充受管 DOM 成功。
 
