@@ -52,6 +52,7 @@ describe("source-linked finish validation", () => {
     const defaultFinishes = defaultRegistry.list().filter((tool) => tool.control === "finish");
     expect(defaultFinishes).toHaveLength(1);
     expect(defaultFinishes[0]?.name).toBe("terminate");
+    expect(defaultFinishes[0]?.description).toBe("Call exactly once to finish, with both required arguments: status must be success or failure, and text must be the complete user-facing result. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion.");
     expect(JSON.stringify(defaultFinishes[0]?.inputSchema)).not.toContain("resultEvidence");
 
     const registry = createDefaultToolRegistry({ sourceLinkedFinish: contract });
@@ -61,6 +62,9 @@ describe("source-linked finish validation", () => {
     const schema = finishes[0]?.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
     expect(schema?.properties).toHaveProperty("resultEvidence");
     expect(schema?.required).toEqual(["status", "text", "resultEvidence"]);
+    expect(finishes[0]?.description).toContain("all three required arguments");
+    expect(finishes[0]?.description).toContain("resultEvidence");
+    expect(finishes[0]?.description).toMatch(/do not semantically verify the reported claims/u);
     expect(registry.modelTools().filter((tool) => tool.name === "terminate")).toHaveLength(1);
   });
 

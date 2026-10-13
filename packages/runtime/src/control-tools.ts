@@ -18,7 +18,9 @@ export function defaultControlTools(options: ControlToolFactoryOptions = {}): re
   return [
     {
       name: "terminate",
-      description: "Call exactly once to finish, with both required arguments: status must be success or failure, and text must be the complete user-facing result. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion.",
+      description: sourceLinkedFinish === undefined
+        ? "Call exactly once to finish, with both required arguments: status must be success or failure, and text must be the complete user-facing result. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion."
+        : "Call exactly once to finish, with all three required arguments: status must be success or failure, text must be the complete user-facing result, and resultEvidence must follow the source-linked evidence schema. Source references are checked against this Run's committed observations and elements; they do not semantically verify the reported claims. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion.",
       category: "control",
       control: "finish",
       inputSchema: createTerminateInputSchema(sourceLinkedFinish !== undefined),
