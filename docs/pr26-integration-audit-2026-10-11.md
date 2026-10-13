@@ -2,19 +2,49 @@
 
 起始审计日期：2026-10-11（Asia/Shanghai）。对象：[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)。后续用户已授权 review、PR29 集成，以及 PR26 的独立集成与有限解耦；各时点的操作范围以最新记录为准。
 
-## 2026-10-13 集成实施记录（进行中，未部署）
+## 2026-10-13 集成与有限解耦完成记录（代码验收通过，未部署）
 
 用户已确认上述边界，授权 Luna max 实施、Sol medium 审查。以己方 `fdcf509` 加准备记录 `e6e4269` 建立独立集成分支 `codex/pr26-platform-integration-20261013`，吸收 PR26 `594fa8e`，保留双方作者历史；原运行工作树、Host、Relay、Preview 未替换。
 
-本轮独立验证：首轮类型检查发现自动合并重复常量/函数、inventory 类型及控制工具判别式问题，修正后根类型检查与 Web 生产构建通过。首轮 37 文件定向回归为 **999/1025 通过、26 项失败**，完整失败报告保留于隔离工作树忽略目录，不把失败抹掉或调整全局超时。
+代码冻结版本为 `aaac0f5850d3c37f16d3b8c58a405c03995865dc`。集成提交 `30b59fa` 保留双父历史；`df0fe59` 为平台机制拆分，`57c865a` 为可选结束合同描述修正，`f96a8f0` 为公共实验入口隔离，`aaac0f5` 为最后的测试合同/等待修正。未改写队友作者，也未升级 CUA SDK 或切换本机候选驱动。
+
+协调者在独立集成工作树以 Node 24.19.0、pnpm 11.19.0 验证：根类型检查/项目构建、Web 生产构建通过；最终完整 Vitest **130 文件、2324/2324 通过**。按 `scripts/test.mjs` 清单执行的 Node 自测 **72 项：71 通过、0 失败、1 项本机文件符号链接权限跳过**，不冒充72项全部执行；构建后的 CLI help smoke 通过。依赖锁文件未变，未共享旧工作树的 dist。
+
+Sol medium 对 `fdcf509..HEAD`、`594fa8e..HEAD` 与解耦增量三向审查，源码 **GO、无可证 P0/P1/P2 阻塞项**；独立小范围 **5 文件、25/25** 通过。最后3个测试文件的增量复核也是 GO，确认未改生产规则、预算、timeout或跳过条件。上述通过范围是离线代码/合同验收，不是 Windows/Mac 真实桌面、模型 API、实体手机 VoiceOver 或业务 Demo 验收。远端状态以 [PR22 最新检查](https://github.com/wszkxlllll/Computer-Harness/pull/22)为准，不用原PR26的CI代替集成版本。
+
+失败历史保留：首轮类型检查发现自动合并重复常量/函数、inventory 类型及控制工具判别式问题；首轮37文件定向回归 **999/1025 通过、26项失败**；随后首次全仓 **2320/2324 通过、4项失败**。完整报告保留于隔离工作树忽略目录，不抹掉失败或提高全局超时。
 
 - 18 项 Runtime 原生窗口恢复用例的 fake 仍返回 desktop Surface，未进入原生 handoff 分支；只修正这些用例的 Surface 身份，保留整桌面不触发原生 handoff 的生产保护。修正后该文件 **183/183** 通过。
 - 来源结果合同测试固定匹配工具目录文字，遗漏参数 description；改核对实际出站参数/版本/引用与 Qwen flat calls 后，独立 **5/5** 通过，无 Provider 生产修改。
-- 其余 CUA/DOM/文件身份夹具失败逐项处理中；平台私有拆分、公共实验入口隔离和 Sol 最终审查尚未完成。本节不作为最终集成验收。
+- 其余 CUA/DOM/文件身份夹具已修正：Windows parent-swap用例使用真正目录junction维持symlink拒绝证明；同名不同frame不伪造歧义，重叠歧义仍拒绝；合成hit-test支持真实onclick列表项，遮挡仍拒绝。相关原生输入/浏览器负例保留。
+- 首次全仓的4项也已关闭：两处工具测试明确Win显式UIA引用与adapter私有自动绑定的边界、匹配当前描述语义；暂停纠正用例改为等待已提交handoff事件并竞争提前终态；Host旧plain-text mock被真实GLM协议拒绝后耗尽1次请求预算，改为合法terminate响应，预算及零HTTP预检负例不变。
 
 Windows 最终取舍已固定：保留私有 foreground-caret 配置/默认前台路径，以及原准入和 readback 下的显式 UIA 追加；不吸收 PR26 无条件禁用全部 Windows UIA 多行的规则。Mac 不自动绑定 Windows UIA 引用。Windows/Mac 仍共用 Session/Surface/Receipt/事件和取消/未知副作用语义，不复制 Computer 主类。
 
-## 2026-10-13 集成前准备复核（尚未开始合并）
+### 实际解耦边界与回归保护
+
+| 实现位置 | 实际职责 | 仍留在共享协调层 |
+| --- | --- | --- |
+| `computer-cua/src/cua-platform-input.ts` | 平台输入路由/按键请求决策，保留Win caret与UIA追加、Mac原生输入差异 | 实际执行生命周期、取消、Receipt、unknown及观察 |
+| `computer-cua/src/windows-transient-evidence.ts` | 既有Win32 owner/瞬态窗口证据判断 | 候选发现调度、Surface准入与push/pop |
+| `computer-cua/src/macos-attached-sheet-evidence.ts` | Mac sheet证明解析与校验 | capture、generation及父子Surface推进 |
+| `computer-cua/src/macos-saved-document.ts` | 受限Mac文档/文件身份与单文件授权校验 | 一次性尝试消费、launch、状态变更和失败传播 |
+
+四模块不依赖 `PrivateSession` 或 `SurfaceRegistry`，SDK加载继续由已有 `cua-sdk-platform.ts` 负责。持久 `platformResolution` 孤立副本移除，保留真正消费的有效platform。未建立第二套Computer、主循环或通用插件框架。
+
+来源结果的terminate schema改由Runtime工厂在Run组装时注册为唯一工具合同；Context只投影Registry，Provider按当前已启用工具映射。启用时描述与三必填参数一致，关闭时原描述/schema不变；自定义Context可换文案和消息布局，不绑定固定prompt模板。恢复只开放list/switch时不强行暴露terminate。该结果引用功能仍是可选的来源绑定，不能证明任务语义成功。
+
+公共Host/Web/Relay/API/AppSession移除了 `native-recovery`、`native-web-document` 两种实验目标和Profile DTO；两组Host环境变量解析器及其测试已删除，Git历史可恢复。普通auto/window/browser/desktop、登录profile、无障碍、语音、个性化保持。固定携程编排不再进入生产共享层；旧实验文档/评测清单保留为历史证据，不再作为现行手机入口指令。
+
+实验仍有实际消费者：现有CLI direct Run，必须显式开启有限恢复、提供精确primary/recovery窗口与单文件授权；混合浏览器组合另要求显式HTTP(S) URL、hybrid grounding与ephemeral profile，不能经TUI或手机API偷偷开启。完整Browser→原生文稿→关闭→精确恢复→一次重开的离线正例保留。文档身份仍受限于已实现的TextEdit证据，不宣称支持任意编辑器。
+
+曾在机械整合中发现过严的“content UIA无DOM等价就全拒绝”门，已经撤回：DOM完整时的content Hyperlink过滤、唯一DOM别名走CDP、明确遮挡后不得native回退均保留；DOM missing/partial不是控件不可用的证明。浏览器仍可用已授权的视觉坐标点击，window模式四次点击精确绑定Native/Browser窗口，desktop模式四次保持desktop授权，不互相混淆。
+
+### 后续操作
+
+本轮没有真实API、桌面输入、SSH部署或服务重启；原运行工作树和Preview release保持。下一步是用户安排空闲时段后，对集成版本做Windows跨应用/弹窗任务、由Mac队友做真实sheet/文稿任务，再核手机语音/VoiceOver与截图交互。获确认后另行切Preview并保留回退；源码/CI通过不等于上述实机完成。
+
+## 2026-10-13 集成前准备复核（历史方案，以顶部完成记录为准）
 
 用户要求先了解双方现状，再决定合并中的解耦范围。本节是准备方案，不是实施完成声明；覆盖下方旧的“直接吸收前序整改即可”的简化建议。
 
