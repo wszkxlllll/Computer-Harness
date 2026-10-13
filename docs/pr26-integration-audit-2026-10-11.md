@@ -10,6 +10,8 @@
 
 文档索引保留双方入口，使用说明同步真实过滤范围；Web 无障碍、Runtime、Provider、Voice 源码没有因 PR29 被覆盖。集成状态下协调者执行 **34 文件、689/689 项定向回归**，包括完整 Web 227、Voice/语音 Provider 41、RemoteRunApi 72、CUA 284、受管浏览器 57、DOM 8；Web/CUA 类型检查通过。网页源码与 a897fc6 一致。远端 CI 以 [PR22 当前检查](https://github.com/wszkxlllll/Computer-Harness/pull/22)的最终合并提交为准，不用原 PR29 的 CI 替代结果。Preview/Host/CUA 本轮不切版、不重启，没有真实模型或桌面任务。
 
+PR29 已通过合并提交 `3b1191a` 纳入 PR22。首次集成 CI [38400968788](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38400968788) 中 Mac 和两组 Ubuntu 成功，Windows 为 1883/1884；唯一失败是此前未修改的 Runtime incidental-popup 用例，以固定轮询次数等待事件而提前退出。独立的 test-only 修正改为在启动前监听已提交的精确窗口请求事件，并与 Run 提前结束竞争；保留全部行为断言，不改变生产逻辑、全局等待器或测试超时。修正后 Runtime 单文件 **141/141** 通过；远端最终结果仍以 PR22 最新提交检查为准。
+
 以下保留修复前审查，PR29 的 P2 已由上述补修关闭，不能继续作为当前未修问题。
 
 ## 2026-10-13 复审（PR26 594fa8e / PR29 8aaf558，PR29补修前）

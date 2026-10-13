@@ -1089,11 +1089,28 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall("proactive-first"), typeCall("proactive-stale-second")] },
       { type: "finish", summary: "continued after popup was ignored" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1", batching: "same-control-input-v1" });
+    let resolveHandoffRequested!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const handoffRequested = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveHandoffRequested = resolve;
+    });
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      batching: "same-control-input-v1",
+      onEventCommitted: (event) => {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "new_window_detected") {
+          resolveHandoffRequested(event);
+        }
+      },
+    });
     let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
     try {
-      run = controller.start("save in the dialog that appears");
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      const startedRun = controller.start("save in the dialog that appears");
+      run = startedRun;
+      const handoffOrTerminal = await Promise.race([
+        handoffRequested.then((event) => ({ kind: "handoff" as const, event })),
+        startedRun.then((outcome) => ({ kind: "terminal" as const, outcome })),
+      ]);
+      expect(handoffOrTerminal).toMatchObject({ kind: "handoff", event: { type: "computer.window.handoff.requested", reasonCode: "new_window_detected" } });
       expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents().map((event) => event.type === "tool.call.rejected" ? event.reason : event.type) })).toBe("waiting_window");
       expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click:true"]);
       expect(computer.calls).toContain("detect-new-window");
