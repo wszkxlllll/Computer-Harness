@@ -1778,12 +1778,21 @@ describe("RunController confirmed window handoff", () => {
       },
       () => ({ type: "finish", summary: "fresh target observed" }),
     ], () => controller.getEvents());
+    let resolveWindowHandoff!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const windowHandoffRequested = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveWindowHandoff = resolve;
+    });
     const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
       contextCompiler: compiler,
       windowHandoff: "confirm-v1",
       windowSwitch: "opened-windows-v1",
       recoverBoundWindowMissing: true,
       enabledToolNames: ["click", "list_windows", "switch_window"],
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing") {
+          resolveWindowHandoff(event);
+        }
+      },
     });
     controller = created.controller;
     const running = controller.start("do not replay the completed close");
@@ -1793,7 +1802,12 @@ describe("RunController confirmed window handoff", () => {
       expect(computer.calls.filter(call => call.startsWith("observe:"))).toHaveLength(1);
       if (mode === "pause_correction") {
         await controller.resume();
-        await waitUntil(() => controller.getSnapshot().status === "waiting_window");
+        await Promise.race([
+          windowHandoffRequested,
+          running.then((outcome) => {
+            throw new Error(`run reached ${outcome} before the bound-window handoff was committed`);
+          }),
+        ]);
         expect(computer.calls.filter(call => call.startsWith("observe:")), JSON.stringify(controller.getEvents().map(event => event.type === "observation.created" ? { type: event.type, id: event.observation.id } : { type: event.type }))).toHaveLength(1);
         expect(computer.calls.filter(call => call === "execute:click")).toHaveLength(1);
         expect(computer.handoffs).toBe(0);

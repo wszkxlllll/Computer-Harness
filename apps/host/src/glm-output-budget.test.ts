@@ -55,10 +55,28 @@ describe("Host GLM output budget", () => {
       async close() {},
     };
     const bodies: Record<string, unknown>[] = [];
+    const terminateFixtureResponse = {
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          tool_calls: [{
+            id: "host-budget-fixture-terminate",
+            type: "function",
+            function: {
+              name: "terminate",
+              arguments: JSON.stringify({
+                status: "success",
+                text: "The first all-on Host Run request was prepared within the configured GLM wire budget.",
+              }),
+            },
+          }],
+        },
+      }],
+    };
     const httpClient: ProviderHttpClient = {
       async post(_url, body) {
         bodies.push(structuredClone(body));
-        return { choices: [{ finish_reason: "stop", message: { content: "Synthetic fixture response." } }] };
+        return terminateFixtureResponse;
       },
     };
     const config: ResolvedRunConfig = {
@@ -119,8 +137,16 @@ describe("Host GLM output budget", () => {
         },
       });
       expect(handle.config.contextMaxWireInputTokens).toBe(inputBudgets.contextMaxWireInputTokens);
-      await expect(handle.start()).resolves.toBe("succeeded");
+      const outcome = await handle.start();
       const report = await handle.report();
+      const diagnosticEvents = report.events
+        .filter((event) => event.type === "runtime.error" || event.type === "model.request.failed" || event.type === "run.finished")
+        .map((event) => event.type === "runtime.error"
+          ? { type: event.type, category: event.category, message: event.message }
+          : event.type === "model.request.failed"
+            ? { type: event.type, category: event.category, code: event.code, message: event.message }
+            : { type: event.type, outcome: event.outcome, summary: event.summary });
+      expect(outcome, JSON.stringify(diagnosticEvents)).toBe("succeeded");
       const requestEvent = report.events.find((event) => event.type === "model.request.started");
       expect(requestEvent?.type).toBe("model.request.started");
       expect(bodies).toHaveLength(1);
@@ -155,7 +181,7 @@ describe("Host GLM output budget", () => {
       const oldHttpClient: ProviderHttpClient = {
         async post(_url, body) {
           oldBodies.push(structuredClone(body));
-          return { choices: [{ finish_reason: "stop", message: { content: "Synthetic fixture response." } }] };
+          return terminateFixtureResponse;
         },
       };
       let oldHandle: Awaited<ReturnType<typeof createProductionRun>> | undefined;
@@ -189,7 +215,7 @@ describe("Host GLM output budget", () => {
         maxWireInputTokens: inputBudgets.contextMaxWireInputTokens,
         toolCount: toolNames.length,
         imageCount: prepared?.estimate?.imageCount,
-        responseContract: "fake GLM stop with plain fixture text; no tool call",
+        responseContract: "fake GLM terminate control with explicit success status and actionable result text",
         legacy8000NoWire: { preflightBudgetFailure: oldPreflightBudgetFailure, httpRequests: oldBodies.length },
       }));
     } finally {

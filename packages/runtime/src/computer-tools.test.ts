@@ -73,11 +73,12 @@ describe("default Computer tools", () => {
         completeness: "complete" as const,
         degraded: false,
         maxElements: 16,
-        elements: [{ elementRef: "uia-current-1", role: "Document", source: "uia" as const, bbox: { x: 10, y: 10, width: 300, height: 250, coordinateSpace: "physical" as const } }],
+        elements: [{ elementRef: "uia-current-1", role: "Edit", source: "uia" as const, state: { enabled: true, editable: true }, bbox: { x: 10, y: 10, width: 300, height: 250, coordinateSpace: "physical" as const } }],
       },
     };
     const context = { runId: "run" as never, session: {} as never, signal: new AbortController().signal, observation };
-    expect(type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, context)).toEqual({
+    const windowsContext = { ...context, session: { platform: "win32" } as never };
+    expect(type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, windowsContext)).toEqual({
       kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
     });
     expect(type.toAction({ text: "first\nsecond" }, context)).toEqual({
@@ -108,9 +109,9 @@ describe("default Computer tools", () => {
       .toThrow(/omit elementRef and use native focused-control typing on macOS/iu);
     expect(type.toAction({ text: "first\nsecond" }, { ...darwinContext, observation })).toEqual({ kind: "type", text: "first\nsecond" });
 
-    const windowsContext = { ...context, session: { platform: "win32" } as never };
+    // The Windows Computer privately binds a unique UIA target; the tool projection does not synthesize a public groundingRef.
     expect(type.toAction({ text: "first\nsecond" }, { ...windowsContext, observation })).toEqual({
-      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+      kind: "type", text: "first\nsecond",
     });
   });
 
@@ -227,7 +228,7 @@ describe("default Computer tools", () => {
     const definition = groundingComputerTools()[0];
     expect(definition?.name).toBe("click_element");
     if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
-    expect(definition.description).toContain("UIA or DOM grounding catalog");
+    expect(definition.description).toContain("UIA or DOM grounding");
     expect(definition.description).toContain("not proof of clickability or effect");
     expect(definition.description).toContain("catalog is bounded");
     expect(definition.description).toContain("do not retry the same target with another reference");
