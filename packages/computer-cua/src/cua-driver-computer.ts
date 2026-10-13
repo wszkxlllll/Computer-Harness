@@ -4371,7 +4371,8 @@ function mergeGroundings(
     // Browser UIA can retain clipped carousel links and inactive-tab links.
     // A complete DOM catalog is authoritative for named hyperlink targets;
     // unsupported/hidden links must not bypass its hit test via native input.
-    if (dom.domComplete === true && normalizeGroundingRole(value.element.role) === "link"
+    if (dom.domComplete === true && value.element.browserRegion === "content"
+        && normalizeGroundingRole(value.element.role) === "link"
         && findEquivalentDomGrounding(dom, value) === undefined) continue;
     elements.set(elementRef, value);
     uiaElements.push(value.element);

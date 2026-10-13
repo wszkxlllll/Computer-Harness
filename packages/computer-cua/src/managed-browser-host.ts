@@ -715,6 +715,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const candidates = [];
   const seen = new Set();
   let truncated = false;
+  let visibleUntraversedFrame = false;
   const interactiveRoles = new Set(["button", "link", "checkbox", "combobox", "listbox", "menuitem", "option", "radio", "slider", "switch", "tab", "textbox", "treeitem"]);
   const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
   const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
@@ -826,6 +827,18 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none" || rect.width <= 0 || rect.height <= 0) return undefined;
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   };
+  const hasVisibleUntraversedFrame = (frame) => {
+    if (typeof frame.checkVisibility === "function" &&
+        frame.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) === false) return false;
+    const style = getComputedStyle(frame);
+    const rect = frame.getBoundingClientRect();
+    const opacity = typeof style.opacity === "string" ? Number(style.opacity) : Number.NaN;
+    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" ||
+        style.contentVisibility === "hidden" || Number.isFinite(opacity) && opacity === 0 ||
+        rect.width <= 0 || rect.height <= 0 || rect.x >= cssWidth || rect.y >= cssHeight ||
+        rect.x + rect.width <= 0 || rect.y + rect.height <= 0) return false;
+    return true;
+  };
   const visibleNativeSelectOptions = (element) => {
     if (element.localName !== "select") return undefined;
     const nodes = element.options !== undefined && element.options !== null
@@ -889,6 +902,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     }
     const elements = root instanceof Element ? [root, ...root.querySelectorAll("*")] : [...root.querySelectorAll("*")];
     for (const element of elements) {
+      if (element.localName === "iframe" && hasVisibleUntraversedFrame(element)) visibleUntraversedFrame = true;
       const role = roleOf(element);
       emit(element);
       if (element.shadowRoot) walk(element.shadowRoot);
@@ -905,7 +919,9 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   walk(document);
   return {
     candidates,
-    complete: !truncated,
+    // Main-document completeness does not cover visible iframe contents,
+    // which use a separate identity and are intentionally not traversed.
+    complete: !truncated && !visibleUntraversedFrame,
     coordinateSpace: "css",
     viewportMetrics: { cssWidth, cssHeight, deviceScaleFactor },
   };

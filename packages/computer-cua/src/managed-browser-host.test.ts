@@ -105,6 +105,44 @@ describe("managed browser host pilot", () => {
     expect(evaluation.candidates.length).toBeLessThanOrEqual(256);
   });
 
+  it.each([
+    { kind: "visible", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "block", complete: false, shadow: false, ancestorOpacityHidden: false },
+    { kind: "hidden", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "none", complete: true, shadow: false, ancestorOpacityHidden: false },
+    { kind: "offscreen", rect: { x: 1_100, y: 100, width: 400, height: 300 }, display: "block", complete: true, shadow: false, ancestorOpacityHidden: false },
+    { kind: "shadow-visible", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "block", complete: false, shadow: true, ancestorOpacityHidden: false },
+    { kind: "ancestor-opacity-hidden", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "block", complete: true, shadow: false, ancestorOpacityHidden: true },
+    { kind: "partially-visible", rect: { x: -25, y: 100, width: 400, height: 300 }, display: "block", complete: false, shadow: false, ancestorOpacityHidden: false },
+  ] as const)("reports DOM coverage for a $kind untraversed iframe", ({ rect, display, complete, shadow, ancestorOpacityHidden }) => {
+    const frame = syntheticElement("iframe", { rect });
+    const ancestor = ancestorOpacityHidden ? syntheticElement("div", { children: [frame] }) : undefined;
+    const shadowHost = shadow ? syntheticElement("div") : undefined;
+    if (shadowHost !== undefined) {
+      Object.defineProperty(shadowHost, "shadowRoot", {
+        value: { querySelectorAll: (selector: string) => selector === "*" ? [frame] : [] },
+      });
+    }
+    const roots = shadowHost === undefined ? [ancestor ?? frame] : [shadowHost];
+    const page = new SyntheticDocument(roots);
+    const visibilityCheck = vi.fn((options: { checkOpacity: boolean; checkVisibilityCSS: boolean }) =>
+      !(ancestorOpacityHidden && options.checkOpacity && options.checkVisibilityCSS));
+    Object.defineProperty(frame, "checkVisibility", { value: visibilityCheck });
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: (element: SyntheticElement) => ({
+        display: element === frame ? display : "block",
+        visibility: "visible",
+        pointerEvents: "auto",
+        opacity: element === ancestor && ancestorOpacityHidden ? "0" : "1",
+      }),
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1 },
+    }) as SyntheticEvaluation;
+
+    expect(evaluation.candidates).toEqual([]);
+    expect(evaluation.complete).toBe(complete);
+    expect(visibilityCheck).toHaveBeenCalledWith({ checkOpacity: true, checkVisibilityCSS: true });
+  });
+
   it("reuses label and aria-labelledby names when revalidating a DOM click", () => {
     const label = syntheticElement("label", { attrs: { for: "arrival" }, textContent: "Arrival time" });
     const labelledInput = syntheticElement("input", {
@@ -931,6 +969,7 @@ interface SyntheticCandidate {
 
 interface SyntheticEvaluation {
   readonly candidates: readonly SyntheticCandidate[];
+  readonly complete: boolean;
 }
 
 class SyntheticElement {

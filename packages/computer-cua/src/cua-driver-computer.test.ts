@@ -7201,6 +7201,7 @@ describe("CuaDriverComputer", () => {
         { role: "Button", name: "Content control", frame: { x: 300, y: 320, width: 100, height: 40 }, enabled: true },
         { role: "Button", name: "Browser toolbar", frame: { x: 110, y: 130, width: 60, height: 30 }, enabled: true },
         { role: "Button", name: "Boundary control", frame: { x: 180, y: 300, width: 50, height: 40 }, enabled: true },
+        { role: "Hyperlink", name: "Boundary link", frame: { x: 180, y: 360, width: 50, height: 40 }, enabled: true },
       ],
     });
     const browserTarget: ManagedBrowserTarget = {
@@ -7234,6 +7235,8 @@ describe("CuaDriverComputer", () => {
       expect(capture.grounding?.elements.find((element) => element.name === "Content control")).toMatchObject({ browserRegion: "content" });
       expect(capture.grounding?.elements.find((element) => element.name === "Browser toolbar")).toMatchObject({ browserRegion: "chrome" });
       expect(capture.grounding?.elements.find((element) => element.name === "Boundary control")).toMatchObject({ browserRegion: "unknown" });
+      const boundaryLink = capture.grounding?.elements.find((element) => element.source === "uia" && element.name === "Boundary link");
+      expect(boundaryLink).toMatchObject({ role: "Hyperlink", browserRegion: "unknown" });
 
       const content = capture.grounding?.elements.find((element) => element.name === "Content control");
       const nativeClick = await computer.execute(session, {
@@ -7245,6 +7248,15 @@ describe("CuaDriverComputer", () => {
       }, new AbortController().signal);
       expect(nativeClick.status).toBe("completed");
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      const boundaryNativeClick = await computer.execute(session, {
+        actionId: "hybrid-region-unknown-link-click" as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        point: { x: boundaryLink!.bbox!.x + boundaryLink!.bbox!.width / 2, y: boundaryLink!.bbox!.y + boundaryLink!.bbox!.height / 2 },
+        groundingRef: boundaryLink!.elementRef,
+      }, new AbortController().signal);
+      expect(boundaryNativeClick.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(2);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -7711,20 +7723,20 @@ describe("CuaDriverComputer", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it.each(["visible", "hidden", "partial", "ambiguous"] as const)("admits Windows UIA hyperlinks only with visible unique DOM evidence when %s", async (scenario) => {
+  it.each(["visible", "hidden", "partial", "ambiguous", "chrome"] as const)("admits Windows UIA hyperlinks only with visible unique DOM evidence when %s", async (scenario) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-hyperlink-"));
     const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
     fake.setGroundingState({ elements_complete: true, elements: [
       { role: "Document", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true },
       { role: "Hyperlink", name: "Details", frame: { x: 100, y: 200, width: 120, height: 40 }, enabled: true },
-      { role: "Button", name: "Browser toolbar", frame: { x: 500, y: 10, width: 80, height: 30 }, enabled: true },
+      { role: "Hyperlink", name: "Browser toolbar", frame: { x: 500, y: 10, width: 80, height: 30 }, enabled: true },
     ] });
     const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
     const candidate = { tagName: "a", ariaRole: "link", name: "Details", frame: { x: 100, y: 200, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true } };
     const transport: DomGroundingTransport = {
       kind: "managed-loopback-cdp-v1",
-      collect: async () => ({ complete: scenario !== "partial", tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario === "hidden" || scenario === "partial" ? [] : scenario === "ambiguous" ? [candidate, candidate] : [candidate] }),
-      click: async () => ({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED", message: "control moved behind an overlay; no input sent" }),
+      collect: async () => ({ complete: scenario !== "partial", tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario === "hidden" || scenario === "partial" || scenario === "chrome" ? [] : scenario === "ambiguous" ? [candidate, candidate] : [candidate] }),
+      click: vi.fn(async () => ({ status: "refused" as const, driverCode: "DOM_CLICK_OCCLUDED", message: "control moved behind an overlay; no input sent" })),
     };
     const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
     const signal = new AbortController().signal;
@@ -7734,10 +7746,18 @@ describe("CuaDriverComputer", () => {
       const observation = await computer.observe(session, basedOn, signal);
       const hyperlink = observation.grounding!.elements.find((element) => element.source === "uia" && element.name === "Details");
       expect(Boolean(hyperlink)).toBe(scenario === "visible" || scenario === "partial");
-      expect(observation.grounding!.elements.find((element) => element.name === "Browser toolbar")).toMatchObject({ browserRegion: "chrome", state: { enabled: true } });
+      const toolbar = observation.grounding!.elements.find((element) => element.source === "uia" && element.name === "Browser toolbar");
+      expect(toolbar).toMatchObject({ role: "Hyperlink", browserRegion: "chrome", state: { enabled: true } });
       if (scenario === "visible") {
         expect(await computer.execute(session, { kind: "click", actionId: "hyperlink-occluded" as ActionId, basedOn, groundingRef: hyperlink!.elementRef, point: { x: 160, y: 220 } }, signal)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
         expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+        expect(transport.click).toHaveBeenCalledTimes(1);
+      }
+      if (scenario === "chrome") {
+        expect(observation.grounding).toMatchObject({ completeness: "complete" });
+        expect(await computer.execute(session, { kind: "click", actionId: "chrome-hyperlink-native" as ActionId, basedOn, groundingRef: toolbar!.elementRef, point: { x: 540, y: 25 } }, signal)).toMatchObject({ status: "completed" });
+        expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+        expect(transport.click).not.toHaveBeenCalled();
       }
       await computer.close(session);
     } finally { await rm(directory, { recursive: true, force: true }); }
