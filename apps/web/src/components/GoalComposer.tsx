@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { BrowserSiteChoice, RunTarget } from "../types";
 import { appNameMatchesHint, explicitApplicationHint, isValidBrowserUrl } from "../run-target";
 import { WindowTargetPicker, type WindowTargetPickerProps } from "./WindowTargetPicker";
@@ -42,6 +42,8 @@ export function GoalComposer({
   const [goal, setGoal] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
   const [switchWindows, setSwitchWindows] = useState(false);
+  const goalInputRef = useRef<HTMLTextAreaElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
   const formDisabled = disabled || busy || voiceActive;
   const parsedBrowserUrl = browserUrl.trim();
   const selectedWindow = targetPicker.candidates.find((candidate) => candidate.token === targetPicker.selectedToken);
@@ -54,6 +56,10 @@ export function GoalComposer({
     const url = choice.url.trim();
     return choice.label.trim() && isValidBrowserUrl(url) ? [{ label: choice.label, url }] : [];
   });
+
+  useEffect(() => {
+    if (error) errorRef.current?.focus();
+  }, [error]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -96,26 +102,27 @@ export function GoalComposer({
   };
 
   return (
-    <form id="new-task" className="goal-composer" onSubmit={submit}>
+    <form id="new-task" className="goal-composer" aria-label="新任务表单" onSubmit={submit}>
       <label htmlFor="goal-input">想让电脑做什么？</label>
       <p id="goal-help" className="sr-only">描述目标、范围和期望结果。</p>
       <textarea
+        ref={goalInputRef}
         id="goal-input"
         name="goal"
         rows={4}
         value={goal}
         onChange={(event) => { const value = event.currentTarget.value; setGoal(value); onGoalChange(value); }}
         placeholder="写下任务内容…"
-        aria-describedby={error ? "goal-help goal-error" : "goal-help"}
+        aria-describedby="goal-help"
         disabled={formDisabled}
         required
       />
-      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} onTranscript={(text) => {
+      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} returnFocusElement={() => goalInputRef.current} onTranscript={(text) => {
         const next = appendVoiceInputText(goal, text);
         setGoal(next);
         onGoalChange(next);
       }} createCaptureAdapter={voiceCaptureAdapterFactory} />
-      {error && <p id="goal-error" className="inline-error" role="alert">{error}</p>}
+      {error && <p ref={errorRef} id="goal-error" className="inline-error" role="alert" tabIndex={-1}>{error}</p>}
       {setupRequired && <a className="setup-required-link" href="/preferences">打开浏览器与登录状态设置</a>}
 
       <label className="preference-toggle" htmlFor="cross-window-run-switch">
@@ -211,6 +218,7 @@ export function GoalComposer({
         <button
           className="button button-primary button-large"
           type="submit"
+          aria-describedby={error ? "goal-error" : undefined}
           disabled={formDisabled || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid)}
         >
           {busy ? "正在发送…" : "开始任务"}

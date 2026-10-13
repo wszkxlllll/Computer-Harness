@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { once } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAssetUrl } from "../api";
 import { ScreenshotPanel } from "./ScreenshotPanel";
@@ -102,12 +102,32 @@ describe("authenticated screenshot viewer", () => {
     expect((opener as HTMLButtonElement).inert).toBe(true);
     expect(image.getAttribute("src")).toContain("/api/runs/run%201/assets/asset-old");
     expect(onViewerOpened).toHaveBeenCalledWith("request-old");
-    expect(screen.getByRole("button", { name: "放大截图" })).toBeDefined();
+    const controls = screen.getByRole("group", { name: "截图缩放和平移控制" });
+    expect(controls).toBeDefined();
+    const zoomIn = within(controls).getByRole("button", { name: "放大截图" });
+    const zoomOut = within(controls).getByRole("button", { name: "缩小截图" });
+    expect(zoomIn.getAttribute("aria-controls")).toBe("screenshot-viewer-stage");
+    expect(screen.getByRole("status", { name: "当前缩放比例 100%" })).toBeDefined();
+    fireEvent.click(zoomIn);
+    expect(screen.getByRole("status", { name: "当前缩放比例 125%" })).toBeDefined();
     expect(screen.getByRole("button", { name: "适合屏幕" })).toBeDefined();
     expect(screen.getByRole("button", { name: "向左平移截图" })).toBeDefined();
     const lastControl = screen.getByRole("button", { name: "向右平移截图" });
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(lastControl);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "关闭" }));
+
+    for (let index = 0; index < 8; index += 1) fireEvent.click(zoomOut);
+    expect(screen.getByRole("status", { name: "当前缩放比例 50%" })).toBeDefined();
+    expect((zoomOut as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "适合屏幕" }));
+    expect(screen.getByRole("status", { name: "当前缩放比例 100%" })).toBeDefined();
+    expect((zoomOut as HTMLButtonElement).disabled).toBe(false);
+    for (let index = 0; index < 8; index += 1) fireEvent.click(zoomIn);
+    expect(screen.getByRole("status", { name: "当前缩放比例 500%" })).toBeDefined();
+    expect((zoomIn as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "适合屏幕" }));
 
     fireEvent.load(image);
     view.rerender(

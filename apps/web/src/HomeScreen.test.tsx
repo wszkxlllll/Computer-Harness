@@ -88,6 +88,22 @@ describe("home run-target selection", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/run/run-created"));
   });
 
+  it("focuses a failed submission message and associates it with the submit control", async () => {
+    vi.mocked(createRun).mockRejectedValue(new ApiError("电脑暂时不可用", 503, "HOST_ERROR"));
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Read this notice" } });
+    await screen.findByText("这里还没有任务");
+    expect(screen.getByRole("form", { name: "新任务表单" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    const error = await screen.findByRole("alert");
+    await waitFor(() => expect(document.activeElement).toBe(error));
+    expect(screen.getByRole("button", { name: "开始任务" }).getAttribute("aria-describedby")).toBe("goal-error");
+    expect(goal.getAttribute("aria-describedby")).toBe("goal-help");
+  });
+
   it("submits an explicit entire-desktop target without window discovery", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
     renderHome();
@@ -508,45 +524,49 @@ describe("home run-target selection", () => {
     fireEvent.change(goal, { target: { value: "在 Notepad 中查看当前窗口" } });
     await screen.findByText("这里还没有任务");
     chooseStartMode(/手动选择窗口/);
-    const previewButtons = await screen.findAllByRole("button", { name: "查看此窗口预览" });
+    expect(await screen.findByRole("group", { name: "候选列表第 1 项（当前顺序，不代表窗口身份）；应用：Notepad.exe；窗口标题：Untitled - Notepad" })).toBeDefined();
+    expect(screen.getByRole("group", { name: "候选列表第 2 项（当前顺序，不代表窗口身份）；应用：Notepad.exe；窗口标题：Untitled - Notepad" })).toBeDefined();
+    expect(document.getElementById("window-target-visual-limit")?.textContent).toContain("读屏无法读取截图，也无法由截图文字验证窗口身份");
+    const previewButtons = await screen.findAllByRole("button", { name: /查看此窗口预览，候选列表第/u });
     const previewButton = previewButtons[0];
     if (previewButton === undefined) throw new Error("expected a candidate preview action");
+    expect(previewButton.getAttribute("aria-describedby")).toBe("window-target-visual-limit");
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(previewButton);
-    const firstImage = await screen.findByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
+    const firstImage = await screen.findByRole("img", { name: /列表第 1 项.*Notepad\.exe.*Untitled - Notepad/u });
     expect(createRun).not.toHaveBeenCalled();
 
     fireEvent.load(firstImage);
-    const firstConfirmation = await screen.findByRole("button", { name: "确认这是目标窗口" });
+    const firstConfirmation = await screen.findByRole("button", { name: /确认这是目标窗口，候选列表第 1 项/u });
     fireEvent.click(firstConfirmation);
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
 
-    const secondPreviewButton = screen.getByRole("button", { name: "查看此窗口预览" });
+    const secondPreviewButton = screen.getByRole("button", { name: /查看此窗口预览，候选列表第 2 项/u });
     fireEvent.click(secondPreviewButton);
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
-    await waitFor(() => expect(screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
-    const images = screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
+    const images = screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u });
     const secondImage = images[1];
     if (secondImage === undefined) throw new Error("expected the second candidate screenshot");
     fireEvent.error(secondImage);
     expect(await screen.findByText("这张实时截图无法显示。请在电脑恢复目标窗口后刷新；仍看不清时不要选择。")).toBeDefined();
-    expect(screen.getAllByRole("button", { name: "确认这是目标窗口" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /确认这是目标窗口，候选列表第/u })).toHaveLength(1);
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
     expect(createRun).not.toHaveBeenCalled();
 
-    const retryButtons = screen.getAllByRole("button", { name: "重新读取预览" });
+    const retryButtons = screen.getAllByRole("button", { name: /重新读取预览，候选列表第/u });
     const secondCandidateRetry = retryButtons[1];
     if (secondCandidateRetry === undefined) throw new Error("expected a retry action for the failed second candidate");
     fireEvent.click(secondCandidateRetry);
-    await waitFor(() => expect(screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(1));
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(1));
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
     resolveSecondPreviewRetry(secondPreview);
-    await waitFor(() => expect(screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
-    const retriedImages = screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
+    const retriedImages = screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u });
     const retriedSecondImage = retriedImages[1];
     if (retriedSecondImage === undefined) throw new Error("expected the retried second candidate screenshot");
     fireEvent.load(retriedSecondImage);
-    const confirmations = await screen.findAllByRole("button", { name: "确认这是目标窗口" });
+    const confirmations = await screen.findAllByRole("button", { name: /确认这是目标窗口，候选列表第/u });
     expect(confirmations).toHaveLength(2);
     expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(confirmations[1]!);
@@ -590,12 +610,18 @@ describe("home run-target selection", () => {
     fireEvent.change(goal, { target: { value: "在 Notepad 中查看当前窗口" } });
     await screen.findByText("这里还没有任务");
     chooseStartMode(/手动选择窗口/);
-    fireEvent.click(await screen.findByRole("radio", { name: /Notepad\.exe.*Notes/u }));
+    const targetRadio = await screen.findByRole("radio", { name: /Notepad\.exe.*Notes/u });
+    targetRadio.focus();
+    fireEvent.keyDown(targetRadio, { key: " ", code: "Space" });
+    targetRadio.click();
+    fireEvent.keyUp(targetRadio, { key: " ", code: "Space" });
+    expect(document.activeElement).toBe(targetRadio);
+    expect((targetRadio as HTMLInputElement).checked).toBe(true);
 
     const startButton = screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement;
     expect(startButton.disabled).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "查看此窗口预览" }));
-    const image = await screen.findByRole("img", { name: /Notepad\.exe.*Notes/u });
+    fireEvent.click(screen.getByRole("button", { name: /查看此窗口预览，候选列表第 1 项/u }));
+    const image = await screen.findByRole("img", { name: /列表第 1 项.*Notepad\.exe.*Notes/u });
     expect(previewWindowTarget).toHaveBeenCalledWith("unique-window", expect.any(AbortSignal));
     expect(startButton.disabled).toBe(false);
     expect(createRun).not.toHaveBeenCalled();

@@ -296,7 +296,7 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
   return (
     <PhoneLayout active="new">
       <main id="main-content" className="page-shell home-page" tabIndex={-1}>
-        <h1 id="home-title" className="task-page-title">新任务</h1>
+        <h1 id="home-title" className="task-page-title" tabIndex={-1}>新任务</h1>
 
         {activeRun && (
           <section className="active-run-row" aria-labelledby="active-run-title">

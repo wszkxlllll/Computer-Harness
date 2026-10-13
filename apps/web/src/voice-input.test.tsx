@@ -144,8 +144,14 @@ describe("voice input control", () => {
     expect(createCaptureAdapter).not.toHaveBeenCalled();
     expect(screen.getByText(/最长 60 秒/)).toBeDefined();
     expect(screen.getByText(/识别后检查文字，再手动发送/)).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    expect(screen.getByRole("group", { name: "语音输入" })).toBeDefined();
+    expect(screen.getByRole("group", { name: "录音控制" })).toBeDefined();
+    const startButton = screen.getByRole("button", { name: "点击开始录音" });
+    startButton.focus();
+    fireEvent.click(startButton);
     await screen.findByRole("button", { name: "结束录音" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("timer", { name: /录音时长/ })).toBeDefined();
     expect(createCaptureAdapter).toHaveBeenCalledWith(3_200);
     expect(onTranscript).not.toHaveBeenCalled();
 
@@ -170,10 +176,15 @@ describe("voice input control", () => {
         <VoiceInputControl onTranscript={onTranscript} createCaptureAdapter={() => ({ start: async () => capture })} />
       </VoiceInputCapabilitiesContext.Provider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "点击开始录音" }));
+    const startButton = screen.getByRole("button", { name: "点击开始录音" });
+    startButton.focus();
+    fireEvent.click(startButton);
     await screen.findByRole("button", { name: "结束录音" });
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    const cancelButton = screen.getByRole("button", { name: "取消" });
+    cancelButton.focus();
+    fireEvent.click(cancelButton);
     await waitFor(() => expect(cancelVoiceInput).toHaveBeenCalledWith("voice-session-1", 2));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "重新录音" }));
     expect(capture.cancelled).toBe(true);
     expect(finishVoiceInput).not.toHaveBeenCalled();
     expect(onTranscript).not.toHaveBeenCalled();
@@ -272,6 +283,64 @@ describe("voice input control", () => {
       </VoiceInputCapabilitiesContext.Provider>,
     );
     expect(screen.getByRole("button", { name: "点击开始录音" })).toBeDefined();
+  });
+
+  it("keeps the recognized goal editable and waits for a separate manual submit", async () => {
+    const targetPicker = { candidates: [], loading: false, onSelect: vi.fn(), onRefresh: vi.fn() };
+    const capture = new FakeCapture();
+    const onSubmit = vi.fn(async () => undefined);
+    render(
+      <VoiceInputCapabilitiesContext.Provider value={capabilities}>
+        <GoalComposer
+          canStart
+          targetMode="auto"
+          browserUrl=""
+          onTargetModeChange={vi.fn()}
+          onBrowserUrlChange={vi.fn()}
+          targetPicker={targetPicker}
+          voiceCaptureAdapterFactory={() => ({ start: async () => capture })}
+          onSubmit={onSubmit}
+        />
+      </VoiceInputCapabilitiesContext.Provider>,
+    );
+
+    const goal = screen.getByLabelText("想让电脑做什么？") as HTMLTextAreaElement;
+    const startButton = screen.getByRole("button", { name: "点击开始录音" });
+    startButton.focus();
+    fireEvent.click(startButton);
+    await screen.findByRole("button", { name: "结束录音" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(screen.getByRole("button", { name: "结束录音" }));
+    await waitFor(() => expect(goal.value).toBe("请查询上海到杭州的车票。"));
+    expect(document.activeElement).toBe(goal);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.change(goal, { target: { value: "只比较明天上海到杭州的车票，不要购买。" } });
+    expect(goal.value).toBe("只比较明天上海到杭州的车票，不要购买。");
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith("只比较明天上海到杭州的车票，不要购买。", { mode: "auto" }));
+  });
+
+  it("does not move focus when the user has left the recording controls", async () => {
+    const capture = new FakeCapture();
+    render(
+      <>
+        <button type="button">其他操作</button>
+        <VoiceInputCapabilitiesContext.Provider value={capabilities}>
+          <VoiceInputControl onTranscript={vi.fn()} createCaptureAdapter={() => ({ start: async () => capture })} />
+        </VoiceInputCapabilitiesContext.Provider>
+      </>,
+    );
+    const startButton = screen.getByRole("button", { name: "点击开始录音" });
+    startButton.focus();
+    fireEvent.click(startButton);
+    await screen.findByRole("button", { name: "结束录音" });
+    const otherAction = screen.getByRole("button", { name: "其他操作" });
+    otherAction.focus();
+    fireEvent.click(screen.getByRole("button", { name: "结束录音" }));
+    await screen.findByText("识别结果已填入输入框；检查后再手动发送。");
+    expect(document.activeElement).toBe(otherAction);
   });
 
   it("locks each parent form against edits and submission throughout capture/finalization", async () => {

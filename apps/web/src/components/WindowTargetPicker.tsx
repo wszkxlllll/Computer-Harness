@@ -88,7 +88,9 @@ export function WindowTargetPicker({
         </p>
       )}
       {!loading && !error && candidates.some((candidate) => candidate.previewRequired) && (
-        <p className="field-hint window-target-message" role="status">标签重复或不完整的候选不会直接选中。请查看对应的真实窗口截图；看不清或仍无法区分时不要确认，请在电脑恢复窗口后刷新。</p>
+        <p id="window-target-visual-limit" className="field-hint window-target-message" role="status">
+          候选序号只表示当前列表顺序，不代表窗口身份。标签重复或不完整的候选不会直接选中。请查看对应的窗口截图；读屏无法读取截图，也无法由截图文字验证窗口身份。看不清或无法亲自视觉辨认时不要确认；可在电脑前核对窗口，或恢复目标窗口后刷新列表。
+        </p>
       )}
 
       {!loading && !error && selectionNeedsConfirmation && (
@@ -100,7 +102,15 @@ export function WindowTargetPicker({
           <legend>可选窗口（{candidates.length}）</legend>
           <div className="window-target-list">
             {candidates.map((candidate, index) => {
+              const position = index + 1;
               const candidateId = `window-target-${index}`;
+              const appName = candidate.appName?.trim() || "未命名应用";
+              const title = candidate.title?.trim() || "未命名窗口";
+              const relationship = candidate.relationship ? windowRelationshipLabel(candidate.relationship) : undefined;
+              const candidateLabel = `候选列表第 ${position} 项（当前顺序，不代表窗口身份）；应用：${appName}；窗口标题：${title}${relationship ? `；${relationship}` : ""}`;
+              const describedBy = [candidate.previewRequired ? "window-target-visual-limit" : undefined, expiresAt ? "window-target-expiry" : undefined]
+                .filter((id): id is string => id !== undefined)
+                .join(" ");
               const preview = previews?.get(candidate.token);
               const previewValid = preview !== undefined && Date.parse(preview.expiresAt) > currentTime;
               const previewLoaded = preview !== undefined && loadedPreviewTokens.has(preview.previewToken);
@@ -108,13 +118,19 @@ export function WindowTargetPicker({
               const loadingPreview = previewLoadingToken === candidate.token;
               const copy = (
                 <>
-                  <span className="window-target-app">{candidate.appName?.trim() || "未命名应用"}</span>
-                  <span className="window-target-title">{candidate.title?.trim() || "未命名窗口"}</span>
-                  {candidate.relationship && <span className="window-target-title">{windowRelationshipLabel(candidate.relationship)}</span>}
+                  <span className="sr-only">候选列表第 {position} 项（当前顺序，不代表窗口身份）；</span>
+                  <span className="window-target-app">{appName}</span>
+                  <span className="window-target-title">{title}</span>
+                  {relationship && <span className="window-target-title">{relationship}</span>}
                 </>
               );
               return (
-                <div className={`window-target-option${candidate.previewRequired ? " window-target-preview-option" : ""}`} key={candidate.token}>
+                <div
+                  className={`window-target-option${candidate.previewRequired ? " window-target-preview-option" : ""}`}
+                  role="group"
+                  aria-label={candidateLabel}
+                  key={candidate.token}
+                >
                   {candidate.previewRequired
                     ? <span className="window-target-copy">{copy}</span>
                     : <>
@@ -125,13 +141,20 @@ export function WindowTargetPicker({
                         value={String(index)}
                         checked={selectedToken === candidate.token}
                         onChange={() => onSelect(candidate.token)}
-                        aria-describedby={expiresAt ? "window-target-expiry" : undefined}
+                        aria-describedby={describedBy || undefined}
                         disabled={disabled || expired}
                       />
                       <label className="window-target-copy" htmlFor={candidateId}>{copy}</label>
                     </>}
                   <span className="window-target-preview-controls">
-                    <button className="button button-secondary" type="button" disabled={disabled || expired || loadingPreview || previewLoadingToken !== undefined || onPreview === undefined} onClick={() => onPreview?.(candidate.token)}>
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      aria-label={`${loadingPreview ? "正在读取此窗口" : preview === undefined ? "查看此窗口预览" : "重新读取预览"}，${candidateLabel}`}
+                      aria-describedby={candidate.previewRequired ? "window-target-visual-limit" : undefined}
+                      disabled={disabled || expired || loadingPreview || previewLoadingToken !== undefined || onPreview === undefined}
+                      onClick={() => onPreview?.(candidate.token)}
+                    >
                       {loadingPreview ? "正在读取此窗口…" : preview === undefined ? "查看此窗口预览" : "重新读取预览"}
                     </button>
                     {loadingPreview && <span className="field-hint" role="status">正在从电脑读取这个精确窗口，不会激活或操作它。</span>}
@@ -143,7 +166,7 @@ export function WindowTargetPicker({
                         <span className="window-target-title">{preview.relationship ? windowRelationshipLabel(preview.relationship) : "捕获时关系未验证"}</span>
                         <img
                           src={`data:image/png;base64,${preview.dataBase64}`}
-                          alt={`${preview.appName ?? "未知应用"}：${preview.title ?? "未知窗口"} 的实时窗口预览`}
+                          alt={`列表第 ${position} 项窗口预览：捕获时应用 ${preview.appName?.trim() || "应用名不可用"}，标题 ${preview.title?.trim() || "窗口标题不可用"}，${formatCapturedAt(preview.capturedAt)}。读屏无法验证窗口身份。`}
                           onLoad={() => setLoadedPreviewTokens((current) => new Set(current).add(preview.previewToken))}
                           onError={() => {
                             setLoadedPreviewTokens((current) => {
@@ -157,7 +180,14 @@ export function WindowTargetPicker({
                         {previewDisplayError && <span className="notice notice-warning" role="alert">{previewDisplayError}</span>}
                         {candidate.previewRequired
                           ? previewValid && previewLoaded && previewDisplayError === undefined
-                            ? <button className="button button-primary" type="button" disabled={disabled || expired} onClick={() => onSelect(candidate.token, preview.previewToken)}>
+                            ? <button
+                              className="button button-primary"
+                              type="button"
+                              aria-label={`确认这是目标窗口，${candidateLabel}`}
+                              aria-describedby="window-target-visual-limit"
+                              disabled={disabled || expired}
+                              onClick={() => onSelect(candidate.token, preview.previewToken)}
+                            >
                               确认这是目标窗口
                             </button>
                             : previewValid

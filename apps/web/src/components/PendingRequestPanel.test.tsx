@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PendingRequestPanel } from "./PendingRequestPanel";
 import type { ApprovalEvidence, PendingRequestBase } from "../types";
@@ -39,8 +39,8 @@ describe("pending request panel", () => {
     expect(screen.getAllByText("窗口标题不可用")).toHaveLength(1);
     expect(screen.getByText("当前 Editor.exe · Parent document 的对话框")).toBeDefined();
     expect(screen.getByText("电脑已授权的另一窗口")).toBeDefined();
-    expect(screen.getAllByRole("button", { name: "查看此窗口的真实画面" })).toHaveLength(2);
-    expect(screen.getByRole("button", { name: /Editor\.exe.*Second document/u })).toBeDefined();
+    expect(screen.getAllByRole("button", { name: /查看 .* 的真实画面，第 \d+ 个候选窗口/u })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /选择 Editor\.exe · Second document，第 2 个候选窗口/u })).toBeDefined();
     expect(onChooseWindow).not.toHaveBeenCalled();
   });
 
@@ -67,6 +67,33 @@ describe("pending request panel", () => {
     await waitFor(() => expect(onRespond).toHaveBeenCalledTimes(2));
     expect(onRespond).toHaveBeenNthCalledWith(2, "Friday morning");
     expect(input.value).toBe("");
+  });
+
+  it("keeps initial request content quiet and announces a same-kind replacement once", () => {
+    const baseProps = {
+      onApprove: vi.fn(),
+      onRespond: vi.fn(),
+      onChooseWindow: vi.fn(),
+      onIgnoreNewWindow: vi.fn(),
+    };
+    const view = render(
+      <PendingRequestPanel
+        {...baseProps}
+        request={{ requestId: "input-old", kind: "user_input", question: "原来的日期是什么？" }}
+      />,
+    );
+    const liveRegion = document.querySelector(".pending-panel [role='status']") as HTMLElement;
+    expect(liveRegion.textContent).toBe("");
+
+    view.rerender(
+      <PendingRequestPanel
+        {...baseProps}
+        request={{ requestId: "input-new", kind: "user_input", question: "请确认新的送达地址。" }}
+      />,
+    );
+    expect(liveRegion.textContent).toContain("电脑的补充请求已更新。");
+    expect(liveRegion.textContent).toContain("请确认新的送达地址。");
+    expect(liveRegion.textContent).not.toContain("原来的日期是什么？");
   });
 
   it("passes the selected approval decision to the current request", () => {
@@ -122,7 +149,7 @@ describe("pending request panel", () => {
     );
 
     expect(screen.getByText("当前 WPS Office · Report.docx 的对话框")).toBeDefined();
-    expect(screen.getByRole("button", { name: "查看此窗口的真实画面" })).toBeDefined();
+    expect(screen.getByRole("button", { name: /查看 WPS Office · Save As 的真实画面，第 1 个候选窗口/u })).toBeDefined();
     expect(screen.getByText(/标签重复或不完整的候选需要先看对应的真实画面/)).toBeDefined();
   });
 
@@ -152,7 +179,7 @@ describe("pending request panel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    fireEvent.click(screen.getByRole("button", { name: /查看 Notepad\.exe · Untitled - Notepad 的真实画面，第 1 个候选窗口/u }));
     const image = await screen.findByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
     expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-preview/window-candidates/preview", expect.objectContaining({
       method: "POST",
@@ -162,7 +189,7 @@ describe("pending request panel", () => {
     expect(onChooseWindow).not.toHaveBeenCalled();
 
     fireEvent.load(image);
-    fireEvent.click(await screen.findByRole("button", { name: "确认这个窗口并继续任务" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认 Notepad.exe · Untitled - Notepad（第 1 个候选窗口）并继续任务" }));
     await waitFor(() => expect(onChooseWindow).toHaveBeenCalledWith(candidate, preview.previewToken));
   });
 
@@ -192,8 +219,8 @@ describe("pending request panel", () => {
       />,
     );
 
-    const directChoice = screen.getByRole("button", { name: /Notepad\.exe.*Notes/u });
-    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    const directChoice = screen.getByRole("button", { name: /选择 Notepad\.exe · Notes，第 1 个候选窗口/u });
+    fireEvent.click(screen.getByRole("button", { name: /查看 Notepad\.exe · Notes 的真实画面，第 1 个候选窗口/u }));
     const image = await screen.findByRole("img", { name: /Notepad\.exe.*Notes/u });
     expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-optional-preview/window-candidates/preview", expect.objectContaining({
       method: "POST",
@@ -237,17 +264,17 @@ describe("pending request panel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    fireEvent.click(screen.getByRole("button", { name: /查看 Notepad\.exe · Untitled - Notepad 的真实画面，第 1 个候选窗口/u }));
     const image = await screen.findByRole("img");
     fireEvent.load(image);
-    expect(await screen.findByRole("button", { name: "确认这个窗口并继续任务" })).toBeDefined();
+    expect(await screen.findByRole("button", { name: "确认 Notepad.exe · Untitled - Notepad（第 1 个候选窗口）并继续任务" })).toBeDefined();
 
-    fireEvent.click(screen.getByRole("button", { name: "重新读取窗口预览" }));
+    fireEvent.click(screen.getByRole("button", { name: /重新读取 Notepad\.exe · Untitled - Notepad 的真实画面，第 1 个候选窗口/u }));
     expect(screen.queryByRole("img")).toBeNull();
-    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认 Notepad.exe · Untitled - Notepad（第 1 个候选窗口）并继续任务" })).toBeNull();
     resolveRefresh(new Response(JSON.stringify({ error: { code: "WINDOW_PREVIEW_UNAVAILABLE" } }), { status: 503 }));
     expect(await screen.findByRole("alert")).toBeDefined();
-    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认 Notepad.exe · Untitled - Notepad（第 1 个候选窗口）并继续任务" })).toBeNull();
   });
 
   it("never substitutes an old candidate title for missing capture-time metadata or confirms a failed image", async () => {
@@ -275,14 +302,14 @@ describe("pending request panel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    fireEvent.click(screen.getByRole("button", { name: /查看 Old app label · Old title 的真实画面，第 1 个候选窗口/u }));
     expect(await screen.findByText("捕获时应用：应用名不可用")).toBeDefined();
     expect(screen.getByText(/捕获时标题：窗口标题不可用/u)).toBeDefined();
     expect(screen.queryByText("捕获时应用：Old app label")).toBeNull();
     const image = screen.getByRole("img");
     fireEvent.error(image);
     expect(await screen.findByRole("alert")).toBeDefined();
-    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认 Old app label · Old title（第 1 个候选窗口）并继续任务" })).toBeNull();
   });
 
   it("clears candidate screenshots when the same request refreshes to new candidate tokens", async () => {
@@ -302,10 +329,10 @@ describe("pending request panel", () => {
     const { rerender } = render(
       <PendingRequestPanel request={request} runId="run-preview-refresh" onApprove={vi.fn()} onRespond={vi.fn()} onChooseWindow={onChooseWindow} onIgnoreNewWindow={vi.fn()} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "查看此窗口的真实画面" }));
+    fireEvent.click(screen.getByRole("button", { name: /查看 Notepad\.exe · Untitled - Notepad 的真实画面，第 1 个候选窗口/u }));
     const image = await screen.findByRole("img");
     fireEvent.load(image);
-    expect(await screen.findByRole("button", { name: "确认这个窗口并继续任务" })).toBeDefined();
+    expect(await screen.findByRole("button", { name: "确认 Notepad.exe · Untitled - Notepad（第 1 个候选窗口）并继续任务" })).toBeDefined();
 
     rerender(
       <PendingRequestPanel
@@ -318,12 +345,85 @@ describe("pending request panel", () => {
       />,
     );
     expect(screen.queryByRole("img")).toBeNull();
-    expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认 Notepad.exe · Untitled - Notepad（第 1 个候选窗口）并继续任务" })).toBeNull();
     await waitFor(() => {
       expect(screen.queryByRole("img")).toBeNull();
-      expect(screen.queryByRole("button", { name: "确认这个窗口并继续任务" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "确认 Notepad.exe · Untitled - Notepad（第 1 个候选窗口）并继续任务" })).toBeNull();
     });
     expect(onChooseWindow).not.toHaveBeenCalled();
+  });
+
+  it("gives ambiguous preview controls distinct spoken names and explains the image-only limit", () => {
+    render(
+      <PendingRequestPanel
+        request={{
+          requestId: "window-ambiguous-labels",
+          kind: "window_handoff",
+          candidates: [
+            { token: "A".repeat(32), appName: "Notepad.exe", title: "Notes" },
+            { token: "B".repeat(32), appName: "Notepad.exe", title: "Notes" },
+          ],
+        }}
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={vi.fn()}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    const first = screen.getByRole("button", { name: /查看 Notepad\.exe · Notes 的真实画面，第 1 个候选窗口/u });
+    const second = screen.getByRole("button", { name: /查看 Notepad\.exe · Notes 的真实画面，第 2 个候选窗口/u });
+    expect(first).not.toBe(second);
+    expect(screen.getByText(/读屏名称和图片替代文字不能核实截图中的真实窗口内容/u)).toBeDefined();
+  });
+
+  it("groups and names two open preview confirmations by candidate and position", async () => {
+    const makePreview = (previewToken: string) => ({
+      previewToken,
+      appName: "Notepad.exe",
+      title: "Notes",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png" as const,
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    });
+    const previews = [makePreview("C".repeat(32)), makePreview("D".repeat(32))];
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(previews[0]), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(previews[1]), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const candidates = [
+      { token: "A".repeat(32), appName: "Notepad.exe", title: "Notes" },
+      { token: "B".repeat(32), appName: "Notepad.exe", title: "Notes" },
+    ];
+    const onChooseWindow = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PendingRequestPanel
+        request={{ requestId: "window-ambiguous-confirmations", kind: "window_handoff", candidates }}
+        runId="run-ambiguous-confirmations"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={onChooseWindow}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /查看 Notepad\.exe · Notes 的真实画面，第 1 个候选窗口/u }));
+    const firstImage = await screen.findByRole("img", { name: /Notepad\.exe：Notes 的实时窗口预览，第 1 个候选/u });
+    fireEvent.load(firstImage);
+    fireEvent.click(screen.getByRole("button", { name: /查看 Notepad\.exe · Notes 的真实画面，第 2 个候选窗口/u }));
+    const secondImage = await screen.findByRole("img", { name: /Notepad\.exe：Notes 的实时窗口预览，第 2 个候选/u });
+    fireEvent.load(secondImage);
+
+    const firstGroup = screen.getByRole("group", { name: "候选窗口：Notepad.exe · Notes，第 1 个候选窗口" });
+    const secondGroup = screen.getByRole("group", { name: "候选窗口：Notepad.exe · Notes，第 2 个候选窗口" });
+    const firstConfirmation = "确认 Notepad.exe · Notes（第 1 个候选窗口）并继续任务";
+    const secondConfirmation = "确认 Notepad.exe · Notes（第 2 个候选窗口）并继续任务";
+    expect(within(firstGroup).getByRole("button", { name: firstConfirmation })).toBeDefined();
+    expect(within(secondGroup).getByRole("button", { name: secondConfirmation })).toBeDefined();
+    fireEvent.click(within(secondGroup).getByRole("button", { name: secondConfirmation }));
+    await waitFor(() => expect(onChooseWindow).toHaveBeenCalledWith(candidates[1], previews[1].previewToken));
   });
 
   it("keeps a generic guard reason actionable and shows the bound proposed action details", () => {
@@ -470,7 +570,7 @@ describe("pending request panel", () => {
     expect(screen.getByText(/没有叠加到截图/)).toBeDefined();
     expect(screen.getByText("模型说明（未经验证）")).toBeDefined();
     expect(screen.getByRole("button", { name: "拒绝" })).toBeDefined();
-    const image = screen.getByRole("img", { name: /绑定的电脑画面/ });
+    const image = screen.getByRole("img", { name: /本次确认请求关联的截图/ });
     fireEvent.load(image);
     await waitFor(() => expect(approve.disabled).toBe(false));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -502,7 +602,7 @@ describe("pending request panel", () => {
       />,
     );
 
-    fireEvent.error(screen.getByRole("img", { name: /绑定的电脑画面/ }));
+    fireEvent.error(screen.getByRole("img", { name: /本次确认请求关联的截图/ }));
     expect(screen.getByText("绑定画面无法载入")).toBeDefined();
     expect(screen.getByRole("button", { name: "重新载入绑定画面" })).toBeDefined();
     expect((screen.getByRole("button", { name: "允许这项操作" }) as HTMLButtonElement).disabled).toBe(true);

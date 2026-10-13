@@ -47,7 +47,7 @@ export function ResultPanel({ reply, outcome, error }: ResultPanelProps) {
         <span className={`outcome-label outcome-${outcome ?? "unknown"}`}>{outcomeLabel}</span>
       </div>
       {reply
-        ? <div ref={copyRef} className={`result-copy${expanded ? " result-copy-expanded" : ""}`}>
+        ? <div id="run-result-copy" ref={copyRef} className={`result-copy${expanded ? " result-copy-expanded" : ""}`}>
           <p>{reply}</p>
         </div>
         : <p className="result-empty-message">{emptyResultMessage}</p>}
@@ -62,6 +62,7 @@ export function ResultPanel({ reply, outcome, error }: ResultPanelProps) {
           className="text-button"
           type="button"
           aria-expanded={expanded}
+          aria-controls="run-result-copy"
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? "收起结果" : "查看完整结果"}

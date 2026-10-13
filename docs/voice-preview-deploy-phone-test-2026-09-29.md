@@ -1,8 +1,29 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29
-状态：隔离Preview Relay/Web现为`2026-10-09-pr22-d2ee1a3-v2`，本机Host 4318已对齐并建立Relay WSS。手机尚待重新扫码，未在本轮创建pairing或真实Run；Windows输入/zoom实机结果不因部署自动通过。
+状态：2026-10-10 已 Web-only 发布隔离 Preview `2026-10-10-web-accessibility-v1`；Relay backend 保持上一版编译代码，本机 Host 4318 和 CUA 不重启，WSS 在线、已有配对保留。iPhone 旁白与真实任务待用户验收；不因部署自动通过。
+
+2026-10-12 只读复核：公网首页、JS、CSS 三项 SHA-256 均与下方 10 月 10 日记录相同；经已固定服务器指纹的 SSH 登录读取，Preview current 仍为上述无障碍 release，Relay active、PID 155349、启动时间仍为 10 月 9 日 22:57:38 CST；release 标记仍记录 backend d2ee1a3、Web base d4eae01 加未提交无障碍改动。未发现当前部署被 PR26 替换的证据，未重启或改动服务。本次默认 SSH 密钥未获授权，但原有密码认证成功，不是已确认的服务器密码失效。此核对不保证期间从未发生又回退的部署，也不代替本机 Host 版本或真实任务验收。
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
+
+## 2026-10-10：网页无障碍版本已发布（无需清空配对）
+
+使用 iPhone Safari 打开 [无障碍 Preview](https://47.108.197.221:8443/?v=a11y-20261010)。先关闭旧页面再打开此链接，避免旧内存页面仍在运行。已经在同一 Safari 配对且会话有效时可以直接继续；首次改用 Safari 或会话过期时，在电脑 `http://127.0.0.1:4318/connect` 扫码并由用户本人／可信协助者确认。此轮没有重启 Relay，因此**不是要求所有人重新配对**；不要照搬下方 2026-10-09 重启后的历史要求。
+
+这次无障碍语义默认可用，不需要先打开项目里的某个模式。按[手机无障碍文档](./mobile-accessibility-experience-review-2026-10-08.md)顶部步骤，先练习系统旁白退出手势，再检查设置、输入、进展、暂停／纠正、请求和结果。建议先关应用自动播报，单独测试旁白，随后再试两套语音并用。没有触发的审批／提问记“未覆盖”；图片才能确认的窗口／审批记“需视觉协助”，不得盲批。
+
+### 发布事实和版本
+
+- 当前 Preview `current`：`/opt/computer-harness-preview/releases/2026-10-10-web-accessibility-v1`；回退点：`2026-10-09-pr22-d2ee1a3-v2`。新 release 从旧 release 独立复制，覆盖匹配的 Web source 与 dist，backend／node_modules／原 `.release-source` 不变。旧哈希资源同时保留，避免已打开页面请求旧资源时 404。
+- Git base 为 `d4eae01`，Web 改动仍未提交，不称 Git HEAD 已发布新源码。`.web-release-source` 记录 uncommitted 来源、77 个 source 文件指纹 `7db6e662041a830de69350c4134ff2e0f9f08834d39b4f9b6c836873805cfdcf`，以及 source+dist tar SHA-256 `8A8BCCD6671F05C47A2A55586384BAC1C56F320387D17FA23AB76D3088E95C0D`。未上传 `.env`、运行记录、账号 profile、密钥或本机 node_modules。
+- 新 JS：`index-BlAUldwj.js`，SHA-256 `3271F27F8DBC4BF2B2BA884CCFC0DA0A584A7AB32E1F2EB9D1C81317E9E4EDE7`；新 CSS：`index-C8yJJOYs.css`，SHA-256 `FEDD42E600E12477B4F66B4F224D83ACE3F5EF9113C92A074BE38D63C2963457`；index SHA-256 `9C841A904847749F4D2807426B8BB205FEB2E6856686DADDA9B21648849E833D`。协调者从公网重新下载读取并核验，均与本机产物一致，中文 UTF-8 无替换症状。
+- Preview／stable health 200，匿名 Preview `GET /api/runs` 为 401；旧 `index-Dksr18pu.js` 仍 200 且原 SHA 不变。Preview／stable PID 与 service state 未变，443 current 不变；本机 Host 4318 在线、WSS established，设备数量仍 2，未代用户生成或批准配对。原登录状态、CUA 候选与配置不变，没有实际桌面／模型调用。
+
+### 回退与边界
+
+当前 Relay 配置的 `webRoot` 是 `/opt/computer-harness-preview/current/apps/web/dist`，进程使用该符号路径读取文件，而非固定旧 release 的 realpath。因此本次只原子替换 Preview current，不需重启服务或清空内存会话。回退时同样只原子指回上述前一 release，然后核对 root／asset／health／匿名 401／两个服务 PID 及 stable current；不得改 443、默认 Host／driver、登录 profile 或自动重放任务。切换脚本失败时只有 current 仍指向自己发布的目录才回退，不覆盖其他人的并发发布。
+
+本轮完成发布与独立公网核验；不宣称已完成真实 iPhone 读屏、物理声音、真实业务任务或完整 WCAG 合规。上一轮 Web 227 项、隔离浏览器 50/50 与 Sol 审查结论见手机文档，不能把本次发布重计为新一轮实机成功。
 
 ## 2026-10-09：只读部署状态核对
 

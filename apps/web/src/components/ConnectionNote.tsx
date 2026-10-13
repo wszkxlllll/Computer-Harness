@@ -1,6 +1,6 @@
 import type { FeedConnection } from "../hooks/useRunFeed";
 
-export function ConnectionNote({ connection }: { connection: FeedConnection }) {
+export function ConnectionNote({ connection, announce = true }: { connection: FeedConnection; announce?: boolean }) {
   const text = connection === "live"
     ? "电脑状态已连接"
     : connection === "reconnecting"
@@ -8,5 +8,5 @@ export function ConnectionNote({ connection }: { connection: FeedConnection }) {
       : connection === "offline"
         ? "电脑暂时无法连接"
         : "正在连接电脑…";
-  return <span className={`connection-note connection-${connection}`} role="status">{text}</span>;
+  return <span className={`connection-note connection-${connection}`} role={announce ? "status" : undefined}>{text}</span>;
 }

@@ -149,9 +149,9 @@ export function PairingScreen() {
   return (
     <>
       <BrandHeader />
-      <main id="main-content" className="page-shell narrow-page" tabIndex={-1}>
+      <main id="main-content" className="page-shell narrow-page" aria-labelledby="pairing-title" tabIndex={-1}>
         <p className="eyebrow">连接 Harness</p>
-        <h1 className="page-title">{heading}</h1>
+        <h1 id="pairing-title" className="page-title" tabIndex={-1}>{heading}</h1>
         {pairState === "starting" && <div className="loading-panel" role="status">正在向电脑发送配对请求…</div>}
         {pairState === "checking" && <div className="loading-panel" role="status">正在确认手机连接状态…</div>}
         {pairState === "pending_local_confirmation" && (

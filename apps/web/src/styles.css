@@ -923,7 +923,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   .device-copy { flex-basis: calc(100% - 4rem); }
   .device-row .button { margin-left: 3.55rem; }
   .decision-actions { align-items: stretch; }
-  .decision-actions .button { flex: 1 1 8rem; }
+  .decision-actions .button { flex: 1 1 8rem; max-inline-size: 100%; min-inline-size: 0; min-width: 0; }
   .preference-radio-row { gap: 0 .45rem; }
   .preference-radio-compact { flex: 1 1 5rem; }
   .preference-language-row { align-items: stretch; flex-direction: column; gap: .15rem; }

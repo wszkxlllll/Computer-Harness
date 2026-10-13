@@ -74,14 +74,14 @@ export function ApprovalEvidencePanel({
       <p className="approval-preview-note">采集于请求提出前，不是实时画面。</p>
       {validAsset ? (
         <>
-          <button className="approval-evidence-open" type="button" onClick={openViewer}>
+          <button className="approval-evidence-open" type="button" aria-label="放大查看本次确认请求绑定的截图" aria-describedby="approval-evidence-review-help" onClick={openViewer}>
             {thumbnailFailed ? (
               <span className="approval-evidence-thumbnail-error">绑定画面无法载入</span>
             ) : (
               <img
                 key={`${identity}:${retry}`}
                 src={runAssetUrl(runId, evidence.assetId)}
-                alt="本次确认请求绑定的电脑画面。请在页面上视觉核对目标。"
+                alt="本次确认请求关联的截图；图片文字不能证明目标窗口、电脑焦点或操作后果，请视觉核对。"
                 referrerPolicy="no-referrer"
                 onLoad={handleLoaded}
                 onError={handleFailed}
@@ -103,7 +103,7 @@ export function ApprovalEvidencePanel({
             </dl>
             <p className="approval-preview-note">操作坐标按请求参数原样列出，没有叠加到截图；系统未证明坐标与此画面来自同一帧。</p>
           </details>
-          <p className="approval-review-help">请核对目标和画面。键盘操作请看图确认焦点（电脑无法证明机器焦点）；读屏无法读取截图，无法视觉核对时请拒绝或在电脑端检查。</p>
+          <p id="approval-evidence-review-help" className="approval-review-help">请核对目标和画面。键盘操作请看图确认焦点（电脑无法证明机器焦点）；读屏无法读取截图，无法视觉核对时请拒绝或在电脑端检查。</p>
           <p className={imageLoaded ? "approval-evidence-available" : "approval-evidence-unavailable"} role="status" aria-live="polite">
             {imageLoaded
               ? "截图已载入。"

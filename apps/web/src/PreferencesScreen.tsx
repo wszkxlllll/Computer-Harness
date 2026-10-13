@@ -11,6 +11,8 @@ import type { ManagedBrowserDefaultSession, ManagedBrowserProfileSettings, Manag
 export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: VoiceCapabilities }) {
   const { preferences, saved, setAssistant, setPresentation, setDisplayPreset, setVoice, reset } = usePreferences();
   const [message, setMessage] = useState("");
+  const [guidanceDraft, setGuidanceDraft] = useState(preferences.assistant.additionalGuidance);
+  const [guidanceNeedsSave, setGuidanceNeedsSave] = useState(false);
   const [voiceInputText, setVoiceInputText] = useState("");
   const [voiceMessage, setVoiceMessage] = useState("");
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -99,7 +101,18 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
   }
 
   function restoreDefaults() {
-    setMessage(reset() ? "已恢复默认偏好，并保存到此浏览器。" : "已恢复默认偏好，但浏览器未能保存。");
+    const didSave = reset();
+    setGuidanceDraft("");
+    setGuidanceNeedsSave(!didSave);
+    setMessage(didSave ? "已恢复默认偏好，并保存到此浏览器。" : "已恢复默认偏好，但浏览器未能保存。");
+  }
+
+  function saveGuidance(value: string) {
+    const didSave = setAssistant("additionalGuidance", value);
+    setGuidanceNeedsSave(!didSave);
+    setMessage(didSave
+      ? "补充说明已保存在此浏览器，并会用于下一次新任务。"
+      : "补充说明已更新，但浏览器未能保存。");
   }
 
   async function playVoicePreview(text: string) {
@@ -152,7 +165,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
   return (
     <PhoneLayout active="settings">
       <main id="main-content" className="page-shell preferences-page" aria-labelledby="preferences-title" tabIndex={-1}>
-        <h1 id="preferences-title" className="page-title">设置</h1>
+        <h1 id="preferences-title" className="page-title" tabIndex={-1}>设置</h1>
 
         <section className="preferences-section" aria-labelledby="display-preferences-title">
           <h2 id="display-preferences-title">显示与辅助</h2>
@@ -218,7 +231,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
           <h2 id="managed-browser-preferences-title">浏览器与登录状态</h2>
           <p className="field-hint">登录状态仅保存在这台电脑上的 Harness 受管浏览器配置中，不会发送到手机或模型。任务开启“跨应用完成任务”时，受管浏览器页面内容可能用于该任务。准备完成仅表示电脑端浏览器已关闭且设置已确认，不保证网站一直保持登录。</p>
 
-          <div className="managed-browser-status" aria-live="polite">
+          <div className="managed-browser-status">
             <strong>本机状态</strong>
             <span>{browserProfileLoading ? "正在读取…" : browserProfile ? managedBrowserStatusLabel(browserProfile.status) : "暂不可用"}</span>
           </div>
@@ -309,12 +322,14 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
               className="preference-select"
               id="preferred-language"
               value={preferences.assistant.preferredLanguage}
+              aria-describedby="preferred-language-help"
               onChange={(event) => saveAssistant("preferredLanguage", event.currentTarget.value as PreferredLanguage)}
             >
               <option value="follow_conversation">跟随当前对话</option>
               <option value="zh-CN">简体中文</option>
               <option value="en">English</option>
             </select>
+            <span id="preferred-language-help" className="sr-only">只影响之后新建任务的回答语言；不会改变电脑操作或审批规则。</span>
           </div>
 
           <div className="assistant-guidance">
@@ -322,31 +337,44 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
             <textarea
               id="assistant-additional-guidance"
               className="preference-textarea"
-              value={preferences.assistant.additionalGuidance}
+              value={guidanceDraft}
               maxLength={RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS * 2}
               aria-describedby="assistant-guidance-help assistant-guidance-count"
               onChange={(event) => {
                 const guidance = Array.from(event.currentTarget.value)
                   .slice(0, RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS)
                   .join("");
-                setMessage(setAssistant("additionalGuidance", guidance)
-                  ? "补充说明已保存在此浏览器，并会用于下一次新任务。"
-                  : "补充说明已更新，但浏览器未能保存。");
+                if (!guidanceNeedsSave) setMessage("");
+                setGuidanceDraft(guidance);
+                setGuidanceNeedsSave(true);
               }}
             />
             <div className="assistant-guidance-footer">
               <p id="assistant-guidance-help" className="field-hint">写下你希望回答采用的格式或解释方式。每次最多 {RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} 个字符；内容只保存在此浏览器，并仅用于之后开始的新任务。</p>
-              <span id="assistant-guidance-count" className="guidance-counter" aria-label={`${[...preferences.assistant.additionalGuidance].length} / ${RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} 个字符`}>
-                {[...preferences.assistant.additionalGuidance].length} / {RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS}
+              <span id="assistant-guidance-count" className="guidance-counter" aria-label={`${[...guidanceDraft].length} / ${RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS} 个字符`}>
+                {[...guidanceDraft].length} / {RUN_ASSISTANT_PREFERENCES_MAX_GUIDANCE_CHARS}
               </span>
             </div>
             <button
+              className="button button-secondary"
+              type="button"
+              disabled={!guidanceNeedsSave}
+              onClick={() => saveGuidance(guidanceDraft)}
+            >
+              保存补充说明
+            </button>
+            <button
               className="text-button guidance-clear"
               type="button"
-              disabled={preferences.assistant.additionalGuidance.length === 0}
-              onClick={() => setMessage(setAssistant("additionalGuidance", "")
-                ? "补充说明已清除，并保存在此浏览器。"
-                : "补充说明已清除，但浏览器未能保存。")}
+              disabled={guidanceDraft.length === 0 && preferences.assistant.additionalGuidance.length === 0}
+              onClick={() => {
+                setGuidanceDraft("");
+                const didSave = setAssistant("additionalGuidance", "");
+                setGuidanceNeedsSave(!didSave);
+                setMessage(didSave
+                  ? "补充说明已清除，并保存在此浏览器。"
+                  : "补充说明已清除，但浏览器未能保存。");
+              }}
             >
               清空补充说明
             </button>
@@ -375,6 +403,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
                 className="preference-select"
                 id="speech-rate"
                 value={preferences.voice.speechRate}
+                aria-describedby="speech-rate-help"
                 disabled={!voiceOutputAvailable}
                 onChange={(event) => setMessage(setVoice("speechRate", event.currentTarget.value as SpeechRate) ? "朗读速度已保存到此浏览器。" : "朗读速度已更新，但浏览器未能保存。")}
               >
@@ -382,6 +411,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
                 <option value="normal">标准</option>
                 <option value="fast">稍快</option>
               </select>
+              <span id="speech-rate-help" className="sr-only">只影响任务通知的语音播放速度。</span>
             </div>
             {(voiceOutputAvailable || voiceCapabilities?.transcribeOnce) && (
               <div className="voice-actions">
@@ -462,12 +492,23 @@ function PreferenceRadio<T extends string>({
   compact?: boolean;
 }) {
   const id = `${name}-${value}`;
+  const titleId = `${id}-title`;
+  const descriptionId = description ? `${id}-description` : undefined;
   return (
     <label className={`preference-radio${compact ? " preference-radio-compact" : ""}`} htmlFor={id}>
-      <input id={id} name={name} type="radio" value={value} checked={selected === value} onChange={() => onChange(value)} />
+      <input
+        id={id}
+        name={name}
+        type="radio"
+        value={value}
+        checked={selected === value}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        onChange={() => onChange(value)}
+      />
       <span className="preference-radio-copy">
-        <strong>{title}</strong>
-        {description && <span>{description}</span>}
+        <strong id={titleId}>{title}</strong>
+        {description && <span id={descriptionId}>{description}</span>}
       </span>
     </label>
   );
@@ -491,10 +532,19 @@ function PreferenceToggle({
   return (
     <label className="preference-toggle" htmlFor={id}>
       <span className="preference-toggle-copy">
-        <strong>{title}</strong>
-        <span className="sr-only">{description}</span>
+        <strong id={`${id}-title`}>{title}</strong>
+        <span id={`${id}-description`} className="sr-only">{description}</span>
       </span>
-      <input id={id} type="checkbox" role="switch" checked={checked} disabled={disabled} onChange={(event) => onChange(event.currentTarget.checked)} />
+      <input
+        id={id}
+        type="checkbox"
+        role="switch"
+        aria-labelledby={`${id}-title`}
+        aria-describedby={`${id}-description`}
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
     </label>
   );
 }

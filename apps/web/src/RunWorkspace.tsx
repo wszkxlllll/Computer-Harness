@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import { CorrectionForm } from "./components/CorrectionForm";
 import { ConnectionNote } from "./components/ConnectionNote";
 import { EventTimeline, eventLabel } from "./components/EventTimeline";
@@ -12,6 +12,7 @@ import { useRunCommands } from "./hooks/useRunCommands";
 import { useRunFeed } from "./hooks/useRunFeed";
 import type { PendingRequestBase, RemoteEvent, RunNotice } from "./types";
 import { BrowserSpeechOutput, RunNoticeCursor, RunNoticeSpeechController, VOICE_INPUT_STARTED_EVENT } from "./run-notice-speech";
+import { RunAnnouncementCursor } from "./run-accessibility";
 import type { VoiceCapabilities } from "./voice-capabilities";
 import type { VoiceSpeechRate } from "@computer-harness/voice";
 
@@ -33,12 +34,23 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   const [refreshingAfterViewer, setRefreshingAfterViewer] = useState(false);
   const [retryingSnapshot, setRetryingSnapshot] = useState(false);
   const [voiceOutputMessage, setVoiceOutputMessage] = useState<string>();
+  const [runAnnouncement, setRunAnnouncement] = useState("");
   const [activeVoiceInputs, setActiveVoiceInputs] = useState<ReadonlySet<string>>(() => new Set());
   const runHeadingRef = useRef<HTMLHeadingElement>(null);
+  const initialSnapshotFocusHandledRef = useRef(false);
+  const recoverableControlFocusRef = useRef<HTMLElement | undefined>(undefined);
+  const focusedPendingElementRef = useRef<HTMLElement | undefined>(undefined);
+  const previousPendingIdentityRef = useRef<string | undefined>(undefined);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const pendingRequestStateRef = useRef(pendingRequestState);
   pendingRequestStateRef.current = pendingRequestState;
+  const pendingStateAheadOfSnapshot = Boolean(
+    snapshot && pendingRequestState && pendingRequestState.sequence > snapshot.sequence,
+  );
+  const snapshotPending = snapshot?.pendingRequest;
+  const currentPending = pendingStateAheadOfSnapshot ? pendingRequestState?.request : snapshotPending;
+  const pendingRequestStale = pendingStateAheadOfSnapshot && !samePendingCommandTarget(currentPending, snapshotPending);
   const currentSpeechPendingRequest = () => pendingRequestStateRef.current === undefined
     ? snapshotRef.current?.pendingRequest
     : pendingRequestStateRef.current.request;
@@ -52,6 +64,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     setVoiceOutputMessage,
   ), [runId, voiceCapabilities]);
   const noticeCursor = useMemo(() => new RunNoticeCursor(runId), [runId]);
+  const announcementCursor = useMemo(() => new RunAnnouncementCursor(runId), [runId]);
   const speechLifecycleRef = useRef(new Map<RunNoticeSpeechController, number>());
   const isTerminal = snapshot?.status === "finished";
   const voiceInputActive = activeVoiceInputs.size > 0;
@@ -60,6 +73,60 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     event.type === "run.progress" && (latest === undefined || event.sequence > latest.sequence) ? event : latest,
   undefined);
   const latestProgressText = selectLatestProgressText(latestProgressNotice, latestProgressEvent);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    const message = announcementCursor.update({
+      runId,
+      status: snapshot.status,
+      connection,
+      pending: currentPending,
+      pendingSyncPending: pendingRequestStale,
+      progressText: latestProgressText,
+      outcome: snapshot.outcome,
+      reply: snapshot.reply,
+      snapshotError: snapshot.error,
+      feedError: error,
+      commandNotice: commands.notice?.text,
+    });
+    if (message) setRunAnnouncement(message);
+  }, [announcementCursor, commands.notice?.text, connection, currentPending, error, latestProgressText, pendingRequestStale, runId, snapshot]);
+
+  useLayoutEffect(() => {
+    const previousIdentity = previousPendingIdentityRef.current;
+    const currentIdentity = currentPending
+      ? `${currentPending.requestId}:${currentPending.kind}`
+      : undefined;
+    if (previousIdentity && !currentIdentity) {
+      const focusedElement = focusedPendingElementRef.current;
+      if (focusedElement && !focusedElement.isConnected && document.activeElement === document.body) {
+        focusedPendingElementRef.current = undefined;
+        runHeadingRef.current?.focus();
+      }
+    }
+    previousPendingIdentityRef.current = currentIdentity;
+  }, [currentPending?.kind, currentPending?.requestId, pendingStateAheadOfSnapshot]);
+
+  useLayoutEffect(() => {
+    if (!snapshot || initialSnapshotFocusHandledRef.current) return;
+    initialSnapshotFocusHandledRef.current = true;
+    const main = document.getElementById("main-content");
+    const modalOpen = document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
+    if (document.activeElement === main && !modalOpen) runHeadingRef.current?.focus();
+  }, [snapshot]);
+
+  useLayoutEffect(() => {
+    const focusedControl = recoverableControlFocusRef.current;
+    if (!focusedControl || focusedControl.isConnected || document.activeElement !== document.body) return;
+    recoverableControlFocusRef.current = undefined;
+    runHeadingRef.current?.focus();
+  });
+
+  useEffect(() => {
+    const clearRunControlFocus = () => { recoverableControlFocusRef.current = undefined; };
+    window.addEventListener("blur", clearRunControlFocus);
+    return () => window.removeEventListener("blur", clearRunControlFocus);
+  }, []);
 
   useEffect(() => {
     const lifecycle = (speechLifecycleRef.current.get(speechController) ?? 0) + 1;
@@ -163,7 +230,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   if (!snapshot) {
     return (
       <PhoneLayout active="tasks">
-        <main id="main-content" className="page-shell run-page" tabIndex={-1}>
+        <main id="main-content" className="page-shell run-page" aria-label="任务状态" tabIndex={-1} onFocusCapture={handleMainFocusCapture} onBlurCapture={handleMainBlurCapture}>
           {error
             ? <div className="notice notice-error" role="alert">
               <p>暂时无法读取这项任务的最新状态。任务目前情况未知；连接中断不代表任务已经停止。</p>
@@ -171,7 +238,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
                 <summary>查看原因</summary>
                 <p>{error}</p>
               </details>
-              <button className="button button-secondary button-large" type="button" disabled={retryingSnapshot} onClick={() => void refreshManually()}>
+              <button className="button button-secondary button-large run-retry" type="button" disabled={retryingSnapshot} onClick={() => void refreshManually()}>
                 {retryingSnapshot ? "正在重新读取…" : "重试读取任务状态"}
               </button>
             </div>
@@ -182,8 +249,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     );
   }
 
-  const currentPending = snapshot.pendingRequest;
-  const pending = currentPending ?? (viewerReview?.request ? viewerReview.request : undefined);
+  const pending = currentPending ?? (!pendingStateAheadOfSnapshot && viewerReview?.request ? viewerReview.request : undefined);
   const requestBlocked = blockedRequestId === "*" || Boolean(pending && blockedRequestId === pending.requestId);
   const canCorrect = !isTerminal && snapshot.capabilities.correct === true && currentPending === undefined;
   const hasControls = snapshot.capabilities.pause || snapshot.capabilities.resume || snapshot.capabilities.abort;
@@ -240,16 +306,27 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
     });
   }
 
+  function handleMainFocusCapture(event: FocusEvent<HTMLElement>) {
+    const target = event.target;
+    recoverableControlFocusRef.current = target instanceof HTMLElement && isRecoverableRunControl(target) ? target : undefined;
+  }
+
+  function handleMainBlurCapture(event: FocusEvent<HTMLElement>) {
+    const nextTarget = event.relatedTarget;
+    if (!(nextTarget instanceof Node) || nextTarget === document.body) return;
+    recoverableControlFocusRef.current = nextTarget instanceof HTMLElement && isRecoverableRunControl(nextTarget)
+      ? nextTarget
+      : undefined;
+  }
+
   return (
     <PhoneLayout active="tasks">
-      <main id="main-content" className="page-shell run-page" tabIndex={-1}>
+      <main id="main-content" className="page-shell run-page" aria-labelledby="run-goal" tabIndex={-1} onFocusCapture={handleMainFocusCapture} onBlurCapture={handleMainBlurCapture}>
         <a className="back-link" href="/">← 返回任务列表</a>
-        <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          当前任务状态：{statusTextFor(snapshot.status)}。{pending ? "有一项待处理请求。" : "没有待处理请求。"}
-        </p>
+        <p className="sr-only" data-run-announcement="true" role="status" aria-live="polite" aria-atomic="true">{runAnnouncement}</p>
         <section className="run-heading" aria-labelledby="run-goal">
           <div className="run-heading-top">
-            <ConnectionNote connection={connection} />
+            <ConnectionNote connection={connection} announce={false} />
             <button className="text-button refresh-run" type="button" disabled={retryingSnapshot} onClick={() => void refreshManually()}>
               {retryingSnapshot ? "正在读取…" : "刷新任务状态"}
             </button>
@@ -283,7 +360,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
             <strong>{statusTextFor(snapshot.status)}</strong>
           </p>
           {latestProgressText
-            ? <p className="run-activity-copy" role="status" aria-live="polite" aria-atomic="true">上次进展：{latestProgressText}</p>
+            ? <p className="run-activity-copy">上次进展：{latestProgressText}</p>
             : <p className="run-activity-copy">上次进展：暂无文字记录。</p>}
           {(connection === "offline" || connection === "reconnecting") && (
             <p className="run-activity-disconnected">
@@ -303,26 +380,29 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
           />
         </section>
 
-        {commands.notice && <div className={`notice notice-${commands.notice.tone}`} role="status" aria-live="polite">{commands.notice.text}</div>}
+        {commands.notice && <div className={`notice notice-${commands.notice.tone}`}>{commands.notice.text}</div>}
         {voiceOutputMessage && <p className="notice notice-warning" role="status" aria-live="polite">{voiceOutputMessage}</p>}
-        {error && <div className="notice notice-warning" role="status">{error}</div>}
+        {error && <div className="notice notice-warning">{error}</div>}
         {refreshingAfterViewer && <p className="notice notice-info" role="status">正在重新读取任务状态；暂不发送请求…</p>}
 
         {pending && (
           <PendingRequestPanel
             request={pending}
+            announcementsManagedExternally
             runId={runId}
             latestAssetId={snapshot.latestAssetId}
-            busy={commands.busyCommand !== undefined || refreshingAfterViewer}
+            busy={commands.busyCommand !== undefined || refreshingAfterViewer || pendingRequestStale}
             canApprove={snapshot.capabilities.approval === true && !refreshingAfterViewer}
             canChooseWindow={snapshot.capabilities.windowHandoff === true && !refreshingAfterViewer && !requestBlocked}
-            reviewBlocked={requestBlocked}
+            reviewBlocked={requestBlocked || pendingRequestStale}
+            requestSyncPending={pendingRequestStale}
             onApprove={commands.actOnApproval}
             onRespond={commands.answerRequest}
             onChooseWindow={commands.chooseWindow}
             onIgnoreNewWindow={commands.ignoreNewWindow}
             onEvidenceViewerOpened={rememberViewerRequest}
             onEvidenceViewerClosed={(requestId) => void refreshAfterViewer(requestId)}
+            onFocusedElementChange={(element) => { focusedPendingElementRef.current = element; }}
             onVoiceActiveChange={(active) => updateVoiceInputActive(`request:${pending.requestId}`, active)}
           />
         )}
@@ -334,7 +414,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
               <span>状态只会在电脑回报后更新。</span>
             </div>
             <div className="control-actions">
-              {snapshot.capabilities.pause && <button className="button button-secondary button-large" type="button" disabled={commands.busyCommand !== undefined} onClick={() => void commands.control("pause")}>暂停</button>}
+              {snapshot.capabilities.pause && <button className="button button-secondary button-large" type="button" disabled={commands.busyCommand !== undefined} onClick={() => void commands.control("pause")}>暂停任务</button>}
               {snapshot.capabilities.resume && <button className="button button-primary button-large" type="button" disabled={commands.busyCommand !== undefined} onClick={() => void commands.control("resume")}>继续任务</button>}
               {snapshot.capabilities.abort && <button className="button button-danger-outline button-large" type="button" disabled={commands.busyCommand !== undefined} onClick={() => void commands.control("abort")}>停止任务</button>}
             </div>
@@ -377,6 +457,37 @@ function selectLatestProgressText(
   const eventSequence = event?.sequence ?? -1;
   if (notice && noticeSequence >= eventSequence) return notice.text;
   return event ? eventLabel(event) : notice?.text;
+}
+
+function samePendingCommandTarget(
+  rendered: PendingRequestBase | undefined,
+  snapshotPending: PendingRequestBase | undefined,
+): boolean {
+  if (!rendered || !snapshotPending) return rendered === snapshotPending;
+  if (rendered.requestId !== snapshotPending.requestId || rendered.kind !== snapshotPending.kind) return false;
+  if (rendered.kind === "approval") return approvalEvidenceKey(rendered) === approvalEvidenceKey(snapshotPending);
+  if (rendered.kind === "window_handoff") {
+    const renderedTokens = (rendered.candidates ?? []).map((candidate) => candidate.token).join("\u0000");
+    const snapshotTokens = (snapshotPending.candidates ?? []).map((candidate) => candidate.token).join("\u0000");
+    return rendered.reasonCode === snapshotPending.reasonCode && renderedTokens === snapshotTokens;
+  }
+  return true;
+}
+
+function isRecoverableRunControl(element: HTMLElement): boolean {
+  return element.matches(".refresh-run, .run-retry, .control-panel button, .correction-form textarea, .correction-form button");
+}
+
+function approvalEvidenceKey(request: PendingRequestBase): string {
+  const evidence = request.preview?.evidence;
+  if (!evidence) return "";
+  return [
+    evidence.assetId,
+    evidence.observationId,
+    evidence.decisionObservationId,
+    evidence.surfaceRef.surfaceId,
+    evidence.surfaceRef.generation,
+  ].join("\u0000");
 }
 
 interface RunSpeechActionsProps {

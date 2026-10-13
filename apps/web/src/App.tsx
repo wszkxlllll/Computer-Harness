@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, getPhoneSession, getVoiceInputCapabilities, setPhoneCsrfToken } from "./api";
 import { BrandHeader } from "./components/BrandHeader";
+import { RouteFocusOnMount } from "./components/RouteFocusOnMount";
 import { ConnectPhoneScreen } from "./ConnectPhoneScreen";
 import { HomeScreen } from "./HomeScreen";
 import { PairingScreen } from "./PairingScreen";
@@ -33,12 +34,12 @@ function AppRoutes({ voiceCapabilities, commonSiteChoices }: AppProps) {
     return () => window.removeEventListener("popstate", updatePathname);
   }, []);
 
-  if (pathname === "/connect") return <ConnectPhoneScreen />;
-  if (pathname === "/pair") return <PairingScreen />;
-  if (pathname === "/preferences") return <PhoneSessionGate><PreferencesScreen voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
+  if (pathname === "/connect") return <RouteFocusOnMount key={pathname}><ConnectPhoneScreen /></RouteFocusOnMount>;
+  if (pathname === "/pair") return <RouteFocusOnMount key={pathname}><PairingScreen /></RouteFocusOnMount>;
+  if (pathname === "/preferences") return <PhoneSessionGate key={pathname}><PreferencesScreen voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
   const runMatch = pathname.match(/^\/run\/([^/]+)\/?$/);
-  if (runMatch) return <PhoneSessionGate><RunWorkspace runId={decodeURIComponent(runMatch[1])} voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
-  return <PhoneSessionGate><HomeScreen commonSiteChoices={commonSiteChoices} /></PhoneSessionGate>;
+  if (runMatch) return <PhoneSessionGate key={pathname}><RunWorkspace runId={decodeURIComponent(runMatch[1])} voiceCapabilities={voiceCapabilities} /></PhoneSessionGate>;
+  return <PhoneSessionGate key={pathname}><HomeScreen commonSiteChoices={commonSiteChoices} /></PhoneSessionGate>;
 }
 
 function PhoneSessionGate({ children }: { children: ReactNode }) {
@@ -80,17 +81,21 @@ function PhoneSessionGate({ children }: { children: ReactNode }) {
   }, []);
 
   if (state === "ready") {
-    return <VoiceInputCapabilitiesContext.Provider value={voiceInputCapabilities}>{children}</VoiceInputCapabilitiesContext.Provider>;
+    return (
+      <VoiceInputCapabilitiesContext.Provider value={voiceInputCapabilities}>
+        <RouteFocusOnMount>{children}</RouteFocusOnMount>
+      </VoiceInputCapabilitiesContext.Provider>
+    );
   }
   if (state === "loading") {
     return <main id="main-content" className="page-shell" tabIndex={-1}><div className="loading-panel" role="status">正在连接你的电脑…</div></main>;
   }
   return (
-    <>
+    <RouteFocusOnMount>
       <BrandHeader />
-      <main id="main-content" className="page-shell narrow-page" tabIndex={-1}>
+      <main id="main-content" className="page-shell narrow-page" aria-labelledby="session-gate-title" tabIndex={-1}>
         <p className="eyebrow">手机控制台</p>
-        <h1 className="page-title">{state === "unpaired" ? "先连接你的电脑" : "电脑暂时没有响应"}</h1>
+        <h1 id="session-gate-title" className="page-title" tabIndex={-1}>{state === "unpaired" ? "先连接你的电脑" : "电脑暂时没有响应"}</h1>
         <div className={`notice ${state === "unpaired" ? "notice-info" : "notice-warning"}`} role={state === "offline" ? "alert" : "status"}>
           {state === "unpaired"
             ? "请在运行 Harness 的电脑上打开“连接手机”，扫描一次性二维码，并等待电脑本机确认。"
@@ -101,6 +106,6 @@ function PhoneSessionGate({ children }: { children: ReactNode }) {
           <a className="button button-secondary button-large" href="/connect">电脑端连接说明</a>
         </div>
       </main>
-    </>
+    </RouteFocusOnMount>
   );
 }

@@ -175,6 +175,7 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
         {notice && <p className="notice notice-warning viewer-notice">{notice}</p>}
 
         <div
+          id="screenshot-viewer-stage"
           className="screenshot-viewer-stage"
           aria-label="截图画面。可拖动平移，也可双指缩放。"
           onPointerDown={onPointerDown}
@@ -201,11 +202,11 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
           )}
         </div>
 
-        <div className="screenshot-viewer-controls" aria-label="截图缩放和平移控制">
+        <div className="screenshot-viewer-controls" role="group" aria-label="截图缩放和平移控制">
           {imageFailed && <button className="button button-secondary" type="button" onClick={retryImage}>重新载入截图</button>}
-          <button className="button button-secondary" type="button" onClick={() => scaleBy(1 / 1.25)} aria-label="缩小截图">−</button>
-          <span className="viewer-zoom-level" role="status" aria-live="polite">{Math.round(scale * 100)}%</span>
-          <button className="button button-secondary" type="button" onClick={() => scaleBy(1.25)} aria-label="放大截图">＋</button>
+          <button className="button button-secondary" type="button" onClick={() => scaleBy(1 / 1.25)} aria-label="缩小截图" aria-controls="screenshot-viewer-stage" disabled={scale <= MIN_SCALE}>−</button>
+          <span className="viewer-zoom-level" role="status" aria-live="polite" aria-label={`当前缩放比例 ${Math.round(scale * 100)}%`}>{Math.round(scale * 100)}%</span>
+          <button className="button button-secondary" type="button" onClick={() => scaleBy(1.25)} aria-label="放大截图" aria-controls="screenshot-viewer-stage" disabled={scale >= MAX_SCALE}>＋</button>
           <button className="button button-secondary viewer-fit-button" type="button" onClick={fit}>适合屏幕</button>
           <div className="viewer-pan-controls" role="group" aria-label="平移截图">
             <button className="button button-secondary" type="button" onClick={() => pan(0, 48)} aria-label="向上平移截图">↑</button>

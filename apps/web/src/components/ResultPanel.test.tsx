@@ -53,6 +53,8 @@ describe("run result panel", () => {
     rerender(<ResultPanel reply={longReply} outcome="succeeded" />);
     const expandButton = screen.getByRole("button", { name: "查看完整结果" });
     expect(expandButton.getAttribute("aria-expanded")).toBe("false");
+    expect(expandButton.getAttribute("aria-controls")).toBe("run-result-copy");
+    expect(document.getElementById(expandButton.getAttribute("aria-controls")!)?.textContent).toContain(longReply);
 
     fireEvent.click(expandButton);
     expect(screen.getByRole("button", { name: "收起结果" }).getAttribute("aria-expanded")).toBe("true");

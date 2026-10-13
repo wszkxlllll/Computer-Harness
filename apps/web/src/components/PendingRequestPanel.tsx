@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type FormEvent } from "react";
 import { canIgnoreWindow } from "../command-contract";
 import { previewWindowHandoffCandidate } from "../api";
 import { ApprovalActionParameters, ApprovalActionPreview } from "./ApprovalActionPreview";
@@ -7,6 +7,7 @@ import type { PendingRequestBase, WindowCandidate, WindowCandidatePreview } from
 import { VoiceInputControl } from "./VoiceInputControl";
 import { appendVoiceInputText } from "../voice-input-text";
 import type { VoiceAudioCaptureAdapter } from "@computer-harness/voice";
+import { pendingRequestAnnouncement, pendingRequestKey } from "../run-accessibility";
 
 interface PendingRequestPanelProps {
   request: PendingRequestBase;
@@ -16,8 +17,11 @@ interface PendingRequestPanelProps {
   canApprove?: boolean;
   canChooseWindow?: boolean;
   reviewBlocked?: boolean;
+  requestSyncPending?: boolean;
+  announcementsManagedExternally?: boolean;
   voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
   onVoiceActiveChange?: (active: boolean) => void;
+  onFocusedElementChange?: (element?: HTMLElement) => void;
   onApprove: (approved: boolean) => Promise<void>;
   onRespond: (text: string) => Promise<boolean>;
   onChooseWindow: (candidate: WindowCandidate, previewToken?: string) => Promise<void>;
@@ -34,8 +38,11 @@ export function PendingRequestPanel({
   canApprove = true,
   canChooseWindow = true,
   reviewBlocked = false,
+  requestSyncPending = false,
+  announcementsManagedExternally = false,
   voiceCaptureAdapterFactory,
   onVoiceActiveChange,
+  onFocusedElementChange,
   onApprove,
   onRespond,
   onChooseWindow,
@@ -50,6 +57,11 @@ export function PendingRequestPanel({
   const [windowPreviewDisplayErrors, setWindowPreviewDisplayErrors] = useState<Map<string, string>>(() => new Map());
   const [windowPreviewLoadingToken, setWindowPreviewLoadingToken] = useState<string>();
   const previewAbort = useRef<AbortController | undefined>(undefined);
+  const sectionRef = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const focusedElementRef = useRef<HTMLElement | undefined>(undefined);
+  const onFocusedElementChangeRef = useRef(onFocusedElementChange);
+  onFocusedElementChangeRef.current = onFocusedElementChange;
   const [currentTime, setCurrentTime] = useState(Date.now());
   const handoffCandidatesByToken = new Map<string, WindowCandidate>();
   if (request.kind === "window_handoff") {
@@ -67,8 +79,9 @@ export function PendingRequestPanel({
   const requiresCandidatePreview = (candidate: WindowCandidate): boolean =>
     candidate.previewRequired === true || !candidate.appName?.trim() || !candidate.title?.trim() ||
     (handoffLabelCounts.get(windowCandidateLabelKey(candidate)) ?? 0) > 1;
-  const [announcement, setAnnouncement] = useState(`有一项待处理请求：${request.kind === "approval" ? "电脑请求你确认一项操作" : request.kind === "user_input" ? "电脑需要你补充信息" : "请选择电脑要继续使用的窗口"}。`);
-  const announcedRequestIdentity = useRef(`${request.requestId}:${request.kind}`);
+  const [announcement, setAnnouncement] = useState("");
+  const requestAnnouncementKey = pendingRequestKey(request);
+  const announcedRequestKey = useRef(requestAnnouncementKey);
   const title = request.kind === "approval"
     ? "电脑请求你确认一项操作"
     : request.kind === "user_input"
@@ -84,13 +97,19 @@ export function PendingRequestPanel({
   const canSubmitApproval = canApprove && !reviewBlocked && (!isComputerActionApproval || (evidenceCanBeReviewed && evidenceLoaded));
   const controlsDisabled = busy || reviewBlocked;
 
-  useEffect(() => {
-    const currentIdentity = `${request.requestId}:${request.kind}`;
-    if (announcedRequestIdentity.current !== currentIdentity) {
-      announcedRequestIdentity.current = currentIdentity;
-      setAnnouncement(`当前请求已更新：${title}。请重新阅读后再决定。`);
+  useLayoutEffect(() => {
+    if (announcedRequestKey.current === requestAnnouncementKey) return;
+    const previousKey = announcedRequestKey.current;
+    announcedRequestKey.current = requestAnnouncementKey;
+    if (!announcementsManagedExternally) {
+      setAnnouncement(pendingRequestAnnouncement(request, previousKey !== undefined));
     }
-  }, [request.requestId, request.kind, title]);
+
+    const focusedElement = focusedElementRef.current;
+    if (previousKey !== undefined && focusedElement && !focusedElement.isConnected && document.activeElement === document.body) {
+      headingRef.current?.focus();
+    }
+  }, [announcementsManagedExternally, request, requestAnnouncementKey]);
 
   useLayoutEffect(() => {
     previewAbort.current?.abort();
@@ -112,6 +131,28 @@ export function PendingRequestPanel({
     const timer = window.setTimeout(() => setCurrentTime(Date.now()), Math.max(1, nextExpiry - Date.now() + 1));
     return () => window.clearTimeout(timer);
   }, [windowPreviews, currentTime]);
+
+  useEffect(() => {
+    const onWindowBlur = () => {
+      focusedElementRef.current = undefined;
+      onFocusedElementChangeRef.current?.(undefined);
+    };
+    window.addEventListener("blur", onWindowBlur);
+    return () => window.removeEventListener("blur", onWindowBlur);
+  }, []);
+
+  function handleFocusCapture(event: FocusEvent<HTMLElement>) {
+    if (!(event.target instanceof HTMLElement)) return;
+    focusedElementRef.current = event.target;
+    onFocusedElementChangeRef.current?.(event.target);
+  }
+
+  function handleBlurCapture(event: FocusEvent<HTMLElement>) {
+    const nextTarget = event.relatedTarget;
+    if (!(nextTarget instanceof Node) || event.currentTarget.contains(nextTarget) || nextTarget === document.body) return;
+    focusedElementRef.current = undefined;
+    onFocusedElementChangeRef.current?.(undefined);
+  }
 
   async function previewCandidate(candidate: WindowCandidate) {
     if (runId === undefined) {
@@ -169,7 +210,13 @@ export function PendingRequestPanel({
     }
   }
 
-  function renderCandidatePreview(candidate: WindowCandidate, requiresConfirmation: boolean) {
+  function renderCandidatePreview(
+    candidate: WindowCandidate,
+    candidateIndex: number,
+    requiresConfirmation: boolean,
+    candidateName: string,
+    candidatePosition: string,
+  ) {
     const preview = windowPreviews.get(candidate.token);
     if (preview === undefined) return null;
     const previewValid = Date.parse(preview.expiresAt) > currentTime;
@@ -181,7 +228,7 @@ export function PendingRequestPanel({
       <span className="window-choice-title">{preview.relationship ? windowRelationshipLabel(preview.relationship) : "捕获时关系未验证"}</span>
       <img
         src={`data:image/png;base64,${preview.dataBase64}`}
-        alt={`${preview.appName ?? "未知应用"}：${preview.title ?? "未知窗口"} 的实时窗口预览`}
+        alt={`${preview.appName ?? "未知应用"}：${preview.title ?? "未知窗口"} 的实时窗口预览，第 ${candidateIndex + 1} 个候选`}
         onLoad={() => setLoadedWindowPreviewTokens((current) => new Set(current).add(preview.previewToken))}
         onError={() => {
           setLoadedWindowPreviewTokens((current) => {
@@ -197,7 +244,13 @@ export function PendingRequestPanel({
         ? <>
           <p className="field-hint">请确认截图中显示的窗口就是本次要继续使用的窗口。若画面不清楚或不一致，请勿确认；无法区分时请在电脑恢复窗口后刷新，或停止任务。</p>
           {previewValid && previewLoaded && previewDisplayError === undefined
-            ? <button className="button button-primary button-large" type="button" disabled={controlsDisabled} onClick={() => void onChooseWindow(candidate, preview.previewToken)}>
+            ? <button
+              className="button button-primary button-large"
+              type="button"
+              aria-label={`确认 ${candidateName}（${candidatePosition}）并继续任务`}
+              disabled={controlsDisabled}
+              onClick={() => void onChooseWindow(candidate, preview.previewToken)}
+            >
               确认这个窗口并继续任务
             </button>
             : previewValid
@@ -213,9 +266,9 @@ export function PendingRequestPanel({
   }
 
   return (
-    <section className="pending-panel" aria-labelledby="pending-title">
-      <h2 id="pending-title">{title}</h2>
-      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
+    <section ref={sectionRef} className="pending-panel" aria-labelledby="pending-title" onFocusCapture={handleFocusCapture} onBlurCapture={handleBlurCapture}>
+      <h2 ref={headingRef} id="pending-title" tabIndex={-1}>{title}</h2>
+      {!announcementsManagedExternally && <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>}
       {request.kind === "approval" && isComputerActionApproval && request.reason && (
         <div className="approval-request-reason">
           <p className="pending-description">{request.reason}</p>
@@ -224,7 +277,7 @@ export function PendingRequestPanel({
       )}
       {request.kind === "approval" && request.reason && !isComputerActionApproval && <p className="pending-description">{request.reason}</p>}
       {request.kind === "approval" && (actions.length > 0 || request.preview !== undefined) && (
-        <details className="approval-more-details">
+        <details className="approval-more-details" key={`approval-details:${request.requestId}`}>
           <summary>更多操作参数</summary>
           {request.preview && <ApprovalActionParameters preview={request.preview} />}
         </details>
@@ -232,7 +285,7 @@ export function PendingRequestPanel({
       {request.kind !== "approval" && request.reason && <p className="pending-description">{request.reason}</p>}
       {request.question && <p className="pending-description">{request.question}</p>}
       {request.description && <p className="pending-description">{request.description}</p>}
-      {request.kind === "approval" && request.preview && <ApprovalActionPreview preview={request.preview} />}
+      {request.kind === "approval" && request.preview && <ApprovalActionPreview key={`approval-preview:${request.requestId}`} preview={request.preview} />}
       {request.kind === "approval" && evidence && evidenceCanBeReviewed && (
         <ApprovalEvidencePanel
           runId={runId!}
@@ -259,15 +312,20 @@ export function PendingRequestPanel({
       {request.kind === "approval" && isComputerActionApproval && evidenceCanBeReviewed && !evidenceLoaded && (
         <p className="approval-review-required" role="status">载入请求绑定的画面后，才可以批准这项电脑操作；你也可以拒绝请求。</p>
       )}
-      {reviewBlocked && (
+      {requestSyncPending && (
+        <p className="field-hint" role={announcementsManagedExternally ? undefined : "status"}>
+          电脑刚报告了新的待处理请求。正在同步当前状态；同步完成前不能处理。也可使用页面顶部的“刷新任务状态”重新读取。
+        </p>
+      )}
+      {reviewBlocked && !requestSyncPending && (
         <p className="notice notice-warning" role="alert">任务状态发生变化或无法刷新。请重新读取当前请求，再作决定或发送补充。</p>
       )}
-      {request.kind === "approval" && busy && reviewBlocked && (
+      {request.kind === "approval" && busy && reviewBlocked && !requestSyncPending && (
         <p className="field-hint" role="status">正在重新读取任务状态，当前决定暂不可用。</p>
       )}
 
       {request.kind === "approval" && canApprove && (
-        <div className="decision-actions">
+        <div className="decision-actions" key={`approval-decision:${request.requestId}`}>
           <button className="button button-primary button-large" type="button" disabled={controlsDisabled || !canSubmitApproval} onClick={() => void onApprove(true)}>
             允许这项操作
           </button>
@@ -283,12 +341,19 @@ export function PendingRequestPanel({
       {request.kind === "user_input" && <UserReplyForm key={request.requestId} busy={controlsDisabled} voiceCaptureAdapterFactory={voiceCaptureAdapterFactory} onVoiceActiveChange={onVoiceActiveChange} onSubmit={onRespond} />}
 
       {request.kind === "window_handoff" && canChooseWindow && (
-        <div className="window-choice-list" role="group" aria-label="可选择的窗口">
+        <div className="window-choice-list" key={`window-choices:${request.requestId}`} role="group" aria-label="可选择的窗口">
           {handoffCandidates.some(requiresCandidatePreview) && (
-            <p className="field-hint" role="status">标签重复或不完整的候选需要先看对应的真实画面。若截图不清楚或仍无法区分，请勿确认；在电脑恢复窗口后刷新，或停止任务。</p>
+            <p className="field-hint" role="status">标签重复或不完整的候选需要先看对应的真实画面。读屏名称和图片替代文字不能核实截图中的真实窗口内容；无法亲自核对时，请勿确认。若截图不清楚或仍无法区分，请在电脑恢复窗口后刷新，或停止任务。</p>
           )}
-          {handoffCandidates.map((candidate) => {
+          {handoffCandidates.map((candidate, candidateIndex) => {
             const previewRequired = requiresCandidatePreview(candidate);
+            const candidateName = [candidate.appName, candidate.title || candidate.description]
+              .filter((value) => value?.trim())
+              .join(" · ") || "电脑上的窗口";
+            const candidatePosition = `第 ${candidateIndex + 1} 个候选窗口`;
+            const previewAction = windowPreviewLoadingToken === candidate.token
+              ? "正在读取"
+              : windowPreviews.has(candidate.token) ? "重新读取" : "查看";
             const candidateLabel = <>
               <span className="window-choice-app">{candidate.appName || "电脑上的窗口"}</span>
               <span className="window-choice-title">{candidate.title || candidate.description || "窗口标题不可用"}</span>
@@ -296,21 +361,23 @@ export function PendingRequestPanel({
             </>;
             const previewControls = <>
               <button className="button button-secondary" type="button" disabled={controlsDisabled || windowPreviewLoadingToken !== undefined} onClick={() => void previewCandidate(candidate)}>
-                {windowPreviewLoadingToken === candidate.token ? "正在读取此窗口…" : windowPreviews.has(candidate.token) ? "重新读取窗口预览" : "查看此窗口的真实画面"}
+                <span className="sr-only">{previewAction} {candidateName} 的真实画面，{candidatePosition}</span>
+                <span aria-hidden="true">{windowPreviewLoadingToken === candidate.token ? "正在读取此窗口…" : windowPreviews.has(candidate.token) ? "重新读取窗口预览" : "查看此窗口的真实画面"}</span>
               </button>
               {windowPreviewLoadingToken === candidate.token && <p className="field-hint" role="status">正在读取这个精确候选，不会激活或操作它。</p>}
               {windowPreviewErrors.get(candidate.token) && <p className="notice notice-warning" role="alert">{windowPreviewErrors.get(candidate.token)}</p>}
-              {renderCandidatePreview(candidate, previewRequired)}
+              {renderCandidatePreview(candidate, candidateIndex, previewRequired, candidateName, candidatePosition)}
             </>;
             return previewRequired
-              ? <div className="window-choice-preview-item" key={candidate.token}>
+              ? <div className="window-choice-preview-item" key={candidate.token} role="group" aria-label={`候选窗口：${candidateName}，${candidatePosition}`}>
                 {candidateLabel}
                 {previewControls}
               </div>
-              : <div className="window-choice-preview-item" key={candidate.token}>
+              : <div className="window-choice-preview-item" key={candidate.token} role="group" aria-label={`候选窗口：${candidateName}，${candidatePosition}`}>
                 <button
                   className="window-choice"
                   type="button"
+                  aria-label={`选择 ${candidateName}，${candidatePosition}`}
                   disabled={controlsDisabled}
                   onClick={() => void onChooseWindow(candidate)}
                 >

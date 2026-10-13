@@ -126,6 +126,134 @@ describe("request-bound screenshot lifecycle", () => {
     expect(document.getElementById("main-content")?.tagName).toBe("MAIN");
   });
 
+  it("keeps one live status region silent on mount and deduplicates repeated progress text", async () => {
+    localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      ...DEFAULT_PREFERENCES,
+      voice: { runNoticesEnabled: false, speechRate: "normal" },
+    }));
+    const firstProgress: RunNotice = {
+      noticeId: "progress-initial",
+      kind: "progress",
+      text: "电脑正在整理结果。",
+      delivery: "polite",
+      eventSequence: 4,
+      feedSequence: 2,
+    };
+    feedState = {
+      ...feedState,
+      snapshot: { ...approval, status: "running", sequence: 2, capabilities: {}, pendingRequest: undefined },
+      notices: [firstProgress],
+    };
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    const liveRegion = document.querySelector("[data-run-announcement]") as HTMLElement;
+    expect(liveRegion.textContent).toBe("");
+
+    feedState = { ...feedState, snapshot: { ...feedState.snapshot!, status: "paused", sequence: 3 } };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    await waitFor(() => expect(liveRegion.textContent).toContain("任务状态已更新：任务已暂停。"));
+
+    const nextProgress = { ...firstProgress, noticeId: "progress-next", feedSequence: 3, text: "已整理两项结果。" };
+    feedState = { ...feedState, notices: [firstProgress, nextProgress] };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    await waitFor(() => expect(liveRegion.textContent).toContain("最近进展：已整理两项结果。"));
+
+    feedState = { ...feedState, notices: [...feedState.notices, { ...nextProgress, noticeId: "progress-duplicate", feedSequence: 4 }] };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect(liveRegion.textContent).toBe("最近进展：已整理两项结果。");
+    expect(document.querySelectorAll("[data-run-announcement]")).toHaveLength(1);
+  });
+
+  it("announces a new same-kind pending request, moves focus only when the old decision control disappears", async () => {
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    const reject = screen.getByRole("button", { name: "拒绝" });
+    reject.focus();
+    expect(document.activeElement).toBe(reject);
+
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "waiting_user",
+        sequence: 2,
+        capabilities: {},
+        pendingRequest: { requestId: "input-B", kind: "user_input", question: "请确认新的送达地址。" },
+      },
+    };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    expect(screen.getByText("请确认新的送达地址。")).toBeDefined();
+    expect(screen.queryByText("Approval A reason")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "电脑需要你补充信息" }));
+    expect(document.querySelector("[data-run-announcement]")?.textContent).toContain("请确认新的送达地址。");
+    expect(document.querySelector(".pending-panel [role='status']")).toBeNull();
+  });
+
+  it("shows an event-ahead request without allowing commands against the old snapshot, then enables it when caught up", () => {
+    const nextRequest = { requestId: "input-new", kind: "user_input", question: "应该使用哪个日期？" } as const;
+    feedState = {
+      ...feedState,
+      snapshot: { ...approval, status: "running", sequence: 1, capabilities: { correct: true }, pendingRequest: undefined },
+      pendingRequestState: { sequence: 1 },
+    };
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    expect(screen.queryByRole("textbox", { name: "你的补充" })).toBeNull();
+    expect(document.querySelector("[data-run-announcement]")?.textContent).toBe("");
+    feedState = { ...feedState, pendingRequestState: { sequence: 2, request: nextRequest } };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    const input = screen.getByRole("textbox", { name: "你的补充" }) as HTMLTextAreaElement;
+    expect(input.disabled).toBe(true);
+    expect(screen.getByText(/同步完成前不能处理/u)).toBeDefined();
+    expect(screen.getByRole("button", { name: "刷新任务状态" })).toBeDefined();
+    expect(document.querySelector("[data-run-announcement]")?.textContent).toContain("应该使用哪个日期？");
+
+    feedState = {
+      ...feedState,
+      snapshot: { ...feedState.snapshot!, status: "waiting_user", sequence: 2, pendingRequest: nextRequest },
+      pendingRequestState: { sequence: 2, request: nextRequest },
+    };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect((screen.getByRole("textbox", { name: "你的补充" }) as HTMLTextAreaElement).disabled).toBe(false);
+    expect(screen.queryByText(/同步完成前不能处理/u)).toBeNull();
+
+    const currentInput = screen.getByRole("textbox", { name: "你的补充" });
+    currentInput.focus();
+    feedState = { ...feedState, pendingRequestState: { sequence: 3 } };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect(screen.queryByRole("textbox", { name: "你的补充" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review the current screen" }));
+    expect(document.querySelector("[data-run-announcement]")?.textContent).toContain("正在同步最新任务状态");
+  });
+
+  it("announces terminal unknown results and connection errors without claiming success", async () => {
+    feedState = {
+      ...feedState,
+      snapshot: { ...approval, status: "running", sequence: 2, capabilities: {}, pendingRequest: undefined },
+    };
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...feedState.snapshot!,
+        status: "finished",
+        sequence: 3,
+        outcome: "outcome_unknown",
+        reply: undefined,
+        error: "电脑没有确认最后一步是否完成。",
+      },
+    };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    const liveRegion = document.querySelector("[data-run-announcement]") as HTMLElement;
+    await waitFor(() => expect(liveRegion.textContent).toContain("结果状态：结果待确认。"));
+    expect(liveRegion.textContent).toContain("原因：电脑没有确认最后一步是否完成。");
+    expect(liveRegion.textContent).not.toContain("结果状态：已完成");
+
+    feedState = { ...feedState, error: "暂时无法刷新任务状态。", connection: "offline" };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    await waitFor(() => expect(liveRegion.textContent).toContain("读取说明：暂时无法刷新任务状态。"));
+  });
+
   it("shows the latest real Runtime progress event when optional spoken progress text is absent", () => {
     feedState = {
       ...feedState,
@@ -294,12 +422,96 @@ describe("request-bound screenshot lifecycle", () => {
     };
     render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
 
-    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    fireEvent.click(screen.getByRole("button", { name: "暂停任务" }));
     expect(commands.control).toHaveBeenCalledWith("pause");
-    const correction = screen.getByLabelText("补充或修正任务要求") as HTMLTextAreaElement;
+    const correction = screen.getByRole("textbox", { name: "补充或修正任务要求" }) as HTMLTextAreaElement;
     fireEvent.change(correction, { target: { value: "Use the date shown in the current report" } });
     fireEvent.submit(correction.closest("form")!);
     expect(commands.correct).toHaveBeenCalledWith("Use the date shown in the current report");
+  });
+
+  it("exposes separate keyboard-focusable pause, resume, and stop controls", () => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "running",
+        sequence: 4,
+        capabilities: { pause: true, resume: true, abort: true },
+        pendingRequest: undefined,
+      },
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    const pause = screen.getByRole("button", { name: "暂停任务" }) as HTMLButtonElement;
+    const resume = screen.getByRole("button", { name: "继续任务" }) as HTMLButtonElement;
+    const stop = screen.getByRole("button", { name: "停止任务" }) as HTMLButtonElement;
+    expect([pause.tagName, resume.tagName, stop.tagName]).toEqual(["BUTTON", "BUTTON", "BUTTON"]);
+    expect([pause.tabIndex, resume.tabIndex, stop.tabIndex]).toEqual([0, 0, 0]);
+
+    fireEvent.click(pause);
+    fireEvent.click(resume);
+    fireEvent.click(stop);
+    expect(commands.control.mock.calls).toEqual([["pause"], ["resume"], ["abort"]]);
+    confirm.mockRestore();
+  });
+
+  it("restores focus to the task heading when a focused control is removed by a Run update", async () => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        status: "running",
+        sequence: 4,
+        capabilities: { pause: true, abort: true, correct: true },
+        pendingRequest: undefined,
+      },
+    };
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    const pause = screen.getByRole("button", { name: "暂停任务" });
+    pause.focus();
+    feedState = {
+      ...feedState,
+      snapshot: { ...feedState.snapshot!, status: "paused", sequence: 5, capabilities: { resume: true, abort: true, correct: true } },
+    };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review the current screen" }));
+    expect(screen.getByRole("button", { name: "继续任务" })).toBeDefined();
+
+    const stop = screen.getByRole("button", { name: "停止任务" });
+    stop.focus();
+    feedState = {
+      ...feedState,
+      snapshot: { ...feedState.snapshot!, status: "finished", sequence: 6, outcome: "cancelled", capabilities: {} },
+    };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review the current screen" }));
+    expect(screen.queryByRole("button", { name: "停止任务" })).toBeNull();
+  });
+
+  it("restores focus when retry or correction controls disappear after their task update", async () => {
+    feedState = { ...feedState, snapshot: undefined, error: "电脑暂时无法连接。", connection: "offline" };
+    const freshSnapshot = { ...approval, status: "running" as const, sequence: 3, capabilities: { correct: true }, pendingRequest: undefined };
+    vi.mocked(commands.refreshStatus).mockResolvedValueOnce(freshSnapshot);
+    const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    const retry = screen.getByRole("button", { name: "重试读取任务状态" });
+    retry.focus();
+    fireEvent.click(retry);
+    await waitFor(() => expect(commands.refreshStatus).toHaveBeenCalledTimes(1));
+
+    feedState = { ...feedState, snapshot: freshSnapshot, error: undefined, connection: "live" };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review the current screen" }));
+
+    const correction = screen.getByRole("textbox", { name: "补充或修正任务要求" });
+    correction.focus();
+    feedState = {
+      ...feedState,
+      snapshot: { ...freshSnapshot, status: "finished", sequence: 4, outcome: "outcome_unknown", capabilities: {} },
+    };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review the current screen" }));
   });
 
   it("distinguishes terminal cleanup pending and clears the warning after confirmed release", () => {
@@ -417,7 +629,7 @@ describe("request-bound screenshot lifecycle", () => {
       ...approval,
       status: "running",
       sequence: 1,
-      capabilities: { correct: true, pause: true, abort: true },
+      capabilities: { correct: true, pause: true, abort: true, approval: true },
       pendingRequest: undefined,
     };
     feedState = { ...feedState, snapshot: runningSnapshot, pendingRequestState: { sequence: 1 } };
@@ -439,7 +651,9 @@ describe("request-bound screenshot lifecycle", () => {
     view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" voiceCapabilities={voiceCapabilities} /></PreferencesProvider>);
 
     await waitFor(() => expect(spoken).toEqual(["可能涉及对外发送或提交内容的点击操作，请核对后审批。"]));
-    expect(screen.queryByRole("heading", { name: "电脑请求你确认一项操作" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "电脑请求你确认一项操作" })).toBeDefined();
+    expect(screen.getByText(/正在同步当前状态；同步完成前不能处理/u)).toBeDefined();
+    expect((screen.getByRole("button", { name: "拒绝" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("drops an approval that resolves while speech output is opening, even before a fresh snapshot", async () => {
