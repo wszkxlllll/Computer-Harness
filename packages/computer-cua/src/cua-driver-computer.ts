@@ -4365,9 +4365,20 @@ function mergeGroundings(
   observationId: ObservationId,
   computerSessionId: ComputerSessionDescriptor["id"],
 ): PrivateGrounding {
-  const elements = new Map(uia.elements);
+  const elements = new Map<string, PrivateGroundingElement>();
+  const uiaElements: GroundingElement[] = [];
+  for (const [elementRef, value] of uia.elements) {
+    // Browser UIA can retain clipped carousel links and inactive-tab links.
+    // A complete DOM catalog is authoritative for named hyperlink targets;
+    // unsupported/hidden links must not bypass its hit test via native input.
+    if (dom.domComplete === true && value.element.browserRegion === "content"
+        && normalizeGroundingRole(value.element.role) === "link"
+        && findEquivalentDomGrounding(dom, value) === undefined) continue;
+    elements.set(elementRef, value);
+    uiaElements.push(value.element);
+  }
   for (const [elementRef, value] of dom.elements) elements.set(elementRef, value);
-  const publicElements = mergeGroundingElements(uia.catalog.elements, dom.catalog.elements);
+  const publicElements = mergeGroundingElements(uiaElements, dom.catalog.elements);
   const truncated = uia.catalog.completeness !== "complete" || dom.catalog.completeness !== "complete";
   return {
     catalog: {
@@ -4392,12 +4403,14 @@ function findEquivalentDomGrounding(
   selected: PrivateGroundingElement | undefined,
 ): PrivateGroundingElement | undefined {
   if (grounding === undefined || selected === undefined || selected.element.bbox === undefined) return undefined;
-  const matches = [...grounding.elements.values()]
-    .filter((candidate) => candidate.element.source === "dom" && candidate.element.bbox !== undefined)
-    .filter((candidate) => equivalentBrowserCandidate(selected.element, candidate.element));
-  if (matches.length !== 1) return undefined;
-  matches.sort((left, right) => boxIntersectionOverUnion(selected.element.bbox!, right.element.bbox!) - boxIntersectionOverUnion(selected.element.bbox!, left.element.bbox!));
-  return matches[0];
+  let match: PrivateGroundingElement | undefined;
+  for (const candidate of grounding.elements.values()) {
+    if (candidate.element.source !== "dom" || candidate.element.bbox === undefined
+        || !equivalentBrowserCandidate(selected.element, candidate.element)) continue;
+    if (match !== undefined) return undefined;
+    match = candidate;
+  }
+  return match;
 }
 
 function equivalentBrowserCandidate(left: GroundingElement, right: GroundingElement): boolean {
@@ -4413,6 +4426,7 @@ function normalizeGroundingRole(value: string): string {
   const normalized = value.normalize("NFKC").toLocaleLowerCase().replace(/[\s_-]+/gu, "");
   const axRole = normalized.startsWith("ax") ? normalized.slice(2) : normalized;
   switch (axRole) {
+    case "hyperlink":
     case "link": return "link";
     case "button": return "button";
     case "textfield":

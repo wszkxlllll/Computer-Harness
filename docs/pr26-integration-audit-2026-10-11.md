@@ -2,7 +2,17 @@
 
 审计日期：2026-10-11（Asia/Shanghai）。对象：[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)。只审查，不修改 PR、不发表评论、不部署、不调用模型或操作桌面。
 
-## 2026-10-13 最新复审（PR26 594fa8e / PR29 8aaf558）
+## 2026-10-13 PR29 补修与集成记录
+
+用户授权发布 PR26 review、通知准备集成，并修复 PR29 合入己方 PR22。PR26 [整改确认与集成通知](https://github.com/wszkxlllll/Computer-Harness/pull/26#pullrequestreview-5503620106)已发布，绑定 594fa8e；PR26 本身尚未合入。PR29 原提交 8aaf558 的作者历史保留，后续小修复为 `147234b`，纳入 `codex/runtime-surface-preview-20261003`。
+
+本轮 Luna 实施、Sol 聚焦审查；修复只限定 `browserRegion=content` 且完整 DOM 的链接过滤，chrome/unknown 保留原受控路径。iframe 覆盖检查随既有 walk，包括开放 Shadow DOM；`checkVisibility` 排除祖先 CSS 隐藏，部分可见 iframe 仍标记覆盖不足。没有新增公共协议字段、网站特例或独立框架。Sol 初审发现的两个 iframe 边界已修正并最终复核 GO；协调者三个相关文件 **349/349** 通过，Computer CUA 类型检查通过。
+
+文档索引保留双方入口，使用说明同步真实过滤范围；Web 无障碍、Runtime、Provider、Voice 源码没有因 PR29 被覆盖。集成状态下协调者执行 **34 文件、689/689 项定向回归**，包括完整 Web 227、Voice/语音 Provider 41、RemoteRunApi 72、CUA 284、受管浏览器 57、DOM 8；Web/CUA 类型检查通过。网页源码与 a897fc6 一致。远端 CI 以 [PR22 当前检查](https://github.com/wszkxlllll/Computer-Harness/pull/22)的最终合并提交为准，不用原 PR29 的 CI 替代结果。Preview/Host/CUA 本轮不切版、不重启，没有真实模型或桌面任务。
+
+以下保留修复前审查，PR29 的 P2 已由上述补修关闭，不能继续作为当前未修问题。
+
+## 2026-10-13 复审（PR26 594fa8e / PR29 8aaf558，PR29补修前）
 
 用户随后授权发布 review 并通知队友准备集成。已向 PR26 发布[整改确认与集成通知](https://github.com/wszkxlllll/Computer-Harness/pull/26#pullrequestreview-5503620106)，绑定 594fa8e，COMMENTED；API 读回确认账号 wszkxlllll（142909575）、版本与中文正文。明确旧主要整改不再阻塞集成，新增 T3 实验分开处理、保留 Windows/无障碍/语音、后续共享修复独立提交；未将此通知当作整包发布或 Preview 切版批准。PR29 的修复/合入已另获授权，实际交付状态见后续集成记录；下方“不合并/不评论”保留为前一轮审查时点。
 
