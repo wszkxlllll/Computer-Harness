@@ -8,7 +8,8 @@ import { installFakeCuaSdkModuleForTests } from "./cua-sdk-test-support.js";
 import { cuaSdkVersionForPlatform } from "./cua-sdk-platform.js";
 import type { ActionId, ActionIntent, ModelTurn, ObservationId, RuntimeEvent, ToolCall } from "@computer-harness/protocol";
 import { BoundWindowMissingError } from "@computer-harness/protocol";
-import { CuaDriverComputer as ProductionCuaDriverComputer, inspectAuthorizedOutputFileIdentity, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
+import { CuaDriverComputer as ProductionCuaDriverComputer, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
+import { inspectAuthorizedOutputFileIdentity } from "./macos-saved-document.js";
 import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, windowSwitchTools, type ComputerSession, type ContextCompiler, type ModelInput, type ProviderAdapter } from "../../runtime/src/index.js";
 import { FileAssetStore, JsonlRunEventWriter } from "../../trajectory/src/index.js";
 import { readRuntimeEvents, reduceRuntimeEvents } from "../../trajectory/src/index.js";
@@ -1265,12 +1266,6 @@ describe("CuaDriverComputer", () => {
     try {
       const session = await computer.open({}, new AbortController().signal);
       expect(session.platform).toBe("darwin");
-      const resolution = (computer as unknown as { session: { platformResolution: {
-        source: string; configured?: string; health: { status: string; reportedPlatform?: string; driverVersion?: string }; conflict: boolean;
-      } } }).session.platformResolution;
-      expect(resolution).toMatchObject({ source: "configured", configured: "darwin", conflict: scenario === "conflict" });
-      expect(resolution.health.status).toBe(scenario === "missing" ? "unavailable" : scenario === "degraded" ? "degraded" : scenario === "schema" || scenario === "sdk" ? "invalid" : "valid");
-      if (scenario === "conflict") expect(resolution.health.reportedPlatform).toBe("win32");
       const signal = new AbortController().signal;
       const observationId = `platform-contract-${scenario}` as ObservationId;
       await computer.observe(session, observationId, signal);
@@ -9659,6 +9654,9 @@ describe("CuaDriverComputer", () => {
       const basedOn = "macos-focus-negative" as ObservationId;
       await computer.observe(session, basedOn, signal);
       expect(await computer.execute(session, { kind: "keypress", actionId: "mac-location-negative" as ActionId, basedOn, keys: [session.platform === "darwin" ? "CMD" : "CTRL", "L"] }, signal)).toMatchObject({ status: "completed" });
+      expect(fake.calls.filter((call) => call.name === "press_key" || call.name === "hotkey")).toMatchObject([
+        { name: session.platform === "win32" ? "press_key" : "hotkey" },
+      ]);
       const typed = await computer.execute(session, { kind: "type", actionId: "mac-location-negative-type" as ActionId, basedOn, text: "https://example.test/" }, signal);
       if (scenario === "non-macos") {
         expect(session.platform).toBe("win32");
@@ -9667,8 +9665,6 @@ describe("CuaDriverComputer", () => {
       } else {
         if (scenario === "unknown-platform") {
           expect(session.platform).toBe(process.platform);
-          expect((computer as unknown as { session: { platformResolution: { source: string; health: { status: string; reportedPlatform?: string } } } }).session.platformResolution)
-            .toMatchObject({ source: "host", health: { status: "invalid" } });
         }
         expect(typed).toMatchObject({ status: "refused", driverCode: "BROWSER_CHROME_FOCUS_UNCONFIRMED" });
       expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(0);

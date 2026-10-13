@@ -1,8 +1,7 @@
-import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { BoundWindowMissingError } from "@computer-harness/protocol";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import type { ToolResult } from "./cua-sdk-contract.js";
 import type {
@@ -11,7 +10,6 @@ import type {
   AuthorizedSavedDocumentEvidence,
   ComputerSessionDescriptor,
   ComputerWindowCandidate,
-  ComputerWindowCandidateRelationship,
   ComputerWindowOption,
   ComputerWindowList,
   GroundingCatalog,
@@ -66,7 +64,6 @@ import {
   listWindowTargets,
   sameWindowGeometry,
   validateWindowTarget,
-  windowActionTarget,
   type CuaWindowBinding,
   type CuaWindowCapture,
   type CuaWindowGeometry,
@@ -82,10 +79,47 @@ import { mergeWindowRelationshipInventory, type WindowRelationshipProbe } from "
 import { settlePostInputObservation } from "./post-input-observation-settler.js";
 import { projectExactWindowRoot as exactWindowRoot } from "./window-root-projection.js";
 import {
+  actionRequest,
+  isBrowserShortcut,
+  normalizeLogicalLineEndings,
+  resolveMultilineTypeDispatch,
+  WindowCoordinateMappingError,
+  type CuaMultilineTypeProfile,
+  type CuaWindowDeliveryMode,
+} from "./cua-platform-input.js";
+import {
+  authorizedOutputParentIsPinned,
+  fileIdentityPin,
+  hasExplicitApplicationIdentityConflict,
+  inspectAuthorizedOutputFileIdentity,
+  parseDocumentIdentityProof,
+  prepareReopenSavedDocumentGrant,
+  sameApplicationIdentity,
+  sameApplicationProcess,
+  sameFileIdentity,
+  samePostLaunchFileIdentity,
+  type PrivateReopenSavedDocumentState,
+  type ReopenSavedDocumentGrant,
+  type VerifiedApplicationIdentity,
+} from "./macos-saved-document.js";
+import { verifyMacAttachedSheetEvidence, type MacAttachedSheetState } from "./macos-attached-sheet-evidence.js";
+import {
+  canVerifyExactTransientRoot,
+  hasExactOwnedAuxiliaryStackEvidence,
+  hasUniqueOwnedMenuStack,
+  trustedWindowClassRootRole,
+  win32OwnedChildEvidence,
+  win32RelationshipChildEvidence,
+  windowCandidateRelationship,
+} from "./windows-transient-evidence.js";
+import {
   isEligibleNativeOnlyDesktopCandidate,
   isRelevantManualWindowCandidate,
   projectSelectableWindowCandidates,
 } from "./window-candidate-projection.js";
+
+export { inspectAuthorizedOutputFileIdentity };
+export type { CuaMultilineTypeProfile, CuaWindowDeliveryMode, ReopenSavedDocumentGrant };
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 const CLEANUP_POLL_INTERVAL_MS = 50;
@@ -98,14 +132,6 @@ function markUnconfirmedNativeTransitionFailure(error: unknown): void {
 
 function isUnconfirmedNativeTransitionFailure(error: unknown): boolean {
   return typeof error === "object" && error !== null && unconfirmedNativeTransitionFailures.has(error);
-}
-
-function hasLineBreak(text: string): boolean {
-  return /[\r\n\u0085\u2028\u2029]/u.test(text);
-}
-
-function normalizeLogicalLineEndings(text: string): string {
-  return text.replace(/\r\n|\r|\n/gu, "\n");
 }
 
 function windowIdentityKey(target: { readonly pid: number; readonly windowId: number }): string {
@@ -151,160 +177,6 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && "code" in value && typeof (value as NodeJS.ErrnoException).code === "string";
 }
 
-function processStart(value: unknown): { seconds: number; microseconds: number } | undefined {
-  const record = parseStructuredRecord(value);
-  return record !== undefined && Number.isSafeInteger(record.seconds) && Number.isSafeInteger(record.microseconds) &&
-    (record.seconds as number) >= 0 && (record.microseconds as number) >= 0
-    ? { seconds: record.seconds as number, microseconds: record.microseconds as number }
-    : undefined;
-}
-
-async function fileIdentityPin(path: string): Promise<FileIdentityPin> {
-  const info = await lstat(path, { bigint: true });
-  if (info.isSymbolicLink() || !info.isFile()) throw new Error("the Host-granted output must be a regular non-symlink file");
-  return {
-    dev: info.dev.toString(), ino: info.ino.toString(), size: info.size.toString(),
-    mtimeNs: info.mtimeNs.toString(), ctimeNs: info.ctimeNs.toString(),
-  };
-}
-
-type AuthorizedOutputFileIdentityRead =
-  | { readonly status: "present"; readonly identity: FileIdentityPin }
-  | { readonly status: "absent" }
-  | { readonly status: "unverified" };
-
-/** @internal The reader parameter keeps ENOENT distinct from every other IO failure. */
-export async function inspectAuthorizedOutputFileIdentity(
-  path: string,
-  readIdentity: (path: string) => Promise<FileIdentityPin> = fileIdentityPin,
-): Promise<AuthorizedOutputFileIdentityRead> {
-  try {
-    return { status: "present", identity: await readIdentity(path) };
-  } catch (error) {
-    return isNodeError(error) && error.code === "ENOENT" ? { status: "absent" } : { status: "unverified" };
-  }
-}
-
-function sameFileIdentity(left: FileIdentityPin, right: FileIdentityPin): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
-}
-
-function samePostLaunchFileIdentity(left: FileIdentityPin, right: FileIdentityPin): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs;
-}
-
-function parseDocumentIdentityProof(
-  result: { readonly isError?: boolean; readonly structuredJson?: string },
-  target: CuaWindowTarget,
-  bounds: CuaWindowGeometry,
-  expectedExecutableUrl: string,
-  expectedDocumentUrl?: string,
-): { readonly identity: VerifiedApplicationIdentity; readonly snapshotId: string; readonly cleanDocument: boolean } | undefined {
-  if (result.isError === true) return undefined;
-  const state = parseStructuredRecord(result.structuredJson);
-  const proof = parseStructuredRecord(state?._private_document_proof);
-  const app = parseStructuredRecord(proof?.application_identity);
-  const topTarget = parseStructuredRecord(proof?.target);
-  const appTarget = parseStructuredRecord(app?.target);
-  const window = parseStructuredRecord(proof?.window);
-  const windowBounds = parseGroundingFrame(window?.bounds);
-  const appStart = processStart(appTarget?.process_start);
-  const topStart = processStart(topTarget?.process_start);
-  if (proof?.version !== "macos-document-identity-v1" || typeof proof.snapshot_id !== "string" || proof.snapshot_id.length === 0 ||
-      app?.status !== "verified" || topTarget?.pid !== target.pid || topTarget.window_id !== target.windowId ||
-      appTarget?.pid !== target.pid || appTarget.window_id !== target.windowId ||
-      appTarget.bundle_id !== "com.apple.TextEdit" || appTarget.executable_url !== expectedExecutableUrl ||
-      appStart === undefined || topStart === undefined || appStart.seconds !== topStart.seconds || appStart.microseconds !== topStart.microseconds ||
-      !Array.isArray(app.instances) || app.instances.length !== 1 || !isRecord(app.instances[0])) return undefined;
-  const instance = app.instances[0];
-  const instanceStart = processStart(instance.process_start);
-  if (instance.pid !== target.pid || instance.bundle_id !== "com.apple.TextEdit" || instance.executable_url !== expectedExecutableUrl ||
-      instanceStart === undefined || instanceStart.seconds !== appStart.seconds || instanceStart.microseconds !== appStart.microseconds ||
-      proof.frontmost_pid !== target.pid || proof.focused_window_id !== target.windowId ||
-      window?.role !== "AXWindow" || window.pid !== target.pid || window.window_id !== target.windowId ||
-      window.owner_pid !== target.pid || windowBounds === undefined || !sameWindowGeometry(windowBounds, bounds)) return undefined;
-  const identity: VerifiedApplicationIdentity = {
-    pid: target.pid, windowId: target.windowId, processStart: appStart,
-    bundleId: "com.apple.TextEdit", executableUrl: expectedExecutableUrl,
-  };
-  if (expectedDocumentUrl === undefined) {
-    return { identity, snapshotId: proof.snapshot_id, cleanDocument: false };
-  }
-  if (proof.status !== "identity_verified" || proof.tail_revalidated !== true) return undefined;
-  const document = parseStructuredRecord(proof.document);
-  const domain = parseStructuredRecord(proof.document_domain);
-  const edited = parseStructuredRecord(proof.edited);
-  const closeButton = parseStructuredRecord(edited?.close_button);
-  const editedValue = parseStructuredRecord(edited?.value);
-  if (document?.status !== "ok" || document.type !== "cf_url" && document.type !== "cf_string" ||
-      document.matches_expected !== true || domain?.status !== "complete_for_ax_windows" ||
-      !Array.isArray(domain.matching_window_ids) || domain.matching_window_ids.length !== 1 || domain.matching_window_ids[0] !== target.windowId ||
-      edited?.source !== "ax_close_button" || closeButton?.status !== "verified" || closeButton.role !== "AXButton" ||
-      closeButton.subrole !== "AXCloseButton" || closeButton.pid !== target.pid || closeButton.window_id !== target.windowId ||
-      closeButton.ax_window_id !== target.windowId || closeButton.ax_window_matches_target !== true ||
-      editedValue?.status !== "ok" || editedValue.type !== "cf_boolean" || editedValue.value !== false) return undefined;
-  return { identity, snapshotId: proof.snapshot_id, cleanDocument: true };
-}
-
-function sameApplicationIdentity(left: VerifiedApplicationIdentity, right: VerifiedApplicationIdentity): boolean {
-  return sameApplicationProcess(left, right) && left.windowId === right.windowId;
-}
-
-function sameApplicationProcess(left: VerifiedApplicationIdentity, right: VerifiedApplicationIdentity): boolean {
-  return left.pid === right.pid &&
-    left.processStart.seconds === right.processStart.seconds && left.processStart.microseconds === right.processStart.microseconds &&
-    left.bundleId === right.bundleId && left.executableUrl === right.executableUrl;
-}
-
-async function prepareReopenSavedDocumentGrant(grant: ReopenSavedDocumentGrant): Promise<{
-  readonly path: string;
-  readonly fileUrl: string;
-  readonly canonicalExecutableUrl: string;
-  readonly parentIdentity: { readonly dev: string; readonly ino: string };
-}> {
-  if (!isAbsolute(grant.path) || grant.path.includes("\0") || resolve(grant.path) !== grant.path || basename(grant.path).length === 0) {
-    throw new Error("saved-document grant path must be one canonical absolute file path");
-  }
-  const parent = dirname(grant.path);
-  const canonicalParent = await realpath(parent);
-  if (canonicalParent !== parent) throw new Error("saved-document grant parent must already be canonical");
-  const parentInfo = await lstat(parent, { bigint: true });
-  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) throw new Error("saved-document grant parent must be a real directory");
-  try {
-    await lstat(grant.path);
-    throw new Error("saved-document grant must name an output file that is absent at Run open");
-  } catch (error) {
-    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-  }
-  let executablePath: string;
-  try {
-    const url = new URL(grant.expectedExecutableUrl);
-    if (url.protocol !== "file:" || url.hostname !== "" || url.search !== "" || url.hash !== "" || url.href !== grant.expectedExecutableUrl) {
-      throw new Error("invalid file URL");
-    }
-    executablePath = fileURLToPath(url);
-  } catch {
-    throw new Error("saved-document grant requires a canonical TextEdit executable file URL");
-  }
-  const canonicalExecutableUrl = pathToFileURL(await realpath(executablePath)).href;
-  if (canonicalExecutableUrl !== grant.expectedExecutableUrl) throw new Error("saved-document executable identity is not canonical");
-  return {
-    path: grant.path,
-    fileUrl: pathToFileURL(grant.path).href,
-    canonicalExecutableUrl,
-    parentIdentity: { dev: parentInfo.dev.toString(), ino: parentInfo.ino.toString() },
-  };
-}
-
-async function authorizedOutputParentIsPinned(state: PrivateReopenSavedDocumentState): Promise<boolean> {
-  const parent = dirname(state.path);
-  if (await realpath(parent) !== parent) return false;
-  const info = await lstat(parent, { bigint: true });
-  return info.isDirectory() && !info.isSymbolicLink() &&
-    info.dev.toString() === state.parentIdentity.dev && info.ino.toString() === state.parentIdentity.ino;
-}
-
 async function queryDocumentIdentity(
   driver: CuaDriverLike,
   session: string,
@@ -337,34 +209,6 @@ async function readDocumentIdentityResult(
   return result;
 }
 
-function hasExplicitApplicationIdentityConflict(
-  result: { readonly isError?: boolean; readonly structuredJson?: string },
-  target: CuaWindowTarget,
-  expectedExecutableUrl: string,
-  expectedIdentity: VerifiedApplicationIdentity,
-): boolean {
-  if (result.isError === true) return false;
-  const state = parseStructuredRecord(result.structuredJson);
-  const proof = parseStructuredRecord(state?._private_document_proof);
-  const app = parseStructuredRecord(proof?.application_identity);
-  if (proof?.version !== "macos-document-identity-v1" || app?.status !== "verified") return false;
-  const appTarget = parseStructuredRecord(app.target);
-  const appStart = processStart(appTarget?.process_start);
-  if (typeof appTarget?.pid !== "number" || appTarget.window_id !== target.windowId ||
-      typeof appTarget.bundle_id !== "string" || typeof appTarget.executable_url !== "string" || appStart === undefined) return false;
-  if (appTarget.pid !== expectedIdentity.pid || appTarget.bundle_id !== expectedIdentity.bundleId ||
-      appTarget.executable_url !== expectedExecutableUrl || appStart.seconds !== expectedIdentity.processStart.seconds ||
-      appStart.microseconds !== expectedIdentity.processStart.microseconds) return true;
-  if (!Array.isArray(app.instances) || app.instances.length !== 1 || !isRecord(app.instances[0])) return true;
-  const instance = app.instances[0];
-  const instanceStart = processStart(instance.process_start);
-  if (typeof instance.pid !== "number" || typeof instance.bundle_id !== "string" ||
-      typeof instance.executable_url !== "string" || instanceStart === undefined) return false;
-  return instance.pid !== expectedIdentity.pid || instance.bundle_id !== expectedIdentity.bundleId ||
-    instance.executable_url !== expectedExecutableUrl || instanceStart.seconds !== expectedIdentity.processStart.seconds ||
-    instanceStart.microseconds !== expectedIdentity.processStart.microseconds;
-}
-
 type OverlayVerification =
   | { readonly status: "present"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "overlay" }> }
   | { readonly status: "absent" }
@@ -374,12 +218,6 @@ type TransientRootVerification =
   | { readonly status: "verified"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }> }
   | { readonly status: "unavailable"; readonly rootRole?: "menu" | "popup" | "dialog" | "window"; readonly queryFailed?: boolean }
   | { readonly status: "contradictory"; readonly reason: string };
-
-type MacAttachedSheetState =
-  | { readonly status: "sheet"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }> }
-  | { readonly status: "geometry_unstable" }
-  | { readonly status: "none" }
-  | { readonly status: "unknown"; readonly reason: string };
 
 async function readMacAttachedSheetState(
   driver: CuaDriverLike,
@@ -397,87 +235,20 @@ async function readMacAttachedSheetState(
     max_elements: 64,
     session,
   }, signal);
-  if (result.isError) return { status: "unknown", reason: "native parent AX proof query failed" };
   const state = parseStructuredRecord(result.structuredJson);
-  if (state === undefined || hasExplicitIdentityMismatch(state, parent.target)) {
-    return { status: "unknown", reason: "native parent AX proof has no exact target identity" };
-  }
-  const proof = parseStructuredRecord(state.attached_sheet_proof);
-  // A degraded catalog can still carry a separately captured, exact AX
-  // relationship proof. In that case its relation snapshot is authoritative;
-  // the catalog snapshot may describe a different (partial) tree.
-  const proofSnapshotId = state.degraded === true
-    ? state.attached_sheet_snapshot_id
-    : state.snapshot_id;
-  const relationOnlyDegraded = state.degraded === true && state.elements_complete === false &&
-    typeof state.attached_sheet_snapshot_id === "string" &&
-    state.attached_sheet_snapshot_id === proof?.snapshot_id && result.degraded === true;
-  if ((result.degraded || state.degraded === true) && !relationOnlyDegraded) {
-    return { status: "unknown", reason: "degraded AX catalog has no exact attached-sheet-only snapshot proof" };
-  }
-  const parentBounds = parseStructuredRecord(proof?.parent_bounds);
-  const snapshotId = proofSnapshotId;
-  const identityOk = proof?.version === "macos-attached-sheet-v1" &&
-    typeof snapshotId === "string" && snapshotId.length > 0 && proof.snapshot_id === snapshotId &&
-    proof.pid === parent.target.pid && proof.parent_window_id === parent.target.windowId &&
-    proof.parent_owner_pid === parent.target.pid && proof.frontmost_pid === parent.target.pid &&
-    proof.direct_children_status === "success" && Number.isSafeInteger(proof.direct_child_count) &&
-    (proof.direct_child_count as number) >= 0 &&
-    (proof.parent_role === "AXWindow" || proof.parent_role === "AXSheet") &&
-    (proof.parent_role !== "AXSheet" || proof.parent_ax_parent_verified === true &&
-      expectedAxParent !== undefined && proof.parent_ax_parent_window_id === expectedAxParent.windowId) &&
-    Number.isFinite(parentBounds?.x) && Number.isFinite(parentBounds?.y) &&
-    Number.isFinite(parentBounds?.width) && Number.isFinite(parentBounds?.height) &&
-    sameWindowGeometry(parent.bounds, {
-      x: parentBounds!.x as number, y: parentBounds!.y as number,
-      width: parentBounds!.width as number, height: parentBounds!.height as number,
-    });
-  if (!identityOk) return { status: "unknown", reason: "native parent AX proof is stale, incomplete, or bound to different geometry" };
-  if (proof!.status === "none") {
-    return proof!.focused_window_id === parent.target.windowId && proof!.sheet === undefined
-      ? { status: "none" }
-      : { status: "unknown", reason: "native no-sheet proof does not show the exact parent focused" };
-  }
-  const sheet = parseStructuredRecord(proof!.sheet);
-  const bounds = parseStructuredRecord(sheet?.bounds);
-  if (proof!.status !== "sheet" || sheet?.role !== "AXSheet" || sheet.ax_parent_verified !== true ||
-      sheet.pid !== parent.target.pid || sheet.owner_pid !== parent.target.pid ||
-      sheet.ax_parent_pid !== parent.target.pid || sheet.ax_parent_window_id !== parent.target.windowId ||
-      !Number.isSafeInteger(sheet.window_id) || (sheet.window_id as number) <= 0 ||
-      sheet.window_id === parent.target.windowId || (proof!.direct_child_count as number) < 1 ||
-      proof!.focused_window_id !== sheet.window_id || candidate === undefined ||
-      candidate.target.pid !== sheet.pid || candidate.target.windowId !== sheet.window_id ||
-      candidate.isOnScreen !== true || candidate.minimized === true ||
-      !Number.isFinite(bounds?.x) || !Number.isFinite(bounds?.y) ||
-      !Number.isFinite(bounds?.width) || !Number.isFinite(bounds?.height) ||
-      (bounds!.width as number) <= 0 || (bounds!.height as number) <= 0 ||
-      !Number.isFinite(candidate.bounds.width) || !Number.isFinite(candidate.bounds.height) ||
-      candidate.bounds.width <= 0 || candidate.bounds.height <= 0) {
-    return { status: "unknown", reason: "native AXSheet proof does not exactly match the unique fresh surfaced candidate" };
-  }
-  if (!sameWindowGeometry(candidate.bounds, {
-    x: bounds!.x as number, y: bounds!.y as number,
-    width: bounds!.width as number, height: bounds!.height as number,
-  })) return { status: "geometry_unstable" };
-  return { status: "sheet", evidence: {
-    kind: "native_window",
-    nativeWindow: asNativeWindowIdentity(candidate.target),
-    owner: asNativeWindowIdentity(parent.target),
-    rootRole: "dialog",
-    visible: true,
-    rootSemanticsVerified: true,
-    interactionPolicy: "modal",
-    frontmostEvidence: "exact_foreground",
-    admissionSource: "macos_attached_sheet_proof",
-  } };
+  return verifyMacAttachedSheetEvidence({
+    result,
+    parent,
+    candidate,
+    state,
+    parentIdentityMismatch: state === undefined || hasExplicitIdentityMismatch(state, parent.target),
+    ...(expectedAxParent === undefined ? {} : { expectedAxParent }),
+  });
 }
-
 type UnknownTransientReplacementAttempt =
   | { readonly decision: "recovered"; readonly surfaceRef: SurfaceRef }
   | { readonly decision: "retry" }
   | { readonly decision: "stop" };
-
-const TRUSTED_MENU_WINDOW_CLASSES = new Set(["#32768"]);
 
 /**
  * A transient HWND shares one Surface lifecycle; evidence policy differs by
@@ -584,139 +355,6 @@ function hasExplicitIdentityMismatch(state: Record<string, unknown> | undefined,
     if (root !== undefined && hasExplicitIdentityMismatch(root, target)) return true;
   }
   return false;
-}
-
-function trustedWindowClassRootRole(windowClass: string | undefined): "menu" | "dialog" | undefined {
-  if (windowClass !== undefined && TRUSTED_MENU_WINDOW_CLASSES.has(windowClass)) return "menu";
-  if (windowClass === "#32770") return "dialog";
-  return undefined;
-}
-
-function hasUniqueOwnedMenuStack(
-  inventory: CuaWindowInventory,
-  parent: CuaWindowTarget,
-  candidate: CuaWindowInfo,
-  baselineComplete: boolean,
-): boolean {
-  if (!inventory.complete || !baselineComplete) return false;
-  return assessOwnedTransientWindowAdmission({
-    parent,
-    candidate,
-    inventory,
-    surfacedWindowCount: 1,
-    baselineComplete,
-    parentSurfaceCurrent: true,
-  }).decision === "admitted";
-}
-
-/**
- * The exact-child UIA query below is private transient-surface evidence, not a
- * UIA grounding/catalog feature exposed to the model. Require a complete,
- * untruncated Win32 relationship snapshot before spending that bounded read.
- */
-function canVerifyExactTransientRoot(inventory: CuaWindowInventory): boolean {
-  return inventory.source === "win32_relationship_probe" && inventory.complete && inventory.truncated !== true;
-}
-
-function win32RelationshipChildEvidence(
-  owner: CuaWindowTarget,
-  candidate: CuaWindowInfo,
-  inventory: CuaWindowInventory,
-): Extract<TransientChildEvidence, { readonly kind: "native_window" }> | undefined {
-  if (inventory.source !== "win32_relationship_probe" || candidate.isOnScreen !== true || candidate.minimized === true ||
-      candidate.ownerPid !== owner.pid || candidate.ownerWindowId !== owner.windowId) return undefined;
-  const exactForeground = inventory.foregroundPid === candidate.target.pid &&
-    inventory.foregroundWindowId === candidate.target.windowId;
-  // Owner/z-order alone does not make an arbitrary auxiliary HWND modal.
-  // Native menu/dialog class evidence and explicit UIA root roles are handled
-  // by verifyTransientNativeChildRoot; the relationship-only fast path is
-  // reserved for an exact child that actually owns the foreground.
-  if (!exactForeground) return undefined;
-  const evidenceKind = "exact_foreground";
-  return {
-    kind: "native_window",
-    nativeWindow: asNativeWindowIdentity(candidate.target),
-    owner: asNativeWindowIdentity(owner),
-    visible: true,
-    interactionPolicy: "modal",
-    relationshipProof: evidenceKind,
-    frontmostEvidence: evidenceKind,
-    admissionSource: "win32_relationship_probe",
-  };
-}
-
-function hasExactOwnedAuxiliaryStackEvidence(
-  owner: CuaWindowTarget,
-  candidate: CuaWindowInfo,
-  inventory: CuaWindowInventory,
-): boolean {
-  const exactOwner = candidate.ownerPid === owner.pid && candidate.ownerWindowId === owner.windowId;
-  const trustedCrossProcessOwner = candidate.target.pid !== owner.pid && inventory.source === "win32_relationship_probe" &&
-    inventory.complete && inventory.truncated !== true && exactOwner;
-  if (!inventory.complete || inventory.truncated === true ||
-      inventory.foregroundPid !== owner.pid || inventory.foregroundWindowId !== owner.windowId ||
-      candidate.target.pid !== owner.pid && !trustedCrossProcessOwner ||
-      candidate.isOnScreen !== true || candidate.minimized === true || !exactOwner || candidate.zIndex === undefined) {
-    return false;
-  }
-  const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(owner));
-  const candidateRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target));
-  return parentRows.length === 1 && candidateRows.length === 1 && parentRows[0]!.isOnScreen === true &&
-    parentRows[0]!.minimized !== true && parentRows[0]!.zIndex !== undefined &&
-    candidate.zIndex > parentRows[0]!.zIndex!;
-}
-
-function windowCandidateRelationship(
-  candidate: CuaWindowInfo,
-  owner: CuaWindowTarget,
-  inventory: CuaWindowInventory,
-  hostScoped: boolean,
-): ComputerWindowCandidateRelationship | undefined {
-  const exactOwner = candidate.ownerPid === owner.pid && candidate.ownerWindowId === owner.windowId;
-  const trustedCrossProcessOwner = candidate.target.pid === owner.pid ||
-    inventory.source === "win32_relationship_probe" && inventory.complete && inventory.truncated !== true;
-  if (exactOwner && trustedCrossProcessOwner) {
-    const rootRole = trustedWindowClassRootRole(candidate.windowClass);
-    return {
-      kind: "owned_child",
-      owner: { pid: owner.pid, windowId: owner.windowId },
-      ...(rootRole === undefined ? {} : { rootRole }),
-    };
-  }
-  return hostScoped && !exactOwner ? { kind: "scoped_peer" } : undefined;
-}
-
-function win32OwnedChildEvidence(
-  owner: CuaWindowTarget,
-  candidate: CuaWindowInfo,
-  inventory: CuaWindowInventory,
-  parentSurfaceCurrent: boolean,
-): Extract<TransientChildEvidence, { readonly kind: "native_window" }> | undefined {
-  if (inventory.source !== "win32_relationship_probe") return undefined;
-  const stageOne = assessOwnedTransientWindowAdmission({
-    parent: owner,
-    candidate,
-    inventory,
-    surfacedWindowCount: 1,
-    baselineComplete: inventory.complete,
-    baselineTruncated: inventory.truncated === true,
-    parentSurfaceCurrent,
-  });
-  if (stageOne.decision !== "admitted") return undefined;
-  const exactForeground = inventory.foregroundPid === candidate.target.pid &&
-    inventory.foregroundWindowId === candidate.target.windowId;
-  if (!exactForeground) return undefined;
-  const relationshipProof = "exact_foreground" as const;
-  return {
-    kind: "native_window",
-    nativeWindow: asNativeWindowIdentity(candidate.target),
-    owner: asNativeWindowIdentity(owner),
-    visible: true,
-    interactionPolicy: "modal",
-    relationshipProof,
-    frontmostEvidence: relationshipProof,
-    admissionSource: "win32_relationship_probe",
-  };
 }
 
 /** Read an explicit same-HWND overlay root; ordinary descendant MenuItems do not qualify. */
@@ -1085,54 +723,8 @@ async function bringWindowToFrontOnce(
 }
 
 export type CuaDriverFactory = (socketPath: string) => CuaDriverLike;
-export type CuaWindowDeliveryMode = "background" | "foreground";
 export type CuaGroundingMode = "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
 export type CuaWindowSwitchMode = "off" | "opened-windows-v1";
-export type CuaMultilineTypeProfile = "foreground-caret-v1";
-
-export interface ReopenSavedDocumentGrant {
-  /** One Host-selected absolute path; never sent to the model. */
-  readonly path: string;
-  /** Canonical executable URL frozen by the Host for com.apple.TextEdit. */
-  readonly expectedExecutableUrl: string;
-}
-
-interface FileIdentityPin {
-  readonly dev: string;
-  readonly ino: string;
-  readonly size: string;
-  readonly mtimeNs: string;
-  readonly ctimeNs: string;
-}
-
-interface VerifiedApplicationIdentity {
-  readonly pid: number;
-  readonly windowId: number;
-  readonly processStart: { readonly seconds: number; readonly microseconds: number };
-  readonly bundleId: "com.apple.TextEdit";
-  readonly executableUrl: string;
-}
-
-interface VerifiedDocumentIdentity {
-  readonly snapshotId: string;
-  readonly observationId: ObservationId;
-  readonly identity: VerifiedApplicationIdentity;
-  readonly fileUrl: string;
-  readonly windowGeometry: CuaWindowGeometry;
-  readonly fileIdentity: FileIdentityPin;
-}
-
-interface PrivateReopenSavedDocumentState {
-  readonly path: string;
-  readonly fileUrl: string;
-  readonly canonicalExecutableUrl: string;
-  readonly parentIdentity: { readonly dev: string; readonly ino: string };
-  readonly primaryIdentity: VerifiedApplicationIdentity;
-  savedDocument?: VerifiedDocumentIdentity;
-  closedSourceActionId?: ActionIntent["actionId"];
-  recoveryReady: boolean;
-  attempted: boolean;
-}
 
 // Keep the adapter side bounded but larger than the model-facing hot set. The
 // Runtime selector narrows this to at most 16 before Observation persistence;
@@ -1201,8 +793,6 @@ interface PrivateSession {
   label: string;
   driver: CuaDriverLike;
   platform: CuaPlatform;
-  /** Bounded health/config evidence retained privately for session diagnostics. */
-  platformResolution: PlatformResolution;
   descriptor: ComputerSessionDescriptor;
   active: boolean;
   surfaceRegistry: SurfaceRegistryState;
@@ -1358,13 +948,6 @@ interface PrivateGroundingElement {
   readonly uiaIdentityFingerprint?: string;
   /** Raw UIA token and snapshot are never projected to Runtime or Providers. */
   readonly uiaTarget?: { readonly pid: number; readonly windowId: number; readonly elementToken: string; readonly snapshotId?: string };
-}
-
-class WindowCoordinateMappingError extends Error {
-  public constructor(public readonly code: string, message: string) {
-    super(message);
-    this.name = "WindowCoordinateMappingError";
-  }
 }
 
 interface DriverErrorDetails {
@@ -1610,7 +1193,6 @@ export class CuaDriverComputer implements Computer {
         label,
         driver,
         platform,
-        platformResolution,
         descriptor,
         active: true,
         surfaceRegistry,
@@ -1754,7 +1336,7 @@ export class CuaDriverComputer implements Computer {
           delete reopenState.savedDocument;
           try {
             signal.throwIfAborted();
-            if (!(await authorizedOutputParentIsPinned(reopenState))) throw new Error("authorized output parent changed");
+            if (!(await authorizedOutputParentIsPinned(reopenState.path, reopenState.parentIdentity))) throw new Error("authorized output parent changed");
             const fileState = await inspectAuthorizedOutputFileIdentity(reopenState.path);
             if (fileState.status === "unverified") throw new Error("authorized output file state could not be verified");
             const beforeFileIdentity = fileState.status === "present" ? fileState.identity : undefined;
@@ -1769,7 +1351,7 @@ export class CuaDriverComputer implements Computer {
               fileWasAbsent ? undefined : reopenState.fileUrl,
             );
             signal.throwIfAborted();
-            const parentStillPinned = await authorizedOutputParentIsPinned(reopenState);
+            const parentStillPinned = await authorizedOutputParentIsPinned(reopenState.path, reopenState.parentIdentity);
             if (!parentStillPinned || documentProof === undefined ||
                 !sameApplicationIdentity(documentProof.identity, reopenState.primaryIdentity)) {
               throw new Error("authorized document or parent proof was not stable");
@@ -4542,10 +4124,9 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
       }
     }
-    const isMultilineType = current.platform === "win32" && action.kind === "type" && hasLineBreak(action.text);
-    const isForegroundCaretMultilineType = isMultilineType && action.groundingRef === undefined &&
-      this.options.multilineTypeProfile === "foreground-caret-v1";
-    const isMultilineUiaType = isMultilineType && !isForegroundCaretMultilineType;
+    const multilineTypeDispatch = resolveMultilineTypeDispatch(current.platform, action, this.options.multilineTypeProfile);
+    const isMultilineType = multilineTypeDispatch !== "standard";
+    const isMultilineUiaType = multilineTypeDispatch === "windows_uia";
     if (action.kind === "select_option") {
     const privateGrounding = this.groundings.get(String(action.basedOn));
     const resolved = privateGrounding?.elements.get(action.groundingRef);
@@ -4823,6 +4404,7 @@ export class CuaDriverComputer implements Computer {
         request = actionRequest(
           requestAction,
           current.label,
+          PRIMARY_DESKTOP,
           actionWindowBinding,
           this.options.windowDeliveryMode,
           decisionObservation?.viewport,
@@ -4876,7 +4458,14 @@ export class CuaDriverComputer implements Computer {
       // Preserve normal Surface/window preflight, then fail closed in the
       // Windows UIA route before any input primitive is dispatched. The
       // Host-only foreground-caret path remains on its separate input route.
-      const receipt = await this.executeMultilineType(current, session, action, decisionObservation, actionWindowBinding, signal);
+      const receipt = await this.executeMultilineType(
+        current,
+        session,
+        action as Extract<ActionIntent, { kind: "type" }>,
+        decisionObservation,
+        actionWindowBinding,
+        signal,
+      );
       if (receipt.status === "completed" && current.preActionWindowBaseline?.actionId === action.actionId) current.preActionWindowBaseline.completed = true;
       if (receipt.status === "completed" && alternativePrimitiveForUnknownAction !== undefined &&
           current.unknownActionReplayGuard !== undefined && decisionObservation !== undefined &&
@@ -5334,66 +4923,6 @@ function isAddressBarElement(element: GroundingElement): boolean {
     element.state?.editable === true && element.state.focused === true &&
     ["edit", "textbox", "textfield", "combobox"].includes(normalizeGroundingRole(element.role)) &&
     ["address and search bar", "search or enter web address", "地址和搜索栏", "地址栏", "搜索或输入网址"].includes(name ?? "");
-}
-
-function isBrowserShortcut(action: ActionIntent, key: string, platform: NodeJS.Platform): boolean {
-  if (action.kind !== "keypress" || action.keys.length !== 2) return false;
-  const keys = action.keys.map((part) => part.toUpperCase());
-  const modifiers = platform === "darwin" ? ["CMD", "META"] : ["CTRL"];
-  return keys.includes(key) && keys.some((part) => modifiers.includes(part));
-}
-
-function actionRequest(
-  action: Exclude<ActionIntent, { kind: "wait" } | SwitchWindowAction | { kind: "reopen_saved_document" }>,
-  session: string,
-  windowBinding?: CuaWindowBinding,
-  configuredDeliveryMode?: CuaWindowDeliveryMode,
-  decisionViewport?: Viewport,
-  platform: NodeJS.Platform = process.platform,
-): { name: string; arguments: Record<string, unknown> } {
-  const target = windowBinding === undefined ? PRIMARY_DESKTOP : windowActionTarget(windowBinding);
-  const deliveryMode = windowBinding === undefined ? "foreground" : configuredDeliveryMode ?? "background";
-  const point = (value: { x: number; y: number }) => windowBinding === undefined
-    ? value
-    : mapWindowPoint(value, decisionViewport, windowBinding.bounds, platform);
-  switch (action.kind) {
-    case "click":
-      return { name: "click", arguments: { session, target, ...point(action.point), delivery_mode: deliveryMode } };
-    case "double_click":
-      return { name: "click", arguments: { session, target, ...point(action.point), count: 2, delivery_mode: deliveryMode } };
-    case "right_click":
-      return { name: "click", arguments: { session, target, ...point(action.point), button: "right", delivery_mode: deliveryMode } };
-    case "type":
-      return { name: "type_text", arguments: { session, target, text: action.text, delivery_mode: deliveryMode } };
-    case "keypress": {
-      if (action.keys.length === 1) {
-        return { name: "press_key", arguments: { session, target, key: action.keys[0], delivery_mode: deliveryMode } };
-      }
-      const foregroundChord = platform === "win32" && windowBinding !== undefined && deliveryMode === "foreground"
-        ? foregroundPressKeyChord(action.keys)
-        : undefined;
-      return foregroundChord === undefined
-        ? { name: "hotkey", arguments: { session, target, keys: action.keys, delivery_mode: deliveryMode } }
-        : { name: "press_key", arguments: {
-            session,
-            target,
-            key: foregroundChord.key,
-            modifiers: foregroundChord.modifiers,
-            delivery_mode: deliveryMode,
-          } };
-    }
-    case "scroll":
-      return { name: "scroll", arguments: { session, target, ...point(action.point), direction: action.direction, by: "line", amount: action.ticks, delivery_mode: deliveryMode } };
-    case "drag": {
-      const from = point(action.from);
-      const to = point(action.to);
-      return { name: "drag", arguments: { session, target, from_x: from.x, from_y: from.y, to_x: to.x, to_y: to.y, delivery_mode: deliveryMode } };
-    }
-    case "select_option":
-      throw new WindowCoordinateMappingError("SELECT_OPTION_DOM_REQUIRED", "select_option must use managed-browser DOM delivery");
-    default:
-      return assertNever(action);
-  }
 }
 
 type GroundingToolResult = {
@@ -6334,46 +5863,6 @@ function isCuaPlatform(value: unknown): value is CuaPlatform {
  * unambiguous one-base-key chord with known native modifiers. Background,
  * desktop, non-Windows, and multi-base actions retain the existing hotkey path.
  */
-function foregroundPressKeyChord(keys: readonly string[]): { key: string; modifiers: string[] } | undefined {
-  const modifiers: string[] = [];
-  const baseKeys: string[] = [];
-  const seenModifiers = new Set<string>();
-  for (const key of keys) {
-    const modifier = canonicalPressKeyModifier(key);
-    if (modifier === undefined) {
-      baseKeys.push(key);
-      continue;
-    }
-    if (seenModifiers.has(modifier)) return undefined;
-    seenModifiers.add(modifier);
-    modifiers.push(modifier);
-  }
-  if (modifiers.length === 0 || baseKeys.length !== 1) return undefined;
-  return { key: baseKeys[0]!, modifiers };
-}
-
-function canonicalPressKeyModifier(key: string): string | undefined {
-  switch (key.toLowerCase()) {
-    case "ctrl":
-    case "control":
-      return "ctrl";
-    case "shift":
-      return "shift";
-    case "alt":
-    case "menu":
-    case "option":
-      return "alt";
-    case "win":
-    case "windows":
-    case "meta":
-    case "cmd":
-    case "command":
-      return "win";
-    default:
-      return undefined;
-  }
-}
-
 function safeCuaSnapshotId(value: unknown): string | undefined {
   return typeof value === "string" && /^s[0-9a-f]{8}$/u.test(value) ? value : undefined;
 }
@@ -6390,52 +5879,6 @@ function confirmsCuaValueWrite(value: unknown): boolean {
   const record = parseStructuredRecord(value);
   if (record?.effect !== "confirmed" || !Array.isArray(record.evidence)) return false;
   return record.evidence.some((item) => parseStructuredRecord(item)?.kind === "value_readback");
-}
-
-/**
- * Validate image-local coordinates and apply the pinned platform contract.
- * The decision frame is the source of truth: an approved action may execute
- * against a later observation, but its coordinates were still produced from
- * action.basedOn. Geometry is checked by the caller before this projection.
- */
-function mapWindowPoint(
-  point: { x: number; y: number },
-  sourceViewport: Viewport | undefined,
-  targetBounds: CuaWindowGeometry,
-  platform: NodeJS.Platform,
-): { x: number; y: number } {
-  if (sourceViewport === undefined) {
-    throw new WindowCoordinateMappingError("WINDOW_VIEWPORT_UNKNOWN", "window action has no source observation viewport");
-  }
-  if (sourceViewport.coordinateSpace !== "physical") {
-    throw new WindowCoordinateMappingError("WINDOW_COORDINATE_SPACE_UNSUPPORTED", "window action requires a physical observation viewport");
-  }
-  if (!validDimension(sourceViewport.width) || !validDimension(sourceViewport.height)) {
-    throw new WindowCoordinateMappingError("WINDOW_VIEWPORT_INVALID", "window action has an invalid source observation viewport");
-  }
-  if (!validDimension(targetBounds.width) || !validDimension(targetBounds.height)) {
-    throw new WindowCoordinateMappingError("WINDOW_GEOMETRY_INVALID", "window action has invalid target geometry");
-  }
-  if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0 || point.x >= sourceViewport.width || point.y >= sourceViewport.height) {
-    throw new WindowCoordinateMappingError("WINDOW_COORDINATE_INVALID", `window action point (${point.x}, ${point.y}) is outside source viewport ${sourceViewport.width}x${sourceViewport.height}`);
-  }
-  return {
-    // CUA 0.22.2 macOS click/scroll/drag consume get_window_state PNG pixels.
-    // The driver reverses its per-window resize ratio and Retina backing
-    // scale itself. A bounds projection here would apply a second transform.
-    // Keep the historical Windows/Linux contract unchanged: Windows capture
-    // through observation-only verify_state does not refresh its resize map.
-    x: platform === "darwin" ? clampCoordinate(Math.round(point.x), sourceViewport.width) : clampCoordinate(Math.round(point.x * targetBounds.width / sourceViewport.width), targetBounds.width),
-    y: platform === "darwin" ? clampCoordinate(Math.round(point.y), sourceViewport.height) : clampCoordinate(Math.round(point.y * targetBounds.height / sourceViewport.height), targetBounds.height),
-  };
-}
-
-function validDimension(value: number): boolean {
-  return Number.isSafeInteger(value) && value > 0;
-}
-
-function clampCoordinate(value: number, size: number): number {
-  return Math.min(size - 1, Math.max(0, value));
 }
 
 async function callTool(driver: CuaDriverLike, name: string, input: Record<string, unknown>, signal: AbortSignal) {
@@ -6627,8 +6070,4 @@ async function waitWithAbort(durationMs: number, signal: AbortSignal): Promise<v
     }, durationMs);
     signal.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function assertNever(value: never): never {
-  throw new Error(`unsupported CUA action ${String(value)}`);
 }
