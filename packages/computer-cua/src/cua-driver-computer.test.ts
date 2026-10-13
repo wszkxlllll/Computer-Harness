@@ -7711,6 +7711,38 @@ describe("CuaDriverComputer", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it.each(["visible", "hidden", "partial", "ambiguous"] as const)("admits Windows UIA hyperlinks only with visible unique DOM evidence when %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-hyperlink-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true },
+      { role: "Hyperlink", name: "Details", frame: { x: 100, y: 200, width: 120, height: 40 }, enabled: true },
+      { role: "Button", name: "Browser toolbar", frame: { x: 500, y: 10, width: 80, height: 30 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const candidate = { tagName: "a", ariaRole: "link", name: "Details", frame: { x: 100, y: 200, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true } };
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({ complete: scenario !== "partial", tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario === "hidden" || scenario === "partial" ? [] : scenario === "ambiguous" ? [candidate, candidate] : [candidate] }),
+      click: async () => ({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED", message: "control moved behind an overlay; no input sent" }),
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "hyperlink-frame" as ObservationId;
+      const observation = await computer.observe(session, basedOn, signal);
+      const hyperlink = observation.grounding!.elements.find((element) => element.source === "uia" && element.name === "Details");
+      expect(Boolean(hyperlink)).toBe(scenario === "visible" || scenario === "partial");
+      expect(observation.grounding!.elements.find((element) => element.name === "Browser toolbar")).toMatchObject({ browserRegion: "chrome", state: { enabled: true } });
+      if (scenario === "visible") {
+        expect(await computer.execute(session, { kind: "click", actionId: "hyperlink-occluded" as ActionId, basedOn, groundingRef: hyperlink!.elementRef, point: { x: 160, y: 220 } }, signal)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
+        expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      }
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it.each(["missing", "partial", "ambiguous"] as const)("uses the guarded UIA point path when DOM equivalence is %s and matches a visual click", async (scenario) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-dom-gate-"));
     const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });

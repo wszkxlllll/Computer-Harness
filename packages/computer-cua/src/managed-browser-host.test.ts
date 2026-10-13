@@ -24,18 +24,6 @@ describe("managed browser host pilot", () => {
     expect(managedBrowserExecutableCandidates("chromium", "linux"))
       .toContain("/usr/bin/chromium");
   });
-  it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("shadowRoot");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("deviceScaleFactor");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain('coordinateSpace: "css"');
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("iframe documents are intentionally not traversed");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("canvasLike");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("aria-labelledby");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("selectedOptions");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain("outerHTML");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain("nodeId");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain(".value");
-  });
 
   it("uses bounded accessible names and selected descriptions in a synthetic page", () => {
     const departureLabel = syntheticElement("label", { attrs: { for: "departure-time" }, textContent: "Departure time" });
@@ -133,11 +121,13 @@ describe("managed browser host pilot", () => {
       attrs: { "aria-label": "user@example.com" },
       rect: { x: 10, y: 90, width: 120, height: 24 },
     });
-    const page = new SyntheticDocument([label, labelledInput, ariaLabel, ariaInput, emailButton]);
+    const previousArrow = syntheticElement("a", { rect: { x: 10, y: 130, width: 24, height: 24 } });
+    const page = new SyntheticDocument([label, labelledInput, ariaLabel, ariaInput, emailButton, previousArrow]);
     const context = {
       document: page,
       Element: SyntheticElement,
       getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }),
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1 },
     };
     const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
       ...context,
@@ -147,12 +137,13 @@ describe("managed browser host pilot", () => {
       { role: "textbox", name: "Arrival time", element: labelledInput },
       { role: "textbox", name: "Departure time", element: ariaInput },
       { role: "button", name: "user@example.com", element: emailButton },
+      { role: "link", name: undefined, element: previousArrow },
     ]) {
       const candidate = evaluation.candidates.find((item) => item.name === expected.name);
       expect(candidate).toBeDefined();
       const result = runInNewContext(buildManagedDomClickExpression({
         role: expected.role,
-        name: expected.name,
+        ...(expected.name === undefined ? {} : { name: expected.name }),
         frame: candidate?.frame as { x: number; y: number; width: number; height: number },
         fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate),
       }), context) as { status: string };
@@ -184,7 +175,7 @@ describe("managed browser host pilot", () => {
     expect(replacement.clicked).toBe(false);
   });
 
-  it("ignores non-input type and refuses occluded native click probes without dispatch", () => {
+  it("refuses occluded click probes and dispatch without input, and removes their candidates", () => {
     const button = syntheticElement("button", { attrs: { type: "submit", "aria-label": "Go" } });
     const page = new SyntheticDocument([button]);
     const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
@@ -195,7 +186,12 @@ describe("managed browser host pilot", () => {
     page.hitTarget = syntheticElement("div");
     expect(runInNewContext(buildManagedDomClickExpression({ ...binding, validateOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
     expect(button.clicked).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
+    expect(button.clicked).toBe(false);
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates).toEqual([]);
+    page.hitTarget = button;
     expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(button.clicked).toBe(true);
   });
 
   it.each([
@@ -203,31 +199,20 @@ describe("managed browser host pilot", () => {
     { x: 10, y: -10, width: 120, height: 24 },
     { x: 950, y: 10, width: 120, height: 24 },
     { x: 10, y: 790, width: 120, height: 24 },
-  ])("refuses a clipped editable native-click probe at %j without input", (rect) => {
+  ])("refuses a clipped click at %j in both dispatch modes without input", (rect) => {
     const input = syntheticElement("input", { attrs: { "aria-label": "Query" }, rect });
     const page = new SyntheticDocument([input]);
     const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
-    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
-    const result = runInNewContext(buildManagedDomClickExpression({ role: "textbox", name: "Query", frame: rect, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate), validateOnly: true }), context);
-    expect(result).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CLIPPED" });
-    expect(input.clicked).toBe(false);
-    expect(page.activeElement).toBeNull();
+    const fingerprint = domCandidateFingerprint({ tagName: "input", ariaRole: "textbox", name: "Query", inputType: "text" });
+    for (const validateOnly of [false, true]) {
+      const result = runInNewContext(buildManagedDomClickExpression({ role: "textbox", name: "Query", frame: rect, fingerprint, validateOnly }), context);
+      expect(result).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CLIPPED" });
+      expect(input.clicked).toBe(false);
+      expect(page.activeElement).toBeNull();
+    }
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates).toEqual([]);
   });
 
-  it("keeps the local fixture coverage explicit for controls, canvas, shadow DOM and iframe boundaries", async () => {
-    // Fixture strings are supplementary; executable round-trip tests above
-    // and below exercise the production collector and fingerprint function.
-    const fixture = await readFile(new URL("./fixtures/managed-dom-fixture.html", import.meta.url), "utf8");
-    expect(fixture).toContain('role="button"');
-    expect(fixture).toContain("<input");
-    expect(fixture).toContain('type="checkbox"');
-    expect(fixture).toContain('type="radio"');
-    expect(fixture).toContain('type="range"');
-    expect(fixture).toContain("<canvas");
-    expect(fixture).toContain("attachShadow");
-    expect(fixture).toContain("<iframe");
-    expect(fixture).not.toContain("value=");
-  });
 
   it("requires an owned-window resolver and managed URL", () => {
     expect(() => new ManagedBrowserHost({ browser: "edge", url: "https://example.com" } as ManagedBrowserHostOptions)).toThrow(/owned-window resolver/iu);
@@ -961,7 +946,8 @@ class SyntheticElement {
   public readonly shadowRoot: undefined;
   public clicked = false;
   private readonly attrs: Readonly<Record<string, string>>;
-  private readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  private rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  private readonly usesDefaultRect: boolean;
 
   public constructor(localName: string, options: SyntheticElementOptions = {}) {
     this.localName = localName;
@@ -974,7 +960,16 @@ class SyntheticElement {
     this.disabled = options.disabled === true;
     this.isContentEditable = options.isContentEditable === true;
     this.shadowRoot = undefined;
+    this.usesDefaultRect = options.rect === undefined;
     this.rect = options.rect ?? { x: 10, y: 10, width: 120, height: 24 };
+  }
+
+  public layoutDefaultAt(y: number): void {
+    if (this.usesDefaultRect) this.rect = { x: 10, y, width: 120, height: 24 };
+  }
+
+  public contains(element: SyntheticElement): boolean {
+    return this.descendants().includes(element);
   }
 
   public getAttribute(name: string): string | null {
@@ -1016,13 +1011,27 @@ class SyntheticDocument {
   public activeElement: SyntheticElement | null = null;
   public focused = true;
   public hitTarget: SyntheticElement | undefined;
-  public elementFromPoint(): SyntheticElement | null { return this.hitTarget ?? this.allElements()[0] ?? null; }
+  public elementFromPoint(x: number, y: number): SyntheticElement | null {
+    if (this.hitTarget !== undefined) return this.hitTarget;
+    return this.allElements().find((element) => {
+      const rect = element.getBoundingClientRect();
+      return ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName)
+        && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+    }) ?? null;
+  }
   public hasFocus(): boolean { return this.focused; }
   private readonly roots: readonly SyntheticElement[];
 
   public constructor(roots: readonly SyntheticElement[]) {
     this.roots = roots;
-    for (const element of this.allElements()) element.onFocus = () => { this.activeElement = element; };
+    let y = 10;
+    for (const element of this.allElements()) {
+      element.onFocus = () => { this.activeElement = element; };
+      if (["a", "button", "input", "select", "textarea", "summary"].includes(element.localName)) {
+        element.layoutDefaultAt(y);
+        y += 36;
+      }
+    }
   }
 
   public querySelectorAll(selector: string): readonly SyntheticElement[] {

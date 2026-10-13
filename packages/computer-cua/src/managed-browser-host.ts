@@ -679,6 +679,26 @@ interface HostState {
   readonly profileLock: FileHandle | undefined;
 }
 
+// Share the same observation-bound click point across collection and dispatch.
+const MANAGED_DOM_CLICK_POINT_SCRIPT = String.raw`
+  const clickPointRefusal = (element, frame) => {
+    if (!frame || frame.x < 0 || frame.y < 0 || frame.x + frame.width > window.innerWidth || frame.y + frame.height > window.innerHeight) return "DOM_CLICK_CLIPPED";
+    if (element.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) === false) return "DOM_CLICK_OCCLUDED";
+    const x = frame.x + frame.width / 2, y = frame.y + frame.height / 2;
+    let hit = document.elementFromPoint(x, y);
+    for (let depth = 0; depth < 16 && hit?.shadowRoot?.elementFromPoint; depth += 1) {
+      const child = hit.shadowRoot.elementFromPoint(x, y);
+      if (!child || child === hit) break;
+      hit = child;
+    }
+    for (let depth = 0; depth < 16 && hit; depth += 1) {
+      if (hit === element || element.contains?.(hit)) return undefined;
+      hit = hit.getRootNode?.()?.host;
+    }
+    return "DOM_CLICK_OCCLUDED";
+  };
+`;
+
 /**
  * Expression evaluated in the managed page's main world. It intentionally
  * keeps label/reference lookups bounded and never emits node IDs, input values
@@ -687,6 +707,7 @@ interface HostState {
  * remain an explicit boundary and canvas/WebGL stays visual-only.
  */
 export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
+  ${MANAGED_DOM_CLICK_POINT_SCRIPT}
   const cssWidth = Number(window.innerWidth);
   const cssHeight = Number(window.innerHeight);
   const deviceScaleFactor = Number(window.devicePixelRatio);
@@ -837,7 +858,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     seen.add(element);
     const role = roleOf(element);
     const frame = visibleFrame(element);
-    if (frame === undefined || !isInteractive(element, role) || isCanvasLike(element, role)) return;
+    if (frame === undefined || !isInteractive(element, role) || isCanvasLike(element, role) || clickPointRefusal(element, frame) !== undefined) return;
     const name = nameOf(element, role);
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
     const description = roleName === "combobox" || element.localName === "select" ? selectedOptionDescription(element, role) : undefined;
@@ -1388,7 +1409,9 @@ export class ManagedBrowserHost {
         ...(request.candidate.frame === undefined ? {} : { frame: request.candidate.frame }),
         fingerprint: request.candidate.fingerprint,
       });
-      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false }, signal);
+      // Only a dispatched click represents a user gesture. Read-only probes
+      // must not grant activation to page code or consume popup permission.
+      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false, userGesture: !verifyFocusOnly && !validateOnly }, signal);
       const value = response?.result?.result?.value;
       if (!isRecord(value) || (value.status !== "completed" && value.status !== "refused" && value.status !== "failed")) {
         return { status: "failed", driverCode: "DOM_CLICK_EVALUATION_INVALID", message: "managed-browser DOM click evaluation returned an invalid result" };
@@ -1644,6 +1667,7 @@ export function buildManagedDomClickExpression(input: {
 }): string {
   const encoded = JSON.stringify(input);
   return String.raw`(function(target) {
+    ${MANAGED_DOM_CLICK_POINT_SCRIPT}
     const MAX_ELEMENTS = 512;
     const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
     const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
@@ -1776,7 +1800,7 @@ export function buildManagedDomClickExpression(input: {
     walk(document);
     const role = normalize(target.role, 64);
     const name = normalize(target.name, 160);
-    const roleMatches = candidates.filter((candidate) => candidate.role === role && candidate.name === name);
+    const roleMatches = candidates.filter((candidate) => candidate.role === role && normalize(candidate.name, 160) === name);
     const matches = roleMatches.filter((candidate) => candidate.fingerprint === target.fingerprint && sameFrame(candidate.frame, target.frame));
     if (matches.length === 0) {
       if (roleMatches.some((candidate) => sameFrame(candidate.frame, target.frame))) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE", message: "DOM candidate fingerprint changed" };
@@ -1791,22 +1815,11 @@ export function buildManagedDomClickExpression(input: {
       if (!editable || !document.hasFocus() || (element.getRootNode?.() ?? document).activeElement !== element) return { status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", message: "managed-browser page/control does not own keyboard focus; no keyboard input was sent" };
       return { status: "completed", message: "managed-browser input focus verified" };
     }
-    if (target.validateOnly === true) {
-      // Native dispatch uses the observation-bound CSS center transformed by
-      // the Adapter, rather than the potentially drifted live frame center.
-      const frame = target.frame;
-      // A clipped public bbox has a different native center from the raw
-      // CSS frame. Reject rather than validate one point and dispatch another.
-      if (frame.x < 0 || frame.y < 0 || frame.x + frame.width > window.innerWidth || frame.y + frame.height > window.innerHeight) return { status: "refused", driverCode: "DOM_CLICK_CLIPPED", message: "managed-browser control is partly outside the viewport; scroll into full view and observe again; no input sent" };
-      let hit = document.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
-      for (let depth = 0; depth < 16 && hit?.shadowRoot?.elementFromPoint; depth += 1) {
-        const child = hit.shadowRoot.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
-        if (!child || child === hit) break;
-        hit = child;
-      }
-      if (hit !== element && !element.contains?.(hit)) return { status: "refused", driverCode: "DOM_CLICK_OCCLUDED", message: "managed-browser click point is obscured; no input sent" };
-      return { status: "completed", message: "managed-browser click candidate verified; no input sent" };
-    }
+    const refusal = clickPointRefusal(element, target.frame);
+    if (refusal !== undefined) return { status: "refused", driverCode: refusal, message: refusal === "DOM_CLICK_CLIPPED"
+      ? "managed-browser control is partly outside the viewport; scroll into full view and observe again; no input sent"
+      : "managed-browser click point is obscured; no input sent" };
+    if (target.validateOnly === true) return { status: "completed", message: "managed-browser click candidate verified; no input sent" };
     try {
       // Programmatic click does not perform the browser's native focus default.
       // This assists an editable control; verifyFocus still gates later input.

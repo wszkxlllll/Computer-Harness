@@ -1,5 +1,9 @@
 # Computer Harness 文档索引
 
+## M01点击修复与真实GLM运行（2026-10-13）
+
+[受管浏览器点击、UIA可见性修复与M01实跑](./member-c-m01-click-repair-2026-10-13.md)：Windows 实测通过用户手势、隐藏链接过滤、可见 Hyperlink 别名及未命名轮播箭头路径。完整修复后的 GLM Run 遇 Guard 审批边界被宿主取消，没有最终清单；不记 M01 业务成功或正式评分。源码、脱敏运行结果及原失败保留在同一成果中，没有全前台兜底、整机升级或附加发布验收。
+
 ## PR28 集成与无障碍源码交付（2026-10-13）
 
 当前开发分支 `codex/runtime-surface-preview-20261003` 纳入 PR28 `06b5974`，保留网页无障碍独立提交 `a897fc6`；只合并文档索引冲突，没有覆盖 Web 源码。393 项定向测试、Web/CUA 类型检查、隔离 Web 构建及 Chrome 50/50 检查通过，JS/CSS 与原 Preview 一致。见[无障碍集成复验](./mobile-accessibility-experience-review-2026-10-08.md)顶部。Preview 不替换，PR26 保持整改待集成；下面“尚未提交”和旧部署阶段描述均以本条及各文档最新日期为准。
