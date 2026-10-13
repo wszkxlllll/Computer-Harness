@@ -2,7 +2,15 @@
 
 起始审计日期：2026-10-11（Asia/Shanghai）。对象：[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)。后续用户已授权 review、PR29 集成，以及 PR26 的独立集成与有限解耦；各时点的操作范围以最新记录为准。
 
-## 2026-10-13 集成与有限解耦完成记录（代码验收通过，未部署）
+## 2026-10-13 后续 CI 复核（修复已验证，待远端检查，未部署）
+
+文档提交 `6e5b9ab` 的 [CI 38421401100](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38421401100) 在 Windows 单测阶段失败：130 文件中129通过，2324项中2322通过。两项失败均位于 `runtime/src/index.test.ts` 的窗口恢复场景，在固定5000次 `setImmediate` 轮询内未等到状态变化；没有编译失败，macOS及兼容性检查通过。该提交没有修改源码或测试，前一交付版本全绿不能替代当前提交的验收。
+
+整改只针对测试同步：两项失败及邻近一项同根因用例，在启动前订阅已提交的 `bound_window_missing` 事件，确认快照进入 `waiting_window` 后继续，并与提前终态竞争。保留转场期间拒绝公开操作、显式恢复、请求次数及不重放动作的断言；失败清理等待Run结束后再删除目录。不提高全局超时、不跳过测试、不修改产品准入。
+
+Luna定向Runtime **183/183** 与类型检查通过；Sol独立增量审查 **GO**，确认公开操作仍在私有恢复guard清除前受到拒绝，断言未削弱。协调者再次执行完整Vitest **130文件、2324/2324通过**，`git diff --check`干净。仅修改一个测试文件及本记录/索引；新提交仍须以实际远端CI为准。Preview、Host和原运行工作树不变。
+
+## 2026-10-13 集成与有限解耦完成记录（此前代码验收通过，未部署）
 
 用户已确认上述边界，授权 Luna max 实施、Sol medium 审查。以己方 `fdcf509` 加准备记录 `e6e4269` 建立独立集成分支 `codex/pr26-platform-integration-20261013`，吸收 PR26 `594fa8e`，保留双方作者历史；原运行工作树、Host、Relay、Preview 未替换。
 

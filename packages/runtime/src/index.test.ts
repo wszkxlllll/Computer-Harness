@@ -1225,6 +1225,10 @@ describe("RunController confirmed window handoff", () => {
 
     const computer = new EmptyRecoveryComputer();
     let controller!: RunController;
+    let resolveWaitingWindow!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const waitingWindowCommitted = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveWaitingWindow = resolve;
+    });
     let discoveryDuringTransition: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
     let handoffDuringTransition: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
     const provider = new ScriptedProvider([
@@ -1245,13 +1249,21 @@ describe("RunController confirmed window handoff", () => {
             { pid: 707, windowId: 907, handoffToken: "must-not-queue" },
             event.sourceActionId,
           ).then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+          // The observer runs after reduction. Do not treat an earlier
+          // recovery request as ready until it has produced waiting_window.
+          if (controller.getSnapshot().status === "waiting_window") resolveWaitingWindow(event);
         }
       },
     });
     controller = created.controller;
+    const running = controller.start("do not allow public handoff during private recovery");
     try {
-      const running = controller.start("do not allow public handoff during private recovery");
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      await Promise.race([
+        waitingWindowCommitted,
+        running.then((outcome) => {
+          throw new Error(`run reached ${outcome} before the bound-window recovery entered waiting_window`);
+        }),
+      ]);
       const discovery = await discoveryDuringTransition;
       const handoff = await handoffDuringTransition;
       expect(discovery?.ok).toBe(false);
@@ -1266,6 +1278,7 @@ describe("RunController confirmed window handoff", () => {
       await expect(running).resolves.toBe("cancelled");
     } finally {
       if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
       await rm(created.directory, { recursive: true, force: true });
     }
   });
@@ -1476,15 +1489,33 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall(`recovery-disabled-${missingTool}`)] },
       { type: "finish", summary: "must remain at the host handoff boundary" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+    let controller!: RunController;
+    let resolveWaitingWindow!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const waitingWindowCommitted = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveWaitingWindow = resolve;
+    });
+    const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
       windowHandoff: "confirm-v1",
       windowSwitch: "opened-windows-v1",
       recoverBoundWindowMissing: true,
       enabledToolNames,
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing" &&
+            controller.getSnapshot().status === "waiting_window") {
+          resolveWaitingWindow(event);
+        }
+      },
     });
+    controller = created.controller;
+    const directory = created.directory;
     const running = controller.start("do not recover unless both control tools are enabled");
     try {
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      await Promise.race([
+        waitingWindowCommitted,
+        running.then((outcome) => {
+          throw new Error(`run reached ${outcome} before the disabled-recovery handoff entered waiting_window`);
+        }),
+      ]);
       expect(controller.getSnapshot().status).toBe("waiting_window");
       expect(provider.inputs).toHaveLength(1);
       expect(computer.listCalls).toBe(0);
@@ -5322,13 +5353,33 @@ describe("RunController model-directed window switching", () => {
       { type: "tool_calls", calls: [clickCall("ordinary-close-once")] },
       { type: "finish", summary: "continued on the explicitly selected window" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+    let controller!: RunController;
+    let resolveWaitingWindow!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const waitingWindowCommitted = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveWaitingWindow = resolve;
+    });
+    const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
       windowHandoff: "confirm-v1",
       windowSwitch: "opened-windows-v1",
+      onEventCommitted(event) {
+        // commitEvent invokes this observer only after the requested handoff
+        // has been reduced into the public waiting_window snapshot.
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing" &&
+            controller.getSnapshot().status === "waiting_window") {
+          resolveWaitingWindow(event);
+        }
+      },
     });
+    controller = created.controller;
+    const directory = created.directory;
     const running = controller.start("complete the action, then recover the exact new window");
     try {
-      await waitUntil(() => ["waiting_window", "waiting_user", "finished"].includes(controller.getSnapshot().status));
+      await Promise.race([
+        waitingWindowCommitted,
+        running.then((outcome) => {
+          throw new Error(`run reached ${outcome} before the post-action window handoff entered waiting_window`);
+        }),
+      ]);
       expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents() })).toBe("waiting_window");
       const request = controller.getSnapshot().pendingWindowHandoff!;
       expect(request.reasonCode).toBe("bound_window_missing");
