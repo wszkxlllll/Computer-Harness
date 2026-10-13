@@ -1,6 +1,18 @@
 # PR26 持续审计与产品收敛清单
 
-审计日期：2026-10-11（Asia/Shanghai）。对象：[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)。只审查，不修改 PR、不发表评论、不部署、不调用模型或操作桌面。
+起始审计日期：2026-10-11（Asia/Shanghai）。对象：[PR26](https://github.com/wszkxlllll/Computer-Harness/pull/26)。后续用户已授权 review、PR29 集成，以及 PR26 的独立集成与有限解耦；各时点的操作范围以最新记录为准。
+
+## 2026-10-13 集成实施记录（进行中，未部署）
+
+用户已确认上述边界，授权 Luna max 实施、Sol medium 审查。以己方 `fdcf509` 加准备记录 `e6e4269` 建立独立集成分支 `codex/pr26-platform-integration-20261013`，吸收 PR26 `594fa8e`，保留双方作者历史；原运行工作树、Host、Relay、Preview 未替换。
+
+本轮独立验证：首轮类型检查发现自动合并重复常量/函数、inventory 类型及控制工具判别式问题，修正后根类型检查与 Web 生产构建通过。首轮 37 文件定向回归为 **999/1025 通过、26 项失败**，完整失败报告保留于隔离工作树忽略目录，不把失败抹掉或调整全局超时。
+
+- 18 项 Runtime 原生窗口恢复用例的 fake 仍返回 desktop Surface，未进入原生 handoff 分支；只修正这些用例的 Surface 身份，保留整桌面不触发原生 handoff 的生产保护。修正后该文件 **183/183** 通过。
+- 来源结果合同测试固定匹配工具目录文字，遗漏参数 description；改核对实际出站参数/版本/引用与 Qwen flat calls 后，独立 **5/5** 通过，无 Provider 生产修改。
+- 其余 CUA/DOM/文件身份夹具失败逐项处理中；平台私有拆分、公共实验入口隔离和 Sol 最终审查尚未完成。本节不作为最终集成验收。
+
+Windows 最终取舍已固定：保留私有 foreground-caret 配置/默认前台路径，以及原准入和 readback 下的显式 UIA 追加；不吸收 PR26 无条件禁用全部 Windows UIA 多行的规则。Mac 不自动绑定 Windows UIA 引用。Windows/Mac 仍共用 Session/Surface/Receipt/事件和取消/未知副作用语义，不复制 Computer 主类。
 
 ## 2026-10-13 集成前准备复核（尚未开始合并）
 

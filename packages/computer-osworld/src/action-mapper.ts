@@ -31,6 +31,11 @@ export function mapActionIntent(action: ActionIntent, viewport: Viewport, keyboa
         "switch_window requires an opened-window inventory and is unavailable on OSWorld",
         "OSWORLD_WINDOW_SWITCH_UNSUPPORTED",
       );
+    case "reopen_saved_document":
+      throw new OsworldActionMappingError(
+        "reopen_saved_document requires a Host-authorized native document grant and is unavailable on OSWorld",
+        "OSWORLD_DOCUMENT_REOPEN_UNSUPPORTED",
+      );
     case "scroll":
       if (!Number.isInteger(action.ticks) || action.ticks <= 0) {
         throw new OsworldActionMappingError("scroll.ticks must be a positive integer");

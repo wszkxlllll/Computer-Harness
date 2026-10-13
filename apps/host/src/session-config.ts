@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import type { ApplicationSessionConfig, RunModel } from "@computer-harness/app-runtime";
-import { parseGlmInputBudgets } from "./glm-output-budget.js";
+import { parseGlmInputBudgets, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 
 export interface HostArguments {
   envFile: string;
@@ -100,9 +100,7 @@ export function createHostSessionConfig(
     windowHandoff: "confirm-v1",
     glmThinking: readGlmThinking(env.GLM_THINKING),
     glmMaxOutputTokens: args.glmMaxOutputTokens,
-    // GLM can take longer on image-heavy turns; allow one bounded 90-second
-    // response window while keeping the runtime's single retry finite.
-    glmRequestTimeoutMs: 90_000,
+    glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
     ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: env.DASHSCOPE_WORKSPACE_ID }),
@@ -112,10 +110,4 @@ export function createHostSessionConfig(
       qwenOutputMode: "strict_json" as const,
     } : {}),
   };
-}
-
-function readGlmThinking(value: string | undefined): "enabled" | "low" | "high" | "max" {
-  return value === "enabled" || value === "low" || value === "high" || value === "max"
-    ? value
-    : "enabled";
 }

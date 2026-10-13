@@ -15,6 +15,7 @@ import type { ResolvedRunConfig, RunCloseConfirmation, RunDependencies, RunHandl
 export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId" | "assistantPreferences">;
 
 export interface WindowTargetInfo {
+  readonly handoffToken?: string;
   readonly pid: number;
   readonly windowId: number;
   readonly appName?: string;
@@ -57,6 +58,20 @@ export type ApplicationSessionRunFeatureOverrides = Partial<Pick<
   managedBrowserProfileRoot?: string;
   /** Run-only opt-in projected onto the CUA Computer at the Host boundary. */
   managedBrowserCompanion?: boolean;
+  /** Host-only single-run native recovery profile projection. */
+  nativeRecovery?: {
+    readonly primaryTarget: ApplicationSessionWindowTarget;
+    readonly recoveryTarget: ApplicationSessionWindowTarget;
+    readonly outputPath: string;
+    readonly expectedExecutableUrl: string;
+  };
+  /** Host-only T3 hybrid: Browser and TextEdit remain separate exact identities. */
+  nativeWebDocument?: {
+    readonly primaryTarget: ApplicationSessionWindowTarget;
+    readonly recoveryTarget: ApplicationSessionWindowTarget;
+    readonly outputPath: string;
+    readonly expectedExecutableUrl: string;
+  };
 };
 
 /** Per-Run non-feature input kept separate from computer and Guard overrides. */
@@ -205,6 +220,8 @@ export class ApplicationSession {
       managedBrowserProfileLabel,
       managedBrowserProfileRoot,
       managedBrowserCompanion,
+      nativeRecovery,
+      nativeWebDocument,
       ...featureConfig
     } = featureOverrides;
     const config: ResolvedRunConfig = {
@@ -249,6 +266,59 @@ export class ApplicationSession {
       config.computer = {
         ...computer,
         ...(managedBrowserCompanion ? { managedBrowserCompanion: true } : {}),
+      };
+    }
+    if (nativeRecovery !== undefined) {
+      if (config.computer.kind !== "cua") throw new Error("native recovery profile requires the CUA computer");
+      if (featureConfig.grounding !== "uia-catalog-v1" || featureConfig.windowSwitch !== "opened-windows-v1" ||
+          featureConfig.windowHandoff !== "confirm-v1" || managedBrowserCompanion === true || managedBrowserUrl !== undefined) {
+        throw new Error("native recovery profile requires exact native window switching with UIA grounding and no managed-browser companion");
+      }
+      config.recoverBoundWindowMissing = true;
+      config.windowHandoff = "confirm-v1";
+      config.windowSwitch = "opened-windows-v1";
+      config.grounding = "uia-catalog-v1";
+      const { managedBrowserCompanion: _existingCompanion, managedBrowserUrl: _existingManagedBrowserUrl, ...nativeComputer } = config.computer;
+      config.computer = {
+        ...nativeComputer,
+        windowTarget: nativeRecovery.primaryTarget,
+        recoveryWindowTarget: nativeRecovery.recoveryTarget,
+        recoverBoundWindowMissing: true,
+        reopenSavedDocumentGrant: {
+          path: nativeRecovery.outputPath,
+          expectedExecutableUrl: nativeRecovery.expectedExecutableUrl,
+        },
+        windowDeliveryMode: "foreground",
+        windowSwitch: "opened-windows-v1",
+        windowSwitchAllowedTargets: [nativeRecovery.primaryTarget, nativeRecovery.recoveryTarget],
+        grounding: "uia-catalog-v1",
+      };
+    }
+    if (nativeWebDocument !== undefined) {
+      if (config.computer.kind !== "cua") throw new Error("hybrid native-web document profile requires the CUA computer");
+      if (featureConfig.windowSwitch !== "opened-windows-v1" || featureConfig.windowHandoff !== "confirm-v1" ||
+          managedBrowserCompanion !== true || managedBrowserUrl !== "https://trains.ctrip.com/" || featureConfig.grounding !== "hybrid-catalog-v1") {
+        throw new Error("hybrid native-web document requires its fixed managed Browser and exact native window switching");
+      }
+      config.recoverBoundWindowMissing = true;
+      config.windowHandoff = "confirm-v1";
+      config.windowSwitch = "opened-windows-v1";
+      config.grounding = "hybrid-catalog-v1";
+      const { managedBrowserProfileLabel: _savedLabel, managedBrowserProfileRoot: _savedRoot, ...ephemeralComputer } = config.computer;
+      config.computer = {
+        ...ephemeralComputer,
+        managedBrowserCompanion: true,
+        managedBrowserUrl: "https://trains.ctrip.com/",
+        managedBrowserProfileMode: "ephemeral",
+        windowTarget: nativeWebDocument.primaryTarget,
+        recoveryWindowTarget: nativeWebDocument.recoveryTarget,
+        recoverBoundWindowMissing: true,
+        reopenSavedDocumentGrant: { path: nativeWebDocument.outputPath, expectedExecutableUrl: nativeWebDocument.expectedExecutableUrl },
+        hybridNativeWebDocumentTargets: { primaryTarget: nativeWebDocument.primaryTarget, recoveryTarget: nativeWebDocument.recoveryTarget },
+        windowDeliveryMode: "foreground",
+        windowSwitch: "opened-windows-v1",
+        windowSwitchAllowedTargets: [nativeWebDocument.primaryTarget, nativeWebDocument.recoveryTarget],
+        grounding: "hybrid-catalog-v1",
       };
     }
     const lease = this.owner.acquire(this.environmentIdentity, runId);

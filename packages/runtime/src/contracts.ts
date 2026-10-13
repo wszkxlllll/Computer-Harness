@@ -25,6 +25,7 @@ import type {
   PreparedRequestEstimate as ProtocolPreparedRequestEstimate,
   PreparedRequestMetadata,
   RunAssistantPreferencesSnapshot,
+  SourceLinkedFinishContract,
   RunId,
   SurfaceRef,
   RiskCategory,
@@ -158,12 +159,20 @@ export interface ProviderAdapter {
   readonly id: string;
   generate(
     input: ModelInput,
-    options: { signal: AbortSignal },
+    options: { signal: AbortSignal; requestContext?: ProviderRequestContext },
   ): Promise<ModelTurn>;
-  prepare?(input: ModelInput, options: { signal: AbortSignal }): Promise<PreparedProviderRequest>;
-  generatePrepared?(prepared: PreparedProviderRequest, options: { signal: AbortSignal }): Promise<ModelTurn>;
+  prepare?(input: ModelInput, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<PreparedProviderRequest>;
+  generatePrepared?(prepared: PreparedProviderRequest, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<ModelTurn>;
   /** Optional Run-owned resource cleanup, called after the Run completes. */
   close?(): Promise<void>;
+}
+
+/** Per-attempt identifiers for safe, non-wire diagnostics only. */
+export interface ProviderRequestContext {
+  readonly runId: string;
+  readonly requestId: string;
+  readonly decisionId: string;
+  readonly attempt: number;
 }
 
 /** Provider-owned wire preparation metadata. The actual request body stays in
@@ -181,6 +190,8 @@ export interface ContextCompileInput {
   plan?: PlanState;
   executionSegment?: ExecutionSegment;
   recentEvents: readonly RuntimeEvent[];
+  /** Exact policy-owned allowance for the request being compiled. */
+  requestBudget?: { readonly remaining: number; readonly limit: number };
   context?: ContextOptions;
   enabledCategories?: readonly ToolCategory[];
   enabledToolNames?: readonly string[];
@@ -190,6 +201,7 @@ export interface ContextCompileInput {
   assistantPreferences?: RunAssistantPreferencesSnapshot;
   /** One trusted, short-lived app-runtime selection; never a user-loaded Skill. */
   operationGuidance?: ContextOperationGuidance;
+  sourceLinkedFinish?: SourceLinkedFinishContract;
   /** Current serializable binding and its capabilities, independent of the
    * latest screenshot viewport. */
   computerSession?: ComputerSessionDescriptor;
@@ -219,7 +231,7 @@ export interface ContextOptions {
   maxHistoryEvents?: number;
   /** Approximate text/tool budget; image cost is reported by the Provider when available. */
   maxInputTokens?: number;
-  /** Provider wire estimate cap, including request-envelope and image allowances. */
+  /** Provider-projected wire estimate cap, including request envelope and image allowance. */
   maxWireInputTokens?: number;
   /** Soft cap for memory text inside the Context fixed blocks. */
   memoryMaxTokens?: number;
@@ -296,6 +308,7 @@ export type GuiActionDraft =
   | { kind: "scroll"; point: Point; direction: "up" | "down" | "left" | "right"; ticks: number }
   | { kind: "drag"; from: Point; to: Point }
   | { kind: "switch_window"; windowRef: string }
+  | { kind: "reopen_saved_document" }
   | { kind: "wait"; durationMs: number };
 
 export interface ToolExecutionContext {
@@ -381,6 +394,8 @@ export interface FinishDecision {
 }
 
 export interface RuntimePolicy {
+  /** Exact remaining request allowance when the policy can attest it. */
+  modelRequestBudget?(snapshot: RunSnapshot): { readonly remaining: number; readonly limit: number };
   evaluateToolCall(context: PolicyContext): Promise<ToolPolicyDecision>;
   checkBudget(snapshot: RunSnapshot): BudgetDecision;
   checkActionBudget(snapshot: RunSnapshot): BudgetDecision;
@@ -444,4 +459,3 @@ export interface IdFactory {
   assetId(): AssetId;
   actionId(): ActionId;
 }
-

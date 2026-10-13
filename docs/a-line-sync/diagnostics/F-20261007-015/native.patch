@@ -1,0 +1,333 @@
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/lib.rs b/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
+--- a/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
+@@ -31,6 +31,7 @@
+ // unit tests run on any host (no Win32 runtime needed) — see issue #1979,
+ // where the multi-monitor normalization bug was diagnosable by pure math.
+ pub mod virtualdesk;
++pub mod value_append;
+ 
+ #[cfg(any(target_os = "windows", test))]
+ mod keycodes;
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -4345,56 +4345,74 @@
+         // 1. With an element_index, try UIA ValuePattern.SetValue first: it works
+         //    for WPF / WinForms / UWP / XAML and many web inputs, sets the value
+         //    through the accessibility channel (no keystrokes), and the `_noact`
+-        //    guard blocks any self-foreground — so it never raises. Auto-falls-
+-        //    back to the WM_CHAR path below if the element has no ValuePattern
+-        //    (most legacy Win32 EDITs consume WM_CHAR fine without focus steal).
++        //    guard retains the existing foreground shielding. Only direct
++        //    UIA_E_NOTSUPPORTED before input may fall back to WM_CHAR below;
++        //    ambiguous null/error, read/write/worker failure cannot fall back.
+         if let Some(idx) = elem_idx {
+             let idx = idx as usize;
+             let state = self.state.clone();
+             let text_for_uia = text.clone();
++            use crate::value_append::{append_value, pattern_failure, route_worker, AppendOutcome, AppendRoute, PatternStatus};
+             let set_result = tokio::task::spawn_blocking(move || {
+                 // Retain the element under the cache lock so a concurrent
+                 // get_window_state snapshot-replace on the same (pid, hwnd)
+                 // can't Release it to zero while this SetValue is in flight.
+                 // The guard is held for the whole closure.
+-                let element_guard = state.element_cache.get_element_retained(pid, hwnd, idx)?;
++                let element_guard = match state.element_cache.get_element_retained(pid, hwnd, idx) {
++                    Some(guard) => guard,
++                    None => return AppendOutcome::ReadFailedNoInput,
++                };
+                 let ptr = element_guard.as_ptr();
++                if !element_guard.is_uia() || ptr == 0 {
++                    return AppendOutcome::ReadFailedNoInput;
++                }
+                 use windows::core::{Interface, BSTR};
+                 use windows::Win32::UI::Accessibility::{
+                     IUIAutomationElement, IUIAutomationValuePattern, UIA_ValuePatternId,
+                 };
+-                let elem: IUIAutomationElement =
+-                    unsafe { IUIAutomationElement::from_raw(ptr as *mut _) };
+-                let result = (|| -> anyhow::Result<(String, String)> {
+-                    let pattern = unsafe { elem.GetCurrentPattern(UIA_ValuePatternId) }?;
+-                    let vp: IUIAutomationValuePattern = pattern.cast()?;
++                // This interface borrows the guard's retained AddRef. Suppress its
++                // Drop even on early return/panic; only the guard releases that ref.
++                let elem = std::mem::ManuallyDrop::new(
++                    unsafe { IUIAutomationElement::from_raw(ptr as *mut _) });
++                let pattern = match unsafe { elem.GetCurrentPattern(UIA_ValuePatternId) } {
++                    Ok(pattern) => pattern,
++                    Err(error) => return pattern_failure(error.code().0, true),
++                };
++                let vp: IUIAutomationValuePattern = match pattern.cast() {
++                    Ok(value) => value,
++                    Err(error) => return pattern_failure(error.code().0, false),
++                };
+                     // Shield the SetValue against host self-foreground. A
+                     // Chromium/Electron (or XAML) ValuePattern.SetValue handler
+                     // calls SetForegroundWindow(self), which WS_EX_NOACTIVATE
+                     // does NOT stop; the EnableWindow shield does (disabled
+                     // top-level can't be foregrounded) while the a11y-channel
+                     // SetValue still lands. Same fix as the UIA Invoke path.
+-                    crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || unsafe {
++                    crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || {
+                         // ValuePattern has no caret/selection insertion API. Preserve
+                         // the current document and append as the deterministic
+                         // background fallback; replacing the whole value violates
+                         // type_text's insertion contract for editors.
+-                        let current = vp
+-                            .CurrentValue()
+-                            .map(|value| value.to_string())
+-                            .unwrap_or_default();
+-                        let inserted = format!("{current}{text_for_uia}");
+-                        vp.SetValue(&BSTR::from(inserted.as_str()))?;
+-                        Ok((current, inserted))
++                        append_value(PatternStatus::Supported, &text_for_uia,
++                            || unsafe { vp.CurrentValue() }.map(|value| value.to_string()).map_err(|_| ()),
++                            |inserted| unsafe { vp.SetValue(&BSTR::from(inserted)) }.map_err(|_| ()))
+                     })
+-                })()
+-                .ok();
+-                std::mem::forget(elem);
+-                result
+             })
+             .await
+-            .unwrap_or(None);
+-            if let Some((before, expected)) = set_result {
++            .map_err(|_| ());
++            let (before, expected) = match route_worker(set_result) {
++                AppendRoute::FallbackOnce => (None, None),
++                AppendRoute::RefuseNoInput => {
++                    return ToolResult::error("UIA append refused: target or current value unavailable; no input attempted and no fallback.")
++                        .with_structured(serde_json::json!({"status":"refused","effect":"none","inputAttempted":false,"fallbackAttempted":false}));
++                }
++                AppendRoute::WriteUnknown => {
++                    return ToolResult::error("UIA append outcome unknown: a write or worker may have started; no fallback or automatic retry. Inspect a fresh snapshot before further input.")
++                        .with_structured(serde_json::json!({"status":"unverifiable","effect":"unverifiable","inputAttempted":"unknown","fallbackAttempted":false}));
++                }
++                AppendRoute::VerifyWritten { before, expected } => (Some(before), Some(expected)),
++            };
++            if let (Some(before), Some(expected)) = (before, expected) {
+                 // Read the value back by element handle — focus-independent
+                 // (works regardless of which window is foreground), proving the
+                 // a11y write actually took rather than trusting SetValue's
+@@ -4466,7 +4484,7 @@
+                     s
+                 });
+             }
+-            // ValuePattern unavailable → fall through to the WM_CHAR path.
++            // Only a direct UIA_E_NOTSUPPORTED before any input may fall through.
+         }
+ 
+         // 2. No element_index on a WPF target: WM_CHAR is dropped and there's no
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/value_append.rs b/libs/cua-driver/rust/crates/platform-windows/src/value_append.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/value_append.rs
+@@ -0,0 +1,128 @@
++//! Pure append transaction and routing. Only explicit unsupported may fall back.
++//! A write error or worker failure is unknown: never repeat through another path.
++
++#[cfg(test)]
++#[path = "value_append_independent.rs"]
++mod independent_tests;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum PatternStatus { Supported, Unsupported, Unavailable }
++
++#[derive(Debug, PartialEq, Eq)]
++pub enum AppendOutcome {
++    PatternUnsupported,
++    PatternUnavailableNoInput,
++    ReadFailedNoInput,
++    WriteAttemptedUnknown,
++    Written { before: String, expected: String },
++}
++
++// Only the direct GetCurrentPattern HRESULT is evidence of unsupported.
++// Cast E_NOINTERFACE and windows-rs S_OK/null Error::empty (code 0) are not.
++pub fn pattern_failure(code: i32, direct_get_pattern: bool) -> AppendOutcome {
++    if direct_get_pattern && code == 0x80040204u32 as i32 {
++        AppendOutcome::PatternUnsupported
++    } else {
++        AppendOutcome::ReadFailedNoInput
++    }
++}
++
++pub fn append_value(
++    status: PatternStatus,
++    suffix: &str,
++    read: impl FnOnce() -> Result<String, ()>,
++    write: impl FnOnce(&str) -> Result<(), ()>,
++) -> AppendOutcome {
++    match status {
++        PatternStatus::Unsupported => return AppendOutcome::PatternUnsupported,
++        PatternStatus::Unavailable => return AppendOutcome::PatternUnavailableNoInput,
++        PatternStatus::Supported => {}
++    }
++    let before = match read() { Ok(value) => value, Err(()) => return AppendOutcome::ReadFailedNoInput };
++    let expected = format!("{before}{suffix}");
++    match write(&expected) {
++        Ok(()) => AppendOutcome::Written { before, expected },
++        Err(()) => AppendOutcome::WriteAttemptedUnknown,
++    }
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub enum AppendRoute {
++    FallbackOnce,
++    RefuseNoInput,
++    WriteUnknown,
++    VerifyWritten { before: String, expected: String },
++}
++
++pub fn route_worker(result: Result<AppendOutcome, ()>) -> AppendRoute {
++    match result {
++        Ok(AppendOutcome::PatternUnsupported) => AppendRoute::FallbackOnce,
++        Ok(AppendOutcome::PatternUnavailableNoInput | AppendOutcome::ReadFailedNoInput) => AppendRoute::RefuseNoInput,
++        Err(()) | Ok(AppendOutcome::WriteAttemptedUnknown) => AppendRoute::WriteUnknown,
++        Ok(AppendOutcome::Written { before, expected }) => AppendRoute::VerifyWritten { before, expected },
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::cell::Cell;
++    #[test]
++    fn read_failure_never_writes_or_falls_back() {
++        let writes=Cell::new(0);
++        let result=append_value(PatternStatus::Supported,"new",||Err(()),|_|{writes.set(writes.get()+1);Ok(())});
++        assert_eq!(result,AppendOutcome::ReadFailedNoInput); assert_eq!(writes.get(),0);
++        assert_eq!(route_worker(Ok(result)),AppendRoute::RefuseNoInput);
++    }
++    #[test]
++    fn empty_and_chinese_multiline_are_actual_values_not_failed_reads() {
++        for before in ["", "原文\n第二行"] {
++            let writes=Cell::new(0);
++            let outcome=append_value(PatternStatus::Supported,"\n追加中文",||Ok(before.into()),|value|{
++                assert_eq!(value,format!("{before}\n追加中文"));writes.set(writes.get()+1);Ok(())
++            });
++            assert_eq!(writes.get(),1);
++            assert_eq!(route_worker(Ok(outcome)),AppendRoute::VerifyWritten{before:before.into(),expected:format!("{before}\n追加中文")});
++        }
++    }
++    #[test]
++    fn attempted_write_failure_and_worker_unknown_never_fall_back() {
++        let writes=Cell::new(0);
++        let outcome=append_value(PatternStatus::Supported,"new",||Ok("old".into()),|_|{writes.set(1);Err(())});
++        assert_eq!(writes.get(),1);assert_eq!(route_worker(Ok(outcome)),AppendRoute::WriteUnknown);
++        assert_eq!(route_worker(Err(())),AppendRoute::WriteUnknown);
++    }
++    #[test]
++    fn only_explicit_unsupported_routes_one_fallback_with_no_transaction() {
++        for status in [PatternStatus::Unsupported,PatternStatus::Unavailable] {
++            let outcome=append_value(status,"new",||panic!("no read"),|_|panic!("no write"));
++            let mut fallback=0;
++            if route_worker(Ok(outcome))==AppendRoute::FallbackOnce {fallback+=1;}
++            assert_eq!(fallback,if status==PatternStatus::Unsupported {1}else{0});
++        }
++    }
++    #[test]
++    fn hresult_classification_is_stage_specific_and_conservative() {
++        for code in [0, 0x80004002u32 as i32, 0x80004003u32 as i32, 0x80040201u32 as i32, 0x800705b4u32 as i32] {
++            assert_eq!(route_worker(Ok(pattern_failure(code,true))),AppendRoute::RefuseNoInput);
++        }
++        assert_eq!(route_worker(Ok(pattern_failure(0x80040204u32 as i32,true))),AppendRoute::FallbackOnce);
++        assert_eq!(route_worker(Ok(pattern_failure(0x80040204u32 as i32,false))),AppendRoute::RefuseNoInput);
++    }
++    #[test]
++    fn late_readback_failure_does_not_reenter_transaction_or_fallback() {
++        let writes=Cell::new(0); let fallbacks=Cell::new(0);
++        let outcome=append_value(PatternStatus::Supported,"\nnew",||Ok("old".into()),|_|{writes.set(writes.get()+1);Ok(())});
++        let route=route_worker(Ok(outcome));
++        assert!(matches!(route,AppendRoute::VerifyWritten{..}));
++        let readback:Result<String,()> = Err(());
++        assert!(readback.is_err());
++        if route==AppendRoute::FallbackOnce {fallbacks.set(1);}
++        assert_eq!(writes.get(),1);assert_eq!(fallbacks.get(),0);
++    }
++    #[test]
++    fn panicking_worker_after_write_is_unknown_without_fallback() {
++        let result=std::panic::catch_unwind(|| append_value(PatternStatus::Supported,"new",||Ok("old".into()),|_|panic!("worker")));
++        assert_eq!(route_worker(result.map_err(|_|())),AppendRoute::WriteUnknown);
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/value_append_independent.rs b/libs/cua-driver/rust/crates/platform-windows/src/value_append_independent.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/value_append_independent.rs
+@@ -0,0 +1,74 @@
++//! Pure std independent tests; no Windows, COM, GUI, or service imports.
++use super::*;
++use std::cell::{Cell, RefCell};
++use std::panic::{catch_unwind, AssertUnwindSafe};
++
++#[test]
++fn read_error_has_one_read_zero_write_zero_fallback() {
++    let reads=Cell::new(0); let writes=Cell::new(0);
++    let out=append_value(PatternStatus::Supported,"suffix",||{reads.set(reads.get()+1);Err(())},|_|{writes.set(writes.get()+1);Ok(())});
++    assert_eq!(reads.get(),1); assert_eq!(writes.get(),0); assert_eq!(route_worker(Ok(out)),AppendRoute::RefuseNoInput);
++}
++#[test]
++fn true_empty_old_value_is_not_read_failure() {
++    let seen=RefCell::new(Vec::new());
++    let out=append_value(PatternStatus::Supported,"中文\n",||Ok(String::new()),|v|{seen.borrow_mut().push(v.to_owned());Ok(())});
++    assert_eq!(*seen.borrow(),vec!["中文\n"]); assert_eq!(route_worker(Ok(out)),AppendRoute::VerifyWritten{before:String::new(),expected:"中文\n".into()});
++}
++#[test]
++fn unicode_crlf_and_existing_content_are_byte_exactly_preserved() {
++    let old="已有中文\r\n😀e\u{301}"; let suffix="\n追加𠮷\r\n"; let seen=RefCell::new(Vec::new());
++    let out=append_value(PatternStatus::Supported,suffix,||Ok(old.into()),|v|{seen.borrow_mut().push(v.as_bytes().to_vec());Ok(())});
++    assert_eq!(*seen.borrow(),vec![format!("{old}{suffix}").into_bytes()]); assert_eq!(route_worker(Ok(out)),AppendRoute::VerifyWritten{before:old.into(),expected:format!("{old}{suffix}")});
++}
++#[test]
++fn write_failure_is_single_attempt_and_unknown_not_fallback() {
++    let count=Cell::new(0); let out=append_value(PatternStatus::Supported,"追加",||Ok("原文".into()),|v|{assert_eq!(v,"原文追加");count.set(count.get()+1);Err(())});
++    assert_eq!(count.get(),1); assert_eq!(route_worker(Ok(out)),AppendRoute::WriteUnknown);
++}
++#[test]
++fn explicit_unsupported_skips_transaction_and_routes_only_one_original_fallback() {
++    let out=append_value(PatternStatus::Unsupported,"x",||panic!("read forbidden"),|_|panic!("write forbidden"));
++    let fallback=Cell::new(0); if route_worker(Ok(out))==AppendRoute::FallbackOnce { fallback.set(fallback.get()+1); }
++    assert_eq!(fallback.get(),1);
++}
++#[test]
++fn unavailable_target_skips_transaction_and_refuses_fallback() {
++    let out=append_value(PatternStatus::Unavailable,"x",||panic!("read forbidden"),|_|panic!("write forbidden")); assert_eq!(route_worker(Ok(out)),AppendRoute::RefuseNoInput);
++}
++#[test]
++fn only_direct_not_supported_hresult_enables_fallback() {
++    assert_eq!(route_worker(Ok(pattern_failure(0x80040204u32 as i32,true))),AppendRoute::FallbackOnce);
++    assert_eq!(route_worker(Ok(pattern_failure(0x80040204u32 as i32,false))),AppendRoute::RefuseNoInput);
++}
++#[test]
++fn stale_timeout_null_cast_and_generic_hresult_never_enable_fallback() {
++    for code in [0,1,-1,0x80004002u32 as i32,0x80004003u32 as i32,0x80004005u32 as i32,0x80040200u32 as i32,0x80040201u32 as i32,0x80131505u32 as i32,0x80131509u32 as i32] {
++        for direct in [false,true] { assert_eq!(route_worker(Ok(pattern_failure(code,direct))),AppendRoute::RefuseNoInput); }
++    }
++}
++#[test]
++fn worker_error_or_cancellation_is_unknown_not_no_input_or_retry() {
++    assert_eq!(route_worker(Err(())),AppendRoute::WriteUnknown);
++}
++#[test]
++fn read_panic_locks_unknown_and_never_calls_write() {
++    let writes=Cell::new(0); let result=catch_unwind(AssertUnwindSafe(||append_value(PatternStatus::Supported,"x",||panic!("fake read panic"),|_|{writes.set(1);Ok(())})));
++    assert_eq!(writes.get(),0); assert_eq!(route_worker(result.map_err(|_|())),AppendRoute::WriteUnknown);
++}
++#[test]
++fn write_panic_after_attempt_locks_unknown_and_cannot_replay() {
++    let writes=Cell::new(0); let result=catch_unwind(AssertUnwindSafe(||append_value(PatternStatus::Supported,"x",||Ok("old".into()),|_|{writes.set(writes.get()+1);panic!("fake write panic")})));
++    assert_eq!(writes.get(),1); assert_eq!(route_worker(result.map_err(|_|())),AppendRoute::WriteUnknown);
++}
++#[test]
++fn written_route_retains_both_values_and_is_not_fallback() {
++    let route=route_worker(Ok(AppendOutcome::Written{before:"old".into(),expected:"oldnew".into()}));
++    assert_eq!(route,AppendRoute::VerifyWritten{before:"old".into(),expected:"oldnew".into()}); assert_ne!(route,AppendRoute::FallbackOnce);
++}
++#[test]
++fn all_nonwritten_outcomes_have_conservative_routes() {
++    assert_eq!(route_worker(Ok(AppendOutcome::PatternUnavailableNoInput)),AppendRoute::RefuseNoInput);
++    assert_eq!(route_worker(Ok(AppendOutcome::ReadFailedNoInput)),AppendRoute::RefuseNoInput);
++    assert_eq!(route_worker(Ok(AppendOutcome::WriteAttemptedUnknown)),AppendRoute::WriteUnknown);
++}

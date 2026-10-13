@@ -8,7 +8,7 @@ import type { Computer, PreparedProviderRequest, ProviderAdapter } from "@comput
 import { createProvider as createProductionProvider } from "../../../packages/app-runtime/src/providers.js";
 import { createRun as createProductionRun } from "../../../packages/app-runtime/src/run-factory.js";
 import type { ProviderHttpClient, ResolvedRunConfig } from "../../../packages/app-runtime/src/config.js";
-import { parseGlmInputBudgets, parseGlmOutputBudget } from "./glm-output-budget.js";
+import { parseGlmInputBudgets, parseGlmOutputBudget, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 
 describe("Host GLM output budget", () => {
   it("wires the CLI parser result to config and the safe startup audit (source contract)", () => {
@@ -19,7 +19,10 @@ describe("Host GLM output budget", () => {
     expect(source).toContain("not a general stock CUA 0.22 compatibility claim");
     expect(configSource).toContain("glmMaxOutputTokens: args.glmMaxOutputTokens");
     expect(configSource).toContain("parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)");
-    expect(source).toContain("max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=90000");
+    expect(source).toContain("max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=${config.glmRequestTimeoutMs}");
+    expect(source).toContain('requestTimeoutSource=${process.env.GLM_REQUEST_TIMEOUT_MS === undefined ? "default" : "environment"} endpointSource=${config.glmEndpoint === undefined ? "default" : "environment"}');
+    expect(source).toContain("HARNESS_SOURCE_LINKED_FINISH_CONTRACT");
+    expect(source.indexOf("await loadEnvFile(args.envFile)")).toBeLessThan(source.indexOf("createHostSessionConfig(args, outputDir, managedBrowserProfile, process.env)"));
   });
   it("uses bounded independent text and wire input defaults and rejects inconsistent values", () => {
     expect(parseGlmInputBudgets()).toEqual({ contextMaxInputTokens: 16_384, contextMaxWireInputTokens: 24_576 });
@@ -193,6 +196,19 @@ describe("Host GLM output budget", () => {
       await handle?.close();
       await rm(outputDir, { recursive: true, force: true });
     }
+  });
+  it("keeps the effective request timeout at 90 seconds by default and validates bounded overrides", () => {
+    expect(parseGlmRequestTimeoutMs(undefined)).toBe(90_000);
+    expect(parseGlmRequestTimeoutMs("120000")).toBe(120_000);
+    expect(parseGlmRequestTimeoutMs("240000")).toBe(240_000);
+    for (const raw of ["", "0", "999", "1000.5", "NaN", "240001", "Infinity"]) {
+      expect(() => parseGlmRequestTimeoutMs(raw)).toThrow(/GLM_REQUEST_TIMEOUT_MS/u);
+    }
+  });
+  it("keeps the existing enabled thinking default and rejects malformed overrides", () => {
+    expect(readGlmThinking(undefined)).toBe("enabled");
+    expect(readGlmThinking("low")).toBe("low");
+    expect(() => readGlmThinking("private-invalid")).toThrow(/GLM_THINKING/u);
   });
   it("uses the bounded 8192 default and accepts explicit supported overrides", () => {
     expect(parseGlmOutputBudget()).toBe(8192);

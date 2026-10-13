@@ -106,7 +106,7 @@ export type TransientChildEvidence =
       readonly rootRole: "menu" | "popup" | "dialog";
       readonly rootSemanticsVerified: true;
       readonly frontmostEvidence: "exact_foreground" | "unique_owned_stack";
-      readonly admissionSource?: "owned_transient_window_root_proof" | "win32_relationship_probe";
+      readonly admissionSource?: "owned_transient_window_root_proof" | "win32_relationship_probe" | "macos_attached_sheet_proof";
     } | {
       /** An exact Win32 owner stack can prove a child without assigning a UIA root role. */
       readonly kind: "native_window";
@@ -272,7 +272,17 @@ export function pushChild(
     if (activeParent !== undefined && sameChildEvidence(state, activeParent, activeSurface, evidence)) {
       return applied(state, toSurfaceRef(activeSurface));
     }
-    if (activeSurface.parentSurfaceId === parentSurface.surfaceId || activeSurface.surfaceId === parentSurface.surfaceId) {
+    const nestedMacSheet = activeSurface.surfaceId === parentSurface.surfaceId &&
+      activeSurface.kind === "native_window" &&
+      activeSurface.admissionSource === "macos_attached_sheet_proof" &&
+      evidence.kind === "native_window" &&
+      evidence.admissionSource === "macos_attached_sheet_proof" &&
+      evidence.rootRole === "dialog" && evidence.rootSemanticsVerified === true &&
+      evidence.frontmostEvidence === "exact_foreground" && evidence.visible === true &&
+      evidence.interactionPolicy === "modal" &&
+      sameNativeWindow(evidence.owner, nativeWindowFor(state, parentSurface) ?? { pid: -1, hwnd: -1 });
+    if (activeSurface.parentSurfaceId === parentSurface.surfaceId ||
+        activeSurface.surfaceId === parentSurface.surfaceId && !nestedMacSheet) {
       return manual(state, "a modal child Surface is already active; resolve it before pushing another child");
     }
   }
@@ -309,6 +319,16 @@ export function pushChild(
       if (!isValidNativeWindowIdentity(evidence.nativeWindow) || !sameNativeWindow(evidence.owner, parentWindow) ||
           sameNativeWindow(evidence.nativeWindow, parentWindow)) {
         return rejected(state, "independent child identity or exact owner is contradictory");
+      }
+      if (evidence.admissionSource === "macos_attached_sheet_proof") {
+        let ancestor: SurfaceRecord | undefined = parentSurface;
+        while (ancestor !== undefined) {
+          const ancestorWindow = nativeWindowFor(state, ancestor);
+          if (ancestorWindow !== undefined && sameNativeWindow(evidence.nativeWindow, ancestorWindow)) {
+            return rejected(state, "attached AXSheet identity aliases an existing ancestor window");
+          }
+          ancestor = ancestor.parentSurfaceId === undefined ? undefined : state.surfaces.get(ancestor.parentSurfaceId);
+        }
       }
       const relationOnly = "relationshipProof" in evidence;
       const rootRole = relationOnly ? undefined : evidence.rootRole;
@@ -730,7 +750,7 @@ function sameChildEvidence(
           evidence.frontmostEvidence === "unique_owned_stack" && evidence.admissionSource === "win32_relationship_probe"
         : evidence.frontmostEvidence === "unique_owned_stack" ||
           evidence.frontmostEvidence === "exact_foreground" && evidence.admissionSource === "win32_relationship_probe");
-    const relationshipProof = relationOnly && evidence.relationshipProof === evidence.frontmostEvidence &&
+  const relationshipProof = relationOnly && evidence.relationshipProof === evidence.frontmostEvidence &&
       evidence.admissionSource === "win32_relationship_probe";
     return parentWindow !== undefined && sameNativeWindow(evidence.owner, parentWindow) &&
       sameNativeWindow(evidence.nativeWindow, child.nativeWindow) && rootRole === child.rootRole &&

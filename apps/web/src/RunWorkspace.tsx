@@ -341,7 +341,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
               {snapshot.target?.provenance === "selected_target" && <small>窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。</small>}
             </p>
           )}
-          {snapshot.error && !(snapshot.status === "finished" && snapshot.outcome && !snapshot.reply) && (
+          {snapshot.error && !(isTerminal && snapshot.outcome && !snapshot.reply?.trim()) && (
             <details className="run-error-details">
               <summary>查看原因</summary>
               <p>{snapshot.error}</p>

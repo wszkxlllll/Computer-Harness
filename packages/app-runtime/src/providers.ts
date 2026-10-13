@@ -3,7 +3,7 @@ import { FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmProfile } from "@c
 import { Qwen38FlashAdapter } from "@computer-harness/provider-qwen";
 import type { ProviderAdapter } from "@computer-harness/runtime";
 import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
-import type { ProviderFactory, ProviderFactoryOptions } from "./config.js";
+import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type ProviderFactory, type ProviderFactoryOptions } from "./config.js";
 
 /**
  * Construct one of the supported Providers without reading the ambient environment.
@@ -11,6 +11,15 @@ import type { ProviderFactory, ProviderFactoryOptions } from "./config.js";
  * passed through ProviderFactoryOptions.
  */
 export const createProvider: ProviderFactory = (options: ProviderFactoryOptions): ProviderAdapter => {
+  if (options.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(options.config.glmRequestTimeoutMs);
+  if (options.model === "glm-5.3-flash") {
+    const text = options.config.contextMaxInputTokens;
+    const wire = options.config.contextMaxWireInputTokens;
+    for (const value of [text, wire]) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("GLM input budgets must be integers from 1 to 131072");
+    }
+    if (text !== undefined && wire !== undefined && text > wire) throw new Error("GLM text budget must not exceed wire budget");
+  }
   if (typeof options.model !== "string") {
     throw new Error(`external Provider '${options.model.id}' requires an injected createProvider factory`);
   }
@@ -57,7 +66,7 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
     assetReader: options.assetReader,
     httpClient: options.httpClients?.glm ?? new RecordingGlmHttpClient(
       resolve(options.outputDir, "provider-exchanges.jsonl"),
-      new FetchGlmHttpClient({ requestTimeoutMs: options.config.glmRequestTimeoutMs ?? 90_000 }),
+      new FetchGlmHttpClient({ requestTimeoutMs: options.config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS }),
     ),
     ...(options.config.glmEndpoint === undefined ? {} : { endpoint: options.config.glmEndpoint }),
   });

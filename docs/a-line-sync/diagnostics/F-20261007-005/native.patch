@@ -1,0 +1,422 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
+index 3c5b416..8300ae2 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
+@@ -63,6 +63,87 @@ struct ExactWindowObservation {
+     focused_window_id: Option<u32>,
+     frontmost_ordinary_window_id: Option<u32>,
+     target_visible_ordinary: bool,
++    frontmost_row_diagnostic: FrontmostRowDiagnostic,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++struct FrontmostRowDiagnostic {
++    state: &'static str,
++    pid: Option<i32>,
++    window_id: Option<u32>,
++    layer: Option<i32>,
++    z: Option<u32>,
++    is_on_screen: Option<bool>,
++    target_pid_relation: &'static str,
++    target_window_id_relation: &'static str,
++}
++
++impl FrontmostRowDiagnostic {
++    fn from_row(
++        row: Option<&crate::windows::WindowInfo>,
++        target_pid: i32,
++        target_window_id: u32,
++    ) -> Self {
++        let Some(row) = row else {
++            return Self {
++                state: "missing",
++                pid: None,
++                window_id: None,
++                layer: None,
++                z: None,
++                is_on_screen: None,
++                target_pid_relation: "unknown",
++                target_window_id_relation: "unknown",
++            };
++        };
++        let z = u32::try_from(row.z_index).ok();
++        if row.pid <= 0 || row.window_id == 0 || row.z_index == 0 || z.is_none() {
++            return Self {
++                state: "invalid",
++                pid: None,
++                window_id: None,
++                layer: None,
++                z: None,
++                is_on_screen: None,
++                target_pid_relation: "unknown",
++                target_window_id_relation: "unknown",
++            };
++        }
++
++        Self {
++            state: "present",
++            pid: Some(row.pid),
++            window_id: Some(row.window_id),
++            layer: Some(row.layer),
++            z,
++            is_on_screen: Some(row.is_on_screen),
++            target_pid_relation: if row.pid == target_pid {
++                "same"
++            } else {
++                "different"
++            },
++            target_window_id_relation: if row.window_id == target_window_id {
++                "same"
++            } else {
++                "different"
++            },
++        }
++    }
++
++    fn as_json(self) -> Value {
++        json!({
++            "schema": "cua.frontmost_window_diagnostic.v1",
++            "source": "observe_exact_window_existing_visible_windows_snapshot",
++            "state": self.state,
++            "frontmost_window_pid": self.pid,
++            "frontmost_window_id": self.window_id,
++            "layer": self.layer,
++            "z": self.z,
++            "is_on_screen": self.is_on_screen,
++            "target_pid_relation": self.target_pid_relation,
++            "target_window_id_relation": self.target_window_id_relation,
++        })
++    }
+ }
+ 
+ impl ExactWindowObservation {
+@@ -119,21 +200,30 @@ fn classify_exact_outcome(
+     }
+ }
+ 
++fn select_frontmost_ordinary_window(
++    windows: &[crate::windows::WindowInfo],
++) -> Option<&crate::windows::WindowInfo> {
++    windows.iter().max_by_key(|window| window.z_index)
++}
++
+ fn observe_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
+     let windows = crate::windows::visible_windows();
+     let target_visible_ordinary = windows
+         .iter()
+         .any(|window| window.pid == pid && window.window_id == window_id && window.layer == 0);
+-    let frontmost_ordinary_window_id = windows
+-        .iter()
+-        .max_by_key(|window| window.z_index)
+-        .map(|window| window.window_id);
++    let frontmost_ordinary_window = select_frontmost_ordinary_window(&windows);
++    let frontmost_ordinary_window_id = frontmost_ordinary_window.map(|window| window.window_id);
+     ExactWindowObservation {
+         workspace_frontmost_pid: crate::apps::frontmost_pid(),
+         front_process_matches_target: crate::input::skylight::front_process_matches(pid, window_id),
+         focused_window_id: crate::ax::bindings::focused_window_id_of_pid(pid),
+         frontmost_ordinary_window_id,
+         target_visible_ordinary,
++        frontmost_row_diagnostic: FrontmostRowDiagnostic::from_row(
++            frontmost_ordinary_window,
++            pid,
++            window_id,
++        ),
+     }
+ }
+ 
+@@ -226,6 +316,7 @@ fn exact_result(
+             "front_process_matches_target": observation.front_process_matches_target,
+             "focused_window_id": observation.focused_window_id,
+             "frontmost_ordinary_window_id": observation.frontmost_ordinary_window_id,
++            "frontmost_window_diagnostic": observation.frontmost_row_diagnostic.as_json(),
+         }
+     });
+     if activated {
+@@ -437,9 +528,58 @@ mod tests {
+             focused_window_id,
+             frontmost_ordinary_window_id,
+             target_visible_ordinary,
++            frontmost_row_diagnostic: FrontmostRowDiagnostic::from_row(None, 42, 7),
++        }
++    }
++
++    fn window_info(
++        pid: i32,
++        window_id: u32,
++        layer: i32,
++        z_index: usize,
++        is_on_screen: bool,
++    ) -> crate::windows::WindowInfo {
++        crate::windows::WindowInfo {
++            window_id,
++            pid,
++            app_name: "PRIVATE_APP_MARKER".into(),
++            title: "PRIVATE_TITLE_MARKER".into(),
++            bounds: crate::windows::WindowBounds {
++                x: 1.0,
++                y: 2.0,
++                width: 3.0,
++                height: 4.0,
++            },
++            layer,
++            z_index,
++            is_on_screen,
++            current_space_id: Some(99),
++            on_current_space: Some(true),
++            space_ids: Some(vec![99]),
+         }
+     }
+ 
++    fn observation_with_frontmost_row(
++        row: Option<&crate::windows::WindowInfo>,
++        target_pid: i32,
++        target_window_id: u32,
++    ) -> ExactWindowObservation {
++        let mut result = observation(
++            Some(9),
++            Some(true),
++            Some(target_window_id),
++            row.map(|window| window.window_id),
++            row.is_some_and(|window| {
++                window.pid == target_pid
++                    && window.window_id == target_window_id
++                    && window.layer == 0
++            }),
++        );
++        result.frontmost_row_diagnostic =
++            FrontmostRowDiagnostic::from_row(row, target_pid, target_window_id);
++        result
++    }
++
+     #[test]
+     fn exact_success_requires_process_focus_and_layer_zero_order() {
+         assert_eq!(
+@@ -576,6 +716,145 @@ mod tests {
+         assert_eq!(fallback["observed"]["workspace_frontmost_pid"], 42);
+     }
+ 
++    #[test]
++    fn diagnostic_projects_only_the_same_selected_row_and_preserves_legacy_result() {
++        let windows = vec![
++            window_info(42, 7, 0, 4, true),
++            window_info(42, 88, 0, 9, false),
++        ];
++        let selected = select_frontmost_ordinary_window(&windows);
++        let legacy_frontmost_id = selected.map(|window| window.window_id);
++        let mut observation = observation_with_frontmost_row(selected, 42, 7);
++        observation.target_visible_ordinary = true;
++        assert_eq!(
++            observation.frontmost_ordinary_window_id,
++            legacy_frontmost_id
++        );
++
++        let result = exact_result(42, 7, "skylight_ax", true, observation);
++        assert_eq!(result.is_error, Some(true));
++        let mut structured = result
++            .structured_content
++            .expect("structured partial result");
++        let diagnostic = structured["observed"]["frontmost_window_diagnostic"].clone();
++        assert_eq!(diagnostic["schema"], "cua.frontmost_window_diagnostic.v1");
++        assert_eq!(
++            diagnostic["source"],
++            "observe_exact_window_existing_visible_windows_snapshot"
++        );
++        assert_eq!(diagnostic["state"], "present");
++        assert_eq!(diagnostic["frontmost_window_pid"], 42);
++        assert_eq!(diagnostic["frontmost_window_id"], 88);
++        assert_eq!(diagnostic["layer"], 0);
++        assert_eq!(diagnostic["z"], 9);
++        assert_eq!(diagnostic["is_on_screen"], false);
++        assert_eq!(diagnostic["target_pid_relation"], "same");
++        assert_eq!(diagnostic["target_window_id_relation"], "different");
++        let serialized = structured.to_string();
++        assert!(!serialized.contains("PRIVATE_APP_MARKER"));
++        assert!(!serialized.contains("PRIVATE_TITLE_MARKER"));
++        assert!(!serialized.contains("current_space_id"));
++        assert!(!serialized.contains("bounds"));
++
++        structured["observed"]
++            .as_object_mut()
++            .expect("observed object")
++            .remove("frontmost_window_diagnostic");
++        assert_eq!(
++            structured,
++            json!({
++                "status": "partial",
++                "code": "bring_to_front_exact_window_unverified",
++                "pid": 42,
++                "window_id": 7,
++                "activated": false,
++                "path": "skylight_ax",
++                "request_accepted": true,
++                "process_activated": true,
++                "exact_window_effect": {
++                    "verified": false,
++                    "focused": true,
++                    "frontmost_ordinary": false,
++                    "target_visible_ordinary": true,
++                },
++                "observed": {
++                    "frontmost_pid": 42,
++                    "workspace_frontmost_pid": 9,
++                    "front_process_matches_target": true,
++                    "focused_window_id": 7,
++                    "frontmost_ordinary_window_id": 88,
++                }
++            })
++        );
++    }
++
++    #[test]
++    fn missing_or_invalid_frontmost_row_is_unknown_without_changing_legacy_id_or_gate() {
++        let missing = FrontmostRowDiagnostic::from_row(None, 42, 7).as_json();
++        assert_eq!(missing["state"], "missing");
++        assert_eq!(missing["frontmost_window_pid"], Value::Null);
++        assert_eq!(missing["frontmost_window_id"], Value::Null);
++        assert_eq!(missing["target_pid_relation"], "unknown");
++
++        for invalid_row in [
++            window_info(0, 88, 0, 9, true),
++            window_info(42, 0, 0, 9, true),
++            window_info(42, 88, 0, 0, true),
++            window_info(42, 88, 0, usize::MAX, true),
++        ] {
++            let diagnostic = FrontmostRowDiagnostic::from_row(Some(&invalid_row), 42, 7).as_json();
++            assert_eq!(diagnostic["state"], "invalid");
++            assert_eq!(diagnostic["frontmost_window_pid"], Value::Null);
++            assert_eq!(diagnostic["frontmost_window_id"], Value::Null);
++            assert_eq!(diagnostic["target_pid_relation"], "unknown");
++        }
++
++        let invalid_row = window_info(0, 88, 0, 9, true);
++        let invalid = observation_with_frontmost_row(Some(&invalid_row), 42, 7);
++        assert_eq!(invalid.frontmost_ordinary_window_id, Some(88));
++        assert_eq!(
++            classify_exact_outcome(true, 42, 7, invalid),
++            ExactOutcome::Partial
++        );
++    }
++
++    #[test]
++    fn final_observation_keeps_its_own_frontmost_diagnostic() {
++        let first = window_info(42, 88, 0, 9, true);
++        let second = window_info(42, 99, 0, 10, true);
++        let final_row = window_info(42, 7, 0, 11, true);
++        let observations = [
++            observation_with_frontmost_row(Some(&first), 42, 7),
++            observation_with_frontmost_row(Some(&second), 42, 7),
++            observation_with_frontmost_row(Some(&final_row), 42, 7),
++        ];
++        let final_observation = *observations.last().expect("final observation");
++        let result = exact_result(42, 7, "skylight_ax", true, final_observation);
++        let structured = result.structured_content.expect("structured result");
++        assert_eq!(structured["status"], "activated");
++        assert_eq!(structured["observed"]["frontmost_ordinary_window_id"], 7);
++        assert_eq!(
++            structured["observed"]["frontmost_window_diagnostic"]["frontmost_window_id"],
++            7
++        );
++        assert_eq!(
++            structured["observed"]["frontmost_window_diagnostic"]["z"],
++            11
++        );
++    }
++
++    #[test]
++    fn frontmost_selection_keeps_max_by_key_tie_behavior() {
++        let windows = vec![
++            window_info(42, 77, 0, 12, true),
++            window_info(42, 88, 0, 12, true),
++        ];
++        assert_eq!(
++            select_frontmost_ordinary_window(&windows).map(|window| window.window_id),
++            Some(88)
++        );
++    }
++
+     #[test]
+     fn verified_result_is_the_only_non_error_exact_mapping() {
+         let result = exact_result(
+@@ -591,4 +870,80 @@ mod tests {
+         assert_eq!(structured["activated"], true);
+         assert_eq!(structured["exact_window_effect"]["verified"], true);
+     }
++
++    #[test]
++    fn diagnostic_does_not_change_success_or_failure_result_contracts() {
++        for (request_accepted, observation, expected) in [
++            (
++                true,
++                observation(Some(9), Some(true), Some(7), Some(7), true),
++                json!({
++                    "status": "activated",
++                    "code": "bring_to_front_exact_window_verified",
++                    "pid": 42,
++                    "window_id": 7,
++                    "activated": true,
++                    "path": "skylight_ax",
++                    "request_accepted": true,
++                    "process_activated": true,
++                    "exact_window_effect": {
++                        "verified": true,
++                        "focused": true,
++                        "frontmost_ordinary": true,
++                        "target_visible_ordinary": true,
++                    },
++                    "observed": {
++                        "frontmost_pid": 42,
++                        "workspace_frontmost_pid": 9,
++                        "front_process_matches_target": true,
++                        "focused_window_id": 7,
++                        "frontmost_ordinary_window_id": 7,
++                    },
++                }),
++            ),
++            (
++                false,
++                observation(None, Some(false), None, None, false),
++                json!({
++                    "status": "failed",
++                    "code": "bring_to_front_exact_window_unverified",
++                    "pid": 42,
++                    "window_id": 7,
++                    "activated": false,
++                    "path": "skylight_ax",
++                    "request_accepted": false,
++                    "process_activated": false,
++                    "exact_window_effect": {
++                        "verified": false,
++                        "focused": false,
++                        "frontmost_ordinary": false,
++                        "target_visible_ordinary": false,
++                    },
++                    "observed": {
++                        "frontmost_pid": null,
++                        "workspace_frontmost_pid": null,
++                        "front_process_matches_target": false,
++                        "focused_window_id": null,
++                        "frontmost_ordinary_window_id": null,
++                    },
++                }),
++            ),
++        ] {
++            let result = exact_result(42, 7, "skylight_ax", request_accepted, observation);
++            assert_eq!(
++                result.is_error,
++                if expected["status"] == "activated" {
++                    None
++                } else {
++                    Some(true)
++                }
++            );
++            let mut structured = result.structured_content.expect("structured result");
++            structured["observed"]
++                .as_object_mut()
++                .expect("observed object")
++                .remove("frontmost_window_diagnostic");
++            assert_eq!(structured, expected);
++        }
++    }
+ }
+

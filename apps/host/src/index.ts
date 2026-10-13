@@ -13,12 +13,15 @@ import {
 } from "@computer-harness/app-runtime";
 import { HostRelayConnector } from "@computer-harness/relay-connector";
 import { createHostServer } from "./server.js";
-import { parseGlmOutputBudget } from "./glm-output-budget.js";
+import { glmReasoningEffort, parseGlmInputBudgets, parseGlmOutputBudget, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 import { resolveHostWindowSelector } from "./window-selection-config.js";
 import { createHostSessionConfig, type HostArguments } from "./session-config.js";
+import { resolveNativeRecoveryProfileConfig } from "./native-recovery-profile-config.js";
+import { resolveNativeWebDocumentProfileConfig } from "./native-web-document-profile-config.js";
+import { resolveHostSourceLinkedFinishContract } from "./source-linked-finish-config.js";
 
 const hostDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(hostDirectory, "../../..");
@@ -33,9 +36,13 @@ async function main(): Promise<void> {
   const credentials = readProviderCredentials();
   const outputDir = resolve(args.output);
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
-  const config = createHostSessionConfig(args, outputDir, managedBrowserProfile, process.env);
+  const baseConfig = createHostSessionConfig(args, outputDir, managedBrowserProfile, process.env);
+  const sourceLinkedFinish = resolveHostSourceLinkedFinishContract(process.env);
+  const config = { ...baseConfig, ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }) };
   const windowSelector = resolveHostWindowSelector(process.env);
-  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=90000\n`);
+  const nativeRecoveryProfile = resolveNativeRecoveryProfileConfig();
+  const nativeWebDocumentProfile = resolveNativeWebDocumentProfileConfig();
+  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=${config.glmRequestTimeoutMs} requestTimeoutSource=${process.env.GLM_REQUEST_TIMEOUT_MS === undefined ? "default" : "environment"} endpointSource=${config.glmEndpoint === undefined ? "default" : "environment"}\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -77,6 +84,8 @@ async function main(): Promise<void> {
     runNotices: { enabled: true, dynamicContentEnabled: true },
     managedBrowserProfile,
     managedBrowserProfileCoordinator: managedBrowserProfileService,
+    ...(nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile }),
+    ...(nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile }),
     ...(windowSelector === undefined ? {} : { windowSelector }),
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
@@ -168,6 +177,7 @@ function parseArguments(argv: readonly string[]): HostArguments {
       process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
       process.stdout.write("Optional local env-file settings: HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1; HARNESS_OPERATION_GUIDANCE=off|catalog-v1.\n");
       process.stdout.write("foreground-caret-v1 is only for an explicitly verified candidate CUA socket; it is not a general stock CUA 0.22 compatibility claim.\n");
+      process.stdout.write("Optional Run result contract: HARNESS_SOURCE_LINKED_FINISH_CONTRACT may contain a bounded source-linked-finish-v1 JSON field contract.\n");
       process.exit(0);
     }
     if (!item.startsWith("--")) throw new Error("Host arguments must use named options.");

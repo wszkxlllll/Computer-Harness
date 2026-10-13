@@ -46,6 +46,9 @@ describe("default Computer tools", () => {
       required: ["text"],
       additionalProperties: false,
     });
+    expect(type?.description).toContain("On macOS, omit elementRef and use the native focused-control typing route");
+    expect(JSON.stringify(type?.inputSchema)).toContain("On macOS, omit elementRef");
+    expect(JSON.stringify(type?.inputSchema)).toContain("Omit on macOS");
     expect(JSON.stringify(type?.inputSchema)).toContain("only when the target is confirmed to support line breaks and the Goal requires them");
     expect(JSON.stringify(type?.inputSchema)).toContain("Enter is a real key event and may submit/send in search or message controls");
   });
@@ -97,6 +100,18 @@ describe("default Computer tools", () => {
         elements: [{ ...observation.grounding.elements[0]!, source: "dom" as const }] },
     };
     expect(() => type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, { ...context, observation: domObservation })).toThrow(/UIA_REQUIRED/iu);
+
+    const darwinContext = { ...context, session: { platform: "darwin" } as never };
+    expect(() => type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, darwinContext))
+      .toThrow(/omit elementRef and use native focused-control typing on macOS/iu);
+    expect(() => type.toAction({ text: "single line", elementRef: "uia-current-1" }, darwinContext))
+      .toThrow(/omit elementRef and use native focused-control typing on macOS/iu);
+    expect(type.toAction({ text: "first\nsecond" }, { ...darwinContext, observation })).toEqual({ kind: "type", text: "first\nsecond" });
+
+    const windowsContext = { ...context, session: { platform: "win32" } as never };
+    expect(type.toAction({ text: "first\nsecond" }, { ...windowsContext, observation })).toEqual({
+      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+    });
   });
 
   it("validates and maps canonical arguments without provider-specific logic", () => {
@@ -156,6 +171,8 @@ describe("default Computer tools", () => {
     const list = definitions.find((definition) => definition.name === "list_windows");
     const change = definitions.find((definition) => definition.name === "switch_window");
     expect(list?.category).toBe("side");
+    expect(list?.description).toContain("a dialog may be a separate window");
+    expect(list?.description).toContain("wait for a fresh observation before interacting");
     expect(change).toMatchObject({ category: "computer", isolatedTurn: true });
     expect(change?.category === "computer" ? change.description : "").toContain("Desktop capture/input stays full");
     expect(change?.category === "computer" ? change.description : "").toContain("native-window scope rebinds");
@@ -171,13 +188,13 @@ describe("default Computer tools", () => {
       session: {} as never,
       signal: new AbortController().signal,
       listWindows: async () => ({
-        options: [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+        options: [{ windowRef: "opaque-1", title: "Search", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" as never }],
         truncated: true,
         omittedCount: 3,
       }),
     });
     expect(inventory).toEqual({
-      windows: [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+      windows: [{ windowRef: "opaque-1", title: "Search", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" }],
       truncated: true,
       omittedCount: 3,
     });
@@ -211,10 +228,13 @@ describe("default Computer tools", () => {
     expect(definition?.name).toBe("click_element");
     if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
     expect(definition.description).toContain("UIA or DOM grounding catalog");
-    expect(definition.description).toContain("not proof that the point is semantically clickable");
+    expect(definition.description).toContain("not proof of clickability or effect");
     expect(definition.description).toContain("catalog is bounded");
     expect(definition.description).toContain("do not retry the same target with another reference");
     expect(JSON.stringify(definition.inputSchema)).toContain("UIA or DOM grounding catalog");
+    expect(definition.description).toContain("current catalog");
+    expect(definition.description).toContain("For managed page content, use a DOM ref");
+    expect(JSON.stringify(definition.inputSchema)).toContain("Use a DOM ref for managed page content");
     const context = {
       runId: "run" as never,
       session: {} as never,

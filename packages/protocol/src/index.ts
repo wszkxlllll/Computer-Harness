@@ -20,7 +20,8 @@ export type SurfaceKind = "desktop" | "native_window" | "browser_tab" | "dom" | 
 export type SurfaceAdmissionSource =
   | "same_hwnd_overlay_root_proof"
   | "owned_transient_window_root_proof"
-  | "win32_relationship_probe";
+  | "win32_relationship_probe"
+  | "macos_attached_sheet_proof";
 
 export type SurfaceTransitionReason =
   | "initial_observation"
@@ -572,6 +573,22 @@ export interface GroundingOption {
   readonly enabled: boolean;
 }
 
+/** Format-only metadata for a native AXTextArea CFString; never contains the text itself. */
+export type GroundingTextFormat =
+  | {
+      readonly source: "ax-cfstring-v1";
+      readonly status: "complete";
+      readonly utf8Bytes: number;
+      readonly codePointCount: number;
+      readonly lineFeedCount: number;
+      readonly trailingLineFeedCount: number;
+      readonly carriageReturnCount: number;
+    }
+  | {
+      readonly source: "ax-cfstring-v1";
+      readonly status: "over_limit";
+    };
+
 /**
  * A model-facing element reference. It is minted by a Computer adapter and is
  * valid only for this observation/session/target geometry. It is not a CUA
@@ -592,6 +609,8 @@ export interface GroundingElement {
   readonly options?: readonly GroundingOption[];
   /** True when more than the bounded visible-option projection was present. */
   readonly optionsTruncated?: boolean;
+  /** Present only for non-Web macOS AXTextArea CFString values. */
+  readonly textFormat?: GroundingTextFormat;
 }
 
 export type GroundingCompleteness = "complete" | "partial" | "unknown";
@@ -668,6 +687,16 @@ export interface ObservationFrame {
   viewport: Viewport;
   screenshot: AssetRef;
   readonly grounding?: GroundingCatalog;
+  /** Host-produced, read-only status for one explicitly authorized saved file. */
+  readonly authorizedSavedDocumentEvidence?: AuthorizedSavedDocumentEvidence;
+}
+
+/** A bounded file/document binding fact; it never attests to document contents. */
+export interface AuthorizedSavedDocumentEvidence {
+  readonly source: "host-authorized-file-and-native-proof-v1";
+  readonly status: "authorized_file_absent" | "verified_clean_current_document" | "unverified";
+  readonly observationId: ObservationId;
+  readonly surfaceRef: SurfaceRef;
 }
 
 /** Exact persisted observation shown with one computer-action approval. */
@@ -694,6 +723,8 @@ export interface ObservationCapture {
     data: Uint8Array;
   };
   readonly grounding?: GroundingCatalog;
+  /** Optional Host fact available only for a single-file saved-document grant. */
+  readonly authorizedSavedDocumentEvidence?: AuthorizedSavedDocumentEvidence;
 }
 
 export type DeclaredActionEffect =
@@ -790,6 +821,69 @@ export interface ObservationAssessment {
   };
 }
 
+/** Host-authored, finite schema for an opt-in source-linked finish. */
+export interface SourceLinkedFinishContract {
+  readonly version: "source-linked-finish-v1";
+  readonly fields: readonly {
+    readonly fieldId: string;
+    readonly label: string;
+    readonly required: boolean;
+  }[];
+}
+
+/** Untrusted finish report. A source-bound field carries references only. */
+export interface SourceLinkedFinishReport {
+  readonly version: "source-linked-finish-v1";
+  readonly fields: readonly (
+    | {
+        readonly fieldId: string;
+        readonly disposition: "source_bound";
+        readonly sources: readonly { readonly observationId: ObservationId; readonly elementRef: string }[];
+      }
+    | { readonly fieldId: string; readonly disposition: "inference"; readonly reason: string }
+    | {
+        readonly fieldId: string;
+        readonly disposition: "unknown";
+        readonly reason: "not_observed" | "no_grounding" | "ambiguous_source" | "conflicting_sources" | "source_unavailable";
+      }
+  )[];
+}
+
+/** Runtime-rendered source facts; never copied from model-provided values or quotes. */
+export interface SourceLinkedFinishEvidence {
+  readonly version: "source-linked-finish-v1";
+  readonly fields: readonly (
+    | {
+        readonly fieldId: string;
+        readonly label: string;
+        readonly disposition: "source_bound";
+        readonly sources: readonly {
+          readonly observationId: ObservationId;
+          readonly capturedAt: string;
+          readonly surfaceRef: SurfaceRef;
+          readonly elementRef: string;
+          readonly source: GroundingElementSource;
+          readonly role: string;
+          readonly name?: string;
+          readonly description?: string;
+          readonly state?: GroundingElementState;
+          readonly options?: readonly GroundingOption[];
+          readonly optionsTruncated?: boolean;
+          readonly textFormat?: GroundingTextFormat;
+          readonly excerpt: string;
+        }[];
+        readonly reviewRequired: boolean;
+      }
+    | { readonly fieldId: string; readonly label: string; readonly disposition: "inference"; readonly reason: string }
+    | {
+        readonly fieldId: string;
+        readonly label: string;
+        readonly disposition: "unknown";
+        readonly reason: "not_observed" | "no_grounding" | "ambiguous_source" | "conflicting_sources" | "source_unavailable";
+      }
+  )[];
+}
+
 export type ModelTurn =
   | {
       type: "tool_calls";
@@ -811,6 +905,7 @@ export type ModelTurn =
       /** Structured termination status supplied by providers that expose it. */
       reportedStatus?: "success" | "failure";
       observationAssessment?: ObservationAssessment;
+      resultEvidence?: SourceLinkedFinishReport;
       usage?: ModelUsage;
     };
 
@@ -829,6 +924,10 @@ export interface ComputerWindowOption {
   readonly appName?: string;
   readonly title?: string;
   readonly isCurrent: boolean;
+  /** Informational only: this exact native identity was visible in a post-action diff. */
+  readonly firstObservedAfterAction?: boolean;
+  /** Run-scoped action that preceded the first visible diff observation. This proves no ownership or causality. */
+  readonly sourceActionId?: ActionId;
 }
 
 /** A bounded, deterministic projection of the latest opened-window topology.
@@ -843,6 +942,12 @@ export interface ComputerWindowList {
 export type SwitchWindowAction = GuiActionBase & {
   kind: "switch_window";
   windowRef: string;
+};
+
+/** Host-authorized, single-file recovery action. The file identity never
+ * crosses the model-facing protocol; the Computer adapter owns the grant. */
+export type ReopenSavedDocumentAction = GuiActionBase & {
+  kind: "reopen_saved_document";
 };
 
 export type ActionIntent =
@@ -861,6 +966,7 @@ export type ActionIntent =
     })
   | (GuiActionBase & { kind: "drag"; from: Point; to: Point })
   | SwitchWindowAction
+  | ReopenSavedDocumentAction
   | { actionId: ActionId; kind: "wait"; durationMs: number };
 
 /** Redacted action shape persisted by the Guard; typed text remains only in the ToolCall/action execution path. */
@@ -874,7 +980,7 @@ export type ActionReceipt =
       status: "completed";
       driverCode?: string;
       message?: string;
-      /** Present only on a completed `switch_window`; it carries the updated
+      /** Present only on a completed target transition; it carries the updated
        * active-target viewport/capabilities while retaining the same ComputerSession id. */
       sessionAfter?: ComputerSessionDescriptor;
     }
@@ -930,6 +1036,8 @@ export interface ComputerCapabilities {
 export interface ComputerSessionDescriptor {
   readonly id: ComputerSessionId;
   readonly backend: string;
+  /** Optional OS platform reported by a trusted computer driver. Omit when unknown. */
+  readonly platform?: "win32" | "darwin" | "linux";
   readonly viewport: Readonly<Viewport>;
   readonly capabilities: Readonly<ComputerCapabilities>;
   readonly openedAt: string;
@@ -950,10 +1058,22 @@ export type ComputerWindowCandidateRelationship =
   | { readonly kind: "scoped_peer" };
 
 export interface ComputerWindowCandidate extends ComputerWindowIdentity {
+  /** Adapter-issued refresh token. Required only for bound_window_missing. */
+  readonly handoffToken?: string;
   readonly appName?: string;
   readonly title?: string;
   /** Exact owner relation for popup handoff, or Host allowlist scope for a peer. */
   readonly relationship?: ComputerWindowCandidateRelationship;
+}
+
+/** Only the completed-action parent rediscovery boundary may emit this marker. */
+export class BoundWindowMissingError extends Error {
+  public readonly code = "WINDOW_TARGET_NOT_FOUND";
+  public readonly source = "completed_action_parent_rediscovery";
+  public constructor(public readonly sourceActionId: ActionId) {
+    super("completed bound window requires explicit fresh target confirmation");
+    this.name = "BoundWindowMissingError";
+  }
 }
 
 export type RunStatus =
@@ -1055,6 +1175,9 @@ export interface ContextAssistantPreferencesTrace {
  * it contains no body/path, and its hash is not an anonymity guarantee. */
 export interface PreparedRequestEstimate {
   readonly estimatedTextTokens: number;
+  readonly estimatedVisualTokens?: number;
+  readonly estimatedEnvelopeTokens?: number;
+  readonly estimatedTotalTokens?: number;
   readonly imageCount: number;
   readonly estimationMethod: "context_report" | "provider_projection";
 }
@@ -1074,7 +1197,7 @@ export interface ContextTrace {
   runId: RunId;
   stablePrefixHash: string;
   fixedBlocks: readonly {
-    name: "system" | "goal" | "tools" | "plan" | "execution_segment" | "memory";
+    name: "system" | "goal" | "tools" | "plan" | "execution_segment" | "memory" | "source_linked_finish";
     estimatedTokens: number;
     included: boolean;
   }[];
@@ -1108,7 +1231,7 @@ export type RuntimeEventData =
   | { type: "run.started" }
   | { type: "computer.open.started" }
   | { type: "computer.open.completed"; session: ComputerSessionDescriptor }
-  | { type: "computer.window.handoff.requested"; sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" }
+  | { type: "computer.window.handoff.requested"; sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" | "bound_window_missing" }
   | { type: "computer.window.handoff.completed"; target: ComputerWindowIdentity; session: ComputerSessionDescriptor }
   | { type: "computer.window.handoff.ignored"; sourceActionId: ActionId }
   | { type: "observation.created"; observation: ObservationFrame }
@@ -1217,6 +1340,10 @@ export type RuntimeEventData =
       outcome: RunOutcome;
       summary?: string;
       reportedStatus?: "success" | "failure";
+      /** Runtime-canonical source evidence; present only when explicitly enabled for this Run. */
+      resultEvidence?: SourceLinkedFinishEvidence;
+      /** Original free-form model report when a canonical source-linked summary is present. */
+      reportedSummary?: string;
     };
 
 export type RuntimeEvent = RuntimeEventBase & RuntimeEventData;

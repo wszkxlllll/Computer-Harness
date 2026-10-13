@@ -100,7 +100,7 @@ export function projectApprovalPreview(
   if (actionEntries.length === 0) return undefined;
 
   const actions = actionEntries.map(({ operation, action }) =>
-    projectApprovalAction(operation, action),
+    ({ ...projectApprovalAction(operation, action), ...projectSelectParameters(action, events, approvalEvent) }),
   );
   const evidence = approvalEvent.evidence === undefined
     ? undefined
@@ -227,6 +227,25 @@ function projectApprovalAction(operation: string, action: ActionGuardActionSumma
     ...(keys.length === 0 ? {} : { keys }),
     ...(typedCharacterCount === undefined ? {} : { typedCharacterCount }),
   };
+}
+
+function projectSelectParameters(action: ActionGuardActionSummary, events: readonly RuntimeEvent[], approval: Extract<RuntimeEvent, { type: "approval.requested" }>): Partial<RemoteApprovalActionPreview> {
+  if (action.kind !== "select_option") return {};
+  const count = typeof action.optionText === "string" ? [...action.optionText].length : undefined;
+  const masked: Partial<RemoteApprovalActionPreview> = { optionTextStatus: "redacted", ...(count === undefined ? {} : { optionCharacterCount: count }) };
+  const decisionEvent = events.find((event): event is Extract<RuntimeEvent, { type: "observation.created" }> => event.type === "observation.created" && event.observation.id === action.basedOn && event.sequence < approval.sequence);
+  const observation = decisionEvent?.observation;
+  const catalog = observation?.grounding;
+  if (observation === undefined || catalog === undefined || catalog.version !== "grounding-catalog-v2" || (catalog.source !== "dom" && catalog.source !== "hybrid") || catalog.completeness === "unknown" || catalog.degraded || catalog.observationId !== observation.id || catalog.computerSessionId !== observation.computerSessionId || catalog.surfaceRef === undefined || !sameSurfaceRef(catalog.surfaceRef, observation.surfaceRef) || approval.evidence === undefined || projectApprovalEvidence(approval.evidence, events, approval.sequence, [{ action }]) === undefined || approval.evidence.decisionObservationId !== observation.id) return masked;
+  const matches = catalog.elements.filter((element) => element.elementRef === action.groundingRef && element.source === "dom" && element.role === "combobox" && element.options !== undefined && element.optionsTruncated !== true && element.state?.enabled === true);
+  if (matches.length !== 1) return masked;
+  const element = matches[0]!;
+  const ref = /^[A-Za-z0-9._:-]{1,96}$/u.test(element.elementRef) ? element.elementRef : undefined;
+  const withRef = { ...masked, ...(ref === undefined ? {} : { groundingRef: ref }) };
+  const options = element.options!.filter((option) => option.enabled && option.text === action.optionText);
+  const sensitive = /(?:password|token|secret|credential|payment|account|permission|security|密码|验证码|支付|账号|账户|权限|密钥|sk-[A-Za-z0-9_-]{16,}|\b\d{13,19}\b|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\b1\d{10}\b)/iu;
+  if (options.length !== 1 || sensitive.test(`${element.name ?? ""}\n${element.description ?? ""}\n${action.optionText}`) || action.optionText.length > 160 || /[\u0000-\u001f\u007f]/u.test(action.optionText)) return withRef;
+  return { ...withRef, optionTextStatus: "visible", optionText: action.optionText };
 }
 
 function safeApprovalPoint(point: { readonly x: number; readonly y: number }): { x: number; y: number } | undefined {

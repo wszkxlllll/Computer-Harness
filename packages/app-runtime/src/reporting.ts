@@ -72,16 +72,31 @@ export async function buildRunReport(
   const completedWindowHandoffs = events.filter((event): event is Extract<RuntimeEvent, { type: "computer.window.handoff.completed" }> => event.type === "computer.window.handoff.completed");
   const latestWindowHandoff = completedWindowHandoffs.at(-1);
   const finalWindow = latestWindowHandoff?.target;
-  const startedSwitchEvents = events.filter((event): event is Extract<RuntimeEvent, { type: "action.execution.started" }> =>
-    event.type === "action.execution.started" && event.action.kind === "switch_window");
-  const switchActionIds = new Set(startedSwitchEvents.map((event) => event.action.actionId));
+  const startedTargetTransitionEvents = events.filter((event): event is Extract<RuntimeEvent, { type: "action.execution.started" }> =>
+    event.type === "action.execution.started" && (event.action.kind === "switch_window" || event.action.kind === "reopen_saved_document"));
+  const startedReopenActionIds = new Set(startedTargetTransitionEvents
+    .filter((event) => event.action.kind === "reopen_saved_document")
+    .map((event) => event.action.actionId));
+  const preflightRefusedReopenActionIds = new Set(events
+    .filter((event): event is Extract<RuntimeEvent, { type: "action.execution.failed" }> =>
+      event.type === "action.execution.failed" &&
+      event.receipt.status === "refused" &&
+      (event.receipt.driverCode === "DOCUMENT_REOPEN_NOT_READY" || event.receipt.driverCode === "DOCUMENT_REOPEN_PREFLIGHT_FAILED") &&
+      startedReopenActionIds.has(event.receipt.actionId))
+    .map((event) => event.receipt.actionId));
+  const switchActionIds = new Set(events
+    .filter((event): event is Extract<RuntimeEvent, { type: "action.execution.started" }> =>
+      event.type === "action.execution.started" && event.action.kind === "switch_window")
+    .map((event) => event.action.actionId));
   const completedWindowSwitches = events.filter((event): event is Extract<RuntimeEvent, { type: "action.execution.completed" }> =>
     event.type === "action.execution.completed" && event.receipt.status === "completed" && switchActionIds.has(event.receipt.actionId) && event.receipt.sessionAfter !== undefined);
-  const latestTargetInvalidatingSwitch = startedSwitchEvents.at(-1);
+  const latestTargetInvalidatingTransition = startedTargetTransitionEvents
+    .filter((event) => event.action.kind !== "reopen_saved_document" || !preflightRefusedReopenActionIds.has(event.action.actionId))
+    .at(-1);
   const finalWindowHandoffIsCurrent = latestWindowHandoff !== undefined &&
-    (latestTargetInvalidatingSwitch === undefined || latestWindowHandoff.sequence > latestTargetInvalidatingSwitch.sequence);
-  const finalTargetUnknown = latestTargetInvalidatingSwitch !== undefined &&
-    (latestWindowHandoff === undefined || latestWindowHandoff.sequence < latestTargetInvalidatingSwitch.sequence);
+    (latestTargetInvalidatingTransition === undefined || latestWindowHandoff.sequence > latestTargetInvalidatingTransition.sequence);
+  const finalTargetUnknown = latestTargetInvalidatingTransition !== undefined &&
+    (latestWindowHandoff === undefined || latestWindowHandoff.sequence < latestTargetInvalidatingTransition.sequence);
   const completedSwitchCount = completedWindowSwitches.length;
   const failedSwitchReceipts = events.filter((event): event is Extract<RuntimeEvent, { type: "action.execution.failed" }> =>
     event.type === "action.execution.failed" && switchActionIds.has(event.receipt.actionId));
@@ -335,7 +350,7 @@ function renderRunReport(summary: Record<string, unknown>): string {
     const enabled = summary.windowSwitch === "opened-windows-v1";
     const metrics = isRecord(summary.metrics) && isRecord(summary.metrics.windowSwitch) ? summary.metrics.windowSwitch : undefined;
     lines.push(`- Model-selected window switching: ${enabled ? "enabled" : "disabled"}${metrics === undefined ? "" : `; proposed=${String(metrics.proposed ?? 0)}, started=${String(metrics.actionsStarted ?? 0)}, completed=${String(metrics.completed ?? 0)}, refused=${String(metrics.refused ?? 0)}`}.`);
-    if (summary.finalComputerTarget === null) lines.push("- Final target: unknown after a model-selected window switch began without a newer verified target; no PID/HWND was inferred from its opaque reference.");
+    if (summary.finalComputerTarget === null) lines.push("- Final target: unknown after a model-selected target transition began without a newer confirmed handoff; no PID/HWND was inferred from its opaque reference.");
   }
   if (recovery.notDeliveredNote !== null) lines.push(`- Delivery note: ${recovery.notDeliveredNote}`);
   if (recovery.latestObservation !== null) {

@@ -675,6 +675,10 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .result-error-details summary { min-height: 2.75rem; padding: .45rem 0; }
 .result-error-details p { margin: .1rem 0 .45rem; overflow-wrap: anywhere; }
 .result-copy:not(.result-copy-expanded)::after { background: linear-gradient(transparent, var(--canvas)); bottom: 0; content: ""; height: 1.5rem; left: 0; pointer-events: none; position: absolute; right: 0; }
+.result-empty-message { margin: .5rem 0; }
+.result-error-details { margin-top: .5rem; }
+.result-error-details summary { cursor: pointer; }
+.result-error-details p { margin: .4rem 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .result-panel .text-button { margin-top: .15rem; }
 .screenshot-panel .section-kicker { margin-bottom: .1rem; }
 .screenshot-open-button img {

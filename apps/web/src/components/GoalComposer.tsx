@@ -11,6 +11,8 @@ interface GoalComposerProps {
   busy?: boolean;
   canStart: boolean;
   targetMode: RunTarget["mode"];
+  nativeRecoveryProfile?: { profileId: string; label: string };
+  nativeWebDocumentProfile?: { profileId: string; label: string };
   browserUrl: string;
   commonSiteChoices?: readonly BrowserSiteChoice[];
   onTargetModeChange: (mode: RunTarget["mode"]) => void;
@@ -28,6 +30,8 @@ export function GoalComposer({
   busy = false,
   canStart,
   targetMode,
+  nativeRecoveryProfile,
+  nativeWebDocumentProfile,
   browserUrl,
   commonSiteChoices = [],
   onTargetModeChange,
@@ -63,8 +67,8 @@ export function GoalComposer({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const value = goal.trim();
-    if (!value || !canStart || disabled || busy || voiceActive) return;
+    const value = targetMode === "native-recovery" || targetMode === "native-web-document" ? goal : goal.trim();
+    if (!value.trim() || !canStart || disabled || busy || voiceActive) return;
     if (targetMode === "window") {
       const targetToken = targetPicker.selectedToken;
       if (!targetToken) return;
@@ -83,6 +87,16 @@ export function GoalComposer({
         : { mode: "browser", ...(switchWindows ? { switchWindows: true } : {}) });
       return;
     }
+    if (targetMode === "native-recovery") {
+      if (nativeRecoveryProfile === undefined) return;
+      await onSubmit(value, { mode: "native-recovery", profileId: nativeRecoveryProfile.profileId });
+      return;
+    }
+    if (targetMode === "native-web-document") {
+      if (nativeWebDocumentProfile === undefined) return;
+      await onSubmit(value, { mode: "native-web-document", profileId: nativeWebDocumentProfile.profileId });
+      return;
+    }
     if (targetMode === "desktop") {
       await onSubmit(value, { mode: "desktop", ...(switchWindows ? { switchWindows: true } : {}) });
       return;
@@ -91,6 +105,7 @@ export function GoalComposer({
   }
 
   function changeMode(mode: RunTarget["mode"]) {
+    if (mode === "native-recovery") setSwitchWindows(false);
     onTargetModeChange(mode);
   }
 
@@ -99,6 +114,8 @@ export function GoalComposer({
     window: "手动选择窗口",
     browser: "打开网站（推荐）",
     desktop: "整个桌面（高级）",
+    "native-recovery": "电脑预设文稿",
+    "native-web-document": "网页查询与文稿",
   };
 
   return (
@@ -125,7 +142,7 @@ export function GoalComposer({
       {error && <p ref={errorRef} id="goal-error" className="inline-error" role="alert" tabIndex={-1}>{error}</p>}
       {setupRequired && <a className="setup-required-link" href="/preferences">打开浏览器与登录状态设置</a>}
 
-      <label className="preference-toggle" htmlFor="cross-window-run-switch">
+      {targetMode !== "native-recovery" && targetMode !== "native-web-document" && <label className="preference-toggle" htmlFor="cross-window-run-switch">
         <span className="preference-toggle-copy">
           <strong>允许切换其他应用</strong>
           <span id="cross-window-run-switch-help">开启后，电脑可查看并切换已打开的窗口。窗口名称、标题和相关网页内容可能随本次任务发送给所选服务。</span>
@@ -139,7 +156,7 @@ export function GoalComposer({
           aria-describedby="cross-window-run-switch-help"
           disabled={formDisabled}
         />
-      </label>
+      </label>}
 
       <details className="target-mode-disclosure">
         <summary>选择起点 · {targetModeLabel[targetMode]}</summary>
@@ -157,6 +174,14 @@ export function GoalComposer({
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="browser" checked={targetMode === "browser"} onChange={() => changeMode("browser")} />
               <span className="target-mode-copy"><strong>打开网站（推荐）</strong><span>电脑会打开网站，并按页面上的内容完成任务。是否使用已登录状态，取决于电脑上的浏览器设置；网址可留空。</span></span>
+            </label>
+            <label className="target-mode-option">
+              <input type="radio" name="target-mode" value="native-recovery" checked={targetMode === "native-recovery"} onChange={() => changeMode("native-recovery")} />
+              <span className="target-mode-copy"><strong>电脑预设文稿</strong><span>只使用电脑预先指定的两个文稿窗口和本地输出文件，不会打开浏览器。</span></span>
+            </label>
+            <label className="target-mode-option">
+              <input type="radio" name="target-mode" value="native-web-document" checked={targetMode === "native-web-document"} onChange={() => changeMode("native-web-document")} />
+              <span className="target-mode-copy"><strong>网页查询与文稿</strong><span>先查询网页，再写入电脑预设的文稿；关闭后可继续打开该文稿。</span></span>
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="desktop" checked={targetMode === "desktop"} onChange={() => changeMode("desktop")} />
@@ -214,12 +239,33 @@ export function GoalComposer({
           {browserUrlInvalid && <p id="browser-target-error" className="inline-error" role="alert">请输入完整的 http:// 或 https:// 地址。</p>}
         </div>
       )}
+      {(targetMode === "native-recovery" || targetMode === "native-web-document") && (
+        <section className="native-recovery-target-status" aria-label="文稿任务状态">
+          {targetPicker.loading
+            ? <p className="loading-line" role="status">正在刷新文稿任务…</p>
+            : targetPicker.expired
+              ? <p className="notice notice-warning" role="status">文稿任务已过期，请刷新后再开始。</p>
+              : targetPicker.error
+                ? <p className="notice notice-warning" role="alert">{targetPicker.error}</p>
+                : <p className="field-hint" role="status">
+                  {(targetMode === "native-web-document" ? nativeWebDocumentProfile : nativeRecoveryProfile) === undefined ? "电脑尚未准备本地文稿任务，请在电脑端检查设置。" : targetMode === "native-web-document" ? "将先打开网页，再使用电脑预设的文稿继续处理。" : "将使用电脑预先指定的两个文稿窗口和本地输出文件。"}
+                </p>}
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={formDisabled || targetPicker.disabled || targetPicker.loading}
+            onClick={targetPicker.onRefresh}
+          >
+            {targetPicker.loading ? "正在刷新…" : "刷新文稿任务"}
+          </button>
+        </section>
+      )}
       <div className="composer-footer">
         <button
           className="button button-primary button-large"
           type="submit"
           aria-describedby={error ? "goal-error" : undefined}
-          disabled={formDisabled || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid)}
+          disabled={formDisabled || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid) || (targetMode === "native-recovery" && nativeRecoveryProfile === undefined) || (targetMode === "native-web-document" && nativeWebDocumentProfile === undefined)}
         >
           {busy ? "正在发送…" : "开始任务"}
         </button>

@@ -37,7 +37,21 @@ export interface RemoteWindowTargetSet {
   readonly expiresAt: string;
   /** Duplicate app/title identities withheld because the phone cannot distinguish them safely. */
   readonly omittedAmbiguousCount?: number;
+  /** One Host-configured native recovery option, exposed only as an opaque id. */
+  readonly nativeRecoveryProfile?: { readonly profileId: string; readonly label: string };
+  readonly nativeWebDocumentProfile?: { readonly profileId: string; readonly label: string };
 }
+
+/** Host-owned exact native recovery configuration; never accepted from a client request. */
+export interface HostNativeRecoveryProfile {
+  readonly profileId: string;
+  readonly primaryTarget: { readonly pid: number; readonly windowId: number };
+  readonly recoveryTarget: { readonly pid: number; readonly windowId: number };
+  readonly outputPath: string;
+  readonly expectedExecutableUrl: string;
+}
+
+export interface HostNativeWebDocumentProfile extends HostNativeRecoveryProfile {}
 
 export interface RemoteWindowCandidatePreview {
   readonly previewToken: string;
@@ -57,6 +71,8 @@ export type RemoteRunTarget =
   | { readonly mode: "auto"; readonly switchWindows?: boolean }
   | { readonly mode: "desktop"; readonly switchWindows?: boolean }
   | { readonly mode: "window"; readonly targetToken: string; readonly previewToken?: string; readonly switchWindows?: boolean }
+  | { readonly mode: "native-recovery"; readonly profileId: string }
+  | { readonly mode: "native-web-document"; readonly profileId: string }
   | { readonly mode: "browser"; readonly sessionMode?: RemoteBrowserSessionMode; readonly url?: string; readonly switchWindows?: boolean };
 /** A bare token remains accepted for existing clients. */
 export type RemoteRunTargetInput = string | RemoteRunTarget;
@@ -68,6 +84,10 @@ export interface RemoteApprovalActionPreview {
   readonly points?: readonly { readonly x: number; readonly y: number }[];
   readonly keys?: readonly string[];
   readonly typedCharacterCount?: number;
+  readonly groundingRef?: string;
+  readonly optionText?: string;
+  readonly optionCharacterCount?: number;
+  readonly optionTextStatus?: "visible" | "redacted";
 }
 
 export interface RemoteApprovalEvidence {
@@ -103,7 +123,7 @@ export type RemotePendingRequest =
   | {
       readonly requestId: string;
       readonly kind: "window_handoff";
-      readonly reasonCode: "foreground_mismatch" | "new_window_detected";
+      readonly reasonCode: "foreground_mismatch" | "new_window_detected" | "bound_window_missing";
       readonly candidates: readonly RemoteWindowCandidate[];
       readonly omittedCandidateCount?: number;
     };

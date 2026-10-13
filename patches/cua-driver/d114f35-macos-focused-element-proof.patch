@@ -1,0 +1,366 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+index f50f240..fa720fa 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+@@ -81,6 +81,7 @@ extern "C" {
+         element: AXUIElementRef,
+         timeout_in_seconds: f32,
+     ) -> AXError;
++    pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
+     pub fn AXUIElementGetTypeID() -> CFTypeID;
+     pub fn AXIsProcessTrusted() -> bool;
+     /// `AXIsProcessTrustedWithOptions(options)` — when called with
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+index 378023c..d169a4c 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+@@ -133,6 +133,172 @@ fn chromium_browser_window(pid: i32) -> bool {
+         })
+ }
+ 
++/// A narrow, independently acquired proof of the focused editable AX element
++/// for one exact frontmost browser window. This deliberately does not change
++/// `elements_complete`: the normal actionable-element walk can still be
++/// incomplete even when the OS can identify its current focused element.
++fn focused_element_proof(pid: i32, window_id: u32, snapshot_id: &str) -> Option<Value> {
++    use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
++
++    if crate::apps::frontmost_pid() != Some(pid)
++        || crate::ax::bindings::focused_window_id_of_pid(pid) != Some(window_id)
++        || crate::windows::resolve_window_owner(pid, window_id)
++            != crate::windows::WindowOwner::SamePid
++    {
++        return None;
++    }
++
++    let bounds = crate::windows::window_bounds_by_id(window_id)?;
++    if !valid_positive_rect(bounds.x, bounds.y, bounds.width, bounds.height) {
++        return None;
++    }
++
++    // `focused_element_in_window` returns a retained element only after the
++    // AXWindow/AXParent chain resolves to this exact CGWindowID.
++    let element = unsafe { crate::ax::exact_target::focused_element_in_window(pid, window_id) }?;
++    let proof = unsafe {
++        let mut element_pid = 0;
++        let element_pid_matches = crate::ax::bindings::AXUIElementGetPid(element, &mut element_pid)
++            == crate::ax::bindings::kAXErrorSuccess
++            && element_pid == pid;
++        let role = crate::ax::bindings::copy_string_attr(element, "AXRole");
++        let name = crate::ax::bindings::copy_string_attr(element, "AXTitle")
++            .filter(|value| !value.trim().is_empty())
++            .or_else(|| crate::ax::bindings::copy_string_attr(element, "AXDescription"));
++        let enabled = crate::ax::bindings::copy_bool_attr(element, "AXEnabled");
++        let editable = crate::ax::bindings::is_attribute_settable(element, "AXValue");
++        let frame = crate::ax::bindings::element_screen_rect(element);
++        let same_focused_element =
++            crate::ax::exact_target::focused_element_in_window(pid, window_id)
++                .map(|fresh| {
++                    let mut fresh_pid = 0;
++                    let fresh_pid_matches =
++                        crate::ax::bindings::AXUIElementGetPid(fresh, &mut fresh_pid)
++                            == crate::ax::bindings::kAXErrorSuccess
++                            && fresh_pid == pid;
++                    let same = CFEqual(element as CFTypeRef, fresh as CFTypeRef) != 0;
++                    CFRelease(fresh as CFTypeRef);
++                    same && fresh_pid_matches
++                })
++                .unwrap_or(false);
++
++        // The native reads above are not atomic. Recheck frontmost and exact
++        // focused window, exact focused element, owner, and geometry after
++        // inspecting the element to reject focus/window transitions during
++        // proof construction. The focused AXUIElement is retained until its
++        // identity has been rechecked.
++        let still_bound = element_pid_matches
++            && same_focused_element
++            && crate::apps::frontmost_pid() == Some(pid)
++            && crate::ax::bindings::focused_window_id_of_pid(pid) == Some(window_id)
++            && crate::windows::resolve_window_owner(pid, window_id)
++                == crate::windows::WindowOwner::SamePid
++            && crate::windows::window_bounds_by_id(window_id)
++                .map(|fresh| same_bounds(&bounds, &fresh))
++                .unwrap_or(false);
++        CFRelease(element as CFTypeRef);
++        if !still_bound {
++            return None;
++        }
++
++        build_focus_proof_payload(
++            pid,
++            window_id,
++            snapshot_id,
++            Some(pid),
++            Some(window_id),
++            true,
++            role,
++            name,
++            frame,
++            enabled,
++            editable,
++            true,
++            &bounds,
++        )
++    };
++    proof
++}
++
++fn valid_positive_rect(x: f64, y: f64, width: f64, height: f64) -> bool {
++    x.is_finite()
++        && y.is_finite()
++        && width.is_finite()
++        && height.is_finite()
++        && width > 0.0
++        && height > 0.0
++}
++
++fn same_bounds(left: &crate::windows::WindowBounds, right: &crate::windows::WindowBounds) -> bool {
++    left.x == right.x
++        && left.y == right.y
++        && left.width == right.width
++        && left.height == right.height
++}
++
++#[allow(clippy::too_many_arguments)]
++fn build_focus_proof_payload(
++    pid: i32,
++    window_id: u32,
++    snapshot_id: &str,
++    frontmost_pid: Option<i32>,
++    focused_window_id: Option<u32>,
++    owner_matches: bool,
++    role: Option<String>,
++    name: Option<String>,
++    frame: Option<[f64; 4]>,
++    enabled: Option<bool>,
++    editable: bool,
++    ancestry_verified: bool,
++    bounds: &crate::windows::WindowBounds,
++) -> Option<Value> {
++    if frontmost_pid != Some(pid)
++        || focused_window_id != Some(window_id)
++        || !owner_matches
++        || !ancestry_verified
++        || enabled != Some(true)
++        || !editable
++        || !valid_positive_rect(bounds.x, bounds.y, bounds.width, bounds.height)
++    {
++        return None;
++    }
++    let role = role.filter(|value| !value.trim().is_empty())?;
++    let name = name.filter(|value| !value.trim().is_empty())?;
++    let [x, y, width, height] = frame?;
++    if !valid_positive_rect(x, y, width, height)
++        || x < bounds.x
++        || y < bounds.y
++        || x + width > bounds.x + bounds.width
++        || y + height > bounds.y + bounds.height
++    {
++        return None;
++    }
++    Some(serde_json::json!({
++        "version": "macos-focused-element-v1",
++        "snapshot_id": snapshot_id,
++        "pid": pid,
++        "window_id": window_id,
++        "frontmost_pid": pid,
++        "focused_window_id": window_id,
++        "coordinate_space": "macos-screen-points",
++        "window_bounds": {
++            "x": bounds.x,
++            "y": bounds.y,
++            "width": bounds.width,
++            "height": bounds.height
++        },
++        "focused_element": {
++            "role": role,
++            "name": name,
++            "frame": { "x": x, "y": y, "width": width, "height": height },
++            "enabled": true,
++            "editable": true,
++            "focused": true,
++            "ancestry_verified": true
++        }
++    }))
++}
++
+ #[async_trait]
+ impl Tool for GetWindowStateTool {
+     fn def(&self) -> &ToolDef {
+@@ -543,10 +709,21 @@ impl Tool for GetWindowStateTool {
+         // Additive — old consumers ignore it. Absent when no snapshot was
+         // registered (unresolved window scope).
+         if let Some(sid) = snapshot_id {
+-            structured["snapshot_id"] =
+-                serde_json::json!(cua_driver_core::element_token::token_for(sid, 0)
+-                    .trim_end_matches(":0")
+-                    .to_string());
++            let snapshot_id = cua_driver_core::element_token::token_for(sid, 0)
++                .trim_end_matches(":0")
++                .to_string();
++            structured["snapshot_id"] = serde_json::json!(snapshot_id);
++            if chromium_browser_window(pid) {
++                let proof = tokio::task::spawn_blocking(move || {
++                    focused_element_proof(pid, window_id, &snapshot_id)
++                })
++                .await
++                .ok()
++                .flatten();
++                if let Some(proof) = proof {
++                    structured["focus_proof"] = proof;
++                }
++            }
+         }
+         // Best-effort-background ladder, rung (2). Both rungs point the agent at
+         // the same next move: an empty AX tree means element_index has nothing
+@@ -1008,6 +1185,150 @@ mod window_scope_contract_tests {
+     }
+ }
+ 
++#[cfg(test)]
++mod focus_proof_tests {
++    use super::build_focus_proof_payload;
++    use crate::windows::WindowBounds;
++
++    fn proof(
++        frontmost_pid: Option<i32>,
++        focused_window_id: Option<u32>,
++        owner_matches: bool,
++        enabled: Option<bool>,
++        editable: bool,
++        ancestry_verified: bool,
++        frame: Option<[f64; 4]>,
++    ) -> Option<serde_json::Value> {
++        build_focus_proof_payload(
++            42,
++            7,
++            "s12345678",
++            frontmost_pid,
++            focused_window_id,
++            owner_matches,
++            Some("AXTextField".into()),
++            Some("Address and search bar".into()),
++            frame,
++            enabled,
++            editable,
++            ancestry_verified,
++            &WindowBounds {
++                x: 100.0,
++                y: 200.0,
++                width: 800.0,
++                height: 600.0,
++            },
++        )
++    }
++
++    #[test]
++    fn emits_only_complete_exact_focus_proof_and_never_ax_value() {
++        let value = proof(
++            Some(42),
++            Some(7),
++            true,
++            Some(true),
++            true,
++            true,
++            Some([120.0, 210.0, 400.0, 30.0]),
++        )
++        .expect("complete exact proof");
++        assert_eq!(value["version"], "macos-focused-element-v1");
++        assert_eq!(value["coordinate_space"], "macos-screen-points");
++        assert_eq!(value["snapshot_id"], "s12345678");
++        assert_eq!(value["pid"], 42);
++        assert_eq!(value["window_id"], 7);
++        assert_eq!(value["focused_element"]["focused"], true);
++        assert_eq!(value["focused_element"]["enabled"], true);
++        assert_eq!(value["focused_element"]["editable"], true);
++        assert!(value["focused_element"].get("value").is_none());
++    }
++
++    #[test]
++    fn rejects_missing_or_mismatched_focus_facts_and_out_of_window_geometry() {
++        assert!(proof(
++            None,
++            Some(7),
++            true,
++            Some(true),
++            true,
++            true,
++            Some([120.0, 210.0, 400.0, 30.0])
++        )
++        .is_none());
++        assert!(proof(
++            Some(42),
++            None,
++            true,
++            Some(true),
++            true,
++            true,
++            Some([120.0, 210.0, 400.0, 30.0])
++        )
++        .is_none());
++        assert!(proof(
++            Some(42),
++            Some(7),
++            false,
++            Some(true),
++            true,
++            true,
++            Some([120.0, 210.0, 400.0, 30.0])
++        )
++        .is_none());
++        assert!(proof(
++            Some(42),
++            Some(7),
++            true,
++            None,
++            true,
++            true,
++            Some([120.0, 210.0, 400.0, 30.0])
++        )
++        .is_none());
++        assert!(proof(
++            Some(42),
++            Some(7),
++            true,
++            Some(false),
++            true,
++            true,
++            Some([120.0, 210.0, 400.0, 30.0])
++        )
++        .is_none());
++        assert!(proof(
++            Some(42),
++            Some(7),
++            true,
++            Some(true),
++            false,
++            true,
++            Some([120.0, 210.0, 400.0, 30.0])
++        )
++        .is_none());
++        assert!(proof(
++            Some(42),
++            Some(7),
++            true,
++            Some(true),
++            true,
++            false,
++            Some([120.0, 210.0, 400.0, 30.0])
++        )
++        .is_none());
++        assert!(proof(
++            Some(42),
++            Some(7),
++            true,
++            Some(true),
++            true,
++            true,
++            Some([899.0, 210.0, 20.0, 30.0])
++        )
++        .is_none());
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import type { ComputerSessionDescriptor, RunId, RuntimeEvent, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { ComputerSessionDescriptor, GroundingCatalog, ObservationId, RunId, RuntimeEvent, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import {
   createDefaultToolRegistry,
   type CleanupDiagnostic,
@@ -13,6 +13,7 @@ import {
   type ProviderAdapter,
 } from "@computer-harness/runtime";
 import { createRunFactory, type ResolvedRunConfig } from "./index.js";
+import { readRuntimeEvents } from "@computer-harness/trajectory";
 
 const fixtureSurfaceRef = { surfaceId: "sdk-mock-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
 
@@ -91,6 +92,105 @@ function noopEventWriter(close: () => Promise<void> = async () => undefined) {
 }
 
 describe("public app-runtime SDK assembly", () => {
+  it("passes source refs through the normal DefaultContextCompiler and replays Runtime-canonical finish evidence", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-sdk-source-linked-"));
+    const observed: { id?: ObservationId } = {};
+    const calls: ModelInput[] = [];
+    const session = {
+      id: "sdk-source-linked-session" as ComputerSessionDescriptor["id"],
+      backend: "sdk-source-linked-computer",
+      viewport: { width: 100, height: 100, coordinateSpace: "physical" as const },
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-10-12T00:00:00.000Z",
+    };
+    const sourceComputer: Computer = {
+      async open() { return session; },
+      async observe(_session, observationId) {
+        observed.id = observationId;
+        const grounding: GroundingCatalog = {
+          version: "uia-catalog-v1",
+          source: "uia",
+          observationId,
+          computerSessionId: session.id,
+          surfaceRef: fixtureSurfaceRef,
+          completeness: "partial",
+          degraded: false,
+          maxElements: 4,
+          elements: [{
+            elementRef: "cpu-m6",
+            role: "StaticText",
+            name: "M6 12-core CPU",
+            state: { enabled: false, selected: false },
+          }],
+        };
+        return {
+          capturedAt: "2026-10-12T00:00:01.000Z",
+          viewport: session.viewport,
+          surfaceRef: fixtureSurfaceRef,
+          screenshot: { mediaType: "image/png", data: new Uint8Array([7]) },
+          grounding,
+        };
+      },
+      async execute(_session, action) { return { actionId: action.actionId, status: "completed" }; },
+      async close() {},
+    };
+    const provider: ProviderAdapter = {
+      id: "sdk-source-linked-provider",
+      async generate(input) {
+        calls.push(input);
+        return {
+          type: "finish",
+          summary: "Reported M4, enabled and selected.",
+          reportedStatus: "success",
+          resultEvidence: {
+            version: "source-linked-finish-v1",
+            fields: [{ fieldId: "cpu", disposition: "source_bound", sources: [{ observationId: String(observed.id), elementRef: "cpu-m6" }] }],
+          },
+        };
+      },
+      async close() {},
+    };
+    const createRun = createRunFactory({
+      createProvider: () => provider,
+      createComputer: () => sourceComputer,
+    });
+    let activeRun: Awaited<ReturnType<typeof createRun>> | undefined;
+    try {
+      const run = await createRun({
+        ...config(outputDir, "sdk-source-linked-run"),
+        model: { kind: "external", id: "sdk-source-linked-provider" },
+        computer: { kind: "external", id: "sdk-source-linked-computer" },
+        sourceLinkedFinish: { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", label: "CPU", required: true }] },
+      });
+      activeRun = run;
+      expect(await run.start()).toBe("succeeded");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.messages.flatMap((message) => message.content).some((block) =>
+        block.type === "text" && block.text.includes("CPU") && block.text.includes("elementRef"),
+      )).toBe(true);
+      const terminateSchema = calls[0]?.tools.find((tool) => tool.name === "terminate")?.inputSchema;
+      expect(JSON.stringify(terminateSchema)).toContain("resultEvidence");
+      expect(JSON.stringify(terminateSchema)).toContain("elementRef");
+      const report = await run.report();
+      const finish = report.events.find((event) => event.type === "run.finished");
+      expect(finish).toMatchObject({
+        type: "run.finished",
+        outcome: "succeeded",
+        summary: expect.stringContaining("M6 12-core CPU"),
+        reportedSummary: "Reported M4, enabled and selected.",
+        resultEvidence: { fields: [{ disposition: "source_bound", sources: [{ state: { enabled: false, selected: false }, capturedAt: "2026-10-12T00:00:01.000Z" }] }] },
+      });
+      const replayed = await readRuntimeEvents(join(outputDir, "trajectory.jsonl"));
+      expect(replayed.find((event) => event.type === "run.finished")).toEqual(finish);
+      if (finish?.type === "run.finished") expect(finish.summary).not.toContain("Reported M4");
+      await run.close();
+      activeRun = undefined;
+    } finally {
+      await activeRun?.close().catch(() => undefined);
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("runs Observe → Tool → Receipt → Observe → Finish with injected adapters and context", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-sdk-mock-run-"));
     const lifecycle: string[] = [];
@@ -180,6 +280,7 @@ describe("public app-runtime SDK assembly", () => {
       expect(inputs).toHaveLength(2);
       expect(inputs[0]?.system).toContain("Application context extension: fixture build.");
       expect(inputs[0]?.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["click", "terminate", "fixture_marker"]));
+      expect(JSON.stringify(inputs[0]?.tools.find((tool) => tool.name === "terminate")?.inputSchema)).not.toContain("resultEvidence");
       expect(inputs[1]?.messages.flatMap((message) => message.content).some((block) =>
         block.type === "tool_result" && block.result.status === "completed",
       )).toBe(true);

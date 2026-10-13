@@ -32,6 +32,8 @@ PR #25完整历史与手机体验改动已集成PR #22；源码head `d2ee1a3`对
 
 [手机端适老化与无障碍体验审查、实施记录](./mobile-accessibility-experience-review-2026-10-08.md)：保留现有布局，收敛输入、状态、审批、结果重听、连接恢复和字号重排；单独Web回归195项、隔离浏览器检查74项通过，综合版本现已部署但尚未重新配对验收。最新[部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)列出v2 asset、4318 Host及重新扫码步骤。CUA #4836当前已Ready，真实记事本最小验收通过；官方矩阵shared通过、native有光标超时，整轮不是全绿。另有Draft替代提案#4901，尚缺Windows实机证据；路线区别与保留基线的判断见[统一修复记录](./window-popup-regression-2026-10-04.md)。
 
+2026-10-12 队友历史核对：[目录、源码与实际成果验证](./astra-local-directory-verification-2026-10-12.md)。当时 e7bce7f；T2 CLI 实验模式三轮已限定通过，旧 F1–F4 已修；正常 Web/default Host、T1/T3 及手机/部署出口分别保留。本条不是当前集成版本或本轮实机验收。
+
 ## 使用、构建与许可
 
 [项目概览与手机体验说明](../README.md)注明公共 Demo Relay 尚未开放，并提供 Windows 本机 Host 启动前置、平台状态、安全边界和许可入口；[开发者上手](./getting-started.md)补充模型、CUA、OSWorld和排错步骤。项目许可见根目录[LICENSE](../LICENSE)，直接依赖与 CUA notices 见[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
@@ -166,6 +168,10 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 - [本地缺陷复现探针](./verification/audit-39ff27f9-local-probes.mjs)作为独立验证工具保留。
 
 ## 历史证据
+
+当前三线执行入口：[统一六批计划](./three-track-execution-plan-2026-10-06.md)、[隔离整合取舍](./three-track-integration-decisions-2026-10-06.md)、[预算与HTTP关联交付](./a-line-sync/fixes/F-20261006-002.md)。原A线独立队列停用，历史证据保留；新版离线通过不等于已经部署或实机通过。
+
+本轮本地冻结：[批次0/1部署单](./three-track-batch01-deployment-2026-10-06.md)。仅预算与请求关联候选离线放行，实机签收待测试方记录。
 
 - [2026-09-26 首页改版前存档](./history/2026-09-26-readme-before-refresh.md)：保留旧首页的参数与阶段记录，当前使用入口以根 README 和专题指南为准。
 - [2026-09-26 交接收敛归档与迁移索引](./history/2026-09-26-handoff-convergence/README.md)：记录旧阶段文档和一次性实验脚本的原路径、新路径、归档理由与恢复方式。

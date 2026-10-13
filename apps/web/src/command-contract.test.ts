@@ -22,6 +22,14 @@ function snapshot(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
 }
 
 describe("request-bound commands", () => {
+  it("F045 missing reason cannot be ignored, and confirmation requires the current remote token", () => {
+    const current = snapshot({ status: "waiting_window", pendingRequest: { kind: "window_handoff", requestId: "missing-1", reasonCode: "bound_window_missing", candidates: [{ token: "current-token" }] } });
+    expect(canIgnoreWindow(current.pendingRequest!)).toBe(false);
+    expect(ignoreWindowCommand(current, "missing-1")).toBeUndefined();
+    expect(windowChoiceCommand(current, "old", "current-token")).toBeUndefined();
+    expect(windowChoiceCommand(current, "missing-1", "expired-token")).toBeUndefined();
+    expect(windowChoiceCommand(current, "missing-1", "current-token")).toMatchObject({ requestId: "missing-1", candidateToken: "current-token" });
+  });
   it("binds approval to the current request and event sequence", () => {
     const current = snapshot({ pendingRequest: { requestId: "approval-2", kind: "approval", reason: "Open the result" } });
     expect(approvalCommand(current, "approval-2", true)).toEqual({

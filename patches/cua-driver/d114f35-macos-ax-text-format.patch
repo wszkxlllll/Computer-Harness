@@ -1,0 +1,231 @@
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
+@@ -92,8 +92,64 @@
+     /// This trust marker is independent of actionable ancestry because
+     /// AXWebArea is commonly non-actionable and therefore has no element index.
+     pub in_web_content: bool,
++    /// Format-only metadata for an exact native AXTextArea CFString value.
++    /// This is omitted for web content, non-string values, and unavailable AXValue.
++    pub text_format: Option<AXTextFormat>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct AXTextFormat {
++    pub source: &'static str,
++    pub status: &'static str,
++    pub utf8_bytes: Option<usize>,
++    pub code_point_count: Option<usize>,
++    pub line_feed_count: Option<usize>,
++    pub trailing_line_feed_count: Option<usize>,
++    pub carriage_return_count: Option<usize>,
++}
++
++const AX_TEXT_FORMAT_MAX_UTF8_BYTES: usize = 16_384;
++
++fn ax_text_format(value: &str) -> AXTextFormat {
++    if value.len() > AX_TEXT_FORMAT_MAX_UTF8_BYTES {
++        return AXTextFormat {
++            source: "ax-cfstring-v1",
++            status: "over_limit",
++            utf8_bytes: None,
++            code_point_count: None,
++            line_feed_count: None,
++            trailing_line_feed_count: None,
++            carriage_return_count: None,
++        };
++    }
++    let line_feed_count = value.bytes().filter(|byte| *byte == b'\n').count();
++    let trailing_line_feed_count = value
++        .bytes()
++        .rev()
++        .take_while(|byte| *byte == b'\n')
++        .count();
++    AXTextFormat {
++        source: "ax-cfstring-v1",
++        status: "complete",
++        utf8_bytes: Some(value.len()),
++        code_point_count: Some(value.chars().count()),
++        line_feed_count: Some(line_feed_count),
++        trailing_line_feed_count: Some(trailing_line_feed_count),
++        carriage_return_count: Some(value.bytes().filter(|byte| *byte == b'\r').count()),
++    }
+ }
+ 
++fn ax_text_format_for_element(
++    role: &str,
++    in_web_content: bool,
++    value: Option<&str>,
++) -> Option<AXTextFormat> {
++    if role != "AXTextArea" || in_web_content {
++        return None;
++    }
++    value.map(ax_text_format)
++}
++
+ #[derive(Default)]
+ struct ControlState {
+     value_state: Option<String>,
+@@ -404,6 +460,13 @@
+     // Read AXValue once with enough type information to preserve the existing
+     // string-only markdown while also exposing numeric/boolean control state.
+     let copied_value = copy_stringish_attr(element, "AXValue");
++    let text_format = ax_text_format_for_element(
++        &role,
++        in_web_content,
++        copied_value
++            .as_ref()
++            .and_then(|copied| copied.string_value.as_deref()),
++    );
+     let value = copied_value
+         .as_ref()
+         .and_then(|copied| copied.string_value.clone());
+@@ -520,6 +583,7 @@
+             enabled: control_state.enabled,
+             selected: control_state.selected,
+             in_web_content,
++            text_format: text_format.clone(),
+         }
+     } else {
+         AXNode {
+@@ -554,6 +618,7 @@
+             enabled: control_state.enabled,
+             selected: control_state.selected,
+             in_web_content,
++            text_format,
+         }
+     };
+ 
+@@ -781,5 +846,53 @@
+         });
+         assert_eq!(reads.get(), 1, "actionable nodes must read state once");
+         assert_eq!(actionable.enabled, Some(true));
++    }
++
++    #[test]
++    fn ax_text_format_counts_exact_cfstring_format_without_retaining_text() {
++        let empty = ax_text_format("");
++        assert_eq!(empty.utf8_bytes, Some(0));
++        assert_eq!(empty.code_point_count, Some(0));
++        assert_eq!(empty.line_feed_count, Some(0));
++        assert_eq!(empty.trailing_line_feed_count, Some(0));
++
++        let only_line_feed = ax_text_format("\n");
++        assert_eq!(only_line_feed.utf8_bytes, Some(1));
++        assert_eq!(only_line_feed.line_feed_count, Some(1));
++        assert_eq!(only_line_feed.trailing_line_feed_count, Some(1));
++
++        let unicode = ax_text_format("雪😀\n");
++        assert_eq!(unicode.utf8_bytes, Some(8));
++        assert_eq!(unicode.code_point_count, Some(3));
++        assert_eq!(unicode.line_feed_count, Some(1));
++        assert_eq!(unicode.trailing_line_feed_count, Some(1));
++
++        let crlf = ax_text_format("x\r\n\n");
++        assert_eq!(crlf.utf8_bytes, Some(4));
++        assert_eq!(crlf.code_point_count, Some(4));
++        assert_eq!(crlf.line_feed_count, Some(2));
++        assert_eq!(crlf.trailing_line_feed_count, Some(2));
++        assert_eq!(crlf.carriage_return_count, Some(1));
++
++        let at_limit = ax_text_format(&"a".repeat(AX_TEXT_FORMAT_MAX_UTF8_BYTES));
++        assert_eq!(at_limit.status, "complete");
++        assert_eq!(at_limit.utf8_bytes, Some(AX_TEXT_FORMAT_MAX_UTF8_BYTES));
++        let over_limit = ax_text_format(&"a".repeat(AX_TEXT_FORMAT_MAX_UTF8_BYTES + 1));
++        assert_eq!(over_limit.status, "over_limit");
++        assert_eq!(over_limit.utf8_bytes, None);
++        assert_eq!(over_limit.code_point_count, None);
+     }
++
++    #[test]
++    fn ax_text_format_is_present_for_empty_native_textareas_only() {
++        assert_eq!(
++            ax_text_format_for_element("AXTextArea", false, Some(""))
++                .unwrap()
++                .utf8_bytes,
++            Some(0)
++        );
++        assert!(ax_text_format_for_element("AXTextArea", false, None).is_none());
++        assert!(ax_text_format_for_element("AXTextArea", true, Some("web")).is_none());
++        assert!(ax_text_format_for_element("AXTextField", false, Some("native")).is_none());
++    }
+ }
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+@@ -1628,6 +1628,28 @@
+             }
+             if let Some(enabled) = node.enabled {
+                 entry["enabled"] = serde_json::Value::Bool(enabled);
++            }
++            if let Some(format) = &node.text_format {
++                let mut text_format = serde_json::json!({
++                    "source": format.source,
++                    "status": format.status,
++                });
++                if let Some(value) = format.utf8_bytes {
++                    text_format["utf8_bytes"] = serde_json::json!(value);
++                }
++                if let Some(value) = format.code_point_count {
++                    text_format["code_point_count"] = serde_json::json!(value);
++                }
++                if let Some(value) = format.line_feed_count {
++                    text_format["line_feed_count"] = serde_json::json!(value);
++                }
++                if let Some(value) = format.trailing_line_feed_count {
++                    text_format["trailing_line_feed_count"] = serde_json::json!(value);
++                }
++                if let Some(value) = format.carriage_return_count {
++                    text_format["carriage_return_count"] = serde_json::json!(value);
++                }
++                entry["text_format"] = text_format;
+             }
+             let selected = node.selected.or_else(|| {
+                 let role = node.role.to_ascii_lowercase();
+@@ -2116,6 +2138,7 @@
+             enabled: None,
+             selected: None,
+             in_web_content: false,
++            text_format: None,
+         }
+     }
+ 
+@@ -2268,6 +2291,40 @@
+     }
+ 
+     #[test]
++    fn elements_surface_format_only_ax_textarea_metadata() {
++        let mut nodes = vec![node(Some(0), "AXTextArea", Some("Body"), 1, None, None)];
++        nodes[0].text_format = Some(crate::ax::tree::AXTextFormat {
++            source: "ax-cfstring-v1",
++            status: "complete",
++            utf8_bytes: Some(4),
++            code_point_count: Some(3),
++            line_feed_count: Some(1),
++            trailing_line_feed_count: Some(1),
++            carriage_return_count: Some(0),
++        });
++        let entry = &build_elements_array(&nodes)[0];
++        assert_eq!(entry["text_format"]["source"], "ax-cfstring-v1");
++        assert_eq!(entry["text_format"]["utf8_bytes"], 4);
++        assert_eq!(entry["text_format"]["code_point_count"], 3);
++        assert_eq!(entry["text_format"]["trailing_line_feed_count"], 1);
++
++        nodes[0].text_format = Some(crate::ax::tree::AXTextFormat {
++            source: "ax-cfstring-v1",
++            status: "over_limit",
++            utf8_bytes: None,
++            code_point_count: None,
++            line_feed_count: None,
++            trailing_line_feed_count: None,
++            carriage_return_count: None,
++        });
++        let entry = &build_elements_array(&nodes)[0];
++        assert_eq!(
++            entry["text_format"],
++            serde_json::json!({ "source": "ax-cfstring-v1", "status": "over_limit" })
++        );
++    }
++
++    #[test]
+     fn elements_surface_control_state_fields() {
+         // A slider whose AXValue is a CFNumber: `value` comes from the
+         // coerced value_state, alongside value_description, min/max,

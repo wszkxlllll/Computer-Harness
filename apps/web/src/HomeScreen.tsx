@@ -21,6 +21,8 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
   const [error, setError] = useState<string>();
   const [listError, setListError] = useState<string>();
   const [windowTargets, setWindowTargets] = useState<WindowTarget[]>([]);
+  const [nativeRecoveryProfile, setNativeRecoveryProfile] = useState<{ profileId: string; label: string }>();
+  const [nativeWebDocumentProfile, setNativeWebDocumentProfile] = useState<{ profileId: string; label: string }>();
   const [windowPreviews, setWindowPreviews] = useState<Map<string, WindowCandidatePreview>>(() => new Map());
   const [windowPreviewErrors, setWindowPreviewErrors] = useState<Map<string, string>>(() => new Map());
   const [windowPreviewLoadingToken, setWindowPreviewLoadingToken] = useState<string>();
@@ -64,6 +66,8 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
       && (selectedTargetCandidate?.previewRequired !== true || selectedPreviewIsCurrent)
       && !windowSelectionNeedsConfirmation
       && windowSelectionGoal === goalDraft.trim())
+    || (targetMode === "native-recovery" && nativeRecoveryProfile !== undefined && !windowTargetsLoading && !windowTargetsError && !windowTargetsExpired)
+    || (targetMode === "native-web-document" && nativeWebDocumentProfile !== undefined && !windowTargetsLoading && !windowTargetsError && !windowTargetsExpired)
   );
 
   const refresh = useCallback(async () => {
@@ -87,6 +91,8 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
     setSelectedTargetToken(undefined);
     setWindowSelectionGoal(undefined);
     setWindowTargets([]);
+    setNativeRecoveryProfile(undefined);
+    setNativeWebDocumentProfile(undefined);
     setWindowPreviews(new Map());
     setWindowPreviewErrors(new Map());
     setWindowPreviewLoadingToken(undefined);
@@ -100,6 +106,8 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
         throw new Error("电脑返回的窗口列表格式无效。请刷新后重试。");
       }
       setWindowTargets(result.candidates.filter((candidate) => typeof candidate?.token === "string" && candidate.token.length > 0));
+      setNativeRecoveryProfile(result.nativeRecoveryProfile);
+      setNativeWebDocumentProfile(result.nativeWebDocumentProfile);
       setOmittedAmbiguousWindowCount(result.omittedAmbiguousCount ?? 0);
       setWindowExpiresAt(result.expiresAt);
     } catch (caught) {
@@ -167,7 +175,7 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
       setWindowPreviewErrors(new Map());
       setWindowPreviewLoadingToken(undefined);
     }
-    if (mode === "window") void refreshWindowTargets();
+    if (mode === "window" || mode === "native-recovery" || mode === "native-web-document") void refreshWindowTargets();
   }
 
   function changeGoalDraft(value: string) {
@@ -203,6 +211,16 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
         return;
       }
       if (selected?.previewRequired === true && preview !== undefined) target = { ...target, previewToken: preview.previewToken };
+    }
+    if (target.mode === "native-recovery" && nativeRecoveryProfile?.profileId !== target.profileId) {
+      setError("电脑预设的本地文稿任务已变化。请刷新窗口列表后再试。");
+      setWindowTargetsExpired(true);
+      return;
+    }
+    if (target.mode === "native-web-document" && nativeWebDocumentProfile?.profileId !== target.profileId) {
+      setError("电脑预设的网页与文稿任务已变化。请刷新窗口列表后再试。");
+      setWindowTargetsExpired(true);
+      return;
     }
     if (target.mode === "browser" && target.url !== undefined && !isValidBrowserUrl(target.url)) return;
 
@@ -319,6 +337,8 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
           busy={sending}
           canStart={canStart}
           targetMode={targetMode}
+          nativeRecoveryProfile={nativeRecoveryProfile}
+          nativeWebDocumentProfile={nativeWebDocumentProfile}
           browserUrl={browserUrl}
           commonSiteChoices={commonSiteChoices}
           onTargetModeChange={changeTargetMode}

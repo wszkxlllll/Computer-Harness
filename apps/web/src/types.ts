@@ -39,12 +39,16 @@ export interface WindowTargetList {
   candidates: WindowTarget[];
   expiresAt: string;
   omittedAmbiguousCount?: number;
+  nativeRecoveryProfile?: { profileId: string; label: string };
+  nativeWebDocumentProfile?: { profileId: string; label: string };
 }
 
 export type RunTarget =
   | { mode: "auto"; switchWindows?: boolean }
   | { mode: "desktop"; switchWindows?: boolean }
   | { mode: "window"; targetToken: string; previewToken?: string; switchWindows?: boolean }
+  | { mode: "native-recovery"; profileId: string }
+  | { mode: "native-web-document"; profileId: string }
   | { mode: "browser"; url?: string; switchWindows?: boolean };
 
 export type ManagedBrowserProfileStatus = "unprepared" | "preparing" | "ready" | "in_use" | "relogin_required" | "cleanup_failed";
@@ -126,6 +130,10 @@ export interface ApprovalActionPreviewItem {
   points?: Array<{ x: number; y: number }>;
   keys?: string[];
   typedCharacterCount?: number;
+  groundingRef?: string;
+  optionText?: string;
+  optionCharacterCount?: number;
+  optionTextStatus?: "visible" | "redacted";
 }
 
 export interface WindowCandidate {

@@ -281,7 +281,7 @@ export interface ManagedBrowserStartupPageDiagnostic {
 export interface ManagedBrowserWindowBindingHint {
   readonly browserWindowId: number;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
-  /** Scale converting this page's CDP DIP bounds to the local CUA backend's window units. */
+  /** Independently measured scale converting this page's CDP DIP bounds to local CUA backend window units. */
   readonly browserBoundsToCuaScale?: number;
   readonly ownedProcessIds?: readonly number[];
   readonly onDiagnostic?: (diagnostic: ManagedBrowserWindowResolutionDiagnostic) => void;
@@ -429,7 +429,7 @@ export interface ManagedBrowserPageActivity {
   /** Opaque per-document marker used only to invalidate stale actions. */
   readonly navigationKey?: string;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
-  /** Scale converting CDP DIP bounds to the local platform-specific CUA window units. */
+  /** Scale converting CDP DIP bounds to local platform-specific CUA window units, derived from stable page metrics rather than candidate geometry. */
   readonly browserBoundsToCuaScale?: number;
 }
 
@@ -656,6 +656,20 @@ export function selectManagedBrowserStartupActivity(
   return activity === undefined || activity.visibilityState === "unloaded" ? undefined : activity;
 }
 
+export function createManagedBrowserWindowBindingHint(
+  selected: ManagedBrowserPageActivity,
+  ownedProcessIds: Iterable<number>,
+  onDiagnostic?: ManagedBrowserWindowBindingHint["onDiagnostic"],
+): ManagedBrowserWindowBindingHint {
+  return {
+    browserWindowId: selected.browserWindowId,
+    ...(selected.browserBounds === undefined ? {} : { browserBounds: selected.browserBounds }),
+    ...(selected.browserBoundsToCuaScale === undefined ? {} : { browserBoundsToCuaScale: selected.browserBoundsToCuaScale }),
+    ownedProcessIds: [...ownedProcessIds],
+    ...(onDiagnostic === undefined ? {} : { onDiagnostic }),
+  };
+}
+
 const MANAGED_PAGE_ACTIVITY_SCRIPT = String.raw`({
   visibilityState: document.visibilityState,
   hasFocus: document.hasFocus(),
@@ -790,7 +804,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     }
     return textFromElements(explicit, 8, 160, element);
   };
-  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
   const nameOf = (element, role) => {
     const candidates = [
       element.getAttribute("aria-label"),
@@ -804,7 +818,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       if (name !== undefined) return name;
     }
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
-    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
     return allowsTextName ? boundedText(element.textContent, 160) : undefined;
   };
   const optionDescription = (option) => {
@@ -858,7 +872,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const isCanvasLike = (element, role) => element.localName === "canvas" || role === "canvas" || role === "webgl" || role === "bitmap";
   const isInteractive = (element, role) => {
     if (element.disabled === true) return true;
-    if (element.tabIndex >= 0 || element.isContentEditable === true) return true;
+    if (element.tabIndex >= 0 || element.isContentEditable === true || typeof element.onclick === "function") return true;
     if (role !== undefined && interactiveRoles.has(role.toLowerCase())) return true;
     return ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName);
   };
@@ -875,7 +889,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     const name = nameOf(element, role);
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
     const description = roleName === "combobox" || element.localName === "select" ? selectedOptionDescription(element, role) : undefined;
-    const enabled = element.disabled !== true;
+    const enabled = element.disabled !== true && element.getAttribute("aria-disabled") !== "true";
     const inputType = (element.getAttribute("type") || "text").toLowerCase();
     const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
     const optionProjection = visibleNativeSelectOptions(element);
@@ -1006,7 +1020,6 @@ function parseManagedBrowserLayoutScale(value: unknown): ManagedBrowserLayoutSca
   const pageZoom = value.cssVisualViewport.zoom;
   if (![physicalWidth, physicalHeight, cssWidth, cssHeight, pageZoom].every((item) =>
     typeof item === "number" && Number.isFinite(item) && item > 0) || (pageZoom as number) > 8) return undefined;
-
   const widthCssToPhysical = (physicalWidth as number) / (cssWidth as number);
   const heightCssToPhysical = (physicalHeight as number) / (cssHeight as number);
   if (!closeEnough(widthCssToPhysical, heightCssToPhysical)) return undefined;
@@ -1018,20 +1031,6 @@ function parseManagedBrowserLayoutScale(value: unknown): ManagedBrowserLayoutSca
 function closeEnough(left: number, right: number): boolean {
   const tolerance = Math.max(1e-6, Math.max(Math.abs(left), Math.abs(right)) * 1e-6);
   return Math.abs(left - right) <= tolerance;
-}
-
-export function createManagedBrowserWindowBindingHint(
-  selected: ManagedBrowserPageActivity,
-  ownedProcessIds: Iterable<number>,
-  onDiagnostic?: ManagedBrowserWindowBindingHint["onDiagnostic"],
-): ManagedBrowserWindowBindingHint {
-  return {
-    browserWindowId: selected.browserWindowId,
-    ...(selected.browserBounds === undefined ? {} : { browserBounds: selected.browserBounds }),
-    ...(selected.browserBoundsToCuaScale === undefined ? {} : { browserBoundsToCuaScale: selected.browserBoundsToCuaScale }),
-    ownedProcessIds: [...ownedProcessIds],
-    ...(onDiagnostic === undefined ? {} : { onDiagnostic }),
-  };
 }
 
 export class ManagedBrowserHost {
@@ -1094,6 +1093,7 @@ export class ManagedBrowserHost {
         "--no-default-browser-check",
         "--disable-sync",
         "--disable-extensions",
+        "--force-renderer-accessibility",
         "--new-window",
         ...launchUrls,
       ];
@@ -1688,7 +1688,7 @@ export function buildManagedDomClickExpression(input: {
     const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
     const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
     const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
-    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
     const boundedText = (value, max) => {
       if (typeof value !== "string") return undefined;
       const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
@@ -1772,7 +1772,7 @@ export function buildManagedDomClickExpression(input: {
         if (name !== undefined) return name;
       }
       const roleName = typeof role === "string" ? role.toLowerCase() : "";
-      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
       return allowsTextName ? boundedText(element.textContent, 160) : undefined;
     };
     const frameOf = (element) => {
@@ -1804,7 +1804,7 @@ export function buildManagedDomClickExpression(input: {
         seen.add(element);
         const role = roleOf(element);
         const frame = frameOf(element);
-        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || role !== "";
+        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || typeof element.onclick === "function" || role !== "";
         if (frame !== undefined && interactive && !["canvas", "img"].includes(element.localName)) {
           const name = nameOf(element, role);
           candidates.push({ element, role, name, frame, fingerprint: fingerprintOf(element, role, name) });

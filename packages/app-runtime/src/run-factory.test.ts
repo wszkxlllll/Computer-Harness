@@ -169,6 +169,181 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("requires matching Run and CUA recovery opt-ins with the exact opened-window scope", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-recovery-config-gate-"));
+    const primary = { pid: 101, windowId: 501 };
+    const recovery = { pid: 101, windowId: 502 };
+    const cua = {
+      kind: "cua" as const,
+      socketPath: "/tmp/cua-recovery-fixture.sock",
+      screenshotDir: join(outputDir, "screenshots"),
+      windowTarget: primary,
+      recoveryWindowTarget: recovery,
+      recoverBoundWindowMissing: true,
+      windowSwitch: "opened-windows-v1" as const,
+      windowSwitchAllowedTargets: [primary, recovery],
+    };
+    try {
+      await expect(createRun({ ...config(outputDir), recoverBoundWindowMissing: true }, {}))
+        .rejects.toThrow(/matching Run and CUA computer opt-ins/u);
+      await expect(createRun({ ...config(outputDir), computer: cua }, {}))
+        .rejects.toThrow(/matching Run and CUA computer opt-ins/u);
+      await expect(createRun({ ...config(outputDir), computer: cua, recoverBoundWindowMissing: true }, {}))
+        .rejects.toThrow(/exact native window switching/u);
+      const nativeRecoveryConfig = {
+        ...config(outputDir),
+        computer: cua,
+        recoverBoundWindowMissing: true,
+        windowSwitch: "opened-windows-v1" as const,
+      };
+      await expect(createRun({
+        ...nativeRecoveryConfig,
+        computer: { ...cua, windowSwitch: "off" },
+      }, {})).rejects.toThrow(/exact native window switching/u);
+      await expect(createRun({ ...nativeRecoveryConfig, computer: { ...cua, managedBrowserUrl: "https://example.invalid" } }, {}))
+        .rejects.toThrow(/exact native window switching/u);
+      await expect(createRun({ ...nativeRecoveryConfig, computer: { ...cua, grounding: "hybrid-catalog-v1" } }, {}))
+        .rejects.toThrow(/exact native window switching/u);
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an invalid resolved GLM timeout before creating Run resources", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-glm-timeout-config-gate-"));
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    try {
+      await expect(createRun({ ...config(outputDir), glmRequestTimeoutMs: 240001 }, { createProvider })).rejects.toThrow(/request timeout/u);
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("records a real Runtime→GLM→recorder→Fetch exchange against its Run request", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-exchange-"));
+    const runId = "runtime-http-correlation" as RunId;
+    const fetchResponse = {
+      choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{
+        id: "synthetic-terminate",
+        type: "function",
+        function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "The requested result remains unverified; no GUI result was supplied." }) },
+      }] } }],
+    };
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => fetchResponse }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        runId,
+        maxModelRequests: 3,
+        contextMaxInputTokens: 16384,
+        contextMaxWireInputTokens: 24576,
+      }, {
+        credentials: { glmApiKey: "synthetic-secret-token" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      const report = await handle.report();
+      const started = report.events.find((event) => event.type === "model.request.started");
+      expect(started?.type).toBe("model.request.started");
+      if (started?.type !== "model.request.started") throw new Error("model request start event was missing");
+      const exchanges = (await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim().split(/\r?\n/u).map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(started).toMatchObject({
+        requestId: expect.any(String),
+        decisionId: expect.any(String),
+        attempt: 1,
+        preparedRequest: { payloadHash: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+        contextBudget: { maxInputTokens: 16384, maxWireInputTokens: 24576 },
+      });
+      expect(exchanges).toHaveLength(1);
+      expect(exchanges[0]).toMatchObject({
+        provider: "glm",
+        correlation: "complete",
+        runId,
+        requestId: started.requestId,
+        decisionId: started.decisionId,
+        attempt: 1,
+        payloadHash: started.preparedRequest?.payloadHash,
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", phase: "awaiting_headers", deadlineMs: 90000, serializedBodyBytes: expect.any(Number), requestConfiguration: { stream: false, thinking: "enabled", reasoningEffort: "server_default", maxTokens: 8192, messageCount: expect.any(Number), toolCount: expect.any(Number), imageCount: 1 } },
+          { stage: "headers_received", phase: "reading_body", httpStatus: 200 },
+          { stage: "body_received", phase: "complete", outcome: "success", httpStatus: 200 },
+        ] },
+        preparedEstimate: { estimatedTextTokens: expect.any(Number), estimatedVisualTokens: expect.any(Number), estimatedEnvelopeTokens: 32, estimatedTotalTokens: expect.any(Number), imageCount: 1, estimationMethod: "provider_projection" },
+      });
+      const serialized = JSON.stringify(exchanges);
+      expect(serialized).not.toContain("synthetic-secret-token");
+      expect(serialized).not.toContain("open.bigmodel.cn");
+      expect(serialized).not.toContain("requested result remains unverified");
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses one explicit GLM timeout for Fetch evidence and Runtime retry reserve", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-explicit-timeout-"));
+    const runId = "runtime-glm-explicit-timeout" as RunId;
+    const fetchMock = vi.fn(async () => { throw new Error("synthetic network failure"); });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        runId,
+        glmRequestTimeoutMs: 120_000,
+        maxModelRequests: 3,
+      }, {
+        credentials: { glmApiKey: "synthetic-secret-token" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const records = (await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim().split(/\r?\n/u).map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        runId,
+        correlation: "complete",
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", deadlineMs: 120_000, serializedBodyBytes: expect.any(Number) },
+          { stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers" },
+        ] },
+      });
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["glm-5.3-flash", "qwen3.8-flash"] as const)("does not apply the default GLM retry reserve to injected %s providers", async (model) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-injected-provider-timeout-"));
+    let calls = 0;
+    const injectedProvider: ProviderAdapter = {
+      id: `injected-${model}`,
+      async generate() {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error("synthetic retryable provider error"), { retryable: true, retryMode: "same_input" });
+        return { type: "finish", summary: "The injected fixture completed successfully." };
+      },
+    };
+    try {
+      const handle = await createRun({ ...config(outputDir), model, glmRequestTimeoutMs: 120_000, maxModelRequests: 3 }, {
+        createProvider: () => injectedProvider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(calls).toBe(2);
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("projects the opt-in multiline typing presentation without replacing registered tool behavior", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-multiline-type-profile-"));
     const inputs: ModelInput[] = [];
@@ -241,6 +416,34 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("rejects an undersized wire budget before the first real HTTP call", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-wire-reject-"));
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ choices: [] }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        goal: `Inspect this synthetic request without losing its content: ${"x".repeat(40000)}`,
+        runId: "runtime-http-wire-reject" as RunId,
+        maxModelRequests: 3,
+        contextMaxInputTokens: 8000,
+        contextMaxWireInputTokens: 8000,
+      }, {
+        credentials: { glmApiKey: "synthetic-secret-token" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      expect(fetchMock).not.toHaveBeenCalled();
+      const report = await handle.report();
+      expect(report.events.some((event) => event.type === "model.request.started")).toBe(false);
+      expect(report.events).toContainEqual(expect.objectContaining({ type: "runtime.error", category: "budget" }));
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("passes the frozen Run preference snapshot to Context but not provider factories", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-assistant-preferences-"));
     const preferences = {
@@ -280,6 +483,65 @@ describe("app-runtime RunHandle", () => {
       expect(modelRequest?.type === "model.request.started" ? JSON.stringify(modelRequest.contextBudget?.trace) : "").not.toContain("Group findings by topic.");
       await handle.close();
     } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a single-file reopen grant out of provider configuration while exposing its zero-argument tool only for that Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-reopen-grant-"));
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    if (originalPlatform === undefined || originalPlatform.configurable !== true) {
+      await rm(outputDir, { recursive: true, force: true });
+      throw new Error("test runtime does not allow restoring a temporary process.platform override");
+    }
+    let providerConfig: ResolvedRunConfig | undefined;
+    let modelToolNames: string[] = [];
+    let computerConfig: import("./computers.js").ComputerBackendConfig | undefined;
+    try {
+      Object.defineProperty(process, "platform", { ...originalPlatform, value: "darwin" });
+      expect(createDefaultToolRegistry().get("reopen_saved_document")).toBeUndefined();
+      const reopenPath = join(outputDir, "one-run-output.txt");
+      const handle = await createRun({
+        ...config(outputDir),
+        computer: {
+          kind: "cua", socketPath: "fixture.sock", screenshotDir: join(outputDir, "screenshots"),
+          windowTarget: { pid: 42, windowId: 84 }, recoveryWindowTarget: { pid: 42, windowId: 85 },
+          windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 42, windowId: 85 }],
+          recoverBoundWindowMissing: true,
+          reopenSavedDocumentGrant: { path: reopenPath, expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+        },
+        windowSwitch: "opened-windows-v1",
+        windowHandoff: "confirm-v1",
+        recoverBoundWindowMissing: true,
+      }, {
+        createProvider: (options) => {
+          providerConfig = options.config;
+          return {
+            id: "reopen-grant-provider",
+            async generate(input) {
+              modelToolNames = input.tools.map((tool) => tool.name);
+              return { type: "finish", summary: "Grant tool visibility checked." };
+            },
+          };
+        },
+        createComputer: ({ config: value }) => {
+          computerConfig = value;
+          const computer = fakeComputer({ open: 0, observe: 0, close: 0 });
+          const open = computer.open.bind(computer);
+          computer.open = async (...args) => ({ ...await open(...args), platform: "darwin" });
+          computer.listWindows = async () => ({ options: [], truncated: false, omittedCount: 0 });
+          return Promise.resolve(computer);
+        },
+      });
+      const outcome = await handle.start();
+      if (outcome !== "succeeded") throw new Error(`reopen-grant fixture ended ${outcome}: ${JSON.stringify(await handle.report())}`);
+      expect(computerConfig).toMatchObject({ reopenSavedDocumentGrant: { path: reopenPath } });
+      expect(providerConfig?.computer).not.toHaveProperty("reopenSavedDocumentGrant");
+      expect(modelToolNames).toContain("reopen_saved_document");
+      await handle.close();
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      expect(process.platform).toBe(originalPlatform.value);
       await rm(outputDir, { recursive: true, force: true });
     }
   });
@@ -867,7 +1129,84 @@ describe("app-runtime RunHandle", () => {
         expect(report.summary).toMatchObject({ windowSwitch: "opened-windows-v1", runtimeOutcome: scenario.outcome, finalComputerTarget: null });
         expect(report.snapshot.latestObservationId).toBeUndefined();
         await writeRunReport(report, outputDir);
-        expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain("Final target: unknown after a model-selected window switch began");
+        expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain("Final target: unknown after a model-selected target transition began");
+      } finally {
+        await rm(outputDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("invalidates a reported target only after reopen dispatch and restores it after a newer handoff", async () => {
+    const scenarios: ReadonlyArray<{ id: string; refusalCode?: string; newerHandoff?: boolean }> = [
+      { id: "not-ready-refusal", refusalCode: "DOCUMENT_REOPEN_NOT_READY" },
+      { id: "preflight-refusal", refusalCode: "DOCUMENT_REOPEN_PREFLIGHT_FAILED" },
+      { id: "generic-refusal", refusalCode: "OTHER_REFUSAL" },
+      { id: "reopen-started" },
+      { id: "newer-handoff", newerHandoff: true },
+    ];
+    for (const scenario of scenarios) {
+      const outputDir = await mkdtemp(join(tmpdir(), `harness-app-reopen-final-target-${scenario.id}-`));
+      const runId = `reopen-final-target-${scenario.id}` as RunId;
+      const session = {
+        id: `${runId}-session` as import("@computer-harness/protocol").ComputerSessionId,
+        backend: "fixture",
+        viewport: { width: 800, height: 600, coordinateSpace: "physical" as const },
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: "2026-10-01T02:00:03.000Z",
+      };
+      const originalTarget = { pid: 2345, windowId: 6789 };
+      const nextTarget = { pid: 3456, windowId: 7890 };
+      const observationId = `${runId}-recovery-observation` as import("@computer-harness/protocol").ObservationId;
+      const callId = `${runId}-reopen-call` as ToolCallId;
+      const actionId = `${runId}-reopen-action` as import("@computer-harness/protocol").ActionId;
+      const action = { actionId, basedOn: observationId, kind: "reopen_saved_document" as const };
+      const call = { id: callId, name: "reopen_saved_document", arguments: {} };
+      const events: RuntimeEvent[] = [
+        ...recoveryReportBaseEvents(runId),
+        { eventId: `${runId}-event-5` as EventId, runId, sequence: 5, occurredAt: "2026-10-01T02:00:05.000Z", type: "computer.window.handoff.requested", sourceActionId: `${runId}-initial-handoff`, reasonCode: "bound_window_missing" },
+        { eventId: `${runId}-event-6` as EventId, runId, sequence: 6, occurredAt: "2026-10-01T02:00:06.000Z", type: "computer.window.handoff.completed", target: originalTarget, session },
+        ...[
+          { eventId: `${runId}-event-7` as EventId, runId, sequence: 7, occurredAt: "2026-10-01T02:00:07.000Z", type: "observation.created" as const, observation: {
+            id: observationId,
+            runId,
+            computerSessionId: session.id,
+            surfaceRef: { ...fixtureSurfaceRef, surfaceId: `${runId}-surface` as SurfaceId },
+            capturedAt: "2026-10-01T02:00:07.000Z",
+            viewport: session.viewport,
+            screenshot: { assetId: `${runId}-asset` as import("@computer-harness/protocol").AssetId, relativePath: "screenshots/current.png", mediaType: "image/png" as const, byteLength: 1 },
+          } },
+          { eventId: `${runId}-event-8` as EventId, runId, sequence: 8, occurredAt: "2026-10-01T02:00:08.000Z", type: "tool.call.received" as const, call },
+          { eventId: `${runId}-event-9` as EventId, runId, sequence: 9, occurredAt: "2026-10-01T02:00:09.000Z", type: "action.proposed" as const, callId, action },
+          { eventId: `${runId}-event-10` as EventId, runId, sequence: 10, occurredAt: "2026-10-01T02:00:10.000Z", type: "action.execution.started" as const, action },
+          ...(scenario.refusalCode !== undefined ? [
+            { eventId: `${runId}-event-11` as EventId, runId, sequence: 11, occurredAt: "2026-10-01T02:00:11.000Z", type: "action.execution.failed" as const, receipt: { actionId, status: "refused" as const, driverCode: scenario.refusalCode, message: "fixture refusal" } },
+            { eventId: `${runId}-event-12` as EventId, runId, sequence: 12, occurredAt: "2026-10-01T02:00:12.000Z", type: "tool.call.failed" as const, result: { callId, status: "failed" as const, error: { code: scenario.refusalCode, message: "fixture refusal" } } },
+            { eventId: `${runId}-event-13` as EventId, runId, sequence: 13, occurredAt: "2026-10-01T02:00:13.000Z", type: "run.finished" as const, outcome: "failed" as const },
+          ] : scenario.newerHandoff ? [
+            { eventId: `${runId}-event-11` as EventId, runId, sequence: 11, occurredAt: "2026-10-01T02:00:11.000Z", type: "action.execution.completed" as const, receipt: { actionId, status: "completed" as const, sessionAfter: session } },
+            { eventId: `${runId}-event-12` as EventId, runId, sequence: 12, occurredAt: "2026-10-01T02:00:12.000Z", type: "computer.window.handoff.requested" as const, sourceActionId: actionId, reasonCode: "bound_window_missing" as const },
+            { eventId: `${runId}-event-13` as EventId, runId, sequence: 13, occurredAt: "2026-10-01T02:00:13.000Z", type: "computer.window.handoff.completed" as const, target: nextTarget, session },
+            { eventId: `${runId}-event-14` as EventId, runId, sequence: 14, occurredAt: "2026-10-01T02:00:14.000Z", type: "run.finished" as const, outcome: "succeeded" as const },
+          ] : [
+            { eventId: `${runId}-event-11` as EventId, runId, sequence: 11, occurredAt: "2026-10-01T02:00:11.000Z", type: "run.finished" as const, outcome: "outcome_unknown" as const },
+          ]),
+        ],
+      ];
+      try {
+        await writeFile(join(outputDir, "trajectory.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+        const report = await buildRunReport({
+          ...config(outputDir),
+          runId,
+          windowSwitch: "opened-windows-v1",
+          computer: { kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } },
+        }, runId, [], []);
+        if (scenario.refusalCode === "DOCUMENT_REOPEN_NOT_READY" || scenario.refusalCode === "DOCUMENT_REOPEN_PREFLIGHT_FAILED") {
+          expect(report.summary.finalComputerTarget).toEqual({ mode: "window", ...originalTarget });
+        } else if (scenario.refusalCode !== undefined || scenario.id === "reopen-started") {
+          expect(report.summary.finalComputerTarget).toBeNull();
+        } else {
+          expect(report.summary.finalComputerTarget).toEqual({ mode: "window", ...nextTarget });
+        }
       } finally {
         await rm(outputDir, { recursive: true, force: true });
       }
@@ -1115,6 +1454,41 @@ describe("app-runtime RunHandle", () => {
       expect(createProvider).not.toHaveBeenCalled();
       expect(await readdir(outputDir)).toEqual([]);
     } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects markerless native-only recovery combined with Browser/Hybrid/grant before creating Run resources", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-markerless-hybrid-rejected-"));
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    if (originalPlatform === undefined || originalPlatform.configurable !== true) {
+      await rm(outputDir, { recursive: true, force: true });
+      throw new Error("test runtime does not allow restoring a temporary process.platform override");
+    }
+    const createProvider = vi.fn(() => ({ id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } }));
+    const createComputer = vi.fn(() => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })));
+    try {
+      Object.defineProperty(process, "platform", { ...originalPlatform, value: "darwin" });
+      await expect(createRun({
+        ...config(outputDir),
+        windowSwitch: "opened-windows-v1",
+        windowHandoff: "confirm-v1",
+        recoverBoundWindowMissing: true,
+        grounding: "hybrid-catalog-v1",
+        computer: {
+          kind: "cua", socketPath: "fixture.sock", screenshotDir: join(outputDir, "screenshots"),
+          windowTarget: { pid: 42, windowId: 84 }, recoveryWindowTarget: { pid: 42, windowId: 85 },
+          windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 42, windowId: 85 }],
+          recoverBoundWindowMissing: true, managedBrowserCompanion: true, managedBrowserUrl: "https://trains.ctrip.com/",
+          reopenSavedDocumentGrant: { path: join(outputDir, "output.txt"), expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+        },
+      }, { createProvider, createComputer })).rejects.toThrow(/bound-window recovery requires/iu);
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(await readdir(outputDir)).toEqual([]);
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      expect(process.platform).toBe(originalPlatform.value);
       await rm(outputDir, { recursive: true, force: true });
     }
   });

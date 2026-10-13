@@ -311,7 +311,7 @@ function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>
     case "failed": return "任务未能完成。";
     case "cancelled": return "任务已取消。";
     case "budget_exhausted": return failureAlreadyExplained ? "任务结束。" : "任务操作已达到上限。";
-    case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "有项操作的结果无法确认，任务已暂停。";
+    case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "任务已结束，操作结果仍待核实。";
   }
 }
 
@@ -382,6 +382,7 @@ function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): str
     keypress: "键盘操作",
     select_option: "选择操作",
     switch_window: "切换窗口操作",
+    reopen_saved_document: "重新打开文档操作",
     wait: "等待操作",
   };
   const riskLabels = categories.map((category) => categoryLabels[category]);

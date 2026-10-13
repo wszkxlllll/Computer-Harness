@@ -15,6 +15,7 @@ import type {
   RunId,
   RunOutcome,
   RunStatus,
+  SourceLinkedFinishEvidence,
   PlanState,
   ExecutionSegment,
   MemoryState,
@@ -49,7 +50,7 @@ export interface RunSnapshot {
   pendingApproval?: { requestId: string; callId: ToolCallId; reason: string };
   pendingUserQuestion?: string;
   pendingUserInputRequestId?: EventId;
-  pendingWindowHandoff?: { sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" };
+  pendingWindowHandoff?: { sourceActionId: ActionId; reasonCode: "foreground_mismatch" | "new_window_detected" | "bound_window_missing" };
   unresolvedActionId?: ActionId;
   /** Internal reducer binding used to validate kind-specific terminal receipt data. */
   unresolvedActionKind?: ActionIntent["kind"];
@@ -60,6 +61,8 @@ export interface RunSnapshot {
   endedAt?: string;
   summary?: string;
   reportedStatus?: "success" | "failure";
+  resultEvidence?: SourceLinkedFinishEvidence;
+  reportedSummary?: string;
   modelUsage?: ModelUsage;
   plan: PlanState;
   executionSegment?: ExecutionSegment;
@@ -314,7 +317,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         unresolvedActionId: event.action.actionId,
         unresolvedActionKind: event.action.kind,
       };
-      if (event.action.kind === "switch_window") delete nextSnapshot.latestObservationId;
+      if (event.action.kind === "switch_window" || event.action.kind === "reopen_saved_document") delete nextSnapshot.latestObservationId;
       return nextSnapshot;
     case "action.execution.completed":
     case "action.execution.failed":
@@ -348,13 +351,15 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         );
       }
       {
-        const switchingWindow = snapshot.unresolvedActionKind === "switch_window";
+        const targetTransition = snapshot.unresolvedActionKind === "switch_window" ||
+          snapshot.unresolvedActionKind === "reopen_saved_document";
+        const transitionName = snapshot.unresolvedActionKind;
         const sessionAfter = "sessionAfter" in event.receipt ? event.receipt.sessionAfter : undefined;
-        if (event.type === "action.execution.completed" && switchingWindow && sessionAfter === undefined) {
-          throw new Error("a completed switch_window action requires sessionAfter");
+        if (event.type === "action.execution.completed" && targetTransition && sessionAfter === undefined) {
+          throw new Error(`a completed ${transitionName} action requires sessionAfter`);
         }
-        if (sessionAfter !== undefined && (event.type !== "action.execution.completed" || !switchingWindow)) {
-          throw new Error("sessionAfter is valid only on a completed switch_window receipt");
+        if (sessionAfter !== undefined && (event.type !== "action.execution.completed" || !targetTransition)) {
+          throw new Error("sessionAfter is valid only on a completed target transition receipt");
         }
         let nextComputerSession = snapshot.computerSession;
         let nextActiveSurfaceRef = snapshot.activeSurfaceRef;
@@ -364,11 +369,11 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         let nextLegacySessionAliases = snapshot.legacyComputerSessionAliases;
         if (sessionAfter !== undefined) {
           if (snapshot.computerSession === undefined || sessionAfter.backend !== snapshot.computerSession.backend) {
-            throw new Error("switch_window sessionAfter must retain the active ComputerSession backend");
+            throw new Error(`${transitionName} sessionAfter must retain the active ComputerSession backend`);
           }
           if (sessionAfter.id !== snapshot.computerSession.id) {
             if (!isDecoderMarkedLegacyEvent(event)) {
-              throw new Error("switch_window sessionAfter must retain the active ComputerSession identity");
+              throw new Error(`${transitionName} sessionAfter must retain the active ComputerSession identity`);
             }
             const aliasSurfaceRef = legacyUnknownSurfaceRef(String(snapshot.runId), String(sessionAfter.id));
             const aliasTracking = trackSurfaceRef(snapshot, aliasSurfaceRef);
@@ -393,7 +398,7 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         const withoutUnresolvedAction = { ...snapshot };
         delete withoutUnresolvedAction.unresolvedActionId;
         delete withoutUnresolvedAction.unresolvedActionKind;
-        if (switchingWindow) delete withoutUnresolvedAction.latestObservationId;
+        if (targetTransition) delete withoutUnresolvedAction.latestObservationId;
         return {
           ...withoutUnresolvedAction,
           status: "running",
@@ -583,6 +588,8 @@ export function reduceRunEvent(snapshot: RunSnapshot, event: RuntimeEvent): RunS
         endedAt: event.occurredAt,
         ...(event.summary === undefined ? {} : { summary: event.summary }),
         ...(event.reportedStatus === undefined ? {} : { reportedStatus: event.reportedStatus }),
+        ...(event.resultEvidence === undefined ? {} : { resultEvidence: event.resultEvidence }),
+        ...(event.reportedSummary === undefined ? {} : { reportedSummary: event.reportedSummary }),
       };
     }
     default:
@@ -806,7 +813,8 @@ function validateSurfaceTransition(
 
   const childPush = to.parentSurfaceId === from.surfaceId;
   const trustedNativeTransient = (surface: SurfaceRef): boolean => surface.kind === "native_window" &&
-    (surface.admissionSource === "owned_transient_window_root_proof" || surface.admissionSource === "win32_relationship_probe");
+    (surface.admissionSource === "owned_transient_window_root_proof" || surface.admissionSource === "win32_relationship_probe" ||
+      surface.admissionSource === "macos_attached_sheet_proof");
   const siblingChildPush = from.kind === "native_window" && to.kind === "native_window" &&
     from.parentSurfaceId !== undefined && from.parentSurfaceId === to.parentSurfaceId &&
     from.surfaceId !== to.surfaceId && snapshot.surfaceParentsById[fromId] === String(from.parentSurfaceId) &&
@@ -828,7 +836,7 @@ function validateSurfaceTransition(
       }
       if ((to.kind === "overlay" && to.admissionSource !== "same_hwnd_overlay_root_proof") ||
           (to.kind === "native_window" && to.admissionSource !== "owned_transient_window_root_proof" &&
-            to.admissionSource !== "win32_relationship_probe")) {
+            to.admissionSource !== "win32_relationship_probe" && to.admissionSource !== "macos_attached_sheet_proof")) {
         throw new Error("transient child_push requires its exact adapter admission source");
       }
       return;
@@ -838,7 +846,8 @@ function validateSurfaceTransition(
       }
       if ((from.kind === "overlay" && from.admissionSource !== "same_hwnd_overlay_root_proof") ||
           (from.kind === "native_window" && from.parentSurfaceId !== undefined &&
-            from.admissionSource !== "owned_transient_window_root_proof" && from.admissionSource !== "win32_relationship_probe")) {
+            from.admissionSource !== "owned_transient_window_root_proof" && from.admissionSource !== "win32_relationship_probe" &&
+            from.admissionSource !== "macos_attached_sheet_proof")) {
         throw new Error("transient child_pop requires its exact adapter admission source");
       }
       return;
@@ -1004,7 +1013,7 @@ const surfaceRefSchema = z.object({
   generation: z.number().int().nonnegative(),
   kind: z.enum(["desktop", "native_window", "browser_tab", "dom", "overlay", "unknown"]),
   parentSurfaceId: nonEmptyString.max(128).optional(),
-  admissionSource: z.enum(["same_hwnd_overlay_root_proof", "owned_transient_window_root_proof", "win32_relationship_probe"]).optional(),
+  admissionSource: z.enum(["same_hwnd_overlay_root_proof", "owned_transient_window_root_proof", "win32_relationship_probe", "macos_attached_sheet_proof"]).optional(),
 }).superRefine((value, context) => {
   if (value.kind === "unknown" ? value.generation !== 0 : value.generation < 1) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["generation"], message: "only a legacy unknown Surface may use generation 0" });
@@ -1013,7 +1022,7 @@ const surfaceRefSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["parentSurfaceId"], message: "Surface cannot be its own parent" });
   }
   if ((value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
-      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe") &&
+      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe" || value.admissionSource === "macos_attached_sheet_proof") &&
         (value.kind !== "native_window" || value.parentSurfaceId === undefined))) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["admissionSource"], message: "admission source does not match its transient Surface kind/parent" });
   }
@@ -1059,6 +1068,17 @@ const groundingOptionSchema = z.object({
   text: nonEmptyString.max(160),
   enabled: z.boolean(),
 });
+const groundingTextFormatSchema = z.discriminatedUnion("status", [
+  z.object({ source: z.literal("ax-cfstring-v1"), status: z.literal("complete"), utf8Bytes: z.number().int().nonnegative().max(16_384), codePointCount: z.number().int().nonnegative().max(16_384), lineFeedCount: z.number().int().nonnegative().max(16_384), trailingLineFeedCount: z.number().int().nonnegative().max(16_384), carriageReturnCount: z.number().int().nonnegative().max(16_384) }).strict(),
+  z.object({ source: z.literal("ax-cfstring-v1"), status: z.literal("over_limit") }).strict(),
+]).superRefine((format, context) => {
+  if (format.status !== "complete") return;
+  if (format.utf8Bytes < format.codePointCount || format.utf8Bytes > 4 * format.codePointCount ||
+      format.lineFeedCount + format.carriageReturnCount > format.codePointCount ||
+      format.trailingLineFeedCount > format.lineFeedCount) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "AXTextArea format counters are inconsistent" });
+  }
+});
 const groundingElementSchema = z.object({
   elementRef: nonEmptyString.max(96),
   role: nonEmptyString.max(64),
@@ -1070,6 +1090,11 @@ const groundingElementSchema = z.object({
   browserRegion: z.enum(["content", "chrome", "unknown"]).optional(),
   options: z.array(groundingOptionSchema).max(32).optional(),
   optionsTruncated: z.boolean().optional(),
+  textFormat: groundingTextFormatSchema.optional(),
+}).superRefine((element, context) => {
+  if (element.textFormat !== undefined && (element.source !== "uia" || element.role !== "AXTextArea" || element.browserRegion === "content")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "textFormat is restricted to native UIA AXTextArea elements" });
+  }
 });
 const groundingSelectionTraceSchema = z.object({
   strategy: z.enum(["deterministic-lexical-v1", "bounded-fusion-v1"]),
@@ -1103,6 +1128,12 @@ const groundingCatalogSchema = z.object({
   elements: z.array(groundingElementSchema).max(256),
   selection: groundingSelectionTraceSchema.optional(),
 });
+const authorizedSavedDocumentEvidenceSchema = z.object({
+  source: z.literal("host-authorized-file-and-native-proof-v1"),
+  status: z.enum(["authorized_file_absent", "verified_clean_current_document", "unverified"]),
+  observationId: nonEmptyString,
+  surfaceRef: surfaceRefSchema,
+}).strict();
 const observationSchema = z.object({
   id: nonEmptyString,
   runId: nonEmptyString,
@@ -1112,6 +1143,21 @@ const observationSchema = z.object({
   viewport: viewportSchema,
   screenshot: assetRefSchema,
   grounding: groundingCatalogSchema.optional(),
+  authorizedSavedDocumentEvidence: authorizedSavedDocumentEvidenceSchema.optional(),
+}).superRefine((observation, context) => {
+  const evidence = observation.authorizedSavedDocumentEvidence;
+  if (evidence !== undefined && (evidence.observationId !== observation.id ||
+      evidence.surfaceRef.surfaceId !== observation.surfaceRef.surfaceId ||
+      evidence.surfaceRef.generation !== observation.surfaceRef.generation ||
+      evidence.surfaceRef.kind !== observation.surfaceRef.kind ||
+      evidence.surfaceRef.parentSurfaceId !== observation.surfaceRef.parentSurfaceId ||
+      evidence.surfaceRef.admissionSource !== observation.surfaceRef.admissionSource)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["authorizedSavedDocumentEvidence"],
+      message: "authorized saved-document evidence must match the exact Observation and Surface",
+    });
+  }
 });
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -1154,6 +1200,74 @@ const toolCallSchema = z.object({
     summary: nonEmptyString.max(240),
   }).optional(),
 });
+const sourceLinkedUnknownReasonSchema = z.enum(["not_observed", "no_grounding", "ambiguous_source", "conflicting_sources", "source_unavailable"]);
+const sourceLinkedFinishReportFieldSchema = z.discriminatedUnion("disposition", [
+  z.object({
+    fieldId: nonEmptyString.max(64),
+    disposition: z.literal("source_bound"),
+    sources: z.array(z.object({ observationId: nonEmptyString.max(128), elementRef: nonEmptyString.max(96) }).strict()).min(1).max(4),
+  }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), disposition: z.literal("inference"), reason: nonEmptyString.max(240) }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), disposition: z.literal("unknown"), reason: sourceLinkedUnknownReasonSchema }).strict(),
+]);
+const sourceLinkedFinishReportSchema = z.object({
+  version: z.literal("source-linked-finish-v1"),
+  fields: z.array(sourceLinkedFinishReportFieldSchema).max(32),
+}).strict();
+const sourceLinkedFinishEvidenceSourceSchema = z.object({
+  observationId: nonEmptyString.max(128),
+  capturedAt: nonEmptyString,
+  surfaceRef: z.object({
+    surfaceId: nonEmptyString.max(128),
+    generation: z.number().int().nonnegative(),
+    kind: z.enum(["desktop", "native_window", "browser_tab", "dom", "overlay", "unknown"]),
+    parentSurfaceId: nonEmptyString.max(128).optional(),
+    admissionSource: z.enum(["same_hwnd_overlay_root_proof", "owned_transient_window_root_proof", "win32_relationship_probe", "macos_attached_sheet_proof"]).optional(),
+  }).strict().superRefine((value, context) => {
+    if (value.kind === "unknown" ? value.generation !== 0 : value.generation < 1) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["generation"], message: "invalid Surface generation" });
+    }
+    if (value.parentSurfaceId === value.surfaceId ||
+        (value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
+        ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe" || value.admissionSource === "macos_attached_sheet_proof") &&
+          (value.kind !== "native_window" || value.parentSurfaceId === undefined))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "invalid Surface parent or admission source" });
+    }
+  }),
+  elementRef: nonEmptyString.max(96),
+  source: z.enum(["uia", "dom"]),
+  role: nonEmptyString.max(64),
+  name: z.string().max(160).optional(),
+  description: z.string().max(240).optional(),
+  state: z.object({
+    enabled: z.boolean().optional(),
+    focused: z.boolean().optional(),
+    editable: z.boolean().optional(),
+    expanded: z.boolean().optional(),
+    selected: z.boolean().optional(),
+    valuePresent: z.boolean().optional(),
+  }).strict().optional(),
+  options: z.array(z.object({ text: nonEmptyString.max(160), enabled: z.boolean() }).strict()).max(32).optional(),
+  optionsTruncated: z.boolean().optional(),
+  textFormat: groundingTextFormatSchema.optional(),
+  excerpt: z.string().min(1).max(2_048),
+}).strict();
+const sourceLinkedFinishEvidenceFieldSchema = z.discriminatedUnion("disposition", [
+  z.object({
+    fieldId: nonEmptyString.max(64),
+    label: nonEmptyString.max(80),
+    disposition: z.literal("source_bound"),
+    sources: z.array(sourceLinkedFinishEvidenceSourceSchema).min(1).max(4),
+    reviewRequired: z.boolean(),
+  }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), label: nonEmptyString.max(80), disposition: z.literal("inference"), reason: nonEmptyString.max(240) }).strict(),
+  z.object({ fieldId: nonEmptyString.max(64), label: nonEmptyString.max(80), disposition: z.literal("unknown"), reason: sourceLinkedUnknownReasonSchema }).strict(),
+]);
+const sourceLinkedFinishEvidenceSchema = z.object({
+  version: z.literal("source-linked-finish-v1"),
+  fields: z.array(sourceLinkedFinishEvidenceFieldSchema).max(32),
+}).strict();
+
 const modelTurnSchema = z.union([
   z.object({
     type: z.literal("tool_calls"),
@@ -1169,6 +1283,7 @@ const modelTurnSchema = z.union([
     summary: nonEmptyString,
     reportedStatus: z.enum(["success", "failure"]).optional(),
     observationAssessment: observationAssessmentSchema.optional(),
+    resultEvidence: sourceLinkedFinishReportSchema.optional(),
     usage: modelUsageSchema.optional(),
   }),
 ]);
@@ -1202,6 +1317,7 @@ const actionIntentSchema = z.discriminatedUnion("kind", [
   }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
   z.object({ ...actionBaseSchema, kind: z.literal("switch_window"), windowRef: nonEmptyString.max(128) }),
+  z.object({ ...actionBaseSchema, kind: z.literal("reopen_saved_document") }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
 ]);
 const actionReceiptSchema = z.object({
@@ -1316,6 +1432,7 @@ const actionGuardSummarySchema = z.discriminatedUnion("kind", [
   z.object({ ...actionBaseSchema, kind: z.literal("scroll"), point: pointSchema, direction: z.enum(["up", "down", "left", "right"]), ticks: z.number().int().positive() }),
   z.object({ ...actionBaseSchema, kind: z.literal("drag"), from: pointSchema, to: pointSchema }),
   z.object({ ...actionBaseSchema, kind: z.literal("switch_window"), windowRef: nonEmptyString.max(128) }),
+  z.object({ ...actionBaseSchema, kind: z.literal("reopen_saved_document") }),
   z.object({ actionId: nonEmptyString, kind: z.literal("wait"), durationMs: z.number().finite().nonnegative() }),
 ]);
 const eventBaseSchema = {
@@ -1330,7 +1447,7 @@ const contextTraceSchema = z.object({
   runId: nonEmptyString,
   stablePrefixHash: nonEmptyString,
   fixedBlocks: z.array(z.object({
-    name: z.enum(["system", "goal", "tools", "plan", "execution_segment", "memory"]),
+    name: z.enum(["system", "goal", "tools", "plan", "execution_segment", "memory", "source_linked_finish"]),
     estimatedTokens: z.number().int().nonnegative(),
     included: z.boolean(),
   })),
@@ -1410,6 +1527,9 @@ const contextTraceSchema = z.object({
     payloadHash: nonEmptyString,
     estimate: z.object({
       estimatedTextTokens: z.number().int().nonnegative(),
+      estimatedVisualTokens: z.number().int().nonnegative().optional(),
+      estimatedEnvelopeTokens: z.number().int().nonnegative().optional(),
+      estimatedTotalTokens: z.number().int().nonnegative().optional(),
       imageCount: z.number().int().nonnegative(),
       estimationMethod: z.enum(["context_report", "provider_projection"]),
     }).optional(),
@@ -1425,7 +1545,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     type: z.literal("computer.open.completed"),
     session: computerSessionSchema,
   }),
-  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.requested"), sourceActionId: nonEmptyString, reasonCode: z.enum(["foreground_mismatch", "new_window_detected"]) }),
+  z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.requested"), sourceActionId: nonEmptyString, reasonCode: z.enum(["foreground_mismatch", "new_window_detected", "bound_window_missing"]) }),
   z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.completed"), target: computerWindowIdentitySchema, session: computerSessionSchema }),
   z.object({ ...eventBaseSchema, type: z.literal("computer.window.handoff.ignored"), sourceActionId: nonEmptyString }),
   z.object({ ...eventBaseSchema, type: z.literal("observation.created"), observation: observationSchema }),
@@ -1447,6 +1567,9 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
       payloadHash: nonEmptyString,
       estimate: z.object({
         estimatedTextTokens: z.number().int().nonnegative(),
+        estimatedVisualTokens: z.number().int().nonnegative().optional(),
+        estimatedEnvelopeTokens: z.number().int().nonnegative().optional(),
+        estimatedTotalTokens: z.number().int().nonnegative().optional(),
         imageCount: z.number().int().nonnegative(),
         estimationMethod: z.enum(["context_report", "provider_projection"]),
       }).optional(),
@@ -1637,10 +1760,20 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     outcome: z.enum(["succeeded", "failed", "cancelled", "budget_exhausted", "outcome_unknown"]),
     summary: z.string().optional(),
     reportedStatus: z.enum(["success", "failure"]).optional(),
+    resultEvidence: sourceLinkedFinishEvidenceSchema.optional(),
+    reportedSummary: z.string().optional(),
   }),
 ]);
 
 export const runtimeEventSchema = runtimeEventUnionSchema.superRefine((event, context) => {
+  if (event.type === "run.finished" && event.resultEvidence !== undefined) {
+    const summaryBytes = Buffer.byteLength(event.summary ?? "", "utf8");
+    const evidenceBytes = Buffer.byteLength(JSON.stringify(event.resultEvidence), "utf8");
+    const reportedBytes = Buffer.byteLength(event.reportedSummary ?? "", "utf8");
+    if (summaryBytes > 16_384 || evidenceBytes > 64_000 || reportedBytes > 16_384 || summaryBytes + evidenceBytes + reportedBytes > 96_000) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["resultEvidence"], message: "source-linked finish exceeds its persisted size limit" });
+    }
+  }
   if (event.schemaVersion === 2) {
     const refs: Array<{ path: (string | number)[]; value: z.infer<typeof surfaceRefSchema> }> = [];
     if (event.type === "observation.created") {
@@ -1768,9 +1901,10 @@ function requiresLegacyUnknownSurface(value: unknown): boolean {
   if (value.parentSurfaceId !== undefined && (typeof value.parentSurfaceId !== "string" ||
       value.parentSurfaceId.trim().length === 0 || value.parentSurfaceId === value.surfaceId)) return true;
   if (value.admissionSource !== undefined && value.admissionSource !== "same_hwnd_overlay_root_proof" &&
-      value.admissionSource !== "owned_transient_window_root_proof" && value.admissionSource !== "win32_relationship_probe") return true;
+      value.admissionSource !== "owned_transient_window_root_proof" && value.admissionSource !== "win32_relationship_probe" &&
+      value.admissionSource !== "macos_attached_sheet_proof") return true;
   if ((value.admissionSource === "same_hwnd_overlay_root_proof" && value.kind !== "overlay") ||
-      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe") &&
+      ((value.admissionSource === "owned_transient_window_root_proof" || value.admissionSource === "win32_relationship_probe" || value.admissionSource === "macos_attached_sheet_proof") &&
         (value.kind !== "native_window" || value.parentSurfaceId === undefined))) return true;
   if (value.kind === "unknown") return value.generation !== 0 || value.parentSurfaceId !== undefined;
   if (value.kind !== "desktop" && value.kind !== "native_window" && value.kind !== "browser_tab" && value.kind !== "dom" && value.kind !== "overlay") return true;

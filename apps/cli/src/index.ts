@@ -1,10 +1,11 @@
 import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
-import type { RunOutcome } from "@computer-harness/protocol";
+import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import type { RunOutcome, SourceLinkedFinishContract } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
+import { parseSourceLinkedFinishContractJson } from "@computer-harness/app-runtime";
 import type { MonitorPolicyMode } from "@computer-harness/runtime";
 import { runApplicationTui, type TuiFeatureSelection } from "./tui.js";
 import { runCuaDoctor } from "./doctor-command.js";
@@ -30,6 +31,10 @@ export interface CliOptions {
   computer: "cua" | "osworld";
   cuaSocket?: string;
   cuaWindowTarget?: { pid: number; windowId: number };
+  cuaRecoveryWindowTarget?: { pid: number; windowId: number };
+  recoverBoundWindowMissing: boolean;
+  sourceLinkedFinish?: SourceLinkedFinishContract;
+  reopenSavedDocumentPath?: string;
   osworldBridge?: string;
   output: string;
   maxSteps: number;
@@ -80,6 +85,11 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   const goal = value("--goal");
   const tui = argv.includes("--tui");
   const windowSwitch = argv.includes("--window-switch");
+  const recoverBoundWindowMissing = argv.includes("--recover-bound-window-missing");
+  const reopenSavedDocumentPath = value("--reopen-saved-document");
+  const rawSourceLinkedFinish = value("--source-linked-finish-contract");
+  let sourceLinkedFinish: SourceLinkedFinishContract | undefined;
+  if (rawSourceLinkedFinish !== undefined) sourceLinkedFinish = parseSourceLinkedFinishContractJson(rawSourceLinkedFinish);
   const modelValue = value("--model");
   const model = resolveCliModel(modelValue, doctor || prepareManagedBrowserProfileValue) as ModelName;
   const monitorValue = value("--monitor") ?? "off";
@@ -112,6 +122,31 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
   const cuaWindowPidValue = value("--cua-window-pid");
   const cuaWindowIdValue = value("--cua-window-id");
   const cuaWindowTarget = resolveCuaWindowTargetOptions({ pid: cuaWindowPidValue, windowId: cuaWindowIdValue, computer, doctor });
+  const cuaRecoveryWindowTarget = resolveCuaWindowTargetOptions({
+    pid: value("--cua-recovery-window-pid"),
+    windowId: value("--cua-recovery-window-id"),
+    computer,
+    doctor,
+  });
+  if (reopenSavedDocumentPath !== undefined && (!isAbsolute(reopenSavedDocumentPath) || reopenSavedDocumentPath.trim() !== reopenSavedDocumentPath)) {
+    throw new Error("--reopen-saved-document requires one exact absolute file path");
+  }
+  if (reopenSavedDocumentPath !== undefined && (!recoverBoundWindowMissing || computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch || tui || argv.includes("--interactive") || value("--managed-browser-url") !== undefined)) {
+    throw new Error("--reopen-saved-document requires a native CUA Run with --window-switch and the exact primary/recovery targets");
+  }
+  if (recoverBoundWindowMissing && (computer !== "cua" || cuaWindowTarget === undefined || cuaRecoveryWindowTarget === undefined || !windowSwitch)) {
+    throw new Error("--recover-bound-window-missing requires CUA, both exact window targets, and --window-switch");
+  }
+  if (recoverBoundWindowMissing && (tui || groundingValue === "dom-catalog-v1" || groundingValue === "hybrid-catalog-v1" || value("--managed-browser-url") !== undefined)) {
+    throw new Error("--recover-bound-window-missing is available only for a native Darwin CUA window Run");
+  }
+  if (!recoverBoundWindowMissing && cuaRecoveryWindowTarget !== undefined) {
+    throw new Error("--cua-recovery-window-pid/--cua-recovery-window-id require --recover-bound-window-missing");
+  }
+  if (cuaWindowTarget !== undefined && cuaRecoveryWindowTarget !== undefined &&
+      cuaWindowTarget.pid === cuaRecoveryWindowTarget.pid && cuaWindowTarget.windowId === cuaRecoveryWindowTarget.windowId) {
+    throw new Error("recovery and primary CUA targets must be distinct exact windows");
+  }
   if (groundingValue === "uia-catalog-v1" && (computer !== "cua" || cuaWindowTarget === undefined)) {
     throw new Error("--grounding uia-catalog-v1 requires --computer cua and an explicit --cua-window-pid/--cua-window-id target");
   }
@@ -220,6 +255,10 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     computer,
     ...(cuaSocket === undefined ? {} : { cuaSocket }),
     ...(cuaWindowTarget === undefined ? {} : { cuaWindowTarget }),
+    ...(cuaRecoveryWindowTarget === undefined ? {} : { cuaRecoveryWindowTarget }),
+    recoverBoundWindowMissing,
+    ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }),
+    ...(reopenSavedDocumentPath === undefined ? {} : { reopenSavedDocumentPath }),
     ...(osworldBridge === undefined ? {} : { osworldBridge }),
     output,
     maxSteps,
@@ -280,6 +319,7 @@ async function main(): Promise<void> {
     process.stdout.write("TUI-only: --grounding auto selects UIA for native windows, DOM + UIA for a selected Harness-managed browser, and off for desktop.\n");
     process.stdout.write("TUI-only: --window-selection jev requires --allow-window-title-sharing and TYPESAFE_API_KEY; default is local.\n");
     process.stdout.write("Run option: --window-switch opts into switching among listed opened windows in a CUA session, including the primary desktop. In TUI, choose features with F; app names and titles go to the main Provider.\n");
+    process.stdout.write("Run option: --source-linked-finish-contract <json> explicitly requires a bounded source-linked-finish-v1 field contract for this Run.\n");
     process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
     return;
@@ -455,6 +495,9 @@ async function runEnvironmentLeaseRecovery(rawArgs: readonly string[]): Promise<
 
 export function toResolvedRunConfig(options: CliOptions, goal: string): ResolvedRunConfig {
   const qwenEndpoint = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
+  const rawGlmRequestTimeoutMs = options.model === "glm-5.3-flash" ? process.env.GLM_REQUEST_TIMEOUT_MS : undefined;
+  const glmRequestTimeoutMs = rawGlmRequestTimeoutMs === undefined ? undefined : Number(rawGlmRequestTimeoutMs.trim());
+  validateGlmRequestTimeoutMs(glmRequestTimeoutMs);
   const managedBrowserInitialTarget = options.grounding === "dom-catalog-v1" || options.grounding === "hybrid-catalog-v1";
   const managedBrowserCompanion = options.windowSwitch
     && !options.tui
@@ -469,6 +512,17 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
+          ...(options.cuaRecoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: options.cuaRecoveryWindowTarget }),
+          ...(options.recoverBoundWindowMissing && options.cuaWindowTarget !== undefined && options.cuaRecoveryWindowTarget !== undefined
+            ? { windowSwitchAllowedTargets: [options.cuaWindowTarget, options.cuaRecoveryWindowTarget] }
+            : {}),
+          ...(options.recoverBoundWindowMissing ? { recoverBoundWindowMissing: true } : {}),
+          ...(options.reopenSavedDocumentPath === undefined ? {} : {
+            reopenSavedDocumentGrant: {
+              path: options.reopenSavedDocumentPath,
+              expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+            },
+          }),
           grounding: options.grounding === "auto" ? "off" : options.grounding,
           ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
           managedBrowserProfileMode: options.managedBrowserProfileMode,
@@ -498,7 +552,10 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
     riskTimeoutMs: options.riskTimeoutMs,
     cleanupDeadlineMs: options.cleanupDeadlineMs,
     monitor: options.monitor,
+    windowHandoff: options.recoverBoundWindowMissing || options.windowSwitch ? "confirm-v1" : "off",
     windowSwitch: options.windowSwitch ? "opened-windows-v1" : "off",
+    ...(options.recoverBoundWindowMissing ? { recoverBoundWindowMissing: true } : {}),
+    ...(options.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: options.sourceLinkedFinish }),
     grounding: options.grounding === "auto" ? "off" : options.grounding,
     ...(options.qwenCoordinateMode === undefined ? {} : { qwenCoordinateMode: options.qwenCoordinateMode }),
     ...(options.qwenThinking === undefined ? {} : { qwenThinking: options.qwenThinking }),
@@ -509,6 +566,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
       || process.env.GLM_THINKING === "low" || process.env.GLM_THINKING === "high" || process.env.GLM_THINKING === "max"
       ? process.env.GLM_THINKING
       : "enabled",
+    ...(glmRequestTimeoutMs === undefined ? {} : { glmRequestTimeoutMs }),
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };

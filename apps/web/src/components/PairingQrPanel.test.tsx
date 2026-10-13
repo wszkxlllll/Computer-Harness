@@ -8,6 +8,21 @@ vi.mock("qrcode", () => ({ default: { toDataURL: vi.fn().mockResolvedValue("data
 afterEach(cleanup);
 
 describe("pairing QR status copy", () => {
+  it("offers the same one-time pairing URL in a separate browser tab", () => {
+    render(<PairingQrPanel
+      challenge={{ challengeId: "challenge", pairingUrl: "http://localhost:4317/pair?token=short-lived", expiresAt: "2026-09-27T00:00:00.000Z" }}
+      hasActiveChallenge={false}
+      busy={false}
+      loading={false}
+      onIssue={vi.fn()}
+    />);
+
+    const link = screen.getByRole("link", { name: "在另一浏览器打开配对链接" });
+    expect(link.getAttribute("href")).toBe("http://localhost:4317/pair?token=short-lived");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noreferrer");
+  });
+
   it("describes HTTPS remote availability conditionally without claiming deployment status", () => {
     render(<PairingQrPanel
       challenge={{ challengeId: "challenge", pairingUrl: "https://relay.example/pair?token=short-lived", expiresAt: "2026-09-27T00:00:00.000Z" }}

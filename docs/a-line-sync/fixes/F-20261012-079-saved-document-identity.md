@@ -1,0 +1,25 @@
+# F-20261012-079 — Native saved-document identity evidence
+
+The seventh candidate adds an opt-in, proof-only `get_window_state.document_identity_query` for a Host-authorized saved-document lifecycle. It uses the existing public Registry, returns before normal tree capture and element-token registration, and leaves ordinary observations unchanged. This evidence does not itself authorize opening a document or imply completion of T2.
+
+The application proof independently binds the exact PID, process start, bundle identifier, actual executable URL, and complete singleton live-instance set. The document proof additionally requires the expected canonical file URL, exact CG owner/window/focus/frame, typed `AXCloseButton.AXEdited=false`, and a unique match across a complete AXWindows domain re-read at the tail. Missing, malformed, changing, or ambiguous evidence fails closed. A blank document can have verified application identity while its document proof remains unverified. CFString/CFURL/CFBoolean types are checked dynamically; unavailable document attributes are not silently treated as unrelated windows.
+
+The formal query has strict parsing and keeps reserved-argument stripping intact. Recording redacts this query's expected document URL and `launch_app.urls` entries with the file scheme; HTTP/HTTPS and other tools retain their existing recording contract. The added producer does not introduce a native open tool. Product reopening uses the existing registered `launch_app` only through a separately reviewed Host grant.
+
+## Reproducible native artifact
+
+Apply [the seventh patch](../../../patches/cua-driver/d114f35-macos-document-identity.patch) after the six existing patches in the recorded order, starting from upstream Cua `d114f35fec05ecd37bf529e5587be86852205b64`. Patch SHA-256: `59dd4defa28d8b5bf0be259c02ca6a21048c28a69f533649494f3bfd233042af` (66,066 bytes). A complete Git archive replay matched all nine changed source files to the tested tree. Three changes only supply `text_format: None` in existing AXNode constructors, completing the prior metadata build closure.
+
+The native author ran formatting, platform-macos library tests (365 passed, 2 ignored), core library tests (588 passed), workspace check, and locked release build. Full logs and replay hashes are retained privately under `A06-private/native7-final/`. No pre-test source SHA was persisted; it has not been reconstructed as a historical assertion. Root independently reviewed the final source, patch, replay hashes, and logs, without claiming to have run those tests.
+
+The release binary SHA was `ad33d2900ec569d8f0ee21a6414f02490dec9e54170283ffed58503791e4aa69`. Removing only its code signature produced staged SHA `1f9fb8e2fce0e487e7ab5828811e1566d9561f063769c45086718ea483063faa`; an independent Mach-O comparison matched all 40 sections. The signed candidate SHA is `54493778143216adc202eb6a7d82e6e5b4f987e78b15291557bd43910b79b6b7`, CDHash `010956ea3f4e307039e848f15a45aa6526a52401`, with isolated bundle `com.trycua.driver.capturefix.local.20261011`. The previous complete app and stock driver remain available for rollback.
+
+## Actual SDK evidence, 2026-10-12
+
+Sol started the signed candidate as PID 83118 and verified Accessibility, AX, and Screen Recording through its normal health endpoint. Overall health remains degraded because the candidate deliberately has its own bundle identity; the read-only capture capability check was skipped, rather than counted as a capture pass. No System Settings change was needed.
+
+A real production SDK query proved the blank window's application identity independently of its missing document. A single normal diagnostic `launch_app` call opened an owned short text fixture. A read-only continuation then found exactly one full document match at new CGID 17768, with a stable complete domain, typed clean close button, and tail revalidation. A production Computer capture produced a 1312×844 exact-window PNG and text-format metadata of 47 UTF-8 bytes, 17 code points, 2 LF, 1 trailing LF, and 0 CR. Sol normally closed only that diagnostic document and confirmed its absence. Root independently read the proofs and inspected the PNG.
+
+The first probe's post-launch assertion selected an unrelated candidate and failed; that artifact is retained. The launch was not repeated. The successful continuation was read-only. These checks use no real Provider requests and are diagnostic evidence, not the singleton Run's permission chain, default Guard acceptance, saved business output, or complete T2 acceptance.
+
+Private receipts: `sol-seventh-candidate-live.json`, `sol-seventh-candidate-health.json`, `sol-seventh-document-proof-955b080d-213c-4a97-98d4-5b1d5d33367c.json`, `sol-seventh-document-proof-continuation-291d7a55-73b8-4fac-a628-edac7f97f07d.json`, `sol-seventh-document-capture-4ddc2a29-33f6-4f2b-aff6-ceb070f50e0f.json`, and `sol-seventh-diagnostic-close-b8dc9f3d-3365-42a5-baaa-004b1d1b86d2.json`. The incomplete first seventh-patch artifact is also preserved privately and must not be used as the reproducible patch.

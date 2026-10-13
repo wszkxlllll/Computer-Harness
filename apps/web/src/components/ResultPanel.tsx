@@ -26,8 +26,8 @@ export function ResultPanel({ reply, outcome, error }: ResultPanelProps) {
     return () => window.removeEventListener("resize", updateExpansion);
   }, [expanded, reply]);
 
-  if (!reply && !outcome) return null;
-
+  const hasReply = Boolean(reply?.trim());
+  if (!hasReply && !outcome) return null;
   const outcomeLabel = outcome === "succeeded" ? "已完成"
     : outcome === "failed" ? "未完成"
       : outcome === "cancelled" ? "已停止"
@@ -41,23 +41,23 @@ export function ResultPanel({ reply, outcome, error }: ResultPanelProps) {
             : "还不能确认任务是否完成。";
   return (
     <section className="result-panel" aria-labelledby="result-heading">
-      {reply && <div className="section-kicker">电脑返回的内容</div>}
+      {hasReply && <div className="section-kicker">电脑返回的内容</div>}
       <div className="result-heading-row">
         <h2 id="result-heading">任务结果</h2>
         <span className={`outcome-label outcome-${outcome ?? "unknown"}`}>{outcomeLabel}</span>
       </div>
-      {reply
+      {hasReply
         ? <div id="run-result-copy" ref={copyRef} className={`result-copy${expanded ? " result-copy-expanded" : ""}`}>
           <p>{reply}</p>
         </div>
         : <p className="result-empty-message">{emptyResultMessage}</p>}
-      {!reply && error?.trim() && (
+      {!hasReply && error?.trim() && (
         <details className="result-error-details">
           <summary>查看原因</summary>
           <p>{error}</p>
         </details>
       )}
-      {reply && canExpand && (
+      {hasReply && canExpand && (
         <button
           className="text-button"
           type="button"

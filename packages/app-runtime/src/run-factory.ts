@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { DefaultContextCompiler } from "@computer-harness/context";
 import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, QwenTextEmbeddingProvider, type MemoryEmbeddingProvider, type MemoryRunModule } from "@computer-harness/memory";
 import { createExecutionSegmentTools, createPlanningRunModule, FilePlanStore, type PlanningRunModule } from "@computer-harness/planning";
@@ -11,7 +12,9 @@ import {
   RunController,
   ToolRegistry,
   createDefaultToolRegistry,
+  validateSourceLinkedFinishContract,
   windowSwitchTools,
+  reopenSavedDocumentTool,
   type ActionPolicy,
   type CleanupDiagnostic,
   type CleanupOperation,
@@ -30,24 +33,75 @@ import { createProvider } from "./providers.js";
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import { selectOperationGuidance } from "./operation-guidance.js";
-import type { MemoryRetrievalMode, ProviderCredentials, ResolvedRunConfig, RunCloseConfirmation, RunDependencies, RunHandle } from "./config.js";
+import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunCloseConfirmation, type RunDependencies, type RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
-  for (const value of [input.contextMaxInputTokens, input.contextMaxWireInputTokens]) {
-    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) {
-      throw new Error("Context input budgets must be integers from 1 to 131072");
+  const sourceLinkedFinish = validateSourceLinkedFinishContract(input.sourceLinkedFinish);
+  const computerRecoveryOptIn = input.computer.kind === "cua" && input.computer.recoverBoundWindowMissing === true;
+  if (input.recoverBoundWindowMissing === true !== computerRecoveryOptIn) {
+    throw new Error("bound-window recovery requires matching Run and CUA computer opt-ins");
+  }
+  if (input.recoverBoundWindowMissing === true) {
+    const hybridNativeWebDocument = input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined;
+    if (process.platform !== "darwin" || input.windowSwitch !== "opened-windows-v1" ||
+        (input.windowHandoff !== undefined && input.windowHandoff !== "confirm-v1")) {
+      throw new Error("bound-window recovery requires a Darwin CUA run with exact native window switching and no managed-browser companion");
+    }
+    if (input.computer.kind !== "cua") throw new Error("bound-window recovery requires a CUA computer");
+    const cuaConfig = input.computer;
+    if ((cuaConfig.windowSwitch !== undefined && cuaConfig.windowSwitch !== "opened-windows-v1") || cuaConfig.windowTarget === undefined ||
+        cuaConfig.recoveryWindowTarget === undefined || (cuaConfig.managedBrowserCompanion === true && !hybridNativeWebDocument) ||
+        (cuaConfig.managedBrowserUrl !== undefined && !hybridNativeWebDocument) || cuaConfig.grounding === "dom-catalog-v1" ||
+        (cuaConfig.grounding === "hybrid-catalog-v1" && !hybridNativeWebDocument) || input.grounding === "dom-catalog-v1" ||
+        (input.grounding === "hybrid-catalog-v1" && !hybridNativeWebDocument)) {
+      throw new Error("bound-window recovery requires a Darwin CUA run with exact native window switching and no managed-browser companion");
+    }
+    const primaryTarget = cuaConfig.windowTarget;
+    const recoveryTarget = cuaConfig.recoveryWindowTarget;
+    const scopes = cuaConfig.windowSwitchAllowedTargets;
+    const identity = (target: { readonly pid: number; readonly windowId: number }) => `${target.pid}:${target.windowId}`;
+    if (scopes?.length !== 2 || new Set(scopes.map(identity)).size !== 2 ||
+        !scopes.some((target) => identity(target) === identity(primaryTarget)) ||
+        !scopes.some((target) => identity(target) === identity(recoveryTarget)) ||
+        identity(primaryTarget) === identity(recoveryTarget)) {
+      throw new Error("bound-window recovery requires exactly the Host-authorized primary and recovery window targets");
     }
   }
-  if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) {
-    throw new Error("Context text budget must not exceed wire budget");
+  if (input.computer.kind === "cua" && input.computer.reopenSavedDocumentGrant !== undefined) {
+    const grant = input.computer.reopenSavedDocumentGrant;
+    if (input.recoverBoundWindowMissing !== true || process.platform !== "darwin" ||
+        input.windowSwitch !== "opened-windows-v1" || input.computer.windowTarget === undefined ||
+        input.computer.recoveryWindowTarget === undefined || (input.computer.managedBrowserCompanion === true && input.computer.hybridNativeWebDocumentTargets === undefined) ||
+        (input.computer.managedBrowserUrl !== undefined && input.computer.hybridNativeWebDocumentTargets === undefined) || input.computer.grounding === "dom-catalog-v1" ||
+        (input.computer.grounding === "hybrid-catalog-v1" && input.computer.hybridNativeWebDocumentTargets === undefined) || !isAbsoluteHostPath(grant.path) ||
+        !isCanonicalExecutableFileUrl(grant.expectedExecutableUrl)) {
+      throw new Error("saved-document reopen requires an exact Darwin native recovery Run and one absolute Host file grant");
+    }
   }
+  for (const value of [input.contextMaxInputTokens, input.contextMaxWireInputTokens]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
+  }
+  if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) throw new Error("Context text budget must not exceed wire budget");
+  if (input.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(input.glmRequestTimeoutMs);
   const runId = input.runId ?? generatedRunId();
   const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
   if (companionRequested && input.windowSwitch !== "opened-windows-v1") {
     throw new Error("managed browser companion requires the opened-windows-v1 Run opt-in");
   }
-  if (companionRequested && browserInitialGrounding) {
+  const hybridNativeWebDocumentRequested = input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined;
+  if (input.computer.kind === "cua" && input.computer.hybridNativeWebDocumentTargets !== undefined && (input.computer.managedBrowserProfileMode !== "ephemeral" ||
+      input.computer.managedBrowserProfileLabel !== undefined || input.computer.managedBrowserProfileRoot !== undefined ||
+      input.computer.managedBrowserUrl !== "https://trains.ctrip.com/" || input.computer.managedBrowserCompanion !== true ||
+      input.computer.windowTarget === undefined || input.computer.recoveryWindowTarget === undefined ||
+      input.computer.hybridNativeWebDocumentTargets === undefined ||
+      input.computer.hybridNativeWebDocumentTargets.primaryTarget.pid !== input.computer.windowTarget.pid ||
+      input.computer.hybridNativeWebDocumentTargets.primaryTarget.windowId !== input.computer.windowTarget.windowId ||
+      input.computer.hybridNativeWebDocumentTargets.recoveryTarget.pid !== input.computer.recoveryWindowTarget.pid ||
+      input.computer.hybridNativeWebDocumentTargets.recoveryTarget.windowId !== input.computer.recoveryWindowTarget.windowId)) {
+    throw new Error("T3 hybrid requires one fixed-url ephemeral Browser and the exact Host TextEdit recovery pair");
+  }
+  if (companionRequested && browserInitialGrounding && !hybridNativeWebDocumentRequested) {
     throw new Error("managed browser companion cannot also be the initial browser target");
   }
   const prepareManagedBrowserCompanion = companionRequested && input.windowSwitch === "opened-windows-v1";
@@ -61,6 +115,7 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     : input.computer;
   const baseConfig: ResolvedRunConfig = {
     ...input,
+    ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }),
     runId,
     grounding,
     windowSwitch: input.windowSwitch ?? "off",
@@ -120,10 +175,16 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       throw new Error(`injected Provider id '${provider.id}' does not match configured external Provider '${config.model.id}'`);
     }
 
+    const providedToolRegistry = dependencies.createToolRegistry?.();
     const tools = projectToolPresentations(
-      dependencies.createToolRegistry?.() ?? createDefaultToolRegistry(),
+      providedToolRegistry ?? (sourceLinkedFinish === undefined
+        ? createDefaultToolRegistry()
+        : createDefaultToolRegistry({ sourceLinkedFinish })),
       computerAssembly.toolPresentationOverrides,
     );
+    if (sourceLinkedFinish !== undefined && providedToolRegistry !== undefined) {
+      assertSourceLinkedFinishRegistry(tools, sourceLinkedFinish);
+    }
     tools.registerMany(computerAssembly.groundingTools);
     let memoryMutationApplier: ((targetRunId: RunId, mutation: MemoryMutation) => Promise<void>) | undefined;
     const memoryRetrievalMode = resolveMemoryRetrievalMode(config);
@@ -182,6 +243,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       throw new Error("windowSwitch opened-windows-v1 requires a Computer with listWindows support");
     }
     if (config.windowSwitch === "opened-windows-v1") tools.registerMany(windowSwitchTools());
+    if (config.computer.kind === "cua" && config.computer.reopenSavedDocumentGrant !== undefined) {
+      tools.register(reopenSavedDocumentTool());
+    }
 
     if (config.riskGuard === "layered" && config.riskModel !== "off" && config.riskModel !== "same") {
       await mkdir(resolve(config.outputDir, "risk-review"), { recursive: true });
@@ -211,13 +275,16 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(config.contextMaxInputTokens === undefined ? {} : { maxInputTokens: config.contextMaxInputTokens }),
       ...(config.contextMaxWireInputTokens === undefined ? {} : { maxWireInputTokens: config.contextMaxWireInputTokens }),
     });
-    const contextCompiler = projectModuleContext(
+    const projectedContextCompiler = projectModuleContext(
       baseContextCompiler,
       runId,
       planningModule,
       memoryModule,
       config.operationGuidance ?? "off",
     );
+    const contextCompiler = sourceLinkedFinish === undefined || dependencies.createContextCompiler === undefined
+      ? projectedContextCompiler
+      : validateSourceLinkedFinishContext(projectedContextCompiler, tools, sourceLinkedFinish);
     const enabledToolNames = computerAssembly.enabledToolNames(tools);
     controller = new RunController({
       runId,
@@ -226,6 +293,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       contextCompiler,
       toolRegistry: tools,
       policy: dependencies.createPolicy?.(factoryConfig) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
+      ...(dependencies.createProvider === undefined && config.model === "glm-5.3-flash" ? {
+        providerAttemptReserveMs: config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS,
+      } : {}),
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,
       assetStore,
@@ -233,7 +303,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       onEventCommitted: eventFeed.publish,
       batching: config.batching,
       windowHandoff: config.windowHandoff ?? "off",
+      ...(config.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: config.sourceLinkedFinish }),
       windowSwitch: config.windowSwitch ?? "off",
+      recoverBoundWindowMissing: config.recoverBoundWindowMissing === true,
       ...(config.assistantPreferences === undefined ? {} : { assistantPreferences: config.assistantPreferences }),
       cleanupDeadlineMs: config.cleanupDeadlineMs,
       features,
@@ -401,6 +473,60 @@ function projectModuleContext(
         ...projectedInput,
         ...(operationGuidance === undefined ? {} : { operationGuidance }),
       }, signal);
+    },
+  };
+}
+
+function assertSourceLinkedFinishRegistry(
+  registry: ToolRegistry,
+  contract: NonNullable<ResolvedRunConfig["sourceLinkedFinish"]>,
+): void {
+  const finishTools = registry.list().filter((tool) => tool.category === "control" && tool.control === "finish");
+  const terminate = registry.get("terminate");
+  if (finishTools.length !== 1 || finishTools[0]?.name !== "terminate" || terminate?.category !== "control" ||
+      terminate.control !== "finish") {
+    throw new Error("source-linked finish requires exactly one registered finish control named terminate");
+  }
+  const expectedTerminate = createDefaultToolRegistry({ sourceLinkedFinish: contract }).get("terminate");
+  const modelTerminate = registry.modelTools("main").find((tool) => tool.name === "terminate");
+  if (expectedTerminate === undefined || modelTerminate === undefined ||
+      !isDeepStrictEqual(terminate.inputSchema, expectedTerminate.inputSchema)) {
+    throw new Error("source-linked finish requires the Runtime terminate input schema produced for this contract");
+  }
+}
+
+function validateSourceLinkedFinishContext(
+  compiler: ContextCompiler,
+  registry: ToolRegistry,
+  contract: NonNullable<ResolvedRunConfig["sourceLinkedFinish"]>,
+): ContextCompiler {
+  const registeredTerminate = registry.modelTools("main").find((tool) => tool.name === "terminate");
+  if (registeredTerminate === undefined) {
+    throw new Error("source-linked finish requires a model-visible terminate tool");
+  }
+  return {
+    async compile(input: ContextCompileInput, signal: AbortSignal) {
+      const finishAllowed = (input.enabledCategories === undefined || input.enabledCategories.includes("control")) &&
+        (input.enabledToolNames === undefined || input.enabledToolNames.includes("terminate"));
+      if (!finishAllowed) {
+        const modelInput = await compiler.compile(input, signal);
+        if (modelInput.tools.some((tool) => tool.name === "terminate" || tool.control === "finish")) {
+          throw new Error("ContextCompiler exposed a finish tool outside the enabled tool set");
+        }
+        return modelInput;
+      }
+      if (input.sourceLinkedFinish === undefined || !isDeepStrictEqual(input.sourceLinkedFinish, contract)) {
+        throw new Error("ContextCompiler did not receive the configured source-linked finish contract");
+      }
+      const modelInput = await compiler.compile(input, signal);
+      const finishTools = modelInput.tools.filter((tool) => tool.control === "finish");
+      const terminateTools = modelInput.tools.filter((tool) => tool.name === "terminate");
+      if (finishTools.length !== 1 || terminateTools.length !== 1 ||
+          terminateTools[0]?.control !== "finish" || terminateTools[0]?.category !== "control" ||
+          !isDeepStrictEqual(terminateTools[0]?.inputSchema, registeredTerminate.inputSchema)) {
+        throw new Error("ContextCompiler must project the registered source-linked terminate schema");
+      }
+      return modelInput;
     },
   };
 }
@@ -653,11 +779,27 @@ function withoutAssistantPreferences(config: ResolvedRunConfig): ResolvedRunConf
     managedBrowserCompanion: _runOnlyBrowserCompanion,
     managedBrowserProfileRoot: _hostOnlyProfileRoot,
     managedBrowserProfileLabel: _hostOnlyProfileLabel,
+    reopenSavedDocumentGrant: _hostOnlySavedDocumentGrant,
     ...computer
   } = factoryConfig.computer;
   if (_hostOnlyTargetScope === undefined && _runOnlyBrowserCompanion === undefined && _hostOnlyProfileRoot === undefined &&
-      _hostOnlyProfileLabel === undefined) return factoryConfig;
+      _hostOnlyProfileLabel === undefined && _hostOnlySavedDocumentGrant === undefined) return factoryConfig;
   return { ...factoryConfig, computer };
+}
+
+function isAbsoluteHostPath(value: string): boolean {
+  return typeof value === "string" && value.length > 0 && isAbsolute(value) && !value.includes("\0");
+}
+
+function isCanonicalExecutableFileUrl(value: string): boolean {
+  if (typeof value !== "string" || value.length === 0) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "file:" && url.hostname === "" && url.search === "" && url.hash === "" &&
+      url.pathname.startsWith("/") && url.href === value;
+  } catch {
+    return false;
+  }
 }
 
 function generatedRunId(): RunId {
