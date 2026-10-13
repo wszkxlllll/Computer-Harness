@@ -1079,9 +1079,11 @@ export class ManagedBrowserHost {
       stage = "create_startup_target";
       const startupTargetId = await createManagedBrowserPage(browserEndpoint, this.options.url, signal);
       const needsNavigationReadiness = this.options.url.startsWith("http://") || this.options.url.startsWith("https://");
-      // HTTP(S) needs a bounded redirect/DOM readiness window. Blank and data
-      // startup pages retain the original 3-second active-page selection cap.
-      const startupReadyDeadline = Date.now() + Math.min(this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, needsNavigationReadiness ? 8_000 : 3_000);
+      // HTTP(S) navigation honors the configured bounded startup timeout.
+      // Blank and data pages retain the short active-page selection budget.
+      const startupTimeoutMs = this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+      const startupReadyDeadline = Date.now() + (needsNavigationReadiness ? startupTimeoutMs : Math.min(startupTimeoutMs, 3_000));
+      stage = "resolve_startup_page";
       if (needsNavigationReadiness) {
         const startupPage = await waitForManagedBrowserNavigationReady(
           { id: startupTargetId, type: "page" },

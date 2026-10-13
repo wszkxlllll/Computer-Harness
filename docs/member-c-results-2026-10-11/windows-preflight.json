@@ -1,0 +1,291 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-11",
+  "scope": "Windows初态适配器预检；不是模型Run、业务成绩或D02稳定性样本",
+  "plannedSourceCommit": "d4eae01a1f27b6c73e2bee64b57e769d39894954",
+  "candidateMigration": {
+    "freshCandidateDirectory": true,
+    "previousWindowsOverlayPreserved": true,
+    "environmentIntegrity": "not_independently_fingerprinted_in_this_local_session",
+    "policyScope": "本次受控本机操作的选择；不改变团队环境完整性要求或审计器准入"
+  },
+  "build": {
+    "cachePackagesReused": 184,
+    "downloadedPackages": 0,
+    "stepLogsRecovered": [
+      "offline-install",
+      "typecheck-build",
+      "web-build",
+      "cli-help"
+    ],
+    "exitCodes": null,
+    "buildStepsReplayed": 0,
+    "serializationSmokePassed": true,
+    "note": "既有四步日志已恢复；原退出码未持久化，不补造全绿回执。生产Windows模块已被后续真实预检成功导入并使用。"
+  },
+  "initialPreflights": [
+    {
+      "cardId": "M01",
+      "runId": "d01-preflight-1791719227114-0d5231a4-bdae-494e-93f4-efe4b09d1b0c",
+      "kind": "initial_adapter_preflight_not_model_Run",
+      "exitCode": 0,
+      "adapterStatus": "adapter_observation_and_cleanup_passed_not_business_acceptance",
+      "cleanupConfirmed": true,
+      "providerRequests": 0,
+      "businessAcceptance": "not_run",
+      "taskInitialStateRelease": "仅页头可见，科室导航尚未见，任务初态不放行",
+      "actualCssViewport": {
+        "cssWidth": 1026,
+        "cssHeight": 568,
+        "deviceScaleFactor": 1
+      },
+      "startedAt": "2026-10-11T11:47:07.116Z",
+      "endedAt": "2026-10-11T11:47:19.662Z",
+      "sourceManifestSha256": "7be7e049e12ef55294c86ced26775fff31eb157ac7ccbf403509071e4f62908c",
+      "privateInstanceSha256": "68f5442331605f2bcd26104b6a952f8d8d97b19ebdb6eabf79a144a69aac17d7",
+      "privateInstancePublished": false,
+      "publicScreenshot": {
+        "path": "windows-evidence/M01-initial.png",
+        "assetId": "d01-preflight-1791719227114-0d5231a4-bdae-494e-93f4-efe4b09d1b0c-initial-screenshot",
+        "mediaType": "image/png",
+        "bytes": 21762,
+        "sha256": "9eb9cb5fff618e3506b350e09cfcb89b17876ce619ce5d171881a20ba9835842",
+        "review": "仅官方公开网页及空白浏览器UI；无个人账号、凭据或本机目录；非业务终态截图"
+      },
+      "surfaceKind": "dom"
+    },
+    {
+      "cardId": "CP01",
+      "runId": "d01-preflight-1791719240012-f6b616ef-4727-4ead-a054-9467d9d6cc70",
+      "kind": "initial_adapter_preflight_not_model_Run",
+      "exitCode": 0,
+      "adapterStatus": "adapter_observation_and_cleanup_passed_not_business_acceptance",
+      "cleanupConfirmed": true,
+      "providerRequests": 0,
+      "businessAcceptance": "not_run",
+      "taskInitialStateRelease": "官方首页可见，但翻译提示遮挡，价目图尚未核对",
+      "actualCssViewport": {
+        "cssWidth": 1026,
+        "cssHeight": 568,
+        "deviceScaleFactor": 1
+      },
+      "startedAt": "2026-10-11T11:47:20.012Z",
+      "endedAt": "2026-10-11T11:47:26.508Z",
+      "sourceManifestSha256": "557fa296c286219cbb4b182681c9721fc2c2d368a466ee3744aaf0e1423f9003",
+      "privateInstanceSha256": "8304d48687b1b7492a3bf4700b171d80b9ddd8ce3d9b4e3a241296bca1c490fc",
+      "privateInstancePublished": false,
+      "publicScreenshot": {
+        "path": "windows-evidence/CP01-initial.png",
+        "assetId": "d01-preflight-1791719240012-f6b616ef-4727-4ead-a054-9467d9d6cc70-initial-screenshot",
+        "mediaType": "image/png",
+        "bytes": 309174,
+        "sha256": "8d85d8273fc89538aebf847f523c2092ae7cd520493617e46b1f5e62b8ec0393",
+        "review": "仅官方公开网页及空白浏览器UI；无个人账号、凭据或本机目录；非业务终态截图"
+      },
+      "surfaceKind": "dom"
+    },
+    {
+      "cardId": "M02",
+      "runId": "d01-preflight-1791719246836-7271617d-a8a5-4257-a829-713375776406",
+      "kind": "initial_adapter_preflight_not_model_Run",
+      "exitCode": 0,
+      "adapterStatus": "adapter_observation_and_cleanup_passed_not_business_acceptance",
+      "cleanupConfirmed": true,
+      "providerRequests": 0,
+      "businessAcceptance": "not_run",
+      "taskInitialStateRelease": "精确PID/HWND最大化后CSS宽度门槛满足；具体日期列尚未核对",
+      "actualCssViewport": {
+        "cssWidth": 1272,
+        "cssHeight": 596,
+        "deviceScaleFactor": 1
+      },
+      "startedAt": "2026-10-11T11:47:26.837Z",
+      "endedAt": "2026-10-11T11:47:38.586Z",
+      "sourceManifestSha256": "7be7e049e12ef55294c86ced26775fff31eb157ac7ccbf403509071e4f62908c",
+      "privateInstanceSha256": "f7361f61c79f4427509580ca773ee1a30af1595babd63fb784d16adda70e01da",
+      "privateInstancePublished": false,
+      "publicScreenshot": {
+        "path": "windows-evidence/M02-initial.png",
+        "assetId": "d01-preflight-1791719246836-7271617d-a8a5-4257-a829-713375776406-initial-screenshot",
+        "mediaType": "image/png",
+        "bytes": 85165,
+        "sha256": "52284e08e0eeab7676d8507897876b5965daa964f12652b40735b629b611bf2d",
+        "review": "仅官方公开网页及空白浏览器UI；无个人账号、凭据或本机目录；非业务终态截图"
+      },
+      "surfaceKind": "dom"
+    },
+    {
+      "cardId": "CP02",
+      "runId": "d01-preflight-1791719258872-81a3b3e9-23a8-4acf-b655-14de6eda3599",
+      "kind": "initial_adapter_preflight_not_model_Run",
+      "exitCode": 1,
+      "adapterStatus": "failed_evidence_retained_no_replay",
+      "cleanupConfirmed": true,
+      "providerRequests": 0,
+      "businessAcceptance": "not_run",
+      "taskInitialStateRelease": "受管浏览器启动失败；直接HTTP可读不替代DOM绑定",
+      "startedAt": "2026-10-11T11:47:38.872Z",
+      "endedAt": "2026-10-11T11:47:47.797Z",
+      "sourceManifestSha256": "557fa296c286219cbb4b182681c9721fc2c2d368a466ee3744aaf0e1423f9003",
+      "privateInstanceSha256": "74fb653ebdbb9d48456736dd6b936fad6946fc513d10defdf434f5bf9e5ea8a1",
+      "privateInstancePublished": false
+    },
+    {
+      "cardId": "M03",
+      "runId": "d01-preflight-1791719567460-e1d0a3b2-0b69-45ce-b3c5-5240390306ff",
+      "kind": "initial_adapter_preflight_not_model_Run",
+      "exitCode": 0,
+      "adapterStatus": "adapter_observation_and_cleanup_passed_not_business_acceptance",
+      "cleanupConfirmed": true,
+      "providerRequests": 0,
+      "businessAcceptance": "not_run",
+      "taskInitialStateRelease": "官方就医须知可见、专用空白记事本发现通过；未切换/输入/保存",
+      "actualCssViewport": {
+        "cssWidth": 1026,
+        "cssHeight": 568,
+        "deviceScaleFactor": 1
+      },
+      "dedicatedEditorExited": true,
+      "startedAt": "2026-10-11T11:52:47.461Z",
+      "endedAt": "2026-10-11T11:53:00.434Z",
+      "sourceManifestSha256": "7be7e049e12ef55294c86ced26775fff31eb157ac7ccbf403509071e4f62908c",
+      "privateInstanceSha256": "129c3a4ebc98bb47bece9f76f191a30b83c0e25d173b87e25d25c21fffd3c92c",
+      "privateInstancePublished": false,
+      "publicScreenshot": {
+        "path": "windows-evidence/M03-initial.png",
+        "assetId": "d01-preflight-1791719567460-e1d0a3b2-0b69-45ce-b3c5-5240390306ff-initial-screenshot",
+        "mediaType": "image/png",
+        "bytes": 57613,
+        "sha256": "4bb9d6213de908367325b8e0feab46c1671ed920bca77c9620b6bc223d68b6af",
+        "review": "仅官方公开网页及空白浏览器UI；无个人账号、凭据或本机目录；非业务终态截图"
+      },
+      "surfaceKind": "dom"
+    },
+    {
+      "cardId": "CP03",
+      "runId": "d01-preflight-1791719580946-5511620f-d3d6-4e1b-8d51-5202d49a8ed9",
+      "kind": "initial_adapter_preflight_not_model_Run",
+      "exitCode": 0,
+      "adapterStatus": "adapter_observation_and_cleanup_passed_not_business_acceptance",
+      "cleanupConfirmed": true,
+      "providerRequests": 0,
+      "businessAcceptance": "not_run",
+      "taskInitialStateRelease": "官方燃气指南可见、专用空白记事本发现通过；未办理/切换/输入/保存",
+      "actualCssViewport": {
+        "cssWidth": 1026,
+        "cssHeight": 568,
+        "deviceScaleFactor": 1
+      },
+      "dedicatedEditorExited": true,
+      "startedAt": "2026-10-11T11:53:00.947Z",
+      "endedAt": "2026-10-11T11:53:10.75Z",
+      "sourceManifestSha256": "557fa296c286219cbb4b182681c9721fc2c2d368a466ee3744aaf0e1423f9003",
+      "privateInstanceSha256": "40ce8d4b8bc2e3bff78a47c11083143560c7545478d33e56f7ab1f6c5bc986af",
+      "privateInstancePublished": false,
+      "publicScreenshot": {
+        "path": "windows-evidence/CP03-initial.png",
+        "assetId": "d01-preflight-1791719580946-5511620f-d3d6-4e1b-8d51-5202d49a8ed9-initial-screenshot",
+        "mediaType": "image/png",
+        "bytes": 67244,
+        "sha256": "264b3eae8222b04d1df7f2956ee44a79bee55789b68144569d63525d40adec67",
+        "review": "仅官方公开网页及空白浏览器UI；无个人账号、凭据或本机目录；非业务终态截图"
+      },
+      "surfaceKind": "dom"
+    }
+  ],
+  "cp02": {
+    "failure": "DomGroundingUnavailableError",
+    "stage": "create_startup_target",
+    "startupElapsedMs": 8853,
+    "publicHttpProbe": {
+      "method": "GET",
+      "requestedUrl": "https://www.bjgas.com/tag/86.html",
+      "status": 200,
+      "finalUrl": "https://www.bjgas.com/tag/86.html",
+      "elapsedMs": 2855,
+      "title": "北京市燃气集团有限责任公司",
+      "bodyBytes": 83025
+    },
+    "rootCause": "undetermined",
+    "diagnosticCaveat": "processState/exitCode在catch清理后生成，不证明浏览器自行退出；QQBrowser importer警告不是根因证明。",
+    "failedAdapterCheckReplayed": false
+  },
+  "counts": {
+    "initialAdapterAttempts": 6,
+    "adapterExit0": 5,
+    "adapterExit1": 1,
+    "modelRuns": 0,
+    "providerRequests": 0,
+    "humanScores": 0,
+    "stabilityRepeats": 0
+  },
+  "businessExecutionRelease": "blocked_pending_complete_task_initial_state_review",
+  "cleanup": {
+    "daemonStopExitCodes": [
+      0,
+      0
+    ],
+    "bothDaemonsExited": true,
+    "listedNodeCuaEdgeNotepadProcessesAtFinalCheck": 0,
+    "dedicatedEditorsExited": true,
+    "temporaryToolsClosed": true,
+    "temporaryTransferStopped": true
+  },
+  "publicationProvenance": [
+    {
+      "artifactId": "resume-status",
+      "kind": "private_local_receipt",
+      "bytes": 6584,
+      "sha256": "fb8976b00c4e16405ad3780afcb4dff5f40c5e41e192a57bcacc6760c1929774",
+      "availability": "retained_privately_not_in_PR",
+      "note": "公开摘要已脱敏；PR不提供原件下载，不能仅凭本包重新核验原件。"
+    },
+    {
+      "artifactId": "preflight-result",
+      "kind": "private_local_receipt",
+      "bytes": 134169,
+      "sha256": "e07296c0b32c77a845e1f5f59181d6cf3fb0d58ec33c55396d2b28f835f638e7",
+      "availability": "retained_privately_not_in_PR",
+      "note": "公开摘要已脱敏；PR不提供原件下载，不能仅凭本包重新核验原件。"
+    },
+    {
+      "artifactId": "preflight-cross-result",
+      "kind": "private_local_receipt",
+      "bytes": 116474,
+      "sha256": "3e99ce997f5251eaa4bf3cecc9d786a55871eb29fb0e725dff14f017b265dbfc",
+      "availability": "retained_privately_not_in_PR",
+      "note": "公开摘要已脱敏；PR不提供原件下载，不能仅凭本包重新核验原件。"
+    },
+    {
+      "artifactId": "build-recovered-result",
+      "kind": "private_local_receipt",
+      "bytes": 5820,
+      "sha256": "e5590091c292e48452693a2b2fb9b5ffa632fc088b475701caa9d8838b731e52",
+      "availability": "retained_privately_not_in_PR",
+      "note": "公开摘要已脱敏；PR不提供原件下载，不能仅凭本包重新核验原件。"
+    },
+    {
+      "artifactId": "cp02-diagnostic-result",
+      "kind": "private_local_receipt",
+      "bytes": 853,
+      "sha256": "9319810a9ff6e08adac0017d1ef3c4cd7a925a6b91dd1e556706e3ac8263ee33",
+      "availability": "retained_privately_not_in_PR",
+      "note": "公开摘要已脱敏；PR不提供原件下载，不能仅凭本包重新核验原件。"
+    },
+    {
+      "artifactId": "cp02-http-diagnostic-result",
+      "kind": "private_local_receipt",
+      "bytes": 1103,
+      "sha256": "5f1ac93d94656db4c215f00b9883b2a8a8433f5a881844e4825865a19469baa5",
+      "availability": "retained_privately_not_in_PR",
+      "note": "公开摘要已脱敏；PR不提供原件下载，不能仅凭本包重新核验原件。"
+    }
+  ],
+  "publicationLimits": [
+    "本文件为既有客机回执的白名单摘要，不含轨迹、私有配置、原始日志或桌面/终端截图。",
+    "原始构建退出码未持久化，保持null；不补造全绿或重跑安装构建。",
+    "截图及本公开包hash只绑定发布物，不证明Windows源码/锁文件/驱动/构建产物字节一致。",
+    "任务2冻结合同与初态预检分别记录；未重新编号或重标历史模型Run。",
+    "官网截图保留运营主体及原URL，仅作公开页面验收证据；不声明项目许可证覆盖第三方素材。"
+  ]
+}

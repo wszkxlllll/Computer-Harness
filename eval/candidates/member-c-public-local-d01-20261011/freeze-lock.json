@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "frozenOn": "2026-10-11",
+  "scope": "task_contract_only_official_public_entries_and_local_preparation",
+  "runtimeExecutionReleased": false,
+  "businessRuns": 0,
+  "changePolicy": "改变任务/输入/判据/计划配置需更新冻结版本与字节锁；运行日期和输出目录在具体实例中展开并独立hash，不改原manifest。",
+  "lockKind": "publication_byte_lock_original_contract_version_unchanged",
+  "publicationUpdatedOn": "2026-10-12",
+  "publicationUpdateScope": "README latest preflight/code-patch references only; original manifests, Goals and all other contract files unchanged; not a new patched-runtime freeze",
+  "source": {
+    "sourceId": "member-c-d01-2026-10-11/freeze-lock.json",
+    "sha256": "fff08272660a9d37b44d5c19a8d16233c8e20a20e23b027988caa94138f5b6be",
+    "bytes": 3348,
+    "availability": "private/not included",
+    "interpretation": "original local frozen artifact; not a clickable published evidence link"
+  },
+  "originalContractManifests": [
+    {
+      "path": "medical-manifest.v1.json",
+      "bytes": 23442,
+      "sha256": "7be7e049e12ef55294c86ced26775fff31eb157ac7ccbf403509071e4f62908c"
+    },
+    {
+      "path": "payment-manifest.v1.json",
+      "bytes": 24755,
+      "sha256": "557fa296c286219cbb4b182681c9721fc2c2d368a466ee3744aaf0e1423f9003"
+    }
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 13613,
+      "sha256": "4ccec673123c2bb86a0f665ed1e604c07db46bb7f40c7c7d5fe2ad097fe8db83"
+    },
+    {
+      "path": "medical-task-cards.md",
+      "bytes": 14977,
+      "sha256": "273150fb7ee9945b463ab82363d28eb746d133bfd0f2004ea87118762bba0370"
+    },
+    {
+      "path": "payment-task-cards.md",
+      "bytes": 16121,
+      "sha256": "534471b44d5ae617116620fd0ff3341749b7c3d16fd7043ad08a22ef1237cedb"
+    },
+    {
+      "path": "medical-manifest.v1.json",
+      "bytes": 23442,
+      "sha256": "7be7e049e12ef55294c86ced26775fff31eb157ac7ccbf403509071e4f62908c"
+    },
+    {
+      "path": "payment-manifest.v1.json",
+      "bytes": 24755,
+      "sha256": "557fa296c286219cbb4b182681c9721fc2c2d368a466ee3744aaf0e1423f9003"
+    },
+    {
+      "path": "synthetic-inputs.json",
+      "bytes": 961,
+      "sha256": "c5f4425cad34ea07dcb037cd67bbc956999a14f88a4ba4984475a113d07b1675"
+    },
+    {
+      "path": "oracle-guidance.json",
+      "bytes": 6135,
+      "sha256": "712a9615c21f98c27b87b01ba851d2c27e50cbfda5dc11e645e5738040fdf8f9"
+    },
+    {
+      "path": "prepare-instance.py",
+      "bytes": 4400,
+      "sha256": "9038b58f68b537b3319355a169ab9d8e37b0d6741f90620a5094e59ad7bcf32e"
+    },
+    {
+      "path": "entry-evidence.json",
+      "bytes": 82396,
+      "sha256": "864a459bf8a322efbfdceb1eb724fcc7b511b22cdddd31ac72a535ff5099c4d6"
+    },
+    {
+      "path": "evidence/sgcc-landing.webp",
+      "bytes": 17308,
+      "sha256": "ff6e9838f0a5e7024f19a5d55f737271f7ac6411c64bea743370917eb9c03298"
+    },
+    {
+      "path": "evidence/csg-login.webp",
+      "bytes": 34892,
+      "sha256": "63142fd93fa6f63f04ddc997f161c71cebc081159cf2dd844e9e87cf767fe296"
+    },
+    {
+      "path": "evidence/csg-foshan-price.webp",
+      "bytes": 45620,
+      "sha256": "d440cf6e1b576bc10fd277903272f2b718fe65653b4134bff829c4fca9370565"
+    },
+    {
+      "path": "evidence/114-website-closed.webp",
+      "bytes": 44748,
+      "sha256": "d8d7675678328aba019b312692521885c2e7f55070bcbc09222170ec9d643dde"
+    },
+    {
+      "path": "evidence/pumch-week-desktop.webp",
+      "bytes": 21896,
+      "sha256": "898aec844ec496f2c49599480fe87deb621f45e959a3979cbd08a1c1e69a275d"
+    },
+    {
+      "path": "evidence/pumch-department.webp",
+      "bytes": 40216,
+      "sha256": "d4fe662fef85f8b631c1576c190a5f9e988cfd7245b018c86e1f0cebd8efd15e"
+    },
+    {
+      "path": "evidence/pumch-notice.webp",
+      "bytes": 35926,
+      "sha256": "8087f6be002e51e8d8b9fab8ba40329bdee8b4521739d418ad74c50b37d22050"
+    },
+    {
+      "path": "evidence/bjgas-price.webp",
+      "bytes": 55722,
+      "sha256": "efe47d537c0f15f90409fdaac16b91bd665f5a63d8633fdfeb4e6838e20db56f"
+    },
+    {
+      "path": "evidence/shgas-guide.webp",
+      "bytes": 30312,
+      "sha256": "bdb484a247a45054941f40c971a7906f8a05ebc5b23ec7356fa09fa638213da3"
+    },
+    {
+      "path": "verification.json",
+      "bytes": 6737,
+      "sha256": "f09c6fc09822d29e1d9a30d199d96ddd78a003801cea002dde58be2893c7b8e6"
+    }
+  ],
+  "excludedFromRecursiveHash": [
+    "freeze-lock.json"
+  ],
+  "publicationChanges": "publication bytes differ from original local package; task contracts/manifest IDs/Goal templates and variants unchanged; hash generation is not execution or consumption verification"
+}
