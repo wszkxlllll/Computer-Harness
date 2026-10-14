@@ -140,7 +140,7 @@ node apps/host/dist/index.js --env-file ".env" --socket "<private-socket>" --mod
 
 Host 示例里的 `--model` 换为 `glm-5.3-flash` 或 `qwen3.8-flash` 即可为重启后的新 Run 选择对应模型。凭据仍留在 Host 私有环境，Web 不接收 key。
 
-2026-10-14 Windows 实跑：[双模型脱敏结果](./member-c-m01-registered-click-2026-10-14.json)。GLM 再跑100次请求/响应未超时，Runtime succeeded，但交付的来源URL、门诊楼层和时间未通过官网复核；DeepSeek 首请求HTTP200、完整响应1138ms，模型返回未提供工具而被整组拒绝，0 GUI动作、Runtime failed。接入与模型选择不等于业务任务通过，也不证明此前GLM超时根因已修复。Windows构建、spike检查、三模型选择冒烟及222项定向回归通过；3项指纹用例未运行，无macOS实机或全套验收。
+2026-10-14 Windows 实跑：[脱敏结果与历史记录](./member-c-m01-registered-click-2026-10-14.json)。组长修复后的`d973e12`新增两轮真实DeepSeek M01：第一轮47响应、44completed后因点击结果未知停止，Runtime cancelled、无交付；第二轮92请求/91接纳响应、84completed，实际进入新版出诊表并交付正确门诊楼层、发布时间和URL，但未交付两院区具体地址，Runtime succeeded不等于完整业务成功。第二轮一次非JSON工具参数错误实际触发有界feedback恢复；两轮均无API超时。详见[修复记录的Windows实跑补充](./pr30-deepseek-repair-2026-10-14.md#修复后windows真实桌面两次m01实跑补充)。此前GLM错误事实、初始DeepSeek未知工具失败及既有构建/回归结果保留为历史，不称本次发布重新验收或历史超时已修复。
 
 Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
 

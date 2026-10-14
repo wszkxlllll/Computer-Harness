@@ -67,3 +67,31 @@ DeepSeek临时网络错误及HTTP 429/5xx由现有Runtime进行有预算的 `sam
 ## PR30对接
 
 PR30原head为 `member-c/m01-registered-click-20261014` 的 `f477f0f`。将其原始提交历史合入已验收修复分支，保留原作者；冲突采用已验收版本，合并后业务源码与 `d63c6fb` 完全一致，不因重复移入而恢复旧缺陷。随后非强制推送回PR30原head，目标基底改为main，避免继续挂在已合并的旧Preview分支下。独立修复分支保留备查，PR30作为后续审查入口；远端CI结果另行确认，不以本地测试代替。
+
+## 修复后Windows真实桌面：两次M01实跑补充
+
+两轮沿用PR30 `d973e12`、M01原公开查询Goal，未注入答案；真实生产Provider／Runtime／CUA及受管Edge精确窗口，foreground＋hybrid。planning、memory、batching均off，不能把结果当作前述Plan+Memory+Batch组合稳定性验收。每轮新建Run和ephemeral浏览器，不续接或重放未知动作；Guard及任务范围自动批准保留。上限100请求／100动作、20分钟、单请求90秒、输出4096。
+
+| 结果 | 首次更新后实跑 | 随后单次复跑 |
+| --- | --- | --- |
+| Runtime／业务 | cancelled／未交付 | succeeded／缺必需院区地址，部分通过 |
+| 请求／Runtime接纳响应／HTTP200 | 47／47／47 | 92／91／92 |
+| 动作回执 | 44completed、1refused、1partial | 84completed、6refused |
+| 范围审批 | 3次全批准 | 11次全批准 |
+| 耗时 | 217.115秒 | 377.683秒 |
+| Runtime total tokens | 720,748 | 1,388,372（不含被解析拒绝响应） |
+| API超时 | 未出现 | 未出现 |
+
+首次的最后一次UIA Hyperlink点击派发后，驱动无法确认前台，返回`ACTION_OUTCOME_UNKNOWN`，明确输入可能已发送。Runtime发`user.input.requested`要求检查屏幕，不得重复操作；本机runner按既有边界停止。不是API失败、预算耗尽或审批取消，前台无法确认的具体根因未定位。未知点击未重放；末图仍患者版首页。
+
+复跑中一次非JSON工具参数错误触发`DEEPSEEK_INVALID_TOOL_CALL`，生产Runtime实际进行了1次有界feedback重新生成，并继续完成后续动作；被拒绝响应没有工具执行。6次GUI拒绝分别为5次`DOM_INPUT_FOCUS_MISMATCH`和1次`DOM_CLICK_BBOX_MISMATCH`，未绕过。没有超时或未知动作结果。
+
+复跑实际到达`https://www.pumch.cn/news_visitinfo.html`，末图显示“门诊出诊表（新）”面包屑与查询表单，模型交付真实路径和URL。清单中的普通门诊5层、特需5层、国际3层、发布时间2017.12.09及`/detail/12497.html`与运行后官网读取相符，院区对应写“未明确”。**东单／西单两院区具体地址没有交付**：模型表示无法清晰读取，拒绝转写门牌。官网`nosocomial.html`可读东单帅府园1号，页脚列西单大木仓胡同41号；人工外部复核读到这些信息不能代替模型交付，故不能计完整M01成功。
+
+两Run cleanup confirmed、各自daemon stop0并退出；本轮临时工具收尾，Windows保持运行，费用未知，无正式评分／D02。首次部署后的Windows构建和CLI help退出0；第二轮没有改代码、构建或测试。这些均是已有实跑事实，**本次发布不追加模型／桌面／测试／CI查询／安全审查／字节校验**。
+
+- [两轮脱敏机器可读结果](member-c-m01-registered-click-2026-10-14.json)：`postRepairDeepseekWindowsRuns`节；初始失败和GLM历史结果继续保留。
+- [首次停止时官网内容裁图](member-c-m01-registered-click-2026-10-14/deepseek-postrepair-cancelled-page.png)
+- [复跑到达新版出诊表的官网内容裁图](member-c-m01-registered-click-2026-10-14/deepseek-postrepair-schedule-page.png)
+
+公开图片裁去浏览器chrome及机器桌面。原轨迹、Provider exchanges、API key、私有配置、机器路径／PID／HWND、本机runner和桌面终端图均不提交。
