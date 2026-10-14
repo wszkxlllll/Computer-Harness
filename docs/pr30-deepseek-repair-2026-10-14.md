@@ -58,6 +58,8 @@ DeepSeek临时网络错误及HTTP 429/5xx由现有Runtime进行有预算的 `sam
 
 ## 放行与边界
 
+历史对照：2026-09-15真实GLM API已返回 `task_create → memory_write_fact → click → type`，实际Runtime完成Plan、Memory与两个FakeComputer动作，下一轮terminate成功；迁移后GLM/Qwen Composite也通过。见[历史真实API记录第4.1节](history/2026-09-17-roadmap-consolidation/real-api-conformance-2026-09-15.md)及[统一集成验收](history/2026-09-17-roadmap-consolidation/qwen-flat-regression-and-integration-acceptance-2026-09-15.md)。这是当时版本的真实API协议证据，不是本轮GLM复测或真实桌面效果证明。
+
 可以推进DeepSeek修复的代码集成审查及受控实验；不能宣称DeepSeek的Plan+Memory+Batch同轮输出稳定。同构Context静态检查已完成，下一步建议先隔离测单独Batch，再与Plan/Memory同轮组合比较，并允许观察真实下一轮是否自然继续。对照须保留原失败，记录完整脱敏文本及调用结构；不为凑成功自动补动作、放宽未知引用或重放副作用，也不改变GLM/Qwen策略。本批严格按预定8次结束，没有无界追加请求。
 
-上述测试不是业务任务成功率，也没有验证本轮真实桌面输入、macOS或手机体验。当前仅本地分支留痕，未推送、未修改原PR30、未替换Preview或重启Host。
+上述测试不是业务任务成功率，也没有验证本轮真实桌面输入、macOS或手机体验。用户确认可以先推送独立修复分支，DeepSeek组合稳定性留待后续优化；不修改原PR30、不合并main、不替换Preview或重启Host。
