@@ -95,3 +95,36 @@ PR30原head为 `member-c/m01-registered-click-20261014` 的 `f477f0f`。将其�
 - [复跑到达新版出诊表的官网内容裁图](member-c-m01-registered-click-2026-10-14/deepseek-postrepair-schedule-page.png)
 
 公开图片裁去浏览器chrome及机器桌面。原轨迹、Provider exchanges、API key、私有配置、机器路径／PID／HWND、本机runner和桌面终端图均不提交。
+
+## Planning／Memory／Batching开启：三轮Windows实跑
+
+用户要求三项开启后顺序运行三轮，并把配置及结果提交PR30。使用已部署`d973e12`生产代码，当前checkout `112de7f`只多了前两轮文档；未改产品默认值、安装、构建或追加离线测试。原M01 Goal不变，每轮新建Run、ephemeral Edge与各自Run内Plan/Memory store，不复用前一轮事实或重放未知动作。`planning=true`、`memory=facts`、`memoryRetrieval=lexical`、`batching=same-control-input-v1`；foreground／hybrid、Guard及M01范围审批保留。每轮上限100请求／100动作、20分钟、90秒单请求、4096输出。
+
+### 配置证据，不只是启动器声明
+
+- [第1轮实际配置投影](member-c-deepseek-all-on-2026-10-15/round-1-config.json)、[第2轮](member-c-deepseek-all-on-2026-10-15/round-2-config.json)、[第3轮](member-c-deepseek-all-on-2026-10-15/round-3-config.json)：运行前从实际传入生产`app.createRun`的对象生成，移除本机路径及凭据来源。
+- [三轮结果及消费者事件](member-c-deepseek-all-on-2026-10-15.json)：同时保存生产`RunHandle.report`的实际配置投影、真实HTTP首请求工具名，以及`planning.task.updated`／模型工具触发的`memory.updated`提交事件。
+- 三轮首请求均提供`task_create/task_update/task_list/task_get`与Memory工具。开关开启、工具供给、模型调用、状态提交、GUI Batch执行和业务结果分别记录；不把生命周期Memory事件算模型写入，不把只声明Batch开关当执行证明。
+
+这些是可公开核对的脱敏参数与真实事件投影，不是可直接运行的本机启动器。个人socket、输出路径等宿主字段由各自操作者提供；私有凭据／runner不提交，也不伪称组长已独立复跑。没有进行源码、配置或轨迹的字节核对。
+
+### 三轮结果
+
+| 指标 | 第1轮 | 第2轮 | 第3轮 |
+| --- | --- | --- | --- |
+| Runtime outcome | succeeded | succeeded | succeeded |
+| 请求／接纳响应 | 36／34 | 37／36 | 22／22 |
+| GUI completed回执 | 27 | 28 | 16 |
+| Planning实际提交事件 | 3 | 1 | 3 |
+| 模型Memory实际提交事件 | 4 | 5 | 2 |
+| 多GUI动作Batch提议／完成 | 0／0 | 0／0 | 0／0 |
+| 耗时 | 146.682秒 | 126.083秒 | 68.310秒 |
+| Runtime total tokens | 684,421 | 736,826 | 418,285 |
+
+第二轮有1组`memory_write_fact + task_create`同轮，两项状态写入均完成；没有GUI动作或Batch在该组中。三轮没有Plan+Memory+GUI完整同轮或多GUI动作Batch执行证据，**不能放行Plan+Memory+Batch稳定性**。Planning和Memory的提交只证明功能实际使用，不证明内容正确、提高成功率或导致速度变化。
+
+全部最终清单都有出诊表链接错误，本轮读得HTTP404：第1轮`news_visitiinfo.html`，第2轮`visitiinfo.html`，第3轮`news_visiitinfo.html`；真实新版入口为`news_visitinfo.html`。第1轮末图确为新版出诊表，第2轮仍旧`visitinfo.html`，第3轮末图为西单地址面板。三轮Runtime成功不等于完整M01通过。第一、二轮还把错误出诊表链接写入各自Run内的Memory并标为stable；不能把事实持久化当外部真值，且不据此推断Memory导致最终错误。
+
+科室楼层／2017.12.09与既有官网位置页相符。西单地址“辟才胡同7号”本轮通过[官网西单面板](https://www.pumch.cn/Article/Index/detail.html?id=12980&dir_name=patient&tpl_file=register_detail)确认，页脚另列“大木仓胡同41号”；保留源位置差异，不能把面板地址误判为编造。第二轮附加的国际医疗部／服务时间说明不在本次通过项中。
+
+三轮均按各自终态结束，Run cleanup confirmed、daemon stop0并退出；临时工具收尾，Windows保持。费用未知，无正式评分／D02，没有额外模型复跑或效果因果评测。本次发布仅排除私人信息，不追加模型／桌面／测试／CI查询／安全审查／哈希或字节校验。

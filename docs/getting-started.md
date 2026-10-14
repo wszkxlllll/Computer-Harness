@@ -142,6 +142,8 @@ Host 示例里的 `--model` 换为 `glm-5.3-flash` 或 `qwen3.8-flash` 即可为
 
 2026-10-14 Windows 实跑：[脱敏结果与历史记录](./member-c-m01-registered-click-2026-10-14.json)。组长修复后的`d973e12`新增两轮真实DeepSeek M01：第一轮47响应、44completed后因点击结果未知停止，Runtime cancelled、无交付；第二轮92请求/91接纳响应、84completed，实际进入新版出诊表并交付正确门诊楼层、发布时间和URL，但未交付两院区具体地址，Runtime succeeded不等于完整业务成功。第二轮一次非JSON工具参数错误实际触发有界feedback恢复；两轮均无API超时。详见[修复记录的Windows实跑补充](./pr30-deepseek-repair-2026-10-14.md#修复后windows真实桌面两次m01实跑补充)。此前GLM错误事实、初始DeepSeek未知工具失败及既有构建/回归结果保留为历史，不称本次发布重新验收或历史超时已修复。
 
+2026-10-15另完成[三轮Planning／Memory／Batching开启实跑](./member-c-deepseek-all-on-2026-10-15.json)，附三份运行前生成的无凭据实际配置投影、生产报告及已提交状态事件。Planning与Memory三轮都有实际使用；Batching开启但没有多GUI动作Batch提议／执行，不能称Batch或三功能组合稳定。三轮Runtime succeeded，但交付出诊表链接均404，业务没有完整通过。此前两轮off配置与本组三轮on配置分开记录，不把开关声明、事实写入或Runtime终态当业务成功证明。
+
 Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
 
 路径提示：直接从仓库根目录执行 `node apps/cli/dist/index.js` 时，`--env-file ".env"` 指向根目录；通过 `pnpm --filter @computer-harness/cli start` 启动时，工作目录是 `apps/cli`，请传根目录 `.env` 的绝对路径或 `..\..\.env`。
