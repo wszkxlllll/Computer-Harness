@@ -85,8 +85,17 @@ function clickInputWithImage(): ModelInput {
 
 describe("app-runtime provider factory", () => {
   it("requires injected credentials without reading the environment", () => {
-    expect(() => createProvider({ model: "glm-5.3-flash", config: config(), assetReader, outputDir: "runs/glm", credentials: {} })).toThrow(/ZHIPUAI_API_KEY/iu);
-    expect(() => createProvider({ model: "qwen3.8-flash", config: config({ model: "qwen3.8-flash" }), assetReader, outputDir: "runs/qwen", credentials: {} })).toThrow(/DASHSCOPE_API_KEY/iu);
+    for (const [model, modelConfig, credentials] of [
+      ["glm-5.3-flash", config(), {}],
+      ["qwen3.8-flash", config({ model: "qwen3.8-flash" }), {}],
+      ["glm-5.3-flash", config(), { glmApiKey: "  " }],
+      ["qwen3.8-flash", config({ model: "qwen3.8-flash" }), { qwenApiKey: "\t" }],
+    ] as const) {
+      let thrown: unknown;
+      try { createProvider({ model, config: modelConfig, assetReader, outputDir: "runs/provider", credentials }); } catch (error) { thrown = error; }
+      expect(thrown).toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+      expect((thrown as Error).message).not.toMatch(/API_KEY|fixture|secret/iu);
+    }
   });
 
   it("constructs both provider adapters from the resolved model and injected key", () => {

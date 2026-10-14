@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+2026-10-14 优先执行：[两项修复、MODE回归与679语义适配及合并记录](./astra-prfix-merge-execution-2026-10-14.md)，[合并前审查](./astra-premerge-review-2026-10-14.md)、[集成专项复审](./astra-pr22-integration-review-2026-10-14.md)。PR23已合入PR22；main仍等待最终组合测试、CI与Sol独审。最终产品路线按两份Astra计划顶部说明，旧profile记录不作当前交付。
+
 ## 最新队友提交复审（2026-10-13）
 
 最新检查补充：后续文档提交 `6e5b9ab` 的Windows CI有两项窗口恢复测试等待失败，已将三处同根因测试改为已提交事件同步，Runtime183项及完整Vitest2324项通过，Sol增量审查GO。没有生产代码修改，新提交远端CI待确认；见同一审计文档顶部，Preview不变。

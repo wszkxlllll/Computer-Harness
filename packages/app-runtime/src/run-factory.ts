@@ -29,7 +29,7 @@ import {
 import { FileAssetStore, JsonlRunEventWriter, type AssetStore, type RunEventWriter } from "@computer-harness/trajectory";
 import type { AssetReader } from "@computer-harness/runtime";
 import { createComputer, prepareComputerRunAssembly, type ComputerToolPresentationOverride } from "./computers.js";
-import { createProvider } from "./providers.js";
+import { assertBuiltInProviderCredentials, createProvider } from "./providers.js";
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import { selectOperationGuidance } from "./operation-guidance.js";
@@ -137,6 +137,12 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     throw new Error("cleanupDeadlineMs must be a positive integer");
   }
   const credentials = dependencies.credentials ?? {};
+  if (dependencies.createProvider === undefined) {
+    assertBuiltInProviderCredentials({ model: config.model, credentials });
+    if (config.riskGuard === "layered" && config.riskModel !== "off" && config.riskModel !== "same") {
+      assertBuiltInProviderCredentials({ model: config.riskModel, credentials });
+    }
+  }
   const cleanupDiagnostics: CleanupDiagnostic[] = [];
   const recordCleanupError = (diagnostic: CleanupDiagnostic): void => {
     cleanupDiagnostics.push(diagnostic);

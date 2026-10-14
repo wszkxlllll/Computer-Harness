@@ -40,7 +40,7 @@ node scripts/stage4-local/evaluate-trajectory.mjs \
 
 无效选择或证据不足是评估结果，退出0；JSON损坏、输入I/O错误、无效命令行等是评估器错误，退出1。输出不能覆盖输入文件。没有人审不会自动生成“通过”的模板。
 
-评估器会拒绝与 trajectory、manifest、human-review 或实际绑定的初/末截图相同的输出路径，包括 canonical 路径和相同 `dev/ino` 的现有别名。结果先写入输出目录中的随机独占临时文件，再原子 rename；写入或 rename 失败会清理本次创建的临时文件，并保留所有输入字节。已有合法结果文件仍可安全替换。
+评估器会拒绝与 trajectory、manifest、human-review 或实际绑定的初/末截图相同的输出路径，包括 canonical 路径和相同 `dev/ino` 的现有别名。结果先写入输出目录中的随机独占临时文件，文件权限设为 `0600`，再原子 rename；写入或 rename 失败会清理本次创建的临时文件，并保留所有输入字节。已有合法结果文件仍可安全替换，且替换后仍为私有文件。
 
 ## 证据合同
 

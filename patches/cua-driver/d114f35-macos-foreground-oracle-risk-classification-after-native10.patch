@@ -1,0 +1,191 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+index b0a2896..625bcff 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+@@ -235,6 +235,7 @@ const PRIVATE_OBSERVATION_OPERATIONS: &[&str] = &[
+     "list_apps",
+     "list_windows",
+     "debug_window_info",
++    "diagnose_foreground_oracles",
+     "get_browser_state",
+     "browser_dialog[action=inspect]",
+     "page[action=get_text|query_dom]",
+@@ -741,6 +742,7 @@ pub fn enforcement_adapters_for_call(
+             | "list_apps"
+             | "list_windows"
+             | "debug_window_info"
++            | "diagnose_foreground_oracles"
+             | "get_browser_state"
+             | "escalate_session"
+             | "zoom"
+@@ -909,6 +911,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
+         | "list_apps"
+         | "list_windows"
+         | "debug_window_info"
++        | "diagnose_foreground_oracles"
+         | "check_permissions"
+         | "get_accessibility_tree"
+         | "verify_state"
+@@ -1024,6 +1027,7 @@ pub fn classify_tool_call(tool: &str, args: &Value) -> RiskAssessment {
+         | "list_apps"
+         | "list_windows"
+         | "debug_window_info"
++        | "diagnose_foreground_oracles"
+         | "get_browser_state"
+         | "escalate_session"
+         | "zoom"
+@@ -1192,6 +1196,7 @@ fn enforce_hard_invariants(
+             | "get_accessibility_tree"
+             | "get_window_state"
+             | "verify_state"
++            | "diagnose_foreground_oracles"
+             | "page"
+             | "browser_prepare"
+     );
+@@ -1419,6 +1424,7 @@ pub fn status_json_with_provider(authorization_host: Option<&'static str>) -> se
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use std::io::Write;
+ 
+     #[test]
+     fn standard_is_the_default() {
+@@ -1613,6 +1619,79 @@ mod tests {
+         assert_eq!(advertised_risk_for("verify_state").class, RiskClass::R2);
+     }
+ 
++    #[test]
++    fn foreground_oracle_diagnostic_is_reviewed_r2_and_keeps_manifest_denials() {
++        let args = serde_json::json!({"pid": i64::from(std::process::id()) + 10, "window_id": 7, "x": 12.5, "y": 30.0});
++        let advertised = advertised_risk_for("diagnose_foreground_oracles");
++        assert_eq!(advertised.class, RiskClass::R2);
++        assert_eq!(advertised.enforcement, RiskEnforcement::Active);
++        assert!(advertised.operation_sensitive);
++        let classified = classify_tool_call("diagnose_foreground_oracles", &args);
++        assert_eq!(classified.class, RiskClass::R2);
++        assert_eq!(classified.enforcement, RiskEnforcement::Active);
++        assert!(classified.operation_sensitive);
++        assert_eq!(
++            enforcement_adapters_for_call("diagnose_foreground_oracles", &args)
++                .iter()
++                .map(|adapter| adapter.id)
++                .collect::<Vec<_>>(),
++            vec!["private_observation"]
++        );
++
++        let ceiling = crate::session_authorization::SessionModeCeiling::for_trusted_sessions(
++            [PermissionMode::Standard],
++            false,
++            std::time::Duration::from_secs(60),
++            std::time::Duration::from_secs(30),
++        )
++        .unwrap();
++        let context =
++            crate::session_authorization::SessionAuthorizationRegistry::with_ceiling(ceiling)
++                .compatibility_context(PermissionMode::Standard, None)
++                .unwrap();
++        assert_eq!(
++            authorize_tool_call_with_context("diagnose_foreground_oracles", &args, &context)
++                .unwrap()
++                .class,
++            RiskClass::R2
++        );
++
++        let mut manifest_file = tempfile::NamedTempFile::new().unwrap();
++        writeln!(manifest_file, "version: 3\nallow:\n  tools: [verify_state]\ndeny:\n  tools: [diagnose_foreground_oracles]")
++            .unwrap();
++        let manifest = std::sync::Arc::new(
++            crate::session_manifest::load_manifest(manifest_file.path()).unwrap(),
++        );
++        let manifest_ceiling =
++            crate::session_authorization::SessionModeCeiling::for_trusted_sessions(
++                [PermissionMode::Standard],
++                false,
++                std::time::Duration::from_secs(60),
++                std::time::Duration::from_secs(30),
++            )
++            .unwrap();
++        let denied_context =
++            crate::session_authorization::SessionAuthorizationRegistry::with_ceiling(
++                manifest_ceiling,
++            )
++            .compatibility_context(PermissionMode::Standard, Some(manifest))
++            .unwrap();
++        assert!(authorize_tool_call_with_context(
++            "diagnose_foreground_oracles",
++            &args,
++            &denied_context
++        )
++        .unwrap_err()
++        .to_string()
++        .contains("capability manifest denies tool"));
++        assert!(
++            authorize_tool_call_with_context("unreviewed_diagnostic", &args, &context)
++                .unwrap_err()
++                .to_string()
++                .contains("no reviewed risk classification")
++        );
++    }
++
+     #[test]
+     fn os_permission_prompt_is_argument_sensitive() {
+         for args in [serde_json::json!({}), serde_json::json!({"prompt": false})] {
+@@ -1638,6 +1717,17 @@ mod tests {
+         )
+         .unwrap_err();
+         assert!(error.to_string().contains("authorization process"));
++
++        let diagnostic_error = authorize_tool_call(
++            "diagnose_foreground_oracles",
++            &serde_json::json!({
++                "pid": std::process::id(), "window_id": 1, "x": 1.0, "y": 1.0,
++            }),
++        )
++        .unwrap_err();
++        assert!(diagnostic_error
++            .to_string()
++            .contains("authorization process"));
+     }
+ 
+     #[test]
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+index 7859ffa..f8b4bce 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -3171,6 +3171,36 @@ mod runtime_isolation_tests {
+         assert_ne!(result.is_error, Some(true));
+     }
+ 
++    #[tokio::test]
++    async fn foreground_oracle_diagnostic_reaches_only_the_registered_readonly_handler() {
++        let args = serde_json::json!({
++            "pid": i64::from(std::process::id()) + 10,
++            "window_id": 7,
++            "x": 12.5,
++            "y": 30.0,
++            "session": "diagnostic-review",
++        });
++        let allowed_hits = Arc::new(AtomicUsize::new(0));
++        let allowed =
++            observation_registry_for("diagnose_foreground_oracles", None, allowed_hits.clone())
++                .invoke_with_context(
++                    "diagnose_foreground_oracles",
++                    args.clone(),
++                    standard_context(),
++                )
++                .await;
++        assert_ne!(allowed.is_error, Some(true));
++        assert_eq!(allowed_hits.load(Ordering::SeqCst), 1);
++
++        let unknown_hits = Arc::new(AtomicUsize::new(0));
++        let unknown =
++            observation_registry_for("unreviewed_readonly_probe", None, unknown_hits.clone())
++                .invoke_with_context("unreviewed_readonly_probe", args, standard_context())
++                .await;
++        assert_eq!(unknown.is_error, Some(true));
++        assert_eq!(unknown_hits.load(Ordering::SeqCst), 0);
++    }
++
+     #[tokio::test]
+     async fn standard_history_requires_an_explicit_protected_host_grant() {
+         let denied_hits = Arc::new(AtomicUsize::new(0));

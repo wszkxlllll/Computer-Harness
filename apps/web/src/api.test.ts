@@ -25,6 +25,17 @@ afterEach(() => {
 });
 
 describe("API error presentation", () => {
+  it("preserves the Host's typed provider setup status and fixed guidance", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: {
+      code: "PROVIDER_CREDENTIALS_MISSING",
+      message: "所选模型尚未配置凭据。请在电脑端完成配置后重试。",
+    } }), { status: 409, headers: { "Content-Type": "application/json" } })));
+
+    const request = createRun("Read the fixture", "provider-preflight", { mode: "browser", url: "about:blank" });
+    await expect(request).rejects.toMatchObject({ status: 409, code: "PROVIDER_CREDENTIALS_MISSING" });
+    await expect(request).rejects.toThrow("所选模型尚未配置凭据。请在电脑端完成配置后重试。");
+  });
+
   it("translates relay error codes into plain status copy", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ error: "host_unavailable" }),

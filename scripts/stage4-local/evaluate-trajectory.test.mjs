@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -62,10 +62,16 @@ async function fixture(t) {
     await writeFile(f.trajectory, f.events.map((event) => JSON.stringify(event)).join("\n") + (f.events.length ? "\n" : ""));
     await writeFile(f.manifestPath, JSON.stringify(f.manifest));
   };
-  f.invoke = async ({ review, family = f.family, variant = f.variant, expectedExit = 0 } = {}) => {
+  f.invoke = async ({ review, family = f.family, variant = f.variant, expectedExit = 0, removeOutput = true, forceUmask022 = false } = {}) => {
     if (review !== undefined) await writeFile(f.reviewPath, JSON.stringify(review));
-    await rm(f.output, { force: true });
-    const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath, "--output", f.output];
+    if (removeOutput) await rm(f.output, { force: true });
+    const args = [];
+    if (forceUmask022 && process.platform !== "win32") {
+      const umaskHook = join(f.directory, "set-umask-022.mjs");
+      await writeFile(umaskHook, "process.umask(0o022);\n");
+      args.push("--import", umaskHook);
+    }
+    args.push(evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath, "--output", f.output);
     if (family !== null) args.push("--family", family);
     if (variant !== null) args.push("--variant", variant);
     if (review !== undefined) args.push("--human-review", f.reviewPath);
@@ -254,12 +260,26 @@ for (const assetName of ["initial", "final"]) {
   }
 }
 
-test("atomic writer replaces a normal existing output", async (t) => {
+test("atomic writer creates a private new output", async (t) => {
   const f = await fixture(t);
-  await writeFile(f.output, "old result");
-  const result = await f.invoke();
+  const result = await f.invoke({ forceUmask022: true });
   assert.equal(result.verdict, "inconclusive");
   assert.equal(JSON.parse(await readFile(f.output, "utf8")).schemaVersion, 2);
+  if (process.platform !== "win32") assert.equal((await stat(f.output)).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
+});
+
+test("atomic writer replaces an existing private output without widening its mode", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.output, "old result");
+  if (process.platform !== "win32") {
+    await chmod(f.output, 0o600);
+    assert.equal((await stat(f.output)).mode & 0o777, 0o600);
+  }
+  const result = await f.invoke({ removeOutput: false, forceUmask022: true });
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(JSON.parse(await readFile(f.output, "utf8")).schemaVersion, 2);
+  if (process.platform !== "win32") assert.equal((await stat(f.output)).mode & 0o777, 0o600);
   assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
 });
 
@@ -273,6 +293,26 @@ test("atomic rename failure removes its temporary file and preserves inputs", as
   await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
     (error) => error.code === 1 && /evaluator error:/.test(error.stderr));
   assert.deepEqual(await Promise.all([f.trajectory, f.manifestPath].map((path) => readFile(path))), before);
+  assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
+});
+
+test("rename failure preserves an existing result and its private mode", async (t) => {
+  const f = await fixture(t);
+  const inputPaths = [f.trajectory, f.manifestPath];
+  const inputBefore = await Promise.all(inputPaths.map((path) => readFile(path)));
+  const oldResult = Buffer.from("keep this prior private result");
+  await writeFile(f.output, oldResult);
+  if (process.platform !== "win32") await chmod(f.output, 0o600);
+  const modeBefore = process.platform === "win32" ? null : (await stat(f.output)).mode & 0o777;
+  const hook = join(f.directory, "fail-temp-rename.mjs");
+  await writeFile(hook, `import fs from "node:fs";\nimport { syncBuiltinESMExports } from "node:module";\nprocess.umask(0o022);\nfs.promises.rename = async () => { throw new Error("injected temporary rename failure"); };\nsyncBuiltinESMExports();\n`);
+  const args = ["--import", hook, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+    "--family", f.family, "--variant", f.variant, "--output", f.output];
+  await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
+    (error) => error.code === 1 && /injected temporary rename failure/.test(error.stderr));
+  assert.deepEqual(await readFile(f.output), oldResult);
+  if (modeBefore !== null) assert.equal((await stat(f.output)).mode & 0o777, modeBefore);
+  assert.deepEqual(await Promise.all(inputPaths.map((path) => readFile(path))), inputBefore);
   assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
 });
 

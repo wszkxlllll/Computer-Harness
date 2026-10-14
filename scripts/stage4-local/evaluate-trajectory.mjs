@@ -326,7 +326,7 @@ async function writeOutputAtomically(outputPath, contents) {
   let handle;
   let ownsTemporaryPath = false;
   try {
-    handle = await open(temporaryPath, "wx");
+    handle = await open(temporaryPath, "wx", 0o600);
     ownsTemporaryPath = true;
     await handle.writeFile(contents, "utf8");
     await handle.close();

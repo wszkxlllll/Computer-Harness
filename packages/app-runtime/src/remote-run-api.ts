@@ -6,6 +6,7 @@ import type { AssetId, AssetRef, ComputerWindowCandidate, JsonValue, RunOutcome,
 import type { AssetReader } from "@computer-harness/runtime";
 import { inspectManagedBrowserProfile, readManagedBrowserStartupUrls } from "@computer-harness/computer-cua";
 import type { ApplicationSession, ApplicationSessionRunFeatureOverrides, WindowTargetInfo, WindowTargetPreview } from "./application-session.js";
+import { ProviderConfigurationError } from "./providers.js";
 import type { RunHandle } from "./config.js";
 import type { EventFeedNotification, EventFeedSubscription } from "./event-feed.js";
 import { RunNoticeProjector, RunNoticeScheduler, type RunNoticeGeneration } from "@computer-harness/voice";
@@ -197,7 +198,7 @@ export function createFileRemoteAssetReader(rootDir: string): AssetReader {
 
 export class RemoteRunApiError extends Error {
   public constructor(
-    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "INVALID_ASSISTANT_PREFERENCES" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "WINDOW_PREVIEW_REQUIRED" | "WINDOW_PREVIEW_UNAVAILABLE" | "WINDOW_PREVIEW_TIMEOUT" | "WINDOW_PREVIEW_CAPTURE_FAILED" | "WINDOW_PREVIEW_CLEANUP_PENDING" | "WINDOW_PREVIEW_IMAGE_TOO_LARGE" | "WINDOW_PREVIEW_BUSY" | "NATIVE_RECOVERY_PROFILE_CONSUMED" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE" | "MANAGED_BROWSER_SETUP_REQUIRED",
+    public readonly code: "RUN_NOT_FOUND" | "RUN_BUSY" | "STALE_SEQUENCE" | "STALE_REQUEST" | "INVALID_COMMAND" | "INVALID_TARGET" | "INVALID_ASSISTANT_PREFERENCES" | "IDEMPOTENCY_CONFLICT" | "CAPACITY_REACHED" | "WINDOW_TARGET_STALE" | "WINDOW_DISCOVERY_FAILED" | "WINDOW_SELECTION_REQUIRED" | "WINDOW_ACTIVATION_FAILED" | "WINDOW_PREVIEW_REQUIRED" | "WINDOW_PREVIEW_UNAVAILABLE" | "WINDOW_PREVIEW_TIMEOUT" | "WINDOW_PREVIEW_CAPTURE_FAILED" | "WINDOW_PREVIEW_CLEANUP_PENDING" | "WINDOW_PREVIEW_IMAGE_TOO_LARGE" | "WINDOW_PREVIEW_BUSY" | "NATIVE_RECOVERY_PROFILE_CONSUMED" | "MANAGED_BROWSER_UNAVAILABLE" | "MANAGED_BROWSER_PROFILE_UNAVAILABLE" | "MANAGED_BROWSER_SETUP_REQUIRED" | "PROVIDER_CREDENTIALS_MISSING",
     message: string,
   ) {
     super(message);
@@ -535,6 +536,14 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
     if (this.startRequests.size >= this.maxStartRequests) {
       return Promise.reject(new RemoteRunApiError("CAPACITY_REACHED", "The Host reached its safe start-request limit. Existing command IDs remain protected from replay; restart the Host to begin a new deduplication epoch."));
+    }
+    try {
+      this.session.assertRunProviderConfiguration();
+    } catch (error) {
+      if (error instanceof ProviderConfigurationError) {
+        return Promise.reject(new RemoteRunApiError("PROVIDER_CREDENTIALS_MISSING", "所选模型尚未配置凭据。请在电脑端完成配置后重试。"));
+      }
+      return Promise.reject(error);
     }
     let selectedTarget: WindowTargetSelection | undefined;
     try {

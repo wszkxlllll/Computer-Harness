@@ -1,3 +1,66 @@
+## 2026-10-14 最高优先：PR22/PR23 修复、独审与合入 main
+
+本轮冻结接收：MODE最终162/162与真实umask022/0755父目录CLI已Sol独验；679语义移植六套件218/218及typecheck已Sol独验、16文件pin/9–11段native来源闭合，已导入最终组合。evaluator接入标准测试列表。最终实际head全套/CI/组合独审继续执行；GitHub中间8fd四verify绿，但required作业因账户付款/额度未启动，已请账户负责人处理，main未合并。
+
+### 本轮追加优先条件：权限保护与679整合
+
+用户最新授权把PRFIX-23-MODE与PRFIX-679作为同一最高优先批次持续执行，**正式修复、实际最终组合测试、Sol独审、同head必要CI全部通过后，完成PR22→main合并**。现有对话01a124b9为唯一执行负责人，沿用Sol协调/Luna实施/Sol独审；不重复合并已经完成的PR23→PR22（8fd7c9d），也不因历史停止条款或手机等待停住这批离线工作。详见[专项审查及证据](./astra-pr22-integration-review-2026-10-14.md)。
+
+1. **先完成MODE正式修复及回归。** 59及8fd的原子writer临时文件未设mode，umask022下将0600旧结果换为0644。采用显式0600或经证明不放宽原限制的实现；替换测试必须在子进程明确umask022，预置真实0600结果后直接调用CLI/保留输出的helper，不先rm。断言替换成功、内容合法、权限不放宽、全部输入（含初末截图）字节不变、临时文件无残留；保留direct/symlink/hardlink/父目录别名及open/write/rename失败回归。候选162绿只属作者阶段证据，Sol复核实际源码和有意义测试后记录正式commit。
+2. **并行完成679移植，避免文件覆盖。** 基线679b08c/PR26是共享凭据提前拒绝及native诊断链归档；对实际最新PR22核diff，不把“旧594已包含”当“679已包含”。ApplicationSession/run-factory尊重注入Provider/Run工厂；仅检查主模型及实际启用的distinct layered risk模型；新请求在消费窗口token、discovery、预留新commandId和分配Run资源前拒绝缺凭据；已有幂等结果优先返回。保留错误码/Host409中文提示及零副作用回归。
+3. **解决文本冲突并核机械clean文件。** 五个已定位冲突是Host server.test、ApplicationSession、RemoteAPI、RunFactory及其test；两边有效合同同时保留：closeConfirmation/迟到cleanup逐项释放、ownerState、统一finish schema、工具说明和operation guidance不退回。remote-run-api.test虽机械clean，679新凭据用例却引用已退役nativeRecoveryProfile/native-recovery；迁到保留的window/browser/auto或相应CLI单文件边界，保留零discovery/零allocation/token不消费及幂等断言，不删除保护或恢复退役入口。保留native9/10/11 patch/source-chain来源，不能冒称运行中driver已部署。
+4. **冻结并验证真正组合。** 两项修复合入后记录源码pin与最终head；重跑typecheck、Web build、完整仓库/评测/新增负例，确认evaluator接入标准测试入口或有明确完整独立命令，Sol独审实际组合及来源。旧156的2324+72、392的455/18、59的160、候选162、679的旧CI均不替代最终组合检查。源变则对应重核，不盲目重复已验证无变模块。
+5. **处理最终head的CI并完成合并。** 392历史失败为Runtime固定轮询窗口与租约集成测试期限；046已做事件等待和该单项有界期限修正进入8fd，不能把旧失败冒充新head失败，也不能直接继承旧绿。定位新失败的真实原因，保留断言和失败历史，等待实际最终head全部必要CI成功、Sol独审无新阻塞，再按已授权PR22→main合并。不得force push、跳过分支强制规则或删/skip测试。Windows/Linux原生工作排除，现有required共享CI保留。
+6. **合并后核验并续办。** fresh读main、PR22/23状态及实际merge/tree，证明含F1/F2/MODE与679有效行为/归档；若采用选择移植，不用679整commit祖先性作唯一判据，保留逐文件/行为映射与回归。落测试exit、review、CI run和merge SHA，更新两份计划及执行记录。PR24/27不强制合入；代码合并不签收部署、正常Mac/Web业务或手机验收，之后继续原Astra未完成部分。
+
+本节是正式最高优先执行/验收要求，接续时按最新证据更新状态；接收、作者候选测试和派工不算修复或合并完成，不重复请求例行实施/合并许可。共享现场、私有文件及已知/未知用量记录保留。
+
+新增复审接收（2026-10-14，同一PRFIX批次）：[专项集成审查](./astra-pr22-integration-review-2026-10-14.md)发现PR23-MODE（0600旧结果原子替换后0644，旧existing测试先rm文件）。已派Luna修mode及真正existing替换回归；旧160绿及独审仅限定已覆盖部分，main不得据此放行。同时隔离移植679凭据提前拒绝与native归档，保留PR22新cleanup/finish/API合同、迁移旧profile测试到合法目标，不恢复退役入口。最终组合全套、必要CI与Sol独审仍为main前置。
+
+当前批次进度（2026-10-14）：PR22/F1正式修复392b6ca及两项共享CI测试修正046019d均已Sol独审；PR23/F2正式修复59a952d完整160项与CI五绿，已实际合入PR22，merge为8fd7c9d。现在冻结最终组合，接入evaluator标准测试并重跑全仓/类型/Web/CI与最终Sol审查；main尚未合并。392失败历史保留，不用中间CI或旧594/679的绿授权当前组合。
+
+执行接收（2026-10-14，本轮 PRFIX-20261014）：Root 已接收最高优先队列；fresh API 核实 PR22=156baad、PR23=1f57852、main=961a098、PR26=679b08c。679 的 CI38544542836 已 completed/success；其新凭据预检及 native patch 交付独立保留，尚未计入 PR22。现在建立隔离候选，由 Luna 分目录单写、Sol 独审；未操作前台、服务或实体手机，未开始合并。源码、review、CI 与合并证据持续写入新私有批次 prfix-merge-20261014-private。
+
+本轮接续记录：[PRFIX 正式修复、版本分叉与合并证据](./astra-prfix-merge-execution-2026-10-14.md)。PR22 最终产品路线移除旧 native-recovery/native-web-document 公共 Web 起点；旧594 profile交付只作历史，后续按普通Web和CLI显式受限实验分别验收。679及其CI五绿保留在PR26，尚不属于PR22。native11权限同意已收到，当前仅延期前台操作，不重复请求该App授权。
+
+用户明确授权本轮执行 **修 PR22/23 → 测试与 Sol 独审 → PR23 合入 PR22 → PR22 合入 main**，并要求现有执行对话优先完成、不因历史停止条款或手机条件停住。负责人“审查并同步 AStra 计划进度”（01a124b9-c56b-7a91-89d8-2581f4ae15a6），Sol 协调、Luna 单写者实施、Sol 独审；本节优先于下方旧 R1–R6/现场队列。证据与位置见[详细审查](./astra-premerge-review-2026-10-14.md) F1/F2；最高优先不是将 P2 改为 P0 严重度。
+
+### A. 接收、核版与隔离
+
+- 先记录当前现场、已存在 dirty 和新提交 `679b08c`，fresh 核对 PR22/23/main/PR26 的 head/base、检查及 review。17:47 的审查参考是 156baad/1f57852/961a098，不是未来版本保证。保留新凭据拒绝修复及其测试，不 reset、覆盖或混入未经审查的改动。
+- 使用适合的隔离 checkout/worktree 承接两个 PR 修复；不切换共享现场分支或抢占桌面/服务。两个修复可分目录并行，由每个目录唯一写入者负责；不要并发修改同一 CUA/API/评测文件或共享构建。
+- 私有反例/原型在 `runs/astra-autonomous-20261010-sol-luna/premerge-review-20261014-private/`，源码固定与测试记录齐全。可读这些证据重新构建有意义回归，但不得提交私有日志、凭据或用户轨迹，也不能用私有绿例替代正式源码检查。
+
+### B. PRFIX-22：保留已知 DOM 负证据
+
+- exact PR22 `packages/computer-cua/src/cua-driver-computer.ts:4234–4238` 以 `domComplete===true` 限制寻找 DOM 对应项。反例是同一次 observation 的 UIA 与唯一已观测 DOM 按钮角色/名称/bbox 相符，UIA enabled，DOM disabled；或 fake DOM live click 若调用会拒绝遮挡。仅全局 complete=false 就导致 native 1、DOM 0、completed。
+- 正式修复不得因全局 partial 丢弃已知 disabled/点位限制。可走保留约束的 DOM 验证路线，或证据不足时拒绝该目标；真正 missing/ambiguous 的合法 native fallback 保留，不给所有 partial inventory 增加全局硬拒绝。
+- 新增 complete/partial 的 disabled 与 live-validator 负例，并保留 missing/ambiguous fallback 正例、精确身份/点位、stale ref 零新增派发。审查工具提示、源码注释和测试路线合同，不能仅删 gate 并改成宽松期望。
+- 私有历史为当前六项 4绿2红，最小原型6绿；首完整401/402中的失败来自旧 positive partial fixture 写死 native 路线，经独审更新为 DOM1/native0 后402/402、0skip。该历史保留；正式实现须重新执行适配器全套和相关常规检查，取得新的源码 pin 与独审。
+
+### C. PRFIX-23：评测输入保护及安全写入
+
+- 在 PR23 正式评测器修复输出保护：保留 resolve 同路径检查，比较 canonical 路径和已有文件 dev/ino，拒绝输出是输入别名。保护 trajectory、manifest、human-review 以及该实际版本支持的 independent-findings；不要为测试导入 PR27 才有的新功能。
+- 覆盖直接同路径、末端软链接、硬链接、父目录别名，断言非零退出、原输入字节/SHA 不变。保留正常新输出/现有合法结果覆盖合同。使用同目录独占随机临时文件写入再原子 rename，或证明同等输入保护的实现；补写入/rename失败、临时文件清理与不截断输入的检查。
+- exact PR23/27 软链接反例均已独跑复现；172/173及三类别名红绿属于旧 PR27/私有原型证据，不继承成 PR23 的正式结果。对修复的实际 PR23 运行自身完整评测测试及新增回归，再由 Sol 独审实际 diff/源码。
+
+### D. 推送、组合验证与合并
+
+1. 两项正式修复各自通过相关测试与 Sol 独审后，精确提交并非 force 推送，更新对应 PR 描述/验证。无直接写分支权限时用针对原分支的修复 PR，仍保留 PR23→PR22→main 依赖，不另造互相替代的产品分支。
+2. 以 fresh 远端 base/head 将修复后的 PR23 合入 PR22 所在 `codex/runtime-surface-preview-20261003` 分支。PR23 当前不是以 main 为 base；不要只改 base 到 main 来跳过整合验证。修复/审查后的源码发生变化时重查相应部分。
+3. 对实际组合 head 重跑全仓 typecheck、Web production build、完整仓库与评测测试、新反例，等待该 head 全部必要 CI，并由 Sol 检查组合 diff、公共合同和无漂移。旧156的2324+72、旧CI绿色、COMMENTED或mergeable=clean不能替代。
+4. PR27 不作为本轮必合依赖。若后续另行选择吸收，原模拟显示 `remote-run-api.test.ts` 有一处冲突，须保留双方有效回归，并重新验证组合；不许为消冲突删除断言或重引 F2。
+5. 核对 PR22 两个 Web profile 的路线收缩并同步计划说明；核对新本地679b08c与PR26去向。其他独有能力/PR24选择暂不扩成本轮整包合并或手机前置。
+6. 最终 PR22 当前 head 测试、CI、独审通过且无新阻塞后，按用户本轮授权执行 PR22→main，无需再次请求例行合并许可。保留历史，不 force push、不跳过仓库强制分支规则；如果实际分支规则要求外部审批或工具自动审批拒绝，记录确切原因并继续未受影响工作。
+7. 用 fresh API/Git 验证 main 实际树/合并提交包含两项修复、PR23与PR22的最终状态；merge方式可能产生不同SHA，以实际树/补丁及回归核对，不能只用旧head祖先关系判失败。记录测试命令、exit、源码pin、review、CI run和merge SHA，更新两份计划状态。
+
+### E. 完成后的续办
+
+合并不自动部署或签收业务成果。随后回到 Astra 三线现有未完成事项，按同版 Host/Web/Relay、正常 Guard、真实 Mac/Web与手机独立出口继续；保留 T2 CLI 三轮限定通过和所有历史失败/未知用量。Windows/Linux原生专测仍排除。本轮两项离线修复及代码合并不等待新App TCC、前台空闲或实体手机。
+
+交接状态：本节已准备供执行，发送与接收结果由协调方追加；实际修复/合并尚未由本节证明。
+
+
 > 最新执行状态（2026-10-13）：八项 MR 已修复提交3b84287，test-only确定性等待修正9720350已推送且当前CI五项全通过。本地完整2076项Vitest＋72项Node、类型检查和Web构建通过；现进入新环境零真实Provider Mac诊断。T3新能力在隔离树实施，正式三线业务及手机专属验收尚未完成。详见 [本轮执行记录](astra-mr-repair-execution-2026-10-13.md) 与 [现场验证记录](astra-live-validation-2026-10-13.md)。
 
 # Astra 自主测试与修复计划

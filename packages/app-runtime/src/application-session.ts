@@ -11,6 +11,7 @@ import {
   type EnvironmentOwner,
 } from "./environment-owner.js";
 import type { ResolvedRunConfig, RunCloseConfirmation, RunDependencies, RunHandle } from "./config.js";
+import { assertBuiltInProviderCredentials } from "./providers.js";
 
 export type ApplicationSessionConfig = Omit<ResolvedRunConfig, "goal" | "runId" | "assistantPreferences">;
 
@@ -127,6 +128,17 @@ export class ApplicationSession {
   public get lastRun(): SessionRunRecord | undefined {
     const record = this.records[this.records.length - 1];
     return record === undefined ? undefined : { ...record };
+  }
+
+  /** Pure check used before the Host consumes one-use target tokens. */
+  public assertRunProviderConfiguration(featureOverrides: ApplicationSessionRunFeatureOverrides = {}): void {
+    if (this.dependencies.createProvider !== undefined || this.createRunFactory !== createRun) return;
+    const riskGuard = featureOverrides.riskGuard ?? this.config.riskGuard;
+    const credentials = this.dependencies.credentials ?? {};
+    assertBuiltInProviderCredentials({ model: this.config.model, credentials });
+    if (riskGuard === "layered" && this.config.riskModel !== "off" && this.config.riskModel !== "same") {
+      assertBuiltInProviderCredentials({ model: this.config.riskModel, credentials });
+    }
   }
 
   public get history(): readonly SessionRunRecord[] {
