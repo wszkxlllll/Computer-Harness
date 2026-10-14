@@ -1011,13 +1011,33 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall("desktop-mismatch-click")] },
       { type: "finish", summary: "continued after the fresh desktop observation" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    let resolveHandoffRequested!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const handoffRequested = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveHandoffRequested = resolve;
+    });
+    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested") resolveHandoffRequested(event);
+      },
+    });
     let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
     try {
       run = controller.start("continue after a desktop click is refused");
-      await waitUntil(() => controller.getSnapshot().status === "finished" || controller.getSnapshot().status === "waiting_window");
+      const runResult = run.then(
+        (outcome) => ({ kind: "finished" as const, outcome }),
+        (error: unknown) => ({ kind: "error" as const, error }),
+      );
+      const result = await Promise.race([
+        runResult,
+        handoffRequested.then((event) => ({ kind: "handoff" as const, event })),
+      ]);
+      if (result.kind === "handoff") {
+        throw new Error(`unexpected committed window handoff request: ${result.event.reasonCode}`);
+      }
+      if (result.kind === "error") throw result.error;
+      expect(result.outcome).toBe("succeeded");
       expect(controller.getSnapshot().status).toBe("finished");
-      await expect(run).resolves.toBe("succeeded");
       expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
       expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
       expect(computer.handoffCandidateCalls).toBe(0);

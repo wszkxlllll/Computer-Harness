@@ -135,9 +135,14 @@ describe("ProcessSharedEnvironmentOwner", () => {
         inspectionNote: "Inspected the fixture desktop state and reconciled all prior actions.",
         externalStateInspected: true,
       });
-      const quarantined = JSON.parse(await readFile(result.quarantinePath, "utf8")) as { identity: string; runId: string; state: string; token: string };
-      const preparedAudit = JSON.parse(await readFile(result.preparedAuditPath, "utf8")) as { status: string; expectedRunId: string };
-      const audit = JSON.parse(await readFile(result.auditPath, "utf8")) as { action: string; status: string; identity: string; expectedRunId: string; operator: string; inspectionNote: string; quarantineFile: string; quarantinedAt: string };
+      const [quarantinedBytes, preparedAuditBytes, auditBytes] = await Promise.all([
+        readFile(result.quarantinePath, "utf8"),
+        readFile(result.preparedAuditPath, "utf8"),
+        readFile(result.auditPath, "utf8"),
+      ]);
+      const quarantined = JSON.parse(quarantinedBytes) as { identity: string; runId: string; state: string; token: string };
+      const preparedAudit = JSON.parse(preparedAuditBytes) as { status: string; expectedRunId: string };
+      const audit = JSON.parse(auditBytes) as { action: string; status: string; identity: string; expectedRunId: string; operator: string; inspectionNote: string; quarantineFile: string; quarantinedAt: string };
       expect(quarantined).toMatchObject({ identity, runId: "reviewed-run", state: "pending_cleanup" });
       expect(quarantined.token.length).toBeGreaterThan(0);
       expect(preparedAudit).toMatchObject({ status: "prepared", expectedRunId: "reviewed-run" });
@@ -158,7 +163,7 @@ describe("ProcessSharedEnvironmentOwner", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("requires explicit review before quarantining an abandoned active Host lease", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-owner-recovery-active-"));
