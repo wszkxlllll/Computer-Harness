@@ -15,6 +15,8 @@
 
 T2同95b CLI实验模式三轮限定PASS、已修F1–F4及有效Mac原生增量保留，不退回“没有成果”。T1/T3与正常Web完整T2仍未通过。Windows/Linux原生实现、专测、环境寻找和验收继续排除；PR28材料只参考，PR23/27评测隔离，不新增医疗/缴费业务任务或伪造真人评分。大重构不是本轮前置。
 
+点击路线合同（PR22 F1）：受管浏览器内容仍优先使用观察内唯一匹配的 DOM 控件；全局 DOM 为 partial 不抹去该控件已知的 disabled 或实时点击校验拒绝。只有没有唯一 DOM 对应项时，非容器 UIA 控件才可走现有带身份、几何与精确点位检查的 native fallback。这项修复不改变正常 Web/Relay、Browser 与 native Surface 的既有边界。
+
 本次只改审查/计划并传递，产品源码仍e7bce7f、Git HEAD6c0af49；498实际请求计数不变。交接对象为原执行对话01a124b9，实际送达状态见综合审查交接节。
 
 2026-10-12 11:53 本轮修复完成并停止（用户要求本轮完成后停止，最新状态以本段为准）：F089已精确27文件提交并原SHA推送 `e7bce7f7792b455d02212c717a34206412002d14`；来源引用finish默认关闭，可经正常CLI/Host显式配置，Runtime只引用本Run已持久化Observation中的保留grounding并规范渲染结果，未知/推断明确标记。它验证来源与输出绑定一致性，不机械判断SKU语义或事实真值，不计T1业务通过。作者最终452/452，Sol独检239/239与Root独检213/213互补合452；主工作区tsc-b exit0，24源文件与冻结pin全部一致。当前HEAD CI38201158820已由Root于03:52:50Z实际核completed/success，4 verify及ci-required共5job全部success，不继承旧cb93五绿。详见[F089](./a-line-sync/fixes/F-20261012-089-source-linked-finish.md)及[来源引用审查](./astra-source-linked-finish-review-2026-10-12.md)。

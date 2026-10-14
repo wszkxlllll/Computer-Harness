@@ -4227,13 +4227,15 @@ export class CuaDriverComputer implements Computer {
     }
     // Hybrid observations intentionally expose both producers. A model may
     // select the UIA copy of a browser control; when a unique equivalent from
-    // a complete DOM observation exists, prefer that observation-bound CDP
-    // path. Otherwise the fresh UIA reference continues through the guarded
-    // native point path below, which applies the same identity, geometry,
-    // enabled-state, and exact-point checks as an ordinary screenshot click.
+    // the DOM observation exists, prefer that observation-bound CDP path even
+    // when the overall DOM catalog is partial. Known target restrictions
+    // (such as disabled state or live click validation) remain authoritative.
+    // Only a missing or ambiguous match continues through the guarded native
+    // point path below with identity, geometry, enabled-state, and exact-point
+    // checks.
     const domEquivalent = action.kind === "click"
       && resolvedGrounding?.element.source === "uia"
-      && browserTarget !== undefined && privateGrounding?.domComplete === true
+      && browserTarget !== undefined
       ? findEquivalentDomGrounding(privateGrounding, resolvedGrounding)
       : undefined;
     const browserGrounding = domEquivalent ?? (

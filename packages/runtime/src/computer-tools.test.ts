@@ -234,8 +234,8 @@ describe("default Computer tools", () => {
     expect(definition.description).toContain("do not retry the same target with another reference");
     expect(JSON.stringify(definition.inputSchema)).toContain("UIA or DOM grounding catalog");
     expect(definition.description).toContain("current catalog");
-    expect(definition.description).toContain("For managed page content, use a DOM ref");
-    expect(JSON.stringify(definition.inputSchema)).toContain("Use a DOM ref for managed page content");
+    expect(definition.description).toContain("a unique observed DOM match is authoritative even when the DOM catalog is partial");
+    expect(JSON.stringify(definition.inputSchema)).toContain("A unique observed DOM match for managed page content remains authoritative in a partial catalog");
     const context = {
       runId: "run" as never,
       session: {} as never,

@@ -253,7 +253,7 @@ export interface GroundingComputerToolsOptions {
 export function groundingComputerTools(options: GroundingComputerToolsOptions = {}): readonly ComputerToolDefinition[] {
   const tools: ComputerToolDefinition[] = [{
     name: "click_element",
-    description: "Click a named element from the current catalog of UIA or DOM grounding. For managed page content, use a DOM ref from a unique complete match; UIA page refs may be refused unless uniquely matched to DOM. The catalog is bounded and the point center is not proof of clickability or effect. If a grounded click is refused or shows no effect, do not retry the same target with another reference; observe first, then choose another safe path.",
+    description: "Click a named element from the current catalog of UIA or DOM grounding. For managed page content, a unique observed DOM match is authoritative even when the DOM catalog is partial; known disabled or live-validation refusals block the click. A fresh non-container UIA ref uses the checked native point path only when no unique DOM match exists. The catalog is bounded and the point center is not proof of clickability or effect. If a grounded click is refused or shows no effect, do not retry the same target with another reference; observe first, then choose another safe path.",
     category: "computer",
     inputSchema: {
       type: "object",
@@ -262,7 +262,7 @@ export function groundingComputerTools(options: GroundingComputerToolsOptions = 
           type: "string",
           minLength: 1,
           maxLength: 96,
-          description: "Current observation's opaque ref from the UIA or DOM grounding catalog; expires when the observation or window changes. Use a DOM ref for managed page content from a unique complete match; UIA page refs may be refused. Non-container UIA refs can use the checked point-click fallback.",
+          description: "Current observation's opaque ref from the UIA or DOM grounding catalog; expires when the observation or window changes. A unique observed DOM match for managed page content remains authoritative in a partial catalog. A non-container UIA ref can use the checked native point path only when no unique DOM match exists.",
         },
       },
       required: ["elementRef"],

@@ -439,7 +439,7 @@ describe("DefaultContextCompiler", () => {
     expect(projectedGroundingText).toContain("surface=dom");
     expect(projectedGroundingText).toContain("bounded candidate list, not a substitute for the screenshot");
     expect(projectedGroundingText).toContain("when partial or truncated, omitted controls may still be visible");
-    expect(projectedGroundingText).toContain("unique complete DOM match is preferred");
+    expect(projectedGroundingText).toContain("a unique observed DOM match remains authoritative even when the catalog is partial");
     expect(projectedGroundingText).toContain("use a clear current screenshot point with click");
     expect(projectedGroundingText).toContain("do not retry the same target by changing refs");
     expect(projectedGroundingText).not.toContain(domSurfaceRef.surfaceId);

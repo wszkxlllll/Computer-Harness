@@ -9321,7 +9321,7 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  it("delivers a DOM-grounded click through managed CDP instead of native coordinates", async () => {
+  it.each([true, false] as const)("delivers a unique enabled DOM match through CDP when the DOM catalog is complete=%s", async (domComplete) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-dom-click-"));
     const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
     fake.setGroundingState({
@@ -9344,7 +9344,7 @@ describe("CuaDriverComputer", () => {
     };
     const clickRequests: unknown[] = [];
     const transport = createMockDomGroundingTransport({
-      complete: true,
+      complete: domComplete,
       tabId: "tab-fixture",
       generation: "generation-1",
       coordinateSpace: "physical",
@@ -9380,6 +9380,7 @@ describe("CuaDriverComputer", () => {
       expect(receipt).toMatchObject({ status: "completed", message: "dom click fixture" });
       expect(clickRequests).toHaveLength(1);
       expect(clickRequests[0]).toMatchObject({ candidate: { name: "Contact user@example.com" } });
+      expect(capture.grounding).toMatchObject({ completeness: domComplete ? "complete" : "partial" });
       expect(fake.calls.some((call) => call.name === "click")).toBe(false);
       await computer.close(session);
     } finally {
@@ -9702,7 +9703,7 @@ describe("CuaDriverComputer", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it.each(["missing", "partial", "ambiguous"] as const)("uses a fresh, point-bound native UIA fallback when DOM equivalence is %s", async (scenario) => {
+  it.each(["missing", "ambiguous", "partial-missing", "partial-ambiguous"] as const)("uses a fresh, point-bound native UIA fallback when DOM equivalence is %s", async (scenario) => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-dom-fallback-"));
     const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
     fake.setGroundingState({ elements_complete: true, elements: [
@@ -9713,7 +9714,7 @@ describe("CuaDriverComputer", () => {
     const domCandidate = { tagName: "button", ariaRole: "button", name: "Continue", frame: { x: 100, y: 200, width: 120, height: 40 }, visible: true, interactive: true, state: { enabled: true } };
     const transport: DomGroundingTransport = {
       kind: "managed-loopback-cdp-v1",
-      collect: async () => ({ complete: scenario !== "partial", tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario === "missing" ? [] : scenario === "ambiguous" ? [domCandidate, domCandidate] : [domCandidate] }),
+      collect: async () => ({ complete: !scenario.startsWith("partial-"), tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: scenario.endsWith("missing") ? [] : [domCandidate, domCandidate] }),
       click: vi.fn(async () => ({ status: "completed" as const, tabId: "tab", generation: "generation" })),
     };
     const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
@@ -9742,6 +9743,61 @@ describe("CuaDriverComputer", () => {
       expect(await computer.execute(session, { kind: "click", actionId: "uia-fallback-stale-ref" as ActionId, basedOn: freshObservationId, groundingRef: candidate.elementRef, point: exactPoint }, signal))
         .toMatchObject({ status: "refused", driverCode: "GROUNDING_REF_STALE" });
       expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    { scenario: "disabled", completeness: "complete" },
+    { scenario: "disabled", completeness: "partial" },
+    { scenario: "live-refusal", completeness: "complete" },
+    { scenario: "live-refusal", completeness: "partial" },
+  ] as const)("preserves known DOM negative evidence in a $completeness hybrid catalog ($scenario)", async ({ scenario, completeness }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-uia-dom-partial-evidence-"));
+    const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true },
+      { role: "Button", name: "Continue", frame: { x: 100, y: 200, width: 120, height: 40 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({
+        complete: completeness === "complete",
+        tabId: "tab",
+        generation: "generation",
+        coordinateSpace: "physical",
+        candidates: [{
+          tagName: "button",
+          ariaRole: "button",
+          name: "Continue",
+          frame: { x: 100, y: 200, width: 120, height: 40 },
+          visible: true,
+          interactive: true,
+          state: { enabled: scenario !== "disabled" },
+        }],
+      }),
+      click: vi.fn(async () => ({ status: "refused" as const, driverCode: "DOM_CLICK_OCCLUDED", message: "the live target is obscured" })),
+    };
+    const computer = new CuaDriverComputer({ socketPath: "test", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "partial-dom-negative" as ObservationId;
+      const observation = await computer.observe(session, basedOn, signal);
+      expect(observation.grounding).toMatchObject({ source: "hybrid", completeness });
+      const candidate = observation.grounding!.elements.find((item) => item.source === "uia" && item.name === "Continue")!;
+      const exactPoint = { x: candidate.bbox!.x + candidate.bbox!.width / 2, y: candidate.bbox!.y + candidate.bbox!.height / 2 };
+      const result = await computer.execute(session, { kind: "click", actionId: `partial-dom-${scenario}` as ActionId, basedOn, groundingRef: candidate.elementRef, point: exactPoint }, signal);
+
+      if (scenario === "disabled") {
+        expect(result).toMatchObject({ status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED" });
+        expect(transport.click).not.toHaveBeenCalled();
+      } else {
+        expect(result).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
+        expect(transport.click).toHaveBeenCalledTimes(1);
+      }
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
       await computer.close(session);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
