@@ -5,6 +5,7 @@ import {
   type ChatCompletionsBoundary,
   type GlmHttpClient,
   type GlmHttpDiagnostics,
+  type GlmRetryMode,
   type GlmTransportEvidence,
 } from "./chat-completions.js";
 
@@ -12,15 +13,29 @@ export type DeepseekHttpDiagnostics = GlmHttpDiagnostics;
 export type DeepseekTransportEvidence = GlmTransportEvidence;
 export type DeepseekHttpClient = GlmHttpClient;
 
-/** DeepSeek errors never request automatic retry or replay of a GUI decision. */
 export class DeepseekProviderError extends Error {
-  public readonly retryable = false;
-  public readonly retryMode = "feedback" as const;
+  public readonly retryable: boolean;
+  public readonly retryMode: GlmRetryMode;
 
-  public constructor(message: string, public readonly code = "DEEPSEEK_PROVIDER_ERROR") {
+  public constructor(
+    message: string,
+    public readonly code = "DEEPSEEK_PROVIDER_ERROR",
+    retryable = isRetryableDeepseekResponseCode(code),
+    retryMode: GlmRetryMode = "feedback",
+  ) {
     super(message);
     this.name = "DeepseekProviderError";
+    this.retryable = retryable;
+    this.retryMode = retryMode;
   }
+}
+
+function isRetryableDeepseekResponseCode(code: string): boolean {
+  return code === "DEEPSEEK_UNAVAILABLE_TOOL"
+    || code === "DEEPSEEK_INVALID_TOOL_CALL"
+    || code === "DEEPSEEK_DUPLICATE_TOOL_CALL"
+    || code === "DEEPSEEK_EMPTY_RESPONSE"
+    || code === "DEEPSEEK_INVALID_RESPONSE";
 }
 
 const deepseekBoundary: ChatCompletionsBoundary = {
@@ -30,7 +45,8 @@ const deepseekBoundary: ChatCompletionsBoundary = {
   maxOutputTokens: 4096,
   userImagesOnly: true,
   strictResponse: true,
-  error: (message, code) => new DeepseekProviderError(message, code),
+  strictResponseRetryable: true,
+  error: (message, code, retryable) => new DeepseekProviderError(message, code, retryable),
   isProviderError: (error) => error instanceof DeepseekProviderError,
 };
 
@@ -42,6 +58,27 @@ export class FetchDeepseekHttpClient extends FetchChatCompletionsHttpClient {
   public constructor(options: FetchDeepseekHttpClientOptions = {}) {
     super(options, deepseekBoundary);
   }
+
+  public override async post(
+    url: string,
+    body: Record<string, unknown>,
+    headers: Readonly<Record<string, string>>,
+    signal: AbortSignal,
+    diagnostics?: DeepseekHttpDiagnostics,
+  ): Promise<unknown> {
+    try {
+      return await super.post(url, body, headers, signal, diagnostics);
+    } catch (error) {
+      if (!(error instanceof DeepseekProviderError) || !isRetryableDeepseekTransportCode(error.code)) throw error;
+      throw new DeepseekProviderError(error.message, error.code, true, "same_input");
+    }
+  }
+}
+
+function isRetryableDeepseekTransportCode(code: string): boolean {
+  return code === "DEEPSEEK_NETWORK_ERROR"
+    || code === "DEEPSEEK_HTTP_429"
+    || /^DEEPSEEK_HTTP_5\d\d$/u.test(code);
 }
 
 export interface DeepseekFlashAdapterOptions {

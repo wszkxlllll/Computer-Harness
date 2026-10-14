@@ -162,7 +162,9 @@ describe("app-runtime RunHandle", () => {
   it("rejects missing main or active layered risk credentials before Run allocation", async () => {
     const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-"));
     const mainOutput = join(root, "main-run");
+    const deepseekMainOutput = join(root, "deepseek-main-run");
     const riskOutput = join(root, "risk-run");
+    const deepseekRiskOutput = join(root, "deepseek-risk-run");
     const createComputer = vi.fn(() => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })));
     const createEventWriter = vi.fn();
     const createAssetStore = vi.fn();
@@ -174,10 +176,25 @@ describe("app-runtime RunHandle", () => {
       expect(createEventWriter).not.toHaveBeenCalled();
       expect(createAssetStore).not.toHaveBeenCalled();
 
+      await expect(createRun({ ...config(deepseekMainOutput), model: "deepseek-flash" }, { createComputer, createEventWriter, createAssetStore }))
+        .rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+      await expect(readdir(deepseekMainOutput)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(createEventWriter).not.toHaveBeenCalled();
+      expect(createAssetStore).not.toHaveBeenCalled();
+
       await expect(createRun({ ...config(riskOutput), riskGuard: "layered", riskModel: "qwen3.8-flash" }, {
         credentials: { glmApiKey: "fixture-main-key" }, createComputer, createEventWriter, createAssetStore,
       })).rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
       await expect(readdir(riskOutput)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(createEventWriter).not.toHaveBeenCalled();
+      expect(createAssetStore).not.toHaveBeenCalled();
+
+      await expect(createRun({ ...config(deepseekRiskOutput), riskGuard: "layered", riskModel: "deepseek-flash" }, {
+        credentials: { glmApiKey: "fixture-main-key" }, createComputer, createEventWriter, createAssetStore,
+      })).rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+      await expect(readdir(deepseekRiskOutput)).rejects.toMatchObject({ code: "ENOENT" });
       expect(createComputer).not.toHaveBeenCalled();
       expect(createEventWriter).not.toHaveBeenCalled();
       expect(createAssetStore).not.toHaveBeenCalled();
@@ -192,6 +209,7 @@ describe("app-runtime RunHandle", () => {
     try {
       for (const [name, riskGuard, riskModel] of [
         ["guard-off", "off", "qwen3.8-flash"],
+        ["guard-off-deepseek", "off", "deepseek-flash"],
         ["same-model", "layered", "same"],
       ] as const) {
         const handle = await createRun({ ...config(join(root, name)), riskGuard, riskModel }, {
@@ -214,6 +232,29 @@ describe("app-runtime RunHandle", () => {
         createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
       });
       expect(createProvider).toHaveBeenCalledOnce();
+      await handle.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves DeepSeek main and active distinct risk credentials to an injected factory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-deepseek-injection-preflight-"));
+    const createProvider = vi.fn(({ model }: { model: ResolvedRunConfig["model"] }) => ({
+      id: String(model),
+      async generate() { return { type: "finish" as const, summary: "unused" }; },
+    }));
+    try {
+      const handle = await createRun({
+        ...config(join(root, "run")),
+        model: "glm-5.3-flash",
+        riskGuard: "layered",
+        riskModel: "deepseek-flash",
+      }, {
+        credentials: {}, createProvider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      expect(createProvider.mock.calls.map(([options]) => options.model)).toEqual(["glm-5.3-flash", "deepseek-flash"]);
       await handle.close();
     } finally {
       await rm(root, { recursive: true, force: true });
