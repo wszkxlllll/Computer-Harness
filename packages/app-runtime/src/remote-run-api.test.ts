@@ -467,13 +467,13 @@ describe("ApplicationRemoteRunApi", () => {
   it("rejects missing credentials before auto discovery and leaves a window token reusable", async () => {
     const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-window-token-"));
     const outputDir = join(root, "runs");
-    const credentials: { glmApiKey?: string } = {};
+    const credentials: { deepseekApiKey?: string } = {};
     const targetWindow = { pid: 72, windowId: 901, appName: "Fixture app", title: "Fixture window" };
     const listWindows = vi.fn(async () => [targetWindow]);
     const listAllWindows = vi.fn(async () => [targetWindow]);
     const activateWindow = vi.fn(async () => undefined);
     const session = new ApplicationSession({
-      config: config(outputDir), owner: new InProcessEnvironmentOwner(), dependencies: { credentials },
+      config: { ...config(outputDir), model: "deepseek-flash" }, owner: new InProcessEnvironmentOwner(), dependencies: { credentials },
       windowDiscovery: { listWindows, listAllWindows, activateWindow },
     });
     const api = new ApplicationRemoteRunApi({
@@ -495,7 +495,7 @@ describe("ApplicationRemoteRunApi", () => {
       expect(session.lastRun).toBeUndefined();
       await expect(readdir(outputDir)).rejects.toMatchObject({ code: "ENOENT" });
 
-      credentials.glmApiKey = "fixture-provider-key";
+      credentials.deepseekApiKey = "fixture-provider-key";
       vi.spyOn(session, "startRun").mockRejectedValue(new Error("fixture stop after token validation"));
       await expect(api.startRun("device-window-token", "window-token-no-key", "Read the fixture", { mode: "window", targetToken: token }))
         .rejects.toThrow("fixture stop after token validation");

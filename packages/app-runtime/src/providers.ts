@@ -17,11 +17,12 @@ export class ProviderConfigurationError extends Error {
 /** Pure preflight shared by Run allocation and the Provider boundary. */
 export function assertBuiltInProviderCredentials(options: Pick<ProviderFactoryOptions, "model" | "credentials">): void {
   if (typeof options.model !== "string") return;
+  if (options.model !== "glm-5.3-flash" && options.model !== "qwen3.8-flash" && options.model !== "deepseek-flash") return;
   const key = options.model === "glm-5.3-flash"
     ? options.credentials.glmApiKey
     : options.model === "qwen3.8-flash"
       ? options.credentials.qwenApiKey
-      : undefined;
+      : options.credentials.deepseekApiKey;
   if (key === undefined || key.trim().length === 0) throw new ProviderConfigurationError();
 }
 

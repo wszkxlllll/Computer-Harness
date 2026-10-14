@@ -127,6 +127,8 @@ export interface ChatCompletionsBoundary {
   readonly maxOutputTokens: number;
   readonly userImagesOnly?: boolean;
   readonly strictResponse?: boolean;
+  /** Whether protocol-shape errors from a complete strict Provider response may use Runtime feedback retry. */
+  readonly strictResponseRetryable?: boolean;
   readonly error: (message: string, code?: string, retryable?: boolean, retryMode?: GlmRetryMode) => Error;
   readonly isProviderError: (error: unknown) => boolean;
 }
@@ -315,7 +317,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     const message = response.message;
     if (boundary.strictResponse && response.finishReason === "tool_calls" &&
         (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0)) {
-      throw providerError(boundary, "GLM tool_calls finish reason requires tool calls", "GLM_INVALID_RESPONSE", false);
+      throw providerError(boundary, "GLM tool_calls finish reason requires tool calls", "GLM_INVALID_RESPONSE", boundary.strictResponseRetryable ?? false);
     }
     const usage = response.usage;
     const rawToolCalls = message.tool_calls;
@@ -689,7 +691,7 @@ function readResponse(value: unknown, boundary: ChatCompletionsBoundary): { mess
     throw providerError(boundary, "GLM response has no assistant message", "GLM_INVALID_RESPONSE");
   }
   if (boundary.strictResponse && (first.message.role !== "assistant" || typeof first.finish_reason !== "string")) {
-    throw providerError(boundary, "GLM response requires an assistant message and finish_reason", "GLM_INVALID_RESPONSE", false);
+    throw providerError(boundary, "GLM response requires an assistant message and finish_reason", "GLM_INVALID_RESPONSE", boundary.strictResponseRetryable ?? false);
   }
   if (first.finish_reason !== undefined && typeof first.finish_reason !== "string") {
     throw providerError(boundary, "GLM response has an invalid finish_reason", "GLM_INVALID_RESPONSE");
@@ -748,7 +750,7 @@ function readToolCall(value: unknown, boundary: ChatCompletionsBoundary): { id: 
     throw providerError(boundary, "GLM returned a malformed ToolCall", "GLM_INVALID_TOOL_CALL");
   }
   if (boundary.strictResponse && (value.type !== "function" || typeof value.function.arguments !== "string")) {
-    throw providerError(boundary, "GLM native tool calls require function type and JSON-string arguments", "GLM_INVALID_TOOL_CALL", false);
+    throw providerError(boundary, "GLM native tool calls require function type and JSON-string arguments", "GLM_INVALID_TOOL_CALL", boundary.strictResponseRetryable ?? false);
   }
   const rawArgs = value.function.arguments;
   let args: unknown = rawArgs;
