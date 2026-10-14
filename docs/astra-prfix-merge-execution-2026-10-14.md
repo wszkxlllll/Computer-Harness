@@ -49,6 +49,12 @@ PR22正式修复提交为 `392b6ca9dc89136852b3c1f517ddfd1cdced6145`，PR23为 `
 
 PR23在独审160/160与同head CI38547248255五绿后，通过普通GitHub merge API合入PR22目标分支。实际merge SHA为 `8fd7c9dbc53d297e137b39efe70bd5bff2f9b6c5`，tree为 `80963600409c2dd7254a9a3d83a008490259d51c`，与Root预先git merge-tree的树逐字一致。fresh API核PR23 merged=true/closed、目标分支指向该merge；没有force或改base。046的中间CI不冒绿，旧392失败保留；随后所有合入内容按最终组合head重验，main仍未合并。
 
+## 66 固定组合验收及恢复后的 CI 续修
+
+`66cf92f639bd17a5398648c5dec7593674dffe83`（tree `fe4268927687ff6d94d830834a6eb4dfe961244f`）已实际完整离线验证：130文件2338 Vitest、234 Node（72+162）、0fail/skip，typecheck/Web/CLI help全exit0，前后HEAD/tree固定且clean。Sol最终独审核27既批准source/test/archive pins无漂移、实际全套日志/exit/SHA、非patch diffcheck0，放行代码/离线证据；未替代必要CI。
+
+用户本人随后确认Actions恢复。66的实际CI38550964967在Windows得到2338 Vitest通过、Node231通过/3失败/0skip，另外三verify成功；required正常执行并因Windows失败拒绝，不再是付款拒绝。三个失败均为故障注入测试将磁盘绝对路径传给--import，Node Windows ESM以protocol d:拒绝，未到注入断言。现只修测试hook为标准file URL，保留原负例；下一实际head重跑完整/type/Web/CLI及CI、Sol审查后才main，不盲重跑66掩盖错误。
+
 ## 679 逐文件与行为映射
 
 采用语义移植，不以679整commit祖先关系代替行为证明。原679及PR26引用保留；本候选包含以下有效增量，避免重引已退役profile：

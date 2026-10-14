@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -69,7 +69,7 @@ async function fixture(t) {
     if (forceUmask022 && process.platform !== "win32") {
       const umaskHook = join(f.directory, "set-umask-022.mjs");
       await writeFile(umaskHook, "process.umask(0o022);\n");
-      args.push("--import", umaskHook);
+      args.push("--import", pathToFileURL(umaskHook).href);
     }
     args.push(evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath, "--output", f.output);
     if (family !== null) args.push("--family", family);
@@ -306,7 +306,7 @@ test("rename failure preserves an existing result and its private mode", async (
   const modeBefore = process.platform === "win32" ? null : (await stat(f.output)).mode & 0o777;
   const hook = join(f.directory, "fail-temp-rename.mjs");
   await writeFile(hook, `import fs from "node:fs";\nimport { syncBuiltinESMExports } from "node:module";\nprocess.umask(0o022);\nfs.promises.rename = async () => { throw new Error("injected temporary rename failure"); };\nsyncBuiltinESMExports();\n`);
-  const args = ["--import", hook, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+  const args = ["--import", pathToFileURL(hook).href, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
     "--family", f.family, "--variant", f.variant, "--output", f.output];
   await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
     (error) => error.code === 1 && /injected temporary rename failure/.test(error.stderr));
@@ -323,7 +323,7 @@ test("atomic write failure removes its temporary file and preserves inputs", asy
   const before = await Promise.all(inputPaths.map((path) => readFile(path)));
   const hook = join(f.directory, "fail-temp-write.mjs");
   await writeFile(hook, `import fs from "node:fs";\nimport { syncBuiltinESMExports } from "node:module";\nconst originalOpen = fs.promises.open;\nfs.promises.open = async (...args) => {\n  const handle = await originalOpen(...args);\n  handle.writeFile = async () => { throw new Error("injected temporary write failure"); };\n  return handle;\n};\nsyncBuiltinESMExports();\n`);
-  const args = ["--import", hook, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+  const args = ["--import", pathToFileURL(hook).href, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
     "--family", f.family, "--variant", f.variant, "--human-review", f.reviewPath, "--output", f.output];
   await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
     (error) => error.code === 1 && /injected temporary write failure/.test(error.stderr));
@@ -337,7 +337,7 @@ test("temporary open failure preserves inputs and leaves no temporary file", asy
   const before = await Promise.all(inputPaths.map((path) => readFile(path)));
   const hook = join(f.directory, "fail-temp-open.mjs");
   await writeFile(hook, `import fs from "node:fs";\nimport { syncBuiltinESMExports } from "node:module";\nfs.promises.open = async () => { throw new Error("injected temporary open failure"); };\nsyncBuiltinESMExports();\n`);
-  const args = ["--import", hook, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+  const args = ["--import", pathToFileURL(hook).href, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
     "--family", f.family, "--variant", f.variant, "--output", f.output];
   await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
     (error) => error.code === 1 && /injected temporary open failure/.test(error.stderr));
