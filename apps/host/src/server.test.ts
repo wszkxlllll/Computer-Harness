@@ -103,6 +103,45 @@ function jsonResponse<T>(response: { json(): T }): T {
 }
 
 describe("Host HTTP boundary", () => {
+  it("returns typed missing-provider configuration as a fixed 409 response", async () => {
+    const api = fakeApi();
+    const startRun = vi.fn(async () => {
+      throw new RemoteRunApiError("PROVIDER_CREDENTIALS_MISSING", "所选模型尚未配置凭据。请在电脑端完成配置后重试。");
+    });
+    const host = createHostServer({ api: { ...api, startRun }, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin });
+    try {
+      const localCsrf = jsonResponse<{ csrfToken: string }>(await host.server.inject({
+        method: "GET", url: "/api/local/session", headers: { origin: localOrigin },
+      })).csrfToken;
+      const pairing = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+        method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+      }));
+      const token = new URL(pairing.pairingUrl).searchParams.get("token")!;
+      const pairRequest = jsonResponse<{ requestId: string }>(await host.server.inject({
+        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Provider preflight fixture" },
+      }));
+      await host.server.inject({
+        method: "POST", url: `/api/local/pairing/requests/${pairRequest.requestId}/confirm`,
+        headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+      });
+      const paired = await host.server.inject({ method: "POST", url: `/api/pair/requests/${pairRequest.requestId}/session`, headers: { origin: relayOrigin }, payload: {} });
+      const body = jsonResponse<{ csrfToken: string }>(paired);
+      const response = await host.server.inject({
+        method: "POST", url: "/api/runs",
+        headers: { origin: relayOrigin, cookie: String(paired.headers["set-cookie"]).split(";")[0], "x-csrf-token": body.csrfToken },
+        payload: { commandId: "provider-preflight", goal: "Read the fixture", target: { mode: "browser", url: "about:blank" } },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(jsonResponse(response)).toEqual({ error: {
+        code: "PROVIDER_CREDENTIALS_MISSING",
+        message: "所选模型尚未配置凭据。请在电脑端完成配置后重试。",
+      } });
+      expect(startRun).toHaveBeenCalledOnce();
+    } finally {
+      await host.close();
+    }
+  });
+
   it("exposes only the opaque native profile id and accepts only its exact selector shape", async () => {
     const profileId = "Opaque_Profile_1234567890";
     const hybridProfileId = "Opaque_Hybrid_Profile_12345";

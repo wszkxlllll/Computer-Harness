@@ -5,6 +5,26 @@ import type { ProviderAdapter } from "@computer-harness/runtime";
 import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
 import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type ProviderFactory, type ProviderFactoryOptions } from "./config.js";
 
+export class ProviderConfigurationError extends Error {
+  public readonly code = "PROVIDER_CREDENTIALS_MISSING";
+
+  public constructor() {
+    super("The selected built-in model has no configured credentials.");
+    this.name = "ProviderConfigurationError";
+  }
+}
+
+/** Shared pure preflight used before Run allocation and at the Provider boundary. */
+export function assertBuiltInProviderCredentials(options: Pick<ProviderFactoryOptions, "model" | "credentials">): void {
+  if (typeof options.model !== "string") return;
+  const key = options.model === "glm-5.3-flash"
+    ? options.credentials.glmApiKey
+    : options.model === "qwen3.8-flash"
+      ? options.credentials.qwenApiKey
+      : undefined;
+  if (key === undefined || key.trim().length === 0) throw new ProviderConfigurationError();
+}
+
 /**
  * Construct one of the supported Providers without reading the ambient environment.
  * Credentials and non-secret endpoint settings are resolved by the CLI and
@@ -20,6 +40,7 @@ export const createProvider: ProviderFactory = (options: ProviderFactoryOptions)
     }
     if (text !== undefined && wire !== undefined && text > wire) throw new Error("GLM text budget must not exceed wire budget");
   }
+  assertBuiltInProviderCredentials(options);
   if (typeof options.model !== "string") {
     throw new Error(`external Provider '${options.model.id}' requires an injected createProvider factory`);
   }
@@ -29,14 +50,11 @@ export const createProvider: ProviderFactory = (options: ProviderFactoryOptions)
 
 function createQwenProvider(options: ProviderFactoryOptions): ProviderAdapter {
   const apiKey = options.credentials.qwenApiKey;
-  if (apiKey === undefined || apiKey.trim().length === 0) {
-    throw new Error("DASHSCOPE_API_KEY is required for qwen3.8-flash");
-  }
   const coordinateMode = options.config.qwenCoordinateMode ?? "normalized_1000";
   const thinking = options.config.qwenThinking ?? "low";
   const outputMode = options.config.qwenOutputMode ?? "strict_json";
   return new Qwen38FlashAdapter({
-    apiKey,
+    apiKey: apiKey!,
     assetReader: options.assetReader,
     httpClient: options.httpClients?.qwen ?? new RecordingQwenHttpClient(resolve(options.outputDir, "provider-exchanges.jsonl"), coordinateMode, thinking, outputMode),
     coordinateMode,
@@ -49,9 +67,6 @@ function createQwenProvider(options: ProviderFactoryOptions): ProviderAdapter {
 
 function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
   const apiKey = options.credentials.glmApiKey;
-  if (apiKey === undefined || apiKey.trim().length === 0) {
-    throw new Error("ZHIPUAI_API_KEY is required for GLM profiles");
-  }
   const profile: GlmProfile = {
     ...glmProfiles["glm-5.3-flash"],
     // The configured glm-5.3-flash deployment is reasoning-only and rejects
@@ -61,7 +76,7 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
     ...(options.config.glmMaxOutputTokens === undefined ? {} : { maxOutputTokens: options.config.glmMaxOutputTokens }),
   };
   return new GlmAdapter({
-    apiKey,
+    apiKey: apiKey!,
     profile,
     assetReader: options.assetReader,
     httpClient: options.httpClients?.glm ?? new RecordingGlmHttpClient(

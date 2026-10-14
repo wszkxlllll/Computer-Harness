@@ -114,6 +114,67 @@ function recoveryReportBaseEvents(runId: RunId): RuntimeEvent[] {
 }
 
 describe("app-runtime RunHandle", () => {
+  it("rejects missing main or active layered risk credentials before Run allocation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-"));
+    const mainOutput = join(root, "main-run");
+    const riskOutput = join(root, "risk-run");
+    const createComputer = vi.fn(() => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })));
+    const createEventWriter = vi.fn();
+    const createAssetStore = vi.fn();
+    try {
+      await expect(createRun(config(mainOutput), { createComputer, createEventWriter, createAssetStore }))
+        .rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+      await expect(readdir(mainOutput)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(createEventWriter).not.toHaveBeenCalled();
+      expect(createAssetStore).not.toHaveBeenCalled();
+
+      await expect(createRun({ ...config(riskOutput), riskGuard: "layered", riskModel: "qwen3.8-flash" }, {
+        credentials: { glmApiKey: "fixture-main-key" }, createComputer, createEventWriter, createAssetStore,
+      })).rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+      await expect(readdir(riskOutput)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(createEventWriter).not.toHaveBeenCalled();
+      expect(createAssetStore).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preflights risk credentials only for an active distinct layered model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-risk-preflight-"));
+    const createComputer = () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 }));
+    try {
+      for (const [name, riskGuard, riskModel] of [
+        ["guard-off", "off", "qwen3.8-flash"],
+        ["same-model", "layered", "same"],
+      ] as const) {
+        const handle = await createRun({ ...config(join(root, name)), riskGuard, riskModel }, {
+          credentials: { glmApiKey: "fixture-main-key" }, createComputer,
+        });
+        await handle.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves credential policy to an injected Provider factory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-injection-preflight-"));
+    const provider = { id: "fixture-provider", async generate() { return { type: "finish" as const, summary: "unused" }; } };
+    const createProvider = vi.fn(() => provider);
+    try {
+      const handle = await createRun(config(join(root, "run")), {
+        credentials: {}, createProvider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      expect(createProvider).toHaveBeenCalledOnce();
+      await handle.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("requires matching Run and CUA recovery opt-ins with the exact opened-window scope", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-recovery-config-gate-"));
     const primary = { pid: 101, windowId: 501 };

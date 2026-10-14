@@ -47,6 +47,38 @@ function fakeHandle(config: ResolvedRunConfig, outcome: RunOutcome): RunHandle {
 }
 
 describe("ApplicationSession", () => {
+  it("checks the final risk-guard selection while trusting injected Provider and Run factories", () => {
+    const credentials = { glmApiKey: "fixture-main-key" };
+    const layeredRisk = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-session"), riskModel: "qwen3.8-flash" },
+      dependencies: { credentials },
+    });
+    expect(() => layeredRisk.assertRunProviderConfiguration()).not.toThrow();
+    expect(() => layeredRisk.assertRunProviderConfiguration({ riskGuard: "off" })).not.toThrow();
+    expect(() => layeredRisk.assertRunProviderConfiguration({ riskGuard: "layered" })).toThrow(expect.objectContaining({
+      name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING",
+    }));
+
+    const sameModelRisk = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-same"), riskModel: "same" },
+      dependencies: { credentials },
+    });
+    expect(() => sameModelRisk.assertRunProviderConfiguration({ riskGuard: "layered" })).not.toThrow();
+
+    const customProvider = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-custom-provider"), riskGuard: "layered", riskModel: "qwen3.8-flash" },
+      dependencies: { credentials: {}, createProvider: vi.fn() },
+    });
+    expect(() => customProvider.assertRunProviderConfiguration()).not.toThrow();
+
+    const customRunFactory = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-custom-run"), riskGuard: "layered", riskModel: "qwen3.8-flash" },
+      dependencies: { credentials: {} },
+      createRun: vi.fn(async () => fakeHandle({ ...baseConfig("/tmp/provider-preflight-custom-run"), runId: "fixture-run" as RunId, goal: "fixture" }, "succeeded")),
+    });
+    expect(() => customRunFactory.assertRunProviderConfiguration()).not.toThrow();
+  });
+
   it("creates independent Run directories and does not inherit the prior Run", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-"));
     const owner = new InProcessEnvironmentOwner();

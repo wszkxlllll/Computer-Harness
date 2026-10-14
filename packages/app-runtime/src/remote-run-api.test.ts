@@ -21,6 +21,7 @@ import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./in
 import { ApplicationSession } from "./application-session.js";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
 import { ApplicationRemoteRunApi, RemoteRunApiError, type ManagedBrowserProfileRunCoordinator } from "./remote-run-api.js";
+import { ProviderConfigurationError } from "./providers.js";
 
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
 const surfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
@@ -372,6 +373,115 @@ function deferred<T>() {
 }
 
 describe("ApplicationRemoteRunApi", () => {
+  it("returns an existing idempotent result before rechecking provider configuration", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-provider-preflight-idempotency-"));
+    const { api, session } = createFixture(outputDir, { summary: "The existing Run completed." });
+    try {
+      const first = await api.startRun("device-preflight", "existing-result", "Read the fixture", { mode: "browser", url: "about:blank" });
+      const preflight = vi.spyOn(session, "assertRunProviderConfiguration").mockImplementation(() => { throw new ProviderConfigurationError(); });
+      await expect(api.startRun("device-preflight", "existing-result", "Read the fixture", { mode: "browser", url: "about:blank" }))
+        .resolves.toMatchObject({ runId: first.runId });
+      expect(preflight).not.toHaveBeenCalled();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports missing credentials before consuming a native recovery profile or discovering windows", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-api-"));
+    const outputDir = join(root, "runs");
+    const listWindows = vi.fn(async () => [
+      { pid: 71, windowId: 801, appName: "TextEdit", title: "Untitled" },
+      { pid: 71, windowId: 802, appName: "TextEdit", title: "Untitled" },
+    ]);
+    const createComputer = vi.fn(async () => fixtureComputer());
+    const profile = {
+      profileId: "Provider_Preflight_Profile_01",
+      primaryTarget: { pid: 71, windowId: 801 },
+      recoveryTarget: { pid: 71, windowId: 802 },
+      outputPath: join(root, "result.txt"),
+      expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+    };
+    const session = new ApplicationSession({
+      config: config(outputDir),
+      owner: new InProcessEnvironmentOwner(),
+      dependencies: { credentials: {}, createComputer },
+      windowDiscovery: { listWindows },
+    });
+    const api = new ApplicationRemoteRunApi({
+      session,
+      capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
+      nativeRecoveryProfile: profile,
+    });
+    try {
+      await expect(api.startRun("device-preflight", "missing-provider-key", "Save the itinerary", {
+        mode: "native-recovery", profileId: profile.profileId,
+      })).rejects.toMatchObject({
+        name: "RemoteRunApiError",
+        code: "PROVIDER_CREDENTIALS_MISSING",
+        message: "所选模型尚未配置凭据。请在电脑端完成配置后重试。",
+      });
+      expect(listWindows).not.toHaveBeenCalled();
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(session.lastRun).toBeUndefined();
+      expect((await api.listWindowTargets("device-preflight")).nativeRecoveryProfile).toEqual({
+        profileId: profile.profileId,
+        label: "Host TextEdit recovery",
+      });
+    } finally {
+      await session.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an issued window token available after credential preflight and skips auto discovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-window-token-"));
+    const credentials: { glmApiKey?: string } = {};
+    const targetWindow = { pid: 72, windowId: 901, appName: "Fixture app", title: "Fixture window" };
+    const listWindows = vi.fn(async () => [targetWindow]);
+    const listAllWindows = vi.fn(async () => [targetWindow]);
+    const activateWindow = vi.fn(async () => undefined);
+    const session = new ApplicationSession({
+      config: config(join(root, "runs")),
+      owner: new InProcessEnvironmentOwner(),
+      dependencies: { credentials },
+      windowDiscovery: { listWindows, listAllWindows, activateWindow },
+    });
+    const api = new ApplicationRemoteRunApi({
+      session,
+      capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
+    });
+    try {
+      await expect(api.startRun("device-window-token", "auto-no-key", "Read the fixture", { mode: "auto" }))
+        .rejects.toMatchObject({ code: "PROVIDER_CREDENTIALS_MISSING" });
+      expect(listWindows).not.toHaveBeenCalled();
+      expect(listAllWindows).not.toHaveBeenCalled();
+      expect(activateWindow).not.toHaveBeenCalled();
+
+      const choices = await api.listWindowTargets("device-window-token");
+      const token = choices.candidates[0]!.token;
+      await expect(api.startRun("device-window-token", "window-token-no-key", "Read the fixture", { mode: "window", targetToken: token }))
+        .rejects.toMatchObject({ code: "PROVIDER_CREDENTIALS_MISSING" });
+      expect(listWindows).toHaveBeenCalledTimes(1);
+      expect(activateWindow).not.toHaveBeenCalled();
+
+      // Repair only the synthetic in-memory credential, then stop at the
+      // ApplicationSession boundary. Reaching it proves the original token
+      // was not consumed by the earlier preflight rejection.
+      credentials.glmApiKey = "fixture-provider-key";
+      vi.spyOn(session, "startRun").mockRejectedValue(new Error("fixture stop after token validation"));
+      await expect(api.startRun("device-window-token", "window-token-no-key", "Read the fixture", { mode: "window", targetToken: token }))
+        .rejects.toThrow("fixture stop after token validation");
+      expect(listWindows).toHaveBeenCalledTimes(2);
+      expect(activateWindow).not.toHaveBeenCalled();
+      expect(session.startRun).toHaveBeenCalledOnce();
+    } finally {
+      await session.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("projects real filtered visible and redacted option approvals identically through GET and SSE", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-option-preview-contract-"));
     const visibleText = "Observed fixture variant";

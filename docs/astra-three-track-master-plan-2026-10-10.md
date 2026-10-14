@@ -1,4 +1,4 @@
-> 最新执行状态（2026-10-13）：八项 MR 已修复提交3b84287，test-only确定性等待修正9720350已推送且当前CI五项全通过。本地完整2076项Vitest＋72项Node、类型检查和Web构建通过；现进入新环境零真实Provider Mac诊断。T3新能力在隔离树实施，正式三线业务及手机专属验收尚未完成。详见 [本轮执行记录](astra-mr-repair-execution-2026-10-13.md) 与 [现场验证记录](astra-live-validation-2026-10-13.md)。
+> 最新执行状态（2026-10-14，当前续办）：用户授权持续推进。八项 MR 及 T3 Host-owned hybrid 已提交同步 594fa8e；2089 项 Vitest＋72 项 Node、类型/Web 构建与本版五项 CI 通过。native8 两权限及实际捕获通过，普通恢复仍被共享控制浮层排序阻挡。native9 最小分类修复已完成隔离构建和 Sol 独检：404 项通过、2 忽略，源码重放/签名一致；新 App 现场权限及零 Provider 验证待办；隔离只读前台诊断候选已完成411项测试、构建及独检，独立签名包已双重复核、待新App两权限确认，未现场运行；现有 guard 不变。T1 正常 Web 已配对且目标读回哈希一致；首次 Start 生成空 Run 后失败，A08 实际用量仍 0。已补齐真实配对allowlist/session及回环测试，Root实际独跑四项通过；原换行bug判断已由完整SHA重建撤回；新驱动代际/Host已恢复，精确localhost Origin页面已实际生成challenge，正在正常UI创建桌面client并补齐监控文件，未计为业务通过。594 Preview 离线候选已独检、部署事务已静审；阶段1连接认证前失败、尚无上传/暂存，未部署；正式三线业务、手机专属验收及交付仍未完成。详见[现场验证记录](astra-live-validation-2026-10-13.md)，本段优先于历史快照。
 
 # Astra 三线总计划：目标与完整验收
 
@@ -299,3 +299,57 @@ T3：携程公开查询→macOS TextEdit 整理，途中通过客户端降低预
 Host-owned `native-web-document` 实现及其普通 Web/Relay 入口、Browser 与 TextEdit 独立能力边界、一次性文稿恢复已由 Luna 实现、Sol 独立审查并导入主分支，共25个路径。Root逐文件核SHA与审查清单一致，保留9720350的CI等待修正；主目录类型检查、119文件2089项Vitest、72项Node自检及Web构建全部通过。私有证据为 `T3-integration-20261013-private/root-final-integration-verification.json`。这是离线实现与组合夹具通过，真实三线业务任务仍待现场验证。9720350的五项CI已通过；此次T3新提交需单独等待CI，不继承旧结果。本轮真实Provider调用仍为0。
 
 屏幕录制权限已完成off→on刷新，并按系统提示退出重开目标App。辅助功能刷新再次出现macOS本人认证，已请用户完成；执行者停在该实际认证面板，尚无刷新后的health或业务Run通过证据。
+
+
+## 2026-10-13 当前续办状态（594fa8e）
+
+T3 Host-owned hybrid能力已提交594fa8e并同SHA推送；Root完整2089 Vitest+72 Node、类型/Web构建及Sol25文件/92源构建一致性独检通过。新CI38347772526五job全部success。Windows/Linux原生任务继续排除，既有CI保留。两系统权限刷新及本人认证已完成，但当前native8实际TCC/AX仍fail；两条系统条目通过Finder确认均为当前App精确路径。正在请求仅移除这两条再重新添加的动作时确认，尚未执行。详细审计以 `docs/astra-live-validation-2026-10-13.md` 为准。
+
+正常Web/default-layered的T2 baseline/repeat/variant新候选已离线准备并Root独核，原文仅替换输出路径且保留LF，输出absent；尚无新正式Run、无新真实Provider请求。现场参数化零Provider runner准备中，旧socket/窗口/会话不可复用。T1/T2/T3业务结果仍需真实现场分别验证，实体手机专属部分待人机协作，不能以离线夹具或CI代替。
+
+
+## 2026-10-13 重加授权修复通过
+
+用户明确授权后，Luna只对当前精确App两记录进行系统UI移除/重新添加，未需新本人认证。一次正常owned重开为PID51462/51463、socket `/private/tmp/ch-r5-readd-health-20261013.sock`，same native8 SHA/CDHash；health TCCaccessibility、TCCscreenrecording、AX全部pass，check_permissions(prompt:false)亦true/true，session已end。custom bundle canonical-only fail继续记录，不换binary不删guard；capture skip仍不能当实际capture通过。证据 `R5-private/readd-permission-refresh-20261013T0503Z/` health+permissions SHA537d6fcb045202ee82d92ac389c63d57f325c758d8ea55e260c6f4a59aa7b91c。下一步仅正常capture能力和fresh TextEdit两空白窗口准备，尚无Runtime/预览/正式原卡通过，无真实Provider请求。
+
+
+## 2026-10-14 T1正常Web并行准备（未Start）
+
+Sol确认T1纯网页任务可与TextEdit恢复/共享pill修复分离；normal managedBrowser仍用native bootstrap及Browser自身exactfocus/capture门，不能声称DOM-only旁路。只解除TextEditblankpair作为T1前置，保留正常Web明确Browser模式、defaultlayered/生产Guard/风险模型、sourceLinkedFinish默认optin省略。原baseline卡SHA42485b83cc47c35ba09f77858096fd7bf61bd6018daf93a35c7575667b7e14f4，唯一goal793UTF8B/SHAf84e0557bcc4c36f9b3225938380a9adb63ffe059963c8412b0faf6570eaa264、无末LF，不套用T2末LF。
+
+唯一现场执行者先准备全新officialboundedbatch+40main/2risk首reservation、监控ready-before-firstProvider、新Host/Relay/正常Web配对及当前native身份/健康；A07/global历史不变。Root+Sol检查后再Start，native9仅隔离构建，T1活跃时不安装候选/切Settings/抢GUI。评测保持独立来源/事实/输出/cleanup及真人分栏。审查 `R5-private/sol-t1-browser-launch-dependency-review-20261014.json`。此条未新增Run或真实Provider。
+
+
+### 2026-10-14 最新现场出口
+
+本轮T1正常Web单次Start生成空目录、实际模型调用0，没有业务成果；Host已正常结束，未知Start不重放。已独核主env正常加载凭据可用/relay-only不可用的新进程boolean，未来启动配置链需修正，但旧Host根因不追认。新AstraDiagnostic App两权限已由用户明确同意，当前停在系统真实本人认证面板，完成后继续零Provider诊断及T2/T3正式验收。详见[现场验证记录](astra-live-validation-2026-10-13.md)文末及[自主修复计划](astra-autonomous-test-repair-plan-2026-10-10.md)最新检查点。三线任务、远端部署与手机验收尚不计完成；Windows/Linux原生范围仍排除。
+
+
+### 2026-10-14 本人认证后最新推进：T1与原生诊断解耦
+
+AstraDiagnostic两权限已正常添加/on，新daemon51429实际TCC辅助功能/录屏与AXpass，会话正常end。私有runner已修中文lsof路径、ESM加载、wire snakecase、正向参数/返回桥，最终13tests与Sol复审通过；前几次均在诊断dispatch前拒绝并保留nonce，不冒现场成果。v6 starttrue/endfalse但Tool异常，Root与Sol已用exactwire riskunclassified+冻结授权/registry源闭包确认：新diagnose_foreground_oracles缺风险登记，在platformdispatch前必拒，sampler未调用。隔离native11按同类AX检查R2注册修复，保留policy/manifest/unknown deny与输入Guard，不改当前运行App。
+
+T1网页业务不依赖这项只读诊断。Root已委派唯一现场执行者直接准备已修主env正常继承的新Host594/原A08不initialize/当前native10代际、fresh桌面配对与exactsession监控；正式新trial仍须单次明确放行，不复用旧command或nonce。旧Host已结束且无Provider/业务动作，历史空目录不覆盖。远端Web版本未知仍仅Host594＋实际Relay桌面链范围，不计手机。Windows/Linux原生任务排除不变。详见现场验证记录文末。
+
+
+### native11最终独检及交付源码链已完成，当前真实外部条件
+
+Sol最终独检通过（SHA5b37eb6ae3524b6069ffa3dc9bf1ef31d2e582ee110fe5c8e006b2ed4cef60c4）：native11两文件patch strict重放byteequal、383源清单/全部日志/三项原upstream测试资源哈希匹配，590core与411mac/2ignored、fmt/check/alltargets/release最终通过；37节签名前后匹配、App签名独跑严格通过。Root交付native11两文件delta及完整11步source-chain，后者SHA229f6b5ddde5340a8d521747385cc85e17f8aab0be098606224eff52c0ee860b，Sol再核11patch逐SHA及artifact/fixture边界全部一致。当前仍未启动/安装/授权新App、不计现场诊断通过。
+
+已向用户请求exact CuaDriverAstraDiagnosticR2Candidate.app辅助功能/屏幕录制当次确认，并合并当前前台使用时机选项；旧App确认不泛化。此前硬件idle4.56s/7.28s已证真实用户活动，保持不抢前台。旧T1空目录、私有runner各次消费nonce和失败全部保留；A08actual仍0。等待期间准备native11专用staticpins/零Provider runner，不覆盖native10历史。
+
+
+### 用户明确当前仅离线，新App同意有效但现场延后
+
+用户已答复：先继续离线修复，暂不占用前台；同意exact CuaDriverAstraDiagnosticR2Candidate.app两权限，暂不占前台。Root已记录同意，未来不重复请求同一App许可；现在不系统设置/激活/输入/新App启动，不以硬件空闲或问题超时自行恢复前台。Host55583无Run/预算0保持，原生native11尚未launch/TCC。
+
+native11专用runner本地14tests/defaultnoSDKconnect通过，但此前作者误将App独检当runner独检，现已更正runner独审pending。原Sol6.1实例连续两次capacity失败，Root启用另一Sol6实例继续同角色离线独审，禁止把capacity失败或作者报告当通过。确认新receipt后完成离线交付；全部live字段仍空。
+
+
+### 本轮主工作区组合验证完成（仅离线，不占前台）
+
+Root已逐SHA导入Sol批准的精确10文件（4生产/6测试），旧Host55583导入前已不存在、4317无监听，退出原因未知且未发送SIGTERM，不冒正常Run cleanup。主工作区实际pnpm build、Web build、完整pnpm test均exit0：119文件2098 Vitest通过＋72 Node自检通过；92运行链TS源内存ESM转译与dist逐字节相等，4Web资产齐全。Root综合收据SHA c045a9cea384e6424456a069da37993c915bf345b622cd3402cca031c042121b。已有未选中历史ledger EOF空行导致整棵dirty diffcheck提示，未擅改；本次精确source/tests/三文档diffcheck通过。
+
+新产品行为：默认内置主模型或实际启用的独立风险模型缺/空凭据时，创建任务资源、消费一次性profile/window token及自动目标发现之前返回固定PROVIDER_CREDENTIALS_MISSING/409与中文配置提示。既有command幂等结果优先；custom Provider/RunFactory不被强制内置凭据；Host仍可无凭据启动配对/设置；401、网络、SDK错误不被混类。所有测试为synthetic/mock，未触真实模型/GUI/native。
+
+native9/10/11交付源码链与补丁已保留完整重放顺序，最新native11链SHA b1862a61171bbcb3754916027284889a3c5d925113a05cbbaaba403b33d7096f，明确用户已同意新App两权限但GUI/授权设置/启动延后。旧native10清单澄清未启动仅指artifact freeze当时，后续真实TCC/授权层拒绝单列，不将pre-App-signing产物冒绝对未签名。当前准备精确提交与该新提交CI核验，不继承旧594CI为新提交结果。所有现场任务与实体手机验收仍未升级，用户“不占前台”指令保持。
