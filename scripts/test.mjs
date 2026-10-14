@@ -37,4 +37,5 @@ run(process.execPath, [
   "scripts/travel/shanghai-pilot-policy.selftest.mjs",
   "scripts/voice/probe-qwen-asr.test.mjs",
   "scripts/stage4-local/evaluate-trajectory.test.mjs",
+  "scripts/relay-synthetic-smoke-fixtures.test.mjs",
 ]);
