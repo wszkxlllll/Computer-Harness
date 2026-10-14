@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-14",
+  "title": "受管浏览器注册 click 子控件修复与 Windows 实跑证据",
+  "sourceBase": "156baad",
+  "scope": "通用 DOM 点击资格与父子控件区分；不包含网站专用规则，不扩大窗口或输入授权",
+  "implementation": {
+    "source": "../packages/computer-cua/src/managed-browser-host.ts",
+    "regression": "../packages/computer-cua/src/managed-browser-host.test.ts",
+    "changes": [
+      "通过 CDP 命令行检查 API 读取本元素注册的 click 监听器，补充 onclick 证据",
+      "候选收集和点击前重定位共用同一个监听器判定；检查结果仅在本次求值中缓存",
+      "未声明 ARIA 角色的非标准元素保持 generic，使用自身名称，并附真实父链接或按钮的上下文",
+      "保留观察绑定、唯一性、几何、视口裁剪、遮挡和开放 shadow root 命中检查",
+      "只读检查不授予用户手势；实际点击保留既有 userGesture 合同"
+    ],
+    "limits": [
+      "不把 CSS pointer 光标或普通文字当作交互证据",
+      "不从祖先委托监听器推断所有后代都能点击",
+      "不把子控件的引用替换成父链接中心",
+      "不降低几何或地址栏焦点保护，不自动重放未知动作"
+    ]
+  },
+  "windowsReproduction": {
+    "entryUrl": "https://www.pumch.cn/patient.html",
+    "beforeRepair": {
+      "control": "就医指南父链接内部的加号 span",
+      "onclickPresent": false,
+      "registeredClickListenerCount": 1,
+      "independentPlusCandidates": 0,
+      "productionNativeScenario": "Menu → 当前观察中的真实子控件加号 → 可见门诊出诊表子链接",
+      "actualMenuExpanded": true,
+      "actionsCompleted": 3,
+      "providerRequests": 0,
+      "cleanupConfirmed": true,
+      "visualLimit": "首轮导航后的截图早于目标页绘制，不把该图当作目标页视觉证明；修复后的场景提供目标页截图。"
+    },
+    "afterRepair": {
+      "independentControl": {"role": "generic", "name": "+", "description": "就医指南+"},
+      "productionDOMScenario": "Menu → 独立 generic 子控件引用 → 可见门诊出诊表子链接",
+      "actualMenuExpanded": true,
+      "observedDestination": "https://www.pumch.cn/news_visitinfo.html",
+      "readyState": "interactive",
+      "visibleSchedule": true,
+      "actionsCompleted": 3,
+      "providerRequests": 0,
+      "cleanupConfirmed": true,
+      "expandedMenuImage": "member-c-m01-registered-click-2026-10-14/expanded-menu.png",
+      "destinationImage": "member-c-m01-registered-click-2026-10-14/schedule-page.png"
+    }
+  },
+  "existingVerification": {
+    "timing": "以下为本轮修复实跑阶段已经执行的结果；提交 PR 阶段未追加测试或验收",
+    "windowsCandidateBuild": "根 TypeScript 构建、spike 类型检查和实际 CLI help 均退出 0",
+    "repairTypeScriptBuildExitCode": 0,
+    "behaviorTests": {"passed": 12, "notSelected": 49, "fullSuiteRun": false},
+    "commands": [
+      "node node_modules/typescript/bin/tsc -b",
+      "node node_modules/vitest/vitest.mjs run packages/computer-cua/src/managed-browser-host.test.ts --no-file-parallelism -t 'round-trips|registered child|occluded|iframe'"
+    ],
+    "coveredBehavior": "父子点击区分、注册监听器移除后拒绝、pointer-only 排除、onclick 控件、遮挡和可见未遍历 iframe 边界",
+    "preservedFailure": "首轮 pnpm exec 尝试依赖状态引导，因 pnpm 不在 PATH 而失败，编译器尚未执行；随后直接调用既有 TypeScript/Vitest 入口通过。没有为此再次安装。",
+    "macOSLiveVerification": "未执行"
+  },
+  "singleGlmRun": {
+    "provider": "GLM-5.3-Flash",
+    "thinking": "low",
+    "task": "M01 公开查询，原 Goal 不变；未向模型提供诊断得出的 URL 或答案",
+    "configuredLimits": {"modelRequests": 100, "guiActions": 100, "hardTimeoutMs": 1200000, "requestTimeoutMs": 90000},
+    "runtimeOutcome": "failed",
+    "businessOutcome": "not_completed",
+    "finalChecklistDelivered": false,
+    "modelSummarySource": "Runtime 自动恢复反馈，不是模型交付",
+    "modelRequests": 57,
+    "modelResponses": 56,
+    "guiActions": 55,
+    "completedReceipts": 48,
+    "refusedReceipts": 7,
+    "usage": {"inputTokens": 770355, "outputTokens": 13831, "totalTokens": 784186},
+    "cost": null,
+    "costStatus": "unknown",
+    "approvalsRequested": 0,
+    "guardDecisions": {"allow": 55},
+    "automaticApproval": "保留 M01 任务范围自动批准，本 Run 未触发审批；未关闭 Guard",
+    "budgetExhausted": false,
+    "terminalFailure": {"code": "GLM_REQUEST_TIMEOUT", "phase": "awaiting_headers", "elapsedMs": 90007, "deadlineMs": 90000, "retryable": false},
+    "causeBoundary": "本机请求期限到达时 fetch 未返回；没有 HTTP 状态码，不能认定是服务端故障、限流或具体网络根因。未提高期限或自动复跑。",
+    "independentGuidanceControlObserved": 3,
+    "independentGuidanceControlClickedByModel": 0,
+    "remainingPathIssues": "动态控件边界变化拒绝，以及两次地址栏焦点未证实的输入拒绝；均未绕过",
+    "finalVisiblePage": "https://www.pumch.cn/department_neifmk/dynamic.html",
+    "cleanupConfirmed": true,
+    "daemonStopExitCode": 0,
+    "daemonExited": true,
+    "formalScoring": "未运行"
+  },
+  "publicationBoundary": {
+    "screenshots": "只保留官方公开网页内容区域，裁去浏览器 chrome 和机器桌面",
+    "excluded": ["API key 和私密配置", "原始轨迹及 Provider exchanges", "操作员桌面和终端截图", "机器绝对路径、PID/HWND 和本机 profile 标识", "本机迁移、传输与付费 Run 启动器"],
+    "byteChecks": "未执行",
+    "deliveryBoundary": "修复控件识别已通过独立实机证明，不等于完整 M01 业务成功"
+  }
+}
