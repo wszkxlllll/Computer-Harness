@@ -100,11 +100,12 @@ export function prepareComputerRunAssembly(
     toolPresentationOverrides,
     enabledToolNames(registry) {
       if (!windowScoped || effectiveConfig.kind !== "cua") return undefined;
-      // Single-target managed browsers only click through grounded elements.
-      // Cross-window Runs retain the click candidate for desktop/native peers;
-      // Runtime filters it again for the current browser Surface, including
-      // when its DOM catalog is unavailable.
-      const groundedClicksOnly = managedGrounding && windowSwitch === "off";
+      // A managed browser always runs in foreground mode. Retain raw click as
+      // a candidate there: Runtime still checks the current Surface,
+      // capabilities, adapter identity, geometry, focus, and action guard.
+      // If a future managed-grounding route is background-only, keep its
+      // existing grounded-element restriction.
+      const groundedClicksOnly = managedGrounding && effectiveConfig.windowDeliveryMode !== "foreground";
       const allowedComputerTools = new Set(groundedClicksOnly ? ["wait"] : ["click", "wait"]);
       if (effectiveConfig.windowDeliveryMode === "foreground") {
         allowedComputerTools.add("type");

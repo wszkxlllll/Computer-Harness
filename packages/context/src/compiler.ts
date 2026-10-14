@@ -123,7 +123,12 @@ export class DefaultContextCompiler implements ContextCompiler {
     const sourceLinkedFinishText = input.sourceLinkedFinish === undefined
       ? undefined
       : formatSourceLinkedFinishContract(input.sourceLinkedFinish);
-    const systemPrompt = composeSystemPrompt(this.systemPrompt, features, input.computerSession?.platform);
+    const systemPrompt = composeSystemPrompt(
+      this.systemPrompt,
+      features,
+      input.computerSession?.platform,
+      tools.filter((tool) => tool.category === "computer").map((tool) => tool.name),
+    );
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
       ? formatExecutionSegment(input.executionSegment)

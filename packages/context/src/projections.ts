@@ -99,6 +99,7 @@ export function composeSystemPrompt(
   base: string,
   features: RunFeatureConfig,
   platform?: import("@computer-harness/protocol").ComputerSessionDescriptor["platform"],
+  availableComputerToolNames: readonly string[] = [],
 ): string {
   // This shared guidance is invariant across feature toggles and Context history
   // modes, so it stays at the start of the cacheable system prefix.
@@ -119,22 +120,52 @@ export function composeSystemPrompt(
   if (features.executionSegments === "segments-v1") sections.push("ExecutionSegment is separate from the PlanningTask chain. Use execution_segment_set only for a genuinely multi-stage task when the current interface is stable and the same ModelTurn can describe 2-4 predictable click micro-steps, including at least one later click that could replace a future main-provider turn. Call it immediately before the first GUI click. Do not create one for a simple one-click screen or every click. A segment may contain only click steps with observable completion evidence; never use it for type/keypress/scroll/drag/wait, uncertain or open-ended work, cross-application transitions, or sensitive actions. It is short-lived, does not update task progress, and is guidance for re-grounding after a fresh observation, not proof of success or authorization.");
   if (features.memory !== "off") sections.push(`Run Memory is enabled (${features.memory}) and selective. Write only facts that will leave recent context, remain needed across stages or interfaces, or support a final comparison or summary. Do not copy the original Goal or Plan because the Goal and current Plan already stay in context; prefer a first observed result, entity, or option that must survive recent context. When useful, write 1-2 key facts in the same ModelTurn before continuing with GUI actions; keep them independent of any new task id. If that turn also creates a new Planning task, do not write task-retention Memory: its task id exists only after task_create returns. After the result, use its id in relatedTaskIds; in the create turn, skip Memory or use non-task retention only for a truly run-stable fact. Memory writes that do not depend on a new task id, including same-turn writes alongside GUI, remain allowed. Do not record every click or treat the currently visible GUI state as a stable fact. Scoped and needs-check entries are applicability-gated; last-known candidates are not current GUI truth, so use the current observation before acting and revise or invalidate explicitly. Read details by id when the compact index is insufficient. For the final answer, use recalled facts that are relevant to the Goal, but preserve their caveats and do not treat a needs-check or last-known packet as current proof.`);
   if (features.riskGuard === "layered") sections.push("For every Computer tool call except switch_window, include _harnessEffect with non-empty effects, target, and summary. Describe this call's immediate expected effect, not the eventual goal: ordinary browsing/navigation is navigate, ordinary reversible typing is local_edit, and final payment, sending/publishing/submission, irreversible deletion/overwrite, sensitive disclosure, or security changes use their matching effect. Use unknown when uncertain. switch_window selects only an exact listed window; its capture scope follows the current observed Surface: desktop activates the listed window while retaining full-primary-desktop scope, and native_window rebinds to the selected window. It does not authorize content changes and does not need _harnessEffect; the Run-level opt-in and exact target/session validation authorize only this selection. Never include secrets or private content in target/summary, and never claim that an action is approved or safe.");
-  const selectAllBatch = platform === "darwin"
-    ? "CMD/Meta+A→type, or click→CMD/Meta+A→type, in the same already-active text control, using exposed tools named click, hotkey with exact keys [CMD, A] (or [META, A]), and type"
-    : "Ctrl+A→type, or click→Ctrl+A→type, in the same already-active text control, using exposed tools named click, hotkey with exact keys [CTRL, A], and type";
+  const available = new Set(availableComputerToolNames);
+  const hasClick = available.has("click");
+  const hasType = available.has("type");
+  const hasHotkey = available.has("hotkey");
+  const hasClickElement = available.has("click_element");
+  const computerToolsAvailable = available.size > 0;
+  const selectAllBatch = platform === "darwin" ? "CMD/Meta+A→type" : "Ctrl+A→type";
+  const selectAllWithClick = platform === "darwin"
+    ? "click→CMD/Meta+A→type"
+    : "click→Ctrl+A→type";
+  const availableBatches: string[] = [];
+  if (hasClick && hasType) availableBatches.push("click→type");
+  if (hasHotkey && hasType) availableBatches.push(selectAllBatch);
+  if (hasClick && hasHotkey && hasType) availableBatches.push(selectAllWithClick);
   const unsupportedSelectAllBatch = platform === "darwin"
-    ? "click_element and CTRL+A are not supported in batches"
-    : "click_element and CMD/Meta+A are not supported in batches";
-  if (features.batching === "off") {
+    ? "CTRL+A is not supported in batches"
+    : "CMD/Meta+A is not supported in batches";
+  const selectAllToolNote = platform === "darwin"
+    ? "Use hotkey with exact keys [CMD, A] (or [META, A]) and type for select-all. "
+    : "Use hotkey with exact keys [CTRL, A] and type for select-all. ";
+  const clickElementBatchNote = hasClickElement
+    ? "click_element cannot be included in a batch; call it alone and wait for a fresh observation. "
+    : "";
+  if (computerToolsAvailable && features.batching === "off") {
     sections.push("Return at most one Computer tool call per model turn.");
-  } else if (features.planning !== "off" || features.memory !== "off") {
-    const enabledWrites = [
-      ...(features.planning === "off" ? [] : ["Planning"]),
-      ...(features.memory === "off" ? [] : ["Memory"]),
-    ].join("/");
-    sections.push(`A model turn may contain up to two ${enabledWrites} write calls first, followed by one Computer call or one GUI batch. A GUI batch is only click→type, ${selectAllBatch}. ${unsupportedSelectAllBatch}: call them alone and wait for a fresh observation before typing. Do not put read tools, Control decisions, Enter, Tab, submit, navigation, scroll, drag, wait, or state writes after/between GUI calls. Never combine a read tool such as memory_get with a Computer call. Do not claim post-action success before the next observation.`);
-  } else {
-    sections.push(`A model turn may contain one Computer call or one GUI batch. A GUI batch is only click→type, ${selectAllBatch}. ${unsupportedSelectAllBatch}: call them alone and wait for a fresh observation before typing. Do not put read tools, Control decisions, Enter, Tab, submit, navigation, scroll, drag, wait, or state writes after/between GUI calls. Never combine a read tool such as memory_get with a Computer call. Do not claim post-action success before the next observation.`);
+  } else if (computerToolsAvailable && features.batching !== "off") {
+    const writePrefix = features.planning !== "off" || features.memory !== "off"
+      ? `A model turn may contain up to two ${[
+          ...(features.planning === "off" ? [] : ["Planning"]),
+          ...(features.memory === "off" ? [] : ["Memory"]),
+        ].join("/")} write calls first, followed by `
+      : "A model turn may contain ";
+    if (availableBatches.length === 0) {
+      const computerTurnLimit = features.planning !== "off" || features.memory !== "off"
+        ? "at most one Computer call."
+        : "one Computer call.";
+      sections.push(`${writePrefix}${computerTurnLimit} No multi-call GUI batch is available with the Computer tools exposed for this turn. ${clickElementBatchNote}Do not claim post-action success before the next observation.`);
+    } else {
+      const computerTurnLimit = "one Computer call or one GUI batch.";
+      const batchLabel = availableBatches.length === 1
+        ? availableBatches[0]
+        : `${availableBatches.slice(0, -1).join(", ")}, or ${availableBatches.at(-1)}`;
+      const controlNote = hasHotkey ? `${unsupportedSelectAllBatch}. ` : "";
+      const selectAllNote = hasHotkey ? selectAllToolNote : "";
+      sections.push(`${writePrefix}${computerTurnLimit} A GUI batch is only ${batchLabel} in the same already-active text control. ${selectAllNote}${clickElementBatchNote}${controlNote}Do not put read tools, Control decisions, Enter, Tab, submit, navigation, scroll, drag, wait, or state writes after/between GUI calls. Never combine a read tool such as memory_get with a Computer call. Do not claim post-action success before the next observation.`);
+    }
   }
   return sections.join(" ");
 }

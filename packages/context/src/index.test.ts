@@ -91,7 +91,10 @@ describe("DefaultContextCompiler", () => {
       "",
       constrained.messages[1]?.content[0]?.type === "text" ? constrained.messages[1].content[0].text : "",
     ].join("\n").length / 4));
-    expect(final.system).toBe(ordinary.system);
+    const singleComputerCallGuidance = "Return at most one Computer tool call per model turn.";
+    expect(ordinary.system).toContain(singleComputerCallGuidance);
+    expect(final.system).toBe(ordinary.system.replace(` ${singleComputerCallGuidance}`, ""));
+    expect(final.system).not.toContain("GUI batch");
     expect(final.tools.map((tool) => tool.name)).toEqual(["terminate"]);
     expect(JSON.stringify(final.messages)).toContain("This is the final model request");
     expect(JSON.stringify(final.messages)).toContain("complete user-facing result text");
@@ -826,7 +829,7 @@ describe("DefaultContextCompiler", () => {
     expect(batch.system).not.toContain("OS=");
     expect(batch.system).toContain("click→type");
     expect(batch.system).toContain("hotkey with exact keys [CTRL, A]");
-    expect(batch.system).toContain("click_element and CMD/Meta+A are not supported in batches");
+    expect(batch.system).not.toContain("click_element");
     expect(batch.system).toContain("Never combine a read tool such as memory_get with a Computer call");
     expect(batch.system).toContain("2-4 predictable click micro-steps");
     expect(batch.system).toContain("Call it immediately before the first GUI click");
@@ -848,7 +851,7 @@ describe("DefaultContextCompiler", () => {
     }, new AbortController().signal);
     expect(macBatch.system).toContain("OS=macOS");
     expect(macBatch.system).toContain("hotkey with exact keys [CMD, A] (or [META, A]");
-    expect(macBatch.system).toContain("CTRL+A are not supported in batches");
+    expect(macBatch.system).toContain("CTRL+A is not supported in batches");
     expect(macBatch.system).not.toContain("hotkey with exact keys [CTRL, A]");
     const linuxBatch = await compiler.compile({
       runId,
@@ -866,7 +869,7 @@ describe("DefaultContextCompiler", () => {
     }, new AbortController().signal);
     expect(linuxBatch.system).toContain("OS=Linux");
     expect(linuxBatch.system).toContain("hotkey with exact keys [CTRL, A]");
-    expect(linuxBatch.system).toContain("CMD/Meta+A are not supported in batches");
+    expect(linuxBatch.system).toContain("CMD/Meta+A is not supported in batches");
     const planningOnly = await compiler.compile({ runId, goal: "planning only", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "off", batching: "same-control-input-v1" } }, new AbortController().signal);
     expect(planningOnly.system).toContain("same ModelTurn as the first GUI action");
     expect(planningOnly.system).toContain("do not copy the original Goal");

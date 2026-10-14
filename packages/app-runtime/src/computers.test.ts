@@ -117,8 +117,7 @@ describe("prepareComputerRunAssembly", () => {
     if (managedClick === undefined) throw new Error("default registry is missing click");
     managedRegistry.register({ ...managedClick, name: "unverified_computer_tool" });
     managedRegistry.registerMany(managed.groundingTools);
-    expect(managed.enabledToolNames(managedRegistry)).toEqual(expect.arrayContaining(["wait", "type", "click_element", "select_option"]));
-    expect(managed.enabledToolNames(managedRegistry)).not.toContain("click");
+    expect(managed.enabledToolNames(managedRegistry)).toEqual(expect.arrayContaining(["click", "wait", "type", "click_element", "select_option"]));
     expect(managed.enabledToolNames(managedRegistry)).not.toContain("unverified_computer_tool");
 
     const managedCrossWindow = prepareComputerRunAssembly({
