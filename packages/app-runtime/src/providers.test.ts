@@ -87,6 +87,7 @@ describe("app-runtime provider factory", () => {
   it("requires injected credentials without reading the environment", () => {
     expect(() => createProvider({ model: "glm-5.3-flash", config: config(), assetReader, outputDir: "runs/glm", credentials: {} })).toThrow(/ZHIPUAI_API_KEY/iu);
     expect(() => createProvider({ model: "qwen3.8-flash", config: config({ model: "qwen3.8-flash" }), assetReader, outputDir: "runs/qwen", credentials: {} })).toThrow(/DASHSCOPE_API_KEY/iu);
+    expect(() => createProvider({ model: "deepseek-flash", config: config({ model: "deepseek-flash" }), assetReader, outputDir: "runs/deepseek", credentials: {} })).toThrow(/DEEPSEEK_API_KEY/u);
   });
 
   it("constructs both provider adapters from the resolved model and injected key", () => {
@@ -94,6 +95,56 @@ describe("app-runtime provider factory", () => {
     const qwen = createProvider({ model: "qwen3.8-flash", config: config({ model: "qwen3.8-flash", qwenCoordinateMode: "normalized_1000", qwenThinking: "low", qwenOutputMode: "strict_json" }), assetReader, outputDir: "runs/qwen", credentials: { qwenApiKey: "fixture-qwen-key" } });
     expect(glm.id).toBe("glm-5.3-flash");
     expect(qwen.id).toBe("qwen3.8-flash");
+  });
+
+  it("produces official DeepSeek pixel actions without GLM credentials or transport", async () => {
+    let requests = 0;
+    const provider = await createProvider({
+      model: "deepseek-flash",
+      config: config({ model: "deepseek-flash" }),
+      assetReader,
+      outputDir: "unused",
+      credentials: { deepseekApiKey: "fixture-deepseek" },
+      httpClients: {
+        glm: { async post() { throw new Error("GLM must not be used"); } },
+        deepseek: { async post(url, body, headers) {
+          requests += 1;
+          expect(url).toBe("https://api.deepseek.com/chat/completions");
+          expect(headers.Authorization).toBe("Bearer fixture-deepseek");
+          expect(body).toMatchObject({ model: "deepseek-flash", thinking: { type: "disabled" }, max_tokens: 4096 });
+          return { choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "deepseek-action", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 20, y: 30 }) } }] } }] };
+        } },
+      },
+    });
+    await expect(provider.generate(clickInputWithImage(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ id: "deepseek-action", arguments: { x: 20, y: 30 } }] });
+    expect(requests).toBe(1);
+  });
+
+  it("returns explicit DeepSeek finish reports with configured output bounds", async () => {
+    const provider = await createProvider({
+      model: "deepseek-flash", config: config({ model: "deepseek-flash", deepseekMaxOutputTokens: 1234, deepseekRequestTimeoutMs: 1000, deepseekEndpoint: "https://fixture.invalid/v1" }),
+      assetReader, outputDir: "unused", credentials: { deepseekApiKey: "fixture" },
+      httpClients: { deepseek: { async post(url, body) {
+        expect(url).toBe("https://fixture.invalid/v1/chat/completions");
+        expect(body.max_tokens).toBe(1234);
+        return { choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{ id: "finish", type: "function", function: { name: "finish", arguments: JSON.stringify({ status: "failure", text: "The fixture could not be completed." }) } }] } }] };
+      } } },
+    });
+    await expect(provider.generate(finishInput(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "failure", summary: "The fixture could not be completed." });
+  });
+
+  it("rejects unknown models rather than falling back to GLM", () => {
+    expect(() => createProvider({ model: "unknown" as ResolvedRunConfig["model"], config: config(), assetReader, outputDir: "unused", credentials: { glmApiKey: "fixture" } })).toThrow(/unsupported Provider model/u);
+  });
+
+  it("rejects invalid DeepSeek deadlines and output bounds before requests", () => {
+    const options = { model: "deepseek-flash" as const, assetReader, outputDir: "unused", credentials: { deepseekApiKey: "fixture" } };
+    for (const deepseekRequestTimeoutMs of [999, 240001, 1000.5, Number.NaN]) {
+      expect(() => createProvider({ ...options, config: config({ model: "deepseek-flash", deepseekRequestTimeoutMs }) })).toThrow(/DeepSeek request timeout/u);
+    }
+    for (const deepseekMaxOutputTokens of [0, 131073, 1.5, Number.NaN]) {
+      expect(() => createProvider({ ...options, config: config({ model: "deepseek-flash", deepseekMaxOutputTokens }) })).toThrow(/DeepSeek max output tokens/u);
+    }
   });
 
   it("rejects invalid resolved GLM input budgets before creating or calling HTTP", () => {

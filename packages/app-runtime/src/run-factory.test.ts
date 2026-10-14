@@ -455,6 +455,62 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it("runs official DeepSeek with only its own credential and reports native multimodal usage privately", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-deepseek-exchange-"));
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as Record<string, unknown>;
+      expect(_url).toBe("https://api.deepseek.com/chat/completions");
+      expect(body).toMatchObject({ model: "deepseek-flash", thinking: { type: "disabled" }, max_tokens: 4096 });
+      return { ok: true, status: 200, json: async () => ({
+        model: "deepseek-flash",
+        choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{
+          id: "deepseek-terminate", type: "function",
+          function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "The requested result could not be verified." }) },
+        }] } }],
+        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_cache_hit_tokens: 15, prompt_cache_miss_tokens: 5 },
+      }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({ ...config(outputDir), model: "deepseek-flash" }, {
+        credentials: { deepseekApiKey: "synthetic-deepseek-secret" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      const report = await handle.report();
+      expect(report.summary).toMatchObject({
+        model: "deepseek-flash", thinkingMode: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels",
+        glmThinking: null, glmMaxOutputTokens: null, deepseekMaxOutputTokens: 4096, deepseekRequestTimeoutMs: 90000,
+        modelReportedStatus: "failure", modelSummary: "The requested result could not be verified.",
+      });
+      const completed = report.events.find((event) => event.type === "model.response.received");
+      expect(completed).toMatchObject({ turn: { usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30, cacheReadTokens: 15 } } });
+      const record = JSON.parse((await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+      expect(record).toMatchObject({
+        provider: "deepseek", requestedModel: "deepseek-flash",
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", deadlineMs: 90000, requestConfiguration: { thinking: "disabled", maxTokens: 4096, imageCount: 1 } },
+          { stage: "headers_received" }, { stage: "body_received", outcome: "success" },
+        ] },
+        response: { usage: { cachedReadTokens: 15, cacheMissTokens: 5 } },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(record)).not.toContain("synthetic-deepseek-secret");
+      expect(JSON.stringify(record)).not.toContain("The requested result could not be verified.");
+      expect(JSON.stringify(report.summary)).not.toContain("synthetic-deepseek-secret");
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unknown model selections before acquiring Run resources", async () => {
+    const createComputer = vi.fn();
+    await expect(createRun({ ...config("unused"), model: "unknown" as ResolvedRunConfig["model"] }, { createComputer })).rejects.toThrow(/unsupported Provider model/u);
+    expect(createComputer).not.toHaveBeenCalled();
+  });
+
   it("uses one explicit GLM timeout for Fetch evidence and Runtime retry reserve", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-explicit-timeout-"));
     const runId = "runtime-glm-explicit-timeout" as RunId;

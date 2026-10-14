@@ -6,8 +6,8 @@ export function resolveCliModel(value: string | undefined, doctor: boolean): App
     if (doctor) return "glm-5.3-flash";
     throw new Error("--model is required for a Run");
   }
-  if (value !== "glm-5.3-flash" && value !== "qwen3.8-flash") {
-    throw new Error("--model must be glm-5.3-flash or qwen3.8-flash");
+  if (value !== "glm-5.3-flash" && value !== "qwen3.8-flash" && value !== "deepseek-flash") {
+    throw new Error("--model must be glm-5.3-flash, qwen3.8-flash, or deepseek-flash");
   }
   return value;
 }

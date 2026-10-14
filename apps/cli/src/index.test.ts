@@ -336,3 +336,59 @@ describe("CLI GLM request-timeout configuration", () => {
     expect(toResolvedRunConfig(qwenOptions, "Inspect the open task")).not.toHaveProperty("glmRequestTimeoutMs");
   });
 });
+
+describe("CLI DeepSeek Run configuration", () => {
+  const baseArgs = ["--goal", "Inspect the open task", "--model", "deepseek-flash", "--computer", "cua", "--cua-socket", "fixture.sock"];
+
+  it("selects DeepSeek without Qwen calibration and keeps Risk Guard selection explicit", () => {
+    const options = parseArgs([...baseArgs, "--risk-guard", "layered", "--risk-model", "deepseek-flash"]);
+    const config = toResolvedRunConfig(options, "Inspect the open task");
+    expect(config.model).toBe("deepseek-flash");
+    expect(config.riskModel).toBe("deepseek-flash");
+    expect(config).not.toHaveProperty("qwenCoordinateMode");
+    expect(config).not.toHaveProperty("qwenThinking");
+    expect(() => parseArgs([...baseArgs, "--qwen-coordinate-mode", "actual_pixels"])).toThrow(/only valid with a Qwen model/u);
+  });
+
+  it("keeps private credentials out of configuration and forwards only provider overrides", () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "private-fixture-key");
+    vi.stubEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/chat/completions");
+    vi.stubEnv("DEEPSEEK_REQUEST_TIMEOUT_MS", "180000");
+    vi.stubEnv("DEEPSEEK_MAX_OUTPUT_TOKENS", "8192");
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", "not-a-number");
+    const config = toResolvedRunConfig(parseArgs(baseArgs), "Inspect the open task");
+    expect(config).toMatchObject({
+      deepseekEndpoint: "https://api.deepseek.com/chat/completions",
+      deepseekRequestTimeoutMs: 180000,
+      deepseekMaxOutputTokens: 8192,
+    });
+    expect(config).not.toHaveProperty("glmRequestTimeoutMs");
+    expect(JSON.stringify(config)).not.toContain("private-fixture-key");
+  });
+
+  it("leaves absent overrides to runtime defaults", () => {
+    vi.stubEnv("DEEPSEEK_REQUEST_TIMEOUT_MS", undefined);
+    vi.stubEnv("DEEPSEEK_MAX_OUTPUT_TOKENS", undefined);
+    const config = toResolvedRunConfig(parseArgs(baseArgs), "Inspect the open task");
+    expect(config).not.toHaveProperty("deepseekRequestTimeoutMs");
+    expect(config).not.toHaveProperty("deepseekMaxOutputTokens");
+  });
+
+  it.each([
+    ["DEEPSEEK_REQUEST_TIMEOUT_MS", "241000"],
+    ["DEEPSEEK_REQUEST_TIMEOUT_MS", "not-a-number"],
+    ["DEEPSEEK_MAX_OUTPUT_TOKENS", "0"],
+    ["DEEPSEEK_MAX_OUTPUT_TOKENS", "131073"],
+  ])("rejects invalid %s overrides", (name, value) => {
+    vi.stubEnv(name, value);
+    expect(() => toResolvedRunConfig(parseArgs(baseArgs), "Inspect the open task")).toThrow();
+  });
+
+  it("does not apply DeepSeek-only overrides to a GLM Run unless Risk Guard selects DeepSeek", () => {
+    vi.stubEnv("DEEPSEEK_REQUEST_TIMEOUT_MS", "not-a-number");
+    const glmArgs = [...baseArgs];
+    glmArgs[3] = "glm-5.3-flash";
+    expect(toResolvedRunConfig(parseArgs(glmArgs), "Inspect the open task")).not.toHaveProperty("deepseekRequestTimeoutMs");
+    expect(() => toResolvedRunConfig(parseArgs([...glmArgs, "--risk-guard", "layered", "--risk-model", "deepseek-flash"]), "Inspect the open task")).toThrow();
+  });
+});
