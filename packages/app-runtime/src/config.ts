@@ -22,7 +22,7 @@ import type { ComputerBackendConfig, ComputerFactoryDependencies } from "./compu
 import type { RunReport } from "./reporting.js";
 import type { RunEventFeed } from "./event-feed.js";
 
-export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash";
+export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash" | "deepseek-flash";
 export const DEFAULT_GLM_REQUEST_TIMEOUT_MS = 90_000;
 export const MIN_GLM_REQUEST_TIMEOUT_MS = 1_000;
 export const MAX_GLM_REQUEST_TIMEOUT_MS = 240_000;
@@ -30,6 +30,21 @@ export const MAX_GLM_REQUEST_TIMEOUT_MS = 240_000;
 export function validateGlmRequestTimeoutMs(value: number | undefined): void {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < MIN_GLM_REQUEST_TIMEOUT_MS || value > MAX_GLM_REQUEST_TIMEOUT_MS)) {
     throw new Error(`GLM request timeout must be an integer from ${MIN_GLM_REQUEST_TIMEOUT_MS} to ${MAX_GLM_REQUEST_TIMEOUT_MS} milliseconds`);
+  }
+}
+
+export const DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS = 90_000;
+export const DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS = 4096;
+
+export function validateDeepseekRequestTimeoutMs(value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 1_000 || value > 240_000)) {
+    throw new Error("DeepSeek request timeout must be an integer from 1000 to 240000 milliseconds");
+  }
+}
+
+export function validateDeepseekMaxOutputTokens(value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) {
+    throw new Error("DeepSeek max output tokens must be an integer from 1 to 131072");
   }
 }
 export type AppRuntimeRiskModel = "off" | "same" | AppRuntimeModel;
@@ -108,6 +123,11 @@ export interface ResolvedRunConfig {
   glmEndpoint?: string;
   /** Bounded live-interactive deadline for one GLM request. */
   glmRequestTimeoutMs?: number;
+  deepseekEndpoint?: string;
+  /** Wall-clock deadline for one DeepSeek request; defaults to 90000ms. */
+  deepseekRequestTimeoutMs?: number;
+  /** Non-thinking DeepSeek completion budget; defaults to 4096. */
+  deepseekMaxOutputTokens?: number;
   fixtureResult?: string;
   monitor?: MonitorPolicyMode;
 }
@@ -116,6 +136,7 @@ export interface ResolvedRunConfig {
 export interface ProviderCredentials {
   glmApiKey?: string;
   qwenApiKey?: string;
+  deepseekApiKey?: string;
   /** Independent embedding credential; never serialized into ResolvedRunConfig. */
   memoryEmbeddingApiKey?: string;
   osworldBridgeToken?: string;
@@ -131,6 +152,7 @@ export interface ProviderFactoryOptions {
   httpClients?: {
     glm?: ProviderHttpClient;
     qwen?: ProviderHttpClient;
+    deepseek?: ProviderHttpClient;
   };
 }
 

@@ -1,11 +1,12 @@
 import { resolve } from "node:path";
+import { DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS, DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs } from "@computer-harness/app-runtime";
 import type { ApplicationSessionConfig, RunModel } from "@computer-harness/app-runtime";
 import { parseGlmInputBudgets, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 
 export interface HostArguments {
   envFile: string;
   socket: string;
-  model: "glm-5.3-flash" | "qwen3.8-flash";
+  model: RunModel;
   output: string;
   port: number;
   origins: string[];
@@ -64,6 +65,13 @@ export function createHostSessionConfig(
   const qwenModel = args.model === "qwen3.8-flash";
   const baseUrl = env.DASHSCOPE_BASE_URL ?? env.DASHSCOPE_ENDPOINT;
   const glmEndpoint = env.GLM_BASE_URL;
+  const deepseekModel = args.model === "deepseek-flash";
+  const deepseekRequestTimeoutMs = deepseekModel && env.DEEPSEEK_REQUEST_TIMEOUT_MS !== undefined
+    ? Number(env.DEEPSEEK_REQUEST_TIMEOUT_MS.trim()) : DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS;
+  const deepseekMaxOutputTokens = deepseekModel && env.DEEPSEEK_MAX_OUTPUT_TOKENS !== undefined
+    ? Number(env.DEEPSEEK_MAX_OUTPUT_TOKENS.trim()) : DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS;
+  validateDeepseekRequestTimeoutMs(deepseekRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(deepseekMaxOutputTokens);
   const profileSettings = resolveHostRunProfileSettings(env);
   return {
     model,
@@ -86,7 +94,7 @@ export function createHostSessionConfig(
     batching: "same-control-input-v1",
     contextMode: "recent",
     contextMaxHistoryEvents: 32,
-    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)),
+    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : deepseekModel ? { contextMaxInputTokens: 16_384, contextMaxWireInputTokens: 24_576 } : parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)),
     ...(profileSettings.operationGuidance === undefined ? {} : { operationGuidance: profileSettings.operationGuidance }),
     riskProfile: "live-interactive",
     riskGuard: "layered",
@@ -98,10 +106,17 @@ export function createHostSessionConfig(
     // blocking a phone-driven action while the interaction path is under test.
     monitor: "shadow",
     windowHandoff: "confirm-v1",
-    glmThinking: readGlmThinking(env.GLM_THINKING),
-    glmMaxOutputTokens: args.glmMaxOutputTokens,
-    glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
-    ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
+    ...(!deepseekModel ? {
+      glmThinking: readGlmThinking(env.GLM_THINKING),
+      glmMaxOutputTokens: args.glmMaxOutputTokens,
+      glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
+      ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
+    } : {}),
+    ...(deepseekModel ? {
+      deepseekRequestTimeoutMs,
+      deepseekMaxOutputTokens,
+      ...(env.DEEPSEEK_BASE_URL === undefined ? {} : { deepseekEndpoint: env.DEEPSEEK_BASE_URL }),
+    } : {}),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: env.DASHSCOPE_WORKSPACE_ID }),
     ...(qwenModel ? {

@@ -104,6 +104,10 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 | Qwen key | `DASHSCOPE_API_KEY` | Qwen3.8-Flash |
 | Qwen endpoint | `DASHSCOPE_BASE_URL` | 别名：`DASHSCOPE_ENDPOINT` |
 | Qwen workspace | `DASHSCOPE_WORKSPACE_ID` | 可选；用于生成 workspace endpoint |
+| DeepSeek key | `DEEPSEEK_API_KEY` | 官方 `deepseek-flash`；只从本机环境注入，不放在命令行、配置或公共响应里 |
+| DeepSeek endpoint | `DEEPSEEK_BASE_URL` | 可选；默认 `https://api.deepseek.com/chat/completions`，接受 API base URL 或完整 chat completions URL |
+| DeepSeek request timeout | `DEEPSEEK_REQUEST_TIMEOUT_MS` | 单请求默认 `90000`；可覆盖为 `1000`–`240000` 整数毫秒 |
+| DeepSeek output budget | `DEEPSEEK_MAX_OUTPUT_TOKENS` | 默认 `4096`；可覆盖为 `1`–`131072` 整数 token（服务端也可能施加更低限制） |
 | Memory embedding key | `MEMORY_EMBEDDING_API_KEY` | Hybrid Memory 专用 key；不要复用聊天模型 key |
 | Jev window selector | `TYPESAFE_API_KEY` | 仅显式启用 CUA TUI Jev 选窗时需要；还需允许分享窗口标题，见[配置步骤](./local-launcher.md#jev-辅助选窗可选) |
 | OSWorld Bridge | `OSWORLD_BRIDGE_TOKEN` | 可选 loopback Bridge token，不进轨迹 |
@@ -114,7 +118,27 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 node apps/cli/dist/index.js --goal "describe the current screen" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
 ```
 
-Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
+### 模型选择与切换范围
+
+CLI Run 必须显式选择 `--model glm-5.3-flash`、`qwen3.8-flash` 或 `deepseek-flash`。切换模型就是结束当前 Run / 退出 TUI 后，以不同 `--model` 启动新 Run / TUI 会话；模型在每个 Run 内固定，TUI 没有模型选择器。CLI 的 `--risk-model` 接受 `off`、`same` 和以上三个模型名；`same` 跟随本 Run 的主模型。
+
+Host 已有启动参数 `--model`（省略时仍默认 GLM），新增 DeepSeek 后可显式选择以上三个模型。Host 进程内的新 Run 使用启动时的模型；要切换须停止旧 Host、确保其 Run 完成清理后，以另一个 `--model` 重启。Web / 手机界面没有每 Run 的模型选择器，也不能修改 Host 的模型。没有运行中热切换、自动 Provider fallback 或动作重放。
+
+DeepSeek 使用截图 `image_url` 和原生 tools，默认发送 `thinking: { type: "disabled" }`，坐标为 `actual_pixels`；它不是 GLM 的别名，也不接受 Qwen 专用参数。只有 CLI 的 Qwen Run 必须额外指定 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`（Host 的 Qwen 配置现为 `normalized_1000`）。
+
+从仓库根目录启动新模型的示例（先把 key 放进私有 `.env`，不要把 key 写进命令）：
+
+```text
+node apps/cli/dist/index.js --goal "describe the current screen" --model deepseek-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-deepseek" --env-file ".env"
+node apps/cli/dist/index.js --goal "describe the current screen" --model qwen3.8-flash --qwen-coordinate-mode normalized_1000 --computer cua --cua-socket "<private-socket>" --output "runs/live-qwen" --env-file ".env"
+node apps/host/dist/index.js --env-file ".env" --socket "<private-socket>" --model deepseek-flash --output "runs/host-deepseek"
+```
+
+Host 示例里的 `--model` 换为 `glm-5.3-flash` 或 `qwen3.8-flash` 即可为重启后的新 Run 选择对应模型。凭据仍留在 Host 私有环境，Web 不接收 key。
+
+2026-10-14 Windows 实跑：[双模型脱敏结果](./member-c-m01-registered-click-2026-10-14.json)。GLM 再跑100次请求/响应未超时，Runtime succeeded，但交付的来源URL、门诊楼层和时间未通过官网复核；DeepSeek 首请求HTTP200、完整响应1138ms，模型返回未提供工具而被整组拒绝，0 GUI动作、Runtime failed。接入与模型选择不等于业务任务通过，也不证明此前GLM超时根因已修复。Windows构建、spike检查、三模型选择冒烟及222项定向回归通过；3项指纹用例未运行，无macOS实机或全套验收。
+
+Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
 
 路径提示：直接从仓库根目录执行 `node apps/cli/dist/index.js` 时，`--env-file ".env"` 指向根目录；通过 `pnpm --filter @computer-harness/cli start` 启动时，工作目录是 `apps/cli`，请传根目录 `.env` 的绝对路径或 `..\..\.env`。
 
