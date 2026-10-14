@@ -55,6 +55,12 @@ PR23在独审160/160与同head CI38547248255五绿后，通过普通GitHub merge
 
 用户本人随后确认Actions恢复。66的实际CI38550964967在Windows得到2338 Vitest通过、Node231通过/3失败/0skip，另外三verify成功；required正常执行并因Windows失败拒绝，不再是付款拒绝。三个失败均为故障注入测试将磁盘绝对路径传给--import，Node Windows ESM以protocol d:拒绝，未到注入断言。现只修测试hook为标准file URL，保留原负例；下一实际head重跑完整/type/Web/CLI及CI、Sol审查后才main，不盲重跑66掩盖错误。
 
+## 33 实际全套与 Mac 焦点测试续修
+
+`33b6c28f0fc9a7d94df002c9d355bc0002d495c5`（tree `025faa1b25adbdc25bdd9f844e3ecb413846ef6c`）重新实际完整2338 Vitest+234 Node、0fail/skip及type/Web/CLI exit0，Sol已读全日志/exit/SHA/新testpin无漂移。CI38552037147的Windows与两Ubuntu实际success，故3个故障注入负例确在Windows加载后执行；Mac唯一失败是App.test.tsx401 gate出现标题后立即读focus，activeElement仍body。
+
+已独立读PhoneSessionGate及RouteFocusOnMount：async session rejection触发状态渲染，focus发生于挂载后的useEffect([])，findByRole只证明DOM标题存在。现无生产focus错误证据，Luna仅控制deferred rejection在act中结算并等待实际activeElement；同类ready任务标题同步等待，保留loading不focus/后续更新不抢focus/两status和standalone全部合同。不删除或skip负例，不提高全局/产品超时；最终以新实际head完整检查与CI为准。
+
 ## 679 逐文件与行为映射
 
 采用语义移植，不以679整commit祖先关系代替行为证明。原679及PR26引用保留；本候选包含以下有效增量，避免重引已退役profile：
@@ -78,7 +84,7 @@ PR23在独审160/160与同head CI38547248255五绿后，通过普通GitHub merge
 | patches/cua-driver/d114f35-macos-foreground-oracle-risk-classification-after-native10.patch | native11，逐字与679相同 |
 | patches/cua-driver/native11-diagnostic-r2-source-chain.json | 11段来源闭合，逐字与679相同，不当作已加载driver |
 
-## 当前组合与外部 CI 阻塞
+## 66冻结前的CI外部阻塞快照（后已恢复）
 
 最终候选把MODE、上述679增量与evaluator标准测试入口纳入同一提交，尚需对这个实际head完成全仓/类型/Web/CLI和组合独审、同head必要CI。中间8fd的CI38548782845四组verify已success，`ci-required`未启动（runner_id=0、steps=[]）；GitHub注释明确账户近期付款失败或支出额度需要调整。046中间run38548701074已cancelled，不冒绿。已请账户负责人恢复Actions；不能以本地测试或四verify替代必要gate，不修改billing/支出设置、不跳过用户要求合main。
 

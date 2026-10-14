@@ -1,5 +1,7 @@
 ## 2026-10-14 最高优先：PR22/PR23 修复、独审与合入 main
 
+2026-10-14 33后续：33b6c28完整离线2338Vitest+234Node/typecheck/Web/CLI及Sol复核通过。实际CI38552037147 Windows与Ubuntu22/24成功，Mac仅App.test.tsx401 gate焦点断言失败（DOM标题存在、activeElement仍body）；经App/RouteFocusOnMount生命周期独审，findByRole不保证passive useEffect焦点已结算。现只修测试deferred session结算/等待真实focus，保全部loading/不抢焦点等断言，不改生产；下一实际head继续完整测试/独审/CI后main。Actions已恢复，不把此失败误称账单或Windows问题。
+
 2026-10-14 Actions恢复后接续：用户本人已确认恢复，fresh66cf92f的CI38550964967正常运行但Windows三个evaluator故障注入测试在加载前因--import磁盘路径（protocol d:）拒绝；2338Vitest全通过、Node231通过/3失败/0skip，其余三verify成功，required按Windows失败正确拒绝。此时不再是账单阻塞。Luna只修测试hook为标准file URL，不删负例/skip或改产品；新提交继续完整/typeWeb/CLI、Sol独审与同headCI，通过后按既有授权合main。66离线2338+234及Sol审查保留为旧head证据，不替代新head。
 
 本轮冻结接收：MODE最终162/162与真实umask022/0755父目录CLI已Sol独验；679语义移植六套件218/218及typecheck已Sol独验、16文件pin/9–11段native来源闭合，已导入最终组合。evaluator接入标准测试列表。最终实际head全套/CI/组合独审继续执行；GitHub中间8fd四verify绿，但required作业因账户付款/额度未启动，已请账户负责人处理，main未合并。

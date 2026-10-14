@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, getPhoneSession, getVoiceInputCapabilities } from "./api";
 import { App } from "./App";
@@ -91,20 +91,26 @@ describe("App composition", () => {
     render(<App />);
 
     const heading = await screen.findByRole("heading", { name: "任务目标" });
-    expect(document.activeElement).toBe(heading);
+    await waitFor(() => expect(document.activeElement).toBe(heading));
   });
 
   it.each([
     [401, "先连接你的电脑"],
     [503, "电脑暂时没有响应"],
   ])("waits for the session check before focusing the gate state for status %s", async (status, heading) => {
-    vi.mocked(getPhoneSession).mockRejectedValueOnce(new ApiError("本次连接未完成。", status));
+    let rejectSession!: (error: unknown) => void;
+    vi.mocked(getPhoneSession).mockReturnValueOnce(new Promise((_resolve, reject) => { rejectSession = reject; }));
 
     render(<App />);
     const loadingMain = screen.getByRole("main");
     expect(document.activeElement).not.toBe(loadingMain);
 
-    const pageHeading = await screen.findByRole("heading", { name: heading });
-    expect(document.activeElement).toBe(pageHeading);
+    await act(async () => {
+      rejectSession(new ApiError("本次连接未完成。", status));
+      await Promise.resolve();
+    });
+
+    const pageHeading = screen.getByRole("heading", { name: heading });
+    await waitFor(() => expect(document.activeElement).toBe(pageHeading));
   });
 });

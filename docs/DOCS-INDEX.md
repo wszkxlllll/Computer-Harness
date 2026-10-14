@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+2026-10-14 最新：33的Windows及两Ubuntu已绿；Mac gate焦点测试按实际useEffect生命周期窄修，保留手机focus合同，新head完整检查/CI后main。见[执行记录](./astra-prfix-merge-execution-2026-10-14.md)。
+
 2026-10-14 接续：Actions已恢复，66实际Windows共享evaluator hook路径错误已定位，测试portable file URL修复/新head验证优先；详见[当前执行记录](./astra-prfix-merge-execution-2026-10-14.md)。
 
 2026-10-14 优先执行：[两项修复、MODE回归与679语义适配及合并记录](./astra-prfix-merge-execution-2026-10-14.md)，[合并前审查](./astra-premerge-review-2026-10-14.md)、[集成专项复审](./astra-pr22-integration-review-2026-10-14.md)。PR23已合入PR22；main仍等待最终组合测试、CI与Sol独审。最终产品路线按两份Astra计划顶部说明，旧profile记录不作当前交付。
