@@ -330,6 +330,43 @@ describe("managed browser host pilot", () => {
     }
   });
 
+  it("keeps a registered child click separate from its parent navigation and refuses it after listener removal", () => {
+    const plus = syntheticElement("span", { textContent: "+", rect: { x: 160, y: 100, width: 40, height: 40 } });
+    const parent = syntheticElement("a", { textContent: "Guidance+", children: [plus], rect: { x: 10, y: 100, width: 190, height: 40 } });
+    const pointerOnly = syntheticElement("span", { textContent: "Decoration", rect: { x: 10, y: 200, width: 40, height: 40 } });
+    const page = new SyntheticDocument([parent, pointerOnly]);
+    page.hitTarget = plus;
+    const listeners = new Set([plus]);
+    const context = {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto", cursor: "pointer" }),
+      getEventListeners: (element: SyntheticElement) => listeners.has(element) ? { click: [{}] } : {},
+      window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 },
+    };
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation;
+    const candidate = evaluation.candidates.find((item) => item.name === "+")!;
+    expect(candidate).toMatchObject({ tagName: "span", ariaRole: "generic", description: "Guidance+", frame: plus.getBoundingClientRect() });
+    expect(evaluation.candidates.some((item) => item.name === "Decoration")).toBe(false);
+    const binding = {
+      role: "generic",
+      name: "+",
+      frame: candidate.frame as { x: number; y: number; width: number; height: number },
+      fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate),
+    };
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(plus.clicked).toBe(true);
+    expect(parent.clicked).toBe(false);
+
+    plus.clicked = false;
+    listeners.delete(plus);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    expect(plus.clicked).toBe(false);
+    expect(parent.clicked).toBe(false);
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates.some((item) => item.name === "+")).toBe(false);
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, { ...context, getEventListeners: undefined }) as SyntheticEvaluation).candidates.some((item) => item.name === "+")).toBe(false);
+  });
+
   it("ignores non-input types, refuses occluded click probes without dispatch, and removes their candidates", () => {
     const button = syntheticElement("button", { attrs: { type: "submit", "aria-label": "Go" } });
     const page = new SyntheticDocument([button]);
@@ -1127,6 +1164,7 @@ interface SyntheticEvaluation {
 
 class SyntheticElement {
   public onFocus: (() => void) | undefined;
+  public parentElement: SyntheticElement | undefined;
   public readonly onclick: unknown;
   public readonly localName: string;
   public readonly children: readonly SyntheticElement[];
@@ -1146,6 +1184,7 @@ class SyntheticElement {
     this.localName = localName;
     this.attrs = options.attrs ?? {};
     this.children = options.children ?? [];
+    for (const child of this.children) child.parentElement = this;
     this.labels = options.labels;
     this.selectedOptions = options.selectedOptions;
     this.textContent = options.textContent ?? "";
