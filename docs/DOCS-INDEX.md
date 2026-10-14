@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+2026-10-14 PR30修复验收：[DeepSeek接入与click/Batch一致性回归](./pr30-deepseek-repair-2026-10-14.md)。源码审查及2419项Vitest通过；8次真实API均HTTP200，但Plan+Memory+Batch同轮输出尚未通过。以已合并main `a2757d6`为基底，隔离移入PR30并保留作者；本轮不替换Preview。下方PR22合并前CI状态保留为历史，main基底的[CI已通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38553980139)，不代表本地修复分支已经运行远端CI。
+
 2026-10-14 最新：33的Windows及两Ubuntu已绿；Mac gate焦点测试按实际useEffect生命周期窄修，保留手机focus合同，新head完整检查/CI后main。见[执行记录](./astra-prfix-merge-execution-2026-10-14.md)。
 
 2026-10-14 接续：Actions已恢复，66实际Windows共享evaluator hook路径错误已定位，测试portable file URL修复/新head验证优先；详见[当前执行记录](./astra-prfix-merge-execution-2026-10-14.md)。

@@ -126,6 +126,10 @@ Host 已有启动参数 `--model`（省略时仍默认 GLM），新增 DeepSeek 
 
 DeepSeek 使用截图 `image_url` 和原生 tools，默认发送 `thinking: { type: "disabled" }`，坐标为 `actual_pixels`；它不是 GLM 的别名，也不接受 Qwen 专用参数。只有 CLI 的 Qwen Run 必须额外指定 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`（Host 的 Qwen 配置现为 `normalized_1000`）。
 
+DeepSeek 的临时网络错误、429/5xx由Runtime按原请求有限重试；完整响应中的工具协议错误可在零执行前带反馈重新生成。两者共用请求次数、时间窗和预算，不是Provider内部无限循环。鉴权/参数HTTP错误、主动截止、用户取消、完整body无法解码及截断响应不会盲目重试；未知工具仍整组拒绝，结果未知的GUI动作绝不自动重放。本地响应校验不等于启用了服务端strict。
+
+如果环境需要代理，已有 `HTTPS_PROXY` 不一定表示 Node fetch 已启用它。使用可信且已授权的代理时，Node 24.5+（或22.21+）可在启动进程时加 `--use-env-proxy`，例如 `node --use-env-proxy apps/cli/dist/index.js ...`；其他参数保持原命令。该开关只作用于本次进程，不修改系统代理，也不默认改变其他Provider的网络路径。不要关闭TLS校验。若Node版本不支持该开关，先按部署环境选择兼容的代理方案，不把这个参数直接加到所有版本的启动脚本。参见[Node官方说明](https://nodejs.org/api/cli.html#--use-env-proxy)。
+
 从仓库根目录启动新模型的示例（先把 key 放进私有 `.env`，不要把 key 写进命令）：
 
 ```text
