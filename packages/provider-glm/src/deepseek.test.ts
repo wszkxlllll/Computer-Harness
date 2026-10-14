@@ -95,6 +95,46 @@ describe("official DeepSeek flash boundary", () => {
     await expect(new DeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: client }).generate(controls, { signal })).resolves.toEqual({ type: "finish", reportedStatus: "failure", summary: "The requested source could not be opened.", resultEvidence, usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30, cacheReadTokens: 15 } });
   });
 
+  it.each([
+    ["unavailable tool", "DEEPSEEK_UNAVAILABLE_TOOL", {
+      choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [
+        { id: "valid-click", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 1, y: 2 }) } },
+        { id: "unknown-call", type: "function", function: { name: "private-unoffered-tool", arguments: JSON.stringify({ secret: "private-payload" }) } },
+      ] } }],
+    }],
+    ["invalid tool call", "DEEPSEEK_INVALID_TOOL_CALL", {
+      choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{ id: "bad-args", type: "function", function: { name: "click", arguments: "private-payload-not-json" } }] } }],
+    }],
+    ["duplicate tool call", "DEEPSEEK_DUPLICATE_TOOL_CALL", {
+      choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [
+        { id: "duplicate-id", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 1, y: 2 }) } },
+        { id: "duplicate-id", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 3, y: 4 }) } },
+      ] } }],
+    }],
+    ["empty response", "DEEPSEEK_EMPTY_RESPONSE", { choices: [{ finish_reason: "stop", message: { role: "assistant", content: null } }] }],
+    ["invalid parsed response", "DEEPSEEK_INVALID_RESPONSE", { choices: [] }],
+  ] as const)("allows finite feedback for a complete response with %s", async (_label, code, value) => {
+    const adapter = new DeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: new Client(value) });
+    await expect(adapter.generate(input(), { signal })).rejects.toMatchObject({
+      name: "DeepseekProviderError",
+      code,
+      retryable: true,
+      retryMode: "feedback",
+    });
+  });
+
+  it("only permits parsed response feedback after a complete successful JSON response", async () => {
+    const cases = [
+      { label: "HTTP 200 parsed shape error", ok: true, status: 200, retryable: true, retryMode: "feedback", code: "DEEPSEEK_INVALID_RESPONSE" },
+      { label: "HTTP 500 response", ok: false, status: 500, retryable: true, retryMode: "same_input", code: "DEEPSEEK_HTTP_500" },
+    ] as const;
+    for (const item of cases) {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: item.ok, status: item.status, json: async () => ({ choices: [] }) })));
+      const adapter = new DeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader });
+      await expect(adapter.generate(input(), { signal })).rejects.toMatchObject({ code: item.code, retryable: item.retryable, retryMode: item.retryMode });
+    }
+  });
+
   it.each(["length", "content_filter", "insufficient_system_resource"])("does not execute truncated or interrupted %s tool decisions", async (finishReason) => {
     const client = new Client(response("click", { x: 400, y: 150 }, finishReason));
     await expect(new DeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: client }).generate(input(), { signal })).rejects.toMatchObject({ name: "DeepseekProviderError", code: "DEEPSEEK_INCOMPLETE_RESPONSE", retryable: false });
@@ -103,7 +143,7 @@ describe("official DeepSeek flash boundary", () => {
 
   it("refuses plain text completion when explicit finish is offered", async () => {
     const client = new Client({ choices: [{ finish_reason: "stop", message: { role: "assistant", content: "Done" } }] });
-    await expect(new DeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: client }).generate({ ...input(), tools: [{ name: "terminate", description: "Finish", category: "control", control: "finish" }] }, { signal })).rejects.toMatchObject({ code: "DEEPSEEK_INVALID_TOOL_CALL", retryable: false });
+    await expect(new DeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: client }).generate({ ...input(), tools: [{ name: "terminate", description: "Finish", category: "control", control: "finish" }] }, { signal })).rejects.toMatchObject({ code: "DEEPSEEK_INVALID_TOOL_CALL", retryable: true, retryMode: "feedback" });
   });
 
   it("keeps malformed argument payloads out of errors", async () => {
@@ -113,6 +153,7 @@ describe("official DeepSeek flash boundary", () => {
       throw new Error("Expected provider failure");
     } catch (error) {
       expect(error).toBeInstanceOf(DeepseekProviderError);
+      expect(error).toMatchObject({ code: "DEEPSEEK_INVALID_TOOL_CALL", retryable: true, retryMode: "feedback" });
       expect(String(error)).not.toContain("private-payload");
       expect(String(error)).not.toContain("GLM");
     }
@@ -178,9 +219,35 @@ describe("DeepSeek transport deadlines and privacy", () => {
 
   it("never exposes provider HTTP payloads, endpoint credentials, or network messages", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 429, json: async () => ({ error: { code: "private-code", message: "private response fixture-key" } }) })));
-    await expect(new FetchDeepseekHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({ message: "DeepSeek HTTP 429", code: "DEEPSEEK_HTTP_429", retryable: false });
+    await expect(new FetchDeepseekHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({ message: "DeepSeek HTTP 429", code: "DEEPSEEK_HTTP_429", retryable: true, retryMode: "same_input" });
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("secret URL https://fixture.invalid?token=fixture-key"); }));
-    await expect(new FetchDeepseekHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({ message: "DeepSeek network request failed", code: "DEEPSEEK_NETWORK_ERROR", retryable: false });
+    await expect(new FetchDeepseekHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({ message: "DeepSeek network request failed", code: "DEEPSEEK_NETWORK_ERROR", retryable: true, retryMode: "same_input" });
+  });
+
+  it.each([
+    [400, false],
+    [401, false],
+    [429, true],
+    [500, true],
+    [503, true],
+    [599, true],
+  ] as const)("classifies HTTP %s with retryable=%s", async (status, retryable) => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status, json: async () => ({ error: { message: "private provider body" } }) })));
+    await expect(new FetchDeepseekHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({
+      code: `DEEPSEEK_HTTP_${status}`,
+      retryable,
+      retryMode: retryable ? "same_input" : "feedback",
+    });
+  });
+
+  it("treats a response-body connection interruption as same-input transport retry", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => { throw new TypeError("private socket reset details"); } })));
+    await expect(new FetchDeepseekHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({
+      message: "DeepSeek response body could not be read",
+      code: "DEEPSEEK_NETWORK_ERROR",
+      retryable: true,
+      retryMode: "same_input",
+    });
   });
 
   it.each([401, 200])("classifies unreadable JSON at HTTP %s without exposing its parse message", async (status) => {
