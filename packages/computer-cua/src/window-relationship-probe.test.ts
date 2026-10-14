@@ -52,6 +52,15 @@ function cua(windows: readonly CuaWindowInfo[] = [parent]): CuaWindowInventory {
 }
 
 describe("cross-platform window relationship inventory merge", () => {
+  it.each(["\ud800", "prefix\ud800", "\udc00", "\ud800x"])("drops malformed UTF-16 probe labels %j without rejecting topology", (label) => {
+    const merged = mergeWindowRelationshipInventory(cua(), probe({
+      windows: [probe().windows[0]!, { ...child, title: label, appName: label }],
+    }), false);
+    expect(merged.complete).toBe(true);
+    expect(merged.windows[1]).not.toHaveProperty("title");
+    expect(merged.windows[1]).not.toHaveProperty("appName");
+  });
+
   it("uses a complete probe's exact rows and bounds despite non-atomic CUA geometry", () => {
     const staleParent = { ...parent, bounds: { x: 1190, y: 211, width: 687, height: 685 } };
     const staleChild: CuaWindowInfo = {
@@ -136,6 +145,54 @@ describe("cross-platform window relationship inventory merge", () => {
     expect(merged.windows[0]).toMatchObject({ title: parent.title, appName: parent.appName });
     expect(merged.windows[1]).toMatchObject({ ownerPid: parent.target.pid, ownerWindowId: parent.target.windowId, windowClass: "#32770" });
     expect(merged.windows.flatMap((window) => Object.keys(window))).not.toContain("text");
+  });
+
+  it("prefers exact CUA labels and falls back to optional probe labels for exact rows", () => {
+    const probeParent = { ...probe().windows[0]!, title: "Win32 parent caption", appName: "wps" };
+    const probeChild = { ...child, title: "Win32 dialog caption", appName: "wps" };
+    const noCaptionOwnedChild = {
+      ...child,
+      windowId: 404,
+      zIndex: 4,
+      appName: "wps",
+    };
+    const merged = mergeWindowRelationshipInventory(cua(), probe({
+      windows: [probeParent, probeChild, noCaptionOwnedChild],
+    }), true);
+
+    expect(merged.complete).toBe(true);
+    expect(merged.windows[0]).toMatchObject({ title: parent.title, appName: parent.appName });
+    expect(merged.windows[1]).toMatchObject({ title: "Win32 dialog caption", appName: "wps" });
+    expect(merged.windows[2]).toMatchObject({ appName: "wps", windowClass: "#32770" });
+    expect(merged.windows[2]).not.toHaveProperty("title");
+  });
+
+  it("does not borrow a label from another HWND in the same process", () => {
+    const unrelatedCuaRow: CuaWindowInfo = {
+      ...parent,
+      target: { pid: parent.target.pid, windowId: 909 },
+      title: "stale other-HWND caption",
+      appName: "stale other app",
+    };
+    const probeParent = { ...probe().windows[0]!, title: "exact probe caption", appName: "wps" };
+    const merged = mergeWindowRelationshipInventory(cua([unrelatedCuaRow]), probe({ windows: [probeParent, child] }), true);
+
+    expect(merged.complete).toBe(true);
+    expect(merged.windows[0]).toMatchObject({ title: "exact probe caption", appName: "wps" });
+    expect(merged.windows[0]?.title).not.toBe(unrelatedCuaRow.title);
+  });
+
+  it("drops invalid optional probe labels without making topology incomplete", () => {
+    const invalidLabels = {
+      ...child,
+      title: "x".repeat(241),
+      appName: { unexpected: "value" },
+    } as unknown as WindowRelationshipProbeSnapshot["windows"][number];
+    const merged = mergeWindowRelationshipInventory(cua(), probe({ windows: [probe().windows[0]!, invalidLabels] }), true);
+
+    expect(merged.complete).toBe(true);
+    expect(merged.windows[1]).not.toHaveProperty("title");
+    expect(merged.windows[1]).not.toHaveProperty("appName");
   });
 
   it("permits narrow partial augmentation for an exact existing foreground child only", () => {

@@ -462,21 +462,32 @@ function sameCandidate(
   catalogSource: GroundingCatalogSource,
   threshold: number,
 ): boolean {
-  const leftRole = normalizeLabel(left.role);
-  const rightRole = normalizeLabel(right.role);
+  const leftSource = left.source ?? inferElementSource(catalogSource);
+  const rightSource = right.source ?? inferElementSource(catalogSource);
+  const crossSourceContentAlias = leftSource !== rightSource &&
+    (leftSource === "dom" && rightSource === "uia" || leftSource === "uia" && rightSource === "dom") &&
+    left.browserRegion === "content" && right.browserRegion === "content" &&
+    (leftSource === "dom" ? left.state?.enabled === true : right.state?.enabled === true);
+  const leftRole = crossSourceContentAlias ? normalizeGroundingCandidateRole(left.role) : normalizeLabel(left.role);
+  const rightRole = crossSourceContentAlias ? normalizeGroundingCandidateRole(right.role) : normalizeLabel(right.role);
   if (leftRole !== rightRole) return false;
   const leftName = normalizeLabel(left.name ?? "");
   const rightName = normalizeLabel(right.name ?? "");
-  if (leftName !== rightName && leftName !== "" && rightName !== "") return false;
+  const comparableLeftName = crossSourceContentAlias ? leftName.replace(/\s+/gu, "") : leftName;
+  const comparableRightName = crossSourceContentAlias ? rightName.replace(/\s+/gu, "") : rightName;
+  if (comparableLeftName !== comparableRightName && comparableLeftName !== "" && comparableRightName !== "") return false;
   const overlap = bboxIoU(left.bbox, right.bbox);
   if (overlap < threshold) return false;
-  const leftSource = left.source ?? inferElementSource(catalogSource);
-  const rightSource = right.source ?? inferElementSource(catalogSource);
   // Only two explicitly known, conflicting browser regions are kept apart.
   // Missing region metadata must not prevent a high-IoU cross-source merge;
   // DOM content then wins through preferCandidate below.
   if (leftSource !== rightSource && left.browserRegion !== undefined && right.browserRegion !== undefined && left.browserRegion !== right.browserRegion) return false;
   return true;
+}
+
+function normalizeGroundingCandidateRole(role: string): string {
+  const normalized = normalizeLabel(role).replace(/\s+/gu, "");
+  return normalized === "axlink" ? "link" : normalized;
 }
 
 function preferCandidate(candidate: GroundingElement, existing: GroundingElement, catalogSource: GroundingCatalogSource): boolean {
@@ -555,7 +566,7 @@ function normalizeLabel(value: string): string {
 function tokenize(value: string): string[] {
   const normalized = value.toLocaleLowerCase();
   const tokens: string[] = [];
-  for (const match of normalized.matchAll(/[\p{Script=Han}]+|[\p{L}\p{N}]+/gu)) {
+  for (const match of normalized.matchAll(/[\p{Script=Han}]+|(?:(?!\p{Script=Han})[\p{L}\p{N}])+/gu)) {
     const valuePart = match[0];
     if (/^\p{Script=Han}+$/u.test(valuePart)) {
       // Two/three-character grams avoid one-character false positives common

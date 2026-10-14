@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import WebSocket, { type RawData } from "ws";
 import type { RemoteStreamEvent } from "@computer-harness/app-runtime";
 import {
-  MAX_ASSET_RESPONSE_BYTES,
   MAX_JSON_REQUEST_BYTES,
   MAX_JSON_RESPONSE_BYTES,
   MAX_SSE_EVENT_BYTES,
@@ -418,14 +417,14 @@ export class HostRelayConnector {
         }
         if (hostResponse.bytes === undefined || hostResponse.body !== undefined) throw new Error("asset response must be bytes");
         const bytes = Buffer.from(hostResponse.bytes);
-        if (bytes.byteLength > MAX_ASSET_RESPONSE_BYTES) {
+        if (bytes.byteLength > route.maxResponseBytes) {
           throw new Error("asset response exceeded its size limit");
         }
         response = { statusCode: hostResponse.statusCode, contentType, bodyBase64: bytes.toString("base64") };
       } else {
         if (hostResponse.bytes !== undefined) throw new Error("non-asset response cannot contain bytes");
         const body = JSON.stringify(hostResponse.body ?? {});
-        const maxBytes = route.kind === "sse" ? MAX_SSE_EVENT_BYTES : MAX_JSON_RESPONSE_BYTES;
+        const maxBytes = route.kind === "sse" ? MAX_SSE_EVENT_BYTES : route.maxResponseBytes;
         if (Buffer.byteLength(body, "utf8") > maxBytes) throw new Error("Host response exceeded its size limit");
         response = { statusCode: hostResponse.statusCode, contentType, body };
       }

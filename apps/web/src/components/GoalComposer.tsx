@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { BrowserSiteChoice, RunTarget } from "../types";
-import { isValidBrowserUrl } from "../run-target";
+import { appNameMatchesHint, explicitApplicationHint, isValidBrowserUrl } from "../run-target";
 import { WindowTargetPicker, type WindowTargetPickerProps } from "./WindowTargetPicker";
 import { VoiceInputControl } from "./VoiceInputControl";
 import type { VoiceAudioCaptureAdapter } from "@computer-harness/voice";
@@ -11,9 +11,12 @@ interface GoalComposerProps {
   busy?: boolean;
   canStart: boolean;
   targetMode: RunTarget["mode"];
+  nativeRecoveryProfile?: { profileId: string; label: string };
+  nativeWebDocumentProfile?: { profileId: string; label: string };
   browserUrl: string;
   commonSiteChoices?: readonly BrowserSiteChoice[];
   onTargetModeChange: (mode: RunTarget["mode"]) => void;
+  onGoalChange?: (goal: string) => void;
   onBrowserUrlChange: (url: string) => void;
   targetPicker: WindowTargetPickerProps;
   voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
@@ -27,9 +30,12 @@ export function GoalComposer({
   busy = false,
   canStart,
   targetMode,
+  nativeRecoveryProfile,
+  nativeWebDocumentProfile,
   browserUrl,
   commonSiteChoices = [],
   onTargetModeChange,
+  onGoalChange = () => undefined,
   onBrowserUrlChange,
   targetPicker,
   voiceCaptureAdapterFactory,
@@ -42,6 +48,10 @@ export function GoalComposer({
   const [switchWindows, setSwitchWindows] = useState(false);
   const formDisabled = disabled || busy || voiceActive;
   const parsedBrowserUrl = browserUrl.trim();
+  const selectedWindow = targetPicker.candidates.find((candidate) => candidate.token === targetPicker.selectedToken);
+  const explicitHint = explicitApplicationHint(goal);
+  const selectedWindowConflictsWithGoal = targetMode === "window" && selectedWindow !== undefined && explicitHint !== undefined &&
+    !appNameMatchesHint(selectedWindow.appName, explicitHint);
   const browserUrlValid = !parsedBrowserUrl || isValidBrowserUrl(parsedBrowserUrl);
   const browserUrlInvalid = Boolean(parsedBrowserUrl) && !isValidBrowserUrl(parsedBrowserUrl);
   const validCommonSiteChoices = commonSiteChoices.flatMap((choice) => {
@@ -51,12 +61,17 @@ export function GoalComposer({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const value = goal.trim();
-    if (!value || !canStart || disabled || busy || voiceActive) return;
+    const value = targetMode === "native-recovery" || targetMode === "native-web-document" ? goal : goal.trim();
+    if (!value.trim() || !canStart || disabled || busy || voiceActive) return;
     if (targetMode === "window") {
       const targetToken = targetPicker.selectedToken;
       if (!targetToken) return;
-      await onSubmit(value, { mode: "window", targetToken, ...(switchWindows ? { switchWindows: true } : {}) });
+      await onSubmit(value, {
+        mode: "window",
+        targetToken,
+        ...(targetPicker.selectedPreviewToken === undefined ? {} : { previewToken: targetPicker.selectedPreviewToken }),
+        ...(switchWindows ? { switchWindows: true } : {}),
+      });
       return;
     }
     if (targetMode === "browser") {
@@ -64,6 +79,16 @@ export function GoalComposer({
       await onSubmit(value, parsedBrowserUrl
         ? { mode: "browser", url: parsedBrowserUrl, ...(switchWindows ? { switchWindows: true } : {}) }
         : { mode: "browser", ...(switchWindows ? { switchWindows: true } : {}) });
+      return;
+    }
+    if (targetMode === "native-recovery") {
+      if (nativeRecoveryProfile === undefined) return;
+      await onSubmit(value, { mode: "native-recovery", profileId: nativeRecoveryProfile.profileId });
+      return;
+    }
+    if (targetMode === "native-web-document") {
+      if (nativeWebDocumentProfile === undefined) return;
+      await onSubmit(value, { mode: "native-web-document", profileId: nativeWebDocumentProfile.profileId });
       return;
     }
     if (targetMode === "desktop") {
@@ -74,6 +99,7 @@ export function GoalComposer({
   }
 
   function changeMode(mode: RunTarget["mode"]) {
+    if (mode === "native-recovery") setSwitchWindows(false);
     onTargetModeChange(mode);
   }
 
@@ -82,6 +108,8 @@ export function GoalComposer({
     window: "手动选择窗口",
     browser: "打开网站（推荐）",
     desktop: "整个桌面（高级）",
+    "native-recovery": "电脑预设文稿",
+    "native-web-document": "网页查询与文稿",
   };
 
   return (
@@ -93,17 +121,21 @@ export function GoalComposer({
         name="goal"
         rows={4}
         value={goal}
-        onChange={(event) => setGoal(event.currentTarget.value)}
+        onChange={(event) => { const value = event.currentTarget.value; setGoal(value); onGoalChange(value); }}
         placeholder="写下任务内容…"
         aria-describedby={error ? "goal-help goal-error" : "goal-help"}
         disabled={formDisabled}
         required
       />
-      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} onTranscript={(text) => setGoal((current) => appendVoiceInputText(current, text))} createCaptureAdapter={voiceCaptureAdapterFactory} />
+      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} onTranscript={(text) => {
+        const next = appendVoiceInputText(goal, text);
+        setGoal(next);
+        onGoalChange(next);
+      }} createCaptureAdapter={voiceCaptureAdapterFactory} />
       {error && <p id="goal-error" className="inline-error" role="alert">{error}</p>}
       {setupRequired && <a className="setup-required-link" href="/preferences">打开浏览器与登录状态设置</a>}
 
-      <label className="preference-toggle" htmlFor="cross-window-run-switch">
+      {targetMode !== "native-recovery" && targetMode !== "native-web-document" && <label className="preference-toggle" htmlFor="cross-window-run-switch">
         <span className="preference-toggle-copy">
           <strong>跨应用完成任务</strong>
           <span id="cross-window-run-switch-help">启用后，模型可以列出和切换已打开窗口；应用名和标题会发送给当前模型，可能包含文件名或个人信息。电脑也会按设置准备受管浏览器；浏览器页面内容可能用于本次任务。</span>
@@ -117,7 +149,7 @@ export function GoalComposer({
           aria-describedby="cross-window-run-switch-help"
           disabled={formDisabled}
         />
-      </label>
+      </label>}
 
       <details className="target-mode-disclosure">
         <summary>选择起点 · {targetModeLabel[targetMode]}</summary>
@@ -137,6 +169,14 @@ export function GoalComposer({
               <span className="target-mode-copy"><strong>打开网站（推荐）</strong><span>使用受管浏览器和基于页面元素的可验证操作；登录状态使用电脑设置，起始网址可选。</span></span>
             </label>
             <label className="target-mode-option">
+              <input type="radio" name="target-mode" value="native-recovery" checked={targetMode === "native-recovery"} onChange={() => changeMode("native-recovery")} />
+              <span className="target-mode-copy"><strong>电脑预设文稿</strong><span>只使用电脑预先指定的两个文稿窗口和本地输出文件，不会打开浏览器。</span></span>
+            </label>
+            <label className="target-mode-option">
+              <input type="radio" name="target-mode" value="native-web-document" checked={targetMode === "native-web-document"} onChange={() => changeMode("native-web-document")} />
+              <span className="target-mode-copy"><strong>网页查询与文稿</strong><span>先查询网页，再写入电脑预设的文稿；关闭后可继续打开该文稿。</span></span>
+            </label>
+            <label className="target-mode-option">
               <input type="radio" name="target-mode" value="desktop" checked={targetMode === "desktop"} onChange={() => changeMode("desktop")} />
               <span className="target-mode-copy"><strong>整个桌面（高级）</strong><span>捕获并操作当前完整桌面，可能包含其他窗口中的内容。</span></span>
             </label>
@@ -144,7 +184,14 @@ export function GoalComposer({
         </fieldset>
       </details>
 
-      {targetMode === "window" && <WindowTargetPicker {...targetPicker} disabled={formDisabled || targetPicker.disabled} />}
+      {targetMode === "window" && <>
+        <WindowTargetPicker {...targetPicker} disabled={formDisabled || targetPicker.disabled} />
+        {selectedWindowConflictsWithGoal && (
+          <p className="field-hint" role="note">
+            任务开头提到了 {explicitHint}，但当前手选窗口是 {selectedWindow.appName || "未命名应用"}。请核对这个起始窗口是否符合任务，再开始。
+          </p>
+        )}
+      </>}
 
       {targetMode === "browser" && (
         <div className="browser-target-field">
@@ -185,11 +232,32 @@ export function GoalComposer({
           {browserUrlInvalid && <p id="browser-target-error" className="inline-error" role="alert">请输入完整的 http:// 或 https:// 地址。</p>}
         </div>
       )}
+      {(targetMode === "native-recovery" || targetMode === "native-web-document") && (
+        <section className="native-recovery-target-status" aria-label="文稿任务状态">
+          {targetPicker.loading
+            ? <p className="loading-line" role="status">正在刷新文稿任务…</p>
+            : targetPicker.expired
+              ? <p className="notice notice-warning" role="status">文稿任务已过期，请刷新后再开始。</p>
+              : targetPicker.error
+                ? <p className="notice notice-warning" role="alert">{targetPicker.error}</p>
+                : <p className="field-hint" role="status">
+                  {(targetMode === "native-web-document" ? nativeWebDocumentProfile : nativeRecoveryProfile) === undefined ? "电脑尚未准备本地文稿任务，请在电脑端检查设置。" : targetMode === "native-web-document" ? "将先打开网页，再使用电脑预设的文稿继续处理。" : "将使用电脑预先指定的两个文稿窗口和本地输出文件。"}
+                </p>}
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={formDisabled || targetPicker.disabled || targetPicker.loading}
+            onClick={targetPicker.onRefresh}
+          >
+            {targetPicker.loading ? "正在刷新…" : "刷新文稿任务"}
+          </button>
+        </section>
+      )}
       <div className="composer-footer">
         <button
           className="button button-primary button-large"
           type="submit"
-          disabled={formDisabled || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid)}
+          disabled={formDisabled || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid) || (targetMode === "native-recovery" && nativeRecoveryProfile === undefined) || (targetMode === "native-web-document" && nativeWebDocumentProfile === undefined)}
         >
           {busy ? "正在发送…" : "开始任务"}
         </button>

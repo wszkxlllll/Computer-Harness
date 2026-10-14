@@ -1,12 +1,15 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { GlmProviderError } from "../../provider-glm/src/index.js";
+import { BoundWindowMissingError } from "@computer-harness/protocol";
+import { DefaultContextCompiler } from "../../context/src/index.js";
 import type {
   ActionId,
   ActionIntent,
   ComputerWindowCandidate,
+  ComputerWindowList,
   ComputerWindowOption,
   AssetId,
   ComputerSessionId,
@@ -24,6 +27,7 @@ import type {
   ToolCallId,
   Viewport,
   RuntimeEventDraft,
+  SourceLinkedFinishContract,
 } from "@computer-harness/protocol";
 import {
   type AssetStore,
@@ -50,11 +54,13 @@ import {
   type RunFeatureConfig,
   type ActionPolicy,
   type ContextCompiler,
+  type CleanupDiagnostic,
   validateActionIntent,
   groundingComputerTools,
   windowSwitchTools,
 } from "./index.js";
 import { currentObservationAssessmentBinding } from "./observation-assessment.js";
+import { reopenSavedDocumentTool } from "./computer-tools.js";
 
 const runId = "runtime-test" as RunId;
 const sessionId = "fake-computer" as ComputerSessionId;
@@ -85,16 +91,19 @@ class TestIds implements IdFactory {
 
 class FakeComputer implements Computer {
   public readonly calls: string[] = [];
-  public readonly session: ComputerSession = {
-    id: sessionId,
-    backend: "fake",
-    viewport,
-    capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
-    openedAt: "2026-08-28T00:00:00.000Z",
-  };
+  public readonly session: ComputerSession;
   private observationCount = 0;
 
-  public constructor(private readonly stableScreenshots = false) {}
+  public constructor(private readonly stableScreenshots = false, platform?: ComputerSession["platform"]) {
+    this.session = {
+      id: sessionId,
+      backend: "fake",
+      ...(platform === undefined ? {} : { platform }),
+      viewport,
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-08-28T00:00:00.000Z",
+    };
+  }
 
   public async open(_options: ComputerOpenOptions, signal: AbortSignal): Promise<ComputerSession> {
     signal.throwIfAborted();
@@ -136,6 +145,28 @@ class FakeComputer implements Computer {
   }
 }
 
+class AuthorizedDocumentEvidenceComputer extends FakeComputer {
+  private captureIndex = 0;
+
+  public constructor(private readonly statuses: readonly ("authorized_file_absent" | "verified_clean_current_document" | "unverified")[]) {
+    super(true);
+  }
+
+  public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+    const capture = await super.observe(session, observationId, signal);
+    const status = this.statuses[this.captureIndex++] ?? this.statuses.at(-1)!;
+    return {
+      ...capture,
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status,
+        observationId,
+        surfaceRef: capture.surfaceRef,
+      },
+    };
+  }
+}
+
 class WindowSwitchComputer extends FakeComputer {
   public inventoryCalls = 0;
   public failTargetObservation = false;
@@ -148,14 +179,14 @@ class WindowSwitchComputer extends FakeComputer {
     viewport: { width: 640, height: 480, coordinateSpace: "physical" },
   };
 
-  public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowOption[]> {
+  public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
     signal.throwIfAborted();
     this.inventoryCalls += 1;
     this.calls.push("listWindows");
-    return [
+    return { options: [
       { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true, pid: 101, hwnd: 501 } as ComputerWindowOption,
       { windowRef: this.targetWindowRef, appName: "Browser", title: "Search results", isCurrent: false, pid: 202, hwnd: 502 } as ComputerWindowOption,
-    ];
+    ], truncated: false, omittedCount: 0 };
   }
 
   public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
@@ -220,7 +251,7 @@ class MismatchedGroundingComputer extends FakeComputer {
 class ManyGroundingComputer extends FakeComputer {
   public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal): Promise<import("@computer-harness/protocol").ObservationCapture> {
     const capture = await super.observe(session, observationId, signal);
-    const elements: GroundingCatalog["elements"] = Array.from({ length: 19 }, (_, index) => ({
+    const elements: Array<GroundingCatalog["elements"][number]> = Array.from({ length: 19 }, (_, index) => ({
       elementRef: `uia-source-${index}`,
       role: "Button",
       name: `Generic action ${index}`,
@@ -570,6 +601,10 @@ function clickCall(callId: string): ToolCall {
   };
 }
 
+function selectAllCall(callId: string, keys: string[]): ToolCall {
+  return { id: callId as ToolCallId, name: "hotkey", arguments: { keys } };
+}
+
 class PreparedScriptedProvider implements ProviderAdapter {
   public readonly id = "prepared-test-provider";
   public readonly preparedInputs: ModelInput[] = [];
@@ -777,12 +812,15 @@ async function makeController(
     batching?: "off" | "same-control-input-v1";
     enabledCategories?: readonly import("./contracts.js").ToolCategory[];
     enabledToolNames?: readonly string[];
-    onCleanupError?: (diagnostic: { operation: "event_writer.flush" | "event_writer.close" | "computer.close"; message: string }) => void;
+    onCleanupError?: (diagnostic: CleanupDiagnostic) => void;
     onEventCommitted?: (event: import("@computer-harness/protocol").RuntimeEvent) => void;
     actionPolicy?: ActionPolicy;
     features?: RunFeatureConfig;
     windowHandoff?: "off" | "confirm-v1";
     windowSwitch?: "off" | "opened-windows-v1";
+    recoverBoundWindowMissing?: boolean;
+    providerAttemptReserveMs?: number;
+    sourceLinkedFinish?: SourceLinkedFinishContract;
   } = {},
 ) {
   const activeComputer = computer ?? new FakeComputer();
@@ -814,6 +852,9 @@ async function makeController(
     ...(overrides.enabledToolNames === undefined ? {} : { enabledToolNames: overrides.enabledToolNames }),
     ...(overrides.windowHandoff === undefined ? {} : { windowHandoff: overrides.windowHandoff }),
     ...(overrides.windowSwitch === undefined ? {} : { windowSwitch: overrides.windowSwitch }),
+    ...(overrides.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: overrides.recoverBoundWindowMissing }),
+    ...(overrides.providerAttemptReserveMs === undefined ? {} : { providerAttemptReserveMs: overrides.providerAttemptReserveMs }),
+    ...(overrides.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: overrides.sourceLinkedFinish }),
   });
   return { controller, computer: activeComputer, directory };
 }
@@ -897,6 +938,890 @@ describe("RunController ExecutionSegment lifecycle", () => {
 });
 
 describe("RunController confirmed window handoff", () => {
+  it("recovers a completed missing-bound close through reducer-backed list/switch control turns", async () => {
+    class RecoverableMissingComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public handoffCount = 0;
+      public readonly targetSession: ComputerSession = {
+        ...this.session,
+        viewport: { width: 640, height: 480, coordinateSpace: "physical" },
+      };
+      public readonly candidate: ComputerWindowCandidate = {
+        pid: 202, windowId: 502, appName: "Editor", title: "Recovery target", handoffToken: "fresh-recovery-token",
+      };
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(_session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        expect(candidate).toEqual(this.candidate);
+        this.handoffCount += 1;
+        return this.targetSession;
+      }
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return {
+          ...capture,
+          viewport: session.viewport,
+          surfaceRef: session === this.targetSession ? nativePeerSurfaceRef : desktopSurfaceRef,
+          ...(session === this.targetSession ? { surfaceTransitionReason: "peer_switch" as const } : {}),
+        };
+      }
+    }
+
+    const computer = new RecoverableMissingComputer();
+    const registry = batchRegistry();
+    registry.registerMany(windowSwitchTools());
+    let markRecoveryListStarted!: () => void;
+    let releaseRecoveryList!: () => void;
+    const recoveryListStarted = new Promise<void>(resolve => { markRecoveryListStarted = resolve; });
+    const recoveryListRelease = new Promise<void>(resolve => { releaseRecoveryList = resolve; });
+    const compiledInputs: Array<Parameters<ContextCompiler["compile"]>[0]> = [];
+    const productionCompiler = new DefaultContextCompiler(registry, {
+      features: { planning: "off", memory: "off", batching: "off" },
+    });
+    const compiler: ContextCompiler = {
+      async compile(input, signal) {
+        compiledInputs.push(structuredClone(input));
+        return productionCompiler.compile(input, signal);
+      },
+    };
+    let controller!: RunController;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("recovery-close-once"), typeCall("recovery-close-suffix")] }),
+      async (input) => {
+        markRecoveryListStarted();
+        await recoveryListRelease;
+        expect(input.tools.map((tool) => tool.name)).toEqual(["list_windows"]);
+        return { type: "tool_calls", calls: [{ id: "recovery-list" as ToolCallId, name: "list_windows", arguments: {} }] };
+      },
+      (input) => {
+        expect(input.tools.map((tool) => tool.name)).toEqual(["switch_window"]);
+        const block = input.messages.flatMap((message) => message.content).find((item) =>
+          item.type === "tool_result" && item.result.callId === "recovery-list",
+        );
+        const output = block?.type === "tool_result" ? block.result.output : undefined;
+        const rows = output !== null && typeof output === "object" && !Array.isArray(output) ? output.windows : undefined;
+        const windowRef = Array.isArray(rows) && rows[0] !== null && typeof rows[0] === "object" && !Array.isArray(rows[0])
+          ? rows[0].windowRef
+          : undefined;
+        expect(typeof windowRef).toBe("string");
+        return { type: "tool_calls", calls: [{ id: "recovery-switch" as ToolCallId, name: "switch_window", arguments: { windowRef } }] };
+      },
+      () => ({ type: "finish", summary: "recovered on the fresh target" }),
+    ], () => controller.getEvents());
+    const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler: compiler,
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "type", "list_windows", "switch_window"],
+      batching: "same-control-input-v1",
+      features: { planning: "off", memory: "off", batching: "same-control-input-v1" },
+    });
+    controller = created.controller;
+
+    try {
+      const running = controller.start("complete the requested task without repeating a completed close");
+      await recoveryListStarted;
+      await expect(controller.listWindowHandoffCandidates(new AbortController().signal)).rejects.toThrow("owned by the active bound-window recovery phase");
+      const queuedManualHandoff = controller.handoffWindow(computer.candidate, computer.actionId);
+      releaseRecoveryList();
+      await expect(queuedManualHandoff).rejects.toThrow("unavailable while the bounded recovery phase is active");
+      const outcome = await running;
+      expect(outcome, JSON.stringify(controller.getEvents())).toBe("succeeded");
+      const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+      expect(reduceRuntimeEvents(events, runId)).toMatchObject({ status: "finished", outcome: "succeeded", stepCount: 1 });
+      expect(events.filter((event) => event.type === "computer.window.handoff.requested")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "computer.window.handoff.completed")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(4);
+      expect(computer.calls.filter((entry) => entry === "execute:click")).toHaveLength(1);
+      expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "recovery-close-suffix")).toBe(true);
+      expect(computer.handoffCount).toBe(1);
+      expect(computer.calls.filter((entry) => entry.startsWith("observe:")).length).toBe(3);
+      for (const input of provider.inputs.slice(1, 3)) {
+        expect(input.messages.flatMap((message) => message.content).some((block) => block.type === "image")).toBe(false);
+        expect(input.messages[0]?.content.some((block) => block.type === "text" && block.text.includes("complete the requested task"))).toBe(true);
+      }
+      expect(compiledInputs[1]?.latestObservation).toBeUndefined();
+      expect(compiledInputs[2]?.latestObservation).toBeUndefined();
+      expect(compiledInputs[2]?.recentEvents.some((event) => event.type === "tool.call.completed" && event.result.callId === "recovery-list")).toBe(true);
+      expect(compiledInputs[2]?.recentEvents.some((event) => event.type === "observation.created")).toBe(false);
+    } finally {
+      releaseRecoveryList();
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects public discovery and manual handoff during the requested-to-waiting recovery boundary", async () => {
+    class EmptyRecoveryComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public handoffs = 0;
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [];
+      }
+      public async handoffWindow(session: ComputerSession): Promise<ComputerSession> {
+        this.handoffs += 1;
+        return session;
+      }
+    }
+
+    const computer = new EmptyRecoveryComputer();
+    let controller!: RunController;
+    let discoveryDuringTransition: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+    let handoffDuringTransition: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("recovery-boundary-close")] },
+      { type: "tool_calls", calls: [{ id: "recovery-boundary-list" as ToolCallId, name: "list_windows", arguments: {} }] },
+    ]);
+    const created = await makeController(provider, computer, windowSwitchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing") {
+          discoveryDuringTransition = controller.listWindowHandoffCandidates(new AbortController().signal).then(
+            () => ({ ok: true as const }), error => ({ ok: false as const, error }),
+          );
+          handoffDuringTransition = controller.handoffWindow(
+            { pid: 707, windowId: 907, handoffToken: "must-not-queue" },
+            event.sourceActionId,
+          ).then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+        }
+      },
+    });
+    controller = created.controller;
+    try {
+      const running = controller.start("do not allow public handoff during private recovery");
+      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      const discovery = await discoveryDuringTransition;
+      const handoff = await handoffDuringTransition;
+      expect(discovery?.ok).toBe(false);
+      if (discovery?.ok === false) expect(discovery.error).toMatchObject({ message: expect.stringContaining("owned by the active bound-window recovery phase") });
+      expect(handoff?.ok).toBe(false);
+      if (handoff?.ok === false) expect(handoff.error).toMatchObject({ message: expect.stringContaining("unavailable while the bounded recovery phase is active") });
+      expect(controller.getSnapshot().status).toBe("waiting_window");
+      expect(controller.getSnapshot().pendingWindowHandoff?.reasonCode).toBe("bound_window_missing");
+      expect(computer.handoffs).toBe(0);
+      expect(provider.inputs).toHaveLength(2);
+      controller.cancel("fixture cleanup");
+      await expect(running).resolves.toBe("cancelled");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not continue or complete a recovery switch when cancellation aborts its in-flight handoff", async () => {
+    class AbortableHandoffComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public handoffStarted!: () => void;
+      public readonly started = new Promise<void>(resolve => { this.handoffStarted = resolve; });
+      public readonly candidate: ComputerWindowCandidate = {
+        pid: 808, windowId: 908, appName: "Editor", title: "Pinned target", handoffToken: "abortable-recovery-token",
+      };
+      public handoffs = 0;
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(_session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        this.handoffs += 1;
+        this.handoffStarted();
+        return new Promise((_resolve, reject) => {
+          if (signal.aborted) reject(signal.reason ?? new Error("handoff aborted"));
+          else signal.addEventListener("abort", () => reject(signal.reason ?? new Error("handoff aborted")), { once: true });
+        });
+      }
+    }
+
+    const computer = new AbortableHandoffComputer();
+    let controller!: RunController;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("recovery-cancel-close")] }),
+      () => ({ type: "tool_calls", calls: [{ id: "recovery-cancel-list" as ToolCallId, name: "list_windows", arguments: {} }] }),
+      input => {
+        const result = input.messages.flatMap(message => message.content).find(item =>
+          item.type === "tool_result" && item.result.callId === "recovery-cancel-list",
+        );
+        const output = result?.type === "tool_result" ? result.result.output : undefined;
+        const rows = output !== null && typeof output === "object" && !Array.isArray(output) ? output.windows : undefined;
+        const windowRef = Array.isArray(rows) && rows[0] !== null && typeof rows[0] === "object" && !Array.isArray(rows[0])
+          ? rows[0].windowRef : undefined;
+        return { type: "tool_calls", calls: [{ id: "recovery-cancel-switch" as ToolCallId, name: "switch_window", arguments: { windowRef } }] };
+      },
+      () => ({ type: "finish", summary: "must not continue after cancellation" }),
+    ], () => controller.getEvents());
+    const created = await makeController(provider, computer, windowSwitchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+    });
+    controller = created.controller;
+    try {
+      const running = controller.start("cancel while exact recovery handoff is in flight");
+      await computer.started;
+      controller.cancel("cancel in-flight recovery handoff");
+      await expect(running).resolves.toBe("cancelled");
+      const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+      expect(provider.inputs).toHaveLength(3);
+      expect(computer.handoffs).toBe(1);
+      expect(computer.calls.filter(call => call.startsWith("execute:")).map(call => call.slice("execute:".length))).toEqual(["click"]);
+      expect(events.some(event => event.type === "computer.window.handoff.completed")).toBe(false);
+      expect(events.filter(event => event.type === "tool.call.completed" && event.result.callId === "recovery-cancel-switch")).toHaveLength(0);
+      expect(events.filter(event => event.type === "run.finished")).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "cancelled" });
+      expect(reduceRuntimeEvents(events, runId)).toMatchObject({ status: "finished", outcome: "cancelled" });
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["fresh_capture_failure", "handoff_event_write_failure"] as const)("fails closed after recovery transition when %s occurs", async failure => {
+    class RecoveryFailureComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public handoffs = 0;
+      public readonly targetSession: ComputerSession = {
+        ...this.session,
+        viewport: { width: 640, height: 480, coordinateSpace: "physical" },
+      };
+      public readonly candidate: ComputerWindowCandidate = {
+        pid: 404, windowId: 704, appName: "Editor", title: "Pinned recovery target", handoffToken: "recovery-failure-token",
+      };
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(_session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        expect(candidate).toEqual(this.candidate);
+        this.handoffs += 1;
+        return this.targetSession;
+      }
+      public override async observe(session: ComputerSession, id: ObservationId, signal: AbortSignal) {
+        if (failure === "fresh_capture_failure" && session === this.targetSession) throw new Error("recovery target capture failed");
+        const capture = await super.observe(session, id, signal);
+        return {
+          ...capture,
+          viewport: session.viewport,
+          surfaceRef: session === this.targetSession ? nativePeerSurfaceRef : desktopSurfaceRef,
+          ...(session === this.targetSession ? { surfaceTransitionReason: "peer_switch" as const } : {}),
+        };
+      }
+    }
+    let writerEventId = 0;
+    const computer = new RecoveryFailureComputer();
+    let controller!: RunController;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall(`recovery-${failure}-close`)] }),
+      () => ({ type: "tool_calls", calls: [{ id: `recovery-${failure}-list` as ToolCallId, name: "list_windows", arguments: {} }] }),
+      input => {
+        const block = input.messages.flatMap(message => message.content).find(item =>
+          item.type === "tool_result" && item.result.callId === `recovery-${failure}-list`,
+        );
+        const output = block?.type === "tool_result" ? block.result.output : undefined;
+        const rows = output !== null && typeof output === "object" && !Array.isArray(output) ? output.windows : undefined;
+        const windowRef = Array.isArray(rows) && rows[0] !== null && typeof rows[0] === "object" && !Array.isArray(rows[0]) ? rows[0].windowRef : undefined;
+        return { type: "tool_calls", calls: [{ id: `recovery-${failure}-switch` as ToolCallId, name: "switch_window", arguments: { windowRef } }] };
+      },
+      () => ({ type: "finish", summary: "must not run after a failed recovery transition" }),
+    ], () => controller.getEvents());
+    const created = await makeController(provider, computer, windowSwitchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+      eventWriter: failure === "handoff_event_write_failure" ? path => new FailingWriter(
+        new JsonlRunEventWriter(path, runId, { next: () => `recovery-writer-${writerEventId++}` as EventId }),
+        draft => draft.type === "computer.window.handoff.completed",
+      ) : undefined,
+    });
+    controller = created.controller;
+    try {
+      await expect(controller.start(`recover only when ${failure} is absent`)).resolves.toBe("failed");
+      const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+      expect(provider.inputs).toHaveLength(3);
+      expect(computer.handoffs).toBe(1);
+      expect(events.filter(event => event.type === "model.request.started")).toHaveLength(3);
+      expect(events.filter(event => event.type === "tool.call.completed" && event.result.callId === `recovery-${failure}-switch`)).toHaveLength(1);
+      expect(events.filter(event => event.type === "run.finished")).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+      expect(events.some(event =>
+        event.type === "tool.call.failed" && event.result.callId === `recovery-${failure}-switch` ||
+        event.type === "tool.call.rejected" && event.callId === `recovery-${failure}-switch`,
+      )).toBe(false);
+      expect(reduceRuntimeEvents(events, runId)).toMatchObject({ status: "finished", outcome: "failed" });
+      expect(events.some(event => event.type === "runtime.error" && event.category === "window_recovery_failed")).toBe(true);
+      expect(computer.calls.filter(call => call.startsWith("observe:")).length).toBe(1);
+      if (failure === "handoff_event_write_failure") {
+        expect(events.some(event => event.type === "computer.window.handoff.completed")).toBe(false);
+      } else {
+        expect(events.filter(event => event.type === "computer.window.handoff.completed")).toHaveLength(1);
+      }
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["list_windows", "switch_window"] as const)("does not start private recovery when the Run did not enable %s", async missingTool => {
+    class MissingToolComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public listCalls = 0;
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        this.listCalls += 1;
+        return [];
+      }
+      public async handoffWindow(session: ComputerSession): Promise<ComputerSession> { return session; }
+    }
+
+    const computer = new MissingToolComputer();
+    const registry = windowSwitchRegistry();
+    const enabledToolNames = ["click", ...(missingTool === "list_windows" ? ["switch_window"] : ["list_windows"] )];
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall(`recovery-disabled-${missingTool}`)] },
+      { type: "finish", summary: "must remain at the host handoff boundary" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames,
+    });
+    const running = controller.start("do not recover unless both control tools are enabled");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_window");
+      expect(provider.inputs).toHaveLength(1);
+      expect(computer.listCalls).toBe(0);
+      expect(computer.calls.filter(call => call === "execute:click")).toHaveLength(1);
+      expect(controller.getEvents().filter(event => event.type === "computer.window.handoff.requested")).toHaveLength(1);
+      controller.cancel("fixture cleanup");
+      await expect(running).resolves.toBe("cancelled");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the final reserved model request from dispatching a recovery switch", async () => {
+    class BudgetRecoveryComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public handoffs = 0;
+      public readonly candidate: ComputerWindowCandidate = { pid: 505, windowId: 805, appName: "Editor", title: "Pinned target", handoffToken: "budget-recovery-token" };
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> { throw new BoundWindowMissingError(this.actionId); }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(session: ComputerSession): Promise<ComputerSession> { this.handoffs += 1; return session; }
+    }
+    const computer = new BudgetRecoveryComputer();
+    const registry = windowSwitchRegistry();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("recovery-budget-close")] },
+      { type: "tool_calls", calls: [{ id: "recovery-budget-list" as ToolCallId, name: "list_windows", arguments: {} }] },
+      { type: "tool_calls", calls: [{ id: "recovery-budget-switch" as ToolCallId, name: "switch_window", arguments: { windowRef: "recovery-budget-ref" } }] },
+      { type: "finish", summary: "must not run after the final request" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(10, 3), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+    });
+    try {
+      await expect(controller.start("preserve the final reserved request")).resolves.toBe("budget_exhausted");
+      const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      expect(events.filter(event => event.type === "model.request.started")).toHaveLength(3);
+      expect(events.some(event => event.type === "tool.call.rejected" && event.callId === "recovery-budget-switch" && event.reason.includes("model request budget is exhausted"))).toBe(true);
+      expect(computer.handoffs).toBe(0);
+      expect(computer.calls.filter(call => call.startsWith("execute:")).map(call => call.slice("execute:".length))).toEqual(["click"]);
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "budget_exhausted" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["pause_and_correction", "cancel"] as const)("drains %s queued during recovery policy before activation", async mode => {
+    class PolicyBarrierComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public handoffs = 0;
+      public readonly candidate: ComputerWindowCandidate = { pid: 606, windowId: 906, appName: "Editor", title: "Pinned target", handoffToken: "policy-barrier-token" };
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> { throw new BoundWindowMissingError(this.actionId); }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(session: ComputerSession): Promise<ComputerSession> { this.handoffs += 1; return session; }
+    }
+    const computer = new PolicyBarrierComputer();
+    let controller!: RunController;
+    let policyTriggered = false;
+    const queuedCommands: Promise<void>[] = [];
+    const basePolicy = new DefaultRuntimePolicy();
+    const policy: RuntimePolicy = {
+      modelRequestBudget: snapshot => basePolicy.modelRequestBudget!(snapshot),
+      checkBudget: snapshot => basePolicy.checkBudget(snapshot),
+      checkActionBudget: snapshot => basePolicy.checkActionBudget(snapshot),
+      canFinish: snapshot => basePolicy.canFinish(snapshot),
+      async evaluateToolCall(context) {
+        if (!policyTriggered && context.call.name === "switch_window") {
+          policyTriggered = true;
+          if (mode === "pause_and_correction") {
+            queuedCommands.push(controller.pause("pause before recovery activation"));
+            queuedCommands.push(controller.submitUserInput("correct the task before recovery activation"));
+          } else {
+            controller.cancel("cancel before recovery activation");
+          }
+        }
+        return { decision: "allow" };
+      },
+    };
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall(`policy-barrier-${mode}-close`)] }),
+      () => ({ type: "tool_calls", calls: [{ id: `policy-barrier-${mode}-list` as ToolCallId, name: "list_windows", arguments: {} }] }),
+      input => {
+        const block = input.messages.flatMap(message => message.content).find(item =>
+          item.type === "tool_result" && item.result.callId === `policy-barrier-${mode}-list`,
+        );
+        const output = block?.type === "tool_result" ? block.result.output : undefined;
+        const rows = output !== null && typeof output === "object" && !Array.isArray(output) ? output.windows : undefined;
+        const windowRef = Array.isArray(rows) && rows[0] !== null && typeof rows[0] === "object" && !Array.isArray(rows[0]) ? rows[0].windowRef : undefined;
+        return { type: "tool_calls", calls: [{ id: `policy-barrier-${mode}-switch` as ToolCallId, name: "switch_window", arguments: { windowRef } }] };
+      },
+      () => ({ type: "finish", summary: "must not activate after pause or cancellation" }),
+    ], () => controller.getEvents());
+    const created = await makeController(provider, computer, windowSwitchRegistry(), policy, {
+      windowHandoff: "confirm-v1", windowSwitch: "opened-windows-v1", recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+    });
+    controller = created.controller;
+    const running = controller.start("do not activate after an asynchronous control command");
+    try {
+      if (mode === "cancel") {
+        await expect(running).resolves.toBe("cancelled");
+      } else {
+        await waitUntil(() => controller.getSnapshot().status === "paused" || controller.getSnapshot().status === "finished");
+        await Promise.all(queuedCommands);
+        expect(controller.getSnapshot().status).toBe("paused");
+        await controller.resume();
+        await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+        expect(controller.getSnapshot().status).toBe("waiting_window");
+        expect(provider.inputs).toHaveLength(3);
+        controller.cancel("fixture cleanup");
+        await expect(running).resolves.toBe("cancelled");
+      }
+      expect(policyTriggered).toBe(true);
+      expect(computer.handoffs).toBe(0);
+      expect(computer.calls.filter(call => call === "execute:click")).toHaveLength(1);
+      expect(controller.getEvents().some(event => event.type === "computer.window.handoff.completed")).toBe(false);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["success_finish", "mixed_calls"] as const)("returns the private recovery phase to normal waiting after %s", async (mode) => {
+    class MissingRecoveryComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> { return []; }
+      public async handoffWindow(session: ComputerSession): Promise<ComputerSession> { return session; }
+    }
+    const computer = new MissingRecoveryComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall(`recovery-${mode}-close`)] },
+      mode === "success_finish"
+        ? { type: "finish", summary: "must not claim success before a fresh observation", reportedStatus: "success" }
+        : { type: "tool_calls", calls: [
+            { id: "recovery-mixed-list" as ToolCallId, name: "list_windows", arguments: {} },
+            clickCall("recovery-mixed-click"),
+          ] },
+    ]);
+    const registry = windowSwitchRegistry();
+    let resolveHandoffRequested!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const handoffRequested = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveHandoffRequested = resolve;
+    });
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested") resolveHandoffRequested(event);
+      },
+    });
+    const running = controller.start("task remains incomplete until the closed target is recovered");
+    try {
+      await Promise.race([
+        handoffRequested,
+        running.then((result) => {
+          throw new Error(`run reached ${result} before the recovery handoff was committed`);
+        }),
+      ]);
+      expect(controller.getSnapshot().status).toBe("waiting_window");
+      expect(controller.getSnapshot().pendingWindowHandoff?.reasonCode).toBe("bound_window_missing");
+      expect(provider.inputs).toHaveLength(2);
+      expect(computer.calls.filter((entry) => entry === "execute:click")).toHaveLength(1);
+      expect(controller.getEvents().filter((event) => event.type === "computer.window.handoff.requested")).toHaveLength(1);
+      if (mode === "mixed_calls") {
+        expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected" &&
+          ["recovery-mixed-list", "recovery-mixed-click"].includes(event.callId))).toHaveLength(2);
+      } else {
+        expect(controller.getEvents().some((event) => event.type === "run.finished" && event.outcome === "succeeded")).toBe(false);
+      }
+      controller.cancel("fixture cleanup");
+      await expect(running).resolves.toBe("cancelled");
+      const persisted = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+      expect(reduceRuntimeEvents(persisted, runId).status).toBe("finished");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["pause_resume", "pause_correction"] as const)("keeps recovery control isolated across %s", async mode => {
+    class PausableMissingComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public readonly targetSession: ComputerSession = { ...this.session, viewport: { width: 640, height: 480, coordinateSpace: "physical" } };
+      public readonly candidate: ComputerWindowCandidate = { pid: 303, windowId: 603, appName: "Editor", title: "Pinned target", handoffToken: "pause-recovery-token" };
+      public handoffs = 0;
+      public constructor() { super(false, "darwin"); }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return { options: [], truncated: false, omittedCount: 0 };
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(_session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        expect(candidate).toEqual(this.candidate);
+        this.handoffs += 1;
+        return this.targetSession;
+      }
+      public override async observe(session: ComputerSession, id: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, id, signal);
+        return { ...capture, viewport: session.viewport, surfaceRef: session === this.targetSession ? nativePeerSurfaceRef : desktopSurfaceRef,
+          ...(session === this.targetSession ? { surfaceTransitionReason: "peer_switch" as const } : {}) };
+      }
+    }
+
+    const computer = new PausableMissingComputer();
+    const registry = windowSwitchRegistry();
+    let controller!: RunController;
+    let recoveryCompileCount = 0;
+    const baseCompiler = new TestContextCompiler(registry);
+    const commandPromises: Promise<void>[] = [];
+    const compiler: ContextCompiler = {
+      async compile(input, signal) {
+        if (input.goal.includes("Harness recovery control") && input.enabledToolNames?.includes("list_windows")) {
+          recoveryCompileCount += 1;
+          if (recoveryCompileCount === 1) {
+            commandPromises.push(controller.pause("pause private recovery"));
+            if (mode === "pause_correction") commandPromises.push(controller.submitUserInput("revise the task while paused"));
+          }
+        }
+        return baseCompiler.compile(input, signal);
+      },
+    };
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall(`pause-recovery-close-${mode}`)] }),
+      (input) => {
+        expect(input.tools.map(tool => tool.name)).toEqual(["list_windows"]);
+        return { type: "tool_calls", calls: [{ id: `pause-recovery-list-${mode}` as ToolCallId, name: "list_windows", arguments: {} }] };
+      },
+      (input) => {
+        expect(input.tools.map(tool => tool.name)).toEqual(["switch_window"]);
+        const block = input.messages.flatMap(message => message.content).find(item =>
+          item.type === "tool_result" && item.result.callId === `pause-recovery-list-${mode}`,
+        );
+        const output = block?.type === "tool_result" ? block.result.output : undefined;
+        const rows = output !== null && typeof output === "object" && !Array.isArray(output) ? output.windows : undefined;
+        const windowRef = Array.isArray(rows) && rows[0] !== null && typeof rows[0] === "object" && !Array.isArray(rows[0])
+          ? rows[0].windowRef : undefined;
+        return { type: "tool_calls", calls: [{ id: `pause-recovery-switch-${mode}` as ToolCallId, name: "switch_window", arguments: { windowRef } }] };
+      },
+      () => ({ type: "finish", summary: "fresh target observed" }),
+    ], () => controller.getEvents());
+    const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler: compiler,
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      recoverBoundWindowMissing: true,
+      enabledToolNames: ["click", "list_windows", "switch_window"],
+    });
+    controller = created.controller;
+    const running = controller.start("do not replay the completed close");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "paused");
+      await Promise.all(commandPromises);
+      expect(computer.calls.filter(call => call.startsWith("observe:"))).toHaveLength(1);
+      if (mode === "pause_correction") {
+        await controller.resume();
+        await waitUntil(() => controller.getSnapshot().status === "waiting_window");
+        expect(computer.calls.filter(call => call.startsWith("observe:")), JSON.stringify(controller.getEvents().map(event => event.type === "observation.created" ? { type: event.type, id: event.observation.id } : { type: event.type }))).toHaveLength(1);
+        expect(computer.calls.filter(call => call === "execute:click")).toHaveLength(1);
+        expect(computer.handoffs).toBe(0);
+        expect(controller.getEvents().filter(event => event.type === "computer.window.handoff.requested")).toHaveLength(1);
+        controller.cancel("fixture cleanup");
+        await expect(running).resolves.toBe("cancelled");
+      } else {
+        await controller.resume();
+        const outcome = await running;
+        expect(outcome, JSON.stringify(controller.getEvents().map(event => event.type === "runtime.error" ? { type: event.type, message: event.message } : { type: event.type }))).toBe("succeeded");
+        expect(computer.calls.filter(call => call.startsWith("observe:"))).toHaveLength(3);
+        expect(computer.calls.filter(call => call === "execute:click")).toHaveLength(1);
+        expect(computer.handoffs).toBe(1);
+      }
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("F045 pauses only the matching completed marker, rejects ignore/missing IDs/tokens and never replays suffix", async () => {
+    class MissingComputer extends FakeComputer {
+      public sourceActionId!: ActionId;
+      public handoffs = 0;
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.sourceActionId = action.actionId;
+        return super.execute(session, action, signal);
+      }
+      public async detectNewWindowHandoffCandidates() { throw new BoundWindowMissingError(this.sourceActionId); }
+      public async listWindowHandoffCandidates() { return [{ pid: 1, windowId: 2, handoffToken: "fresh" }]; }
+      public async handoffWindow(session: ComputerSession) { this.handoffs++; return session; }
+    }
+    const computer = new MissingComputer(), provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("missing-click"), typeCall("forbidden-suffix")] },
+      { type: "finish", summary: "fresh target confirmed" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1", batching: "same-control-input-v1" });
+    const running = controller.start("save the owned document");
+    try {
+      await waitUntil(() => ["waiting_window", "finished"].includes(controller.getSnapshot().status));
+      expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents() })).toBe("waiting_window");
+      const request = controller.getSnapshot().pendingWindowHandoff!;
+      expect(request.reasonCode).toBe("bound_window_missing");
+      expect(controller.getEvents().filter(e => e.type === "action.execution.completed")).toHaveLength(1);
+      expect(controller.getEvents().filter(e => e.type === "tool.call.completed")).toHaveLength(1);
+      const candidate = (await controller.listWindowHandoffCandidates(new AbortController().signal))[0]!;
+      await expect(controller.handoffWindow(candidate)).rejects.toThrow(/exact request/u);
+      await expect(controller.handoffWindow(candidate, "old" as ActionId)).rejects.toThrow();
+      const { handoffToken: omittedToken, ...withoutToken } = candidate;
+      await expect(controller.handoffWindow(withoutToken, request.sourceActionId)).rejects.toThrow();
+      await expect(controller.ignoreNewWindowAndContinueOnCurrentTarget(request.sourceActionId)).rejects.toThrow();
+      expect(computer.handoffs).toBe(0);
+      await controller.handoffWindow(candidate, request.sourceActionId);
+      expect(await running).toBe("succeeded");
+      expect(computer.calls.filter(c => c.startsWith("execute:"))).toEqual(["execute:click"]);
+    } finally { if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup"); await running.catch(() => undefined); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["plain_code", "wrong_action"])("F045 does not route non-authorizing marker %s", async mode => {
+    class WrongMissing extends FakeComputer {
+      public async detectNewWindowHandoffCandidates() {
+        throw mode === "plain_code" ? Object.assign(new Error("synthetic"), { code: "WINDOW_TARGET_NOT_FOUND" }) : new BoundWindowMissingError("old" as ActionId);
+      }
+      public async listWindowHandoffCandidates() { return []; }
+      public async handoffWindow(session: ComputerSession) { return session; }
+    }
+    const { controller, directory } = await makeController(new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("wrong-missing")] }]), new WrongMissing(), batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    try {
+      expect(await controller.start("owned task")).toBe("failed");
+      expect(controller.getEvents().some(e => e.type === "computer.window.handoff.requested")).toBe(false);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+  it("F045 off mode never invokes the completed-missing diff or creates a handoff", async () => {
+    let diffs = 0;
+    class OffComputer extends FakeComputer {
+      public async detectNewWindowHandoffCandidates() { diffs++; throw new BoundWindowMissingError("off-action" as ActionId); }
+      public async listWindowHandoffCandidates() { return []; }
+      public async handoffWindow(session: ComputerSession) { return session; }
+    }
+    const { controller, directory } = await makeController(new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("off-click")] }, { type: "finish", summary: "done" }]), new OffComputer(), batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "off" });
+    try {
+      expect(await controller.start("owned task")).toBe("succeeded"); expect(diffs).toBe(0);
+      expect(controller.getEvents().some(e => e.type === "computer.window.handoff.requested")).toBe(false);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+  it.each(["cancel", "empty", "list_failure"])("F045 missing %s stays stopped without another provider turn or GUI replay", async mode => {
+    class WaitingMissing extends FakeComputer {
+      public actionId!: ActionId;
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) { this.actionId = action.actionId; return super.execute(session, action, signal); }
+      public async detectNewWindowHandoffCandidates() { throw new BoundWindowMissingError(this.actionId); }
+      public async listWindowHandoffCandidates() { if (mode === "list_failure") throw new Error("synthetic inventory failure"); return []; }
+      public async handoffWindow() { throw new Error("must not activate"); }
+    }
+    const computer = new WaitingMissing();
+    const { controller, directory } = await makeController(new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("waiting-missing")] }, { type: "finish", summary: "must not request" }]), computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    const running = controller.start("owned task");
+    try {
+      await waitUntil(() => ["waiting_window", "finished"].includes(controller.getSnapshot().status));
+      expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents() })).toBe("waiting_window");
+      expect(controller.getSnapshot().pendingWindowHandoff?.reasonCode).toBe("bound_window_missing");
+      if (mode === "list_failure") await expect(controller.listWindowHandoffCandidates(new AbortController().signal)).rejects.toThrow("synthetic inventory failure");
+      else if (mode === "empty") expect(await controller.listWindowHandoffCandidates(new AbortController().signal)).toEqual([]);
+      controller.cancel("explicit host stop"); expect(await running).toBe("cancelled");
+      expect(controller.getSnapshot().modelRequestCount).toBe(1);
+      expect(computer.calls.filter(c => c.startsWith("execute:"))).toEqual(["execute:click"]);
+    } finally { if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup"); await running.catch(() => undefined); await rm(directory, { recursive: true, force: true }); }
+  });
+  it.each(["TRANSIENT_SURFACE_UNKNOWN", "WINDOW_INVENTORY_UNKNOWN"])("pauses for manual popup recovery after a completed action: %s", async (code) => {
+    class ManualPopupComputer extends FakeComputer {
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        throw Object.assign(new Error("exact popup state is unknown"), { code });
+      }
+      public async listWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> { return []; }
+      public async handoffWindow(session: ComputerSession): Promise<ComputerSession> { return session; }
+    }
+    const computer = new ManualPopupComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("manual-popup-click"), typeCall("manual-popup-stale-type")] },
+      { type: "finish", summary: "continued after manual recovery" },
+    ]);
+    let resolveInputRequested!: () => void;
+    const inputRequested = new Promise<void>((resolve) => { resolveInputRequested = resolve; });
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      batching: "same-control-input-v1",
+      onEventCommitted: (event) => {
+        if (event.type === "user.input.requested") resolveInputRequested();
+      },
+    });
+    const running = controller.start("complete the popup interaction");
+    try {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          inputRequested,
+          running.then(() => { throw new Error("run finished before the user-input request was committed"); }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("user-input request was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
+      expect(controller.getSnapshot().status, JSON.stringify({ calls: computer.calls, events: controller.getEvents() })).toBe("waiting_user");
+      expect(controller.getSnapshot().pendingUserQuestion).toBe("当前弹窗状态暂时无法确认，请在电脑上确认或关闭弹窗后继续。");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(1);
+      expect(controller.getEvents().filter((event) => event.type === "tool.call.completed")).toHaveLength(1);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "manual-popup-stale-type")).toBe(true);
+      await controller.submitUserInput("Popup resolved; continue.");
+      expect(await running).toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("lets the host ignore a cross-process incidental popup after a fresh observation, without replay", async () => {
     class ProactiveHandoffComputer extends FakeComputer {
       public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal, options?: import("./contracts.js").ComputerExecuteOptions) {
@@ -924,11 +1849,28 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall("proactive-first"), typeCall("proactive-stale-second")] },
       { type: "finish", summary: "continued after popup was ignored" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1", batching: "same-control-input-v1" });
+    let resolveHandoffRequested!: () => void;
+    const handoffRequested = new Promise<void>((resolve) => { resolveHandoffRequested = resolve; });
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      batching: "same-control-input-v1",
+      onEventCommitted: (event) => {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "new_window_detected") resolveHandoffRequested();
+      },
+    });
     let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
     try {
       run = controller.start("save in the dialog that appears");
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          handoffRequested,
+          run.then(() => { throw new Error("run finished before the new-window handoff event was committed"); }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("new-window handoff event was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
       expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents().map((event) => event.type === "tool.call.rejected" ? event.reason : event.type) })).toBe("waiting_window");
       expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click:true"]);
       expect(computer.calls).toContain("detect-new-window");
@@ -979,11 +1921,27 @@ describe("RunController confirmed window handoff", () => {
       { type: "tool_calls", calls: [clickCall("handoff-refused")] },
       { type: "finish", summary: "continued after re-observation" },
     ]);
-    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    let resolveForegroundHandoff!: () => void;
+    const foregroundHandoff = new Promise<void>((resolve) => { resolveForegroundHandoff = resolve; });
+    const { controller, directory } = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      onEventCommitted: (event) => {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "foreground_mismatch") resolveForegroundHandoff();
+      },
+    });
     let run: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
     try {
       run = controller.start("save in new dialog");
-      await waitUntil(() => controller.getSnapshot().status === "waiting_window");
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          foregroundHandoff,
+          run.then(() => { throw new Error("run finished before the foreground-mismatch handoff was committed"); }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("foreground-mismatch handoff was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
       await expect(controller.ignoreNewWindowAndContinueOnCurrentTarget()).rejects.toThrow(/only a proactively detected window may be ignored/u);
       expect(controller.getSnapshot().pendingWindowHandoff).toMatchObject({ reasonCode: "foreground_mismatch" });
       expect(computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(1);
@@ -1104,6 +2062,43 @@ describe("RunController S2-2 happy path", () => {
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, summary: "model says done", outcome: "succeeded", modelUsage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 } });
   });
 
+  it("keeps ordinary unconfigured finish compatible by ignoring unsolicited malformed evidence", async () => {
+    const malformedFinish = {
+      type: "finish",
+      summary: "ordinary finish still succeeds",
+      resultEvidence: { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "source_bound", value: "M6" }] },
+    } as unknown as ModelTurn;
+    const provider = new ScriptedProvider([malformedFinish]);
+    const { controller, directory } = await makeController(provider);
+    await expect(controller.start("finish normally without opt-in")).resolves.toBe("succeeded");
+    const response = controller.getEvents().find((event) => event.type === "model.response.received");
+    expect(response?.type === "model.response.received" && response.turn.type === "finish" ? response.turn : undefined).toEqual({
+      type: "finish",
+      summary: "ordinary finish still succeeds",
+    });
+    expect(controller.getEvents().some((event) => event.type === "run.finished" && "resultEvidence" in event)).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("turns malformed opted-in evidence into one controlled failed terminal and a replayable trajectory", async () => {
+    const malformedFinish = {
+      type: "finish",
+      summary: "model asserted a value",
+      resultEvidence: { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "source_bound", value: "M4", sources: [{ observationId: "obs", elementRef: "ref" }] }] },
+    } as unknown as ModelTurn;
+    const provider = new ScriptedProvider([malformedFinish]);
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(5, 3), {
+      sourceLinkedFinish: { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", label: "CPU", required: true }] },
+    });
+    await expect(created.controller.start("finish with invalid proof")).resolves.toBe("failed");
+    expect(provider.inputs).toHaveLength(1);
+    expect(created.controller.getEvents().filter((event) => event.type === "runtime.error" && event.category === "source_linked_finish_invalid")).toHaveLength(1);
+    expect(created.controller.getEvents().find((event) => event.type === "run.finished")).toMatchObject({ outcome: "failed" });
+    const replayed = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+    expect(replayed.find((event) => event.type === "run.finished")).toMatchObject({ outcome: "failed" });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("carries a provider continuation from one ModelTurn into the next context", async () => {
     const provider = new ScriptedProvider([
       {
@@ -1144,6 +2139,64 @@ describe("RunController S2-2 happy path", () => {
     const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 2));
     await expect(controller.start("do not loop")).resolves.toBe("budget_exhausted");
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, stepCount: 0, outcome: "budget_exhausted" });
+  });
+
+  it("admits retry only when the remaining retry window strictly exceeds delay plus configured reserve", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let retryTimerRegistered!: () => void;
+    const retryTimerScheduled = new Promise<void>((resolve) => {
+      retryTimerRegistered = resolve;
+    });
+    let retryFailureCommitted = false;
+    const originalSetTimeout = globalThis.setTimeout;
+    const retryTimerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+      if (delay === 500 && retryFailureCommitted) retryTimerRegistered();
+      return originalSetTimeout(callback, delay, ...args);
+    });
+    try {
+      const boundaryProvider = new PreparedScriptedProvider("same_input_retry");
+      const boundary = await makeController(boundaryProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
+        providerAttemptReserveMs: 119_500,
+      });
+      await expect(boundary.controller.start("boundary must not admit retry")).resolves.toBe("failed");
+      expect(boundaryProvider.generateCalls).toBe(1);
+      expect(boundary.controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, outcome: "failed" });
+      await rm(boundary.directory, { recursive: true, force: true });
+
+      const admittedProvider = new PreparedScriptedProvider("same_input_retry");
+      const admitted = await makeController(admittedProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
+        providerAttemptReserveMs: 119_499,
+        onEventCommitted: (event) => {
+          if (event.type === "model.request.failed") retryFailureCommitted = true;
+        },
+      });
+      const running = admitted.controller.start("one millisecond of reserve headroom admits retry");
+      await retryTimerScheduled;
+      expect(admittedProvider.generateCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(running).resolves.toBe("succeeded");
+      expect(admittedProvider.generateCalls).toBe(2);
+      expect(admitted.controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, outcome: "succeeded" });
+      await rm(admitted.directory, { recursive: true, force: true });
+    } finally {
+      retryTimerSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("blocks GUI dispatch from tool calls returned by the final reserved request", async () => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("final-gate-1")] },
+      { type: "tool_calls", calls: [clickCall("final-gate-2")] },
+      { type: "tool_calls", calls: [clickCall("final-gate-3")] },
+    ]);
+    const { controller, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3));
+    await expect(controller.start("use the final response budget safely")).resolves.toBe("budget_exhausted");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(3);
+    expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(2);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "final-gate-3" && event.reason.includes("model request budget is exhausted"))).toBe(true);
+    expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 3, stepCount: 2, outcome: "budget_exhausted" });
   });
 
   it("allows a closing model turn after the last GUI action budget is consumed", async () => {
@@ -1272,9 +2325,31 @@ describe("RunController S2-2 happy path", () => {
     expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(3);
     const started = controller.getEvents().filter((event): event is Extract<typeof event, { type: "action.execution.started" }> => event.type === "action.execution.started");
     expect(started).toHaveLength(2);
-    expect(started[0]?.executionObservationId).toBe(started[0]?.action.basedOn);
-    expect(started[1]?.executionObservationId).not.toBe(started[1]?.action.basedOn);
+    if (started[0]?.action.kind !== "click" || started[1]?.action.kind !== "type") throw new Error("expected the click then type batch actions");
+    expect(started[0].executionObservationId).toBe(started[0].action.basedOn);
+    expect(started[1].executionObservationId).not.toBe(started[1].action.basedOn);
     expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it.each([
+    { platform: "darwin" as const, keys: ["CMD", "A"], allowed: true },
+    { platform: "darwin" as const, keys: ["META", "A"], allowed: true },
+    { platform: "darwin" as const, keys: ["CTRL", "A"], allowed: false },
+    { platform: "win32" as const, keys: ["CTRL", "A"], allowed: true },
+    { platform: "linux" as const, keys: ["CTRL", "A"], allowed: true },
+    { platform: undefined, keys: ["CTRL", "A"], allowed: true },
+    { platform: undefined, keys: ["CMD", "A"], allowed: false },
+  ])("matches the select-all batch chord only for the reported platform: $platform / $keys", async ({ platform, keys, allowed }) => {
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("platform-click"), selectAllCall("platform-select-all", keys), typeCall("platform-type", "new value")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const computer = new FakeComputer(false, platform);
+    const { controller, directory } = await makeController(provider, computer, batchRegistry(), new DefaultRuntimePolicy(), { batching: "same-control-input-v1" });
+    await expect(controller.start("replace text in the active field")).resolves.toBe("succeeded");
+    expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(allowed ? 3 : 0);
+    expect(controller.getEvents().filter((event) => event.type === "tool.call.rejected").length).toBe(allowed ? 0 : 3);
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -1899,6 +2974,39 @@ describe("RunController command inbox and control semantics", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("drains pause and correction commands before rejecting an invalid opt-in finish", async () => {
+    let controller!: RunController;
+    let commandsDone: Promise<void> | undefined;
+    let notifyReady!: () => void;
+    const ready = new Promise<void>((resolve) => { notifyReady = resolve; });
+    const provider = new ScriptedProvider(
+      [
+        { type: "finish", summary: "stale finish without required evidence" },
+        { type: "finish", summary: "corrected finish", resultEvidence: { version: "source-linked-finish-v1", fields: [{ fieldId: "availability", disposition: "unknown", reason: "not_observed" }] } },
+      ],
+      (count) => {
+        if (count === 1) {
+          commandsDone = Promise.all([controller.pause("inspect pending result"), controller.submitUserInput("Continue with the current page")]).then(() => undefined);
+          notifyReady();
+        }
+      },
+    );
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(5, 3), {
+      sourceLinkedFinish: { version: "source-linked-finish-v1", fields: [{ fieldId: "availability", label: "Availability", required: true }] },
+    });
+    controller = created.controller;
+    const running = controller.start("inspect availability");
+    await ready;
+    await expect(commandsDone).resolves.toBeUndefined();
+    await waitUntil(() => controller.getSnapshot().status === "paused");
+    await expect(controller.resume()).resolves.toBeUndefined();
+    await expect(running).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(controller.getSnapshot()).toMatchObject({ summary: "Availability：未知（未在引用的观察中看到相关信息）" });
+    expect(controller.getEvents().filter((event) => event.type === "runtime.error" && event.category === "source_linked_finish_invalid")).toHaveLength(0);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
   it("invalidates a deferred turn when correction follows resume without waiting", async () => {
     let controller!: RunController;
     let pauseReadyResolve!: () => void;
@@ -2404,10 +3512,11 @@ describe("RunController S2-4 failure boundaries", () => {
     await created.controller.resolveApproval(requestId ?? "", true);
     await expect(running).resolves.toBe("succeeded");
     const proposed = created.controller.getEvents().find((event) => event.type === "action.proposed");
+    if (proposed?.type !== "action.proposed" || proposed.action.kind !== "click") throw new Error("expected the approved click action to be proposed");
     expect(proposed?.type === "action.proposed" ? proposed.action.actionId : undefined).toBe(approvedActionId);
     expect(proposed?.type === "action.proposed" ? proposed.executionObservationId : undefined).toBeDefined();
     expect(proposed?.type === "action.proposed" ? proposed.executionObservationId : undefined).not.toBe(
-      proposed?.type === "action.proposed" ? proposed.action.basedOn : undefined,
+      proposed.action.basedOn,
     );
     expect(created.computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(3);
     expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(1);
@@ -2452,7 +3561,7 @@ describe("RunController S2-4 failure boundaries", () => {
     const events = created.controller.getEvents();
     const proposed = events.find((event) => event.type === "action.proposed");
     expect(proposed).toMatchObject({ executionObservationId: requested.evidence.observationId });
-    if (proposed?.type !== "action.proposed") throw new Error("expected the approved action to be proposed");
+    if (proposed?.type !== "action.proposed" || proposed.action.kind !== "click") throw new Error("expected the approved click action to be proposed");
     expect(proposed.action.basedOn).toBe(requested.evidence.decisionObservationId);
     expect(events.filter((event) => event.type === "approval.requested")).toHaveLength(1);
     expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
@@ -2908,7 +4017,6 @@ describe("RunController S2-4 failure boundaries", () => {
         requestId: "legacy-approval",
         definition: { category: "computer" },
         // A pre-Surface approval has no persistent binding and cannot recover as executable.
-        executionSurfaceRef: undefined,
       };
       await expect(internals.applyCommand({ kind: "approval_resolution", requestId: "legacy-approval", approved: true }))
         .rejects.toThrow("LEGACY_SURFACE_UNRESOLVED");
@@ -3026,6 +4134,441 @@ describe("RunController S2-4 failure boundaries", () => {
     expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
   });
+
+  it("continues from a freshly re-observed exact native Surface after generic foreground reconfirmation", async () => {
+    const surfaceRef: SurfaceRef = {
+      surfaceId: "unknown-native-surface" as SurfaceRef["surfaceId"],
+      generation: 3,
+      kind: "native_window",
+    };
+    class ReconfirmedForegroundComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef };
+      }
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+          safeRecovery: { kind: "native_surface_reconfirmed" as const, surfaceRef },
+        };
+      }
+    }
+    const computer = new ReconfirmedForegroundComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-reconfirmed-click"), typeCall("unknown-reconfirmed-stale-suffix")] },
+      { type: "finish", summary: "continued from the fresh native screen", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1" },
+    );
+    await expect(controller.start("continue from the confirmed current screen")).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+    expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    const events = controller.getEvents();
+    expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "partial" &&
+      event.receipt.safeRecovery?.kind === "native_surface_reconfirmed")).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "unknown-reconfirmed-stale-suffix")).toBe(true);
+    expect(events.some((event) => event.type === "computer.surface.transitioned" &&
+      event.reason === "initial_observation" && event.to.surfaceId === surfaceRef.surfaceId)).toBe(true);
+    expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not continue when the fresh observation contradicts native-surface reconfirmation", async () => {
+    const claimedSurface: SurfaceRef = {
+      surfaceId: "claimed-unknown-native-surface" as SurfaceRef["surfaceId"],
+      generation: 3,
+      kind: "native_window",
+    };
+    const actualSurface: SurfaceRef = {
+      surfaceId: "different-unknown-native-surface" as SurfaceRef["surfaceId"],
+      generation: 1,
+      kind: "native_window",
+    };
+    class MismatchedReconfirmationComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef: this.calls.filter((call) => call.startsWith("observe:")).length === 1 ? claimedSurface : actualSurface };
+      }
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+          safeRecovery: { kind: "native_surface_reconfirmed" as const, surfaceRef: claimedSurface },
+        };
+      }
+    }
+    const computer = new MismatchedReconfirmationComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-mismatched-click")] },
+      { type: "finish", summary: "must wait for user recovery", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer);
+    const running = controller.start("perform the GUI task");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(provider.inputs).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+      await controller.submitUserInput("I checked the screen; continue safely.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("holds for user input when unknown action has no owned-surface or Host-handoff proof", async () => {
+    class UnresolvedForegroundComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+        };
+      }
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push("detect-after-unknown");
+        return [] as readonly ComputerWindowCandidate[];
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return [] as readonly ComputerWindowCandidate[];
+      }
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return session;
+      }
+    }
+    const computer = new UnresolvedForegroundComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-manual-click"), typeCall("unknown-manual-stale-suffix")] },
+      { type: "finish", summary: "continued after user checked the screen", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1", windowHandoff: "confirm-v1" },
+    );
+    const running = controller.start("perform the GUI task");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_user");
+      expect(controller.getSnapshot().pendingUserQuestion).toContain("不要重复刚才的操作");
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "unknown-manual-stale-suffix")).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+      await controller.submitUserInput("I checked the screen; choose another safe action.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+      expect(provider.inputs).toHaveLength(2);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("routes a newly surfaced peer after an unknown action through the existing Host handoff gate", async () => {
+    const candidate: ComputerWindowCandidate = { pid: 902, windowId: 1902, appName: "Other window", title: "Fresh target" };
+    class UnknownActionPeerComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "The action may have been sent; do not repeat it.",
+        };
+      }
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push("detect-after-unknown");
+        return [candidate];
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return [candidate];
+      }
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push("handoff");
+        return session;
+      }
+    }
+    const computer = new UnknownActionPeerComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("unknown-peer-click"), typeCall("unknown-peer-stale-suffix")] },
+      { type: "finish", summary: "continued after host selected a target", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1", windowHandoff: "confirm-v1" },
+    );
+    let running: Promise<import("@computer-harness/protocol").RunOutcome> | undefined;
+    try {
+      running = controller.start("perform the GUI task");
+      await waitUntil(() => controller.getSnapshot().status === "waiting_window" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status).toBe("waiting_window");
+      expect(controller.getSnapshot().pendingWindowHandoff).toMatchObject({ reasonCode: "new_window_detected" });
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+      expect(computer.calls).toContain("detect-after-unknown");
+      expect(controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "unknown-peer-stale-suffix")).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested" && event.reasonCode === "new_window_detected")).toBe(true);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["parent", "owned-sibling", "macos-sheet"] as const)(
+    "continues from a partial transient receipt only after its %s recovery Surface is freshly observed",
+    async (recoveryRoute) => {
+    const childSurface: SurfaceRef = {
+      surfaceId: "recovery-child" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: "recovery-parent" as SurfaceId,
+      admissionSource: recoveryRoute === "macos-sheet" ? "macos_attached_sheet_proof" : "win32_relationship_probe",
+    };
+    const parentSurface: SurfaceRef = {
+      surfaceId: "recovery-parent" as SurfaceId,
+      generation: 3,
+      kind: "native_window",
+      parentSurfaceId: "recovery-grandparent" as SurfaceId,
+      admissionSource: recoveryRoute === "macos-sheet" ? "macos_attached_sheet_proof" : "win32_relationship_probe",
+    };
+    const siblingSurface: SurfaceRef = {
+      surfaceId: "recovery-sibling" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: parentSurface.surfaceId,
+      admissionSource: recoveryRoute === "macos-sheet" ? "macos_attached_sheet_proof" : "win32_relationship_probe",
+    };
+    const recoverySurface = recoveryRoute === "parent" ? parentSurface : siblingSurface;
+    class RecoverableChildComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        const restored = this.calls.some((call) => call === "execute:click");
+        return {
+          ...capture,
+          surfaceRef: restored ? recoverySurface : childSurface,
+          ...(restored ? { surfaceTransitionReason: recoveryRoute === "parent" ? "child_pop" as const : "child_push" as const } : {}),
+        };
+      }
+
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "CUA_TRANSIENT_ACTION_OUTCOME_UNKNOWN",
+          message: "The action outcome is unknown. The transient window closed and its exact parent was freshly captured. Do not repeat this action; inspect the refreshed screen and choose the next step.",
+          safeRecovery: {
+            kind: recoveryRoute === "parent" ? "transient_parent_restored" as const : "transient_owned_surface_reconciled" as const,
+            surfaceRef: recoverySurface,
+          },
+        };
+      }
+    }
+    const computer = new RecoverableChildComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("recovery-unknown-click"), typeCall("recovery-stale-suffix")] },
+      { type: "finish", summary: "continued from the refreshed parent screen", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { batching: "same-control-input-v1" },
+    );
+
+    await expect(controller.start("complete the confirmed dialog task")).resolves.toBe("succeeded");
+    expect(provider.inputs).toHaveLength(2);
+    expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+    expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+    expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(0);
+    expect(provider.inputs[1]?.messages.some((message) =>
+      message.content.some((block) => block.type === "tool_result" && block.result.callId === "recovery-unknown-click" &&
+        block.result.status === "failed" && block.result.error.message.includes("Do not repeat this action")),
+    )).toBe(true);
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "action.execution.failed" && event.receipt.status === "partial" &&
+      event.receipt.safeRecovery?.kind === (recoveryRoute === "parent" ? "transient_parent_restored" : "transient_owned_surface_reconciled"))).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "recovery-stale-suffix")).toBe(true);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+    expect(events.some((event) => event.type === "computer.surface.transitioned" &&
+      event.reason === (recoveryRoute === "parent" ? "child_pop" : "child_push") &&
+      event.to.surfaceId === recoverySurface.surfaceId)).toBe(true);
+    expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(false);
+    await rm(directory, { recursive: true, force: true });
+    },
+  );
+
+  it("does not continue when a partial recovery proof mismatches the fresh Surface", async () => {
+    const childSurface: SurfaceRef = {
+      surfaceId: "mismatch-child" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: "mismatch-parent" as SurfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const claimedParent: SurfaceRef = { surfaceId: "mismatch-parent" as SurfaceId, generation: 3, kind: "native_window" };
+    const wrongParent: SurfaceRef = { surfaceId: "wrong-parent" as SurfaceId, generation: 1, kind: "native_window" };
+    class MismatchedRecoveryComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        const restored = this.calls.some((call) => call === "execute:click");
+        return {
+          ...capture,
+          surfaceRef: restored ? wrongParent : childSurface,
+          ...(restored ? { surfaceTransitionReason: "child_pop" as const } : {}),
+        };
+      }
+
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          safeRecovery: { kind: "transient_parent_restored" as const, surfaceRef: claimedParent },
+        };
+      }
+    }
+    const computer = new MismatchedRecoveryComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("mismatched-recovery-click")] },
+      { type: "finish", summary: "must not continue", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer);
+
+    await expect(controller.start("stop after unverified recovery")).resolves.toBe("outcome_unknown");
+    expect(provider.inputs).toHaveLength(1);
+    expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "outcome_unknown" });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it.each(["extra-ref-field", "wait-action", "reopen-action", "sibling-wrong-parent", "sibling-same-surface", "sibling-untrusted-source", "sibling-untrusted-old-source", "macos-sheet-wrong-kind"] as const)(
+    "rejects invalid safe recovery evidence for %s",
+    async (scenario) => {
+    const childSurface: SurfaceRef = {
+      surfaceId: `invalid-recovery-child-${scenario}` as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: `invalid-recovery-parent-${scenario}` as SurfaceId,
+      ...(scenario === "sibling-untrusted-old-source" ? {} : scenario === "macos-sheet-wrong-kind"
+        ? { admissionSource: "macos_attached_sheet_proof" as const }
+        : { admissionSource: "win32_relationship_probe" as const }),
+    };
+    const parentSurfaceId = childSurface.parentSurfaceId;
+    if (parentSurfaceId === undefined) throw new Error("expected the recovery fixture child to have a parent Surface");
+    const requiredParentSurfaceId: SurfaceId = parentSurfaceId;
+    const parentSurface: SurfaceRef = {
+      surfaceId: requiredParentSurfaceId,
+      generation: 3,
+      kind: "native_window",
+    };
+    class InvalidRecoveryComputer extends FakeComputer {
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return { ...capture, surfaceRef: childSurface };
+      }
+
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        const isSiblingRecovery = scenario.startsWith("sibling-") || scenario === "macos-sheet-wrong-kind";
+        const siblingSurface: SurfaceRef = {
+          surfaceId: scenario === "sibling-same-surface" ? childSurface.surfaceId : `invalid-sibling-${scenario}` as SurfaceId,
+          generation: 1,
+          kind: scenario === "macos-sheet-wrong-kind" ? "browser_tab" : "native_window",
+          parentSurfaceId: scenario === "sibling-wrong-parent" ? `wrong-parent-${scenario}` as SurfaceId : requiredParentSurfaceId,
+          ...(scenario === "sibling-untrusted-source" ? {} : scenario === "macos-sheet-wrong-kind"
+            ? { admissionSource: "macos_attached_sheet_proof" as const }
+            : { admissionSource: "win32_relationship_probe" as const }),
+        };
+        const surfaceRef = scenario === "extra-ref-field"
+          ? { ...parentSurface, extra: "unexpected" }
+          : isSiblingRecovery ? siblingSurface : parentSurface;
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          safeRecovery: {
+            kind: isSiblingRecovery ? "transient_owned_surface_reconciled" as const : "transient_parent_restored" as const,
+            surfaceRef,
+          },
+        } as import("@computer-harness/protocol").ActionReceipt;
+      }
+    }
+    const actionCall: ToolCall = scenario === "wait-action"
+      ? { id: "invalid-recovery-action" as ToolCallId, name: "wait", arguments: { durationMs: 10 } }
+      : scenario === "reopen-action"
+        ? { id: "invalid-recovery-action" as ToolCallId, name: "reopen_saved_document", arguments: {} }
+      : clickCall("invalid-recovery-action");
+    const computer = new InvalidRecoveryComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [actionCall] },
+      { type: "finish", summary: "must not continue", reportedStatus: "success" },
+    ]);
+    let registry: ToolRegistry;
+    if (scenario === "wait-action") registry = waitRegistry();
+    else if (scenario === "reopen-action") {
+      registry = new ToolRegistry();
+      registry.register(reopenSavedDocumentTool());
+    } else registry = clickRegistry();
+    const { controller, directory } = await makeController(provider, computer, registry);
+
+    const outcome = await controller.start("reject malformed safe recovery");
+    if (scenario === "reopen-action") expect(computer.calls).toContain("execute:reopen_saved_document");
+    expect(outcome).toBe("outcome_unknown");
+    expect(provider.inputs).toHaveLength(1);
+    expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(1);
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(events.some((event) => event.type === "action.execution.failed")).toBe(false);
+    expect(events.some((event) => event.type === "runtime.error" && event.category === "unknown_side_effect")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "outcome_unknown" });
+    await rm(directory, { recursive: true, force: true });
+    },
+  );
 
   it("prepares once and records one-to-one decision and attempt metadata", async () => {
     const provider = new PreparedScriptedProvider("success");
@@ -3324,6 +4867,32 @@ describe("RunController Monitor online consumer", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it("keeps same-status host evidence stable across Observation IDs but treats a status change as new evidence", async () => {
+    for (const scenario of [
+      { name: "same-status", statuses: ["authorized_file_absent", "authorized_file_absent", "authorized_file_absent"] as const, executeCount: 1 },
+      { name: "changed-status", statuses: ["authorized_file_absent", "verified_clean_current_document", "verified_clean_current_document"] as const, executeCount: 2 },
+    ]) {
+      const provider = new ScriptedProvider([
+        { type: "tool_calls", calls: [clickCall(`${scenario.name}-1`)] },
+        { type: "tool_calls", calls: [clickCall(`${scenario.name}-2`)] },
+        { type: "finish", summary: "replanned" },
+      ]);
+      const computer = new AuthorizedDocumentEvidenceComputer(scenario.statuses);
+      const created = await makeController(provider, computer, clickRegistry(), new DefaultRuntimePolicy(), {
+        features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+      });
+      await expect(created.controller.start(`preserve ${scenario.name} host evidence semantics`)).resolves.toBe("succeeded");
+      const events = created.controller.getEvents();
+      const observations = events.filter((event) => event.type === "observation.created").map((event) => event.observation);
+      expect(observations[0]?.authorizedSavedDocumentEvidence?.observationId).toBe(observations[0]?.id);
+      expect(observations[1]?.authorizedSavedDocumentEvidence?.observationId).toBe(observations[1]?.id);
+      expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(scenario.executeCount);
+      expect(events.filter((event) => event.type === "tool.call.rejected" && event.callId === `${scenario.name}-2`).length)
+        .toBe(scenario.executeCount === 1 ? 1 : 0);
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not block repeats when transition evidence is changed/unknown or Monitor is shadow/off", async () => {
     const scenarios: Array<{ name: string; computer: FakeComputer; monitor: "off" | "shadow" | "guidance" }> = [
       { name: "changed", computer: new SequencedScreenshotComputer([1, 2, 3, 4]), monitor: "guidance" },
@@ -3456,6 +5025,270 @@ describe("RunController model-directed window switching", () => {
     arguments: { windowRef },
   });
 
+  it("preserves ordinary explicit recovery when the post-action inventory first discovers the bound window vanished", async () => {
+    class VanishedWindowComputer extends FakeComputer {
+      public actionId!: ActionId;
+      public inventoryRead = false;
+      public readonly candidate: ComputerWindowCandidate = {
+        pid: 202, windowId: 502, appName: "Editor", title: "Fresh window", handoffToken: "fresh-window-token",
+      };
+      public readonly targetSession: ComputerSession = {
+        ...this.session,
+        viewport: { width: 640, height: 480, coordinateSpace: "physical" },
+      };
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actionId = action.actionId;
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return { actionId: action.actionId, status: "completed" as const, message: "A localized display message" };
+      }
+      public async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryRead = true;
+        // Mirror CUA's ordinary-mode behavior: an incomplete inventory that
+        // proves the bound peer is absent invalidates its observation state.
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async detectNewWindowHandoffCandidates(): Promise<readonly ComputerWindowCandidate[]> {
+        if (this.inventoryRead) throw Object.assign(new Error("bound surface was already invalidated"), { code: "TRANSIENT_SURFACE_UNKNOWN" });
+        throw new BoundWindowMissingError(this.actionId);
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+        signal.throwIfAborted();
+        return [this.candidate];
+      }
+      public async handoffWindow(_session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+        signal.throwIfAborted();
+        expect(candidate).toEqual(this.candidate);
+        return this.targetSession;
+      }
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        const capture = await super.observe(session, observationId, signal);
+        return {
+          ...capture,
+          viewport: session.viewport,
+          surfaceRef: session === this.targetSession ? nativePeerSurfaceRef : desktopSurfaceRef,
+          ...(session === this.targetSession ? { surfaceTransitionReason: "peer_switch" as const } : {}),
+        };
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new VanishedWindowComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("ordinary-close-once")] },
+      { type: "finish", summary: "continued on the explicitly selected window" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+    });
+    const running = controller.start("complete the action, then recover the exact new window");
+    try {
+      await waitUntil(() => ["waiting_window", "waiting_user", "finished"].includes(controller.getSnapshot().status));
+      expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents() })).toBe("waiting_window");
+      const request = controller.getSnapshot().pendingWindowHandoff!;
+      expect(request.reasonCode).toBe("bound_window_missing");
+      const candidate = (await controller.listWindowHandoffCandidates(new AbortController().signal))[0]!;
+      await controller.handoffWindow(candidate, request.sourceActionId);
+      expect(await running).toBe("succeeded");
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+      expect(computer.calls.filter((call) => call.startsWith("observe:"))).toHaveLength(2);
+      expect(controller.getEvents().filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+      expect(controller.getEvents().filter((event) => event.type === "computer.window.handoff.completed")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a fresh opaque inventory after a native action without claiming an alternate is related", async () => {
+    const registry = windowSwitchRegistry();
+    const computer = new WindowSwitchComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("open-dialog")] },
+      { type: "finish", summary: "inspected the new window options" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("open the dialog and inspect it")).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(1);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      const completed = controller.getEvents().find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("open-dialog" as ToolCallId));
+      expect(completed?.result.output).toMatchObject({
+        windowInventory: {
+          currentWindow: "opaque-current",
+          options: [
+            { windowRef: "opaque-current", isCurrent: true },
+            { windowRef: "opaque-target", isCurrent: false },
+          ],
+          guidance: expect.stringContaining("does not prove creation, ownership, foreground, or relation"),
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark the post-action inventory as a new option when it contains only the current window", async () => {
+    const registry = windowSwitchRegistry();
+    class CurrentOnlyComputer extends WindowSwitchComputer {
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        return { options: [{ windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true }], truncated: false, omittedCount: 0 };
+      }
+    }
+    const computer = new CurrentOnlyComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("ordinary-action")] },
+      { type: "finish", summary: "done" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("perform one action")).resolves.toBe("succeeded");
+      const completed = controller.getEvents().find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("ordinary-action" as ToolCallId));
+      expect(completed?.result.output).not.toHaveProperty("windowInventory");
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat display text as an inventory signal; an explicit refresh expires old refs before switching", async () => {
+    const registry = windowSwitchRegistry();
+    class WindowNoticeComputer extends WindowSwitchComputer {
+      private inventoryGeneration = 0;
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        this.inventoryGeneration += 1;
+        const suffix = this.inventoryGeneration === 1 ? "old" : "fresh";
+        this.targetWindowRef = `${suffix}-target`;
+        return {
+          options: [
+            { windowRef: `${suffix}-current`, appName: "Editor", title: "Draft", isCurrent: true },
+            {
+              windowRef: `${suffix}-target`, appName: "TextEdit", title: "Save", isCurrent: false,
+              ...(this.inventoryGeneration === 1 ? {} : { firstObservedAfterAction: true, sourceActionId: "open-save-sheet" as ActionId }),
+            },
+          ],
+          truncated: false,
+          omittedCount: 0,
+        };
+      }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        if (action.kind === "click") {
+          signal.throwIfAborted();
+          this.calls.push("execute:click");
+          return { actionId: action.actionId, status: "completed" as const, message: "Pressed CMD+S\n\n🪟 Action opened new window(s): Save" };
+        }
+        return super.execute(session, action, signal);
+      }
+    }
+    const computer = new WindowNoticeComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("initial-inventory")] },
+      { type: "tool_calls", calls: [clickCall("open-save-sheet")] },
+      { type: "tool_calls", calls: [listWindowsCall("fresh-inventory")] },
+      { type: "tool_calls", calls: [switchWindowCall("stale-switch", "old-target")] },
+      { type: "tool_calls", calls: [switchWindowCall("fresh-switch", "fresh-target")] },
+      { type: "finish", summary: "observed the selected window" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("open and inspect the save dialog")).resolves.toBe("succeeded");
+      expect(computer.inventoryCalls).toBe(2);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual([
+        "execute:click",
+        "execute:switch_window:fresh-target",
+      ]);
+      const events = controller.getEvents();
+      const freshInventory = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("fresh-inventory" as ToolCallId));
+      expect(freshInventory?.result.output).toMatchObject({
+          windows: [
+            { windowRef: "fresh-current", isCurrent: true },
+            { windowRef: "fresh-target", title: "Save", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "open-save-sheet" },
+          ],
+      });
+      const actionResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("open-save-sheet" as ToolCallId));
+      expect(actionResult?.result.output).not.toHaveProperty("windowInventory");
+      expect(JSON.stringify(freshInventory?.result.output)).not.toContain("old-target");
+      expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === ("stale-switch" as ToolCallId))).toBe(true);
+      const observations = events.filter((event) => event.type === "observation.created");
+      expect(observations).toHaveLength(3);
+      const switchStarted = events.find((event): event is Extract<RuntimeEvent, { type: "action.execution.started" }> =>
+        event.type === "action.execution.started" && event.action.kind === "switch_window");
+      expect(switchStarted?.action).toMatchObject({ kind: "switch_window", windowRef: "fresh-target", basedOn: observations[1]?.observation.id });
+      expect(events.some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not expose stale or partial refs when the post-action inventory refresh fails", async () => {
+    const registry = windowSwitchRegistry();
+    class FailingRefreshComputer extends WindowSwitchComputer {
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        if (this.inventoryCalls > 1) throw new Error("inventory unavailable");
+        return { options: [
+          { windowRef: "old-current", appName: "Editor", title: "Draft", isCurrent: true },
+          { windowRef: "old-target", appName: "TextEdit", title: "Save", isCurrent: false },
+        ], truncated: false, omittedCount: 0 };
+      }
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        if (action.kind === "click") {
+          signal.throwIfAborted();
+          this.calls.push("execute:click");
+          return { actionId: action.actionId, status: "completed" as const, message: "Pressed CMD+S\n\n🪟 Action opened new window(s): Save" };
+        }
+        return super.execute(session, action, signal);
+      }
+    }
+    const computer = new FailingRefreshComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("old-list")] },
+      { type: "tool_calls", calls: [clickCall("open-save-sheet-refresh-fails")] },
+      { type: "tool_calls", calls: [listWindowsCall("failed-refresh")] },
+      { type: "tool_calls", calls: [switchWindowCall("old-ref-after-refresh-failed", "old-target")] },
+      { type: "finish", summary: "refresh failed; kept existing target" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("open and inspect the save dialog")).resolves.toBe("succeeded");
+      const events = controller.getEvents();
+      const actionResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("open-save-sheet-refresh-fails" as ToolCallId));
+      expect(actionResult?.result.output).not.toHaveProperty("windowInventory");
+      expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === ("old-ref-after-refresh-failed" as ToolCallId))).toBe(true);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps listed refs across an ordinary observation and commits an isolated target transition", async () => {
     const registry = windowSwitchRegistry();
     const computer = new WindowSwitchComputer();
@@ -3483,10 +5316,14 @@ describe("RunController model-directed window switching", () => {
       const inventoryResult = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
         event.type === "tool.call.completed" && event.result.callId === ("inventory-call" as ToolCallId),
       );
-      expect(inventoryResult?.result.output).toEqual([
-        { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true },
-        { windowRef: "opaque-target", appName: "Browser", title: "Search results", isCurrent: false },
-      ]);
+      expect(inventoryResult?.result.output).toEqual({
+        windows: [
+          { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true },
+          { windowRef: "opaque-target", appName: "Browser", title: "Search results", isCurrent: false },
+        ],
+        truncated: false,
+        omittedCount: 0,
+      });
       expect(JSON.stringify(inventoryResult?.result.output)).not.toMatch(/pid|hwnd|adapterHandle/iu);
 
       const observations = events.filter((event): event is Extract<RuntimeEvent, { type: "observation.created" }> => event.type === "observation.created");
@@ -3801,18 +5638,18 @@ describe("RunController model-directed window switching", () => {
 
   it("expires listed refs when the legacy popup picker refreshes inventory and the Host chooses C", async () => {
     class PopupWindowSwitchComputer extends WindowSwitchComputer {
-      public override async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
         signal.throwIfAborted();
         return [{ pid: 303, windowId: 909, appName: "Popup", title: "Incidental dialog" }];
       }
 
-      public override async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
         signal.throwIfAborted();
         this.targetWindowRef = "opaque-target-after-picker";
         return [{ pid: 303, windowId: 909, appName: "Popup", title: "Incidental dialog" }];
       }
 
-      public override async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
+      public async handoffWindow(session: ComputerSession, _candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSession> {
         signal.throwIfAborted();
         return session;
       }

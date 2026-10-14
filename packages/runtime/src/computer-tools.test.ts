@@ -28,10 +28,15 @@ describe("default Computer tools", () => {
     const scroll = tools.find((tool) => tool.name === "scroll");
     expect(scroll?.inputSchema).toMatchObject({ required: ["x", "y", "direction", "ticks"] });
     const type = tools.find((tool) => tool.name === "type");
+    expect(type?.description).toContain("appends to the end of the target's current value regardless of caret or selection");
+    expect(type?.description).toContain("soft-wrapped visual lines are not paragraph boundaries");
+    expect(type?.description).toContain("Windows desktop-wide CUA multiline input is not supported by this path");
+    expect(type?.description).toContain("other platforms keep their native multiline typing route");
+    expect(type?.description).toContain("On macOS, omit elementRef and use the native focused-control typing route");
     expect(type?.inputSchema).toMatchObject({
       properties: {
-        text: { type: "string" },
-        elementRef: { type: "string", minLength: 1, maxLength: 96 },
+        text: { type: "string", description: expect.stringContaining("On macOS, omit elementRef") },
+        elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("Omit on macOS") },
       },
       required: ["text"],
       additionalProperties: false,
@@ -81,6 +86,18 @@ describe("default Computer tools", () => {
         elements: [{ ...observation.grounding.elements[0]!, source: "dom" as const }] },
     };
     expect(() => type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, { ...context, observation: domObservation })).toThrow(/UIA_REQUIRED/iu);
+
+    const darwinContext = { ...context, session: { platform: "darwin" } as never };
+    expect(() => type.toAction({ text: "first\nsecond", elementRef: "uia-current-1" }, darwinContext))
+      .toThrow(/omit elementRef and use native focused-control typing on macOS/iu);
+    expect(() => type.toAction({ text: "single line", elementRef: "uia-current-1" }, darwinContext))
+      .toThrow(/omit elementRef and use native focused-control typing on macOS/iu);
+    expect(type.toAction({ text: "first\nsecond" }, { ...darwinContext, observation })).toEqual({ kind: "type", text: "first\nsecond" });
+
+    const windowsContext = { ...context, session: { platform: "win32" } as never };
+    expect(type.toAction({ text: "first\nsecond" }, { ...windowsContext, observation })).toEqual({
+      kind: "type", text: "first\nsecond", groundingRef: "uia-current-1",
+    });
   });
 
   it("validates and maps canonical arguments without provider-specific logic", () => {
@@ -140,6 +157,8 @@ describe("default Computer tools", () => {
     const list = definitions.find((definition) => definition.name === "list_windows");
     const change = definitions.find((definition) => definition.name === "switch_window");
     expect(list?.category).toBe("side");
+    expect(list?.description).toContain("a dialog may be a separate window");
+    expect(list?.description).toContain("wait for a fresh observation before interacting");
     expect(change).toMatchObject({ category: "computer", isolatedTurn: true });
     expect(createDefaultComputerTools().get("list_windows")).toBeUndefined();
     expect(createDefaultComputerTools().get("switch_window")).toBeUndefined();
@@ -149,9 +168,17 @@ describe("default Computer tools", () => {
       runId: "run" as never,
       session: {} as never,
       signal: new AbortController().signal,
-      listWindows: async () => [{ windowRef: "opaque-1", title: "Search", isCurrent: false }],
+      listWindows: async () => ({
+        options: [{ windowRef: "opaque-1", title: "Search", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" as never }],
+        truncated: true,
+        omittedCount: 3,
+      }),
     });
-    expect(inventory).toEqual([{ windowRef: "opaque-1", title: "Search", isCurrent: false }]);
+    expect(inventory).toEqual({
+      windows: [{ windowRef: "opaque-1", title: "Search", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" }],
+      truncated: true,
+      omittedCount: 3,
+    });
     expect(() => change.validate({ windowRef: "" })).toThrow(/opaque reference/iu);
     expect(() => change.validate({ windowRef: "opaque-1", pid: 123 })).toThrow(/only the windowRef argument/iu);
     expect(() => change.validate({ windowRef: "opaque-1", windowId: 456 })).toThrow(/only the windowRef argument/iu);
@@ -181,6 +208,10 @@ describe("default Computer tools", () => {
     const definition = groundingComputerTools()[0];
     expect(definition?.name).toBe("click_element");
     if (definition === undefined || definition.category !== "computer") throw new Error("grounding tool missing");
+    expect(definition.description).toContain("current catalog");
+    expect(definition.description).toContain("For managed page content, use a DOM ref");
+    expect(definition.description.length).toBeLessThanOrEqual(180);
+    expect(JSON.stringify(definition.inputSchema)).toContain("Use a DOM ref for managed page content");
     const context = {
       runId: "run" as never,
       session: {} as never,

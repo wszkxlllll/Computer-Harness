@@ -248,6 +248,24 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(projector.project(actionCompleted(6, "action-2"))).toBeUndefined();
   });
 
+  it("projects a fixed, current-request-bound window handoff notice without window labels", () => {
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    const sourceActionId = "action-window-handoff" as ActionId;
+    const handoff = projector.project(event(1, {
+      type: "computer.window.handoff.requested",
+      sourceActionId,
+      reasonCode: "new_window_detected",
+    }));
+
+    expect(handoff).toMatchObject({
+      kind: "handoff",
+      delivery: "interrupt",
+      text: "任务正在等待你选择或确认一个窗口。",
+      pendingRequestId: sourceActionId,
+    });
+    expect(handoff?.text).not.toContain(sourceActionId);
+  });
+
   it("speaks a user-level milestone only when its exact fresh observation was included in the response request", () => {
     const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     projector.project(observation(1, "observation-1"));
@@ -486,7 +504,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
       ["failed", "任务未能完成。"],
       ["cancelled", "任务已取消。"],
       ["budget_exhausted", "任务操作已达到上限。"],
-      ["outcome_unknown", "有项操作的结果无法确认，任务已暂停。"],
+      ["outcome_unknown", "任务已结束，操作结果仍待核实。"],
     ] as const;
     for (const [outcome, fallback] of unsuccessfulOutcomes) {
       expect(new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
@@ -580,7 +598,7 @@ describe("RuntimeEvent to RunNotice projection", () => {
       type: "runtime.error",
       category: "unknown_side_effect",
       message: "Do not speak this raw error, path, or coordinate.",
-    }))).toMatchObject({ kind: "error", text: "有项操作的结果无法确认，任务已停止。" });
+    }))).toMatchObject({ kind: "error", text: "操作结果暂时无法确认，请查看当前任务状态。" });
     expect(projector.project(event(4, {
       type: "runtime.error",
       category: "partial_side_effect",
@@ -593,6 +611,23 @@ describe("RuntimeEvent to RunNotice projection", () => {
     expect(projector.project(event(6, {
       type: "runtime.error", category: "monitor_diagnostic", message: "private Monitor exception",
     }))).toBeUndefined();
+  });
+
+  it("distinguishes recoverable side-effect uncertainty from a terminal unknown outcome", () => {
+    const recovering = new RunNoticeProjector(runId);
+    expect(recovering.project(event(1, {
+      type: "runtime.error", category: "unknown_side_effect", message: "private raw detail",
+    }))?.text).toBe("操作结果暂时无法确认，请查看当前任务状态。");
+    expect(recovering.project(observation(2, "recovered-observation"))).toBeUndefined();
+    expect(recovering.project(event(3, { type: "run.finished", outcome: "succeeded", summary: "recovered" }))?.text)
+      .toBe("任务已完成，可查看结果。");
+
+    const terminal = new RunNoticeProjector(runId);
+    expect(terminal.project(event(1, {
+      type: "runtime.error", category: "unknown_side_effect", message: "private raw detail",
+    }))?.text).not.toContain("任务已停止");
+    expect(terminal.project(event(2, { type: "run.finished", outcome: "outcome_unknown" }))?.text)
+      .toBe("任务结束。");
   });
 });
 
@@ -655,6 +690,25 @@ describe("RunNoticeScheduler", () => {
     const current = notice(3, { kind: "question", delivery: "interrupt", pendingRequestId: "question-3", text: "请回答", dedupeKey: "question-3" });
     secondScheduler.offer(current, secondGeneration);
     expect(secondScheduler.takeNext(new Set([pendingId(current)]))?.noticeId).toBe(current.noticeId);
+
+    const expiredHandoffScheduler = new RunNoticeScheduler();
+    const expiredHandoffGeneration = expiredHandoffScheduler.activateRun(runId);
+    const handoff = notice(4, {
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: "action-window-4",
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+    expiredHandoffScheduler.offer(handoff, expiredHandoffGeneration);
+    expect(expiredHandoffScheduler.takeNext(new Set())).toBeUndefined();
+
+    const currentHandoffScheduler = new RunNoticeScheduler();
+    const currentHandoffGeneration = currentHandoffScheduler.activateRun(runId);
+    currentHandoffScheduler.offer(handoff, currentHandoffGeneration);
+    expect(currentHandoffScheduler.takeNext(new Set(["action-window-4"]))).toMatchObject({
+      noticeId: handoff.noticeId,
+      pendingRequestId: "action-window-4",
+    });
   });
 
   it("drops polite progress on errors but keeps current interactions, while results replace all pending notices", () => {

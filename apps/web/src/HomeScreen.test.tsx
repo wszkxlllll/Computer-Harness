@@ -1,19 +1,20 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRun, listRuns, listWindowTargets } from "./api";
+import { createRun, listRuns, listWindowTargets, previewWindowTarget } from "./api";
 import { HomeScreen } from "./HomeScreen";
 import { GoalComposer } from "./components/GoalComposer";
-import { ApiError, type BrowserSiteChoice, type WindowTargetList } from "./types";
+import { ApiError, type BrowserSiteChoice, type WindowCandidatePreview, type WindowTargetList } from "./types";
 import { PreferencesProvider } from "./PreferencesContext";
 import { PREFERENCES_STORAGE_KEY } from "./preferences";
 
 vi.mock("./api", async (importOriginal) => {
   const api = await importOriginal<typeof import("./api")>();
-  return { ...api, createRun: vi.fn(), listRuns: vi.fn(), listWindowTargets: vi.fn() };
+  return { ...api, createRun: vi.fn(), listRuns: vi.fn(), listWindowTargets: vi.fn(), previewWindowTarget: vi.fn() };
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
   localStorage.clear();
@@ -108,6 +109,126 @@ describe("home run-target selection", () => {
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
+  it("offers the computer's preset document task only from its opaque summary", async () => {
+    const profileId = "Opaque_Profile_1234567890";
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      nativeRecoveryProfile: { profileId, label: "Host TextEdit recovery" },
+    });
+    vi.mocked(createRun).mockRejectedValue(new ApiError("fixture response", 409));
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    const exactGoal = "  Save my itinerary\n正文末行。\n\n";
+    fireEvent.change(goal, { target: { value: exactGoal } });
+    chooseStartMode(/电脑预设文稿/);
+    await screen.findByText("将使用电脑预先指定的两个文稿窗口和本地输出文件。");
+    const startButton = screen.getByRole("button", { name: "开始任务" });
+    expect((startButton as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(startButton);
+
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      exactGoal,
+      expect.any(String),
+      { mode: "native-recovery", profileId },
+      defaultAssistantPreferences,
+      false,
+    ));
+    expect(listWindowTargets).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits the Host-owned hybrid task by opaque profile id and preserves exact goal text", async () => {
+    const profileId = "Opaque_Hybrid_Profile_12345";
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      nativeWebDocumentProfile: { profileId, label: "Host Browser and TextEdit recovery" },
+    });
+    vi.mocked(createRun).mockRejectedValue(new ApiError("fixture response", 409));
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    const exactGoal = "  Use the fixed Browser and TextEdit document\n正文末行。\n";
+    fireEvent.change(goal, { target: { value: exactGoal } });
+    chooseStartMode(/网页查询与文稿/);
+    await screen.findByText("将先打开网页，再使用电脑预设的文稿继续处理。");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      exactGoal,
+      expect.any(String),
+      { mode: "native-web-document", profileId },
+      defaultAssistantPreferences,
+      false,
+    ));
+    expect(listWindowTargets).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the local document task unavailable until the computer prepares it", async () => {
+    renderHome();
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Save my itinerary" } });
+    chooseStartMode(/电脑预设文稿/);
+    await screen.findByText("电脑尚未准备本地文稿任务，请在电脑端检查设置。");
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("refreshes an expired document task and starts with the refreshed profile id", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-12T10:00:00.000Z"));
+    const profileId = "Fresh_Profile_1234567890";
+    let rejectRefresh!: (reason?: unknown) => void;
+    vi.mocked(listWindowTargets)
+      .mockResolvedValueOnce({
+        candidates: [],
+        expiresAt: new Date(Date.now() + 1_000).toISOString(),
+        nativeRecoveryProfile: { profileId: "Expired_Profile_1234567890", label: "Expired profile" },
+      })
+      .mockImplementationOnce(() => new Promise<WindowTargetList>((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockResolvedValueOnce({
+        candidates: [],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        nativeRecoveryProfile: { profileId, label: "Fresh profile" },
+      });
+    vi.mocked(createRun).mockRejectedValue(new ApiError("fixture response", 409));
+    renderHome();
+
+    fireEvent.change(screen.getByLabelText("想让电脑做什么？"), { target: { value: "Save my itinerary" } });
+    chooseStartMode(/电脑预设文稿/);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const startButton = screen.getByRole("button", { name: "开始任务" });
+    expect((startButton as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_001); });
+    expect(screen.getByText("文稿任务已过期，请刷新后再开始。")).toBeDefined();
+    expect((startButton as HTMLButtonElement).disabled).toBe(true);
+
+    const refreshButton = screen.getByRole("button", { name: "刷新文稿任务" });
+    fireEvent.click(refreshButton);
+    expect(screen.getByText("正在刷新文稿任务…")).toBeDefined();
+    expect((refreshButton as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { rejectRefresh(new Error("Host refresh failed")); await Promise.resolve(); });
+    expect(screen.getByRole("alert").textContent).toContain("Host refresh failed");
+    expect((refreshButton as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(refreshButton);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText("将使用电脑预先指定的两个文稿窗口和本地输出文件。")).toBeDefined();
+    expect((startButton as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(startButton);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(createRun).toHaveBeenCalledWith(
+      "Save my itinerary",
+      expect.any(String),
+      { mode: "native-recovery", profileId },
+      defaultAssistantPreferences,
+      false,
+    );
+    expect(listWindowTargets).toHaveBeenCalledTimes(3);
+  });
+
   it.each([
     ["auto", /自动选择/, { mode: "auto" }],
     ["window", /手动选择窗口/, { mode: "window", targetToken: "opaque-a" }],
@@ -176,7 +297,7 @@ describe("home run-target selection", () => {
       .mockRejectedValueOnce(new ApiError("电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。", 503, "WINDOW_DISCOVERY_FAILED"))
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"))
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"))
-      .mockRejectedValueOnce(new ApiError("电脑正在处理另一个任务。请等待当前任务结束后再开始。", 409, "RUN_BUSY"))
+      .mockRejectedValueOnce(new ApiError("电脑暂时无法开始新任务：现有任务尚未结束，或资源收尾尚未确认。请刷新任务列表后再试。", 409, "RUN_BUSY"))
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"));
     renderHome();
 
@@ -412,6 +533,7 @@ describe("home run-target selection", () => {
     vi.mocked(listWindowTargets).mockResolvedValue({
       candidates: [{ token: "candidate-a", appName: "Browser", title: "Contacts" }],
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      omittedAmbiguousCount: 2,
     });
     vi.mocked(createRun).mockRejectedValue(new ApiError(
       "电脑无法唯一确定要操作的窗口。请从刷新后的列表中手动选择一个窗口。",
@@ -427,6 +549,7 @@ describe("home run-target selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 
     expect(await screen.findByRole("radio", { name: /Browser.*Contacts/ })).toBeDefined();
+    expect(screen.getByText(/有 2 个候选未显示/u)).toBeDefined();
     expect((goal as HTMLTextAreaElement).value).toBe("Keep this goal after choosing a window");
     openStartSelection();
     expect((screen.getByRole("radio", { name: /手动选择窗口/ }) as HTMLInputElement).checked).toBe(true);
@@ -434,6 +557,107 @@ describe("home run-target selection", () => {
     expect(screen.getByRole("button", { name: "开始任务" }).hasAttribute("disabled")).toBe(true);
     expect(createRun).toHaveBeenCalledWith("Keep this goal after choosing a window", expect.any(String), { mode: "auto" }, defaultAssistantPreferences, false);
     expect(listWindowTargets).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires a fresh manual window confirmation when the goal changes and warns when the chosen app differs", async () => {
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [
+        { token: "notepad-token", appName: "Notepad", title: "Notes" },
+        { token: "wps-token", appName: "WPS Office", title: "Report.docx" },
+      ],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    vi.mocked(createRun).mockResolvedValue({ runId: "manual-run", status: "running" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Open the previous task" } });
+    await screen.findByText("这里还没有任务");
+    chooseStartMode(/手动选择窗口/);
+    fireEvent.click(await screen.findByRole("radio", { name: /Notepad.*Notes/ }));
+
+    fireEvent.change(goal, { target: { value: "请在WPS里写入新内容" } });
+    expect(screen.getByText("任务目标已更改，请重新点选窗口以确认新的起始目标。" )).toBeDefined();
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Notepad.*Notes/ }));
+    expect(screen.getByText(/任务开头提到了 wps，但当前手选窗口是 Notepad/u)).toBeDefined();
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "请在WPS里写入新内容",
+      expect.any(String),
+      { mode: "window", targetToken: "notepad-token" },
+      defaultAssistantPreferences,
+      false,
+    ));
+  });
+
+  it("requires viewing and explicitly confirming an exact live preview for repeated window labels", async () => {
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [
+        { token: "duplicate-a", appName: "Notepad.exe", title: "Untitled - Notepad", previewRequired: true },
+        { token: "duplicate-b", appName: "Notepad.exe", title: "Untitled - Notepad", previewRequired: true },
+      ],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const preview: WindowCandidatePreview = {
+      previewToken: "P".repeat(32),
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    const secondPreview: WindowCandidatePreview = { ...preview, previewToken: "Q".repeat(32), dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" };
+    vi.mocked(previewWindowTarget)
+      .mockResolvedValueOnce(preview)
+      .mockResolvedValueOnce(secondPreview);
+    vi.mocked(createRun).mockResolvedValue({ runId: "previewed-run", status: "running" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "在 Notepad 中查看当前窗口" } });
+    await screen.findByText("这里还没有任务");
+    chooseStartMode(/手动选择窗口/);
+    const previewButtons = await screen.findAllByRole("button", { name: "查看此窗口预览" });
+    const previewButton = previewButtons[0];
+    if (previewButton === undefined) throw new Error("expected a candidate preview action");
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(previewButton);
+    const firstImage = await screen.findByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
+    expect(createRun).not.toHaveBeenCalled();
+
+    fireEvent.load(firstImage);
+    const firstConfirmation = await screen.findByRole("button", { name: "确认这是目标窗口" });
+    fireEvent.click(firstConfirmation);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
+
+    const secondPreviewButton = screen.getByRole("button", { name: "查看此窗口预览" });
+    fireEvent.click(secondPreviewButton);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
+    const images = screen.getAllByRole("img", { name: /Notepad\.exe.*Untitled - Notepad/u });
+    const secondImage = images[1];
+    if (secondImage === undefined) throw new Error("expected the second candidate screenshot");
+    fireEvent.load(secondImage);
+    const confirmations = await screen.findAllByRole("button", { name: "确认这是目标窗口" });
+    expect(confirmations).toHaveLength(2);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(confirmations[1]!);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "在 Notepad 中查看当前窗口",
+      expect.any(String),
+      { mode: "window", targetToken: "duplicate-b", previewToken: secondPreview.previewToken },
+      defaultAssistantPreferences,
+      false,
+    ));
   });
 
   it("blocks every target mode while an active Run exists", async () => {

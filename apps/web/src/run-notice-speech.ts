@@ -77,6 +77,11 @@ interface PendingUtterance {
   settled: boolean;
 }
 
+interface PendingNoticeRequest {
+  readonly requestId: string;
+  readonly kind: string;
+}
+
 class BrowserSpeechSession implements VoiceOutputSession {
   private closed = false;
   private lastSequence = -1;
@@ -260,7 +265,7 @@ export class RunNoticeSpeechController {
   private preferredSpeechRate?: VoiceSpeechRate;
   private readonly seenNoticeIds = new Set<string>();
   private readonly inFlightNoticeIds = new Set<string>();
-  private readonly pendingNoticeIds = new Map<string, string>();
+  private readonly pendingNoticeIds = new Map<string, PendingNoticeRequest>();
 
   private adapter?: VoiceOutputAdapter;
 
@@ -315,7 +320,10 @@ export class RunNoticeSpeechController {
         return "handled";
       }
       this.rememberNotice(notice.noticeId);
-      if (notice.pendingRequestId) this.pendingNoticeIds.set(notice.noticeId, notice.pendingRequestId);
+      const pendingKind = expectedPendingRequestKind(notice.kind);
+      if (notice.pendingRequestId !== undefined && pendingKind !== undefined) {
+        this.pendingNoticeIds.set(notice.noticeId, { requestId: notice.pendingRequestId, kind: pendingKind });
+      }
       const chunk = { chunkId: notice.noticeId, sequence: ++this.sequence, text: notice.text };
       const playback = session.enqueueText(chunk);
       if (notice.kind === "result") {
@@ -341,8 +349,8 @@ export class RunNoticeSpeechController {
   }
 
   public syncPendingRequest(current: PendingRequestBase | undefined): void {
-    const liveId = current?.requestId;
-    if ([...this.pendingNoticeIds.values()].some((requestId) => requestId !== liveId)) {
+    if ([...this.pendingNoticeIds.values()].some((request) =>
+      request.requestId !== current?.requestId || request.kind !== current?.kind)) {
       void this.cancel("interrupted");
     }
   }
@@ -401,13 +409,13 @@ export class RunNoticeSpeechController {
   }
 
   private matchesCurrentPending(notice: RunNotice, pending: PendingRequestBase | undefined): boolean {
-    if (notice.kind !== "approval" && notice.kind !== "question") return true;
-    const expectedKind = notice.kind === "approval" ? "approval" : "user_input";
+    const expectedKind = expectedPendingRequestKind(notice.kind);
+    if (expectedKind === undefined) return true;
     return notice.pendingRequestId !== undefined && pending?.requestId === notice.pendingRequestId && pending.kind === expectedKind;
   }
 
   private pendingSnapshotMayBeStale(notice: RunNotice, snapshotSequence: number | undefined): boolean {
-    return (notice.kind === "approval" || notice.kind === "question") && notice.feedSequence !== undefined &&
+    return expectedPendingRequestKind(notice.kind) !== undefined && notice.feedSequence !== undefined &&
       (snapshotSequence === undefined || snapshotSequence < notice.feedSequence);
   }
 
@@ -422,6 +430,15 @@ export class RunNoticeSpeechController {
   private rememberNotice(noticeId: string): void {
     this.seenNoticeIds.add(noticeId);
     if (this.seenNoticeIds.size > 512) this.seenNoticeIds.delete(this.seenNoticeIds.values().next().value as string);
+  }
+}
+
+function expectedPendingRequestKind(kind: RunNotice["kind"]): string | undefined {
+  switch (kind) {
+    case "approval": return "approval";
+    case "question": return "user_input";
+    case "handoff": return "window_handoff";
+    default: return undefined;
   }
 }
 

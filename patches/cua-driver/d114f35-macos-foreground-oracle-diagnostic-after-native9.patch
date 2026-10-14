@@ -1,0 +1,807 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
+index a657ced..56c529a 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
+@@ -593,6 +593,41 @@ pub fn front_process_matches(target_pid: libc::pid_t, target_wid: u32) -> Option
+     Some(front_psn == target_psn)
+ }
+ 
++/// Read the current WindowServer front process while retaining only an opaque
++/// in-memory token for a before/after stability comparison. The token must
++/// never be serialized; callers should publish only `matches_target` and the
++/// stability result.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct FrontProcessObservation {
++    pub(crate) matches_target: bool,
++    token: [u8; 8],
++}
++
++impl FrontProcessObservation {
++    pub(crate) fn same_process(self, other: Self) -> bool {
++        self.token == other.token
++    }
++}
++
++pub(crate) fn observe_front_process(
++    target_pid: libc::pid_t,
++    target_wid: u32,
++) -> Option<FrontProcessObservation> {
++    let get_front = get_front_process_fn()?;
++    let mut front_psn = [0u8; 8];
++    if unsafe { get_front(front_psn.as_mut_ptr() as *mut c_void) } != 0 {
++        return None;
++    }
++    let mut target_psn = [0u8; 8];
++    if !get_process_psn_for_window(target_wid, target_pid, &mut target_psn) {
++        return None;
++    }
++    Some(FrontProcessObservation {
++        matches_target: front_psn == target_psn,
++        token: front_psn,
++    })
++}
++
+ /// Make `target_pid` and `target_wid` WindowServer-frontmost and leave them
+ /// there. Unlike [`with_foreground_assist`], this deliberately does not save or
+ /// restore the previous process. It is the persistent counterpart required by
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+index 68287e0..a3ca8f1 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+@@ -5,6 +5,7 @@ mod click;
+ mod clipboard;
+ mod double_click;
+ mod drag;
++mod foreground_oracle_diagnostic;
+ mod get_window_state;
+ mod hotkey;
+ mod invoke_menu;
+@@ -888,6 +889,9 @@ pub fn register_all(
+ 
+     registry.register(Box::new(list_apps::ListAppsTool));
+     registry.register(Box::new(list_windows::ListWindowsTool));
++    registry.register(Box::new(
++        foreground_oracle_diagnostic::ForegroundOracleDiagnosticTool,
++    ));
+     registry.register(Box::new(get_window_state::GetWindowStateTool::new(
+         state.clone(),
+     )));
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/foreground_oracle_diagnostic.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/foreground_oracle_diagnostic.rs
+new file mode 100644
+index 0000000..5574caa
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/foreground_oracle_diagnostic.rs
+@@ -0,0 +1,733 @@
++//! Bounded, read-only comparison of foreground-related macOS observations.
++//!
++//! This tool records correlated AppKit state separately from WindowServer,
++//! AX, and CG-window evidence. It never changes focus or dispatches input.
++
++use async_trait::async_trait;
++use cua_driver_core::{
++    protocol::ToolResult,
++    tool::{Tool, ToolDef},
++};
++use serde_json::{json, Value};
++use std::{
++    sync::{
++        atomic::{AtomicBool, Ordering},
++        mpsc, OnceLock,
++    },
++    thread,
++    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
++};
++
++const TOTAL_BUDGET: Duration = Duration::from_millis(500);
++const SAMPLE_OFFSETS: [Duration; 3] = [
++    Duration::from_millis(0),
++    Duration::from_millis(100),
++    Duration::from_millis(300),
++];
++
++pub struct ForegroundOracleDiagnosticTool;
++
++static DEF: OnceLock<ToolDef> = OnceLock::new();
++static GENERATION: OnceLock<String> = OnceLock::new();
++
++/// A timed-out synchronous AppKit/AX call cannot be cancelled safely. Keep its
++/// permit in the worker until it really exits, so repeated requests cannot
++/// accumulate blocked diagnostic workers.
++struct DiagnosticGate {
++    active: AtomicBool,
++}
++
++impl DiagnosticGate {
++    const fn new() -> Self {
++        Self {
++            active: AtomicBool::new(false),
++        }
++    }
++
++    fn try_acquire(&'static self) -> Option<DiagnosticPermit> {
++        self.active
++            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
++            .ok()
++            .map(|_| DiagnosticPermit { gate: self })
++    }
++}
++
++struct DiagnosticPermit {
++    gate: &'static DiagnosticGate,
++}
++
++impl Drop for DiagnosticPermit {
++    fn drop(&mut self) {
++        self.gate.active.store(false, Ordering::Release);
++    }
++}
++
++fn diagnostic_gate() -> &'static DiagnosticGate {
++    static GATE: DiagnosticGate = DiagnosticGate::new();
++    &GATE
++}
++
++fn def() -> &'static ToolDef {
++    DEF.get_or_init(|| ToolDef {
++        name: "diagnose_foreground_oracles".into(),
++        description: "Read-only, bounded comparison of AppKit, WindowServer, AX, and CG point-hit-test foreground observations for an exact macOS target window. Samples at 0/100/300 ms within 500 ms. Does not activate, capture, move the cursor, or dispatch input. It is diagnostic evidence only and never authorizes a click.".into(),
++        input_schema: json!({
++            "type": "object",
++            "required": ["pid", "window_id", "x", "y"],
++            "properties": {
++                "pid": { "type": "integer", "minimum": 1 },
++                "window_id": { "type": "integer", "minimum": 1 },
++                "x": { "type": "number" },
++                "y": { "type": "number" }
++            },
++            "additionalProperties": false
++        }),
++        read_only: true,
++        destructive: false,
++        idempotent: true,
++        open_world: false,
++    })
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum EvidenceConclusion {
++    TargetConsistent,
++    OracleDisagreement,
++    FocusOrOcclusionMismatch,
++    Inconclusive,
++}
++
++fn classify_evidence(
++    target_pid: i32,
++    target_window_id: u32,
++    front_stable: Option<bool>,
++    front_matches_target: Option<bool>,
++    focused_window: Option<u32>,
++    focused_element_owner: Option<i32>,
++    point_top: Option<bool>,
++) -> EvidenceConclusion {
++    let (Some(true), Some(true), Some(window_id), Some(owner_pid), Some(true)) = (
++        front_stable,
++        front_matches_target,
++        focused_window,
++        focused_element_owner,
++        point_top,
++    ) else {
++        if front_stable != Some(true) {
++            return EvidenceConclusion::Inconclusive;
++        }
++        if front_matches_target == Some(false) {
++            return EvidenceConclusion::FocusOrOcclusionMismatch;
++        }
++        if focused_window.is_some_and(|value| value != target_window_id)
++            || focused_element_owner.is_some_and(|value| value != target_pid)
++            || point_top == Some(false)
++        {
++            return EvidenceConclusion::FocusOrOcclusionMismatch;
++        }
++        return EvidenceConclusion::Inconclusive;
++    };
++    if window_id != target_window_id || owner_pid != target_pid {
++        return EvidenceConclusion::FocusOrOcclusionMismatch;
++    }
++    EvidenceConclusion::TargetConsistent
++}
++
++fn classify_appkit_independent(
++    independent: EvidenceConclusion,
++    workspace_front_pid: Option<i32>,
++    target_active: Option<bool>,
++    target_pid: i32,
++) -> EvidenceConclusion {
++    match independent {
++        EvidenceConclusion::TargetConsistent
++            if workspace_front_pid.is_some() && target_active.is_some() =>
++        {
++            if workspace_front_pid != Some(target_pid) || target_active != Some(true) {
++                EvidenceConclusion::OracleDisagreement
++            } else {
++                EvidenceConclusion::TargetConsistent
++            }
++        }
++        EvidenceConclusion::TargetConsistent => EvidenceConclusion::Inconclusive,
++        other => other,
++    }
++}
++
++fn now_unix_ms() -> Option<u128> {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .ok()
++        .map(|duration| duration.as_millis())
++}
++
++fn remaining(deadline: Instant) -> Option<Duration> {
++    deadline
++        .checked_duration_since(Instant::now())
++        .filter(|d| !d.is_zero())
++}
++
++fn timeout_element(
++    element: crate::ax::bindings::AXUIElementRef,
++    deadline: Instant,
++) -> Result<(), &'static str> {
++    let Some(left) = remaining(deadline) else {
++        return Err("deadline_expired");
++    };
++    let seconds = left.as_secs_f32();
++    if !seconds.is_finite() || seconds <= 0.0 {
++        return Err("deadline_expired");
++    }
++    let result = unsafe { crate::ax::bindings::AXUIElementSetMessagingTimeout(element, seconds) };
++    checked_timeout_setup(result == crate::ax::bindings::kAXErrorSuccess, deadline)
++}
++
++fn checked_timeout_setup(setup_succeeded: bool, deadline: Instant) -> Result<(), &'static str> {
++    if !setup_succeeded {
++        return Err("timeout_setup_failed");
++    }
++    if remaining(deadline).is_none() {
++        return Err("deadline_expired");
++    }
++    Ok(())
++}
++
++struct AxFocus {
++    focused_window_id: Option<u32>,
++    focused_element_owner_pid: Option<i32>,
++    window_status: &'static str,
++    element_owner_status: &'static str,
++}
++
++fn read_ax_focus(pid: i32, deadline: Instant) -> AxFocus {
++    use crate::ax::bindings::{AXUIElementCreateApplication, AXUIElementGetPid};
++    use core_foundation::base::{CFRelease, CFTypeRef};
++
++    let app = unsafe { AXUIElementCreateApplication(pid) };
++    if app.is_null() {
++        return AxFocus {
++            focused_window_id: None,
++            focused_element_owner_pid: None,
++            window_status: "application_element_unavailable",
++            element_owner_status: "application_element_unavailable",
++        };
++    }
++
++    let window_timeout = timeout_element(app, deadline);
++    let window = if window_timeout.is_ok() {
++        unsafe { crate::ax::bindings::copy_element_attr(app, "AXFocusedWindow") }
++    } else {
++        None
++    };
++    let (focused_window_id, window_status) = match window {
++        Some(window) => {
++            let setup = timeout_element(window as crate::ax::bindings::AXUIElementRef, deadline);
++            let id = if setup.is_ok() && remaining(deadline).is_some() {
++                unsafe { crate::ax::bindings::ax_get_window_id(window) }
++            } else {
++                None
++            };
++            unsafe { CFRelease(window as CFTypeRef) };
++            match (setup, id) {
++                (Err(reason), _) => (None, reason),
++                (Ok(()), Some(id)) if remaining(deadline).is_some() => (Some(id), "available"),
++                (Ok(()), Some(_)) => (None, "deadline_expired"),
++                (Ok(()), None) if remaining(deadline).is_none() => (None, "deadline_expired"),
++                (Ok(()), None) => (None, "window_id_unavailable"),
++            }
++        }
++        None if window_timeout.is_err() => (None, window_timeout.err().unwrap_or("unknown")),
++        None if remaining(deadline).is_none() => (None, "deadline_expired"),
++        None => (None, "focused_window_unavailable"),
++    };
++
++    let element_timeout = timeout_element(app, deadline);
++    let focused_element = if element_timeout.is_ok() {
++        unsafe { crate::ax::bindings::copy_element_attr(app, "AXFocusedUIElement") }
++    } else {
++        None
++    };
++    let (focused_element_owner_pid, element_owner_status) = match focused_element {
++        Some(element) => {
++            let setup = timeout_element(element, deadline);
++            let mut owner = 0i32;
++            let result = if setup.is_ok() && remaining(deadline).is_some() {
++                unsafe { AXUIElementGetPid(element, &mut owner) }
++            } else {
++                -1
++            };
++            unsafe { CFRelease(element as CFTypeRef) };
++            if let Err(reason) = setup {
++                (None, reason)
++            } else if remaining(deadline).is_none() {
++                (None, "deadline_expired")
++            } else if result == crate::ax::bindings::kAXErrorSuccess && owner > 0 {
++                (Some(owner), "available")
++            } else {
++                (None, "focused_element_owner_unavailable")
++            }
++        }
++        None if element_timeout.is_err() => (None, element_timeout.err().unwrap_or("unknown")),
++        None if remaining(deadline).is_none() => (None, "deadline_expired"),
++        None => (None, "focused_element_unavailable"),
++    };
++
++    unsafe { CFRelease(app as CFTypeRef) };
++    AxFocus {
++        focused_window_id,
++        focused_element_owner_pid,
++        window_status,
++        element_owner_status,
++    }
++}
++
++fn sample(
++    pid: i32,
++    window_id: u32,
++    x: f64,
++    y: f64,
++    deadline: Instant,
++    index: usize,
++    offset: Duration,
++) -> Value {
++    let started = Instant::now();
++    let before = crate::input::skylight::observe_front_process(pid, window_id);
++    let front_before = before.map(|value| value.matches_target);
++    let workspace_front_pid = crate::apps::frontmost_pid();
++    let target_active = crate::apps::list_running_apps()
++        .into_iter()
++        .find(|app| app.pid == pid)
++        .map(|app| app.active);
++    let ax = if remaining(deadline).is_some() {
++        read_ax_focus(pid, deadline)
++    } else {
++        AxFocus {
++            focused_window_id: None,
++            focused_element_owner_pid: None,
++            window_status: "deadline_expired",
++            element_owner_status: "deadline_expired",
++        }
++    };
++    let report = if remaining(deadline).is_some() {
++        Some(crate::windows::exact_window_hit_test_report(
++            pid, window_id, x, y, None,
++        ))
++    } else {
++        None
++    };
++    let after = if remaining(deadline).is_some() {
++        crate::input::skylight::observe_front_process(pid, window_id)
++    } else {
++        None
++    };
++    let front_stable = before
++        .zip(after)
++        .map(|(before, after)| before.same_process(after));
++    let front_after = after.map(|value| value.matches_target);
++    let front_target = match (front_stable, front_before, front_after) {
++        (Some(true), Some(before), Some(after)) if before == after => Some(before),
++        _ => None,
++    };
++
++    let point_top = report.as_ref().and_then(|report| {
++        if report.read_status != "ok"
++            || report.malformed_row_count != 0
++            || report.target_row.is_none()
++        {
++            None
++        } else {
++            Some(report.allowed)
++        }
++    });
++    let conclusion = classify_evidence(
++        pid,
++        window_id,
++        front_stable,
++        front_target,
++        ax.focused_window_id,
++        ax.focused_element_owner_pid,
++        point_top,
++    );
++    let conclusion =
++        classify_appkit_independent(conclusion, workspace_front_pid, target_active, pid);
++    let sample_complete = front_stable == Some(true)
++        && front_target.is_some()
++        && workspace_front_pid.is_some()
++        && target_active.is_some()
++        && ax.focused_window_id.is_some()
++        && ax.focused_element_owner_pid.is_some()
++        && report.as_ref().is_some_and(|report| {
++            report.read_status == "ok"
++                && report.malformed_row_count == 0
++                && report.target_row.is_some()
++        });
++
++    json!({
++        "sampleIndex": index,
++        "status": if sample_complete { "complete" } else { "inconclusive" },
++        "scheduledOffsetMs": offset.as_millis(),
++        "elapsedSinceSampleStartMs": started.elapsed().as_millis(),
++        "observedAtUnixMs": now_unix_ms(),
++        "processId": std::process::id(),
++        "processGeneration": GENERATION.get_or_init(|| uuid::Uuid::new_v4().to_string()),
++        "threadId": format!("{:?}", thread::current().id()),
++        "isMainThread": is_main_thread(),
++        "appKit": {
++            "frontmostPid": {"status": if workspace_front_pid.is_some() { "available" } else { "unknown" }, "value": workspace_front_pid},
++            "targetIsActive": {"status": if target_active.is_some() { "available_related_dynamic_state" } else { "unknown" }, "value": target_active}
++        },
++        "windowServer": {
++            "frontProcessBeforeMatchesTarget": front_before,
++            "frontProcessAfterMatchesTarget": front_after,
++            "sameFrontProcessBeforeAndAfter": front_stable,
++            "targetMatchStable": front_target
++        },
++        "accessibility": {
++            "focusedWindowId": {"status": ax.window_status, "value": ax.focused_window_id},
++            "focusedElementOwnerPid": {"status": ax.element_owner_status, "value": ax.focused_element_owner_pid}
++        },
++        "cgPoint": {
++            "status": report.as_ref().map(|r| if r.read_status == "ok" && r.malformed_row_count == 0 { "available" } else { "unknown_incomplete_inventory" }).unwrap_or("deadline_expired"),
++            "targetIdentity": report.as_ref().and_then(|r| r.target_row.as_ref()).map(|row| json!({"pid": row.pid, "windowId": row.window_id, "layer": row.layer, "zIndex": row.z_index, "onScreen": row.is_on_screen})),
++            "pointTopMatchesTarget": point_top,
++            "readStatus": report.as_ref().map(|r| r.read_status),
++            "rawRows": report.as_ref().and_then(|r| r.raw_row_count),
++            "parsedRows": report.as_ref().map(|r| r.parsed_row_count),
++            "malformedRows": report.as_ref().map(|r| r.malformed_row_count),
++            "outcome": report.as_ref().map(|r| r.outcome),
++            "firstBlockingWindow": report.as_ref().and_then(|r| r.first_blocking_row.as_ref()).map(|row| json!({"pid": row.pid, "windowId": row.window_id, "layer": row.layer, "zIndex": row.z_index, "onScreen": row.is_on_screen}))
++        },
++        "conclusion": match conclusion {
++            EvidenceConclusion::TargetConsistent => "independent_oracles_target_consistent",
++            EvidenceConclusion::OracleDisagreement => "appkit_vs_independent_oracle_disagreement",
++            EvidenceConclusion::FocusOrOcclusionMismatch => "focus_or_point_mismatch",
++            EvidenceConclusion::Inconclusive => "inconclusive",
++        }
++    })
++}
++
++fn is_main_thread() -> Option<bool> {
++    #[cfg(target_os = "macos")]
++    {
++        Some(unsafe { libc::pthread_main_np() != 0 })
++    }
++    #[cfg(not(target_os = "macos"))]
++    {
++        None
++    }
++}
++
++fn collect(pid: i32, window_id: u32, x: f64, y: f64) -> Value {
++    let start = Instant::now();
++    let deadline = start + TOTAL_BUDGET;
++    let mut samples = Vec::new();
++    for (index, offset) in SAMPLE_OFFSETS.into_iter().enumerate() {
++        let scheduled = start + offset;
++        if Instant::now() < scheduled {
++            thread::sleep(scheduled.saturating_duration_since(Instant::now()));
++        }
++        if remaining(deadline).is_none() {
++            samples.push(json!({"sampleIndex": index, "scheduledOffsetMs": offset.as_millis(), "conclusion": "not_sampled_deadline", "status": "unknown"}));
++            continue;
++        }
++        samples.push(sample(pid, window_id, x, y, deadline, index, offset));
++    }
++    let elapsed = start.elapsed();
++    json!({
++        "schema": "foreground-oracle-diagnostic-v1",
++        "diagnosticOnly": true,
++        "authorizesInput": false,
++        "target": {"pid": pid, "windowId": window_id, "screenX": x, "screenY": y},
++        "budgetMs": TOTAL_BUDGET.as_millis(),
++        "elapsedMs": elapsed.as_millis(),
++        "deadlineMet": elapsed <= TOTAL_BUDGET,
++        "samples": samples
++    })
++}
++
++#[async_trait]
++impl Tool for ForegroundOracleDiagnosticTool {
++    fn def(&self) -> &ToolDef {
++        def()
++    }
++
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let Some(pid) = args
++            .get("pid")
++            .and_then(Value::as_i64)
++            .and_then(|v| i32::try_from(v).ok())
++            .filter(|v| *v > 0)
++        else {
++            return ToolResult::error(
++                "diagnose_foreground_oracles requires a positive 32-bit pid.",
++            );
++        };
++        let Some(window_id) = args
++            .get("window_id")
++            .and_then(Value::as_i64)
++            .and_then(|v| u32::try_from(v).ok())
++            .filter(|v| *v > 0)
++        else {
++            return ToolResult::error(
++                "diagnose_foreground_oracles requires a positive 32-bit window_id.",
++            );
++        };
++        let Some(x) = args
++            .get("x")
++            .and_then(Value::as_f64)
++            .filter(|v| v.is_finite())
++        else {
++            return ToolResult::error(
++                "diagnose_foreground_oracles requires a finite screen x coordinate.",
++            );
++        };
++        let Some(y) = args
++            .get("y")
++            .and_then(Value::as_f64)
++            .filter(|v| v.is_finite())
++        else {
++            return ToolResult::error(
++                "diagnose_foreground_oracles requires a finite screen y coordinate.",
++            );
++        };
++        let Some(permit) = diagnostic_gate().try_acquire() else {
++            return ToolResult::text(
++                "A previous foreground diagnostic worker is still running; evidence is unknown.",
++            )
++            .with_structured(json!({
++                "schema": "foreground-oracle-diagnostic-v1",
++                "diagnosticOnly": true,
++                "authorizesInput": false,
++                "budgetMs": TOTAL_BUDGET.as_millis(),
++                "deadlineMet": false,
++                "workerMayStillRun": true,
++                "status": "unknown_worker_busy"
++            }));
++        };
++        let (sender, receiver) = mpsc::sync_channel(1);
++        let worker = thread::Builder::new()
++            .name("cua-foreground-oracle-diagnostic".into())
++            .spawn(move || {
++                let _permit = permit;
++                let report = collect(pid, window_id, x, y);
++                let _ = sender.send(report);
++            });
++        if worker.is_err() {
++            return ToolResult::error(
++                "foreground diagnostic worker could not start; evidence is unknown.",
++            );
++        }
++        let job = tokio::task::spawn_blocking(move || receiver.recv_timeout(TOTAL_BUDGET));
++        match tokio::time::timeout(TOTAL_BUDGET, job).await {
++            Ok(Ok(report)) => ToolResult::text("Read-only foreground oracle samples collected.")
++                .with_structured(match report {
++                    Ok(report) => report,
++                    Err(mpsc::RecvTimeoutError::Timeout) => json!({
++                        "schema": "foreground-oracle-diagnostic-v1",
++                        "diagnosticOnly": true,
++                        "authorizesInput": false,
++                        "target": {"pid": pid, "windowId": window_id},
++                        "budgetMs": TOTAL_BUDGET.as_millis(),
++                        "deadlineMet": false,
++                        "workerMayStillRun": true,
++                        "status": "unknown_worker_timeout"
++                    }),
++                    Err(mpsc::RecvTimeoutError::Disconnected) => json!({
++                        "schema": "foreground-oracle-diagnostic-v1",
++                        "diagnosticOnly": true,
++                        "authorizesInput": false,
++                        "target": {"pid": pid, "windowId": window_id},
++                        "budgetMs": TOTAL_BUDGET.as_millis(),
++                        "deadlineMet": false,
++                        "workerMayStillRun": false,
++                        "status": "unknown_worker_ended"
++                    }),
++                }),
++            Ok(Err(_)) => {
++                ToolResult::error("foreground diagnostic worker failed; evidence is unknown.")
++            }
++            Err(_) => ToolResult::text(
++                "Foreground diagnostic exceeded its bounded deadline; evidence is unknown.",
++            )
++            .with_structured(json!({
++                "schema": "foreground-oracle-diagnostic-v1",
++                "diagnosticOnly": true,
++                "authorizesInput": false,
++                "target": {"pid": pid, "windowId": window_id},
++                "budgetMs": TOTAL_BUDGET.as_millis(),
++                "deadlineMet": false,
++                "workerMayStillRun": true,
++                "samples": [],
++                "status": "unknown_deadline"
++            })),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn diagnostic_gate_stays_held_until_blocked_worker_exits() {
++        static GATE: DiagnosticGate = DiagnosticGate::new();
++        let permit = GATE.try_acquire().expect("first worker acquires gate");
++        let (sender, receiver) = mpsc::sync_channel(1);
++        let worker = std::thread::spawn(move || {
++            let _permit = permit;
++            std::thread::sleep(Duration::from_millis(40));
++            let _ = sender.send(());
++        });
++        assert_eq!(
++            receiver.recv_timeout(Duration::from_millis(5)),
++            Err(mpsc::RecvTimeoutError::Timeout),
++            "caller times out while the diagnostic worker remains blocked"
++        );
++        assert!(
++            GATE.try_acquire().is_none(),
++            "no duplicate worker while timed-out work remains active"
++        );
++        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
++        worker.join().unwrap();
++        assert!(
++            GATE.try_acquire().is_some(),
++            "permit releases on worker exit"
++        );
++    }
++
++    #[test]
++    fn positive_independent_evidence_is_only_diagnostic_consistency() {
++        assert_eq!(
++            classify_evidence(
++                24577,
++                7192,
++                Some(true),
++                Some(true),
++                Some(7192),
++                Some(24577),
++                Some(true)
++            ),
++            EvidenceConclusion::TargetConsistent
++        );
++    }
++
++    #[test]
++    fn changed_or_unknown_windowserver_process_is_inconclusive() {
++        assert_eq!(
++            classify_evidence(24577, 7192, None, None, Some(7192), Some(24577), Some(true)),
++            EvidenceConclusion::Inconclusive
++        );
++        assert_eq!(
++            classify_evidence(
++                24577,
++                7192,
++                None,
++                Some(true),
++                Some(7192),
++                Some(24577),
++                Some(true)
++            ),
++            EvidenceConclusion::Inconclusive
++        );
++    }
++
++    #[test]
++    fn ax_owner_or_focused_window_mismatch_never_confirms_target() {
++        assert_eq!(
++            classify_evidence(
++                24577,
++                7192,
++                Some(true),
++                Some(true),
++                Some(1),
++                Some(24577),
++                Some(true)
++            ),
++            EvidenceConclusion::FocusOrOcclusionMismatch
++        );
++        assert_eq!(
++            classify_evidence(
++                24577,
++                7192,
++                Some(true),
++                Some(true),
++                Some(7192),
++                Some(20333),
++                Some(true)
++            ),
++            EvidenceConclusion::FocusOrOcclusionMismatch
++        );
++    }
++
++    #[test]
++    fn missing_appkit_observation_is_inconclusive_not_disagreement() {
++        assert_eq!(
++            classify_appkit_independent(
++                EvidenceConclusion::TargetConsistent,
++                None,
++                Some(true),
++                24577
++            ),
++            EvidenceConclusion::Inconclusive
++        );
++        assert_eq!(
++            classify_appkit_independent(
++                EvidenceConclusion::TargetConsistent,
++                Some(24577),
++                None,
++                24577
++            ),
++            EvidenceConclusion::Inconclusive
++        );
++        assert_eq!(
++            classify_appkit_independent(
++                EvidenceConclusion::TargetConsistent,
++                Some(20333),
++                Some(true),
++                24577
++            ),
++            EvidenceConclusion::OracleDisagreement
++        );
++    }
++
++    #[test]
++    fn ax_timeout_setup_failure_stays_unknown() {
++        let deadline = Instant::now() + Duration::from_secs(1);
++        assert_eq!(
++            checked_timeout_setup(false, deadline),
++            Err("timeout_setup_failed")
++        );
++        assert_eq!(
++            classify_evidence(24577, 7192, Some(true), Some(true), None, None, Some(true)),
++            EvidenceConclusion::Inconclusive
++        );
++    }
++
++    #[test]
++    fn point_occluder_or_incomplete_evidence_never_confirms_target() {
++        assert_eq!(
++            classify_evidence(
++                24577,
++                7192,
++                Some(true),
++                Some(true),
++                Some(7192),
++                Some(24577),
++                Some(false)
++            ),
++            EvidenceConclusion::FocusOrOcclusionMismatch
++        );
++        assert_eq!(
++            classify_evidence(
++                24577,
++                7192,
++                Some(true),
++                Some(true),
++                Some(7192),
++                Some(24577),
++                None
++            ),
++            EvidenceConclusion::Inconclusive
++        );
++    }
++}

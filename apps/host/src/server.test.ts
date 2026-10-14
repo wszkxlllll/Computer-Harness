@@ -10,6 +10,22 @@ const runId = "run-123456" as RunId;
 const assetId = "asset-123456" as AssetId;
 const targetToken = "T".repeat(32);
 
+function containsPrivateWindowIdentityKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsPrivateWindowIdentityKey);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, child]) =>
+    /^(?:pid|windowid|socketpath)$/iu.test(key) || containsPrivateWindowIdentityKey(child));
+}
+
+describe("window identity serialization assertions", () => {
+  it("checks nested key names without treating opaque token values as private fields", () => {
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ token: "fixture-pID-windowId-socketPath-opaque" }] })).toBe(false);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { pid: 451 } } }] })).toBe(true);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { windowId: 894 } } }] })).toBe(true);
+    expect(containsPrivateWindowIdentityKey({ candidates: [{ identity: { target: { socketPath: "/private/socket" } } }] })).toBe(true);
+  });
+});
+
 function snapshot(sequence = 0): RemoteRunSnapshot {
   return {
     runId,
@@ -20,13 +36,39 @@ function snapshot(sequence = 0): RemoteRunSnapshot {
   };
 }
 
-function fakeApi(): RemoteRunApi {
+function fakeApi(
+  nativeRecoveryProfile?: { readonly profileId: string; readonly label: string },
+  nativeWebDocumentProfile?: { readonly profileId: string; readonly label: string },
+): RemoteRunApi {
   return {
     listRuns: () => [snapshot()],
     getRun: (_deviceId, id) => id === runId ? snapshot(0) : undefined,
     listWindowTargets: async () => ({
       candidates: [{ token: targetToken, appName: "Fixture app", title: "Fixture window" }],
       expiresAt: "2026-09-26T00:10:00.000Z",
+      ...(nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile }),
+      ...(nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile }),
+    }),
+    previewWindowTarget: async (_deviceId, candidateToken) => Object.assign({
+      previewToken: "P".repeat(32),
+      appName: "Fixture app",
+      title: "Fixture window",
+      relationship: { kind: "owned_child" as const, rootRole: "dialog" as const, parentAppName: "Fixture app", parentTitle: "Parent window" },
+      capturedAt: "2026-09-26T00:00:00.000Z",
+      expiresAt: "2026-09-26T00:02:00.000Z",
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: candidateToken === targetToken ? "iVBORw0KGgo=" : "",
+    }, { pid: 451, windowId: 894, socketPath: "private.sock" }),
+    previewWindowHandoffCandidate: async (_deviceId, _runId, requestId, candidateToken) => ({
+      previewToken: "P".repeat(32),
+      appName: "Fixture app",
+      title: "Fixture window",
+      capturedAt: "2026-09-26T00:00:00.000Z",
+      expiresAt: "2026-09-26T00:02:00.000Z",
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: requestId.length > 0 && candidateToken.length > 0 ? "iVBORw0KGgo=" : "",
     }),
     startRun: async (_deviceId, commandId, goal, _target) => ({
       ...snapshot(),
@@ -61,6 +103,123 @@ function jsonResponse<T>(response: { json(): T }): T {
 }
 
 describe("Host HTTP boundary", () => {
+  it("returns typed missing-provider configuration as a fixed 409 response", async () => {
+    const api = fakeApi();
+    const startRun = vi.fn(async () => {
+      throw new RemoteRunApiError("PROVIDER_CREDENTIALS_MISSING", "所选模型尚未配置凭据。请在电脑端完成配置后重试。");
+    });
+    const host = createHostServer({ api: { ...api, startRun }, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin });
+    try {
+      const localCsrf = jsonResponse<{ csrfToken: string }>(await host.server.inject({
+        method: "GET", url: "/api/local/session", headers: { origin: localOrigin },
+      })).csrfToken;
+      const pairing = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+        method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+      }));
+      const token = new URL(pairing.pairingUrl).searchParams.get("token")!;
+      const pairRequest = jsonResponse<{ requestId: string }>(await host.server.inject({
+        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Provider preflight fixture" },
+      }));
+      await host.server.inject({
+        method: "POST", url: `/api/local/pairing/requests/${pairRequest.requestId}/confirm`,
+        headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+      });
+      const paired = await host.server.inject({ method: "POST", url: `/api/pair/requests/${pairRequest.requestId}/session`, headers: { origin: relayOrigin }, payload: {} });
+      const body = jsonResponse<{ csrfToken: string }>(paired);
+      const response = await host.server.inject({
+        method: "POST", url: "/api/runs",
+        headers: { origin: relayOrigin, cookie: String(paired.headers["set-cookie"]).split(";")[0], "x-csrf-token": body.csrfToken },
+        payload: { commandId: "provider-preflight", goal: "Read the fixture", target: { mode: "browser", url: "about:blank" } },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(jsonResponse(response)).toEqual({ error: {
+        code: "PROVIDER_CREDENTIALS_MISSING",
+        message: "所选模型尚未配置凭据。请在电脑端完成配置后重试。",
+      } });
+      expect(startRun).toHaveBeenCalledOnce();
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("exposes only the opaque native profile id and accepts only its exact selector shape", async () => {
+    const profileId = "Opaque_Profile_1234567890";
+    const hybridProfileId = "Opaque_Hybrid_Profile_12345";
+    const api = fakeApi({ profileId, label: "Host TextEdit recovery" }, { profileId: hybridProfileId, label: "Host Browser and TextEdit recovery" });
+    const startRun = vi.fn(api.startRun);
+    const host = createHostServer({ api: { ...api, startRun }, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin });
+    try {
+      const localCsrf = jsonResponse<{ csrfToken: string }>(await host.server.inject({
+        method: "GET", url: "/api/local/session", headers: { origin: localOrigin },
+      })).csrfToken;
+      const pairing = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+        method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+      }));
+      const token = new URL(pairing.pairingUrl).searchParams.get("token")!;
+      const pairRequest = jsonResponse<{ requestId: string }>(await host.server.inject({
+        method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName: "Recovery profile fixture" },
+      }));
+      await host.server.inject({
+        method: "POST", url: `/api/local/pairing/requests/${pairRequest.requestId}/confirm`,
+        headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+      });
+      const paired = await host.server.inject({
+        method: "POST", url: `/api/pair/requests/${pairRequest.requestId}/session`, headers: { origin: relayOrigin }, payload: {},
+      });
+      const pairedBody = jsonResponse<{ csrfToken: string }>(paired);
+      const cookie = String(paired.headers["set-cookie"]).split(";")[0];
+      const headers = { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken };
+
+      const choices = await host.server.inject({ method: "GET", url: "/api/windows", headers: { origin: relayOrigin, cookie } });
+      expect(jsonResponse(choices).nativeRecoveryProfile).toEqual({ profileId, label: "Host TextEdit recovery" });
+      expect(jsonResponse(choices).nativeWebDocumentProfile).toEqual({ profileId: hybridProfileId, label: "Host Browser and TextEdit recovery" });
+      expect(containsPrivateWindowIdentityKey(jsonResponse(choices))).toBe(false);
+
+      const extraRawFields = await host.server.inject({
+        method: "POST", url: "/api/runs", headers,
+        payload: { commandId: "native-profile-extra", goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId, pid: 77, windowId: 1101 } },
+      });
+      expect(extraRawFields.statusCode).toBe(400);
+
+      for (const switchWindows of [true, false]) {
+        const targetExtra = await host.server.inject({
+          method: "POST", url: "/api/runs", headers,
+          payload: { commandId: `native-profile-switch-${switchWindows}`, goal: "Save the file to /tmp/itinerary.txt", target: { mode: "native-recovery", profileId, switchWindows } },
+        });
+        expect(targetExtra.statusCode).toBe(400);
+      }
+      expect(startRun).not.toHaveBeenCalled();
+
+      const exactGoal = "  Save the file to /tmp/itinerary.txt\n正文末行。\n\n";
+      const started = await host.server.inject({
+        method: "POST", url: "/api/runs", headers,
+        payload: { commandId: "native-profile-valid", goal: exactGoal, target: { mode: "native-recovery", profileId } },
+      });
+      expect(started.statusCode).toBe(202);
+      expect(startRun).toHaveBeenCalledWith(expect.any(String), "native-profile-valid", exactGoal, { mode: "native-recovery", profileId }, undefined, false);
+
+      for (const target of [
+        { mode: "native-web-document", profileId: hybridProfileId, url: "https://example.test/" },
+        { mode: "native-web-document", profileId: hybridProfileId, pid: 77 },
+        { mode: "native-web-document", profileId: hybridProfileId, path: "/tmp/output.txt" },
+        { mode: "native-web-document", profileId: hybridProfileId, switchWindows: false },
+      ]) {
+        const invalid = await host.server.inject({ method: "POST", url: "/api/runs", headers,
+          payload: { commandId: `hybrid-invalid-${startRun.mock.calls.length}`, goal: exactGoal, target },
+        });
+        expect(invalid.statusCode).toBe(400);
+      }
+      const hybrid = await host.server.inject({ method: "POST", url: "/api/runs", headers,
+        payload: { commandId: "hybrid-profile-valid", goal: exactGoal, target: { mode: "native-web-document", profileId: hybridProfileId } },
+      });
+      expect(hybrid.statusCode).toBe(202);
+      expect(startRun).toHaveBeenCalledWith(expect.any(String), "hybrid-profile-valid", exactGoal,
+        { mode: "native-web-document", profileId: hybridProfileId }, undefined, false);
+    } finally {
+      await host.close();
+    }
+  });
+
   it("exposes only the authenticated managed-profile contract and keeps commands idempotent", async () => {
     const operationId = "11111111-1111-4111-8111-111111111111";
     let state: ManagedBrowserProfileStateView = {
@@ -316,7 +475,43 @@ describe("Host HTTP boundary", () => {
       expect(choicesResponse.statusCode).toBe(200);
       const choices = jsonResponse<{ candidates: Array<Record<string, unknown>>; expiresAt: string }>(choicesResponse);
       expect(choices.candidates).toEqual([{ token: targetToken, appName: "Fixture app", title: "Fixture window" }]);
-      expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+      expect(containsPrivateWindowIdentityKey(choices)).toBe(false);
+
+      const missingPreviewCsrf = await host.server.inject({
+        method: "POST", url: "/api/windows/preview", headers: { origin: relayOrigin, cookie }, payload: { candidateToken: targetToken },
+      });
+      expect(missingPreviewCsrf.statusCode).toBe(403);
+      const malformedPreview = await host.server.inject({
+        method: "POST", url: "/api/windows/preview", headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { candidateToken: targetToken, pid: 451 },
+      });
+      expect(malformedPreview.statusCode).toBe(400);
+      expect(malformedPreview.headers["cache-control"]).toContain("no-store");
+      const windowPreview = await host.server.inject({
+        method: "POST", url: "/api/windows/preview", headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { candidateToken: targetToken },
+      });
+      expect(windowPreview.statusCode).toBe(200);
+      expect(windowPreview.headers["cache-control"]).toContain("no-store");
+      expect(jsonResponse(windowPreview)).toMatchObject({ appName: "Fixture app", title: "Fixture window", relationship: { kind: "owned_child", rootRole: "dialog", parentTitle: "Parent window" }, mediaType: "image/png", viewport: { width: 320, height: 240 } });
+      expect(containsPrivateWindowIdentityKey(windowPreview.json())).toBe(false);
+
+      const bridgePreview = await host.relayHandler.request({
+        type: "bridge.request", requestId: "bridge-window-preview", method: "POST", path: "/api/windows/preview",
+        deviceId, sessionToken: cookie.split("=")[1], csrfToken: pairedBody.csrfToken, body: { candidateToken: targetToken },
+      });
+      expect(bridgePreview.statusCode).toBe(200);
+      expect(bridgePreview.body).toMatchObject({ appName: "Fixture app", title: "Fixture window", relationship: { kind: "owned_child", rootRole: "dialog", parentTitle: "Parent window" }, mediaType: "image/png" });
+      expect(containsPrivateWindowIdentityKey(bridgePreview.body)).toBe(false);
+
+      const handoffPreview = await host.server.inject({
+        method: "POST", url: `/api/runs/${runId}/window-candidates/preview`,
+        headers: { origin: relayOrigin, cookie, "x-csrf-token": pairedBody.csrfToken },
+        payload: { requestId: "action-window-1", candidateToken: targetToken },
+      });
+      expect(handoffPreview.statusCode).toBe(200);
+      expect(handoffPreview.headers["cache-control"]).toContain("no-store");
+      expect(jsonResponse(handoffPreview)).toMatchObject({ appName: "Fixture app", title: "Fixture window", mediaType: "image/png" });
 
       const missingCsrf = await host.server.inject({
         method: "POST",
@@ -652,7 +847,7 @@ describe("Host HTTP boundary", () => {
         sessionToken: secret.sessionToken,
       });
       expect(bridgeWindows.statusCode).toBe(200);
-      expect(JSON.stringify(bridgeWindows.body)).not.toMatch(/pid|windowId/iu);
+      expect(containsPrivateWindowIdentityKey(bridgeWindows.body)).toBe(false);
       expect(host.relayHandler.authorizeSession("other-device", secret.sessionToken)).toBe(false);
       expect(host.relayHandler.authorizeSession(deviceId, "not-a-session")).toBe(false);
     } finally {
@@ -723,6 +918,98 @@ describe("Host HTTP boundary", () => {
     } finally {
       await reader?.cancel().catch(() => undefined);
       await host.close();
+    }
+  });
+
+  it("releases SSE admission slots on close and abort while preserving per-device limits", async () => {
+    let closedSubscriptions = 0;
+    const api: RemoteRunApi = {
+      ...fakeApi(),
+      subscribe: () => ({ close: () => { closedSubscriptions += 1; } }),
+    };
+    const host = createHostServer({ api, allowedOrigins: [localOrigin, relayOrigin], bridgeOrigin: relayOrigin, port: 0 });
+    const connections: Array<{ reader: ReadableStreamDefaultReader<Uint8Array>; controller: AbortController }> = [];
+    let hostClosed = false;
+    try {
+      const localCsrf = jsonResponse<{ csrfToken: string }>(await host.server.inject({
+        method: "GET", url: "/api/local/session", headers: { origin: localOrigin },
+      })).csrfToken;
+      async function pairDevice(clientName: string) {
+        const challenge = jsonResponse<{ pairingUrl: string }>(await host.server.inject({
+          method: "POST", url: "/api/local/pairing", headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: {},
+        }));
+        const token = new URL(challenge.pairingUrl).searchParams.get("token")!;
+        const pair = jsonResponse<{ requestId: string }>(await host.server.inject({
+          method: "POST", url: "/api/pair/requests", headers: { origin: relayOrigin }, payload: { token, clientName },
+        }));
+        await host.server.inject({
+          method: "POST", url: "/api/local/pairing/requests/" + pair.requestId + "/confirm",
+          headers: { origin: localOrigin, "x-csrf-token": localCsrf }, payload: { approved: true },
+        });
+        const paired = await host.server.inject({
+          method: "POST", url: "/api/pair/requests/" + pair.requestId + "/session", headers: { origin: relayOrigin }, payload: {},
+        });
+        return String(paired.headers["set-cookie"]).split(";")[0];
+      }
+
+      const firstDeviceCookie = await pairDevice("SSE limit device A");
+      const secondDeviceCookie = await pairDevice("SSE limit device B");
+      const address = new URL(await host.listen());
+      async function connect(cookie: string) {
+        const controller = new AbortController();
+        const response = await fetch(new URL("/api/runs/" + runId + "/events", address), {
+          headers: { origin: relayOrigin, cookie, accept: "text/event-stream" }, signal: controller.signal,
+        });
+        if (response.status !== 200) return { status: response.status, controller } as const;
+        const reader = response.body!.getReader();
+        const first = await reader.read();
+        expect(new TextDecoder().decode(first.value)).toContain(": connected");
+        const connection = { status: response.status as const, controller, reader };
+        connections.push(connection);
+        return connection;
+      }
+
+      const deviceA = [
+        await connect(firstDeviceCookie),
+        await connect(firstDeviceCookie),
+        await connect(firstDeviceCookie),
+      ];
+      expect(deviceA.map((connection) => connection.status)).toEqual([200, 200, 200]);
+      expect((await connect(firstDeviceCookie)).status).toBe(429);
+      const deviceB = await connect(secondDeviceCookie);
+      expect(deviceB.status).toBe(200);
+
+      const first = deviceA[0];
+      const second = deviceA[1];
+      const third = deviceA[2];
+      if (first.status !== 200 || second.status !== 200 || third.status !== 200 || deviceB.status !== 200) {
+        throw new Error("SSE test connections were not admitted as expected");
+      }
+      await first.reader.cancel();
+      second.controller.abort();
+      await second.reader.cancel().catch(() => undefined);
+      await third.reader.cancel();
+      for (let attempt = 0; closedSubscriptions < 3 && attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(closedSubscriptions).toBe(3);
+
+      const reopened = await connect(firstDeviceCookie);
+      expect(reopened.status).toBe(200);
+      if (reopened.status !== 200) throw new Error("SSE slot was not released after close/abort");
+      hostClosed = true;
+      await host.close();
+      expect(closedSubscriptions).toBe(5);
+      await expect(Promise.race([
+        Promise.all([deviceB.reader.read(), reopened.reader.read()]),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Host cleanup did not close SSE streams")), 2_000)),
+      ])).resolves.toMatchObject([{ done: true }, { done: true }]);
+    } finally {
+      await Promise.all(connections.map(async ({ controller, reader }) => {
+        controller.abort();
+        await reader.cancel().catch(() => undefined);
+      }));
+      if (!hostClosed) await host.close();
     }
   });
 

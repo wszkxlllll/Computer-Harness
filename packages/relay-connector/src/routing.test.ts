@@ -42,3 +42,29 @@ describe("managed browser profile relay routes", () => {
     expect(isValidApiRequestBody(runs, request({ mode: "browser", sessionMode: "saved", switchWindows: true }))).toBe(true);
   });
 });
+
+describe("candidate-bound window preview relay routes", () => {
+  it("allows only bounded preview requests bound to initial or waiting-run candidates", () => {
+    const initial = resolveAllowedApiRoute("POST", "/api/windows/preview");
+    const handoff = resolveAllowedApiRoute("POST", "/api/runs/run-123/window-candidates/preview");
+    expect(initial?.maxResponseBytes).toBeLessThan(3 * 1024 * 1024 + 1);
+    expect(handoff?.maxResponseBytes).toBe(initial?.maxResponseBytes);
+    expect(resolveAllowedApiRoute("GET", "/api/windows/preview")).toBeNull();
+    expect(resolveAllowedApiRoute("POST", "/api/runs/run-123/window-candidates/preview/other")).toBeNull();
+
+    expect(isValidApiRequestBody(initial!, { candidateToken: "T".repeat(32) })).toBe(true);
+    expect(isValidApiRequestBody(initial!, { candidateToken: "T".repeat(32), pid: 10 })).toBe(false);
+    expect(isValidApiRequestBody(initial!, { candidateToken: "short" })).toBe(false);
+    expect(isValidApiRequestBody(handoff!, { requestId: "action-1", candidateToken: "T".repeat(32) })).toBe(true);
+    expect(isValidApiRequestBody(handoff!, { requestId: "action-1", candidateToken: "T".repeat(32), runId: "other" })).toBe(false);
+    expect(isValidApiRequestBody(handoff!, { requestId: "invalid id", candidateToken: "T".repeat(32) })).toBe(false);
+  });
+
+  it("accepts a window start proof only as a bounded opaque preview token", () => {
+    const runs = resolveAllowedApiRoute("POST", "/api/runs");
+    if (runs === null) throw new Error("expected the run route");
+    const request = (target: JsonObject): JsonObject => ({ commandId: "preview-start", goal: "Use this window", target });
+    expect(isValidApiRequestBody(runs, request({ mode: "window", targetToken: "T".repeat(32), previewToken: "P".repeat(32) }))).toBe(true);
+    expect(isValidApiRequestBody(runs, request({ mode: "window", targetToken: "T".repeat(32), previewToken: "bad" }))).toBe(false);
+  });
+});

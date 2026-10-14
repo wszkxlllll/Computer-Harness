@@ -36,7 +36,7 @@ const fixture = {
 };
 
 function encodedJson(value: unknown): Buffer {
-  return Buffer.from(JSON.stringify(value), "ascii");
+  return Buffer.from(JSON.stringify(value), "utf8");
 }
 
 describe("Windows read-only relationship probe", () => {
@@ -55,12 +55,61 @@ describe("Windows read-only relationship probe", () => {
     expect(Object.keys(parsed.windows[0]!)).not.toContain("text");
   });
 
-  it("forces truncated snapshots incomplete and rejects extra title/content fields", () => {
+  it("accepts bounded labels, drops unusable optional labels, and rejects content fields", () => {
     expect(parseWindowRelationshipProbeOutput(JSON.stringify({ ...fixture, complete: true, truncated: true })).complete).toBe(false);
-    expect(() => parseWindowRelationshipProbeOutput(JSON.stringify({ ...fixture, windows: [{ ...fixture.windows[0], title: "not accepted" }] })))
-      .toThrow(/invalid window row/iu);
+    const labeled = parseWindowRelationshipProbeOutput(JSON.stringify({
+      ...fixture,
+      windows: [{ ...fixture.windows[0], title: "  项目预算 — WPS  ", appName: "wps" }],
+    }));
+    expect(labeled.complete).toBe(true);
+    expect(labeled.windows[0]).toMatchObject({ title: "项目预算 — WPS", appName: "wps" });
+    const unusableLabels = parseWindowRelationshipProbeOutput(JSON.stringify({
+      ...fixture,
+      windows: [{ ...fixture.windows[0], title: "x".repeat(241), appName: "bad\nlabel" }],
+    }));
+    expect(unusableLabels.complete).toBe(true);
+    expect(unusableLabels.windows[0]).not.toHaveProperty("title");
+    expect(unusableLabels.windows[0]).not.toHaveProperty("appName");
     expect(() => parseWindowRelationshipProbeOutput(JSON.stringify({ ...fixture, text: "not accepted" })))
       .toThrow(/invalid schema/iu);
+  });
+
+  it.each(["\ud800", "prefix\ud800", "\udc00", "\ud800x"])("drops malformed UTF-16 labels %j without rejecting topology", (label) => {
+    const parsed = parseWindowRelationshipProbeOutput(JSON.stringify({
+      ...fixture,
+      windows: [{ ...fixture.windows[0], title: label, appName: label }],
+    }));
+    expect(parsed.complete).toBe(true);
+    expect(parsed.windows[0]).not.toHaveProperty("title");
+    expect(parsed.windows[0]).not.toHaveProperty("appName");
+  });
+
+  it("decodes native probe labels as UTF-8 and keeps label-read failures nonfatal", async () => {
+    const execute = vi.fn<PowerShellProbeExecutor>(async () => ({
+      exitCode: 0,
+      stdout: encodedJson({
+        ...fixture,
+        windows: [
+          { ...fixture.windows[0], title: "合同草稿 — 预算", appName: "金山办公" },
+          { ...fixture.windows[1], title: null, appName: null },
+        ],
+      }),
+    }));
+    const parsed = await createWindowsWindowRelationshipProbe({ execute }).read(new AbortController().signal);
+
+    expect(parsed.complete).toBe(true);
+    expect(parsed.windows[0]).toMatchObject({ title: "合同草稿 — 预算", appName: "金山办公" });
+    expect(parsed.windows[1]).not.toHaveProperty("title");
+    expect(parsed.windows[1]).not.toHaveProperty("appName");
+  });
+
+  it("rejects malformed UTF-8 output instead of silently replacing bytes", async () => {
+    const execute = vi.fn<PowerShellProbeExecutor>(async () => ({
+      exitCode: 0,
+      stdout: Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xc3, 0x28, 0x7d]),
+    }));
+    await expect(createWindowsWindowRelationshipProbe({ execute }).read(new AbortController().signal))
+      .rejects.toThrow(/valid UTF-8/iu);
   });
 
   it("uses fixed PowerShell arguments and read-only Win32 APIs through an injected executor", async () => {
@@ -72,6 +121,18 @@ describe("Windows read-only relationship probe", () => {
       expect(script).toContain("EnumWindows");
       expect(script).toContain("GetWindowThreadProcessId");
       expect(script).toContain("GetForegroundWindow");
+      expect(script).toContain("GetWindowTextW");
+      expect(script).toContain("GetWindowText(hwnd, text, text.Capacity)");
+      expect(script).toContain("Process.GetProcessById(pid)");
+      expect(script).toContain("ProcessName contains the executable's basename without an absolute path.");
+      expect(script).toContain("appNameByPid.TryGetValue(pid, out appName)");
+      expect(script).toContain("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)");
+      const titleReader = script.slice(script.indexOf("private static string ReadWindowTitle"), script.indexOf("private static string ReadAppName"));
+      const appNameReader = script.slice(script.indexOf("private static string ReadAppName"), script.indexOf("private static string BoundedLabel"));
+      expect(titleReader).not.toContain("complete =");
+      expect(titleReader).toContain("catch { return null; }");
+      expect(appNameReader).not.toContain("complete =");
+      expect(appNameReader).toContain("catch { }");
       expect(script).toContain("GW_HWNDFIRST");
       expect(script).toContain("GW_HWNDNEXT");
       expect(script).toContain("previousDpiContext = SetThreadDpiAwarenessContext(new IntPtr(-4));");
@@ -87,7 +148,8 @@ describe("Windows read-only relationship probe", () => {
       expect(script).toContain("if (frameWidth <= 0 || frameHeight <= 0 || frameWidth > Int32.MaxValue || frameHeight > Int32.MaxValue) { complete = false; return true; }");
       expect(script).toContain("bounds = new { x = rect.Left, y = rect.Top, width = width, height = height }");
       expect(script).not.toMatch(/bounds = new \{ x = outerRect/u);
-      expect(script).not.toMatch(/\[DllImport\([^\]]*\)\]\s*private static extern [^;]*(?:SetForegroundWindow|SendInput|GetWindowText)/iu);
+      expect(script).not.toMatch(/\[DllImport\([^\]]*\)\]\s*private static extern [^;]*(?:SetForegroundWindow|SendInput)/iu);
+      expect(script).not.toMatch(/GetDlgItem|WM_GETTEXT|SendMessage|MainModule\.FileName/iu);
       return { exitCode: 0, stdout: encodedJson(fixture) };
     });
     const probe = createWindowsWindowRelationshipProbe({ timeoutMs: 1_000, maxOutputBytes: 8_192, execute });

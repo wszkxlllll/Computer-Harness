@@ -12,6 +12,9 @@ import {
   type RunSnapshot,
   type RunSummary,
   type RunTarget,
+  type WindowCandidate,
+  type WindowCandidateRelationship,
+  type WindowCandidatePreview,
   type WindowTargetList,
 } from "./types";
 import type { Pcm16AudioChunk, VoiceInputCapabilities, VoiceSessionUpdate } from "@computer-harness/voice";
@@ -127,10 +130,16 @@ function errorMessageForCode(code?: string): string | undefined {
     request_too_large: "这次请求内容过长，请缩短后再试。",
     WINDOW_TARGET_STALE: "所选窗口已过期或发生变化。请刷新可用窗口并重新选择后再开始。",
     WINDOW_SELECTION_REQUIRED: "电脑无法唯一确定要操作的窗口。请从刷新后的列表中手动选择一个窗口。",
+    WINDOW_PREVIEW_REQUIRED: "请先查看这个精确窗口的实时预览，并在确认画面后再选择。",
+    WINDOW_PREVIEW_UNAVAILABLE: "电脑无法安全预览这个精确窗口。请在电脑上恢复或调整目标窗口，刷新列表后重试。",
+    WINDOW_PREVIEW_CAPTURE_FAILED: "电脑没有返回可用的精确窗口预览。请刷新窗口列表后重试。",
+    WINDOW_PREVIEW_IMAGE_TOO_LARGE: "窗口预览超过安全传输限制。请调整窗口大小后刷新重试。",
+    WINDOW_PREVIEW_BUSY: "另一张窗口预览仍在读取。等它完成或取消后再试。",
     WINDOW_ACTIVATION_FAILED: "电脑找到了匹配窗口，但无法将它恢复到屏幕上。任务尚未开始，请手动选择一个当前可见的窗口后重试。",
     WINDOW_DISCOVERY_FAILED: "电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。",
-    RUN_BUSY: "电脑正在处理另一个任务。请等待当前任务结束后再开始。",
+    RUN_BUSY: "电脑暂时无法开始新任务：现有任务尚未结束，或资源收尾尚未确认。请刷新任务列表后再试。",
     INVALID_TARGET: "目标信息无效。请检查窗口选择或 http://、https:// 地址后重试。",
+    NATIVE_RECOVERY_PROFILE_CONSUMED: "电脑预设文稿任务已使用，或启动结果暂无法确认。请在电脑端检查任务状态，确认无误后再准备新的本地文稿任务。",
     MANAGED_BROWSER_UNAVAILABLE: "电脑上的受管理浏览器当前不可用。请在电脑端检查 Harness 状态后重试。",
     MANAGED_BROWSER_PROFILE_UNAVAILABLE: "受管浏览器配置当前被占用，或上次异常退出留下了运行标记。任务尚未启动。请停止使用它的浏览器和 Harness Host，再在电脑运行 scripts/mobile.ps1 recover-browser-profile。该命令只归档运行标记，不会删除登录数据。",
     MANAGED_BROWSER_SETUP_REQUIRED: "受管浏览器的本机登录状态尚未准备好。请先在设置中准备浏览器，再开始此任务。",
@@ -149,7 +158,175 @@ function errorMessageForCode(code?: string): string | undefined {
 }
 
 export function listWindowTargets(): Promise<WindowTargetList> {
-  return request("/api/windows");
+  return request<unknown>("/api/windows").then(validateWindowTargetList);
+}
+
+export async function previewWindowTarget(candidateToken: string, signal?: AbortSignal): Promise<WindowCandidatePreview> {
+  return validateWindowCandidatePreview(await request<unknown>("/api/windows/preview", {
+    method: "POST",
+    body: JSON.stringify({ candidateToken }),
+    ...(signal === undefined ? {} : { signal }),
+  }, "phone"));
+}
+
+export async function previewWindowHandoffCandidate(
+  runId: string,
+  requestId: string,
+  candidateToken: string,
+  signal?: AbortSignal,
+): Promise<WindowCandidatePreview> {
+  return validateWindowCandidatePreview(await request<unknown>(`/api/runs/${encodeURIComponent(runId)}/window-candidates/preview`, {
+    method: "POST",
+    body: JSON.stringify({ requestId, candidateToken }),
+    ...(signal === undefined ? {} : { signal }),
+  }, "phone"));
+}
+
+function validateWindowCandidatePreview(value: unknown): WindowCandidatePreview {
+  const record = windowRecord(value, "电脑返回的窗口预览格式无效。");
+  if (!hasExactKeys(record, ["previewToken", "capturedAt", "expiresAt", "viewport", "mediaType", "dataBase64"], ["appName", "title", "relationship"])) {
+    throw new Error("电脑返回的窗口预览格式无效。");
+  }
+  const viewport = windowRecord(record.viewport, "电脑返回的窗口预览格式无效。");
+  const appName = optionalWindowText(record.appName, 256);
+  const title = optionalWindowText(record.title, 512);
+  const relationship = validateWindowCandidateRelationship(record.relationship);
+  const dataBase64 = record.dataBase64;
+  const maxBase64Length = Math.ceil(1_048_576 / 3) * 4;
+  if (typeof record.previewToken !== "string" || !/^[A-Za-z0-9_-]{32}$/u.test(record.previewToken) ||
+      typeof record.capturedAt !== "string" || !Number.isFinite(Date.parse(record.capturedAt)) ||
+      typeof record.expiresAt !== "string" || !Number.isFinite(Date.parse(record.expiresAt)) ||
+      record.mediaType !== "image/png" || typeof dataBase64 !== "string" || dataBase64.length === 0 ||
+      dataBase64.length > maxBase64Length ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(dataBase64) ||
+      decodedBase64Length(dataBase64) > 1_048_576 ||
+      !hasExactKeys(viewport, ["width", "height"]) ||
+      !Number.isSafeInteger(viewport.width) || !Number.isSafeInteger(viewport.height) ||
+      Number(viewport.width) < 1 || Number(viewport.height) < 1 ||
+      Number(viewport.width) > 8_192 || Number(viewport.height) > 8_192) {
+    throw new Error("电脑返回的窗口预览格式无效。");
+  }
+  return {
+    previewToken: record.previewToken,
+    ...(appName === undefined ? {} : { appName }),
+    ...(title === undefined ? {} : { title }),
+    ...(relationship === undefined ? {} : { relationship }),
+    capturedAt: record.capturedAt,
+    expiresAt: record.expiresAt,
+    viewport: { width: Number(viewport.width), height: Number(viewport.height) },
+    mediaType: "image/png",
+    dataBase64,
+  };
+}
+
+function validateWindowTargetList(value: unknown): WindowTargetList {
+  const record = windowRecord(value, "电脑返回的窗口列表格式无效。");
+  if (!hasExactKeys(record, ["candidates", "expiresAt"], ["omittedAmbiguousCount", "nativeRecoveryProfile", "nativeWebDocumentProfile"]) ||
+      !Array.isArray(record.candidates) || record.candidates.length > 64 ||
+      typeof record.expiresAt !== "string" || !Number.isFinite(Date.parse(record.expiresAt)) ||
+      record.omittedAmbiguousCount !== undefined && (!Number.isSafeInteger(record.omittedAmbiguousCount) || Number(record.omittedAmbiguousCount) < 0) ||
+      record.nativeRecoveryProfile !== undefined && !isNativeRecoveryProfileSummary(record.nativeRecoveryProfile) ||
+      record.nativeWebDocumentProfile !== undefined && !isNativeRecoveryProfileSummary(record.nativeWebDocumentProfile)) {
+    throw new Error("电脑返回的窗口列表格式无效。");
+  }
+  const candidates = record.candidates.map(validateWindowTarget);
+  const labelCounts = new Map<string, number>();
+  for (const candidate of candidates) {
+    const key = `${normalizeWindowLabel(candidate.appName)}\u0000${normalizeWindowLabel(candidate.title)}`;
+    labelCounts.set(key, (labelCounts.get(key) ?? 0) + 1);
+  }
+  return {
+    candidates: candidates.map((candidate) => {
+      const key = `${normalizeWindowLabel(candidate.appName)}\u0000${normalizeWindowLabel(candidate.title)}`;
+      const needsPreview = candidate.previewRequired === true || candidate.appName === undefined || candidate.title === undefined || labelCounts.get(key)! > 1;
+      return { ...candidate, ...(needsPreview ? { previewRequired: true } : {}) };
+    }),
+    expiresAt: record.expiresAt,
+    ...(record.omittedAmbiguousCount === undefined ? {} : { omittedAmbiguousCount: Number(record.omittedAmbiguousCount) }),
+    ...(record.nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile: validateNativeRecoveryProfileSummary(record.nativeRecoveryProfile) }),
+    ...(record.nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile: validateNativeRecoveryProfileSummary(record.nativeWebDocumentProfile) }),
+  };
+}
+
+function isNativeRecoveryProfileSummary(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return hasExactKeys(record, ["profileId", "label"]) &&
+    typeof record.profileId === "string" && /^[A-Za-z0-9_-]{16,128}$/u.test(record.profileId) &&
+    typeof record.label === "string" && record.label.length > 0 && record.label.length <= 80;
+}
+
+function validateNativeRecoveryProfileSummary(value: unknown): { profileId: string; label: string } {
+  if (!isNativeRecoveryProfileSummary(value)) throw new Error("电脑返回的文稿任务信息无效，请刷新窗口列表后重试。");
+  const record = value as { profileId: string; label: string };
+  return { profileId: record.profileId, label: record.label };
+}
+
+function validateWindowTarget(value: unknown): WindowCandidate {
+  const record = windowRecord(value, "电脑返回的窗口候选格式无效。");
+  if (!hasExactKeys(record, ["token"], ["appName", "title", "previewRequired", "relationship"]) ||
+      typeof record.token !== "string" || !/^[A-Za-z0-9_-]{32}$/u.test(record.token) ||
+      record.previewRequired !== undefined && typeof record.previewRequired !== "boolean") {
+    throw new Error("电脑返回的窗口候选格式无效。");
+  }
+  const appName = optionalWindowText(record.appName, 256);
+  const title = optionalWindowText(record.title, 512);
+  const relationship = validateWindowCandidateRelationship(record.relationship);
+  return {
+    token: record.token,
+    ...(appName === undefined ? {} : { appName }),
+    ...(title === undefined ? {} : { title }),
+    ...(record.previewRequired === true ? { previewRequired: true } : {}),
+    ...(relationship === undefined ? {} : { relationship }),
+  };
+}
+
+function validateWindowCandidateRelationship(value: unknown): WindowCandidateRelationship | undefined {
+  if (value === undefined) return undefined;
+  const relationship = windowRecord(value, "电脑返回的窗口关系信息格式无效。");
+  if (relationship.kind === "scoped_peer" && hasExactKeys(relationship, ["kind"])) return { kind: "scoped_peer" };
+  if (relationship.kind !== "owned_child" ||
+      !hasExactKeys(relationship, ["kind"], ["rootRole", "parentAppName", "parentTitle"]) ||
+      relationship.rootRole !== undefined && !["menu", "popup", "dialog"].includes(String(relationship.rootRole))) {
+    throw new Error("电脑返回的窗口关系信息格式无效。");
+  }
+  const parentAppName = optionalWindowText(relationship.parentAppName, 256);
+  const parentTitle = optionalWindowText(relationship.parentTitle, 512);
+  return {
+    kind: "owned_child",
+    ...(relationship.rootRole === undefined ? {} : { rootRole: relationship.rootRole as "menu" | "popup" | "dialog" }),
+    ...(parentAppName === undefined ? {} : { parentAppName }),
+    ...(parentTitle === undefined ? {} : { parentTitle }),
+  };
+}
+
+function windowRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(message);
+  return value as Record<string, unknown>;
+}
+
+function hasExactKeys(record: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const expected = new Set([...required, ...optional]);
+  const keys = Object.keys(record);
+  return required.every((key) => Object.hasOwn(record, key)) && keys.every((key) => expected.has(key));
+}
+
+function optionalWindowText(value: unknown, maxLength: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > maxLength || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error("电脑返回的窗口标签格式无效。");
+  }
+  const normalized = value.trim();
+  return normalized.length === 0 ? undefined : normalized;
+}
+
+function normalizeWindowLabel(value: string | undefined): string {
+  return value?.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim() ?? "";
+}
+
+function decodedBase64Length(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return value.length / 4 * 3 - padding;
 }
 
 export async function getManagedBrowserProfileSettings(): Promise<ManagedBrowserProfileSettings> {

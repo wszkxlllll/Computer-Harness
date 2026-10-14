@@ -1,7 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRun } from "@computer-harness/app-runtime";
+import type { Computer } from "@computer-harness/runtime";
 import { parseArgs, toResolvedRunConfig } from "./index.js";
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("CLI window-switch configuration", () => {
+  it("keeps the source-linked contract opt-in and validates an explicit bounded JSON contract", () => {
+    const baseArgs = ["--goal", "Inspect the fixture", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock"];
+    const contract = { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", label: "CPU model", required: true }] };
+    const ordinary = toResolvedRunConfig(parseArgs(baseArgs), "Inspect the fixture");
+    const optedIn = toResolvedRunConfig(parseArgs([...baseArgs, "--source-linked-finish-contract", JSON.stringify(contract)]), "Inspect the fixture");
+    expect(ordinary).not.toHaveProperty("sourceLinkedFinish");
+    expect(optedIn.sourceLinkedFinish).toEqual(contract);
+    expect(() => parseArgs([...baseArgs, "--source-linked-finish-contract", "{"])).toThrow(/valid JSON/u);
+    expect(() => parseArgs([...baseArgs, "--source-linked-finish-contract", JSON.stringify({
+      ...contract,
+      fields: [{ ...contract.fields[0], answer: "M6" }],
+    })])).toThrow(/invalid or duplicate field/u);
+  });
+
   it("keeps desktop runs opt-in while allowing the switch flag without a bound window", () => {
     const baseArgs = ["--goal", "Inspect the open task", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock"];
     const defaultOptions = parseArgs(baseArgs);
@@ -15,6 +36,139 @@ describe("CLI window-switch configuration", () => {
     expect(optedInConfig.windowSwitch).toBe("opened-windows-v1");
     expect(optedInConfig.computer).not.toHaveProperty("windowTarget");
     expect(optedInConfig.computer).not.toHaveProperty("managedBrowserUrl");
+  });
+
+  it("passes the exact recovery target pair through the explicit native recovery opt-in", () => {
+    const baseArgs = [
+      "--goal", "Inspect the task after its window closes",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      "--cua-recovery-window-pid", "43", "--cua-recovery-window-id", "85",
+    ];
+
+    const options = parseArgs(baseArgs);
+    const config = toResolvedRunConfig(options, "Inspect the task after its window closes");
+
+    expect(options.recoverBoundWindowMissing).toBe(true);
+    expect(options.cuaWindowTarget).toEqual({ pid: 42, windowId: 84 });
+    expect(options.cuaRecoveryWindowTarget).toEqual({ pid: 43, windowId: 85 });
+    expect(config.windowSwitch).toBe("opened-windows-v1");
+    expect(config.computer).toMatchObject({
+      kind: "cua",
+      recoverBoundWindowMissing: true,
+      windowTarget: { pid: 42, windowId: 84 },
+      recoveryWindowTarget: { pid: 43, windowId: 85 },
+      windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 43, windowId: 85 }],
+    });
+  });
+
+  it("grants one absolute saved-document path only with the exact native recovery scope", () => {
+    const baseArgs = [
+      "--goal", "Inspect the task after its saved document closes",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      "--cua-recovery-window-pid", "43", "--cua-recovery-window-id", "85",
+    ];
+    const options = parseArgs([...baseArgs, "--grounding", "uia-catalog-v1", "--reopen-saved-document", "/tmp/one-run-output.txt"]);
+    const config = toResolvedRunConfig(options, options.goal!);
+
+    expect(config.computer).toMatchObject({
+      kind: "cua",
+      grounding: "uia-catalog-v1",
+      reopenSavedDocumentGrant: {
+        path: "/tmp/one-run-output.txt",
+        expectedExecutableUrl: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+      },
+    });
+    expect(() => parseArgs([
+      "--goal", "Inspect the task", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock",
+      "--reopen-saved-document", "/tmp/one-run-output.txt",
+    ])).toThrow(/recovery|window-switch/u);
+    expect(() => parseArgs([...baseArgs, "--reopen-saved-document", "relative/output.txt"])).toThrow(/absolute file path/u);
+  });
+
+  it("assembles the real CLI recovery config with the effective native window-switch setting", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-cli-recovery-assembly-"));
+    const options = parseArgs([
+      "--goal", "Inspect the task after its window closes",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--output", outputDir,
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      "--cua-recovery-window-pid", "43", "--cua-recovery-window-id", "85",
+    ]);
+    const config = toResolvedRunConfig(options, options.goal!);
+    expect(config.computer).not.toHaveProperty("windowSwitch");
+
+    let effectiveComputerConfig: unknown;
+    const computer: Computer = {
+      async open() { throw new Error("assembly test must not open a computer session"); },
+      async observe() { throw new Error("assembly test must not observe"); },
+      async execute() { throw new Error("assembly test must not execute"); },
+      async close() {},
+      async listWindows() { return { options: [], truncated: false, omittedCount: 0 }; },
+    };
+    const provider = {
+      id: "fixture-provider",
+      async generate() { throw new Error("assembly test must not generate a model turn"); },
+    };
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    if (platformDescriptor === undefined || platformDescriptor.configurable !== true) {
+      await rm(outputDir, { recursive: true, force: true });
+      throw new Error("test runtime does not allow restoring a temporary process.platform override");
+    }
+
+    try {
+      Object.defineProperty(process, "platform", { ...platformDescriptor, value: "darwin" });
+      const handle = await createRun(config, {
+        createProvider: async () => provider,
+        createComputer: async ({ config: computerConfig }) => {
+          effectiveComputerConfig = computerConfig;
+          return computer;
+        },
+      });
+      expect(effectiveComputerConfig).toMatchObject({
+        kind: "cua",
+        windowSwitch: "opened-windows-v1",
+        windowDeliveryMode: "foreground",
+        recoverBoundWindowMissing: true,
+        windowTarget: { pid: 42, windowId: 84 },
+        recoveryWindowTarget: { pid: 43, windowId: 85 },
+        windowSwitchAllowedTargets: [{ pid: 42, windowId: 84 }, { pid: 43, windowId: 85 }],
+      });
+      await handle.close();
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+      expect(process.platform).toBe(platformDescriptor.value);
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["missing recovery target", ["--cua-recovery-window-pid", "43"]],
+    ["duplicate exact target", ["--cua-recovery-window-pid", "42", "--cua-recovery-window-id", "84"]],
+  ] as const)("rejects recovery configuration with a %s", (_label, recoveryArgs) => {
+    expect(() => parseArgs([
+      "--goal", "Inspect the task",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--window-switch",
+      "--recover-bound-window-missing",
+      "--cua-window-pid", "42", "--cua-window-id", "84",
+      ...recoveryArgs,
+    ])).toThrow(/recovery|distinct|provided together/u);
   });
 
   it("projects standalone persistent-profile settings locally without a Host API dependency", () => {
@@ -102,5 +256,41 @@ describe("CLI window-switch configuration", () => {
       "--osworld-bridge", "http://fixture.invalid",
       "--window-switch",
     ])).toThrow("--window-switch requires --computer cua");
+  });
+});
+
+describe("CLI GLM request-timeout configuration", () => {
+  const options = parseArgs([
+    "--goal", "Inspect the open task",
+    "--model", "glm-5.3-flash",
+    "--computer", "cua",
+    "--cua-socket", "fixture.sock",
+  ]);
+
+  it("leaves the runtime default unset when the environment override is absent", () => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", undefined);
+    expect(toResolvedRunConfig(options, "Inspect the open task")).not.toHaveProperty("glmRequestTimeoutMs");
+  });
+
+  it("forwards a valid environment override as a number", () => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", "180000");
+    expect(toResolvedRunConfig(options, "Inspect the open task").glmRequestTimeoutMs).toBe(180000);
+  });
+
+  it.each(["241000", "not-a-number"])("rejects invalid environment overrides (%s)", (value) => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", value);
+    expect(() => toResolvedRunConfig(options, "Inspect the open task")).toThrow(/request timeout/u);
+  });
+
+  it("does not apply a GLM-only override to Qwen runs", () => {
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", "not-a-number");
+    const qwenOptions = parseArgs([
+      "--goal", "Inspect the open task",
+      "--model", "qwen3.8-flash",
+      "--computer", "cua",
+      "--cua-socket", "fixture.sock",
+      "--qwen-coordinate-mode", "normalized_1000",
+    ]);
+    expect(toResolvedRunConfig(qwenOptions, "Inspect the open task")).not.toHaveProperty("glmRequestTimeoutMs");
   });
 });

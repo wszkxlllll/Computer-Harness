@@ -63,6 +63,105 @@ describe("DeterministicGroundingSelector", () => {
     expect(selected.selection?.reasons.find((item) => item.elementRef === "uia-source-target")?.codes).toContain("goal_match");
   });
 
+  it("keeps an executable Mac mini DOM ref in a partial hybrid hot set", () => {
+    const sameBox = { x: 760, y: 490, width: 82, height: 138, coordinateSpace: "physical" as const };
+    const elements: GroundingCatalog["elements"] = [
+      ...["MacBook Air", "MacBook Pro", "iMac", "Mac Studio", "MacBook Neo", "Mac 机型比较", "Apple 支持", "Mac 页面"].map((name, index) => ({
+        elementRef: `dom-product-${index}`,
+        role: "link",
+        name,
+        source: "dom" as const,
+        browserRegion: "content" as const,
+        bbox: { x: 100 + index * 100, y: 300, width: 80, height: 100, coordinateSpace: "physical" as const },
+        state: { enabled: true },
+      })),
+      {
+        elementRef: "dom-mac-mini",
+        role: "link",
+        name: "Mac mini新款",
+        source: "dom",
+        browserRegion: "content",
+        bbox: sameBox,
+        state: { enabled: true },
+      },
+      {
+        elementRef: "uia-mac-mini",
+        role: "AXLink",
+        name: "Mac mini 新款",
+        source: "uia",
+        browserRegion: "content",
+        bbox: sameBox,
+        state: { enabled: true },
+      },
+      {
+        elementRef: "uia-different-overlap",
+        role: "AXLink",
+        name: "Different nearby control",
+        source: "uia",
+        browserRegion: "content",
+        bbox: sameBox,
+        state: { enabled: true },
+      },
+      {
+        elementRef: "uia-toolbar",
+        role: "AXLink",
+        name: "Mac browser toolbar",
+        source: "uia",
+        browserRegion: "chrome",
+        bbox: { x: 10, y: 10, width: 80, height: 30, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+      {
+        elementRef: "uia-only-content",
+        role: "AXLink",
+        name: "UIA only content",
+        source: "uia",
+        browserRegion: "content",
+        bbox: { x: 700, y: 700, width: 80, height: 30, coordinateSpace: "physical" },
+        state: { enabled: true },
+      },
+    ];
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog(elements), {
+      goal: "请查询 Mac mini、MacBook Air、iMac 三个产品系列当前最低价的标准配置，并逐项记录官网来源。",
+      latestUserCorrections: [],
+    });
+    const refs = new Set(selected.elements.map((element) => element.elementRef));
+    expect(refs.has("dom-mac-mini")).toBe(true);
+    expect(refs.has("uia-mac-mini")).toBe(false);
+    expect(refs.has("uia-different-overlap")).toBe(true);
+    expect(refs.has("uia-toolbar")).toBe(true);
+    expect(refs.has("uia-only-content")).toBe(true);
+    expect(selected.selection?.candidateElementCount).toBe(elements.length);
+  });
+
+  it("keeps UIA and DOM state distinct when DOM enabled state is false or unknown", () => {
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog([
+      { elementRef: "dom-disabled", role: "link", name: "Disabled control", source: "dom", browserRegion: "content", bbox: { x: 100, y: 100, width: 80, height: 30, coordinateSpace: "physical" }, state: { enabled: false } },
+      { elementRef: "uia-disabled", role: "AXLink", name: "Disabled control", source: "uia", browserRegion: "content", bbox: { x: 100, y: 100, width: 80, height: 30, coordinateSpace: "physical" }, state: { enabled: true } },
+      { elementRef: "dom-unknown", role: "link", name: "Unknown control", source: "dom", browserRegion: "content", bbox: { x: 220, y: 100, width: 80, height: 30, coordinateSpace: "physical" } },
+      { elementRef: "uia-unknown", role: "AXLink", name: "Unknown control", source: "uia", browserRegion: "content", bbox: { x: 220, y: 100, width: 80, height: 30, coordinateSpace: "physical" }, state: { enabled: true } },
+    ]), { goal: "Disabled control and Unknown control", latestUserCorrections: [] });
+    expect(selected.elements.find((element) => element.elementRef === "dom-disabled")?.state?.enabled).toBe(false);
+    expect(selected.elements.find((element) => element.elementRef === "dom-unknown")?.state?.enabled).toBeUndefined();
+    expect(selected.elements.some((element) => element.elementRef === "uia-disabled")).toBe(true);
+    expect(selected.elements.some((element) => element.elementRef === "uia-unknown")).toBe(true);
+  });
+
+  it("does not compact UIA-only labels while matching cross-source content aliases", () => {
+    const selected = new DeterministicGroundingSelector().select(catalog([
+      { elementRef: "uia-spaced", role: "Button", name: "A B", bbox: { x: 10, y: 10, width: 40, height: 20, coordinateSpace: "physical" } },
+      { elementRef: "uia-compact", role: "Button", name: "AB", bbox: { x: 10, y: 10, width: 40, height: 20, coordinateSpace: "physical" } },
+    ]), { goal: "", latestUserCorrections: [] });
+    expect(selected.elements.map((element) => element.elementRef)).toEqual(["uia-spaced", "uia-compact"]);
+  });
+
+  it("matches Latin, digits, and Han terms when they are adjacent in a label", () => {
+    const selected = new DeterministicGroundingSelector().select(catalog([
+      { elementRef: "uia-mixed-script", role: "Link", name: "2026 Mac mini新款上海", bbox: { x: 10, y: 10, width: 140, height: 30, coordinateSpace: "physical" }, state: { enabled: true } },
+    ]), { goal: "查询 2026 Mac mini 上海产品", latestUserCorrections: [] });
+    expect(selected.selection?.reasons.find((item) => item.elementRef === "uia-mixed-script")?.codes).toContain("goal_match");
+  });
+
   it("uses state hints only as a deterministic fallback and preserves disabled evidence", () => {
     const selected = new DeterministicGroundingSelector().select(catalog([
       {

@@ -499,12 +499,12 @@ export async function activateWindowTarget(
         exactWindowEffect?.verified === false) {
       throw new WindowContractError(
         "WINDOW_ACTIVATION_UNCONFIRMED",
-        activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
+        `${activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle)} ${activationEvidenceSummary(result, structured, target, "is_error")}`,
       );
     }
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", `CUA bring_to_front refused the exact window target ${activationEvidenceSummary(result, structured, target, "is_error")}`);
   }
-  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
+  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", `CUA bring_to_front returned a degraded result for the exact window target ${activationEvidenceSummary(result, structured, target, "degraded")}`);
   const landed = structured?.landed_on_target;
   const targetHandle = parseWindowHandle(structured?.target_hwnd);
   const foregroundHandle = parseWindowHandle(structured?.now_fg_hwnd);
@@ -538,11 +538,69 @@ export async function activateWindowTarget(
         exactWindowEffect?.verified === false) {
       throw new WindowContractError(
         "WINDOW_ACTIVATION_UNCONFIRMED",
-        activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
+        `${activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle)} ${activationEvidenceSummary(result, structured, target, "explicit_mismatch")}`,
       );
     }
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
+    const branch = explicitMismatch ? "explicit_mismatch" : "unverified";
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", `CUA bring_to_front did not land on the exact window target ${activationEvidenceSummary(result, structured, target, branch)}`);
   }
+}
+
+type ActivationDiagnosticBranch = "is_error" | "degraded" | "explicit_mismatch" | "unverified";
+type ActivationDiagnosticValue = "true" | "false" | "missing" | "invalid";
+
+/** Fixed, bounded and non-content evidence that survives the Computer.open error wrapper. */
+function activationEvidenceSummary(
+  result: ToolResult,
+  structured: Record<string, unknown> | undefined,
+  target: CuaWindowTarget,
+  branch: ActivationDiagnosticBranch,
+): string {
+  const structuredState = result.structuredJson === undefined ? "missing" : structured === undefined ? "invalid" : "present";
+  const observedState = structuredState !== "present"
+    ? structuredState
+    : !Object.hasOwn(structured!, "observed") ? "missing" : isRecord(structured!.observed) ? "present" : "invalid";
+  const observed = isRecord(structured?.observed) ? structured.observed : undefined;
+  const effectState = structuredState !== "present"
+    ? structuredState
+    : !Object.hasOwn(structured!, "exact_window_effect") ? "missing" : isRecord(structured!.exact_window_effect) ? "present" : "invalid";
+  const effect = isRecord(structured?.exact_window_effect) ? structured.exact_window_effect : undefined;
+  const handle = (record: Record<string, unknown> | undefined, key: string, containerState: "missing" | "invalid" | "present"): string => {
+    if (containerState === "missing" || containerState === "invalid") return containerState;
+    if (record === undefined) return "invalid";
+    if (!Object.hasOwn(record, key)) return "missing";
+    const value = parseWindowHandle(record[key]);
+    if (value === undefined || Number(value) <= 0) return "invalid";
+    return `${value === String(target.windowId) ? "match" : "mismatch"}:${value}`;
+  };
+  const boolean = (record: Record<string, unknown> | undefined, key: string, containerState: "missing" | "invalid" | "present"): ActivationDiagnosticValue => {
+    if (containerState === "missing" || containerState === "invalid") return containerState;
+    if (record === undefined) return "invalid";
+    if (!Object.hasOwn(record, key)) return "missing";
+    return typeof record[key] === "boolean" ? String(record[key]) as "true" | "false" : "invalid";
+  };
+  const status = structuredState !== "present" ? structuredState
+    : !Object.hasOwn(structured!, "status") ? "missing"
+    : structured!.status === "activated" || structured!.status === "partial" || structured!.status === "refused"
+      ? structured!.status as "activated" | "partial" | "refused"
+      : "invalid";
+  const exactVerified = boolean(effect, "verified", effectState);
+  const focused = handle(observed, "focused_window_id", observedState);
+  const frontmost = handle(observed, "frontmost_ordinary_window_id", observedState);
+  const reasons = [
+    handle(structured, "window_id", structuredState).startsWith("mismatch") ? "window_id_mismatch" : undefined,
+    focused.startsWith("mismatch") ? "focused_mismatch" : undefined,
+    frontmost.startsWith("mismatch") ? "frontmost_mismatch" : undefined,
+    handle(structured, "target_hwnd", structuredState).startsWith("mismatch") ? "target_hwnd_mismatch" : undefined,
+    handle(structured, "now_fg_hwnd", structuredState).startsWith("mismatch") ? "now_fg_hwnd_mismatch" : undefined,
+    exactVerified === "false" ? "exact_verified_false" : undefined,
+    boolean(observed, "front_process_matches_target", observedState) === "false" ? "front_process_false" : undefined,
+    boolean(structured, "landed_on_target", structuredState) === "false" ? "landed_false" : undefined,
+  ].filter((value): value is string => value !== undefined);
+  const reason = reasons.length === 0 ? branch === "degraded" ? "degraded" : "driver_refused_or_missing_proof" : reasons.join(",");
+  const isError = typeof result.isError === "boolean" ? String(result.isError) : "invalid";
+  const degraded = typeof result.degraded === "boolean" ? String(result.degraded) : "invalid";
+  return `[activation_evidence branch=${branch} is_error=${isError} degraded=${degraded} status=${status} window_id=${handle(structured, "window_id", structuredState)} focused=${focused} frontmost=${frontmost} front_process=${boolean(observed, "front_process_matches_target", observedState)} exact_effect=${effectState} exact_verified=${exactVerified} landed=${boolean(structured, "landed_on_target", structuredState)} target_hwnd=${handle(structured, "target_hwnd", structuredState)} now_fg_hwnd=${handle(structured, "now_fg_hwnd", structuredState)} reason=${reason}]`;
 }
 
 function activationUnconfirmedMessage(

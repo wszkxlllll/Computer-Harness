@@ -19,6 +19,7 @@ export interface AllowedApiRoute {
 
 export const MAX_JSON_REQUEST_BYTES = 32 * 1024;
 export const MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024;
+export const MAX_WINDOW_PREVIEW_RESPONSE_BYTES = 3 * 1024 * 1024;
 export const MAX_ASSET_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MAX_SSE_EVENT_BYTES = 64 * 1024;
 export const MAX_WIRE_MESSAGE_BYTES = 12 * 1024 * 1024;
@@ -54,6 +55,9 @@ function identifyRoute(method: RelayHttpMethod, pathname: string): Omit<AllowedA
 
   if (method === "GET" && pathname === "/api/windows") {
     return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  if (method === "POST" && pathname === "/api/windows/preview") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_WINDOW_PREVIEW_RESPONSE_BYTES };
   }
   if (method === "GET" && pathname === "/api/managed-browser-profile") {
     return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
@@ -109,6 +113,10 @@ function identifyRoute(method: RelayHttpMethod, pathname: string): Omit<AllowedA
   const commandsMatch = /^\/api\/runs\/([A-Za-z0-9_-]{1,128})\/commands$/u.exec(pathname);
   if (commandsMatch !== null && method === "POST") {
     return { method, path: pathname, kind: "json", maxResponseBytes: MAX_JSON_RESPONSE_BYTES };
+  }
+  const handoffPreviewMatch = /^\/api\/runs\/[A-Za-z0-9_-]{1,128}\/window-candidates\/preview$/u.exec(pathname);
+  if (handoffPreviewMatch !== null && method === "POST") {
+    return { method, path: pathname, kind: "json", maxResponseBytes: MAX_WINDOW_PREVIEW_RESPONSE_BYTES };
   }
   const commandReceiptMatch = /^\/api\/runs\/([A-Za-z0-9_-]{1,128})\/commands\/([A-Za-z0-9_-]{1,128})$/u.exec(pathname);
   if (commandReceiptMatch !== null && method === "GET") {
@@ -211,7 +219,21 @@ function isValidRunTarget(value: unknown): boolean {
   if (value.mode === "auto") return hasOptionalSwitchWindows(value, ["mode"]);
   if (value.mode === "desktop") return hasOptionalSwitchWindows(value, ["mode"]);
   if (value.mode === "window") {
-    return hasOptionalSwitchWindows(value, ["mode", "targetToken"]) && isValidWindowTargetToken(value.targetToken);
+    return (hasOptionalSwitchWindows(value, ["mode", "targetToken"]) ||
+      hasOptionalSwitchWindows(value, ["mode", "targetToken", "previewToken"])) &&
+      isValidWindowTargetToken(value.targetToken) &&
+      (value.previewToken === undefined || isValidWindowTargetToken(value.previewToken));
+  }
+  if (value.mode === "native-recovery") {
+    const profileId = value.profileId;
+    return !Object.hasOwn(value, "switchWindows") &&
+      hasExactKeys(value, ["mode", "profileId"]) &&
+      isValidIdentifier(profileId) && profileId.length >= 16;
+  }
+  if (value.mode === "native-web-document") {
+    const profileId = value.profileId;
+    return !Object.hasOwn(value, "switchWindows") && hasExactKeys(value, ["mode", "profileId"]) &&
+      isValidIdentifier(profileId) && profileId.length >= 16;
   }
   if (value.mode === "browser") {
     if (hasOptionalSwitchWindows(value, ["mode"])) return true;
@@ -226,6 +248,13 @@ function isValidRunTarget(value: unknown): boolean {
 
 /** Validate the only route-specific browser start payload without accepting OS handles or paths. */
 export function isValidApiRequestBody(route: AllowedApiRoute, body: JsonObject | undefined): boolean {
+  if (route.method === "POST" && route.path === "/api/windows/preview") {
+    return body !== undefined && hasExactKeys(body, ["candidateToken"]) && isValidWindowTargetToken(body.candidateToken);
+  }
+  if (route.method === "POST" && /^\/api\/runs\/[A-Za-z0-9_-]{1,128}\/window-candidates\/preview$/u.test(route.path)) {
+    return body !== undefined && hasExactKeys(body, ["requestId", "candidateToken"]) &&
+      isValidIdentifier(body.requestId) && isValidWindowTargetToken(body.candidateToken);
+  }
   if (route.method === "PUT" && route.path === "/api/managed-browser-profile/preference") {
     return body !== undefined && hasExactKeys(body, ["defaultSession"])
       && (body.defaultSession === "saved" || body.defaultSession === "temporary");

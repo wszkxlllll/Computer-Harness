@@ -45,12 +45,13 @@ class FakeEventSource {
   }
 }
 
-function snapshot(sequence: number): RunSnapshot {
+function snapshot(sequence: number, pendingRequest?: RunSnapshot["pendingRequest"]): RunSnapshot {
   return {
     runId: "run-1",
     goal: "Find three options",
     status: "running",
     sequence,
+    ...(pendingRequest === undefined ? {} : { pendingRequest }),
     capabilities: { pause: true, resume: false, abort: true, correct: true },
   };
 }
@@ -64,8 +65,14 @@ function Probe() {
       <span data-testid="error">{feed.error ?? ""}</span>
       <span data-testid="event-count">{feed.events.length}</span>
       <span data-testid="notice-count">{feed.notices.length}</span>
+      <span data-testid="notice-kind">{feed.notices[0]?.kind ?? "none"}</span>
+      <span data-testid="notice-pending-request-id">{feed.notices[0]?.pendingRequestId ?? "none"}</span>
       <span data-testid="pending-request-id">{feed.pendingRequestState?.request?.requestId ?? "none"}</span>
       <span data-testid="pending-state-sequence">{feed.pendingRequestState?.sequence ?? -1}</span>
+      <span data-testid="pending-option-text">{feed.pendingRequestState?.request?.preview?.actions[0]?.optionText ?? "none"}</span>
+      <span data-testid="pending-option-status">{feed.pendingRequestState?.request?.preview?.actions[0]?.optionTextStatus ?? "none"}</span>
+      <span data-testid="pending-option-count">{feed.pendingRequestState?.request?.preview?.actions[0]?.optionCharacterCount ?? -1}</span>
+      <span data-testid="pending-grounding-ref">{feed.pendingRequestState?.request?.preview?.actions[0]?.groundingRef ?? "none"}</span>
       <button type="button" onClick={() => void feed.refresh().catch(() => undefined)}>refresh</button>
     </div>
   );
@@ -103,7 +110,13 @@ describe("run feed reconnect", () => {
   });
 
   it("applies pending-request SSE before the delayed GET snapshot and keeps it authoritative", async () => {
-    vi.mocked(getRun).mockResolvedValue(snapshot(4));
+    const pendingRequest: NonNullable<RunSnapshot["pendingRequest"]> = {
+      requestId: "approval-A",
+      kind: "approval",
+      reason: "Review this action",
+      preview: { actions: [{ operation: "select_option", kind: "select_option", groundingRef: "dom-ref", optionText: "Observed fixture variant", optionCharacterCount: 24, optionTextStatus: "visible" }] },
+    };
+    vi.mocked(getRun).mockResolvedValueOnce(snapshot(4)).mockResolvedValueOnce(snapshot(5, pendingRequest));
     render(<Probe />);
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     const source = FakeEventSource.instances[0];
@@ -113,7 +126,7 @@ describe("run feed reconnect", () => {
       runId: "run-1",
       sequence: 5,
       type: "run.event",
-      data: { type: "run.pending_request", request: { requestId: "approval-A", kind: "approval", reason: "Review this action" } },
+      data: { type: "run.pending_request", request: pendingRequest },
     }));
     act(() => source.emit({
       runId: "run-1",
@@ -133,12 +146,20 @@ describe("run feed reconnect", () => {
     expect(screen.getByTestId("sequence").textContent).toBe("4");
     expect(screen.getByTestId("pending-request-id").textContent).toBe("approval-A");
     expect(screen.getByTestId("pending-state-sequence").textContent).toBe("5");
+    expect(screen.getByTestId("pending-option-text").textContent).toBe("Observed fixture variant");
+    expect(screen.getByTestId("pending-option-status").textContent).toBe("visible");
+    expect(screen.getByTestId("pending-option-count").textContent).toBe("24");
+    expect(screen.getByTestId("pending-grounding-ref").textContent).toBe("dom-ref");
     expect(screen.getByTestId("notice-count").textContent).toBe("1");
 
     await act(async () => { await vi.advanceTimersByTimeAsync(250); });
     expect(getRun).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("pending-request-id").textContent).toBe("approval-A");
     expect(screen.getByTestId("pending-state-sequence").textContent).toBe("5");
+    expect(screen.getByTestId("pending-option-text").textContent).toBe("Observed fixture variant");
+    expect(screen.getByTestId("pending-option-status").textContent).toBe("visible");
+    expect(screen.getByTestId("pending-option-count").textContent).toBe("24");
+    expect(screen.getByTestId("pending-grounding-ref").textContent).toBe("dom-ref");
 
     act(() => source.emit({
       runId: "run-1",
@@ -148,6 +169,46 @@ describe("run feed reconnect", () => {
     }));
     expect(screen.getByTestId("pending-request-id").textContent).toBe("none");
     expect(screen.getByTestId("pending-state-sequence").textContent).toBe("7");
+  });
+
+  it("decodes a window handoff notice only with its matching pending request ID", async () => {
+    vi.mocked(getRun).mockResolvedValue(snapshot(4));
+    render(<Probe />);
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+
+    act(() => source.emit({
+      runId: "run-1",
+      sequence: 5,
+      type: "run.event",
+      data: { type: "run.pending_request", request: { requestId: "action-window-handoff", kind: "window_handoff", candidates: [] } },
+    }));
+    act(() => source.emit({
+      runId: "run-1",
+      sequence: 6,
+      type: "run.event",
+      data: {
+        type: "run.notice",
+        noticeId: "action-window-handoff-notice",
+        kind: "handoff",
+        text: "任务正在等待你选择或确认一个窗口。",
+        delivery: "interrupt",
+        eventSequence: 22,
+        pendingRequestId: "action-window-handoff",
+      },
+    }));
+
+    expect(screen.getByTestId("pending-request-id").textContent).toBe("action-window-handoff");
+    expect(screen.getByTestId("notice-kind").textContent).toBe("handoff");
+    expect(screen.getByTestId("notice-pending-request-id").textContent).toBe("action-window-handoff");
+
+    act(() => source.emit({
+      runId: "run-1",
+      sequence: 7,
+      type: "run.event",
+      data: { type: "run.notice", noticeId: "unbound-window-handoff", kind: "handoff", text: "过期选窗通知。", delivery: "interrupt", eventSequence: 23 },
+    }));
+    expect(screen.getByTestId("notice-count").textContent).toBe("1");
   });
 
   it("deduplicates events and reflects native reconnect state", async () => {

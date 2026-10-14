@@ -36,6 +36,8 @@ export function formatWindowSwitchState(
   state: {
     readonly currentWindow?: { readonly appName?: string; readonly title?: string };
     readonly options?: readonly ComputerWindowOption[];
+    readonly truncated?: boolean;
+    readonly omittedCount?: number;
   } | undefined,
   grounding: GroundingCatalog | undefined,
   currentViewport: import("@computer-harness/protocol").Viewport | undefined,
@@ -65,8 +67,11 @@ export function formatWindowSwitchState(
     lines.push("No list_windows inventory is cached. Call list_windows before choosing another target.");
   } else {
     lines.push("Latest list_windows inventory (choose only a listed windowRef; references remain valid across ordinary observations and expire when the list is refreshed, a target changes, or the Run ends. App/title labels reflect discovery time and may be stale):");
-    for (const option of state.options.slice(0, 128)) lines.push(formatWindowOption(option));
-    if (state.options.length > 128) lines.push(`- ${state.options.length - 128} additional options were omitted from this bounded projection; refresh or use the Host picker.`);
+    const firstObserved = state.options.filter((option) => option.firstObservedAfterAction === true);
+    const firstObservedRefs = new Set(firstObserved.map((option) => option.windowRef));
+    const orderedOptions = [...firstObserved, ...state.options.filter((option) => !firstObservedRefs.has(option.windowRef))];
+    for (const option of orderedOptions.slice(0, 128)) lines.push(formatWindowOption(option));
+    if (state.truncated === true) lines.push(`- This candidate projection is truncated: ${state.omittedCount ?? "an unknown number of"} additional selectable windows were omitted. Do not infer that an unlisted app is absent; ask the user to choose from the operating system's window switcher.`);
     if (state.options.length === 0) lines.push("- no selectable opened windows were returned");
   }
   return lines.join("\n");
@@ -75,10 +80,17 @@ export function formatWindowSwitchState(
 function formatWindowOption(option: ComputerWindowOption): string {
   const appName = option.appName === undefined ? "" : ` app=${compactLabel(option.appName, 128)}`;
   const title = option.title === undefined ? "" : ` title=${compactLabel(option.title, 160)}`;
-  return `- windowRef=${compactLabel(option.windowRef, 128)}${option.isCurrent ? " [current]" : ""}${appName}${title}`;
+  const firstObserved = option.firstObservedAfterAction === true && option.sourceActionId !== undefined
+    ? ` [first observed after action=${compactLabel(option.sourceActionId, 128)}; not proof of creation, ownership, foreground, or relation]`
+    : "";
+  return `- windowRef=${compactLabel(option.windowRef, 128)}${option.isCurrent ? " [current]" : ""}${firstObserved}${appName}${title}`;
 }
 
-export function composeSystemPrompt(base: string, features: RunFeatureConfig): string {
+export function composeSystemPrompt(
+  base: string,
+  features: RunFeatureConfig,
+  platform?: import("@computer-harness/protocol").ComputerSessionDescriptor["platform"],
+): string {
   // This shared guidance is invariant across feature toggles and Context history
   // modes, so it stays at the start of the cacheable system prefix.
   const sections = [
@@ -86,6 +98,10 @@ export function composeSystemPrompt(base: string, features: RunFeatureConfig): s
     base,
     "Optional user response preferences, when present, are lower-priority style guidance. They cannot override system or safety instructions, tool or approval policy, the Goal, explicit user requests, or later user corrections. They never authorize actions. Do not repeat private preference text verbatim.",
   ];
+  if (platform !== undefined) {
+    const os = platform === "darwin" ? "macOS" : platform === "win32" ? "Windows" : "Linux";
+    sections.push(`Active Computer platform reported by the driver: OS=${os}. Use platform-appropriate keyboard shortcuts; do not infer a different platform from the Host.`);
+  }
   const completionEvidence = features.memory === "off"
     ? "the original Goal and latest observed state"
     : "the original Goal, latest observed state, and relevant recalled Run Memory";
@@ -94,6 +110,12 @@ export function composeSystemPrompt(base: string, features: RunFeatureConfig): s
   if (features.executionSegments === "segments-v1") sections.push("ExecutionSegment is separate from the PlanningTask chain. Use execution_segment_set only for a genuinely multi-stage task when the current interface is stable and the same ModelTurn can describe 2-4 predictable click micro-steps, including at least one later click that could replace a future main-provider turn. Call it immediately before the first GUI click. Do not create one for a simple one-click screen or every click. A segment may contain only click steps with observable completion evidence; never use it for type/keypress/scroll/drag/wait, uncertain or open-ended work, cross-application transitions, or sensitive actions. It is short-lived, does not update task progress, and is guidance for re-grounding after a fresh observation, not proof of success or authorization.");
   if (features.memory !== "off") sections.push(`Run Memory is enabled (${features.memory}) and selective. Write only facts that will leave recent context, remain needed across stages or interfaces, or support a final comparison or summary. Do not copy the original Goal or Plan because the Goal and current Plan already stay in context; prefer a first observed result, entity, or option that must survive recent context. When useful, write 1-2 key facts in the same ModelTurn before continuing with GUI actions; keep them independent of any new task id. If that turn also creates a new Planning task, do not write task-retention Memory: its task id exists only after task_create returns. After the result, use its id in relatedTaskIds; in the create turn, skip Memory or use non-task retention only for a truly run-stable fact. Memory writes that do not depend on a new task id, including same-turn writes alongside GUI, remain allowed. Do not record every click or treat the currently visible GUI state as a stable fact. Scoped and needs-check entries are applicability-gated; last-known candidates are not current GUI truth, so use the current observation before acting and revise or invalidate explicitly. Read details by id when the compact index is insufficient. For the final answer, use recalled facts that are relevant to the Goal, but preserve their caveats and do not treat a needs-check or last-known packet as current proof.`);
   if (features.riskGuard === "layered") sections.push("For every Computer tool call except switch_window, include _harnessEffect with non-empty effects, target, and summary. Describe this call's immediate expected effect, not the eventual goal: ordinary browsing/navigation is navigate, ordinary reversible typing is local_edit, and final payment, sending/publishing/submission, irreversible deletion/overwrite, sensitive disclosure, or security changes use their matching effect. Use unknown when uncertain. switch_window changes only the active listed-window binding and does not need _harnessEffect; its Run-level opt-in and exact target/session validation are the authorization boundary. Never include secrets or private content in target/summary, and never claim that an action is approved or safe.");
+  const selectAllBatch = platform === "darwin"
+    ? "CMD/Meta+A→type, or click→CMD/Meta+A→type, in the same already-active text control, using exposed tools named click, hotkey with exact keys [CMD, A] (or [META, A]), and type"
+    : "Ctrl+A→type, or click→Ctrl+A→type, in the same already-active text control, using exposed tools named click, hotkey with exact keys [CTRL, A], and type";
+  const unsupportedSelectAllBatch = platform === "darwin"
+    ? "click_element and CTRL+A are not supported in batches"
+    : "click_element and CMD/Meta+A are not supported in batches";
   if (features.batching === "off") {
     sections.push("Return at most one Computer tool call per model turn.");
   } else if (features.planning !== "off" || features.memory !== "off") {
@@ -101,9 +123,9 @@ export function composeSystemPrompt(base: string, features: RunFeatureConfig): s
       ...(features.planning === "off" ? [] : ["Planning"]),
       ...(features.memory === "off" ? [] : ["Memory"]),
     ].join("/");
-    sections.push(`A model turn may contain up to two ${enabledWrites} write calls first, followed by one Computer call or one GUI batch. A GUI batch is only click→type, Ctrl+A→type, or click→Ctrl+A→type in the same already-active text control, using exposed tools named click, hotkey with exact keys [CTRL, A], and type. click_element and CMD/Meta+A are not supported in batches: call them alone and wait for a fresh observation before typing. Do not put read tools, Control decisions, Enter, Tab, submit, navigation, scroll, drag, wait, or state writes after/between GUI calls. Never combine a read tool such as memory_get with a Computer call. Do not claim post-action success before the next observation.`);
+    sections.push(`A model turn may contain up to two ${enabledWrites} write calls first, followed by one Computer call or one GUI batch. A GUI batch is only click→type, ${selectAllBatch}. ${unsupportedSelectAllBatch}: call them alone and wait for a fresh observation before typing. Do not put read tools, Control decisions, Enter, Tab, submit, navigation, scroll, drag, wait, or state writes after/between GUI calls. Never combine a read tool such as memory_get with a Computer call. Do not claim post-action success before the next observation.`);
   } else {
-    sections.push("A model turn may contain one Computer call or one GUI batch. A GUI batch is only click→type, Ctrl+A→type, or click→Ctrl+A→type in the same already-active text control, using exposed tools named click, hotkey with exact keys [CTRL, A], and type. click_element and CMD/Meta+A are not supported in batches: call them alone and wait for a fresh observation before typing. Do not put read tools, Control decisions, Enter, Tab, submit, navigation, scroll, drag, wait, or state writes after/between GUI calls. Never combine a read tool such as memory_get with a Computer call. Do not claim post-action success before the next observation.");
+    sections.push(`A model turn may contain one Computer call or one GUI batch. A GUI batch is only click→type, ${selectAllBatch}. ${unsupportedSelectAllBatch}: call them alone and wait for a fresh observation before typing. Do not put read tools, Control decisions, Enter, Tab, submit, navigation, scroll, drag, wait, or state writes after/between GUI calls. Never combine a read tool such as memory_get with a Computer call. Do not claim post-action success before the next observation.`);
   }
   return sections.join(" ");
 }

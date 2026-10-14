@@ -1,6 +1,6 @@
 import type { ActionGuardActionSummary, EventId, ObservationAssessment, ObservationId, PlanningTask, RiskCategory, RunId, RuntimeEvent } from "@computer-harness/protocol";
 
-export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
+export type RunNoticeKind = "progress" | "approval" | "question" | "handoff" | "error" | "result";
 export type RunNoticeDelivery = "polite" | "interrupt";
 export type RunNoticeProgressSemantic = "run_start" | "observation_milestone" | "observation_blocker";
 
@@ -98,9 +98,19 @@ export class RunNoticeProjector {
         return this.projectApproval(event, context);
       case "user.input.requested":
         return this.projectQuestion(event);
+      case "computer.window.handoff.requested":
+        return this.notice(
+          event,
+          "handoff",
+          "任务正在等待你选择或确认一个窗口。",
+          "interrupt",
+          `handoff:${event.sourceActionId}`,
+          "fixed",
+          event.sourceActionId,
+        );
       case "user.input.received":
       case "approval.resolved":
-        // The scheduler checks these notices against the live pending-request snapshot at dequeue time.
+        // The scheduler checks interactive notices against the live pending request at dequeue time.
         return undefined;
       case "runtime.error":
         return this.projectRuntimeError(event);
@@ -301,7 +311,7 @@ function resultFallback(outcome: Extract<RuntimeEvent, { type: "run.finished" }>
     case "failed": return failureAlreadyExplained ? "任务结束。" : "任务未能完成。";
     case "cancelled": return "任务已取消。";
     case "budget_exhausted": return failureAlreadyExplained ? "任务结束。" : "任务操作已达到上限。";
-    case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "有项操作的结果无法确认，任务已暂停。";
+    case "outcome_unknown": return failureAlreadyExplained ? "任务结束。" : "任务已结束，操作结果仍待核实。";
   }
 }
 
@@ -313,7 +323,7 @@ function runtimeErrorVoiceText(category: string): string | undefined {
     case "budget":
       return "任务操作已达到上限，暂时停止。";
     case "unknown_side_effect":
-      return "有项操作的结果无法确认，任务已停止。";
+      return "操作结果暂时无法确认，请查看当前任务状态。";
     case "partial_side_effect":
       return "部分内容可能已经输入，结果无法确认，任务已停止。";
     case "cleanup":
@@ -372,6 +382,7 @@ function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): str
     keypress: "键盘操作",
     select_option: "选择操作",
     switch_window: "切换窗口操作",
+    reopen_saved_document: "重新打开文档操作",
     wait: "等待操作",
   };
   const riskLabels = categories.map((category) => categoryLabels[category]);

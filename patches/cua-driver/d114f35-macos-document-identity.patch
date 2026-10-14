@@ -1,0 +1,1633 @@
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -4187,6 +4187,9 @@
+                 serde_json::json!({
+                     "_protected_process_fingerprint": {"pid": 1},
+                     "_session_id": "forged",
++                    "document_identity_query": {
++                        "expected_document_url": "file:///private/document.rtf"
++                    },
+                     "files": ["/does/not/matter"]
+                 }),
+                 unrestricted_context(),
+@@ -4197,6 +4200,10 @@
+         let received = last_args.lock().unwrap().clone().unwrap();
+         assert!(received.get("_protected_process_fingerprint").is_none());
+         assert!(received.get("_session_id").is_none());
++        assert_eq!(
++            received["document_identity_query"]["expected_document_url"],
++            "file:///private/document.rtf"
++        );
+     }
+ 
+     #[tokio::test]
+@@ -4718,6 +4725,32 @@
+                     );
+                 }
+             }
++            "get_window_state" => {
++                if let Some(query) = arguments
++                    .get_mut("document_identity_query")
++                    .and_then(Value::as_object_mut)
++                {
++                    if query.contains_key("expected_document_url") {
++                        query.insert(
++                            "expected_document_url".to_owned(),
++                            Value::String("[redacted]".to_owned()),
++                        );
++                    }
++                }
++            }
++            "launch_app" => {
++                if let Some(urls) = arguments.get_mut("urls").and_then(Value::as_array_mut) {
++                    for url in urls {
++                        if url
++                            .as_str()
++                            .and_then(|value| value.get(..5))
++                            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
++                        {
++                            *url = Value::String("[redacted]".to_owned());
++                        }
++                    }
++                }
++            }
+             "browser_pointer" => {}
+             _ => {}
+         }
+@@ -4842,6 +4875,63 @@
+                 "recording leaked {forbidden}"
+             );
+         }
++    }
++
++    #[test]
++    fn document_identity_query_recording_redacts_the_expected_url() {
++        let recorded = recording_args_for(
++            "get_window_state",
++            &serde_json::json!({
++                "pid": 22394,
++                "window_id": 17753,
++                "document_identity_query": {
++                    "expected_document_url": "file:///Users/example/private-note.rtf"
++                }
++            }),
++        );
++        assert_eq!(
++            recorded["document_identity_query"]["expected_document_url"],
++            "[redacted]"
++        );
++        assert!(!recorded
++            .to_string()
++            .contains("/Users/example/private-note.rtf"));
++    }
++
++    #[test]
++    fn launch_app_recording_redacts_file_urls_and_preserves_web_urls() {
++        let recorded = recording_args_for(
++            "launch_app",
++            &serde_json::json!({
++                "bundle_id": "com.apple.TextEdit",
++                "urls": [
++                    "file:///Users/example/private-note.rtf",
++                    "https://example.test/document",
++                    "http://example.test/health",
++                ],
++            }),
++        );
++        assert_eq!(recorded["urls"][0], "[redacted]");
++        assert_eq!(recorded["urls"][1], "https://example.test/document");
++        assert_eq!(recorded["urls"][2], "http://example.test/health");
++        assert!(!recorded
++            .to_string()
++            .contains("/Users/example/private-note.rtf"));
++
++        let mixed_case_file_scheme = recording_args_for(
++            "launch_app",
++            &serde_json::json!({"urls": ["FILE:///Users/example/secret.rtf"]}),
++        );
++        assert_eq!(mixed_case_file_scheme["urls"][0], "[redacted]");
++
++        let unrelated_tool = recording_args_for(
++            "other_tool",
++            &serde_json::json!({"urls": ["file:///Users/example/private-note.rtf"]}),
++        );
++        assert_eq!(
++            unrelated_tool["urls"][0],
++            "file:///Users/example/private-note.rtf"
++        );
+     }
+ 
+     #[test]
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool_args.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool_args.rs
+@@ -100,6 +100,7 @@
+             "_session_id": "forged",
+             "_observation_only": true,
+             "_cua_browser_prepare_mcp_host_approved": true,
++            "document_identity_query": {"expected_document_url": "file:///private/doc.rtf"},
+             "profile": {"mode": "isolated_new", "_future_public_field": "retained"}
+         });
+         sanitize_reserved_args(&mut args);
+@@ -107,6 +108,7 @@
+             args,
+             json!({
+                 "pid": 42,
++                "document_identity_query": {"expected_document_url": "file:///private/doc.rtf"},
+                 "profile": {"mode": "isolated_new", "_future_public_field": "retained"}
+             })
+         );
+--- a/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
+@@ -42,6 +42,140 @@
+ /// never triggers the macOS Automation permission for System Events.
+ pub fn list_running_apps() -> Vec<AppInfo> {
+     list_running_apps_native()
++}
++
++/// Return the actual bundle/executable identity for one app process and the
++/// complete live NSRunningApplication set for its bundle. Any unreadable
++/// process lifetime or executable identity makes the result unavailable.
++pub(crate) fn document_app_identity(
++    pid: i32,
++    expected_bundle_id: &str,
++) -> Option<serde_json::Value> {
++    use objc2_app_kit::NSRunningApplication;
++    use objc2_foundation::NSString;
++
++    if pid <= 0 {
++        return None;
++    }
++    let target = unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) }?;
++    if unsafe { target.isTerminated() } {
++        return None;
++    }
++    let target_bundle_id = unsafe { target.bundleIdentifier() }?.to_string();
++    let target_executable_url = unsafe { target.executableURL() }?;
++    if !unsafe { target_executable_url.isFileURL() } {
++        return None;
++    }
++    let target_executable_url = unsafe { target_executable_url.absoluteString() }?.to_string();
++    let target_start = crate::ax::enablement::process_start_stamp(pid)?;
++
++    let bundle = NSString::from_str(expected_bundle_id);
++    let running = unsafe { NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle) };
++    let mut instances = Vec::new();
++    let mut target_instance_matches = false;
++    unsafe {
++        for index in 0..running.count() {
++            let app = running.objectAtIndex(index);
++            if app.isTerminated() {
++                continue;
++            }
++            let instance_pid = app.processIdentifier();
++            if instance_pid <= 0 {
++                return None;
++            }
++            let actual_bundle = app.bundleIdentifier()?.to_string();
++            let executable_url = app.executableURL()?;
++            if !executable_url.isFileURL() {
++                return None;
++            }
++            let executable = executable_url.absoluteString()?.to_string();
++            let start = crate::ax::enablement::process_start_stamp(instance_pid)?;
++            if instance_pid == pid {
++                target_instance_matches = start == target_start
++                    && actual_bundle == target_bundle_id
++                    && executable == target_executable_url;
++            }
++            instances.push(serde_json::json!({
++                "pid": instance_pid,
++                "bundle_id": actual_bundle,
++                "executable_url": executable,
++                "process_start": { "seconds": start.0, "microseconds": start.1 },
++            }));
++        }
++    }
++    instances.sort_by_key(|row| {
++        row.get("pid")
++            .and_then(serde_json::Value::as_i64)
++            .unwrap_or_default()
++    });
++    let identity = serde_json::json!({
++        "status": "complete",
++        "expected_bundle_identifier": expected_bundle_id,
++        "target_bundle_id": target_bundle_id,
++        "target_executable_url": target_executable_url,
++        "target_process_start": { "seconds": target_start.0, "microseconds": target_start.1 },
++        "target_instance_matches": target_instance_matches,
++        "instances": instances,
++    });
++    document_app_identity_is_exact(&identity, pid, expected_bundle_id).then_some(identity)
++}
++
++pub(crate) fn document_app_identity_is_exact(
++    identity: &serde_json::Value,
++    pid: i32,
++    expected_bundle_id: &str,
++) -> bool {
++    let Some(instances) = identity
++        .get("instances")
++        .and_then(serde_json::Value::as_array)
++    else {
++        return false;
++    };
++    if identity.get("status").and_then(serde_json::Value::as_str) != Some("complete")
++        || identity
++            .get("expected_bundle_identifier")
++            .and_then(serde_json::Value::as_str)
++            != Some(expected_bundle_id)
++        || identity
++            .get("target_bundle_id")
++            .and_then(serde_json::Value::as_str)
++            != Some(expected_bundle_id)
++        || identity
++            .get("target_executable_url")
++            .and_then(serde_json::Value::as_str)
++            .is_none_or(str::is_empty)
++        || identity
++            .get("target_instance_matches")
++            .and_then(serde_json::Value::as_bool)
++            != Some(true)
++        || instances.len() != 1
++    {
++        return false;
++    }
++    let instance = &instances[0];
++    instance.get("pid").and_then(serde_json::Value::as_i64) == Some(i64::from(pid))
++        && instance
++            .get("bundle_id")
++            .and_then(serde_json::Value::as_str)
++            == Some(expected_bundle_id)
++        && instance
++            .get("executable_url")
++            .and_then(serde_json::Value::as_str)
++            == identity
++                .get("target_executable_url")
++                .and_then(serde_json::Value::as_str)
++        && instance.get("process_start") == identity.get("target_process_start")
++}
++
++pub(crate) fn document_app_identity_is_stable(
++    initial: &serde_json::Value,
++    tail: Option<&serde_json::Value>,
++    pid: i32,
++    expected_bundle_id: &str,
++) -> bool {
++    document_app_identity_is_exact(initial, pid, expected_bundle_id)
++        && tail == Some(initial)
++        && tail.is_some_and(|value| document_app_identity_is_exact(value, pid, expected_bundle_id))
+ }
+ 
+ fn list_running_apps_native() -> Vec<AppInfo> {
+@@ -716,7 +850,10 @@
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{finder_folder_handoff, unix_secs_to_rfc3339};
++    use super::{
++        document_app_identity_is_exact, document_app_identity_is_stable, finder_folder_handoff,
++        unix_secs_to_rfc3339,
++    };
+ 
+     #[test]
+     fn finder_folder_handoff_is_narrowly_selected() {
+@@ -782,4 +919,113 @@
+         // 1990-07-04T15:30:00Z → 647105400.
+         assert_eq!(unix_secs_to_rfc3339(647_105_400), "1990-07-04T15:30:00Z");
+     }
+-}
++
++    #[test]
++    fn document_app_identity_requires_exact_single_textedit_process_lifetime() {
++        let expected = "com.apple.TextEdit";
++        let valid = serde_json::json!({
++            "status": "complete",
++            "expected_bundle_identifier": expected,
++            "target_bundle_id": expected,
++            "target_executable_url": "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
++            "target_process_start": { "seconds": 100, "microseconds": 7 },
++            "target_instance_matches": true,
++            "instances": [{
++                "pid": 123,
++                "bundle_id": expected,
++                "executable_url": "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
++                "process_start": { "seconds": 100, "microseconds": 7 },
++            }],
++        });
++        assert!(document_app_identity_is_exact(&valid, 123, expected));
++
++        let mut wrong_bundle = valid.clone();
++        wrong_bundle["target_bundle_id"] = serde_json::json!("com.example.Other");
++        assert!(!document_app_identity_is_exact(
++            &wrong_bundle,
++            123,
++            expected
++        ));
++
++        let mut missing_bundle = valid.clone();
++        missing_bundle
++            .as_object_mut()
++            .unwrap()
++            .remove("target_bundle_id");
++        assert!(!document_app_identity_is_exact(
++            &missing_bundle,
++            123,
++            expected
++        ));
++
++        let mut instance_missing_bundle = valid.clone();
++        instance_missing_bundle["instances"][0]
++            .as_object_mut()
++            .unwrap()
++            .remove("bundle_id");
++        assert!(!document_app_identity_is_exact(
++            &instance_missing_bundle,
++            123,
++            expected
++        ));
++
++        let mut missing_executable = valid.clone();
++        missing_executable
++            .as_object_mut()
++            .unwrap()
++            .remove("target_executable_url");
++        assert!(!document_app_identity_is_exact(
++            &missing_executable,
++            123,
++            expected
++        ));
++
++        let mut empty_executable = valid.clone();
++        empty_executable["target_executable_url"] = serde_json::json!("");
++        assert!(!document_app_identity_is_exact(
++            &empty_executable,
++            123,
++            expected
++        ));
++
++        let mut multiple_instances = valid.clone();
++        multiple_instances["instances"]
++            .as_array_mut()
++            .unwrap()
++            .push(valid["instances"][0].clone());
++        assert!(!document_app_identity_is_exact(
++            &multiple_instances,
++            123,
++            expected
++        ));
++
++        assert!(!document_app_identity_is_exact(&valid, 124, expected));
++
++        let mut changed_start = valid.clone();
++        changed_start["instances"][0]["process_start"]["microseconds"] = serde_json::json!(8);
++        assert!(!document_app_identity_is_exact(
++            &changed_start,
++            123,
++            expected
++        ));
++
++        assert!(document_app_identity_is_stable(
++            &valid,
++            Some(&valid),
++            123,
++            expected
++        ));
++        let mut changed_executable = valid.clone();
++        changed_executable["target_executable_url"] =
++            serde_json::json!("file:///Applications/OtherTextEdit.app/Contents/MacOS/TextEdit");
++        assert!(!document_app_identity_is_stable(
++            &valid,
++            Some(&changed_executable),
++            123,
++            expected
++        ));
++        assert!(!document_app_identity_is_stable(
++            &valid, None, 123, expected
++        ));
++    }
++}
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+@@ -16,6 +16,30 @@
+     string::CFStringRef,
+ };
+ use std::os::raw::{c_int, c_void};
++
++/// A typed value copied from an AX attribute. `Missing` is distinct from
++/// unsupported and transport/read failures so callers cannot infer a clean or
++/// empty state from an unreadable attribute.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum CheckedAxValue<T> {
++    Value(T),
++    Missing,
++    Unsupported(AXError),
++    ReadError(AXError),
++    WrongType(CFTypeID),
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum AXDocumentValue {
++    CFUrl(String),
++    CFString(String),
++}
++
++#[link(name = "CoreFoundation", kind = "framework")]
++extern "C" {
++    fn CFURLGetTypeID() -> CFTypeID;
++    fn CFURLGetString(url: *const c_void) -> CFStringRef;
++}
+ 
+ // ── AXUIElement opaque type ──────────────────────────────────────────────────
+ 
+@@ -192,6 +216,46 @@
+     Ok(children)
+ }
+ 
++/// Copy an AX attribute-name list, preserving API/type errors instead of
++/// treating them as an empty set. Used only to distinguish a genuinely absent
++/// `AXDocument` attribute from an unreadable document value.
++///
++/// # Safety
++/// `element` must remain valid for the duration of the AX call.
++pub unsafe fn copy_attribute_names_checked(
++    element: AXUIElementRef,
++) -> Result<Vec<String>, AXError> {
++    let mut value: CFArrayRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeNames(element, &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value as CFTypeRef);
++        }
++        return Err(if error == kAXErrorSuccess {
++            kAXErrorFailure
++        } else {
++            error
++        });
++    }
++    if core_foundation::base::CFGetTypeID(value as CFTypeRef) != CFArray::<CFTypeRef>::type_id() {
++        CFRelease(value as CFTypeRef);
++        return Err(kAXErrorFailure);
++    }
++    let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value);
++    let mut names = Vec::with_capacity(array.len() as usize);
++    for index in 0..array.len() {
++        let Some(item_ref) = array.get(index) else {
++            return Err(kAXErrorFailure);
++        };
++        let item = *item_ref;
++        if item.is_null() || core_foundation::base::CFGetTypeID(item) != CFStr::type_id() {
++            return Err(kAXErrorFailure);
++        }
++        names.push(CFStr::wrap_under_get_rule(item as _).to_string());
++    }
++    Ok(names)
++}
++
+ /// Copy a required AX string attribute and preserve missing/type/read failures.
+ ///
+ /// # Safety
+@@ -219,6 +283,81 @@
+     }
+     let string = CFStr::wrap_under_create_rule(value as _).to_string();
+     Ok(string)
++}
++
++/// Copy `AXDocument` without coercing non-document Foundation values to
++/// strings. CFURL is converted only with CFURLGetString; the resulting string
++/// is retained verbatim for a private, exact host-side URL comparison.
++///
++/// # Safety
++/// `element` must remain a valid AX element for the duration of the call.
++pub unsafe fn copy_ax_document_checked(element: AXUIElementRef) -> CheckedAxValue<AXDocumentValue> {
++    use core_foundation::base::CFGetTypeID;
++
++    let attr = CFStr::new("AXDocument");
++    let mut value: CFTypeRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value);
++        }
++        return match error {
++            kAXErrorNoValue => CheckedAxValue::Missing,
++            kAXErrorAttributeUnsupported => CheckedAxValue::Unsupported(error),
++            kAXErrorSuccess => CheckedAxValue::ReadError(kAXErrorFailure),
++            other => CheckedAxValue::ReadError(other),
++        };
++    }
++
++    let type_id = CFGetTypeID(value);
++    if type_id == CFStr::type_id() {
++        let text = CFStr::wrap_under_create_rule(value as _).to_string();
++        return CheckedAxValue::Value(AXDocumentValue::CFString(text));
++    }
++    if type_id == CFURLGetTypeID() {
++        let text = CFURLGetString(value as _);
++        if text.is_null() {
++            CFRelease(value);
++            return CheckedAxValue::ReadError(kAXErrorFailure);
++        }
++        let text = CFStr::wrap_under_get_rule(text).to_string();
++        CFRelease(value);
++        return CheckedAxValue::Value(AXDocumentValue::CFUrl(text));
++    }
++
++    CFRelease(value);
++    CheckedAxValue::WrongType(type_id)
++}
++
++/// Copy `AXEdited` only when the AX value is a real CFBoolean. AX apps may
++/// expose this attribute as unsupported; that must remain a distinct result.
++///
++/// # Safety
++/// `element` must remain a valid AX element for the duration of the call.
++pub unsafe fn copy_ax_edited_checked(element: AXUIElementRef) -> CheckedAxValue<bool> {
++    use core_foundation::{base::CFGetTypeID, boolean::CFBoolean};
++
++    let attr = CFStr::new("AXEdited");
++    let mut value: CFTypeRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value);
++        }
++        return match error {
++            kAXErrorNoValue => CheckedAxValue::Missing,
++            kAXErrorAttributeUnsupported => CheckedAxValue::Unsupported(error),
++            kAXErrorSuccess => CheckedAxValue::ReadError(kAXErrorFailure),
++            other => CheckedAxValue::ReadError(other),
++        };
++    }
++    let type_id = CFGetTypeID(value);
++    if type_id != CFBoolean::type_id() {
++        CFRelease(value);
++        return CheckedAxValue::WrongType(type_id);
++    }
++    let boolean = CFBoolean::wrap_under_create_rule(value as _);
++    CheckedAxValue::Value(boolean.into())
+ }
+ 
+ /// Whether an AX attribute is currently writable on this element.
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/cache.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/cache.rs
+@@ -169,6 +169,7 @@
+             enabled: None,
+             selected: None,
+             in_web_content: false,
++            text_format: None,
+         }
+     }
+ 
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs
+@@ -22,11 +22,11 @@
+ /// lifetime.
+ const CHROMIUM_SETTLE_SECONDS: f64 = 0.5;
+ 
+-type ProcessStartStamp = (u64, u64);
++pub(crate) type ProcessStartStamp = (u64, u64);
+ 
+ /// Kernel start time of a process: `(pbi_start_tvsec, pbi_start_tvusec)`.
+ /// `None` when the process is gone or proc info is unreadable.
+-fn process_start_stamp(pid: i32) -> Option<ProcessStartStamp> {
++pub(crate) fn process_start_stamp(pid: i32) -> Option<ProcessStartStamp> {
+     // SAFETY: proc_pidinfo writes at most `size` bytes into `info` and returns
+     // the number of bytes filled (<= size) or <= 0 on failure.
+     unsafe {
+--- a/libs/cua-driver/rust/crates/platform-macos/src/browser/consent_ui.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/browser/consent_ui.rs
+@@ -405,6 +405,7 @@
+             enabled: None,
+             selected: None,
+             in_web_content: false,
++            text_format: None,
+         }
+     }
+ 
+--- a/libs/cua-driver/rust/crates/platform-macos/src/browser/setup_ui.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/browser/setup_ui.rs
+@@ -1731,6 +1731,7 @@
+             enabled: None,
+             selected: None,
+             in_web_content: false,
++            text_format: None,
+         }
+     }
+ 
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+@@ -5,6 +5,272 @@
+ };
+ use serde_json::Value;
+ use std::sync::Arc;
++
++fn checked_ax_document_json(
++    value: &crate::ax::bindings::CheckedAxValue<crate::ax::bindings::AXDocumentValue>,
++    expected_url: Option<&str>,
++) -> Value {
++    use crate::ax::bindings::{AXDocumentValue, CheckedAxValue};
++    match value {
++        CheckedAxValue::Value(AXDocumentValue::CFUrl(value)) => serde_json::json!({
++            "status": "ok",
++            "type": "cf_url",
++            "matches_expected": expected_url.is_some_and(|expected| value == expected),
++        }),
++        CheckedAxValue::Value(AXDocumentValue::CFString(value)) => serde_json::json!({
++            "status": "ok",
++            "type": "cf_string",
++            "matches_expected": expected_url.is_some_and(|expected| value == expected),
++        }),
++        CheckedAxValue::Missing => serde_json::json!({ "status": "missing" }),
++        CheckedAxValue::Unsupported(error) => serde_json::json!({
++            "status": "unsupported",
++            "ax_error": error,
++        }),
++        CheckedAxValue::ReadError(error) => serde_json::json!({
++            "status": "read_error",
++            "ax_error": error,
++        }),
++        CheckedAxValue::WrongType(type_id) => serde_json::json!({
++            "status": "wrong_type",
++            "cf_type_id": type_id,
++        }),
++    }
++}
++
++fn checked_ax_edited_json(value: &crate::ax::bindings::CheckedAxValue<bool>) -> Value {
++    use crate::ax::bindings::CheckedAxValue;
++    match value {
++        CheckedAxValue::Value(value) => serde_json::json!({
++            "status": "ok",
++            "type": "cf_boolean",
++            "value": value,
++        }),
++        CheckedAxValue::Missing => serde_json::json!({ "status": "missing" }),
++        CheckedAxValue::Unsupported(error) => serde_json::json!({
++            "status": "unsupported",
++            "ax_error": error,
++        }),
++        CheckedAxValue::ReadError(error) => serde_json::json!({
++            "status": "read_error",
++            "ax_error": error,
++        }),
++        CheckedAxValue::WrongType(type_id) => serde_json::json!({
++            "status": "wrong_type",
++            "cf_type_id": type_id,
++        }),
++    }
++}
++
++enum CheckedElementRead {
++    Value(crate::ax::bindings::AXUIElementRef),
++    Missing,
++    Unsupported(i32),
++    ReadError(i32),
++    WrongType(core_foundation::base::CFTypeID),
++}
++
++unsafe fn copy_element_attr_checked(
++    element: crate::ax::bindings::AXUIElementRef,
++    attr_name: &str,
++) -> CheckedElementRead {
++    use crate::ax::bindings::{
++        kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess,
++        AXUIElementCopyAttributeValue, AXUIElementGetTypeID,
++    };
++    use core_foundation::{
++        base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType},
++        string::CFString,
++    };
++
++    let attr = CFString::new(attr_name);
++    let mut value: CFTypeRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value);
++        }
++        return if error == kAXErrorNoValue {
++            CheckedElementRead::Missing
++        } else if error == kAXErrorAttributeUnsupported {
++            CheckedElementRead::Unsupported(error)
++        } else if error == kAXErrorSuccess {
++            CheckedElementRead::ReadError(-25200)
++        } else {
++            CheckedElementRead::ReadError(error)
++        };
++    }
++    let type_id = CFGetTypeID(value);
++    if type_id == AXUIElementGetTypeID() {
++        CheckedElementRead::Value(value as _)
++    } else {
++        CFRelease(value);
++        CheckedElementRead::WrongType(type_id)
++    }
++}
++
++fn checked_element_read_json(value: &CheckedElementRead) -> Value {
++    match value {
++        CheckedElementRead::Value(_) => serde_json::json!({ "status": "ok", "type": "ax_element" }),
++        CheckedElementRead::Missing => serde_json::json!({ "status": "missing" }),
++        CheckedElementRead::Unsupported(error) => {
++            serde_json::json!({ "status": "unsupported", "ax_error": error })
++        }
++        CheckedElementRead::ReadError(error) => {
++            serde_json::json!({ "status": "read_error", "ax_error": error })
++        }
++        CheckedElementRead::WrongType(type_id) => {
++            serde_json::json!({ "status": "wrong_type", "cf_type_id": type_id })
++        }
++    }
++}
++
++fn exact_unique_document_match(
++    domain_complete: bool,
++    matching_window_ids: &[u32],
++    target_window_id: u32,
++) -> bool {
++    domain_complete && matching_window_ids.len() == 1 && matching_window_ids[0] == target_window_id
++}
++
++fn stable_unique_document_domain(
++    initial_complete: bool,
++    initial_rows: &[Value],
++    initial_matching_ids: &[u32],
++    tail_complete: bool,
++    tail_rows: &[Value],
++    tail_matching_ids: &[u32],
++    target_window_id: u32,
++) -> bool {
++    initial_complete
++        && tail_complete
++        && initial_rows == tail_rows
++        && initial_matching_ids == tail_matching_ids
++        && exact_unique_document_match(initial_complete, initial_matching_ids, target_window_id)
++        && exact_unique_document_match(tail_complete, tail_matching_ids, target_window_id)
++}
++
++fn parse_document_identity_query(args: &Value) -> Result<Option<Option<String>>, &'static str> {
++    let Some(query) = args.get("document_identity_query") else {
++        return Ok(None);
++    };
++    let Some(object) = query.as_object() else {
++        return Err("document_identity_query must be an object");
++    };
++    if object.len() > 1 || object.keys().any(|key| key != "expected_document_url") {
++        return Err("document_identity_query accepts only expected_document_url");
++    }
++    if object.is_empty() {
++        return Ok(Some(None));
++    }
++    let Some(url) = object.get("expected_document_url").and_then(Value::as_str) else {
++        return Err("document_identity_query.expected_document_url must be a string");
++    };
++    if url.len() > 8192
++        || !url.starts_with("file:///")
++        || url.chars().any(char::is_control)
++        || url.contains('?')
++        || url.contains('#')
++    {
++        return Err(
++            "document_identity_query.expected_document_url must be a canonical local file URL",
++        );
++    }
++    Ok(Some(Some(url.to_owned())))
++}
++
++/// Re-read the complete per-application AXWindows domain without retaining or
++/// serializing document URL values. Used at the end of proof construction so a
++/// new matching document, changed AXDocument state, or unreadable row invalidates
++/// the initial uniqueness result.
++unsafe fn read_document_domain_projection(
++    app: crate::ax::bindings::AXUIElementRef,
++    expected_pid: i32,
++    expected_url: Option<&str>,
++) -> Option<(Vec<Value>, Vec<u32>, bool)> {
++    use crate::ax::bindings::{
++        copy_attribute_names_checked, copy_ax_document_checked, copy_element_array_attr_checked,
++        copy_string_attr_checked, kAXErrorSuccess, AXDocumentValue, AXUIElementGetPid,
++        CheckedAxValue,
++    };
++    use core_foundation::base::{CFRelease, CFTypeRef};
++
++    let windows = copy_element_array_attr_checked(app, "AXWindows").ok()?;
++    let mut rows = Vec::new();
++    let mut matching_ids = Vec::new();
++    let mut ids = std::collections::HashSet::new();
++    let mut complete = true;
++    let mut roles_read = true;
++    for candidate in &windows {
++        let role = match copy_string_attr_checked(*candidate, "AXRole") {
++            Ok(role) if !role.trim().is_empty() => role,
++            _ => {
++                roles_read = false;
++                break;
++            }
++        };
++        if role != "AXWindow" {
++            complete = false;
++            continue;
++        }
++        let mut candidate_pid = 0;
++        if AXUIElementGetPid(*candidate, &mut candidate_pid) != kAXErrorSuccess
++            || candidate_pid != expected_pid
++        {
++            complete = false;
++        }
++        let Some(candidate_id) = crate::ax::bindings::ax_get_window_id(*candidate) else {
++            complete = false;
++            continue;
++        };
++        if !ids.insert(candidate_id) {
++            complete = false;
++        }
++        let document = copy_ax_document_checked(*candidate);
++        let document_row = match document {
++            CheckedAxValue::Value(AXDocumentValue::CFUrl(value)) => {
++                let matches = expected_url.is_some_and(|expected| value == expected);
++                if matches {
++                    matching_ids.push(candidate_id);
++                }
++                serde_json::json!({ "status": "ok", "type": "cf_url", "matches_expected": matches })
++            }
++            CheckedAxValue::Value(AXDocumentValue::CFString(value)) => {
++                let matches = expected_url.is_some_and(|expected| value == expected);
++                if matches {
++                    matching_ids.push(candidate_id);
++                }
++                serde_json::json!({ "status": "ok", "type": "cf_string", "matches_expected": matches })
++            }
++            CheckedAxValue::Missing => serde_json::json!({ "status": "missing" }),
++            CheckedAxValue::Unsupported(error) => match copy_attribute_names_checked(*candidate) {
++                Ok(names) if !names.iter().any(|name| name == "AXDocument") => {
++                    serde_json::json!({ "status": "absent", "ax_error": error })
++                }
++                _ => {
++                    complete = false;
++                    serde_json::json!({ "status": "unknown" })
++                }
++            },
++            CheckedAxValue::ReadError(_) | CheckedAxValue::WrongType(_) => {
++                complete = false;
++                serde_json::json!({ "status": "unknown" })
++            }
++        };
++        rows.push(serde_json::json!({
++            "window_id": candidate_id,
++            "role": "AXWindow",
++            "document": document_row,
++        }));
++    }
++    for candidate in windows {
++        CFRelease(candidate as CFTypeRef);
++    }
++    if !roles_read {
++        return None;
++    }
++    Some((rows, matching_ids, complete))
++}
+ 
+ use super::ToolState;
+ 
+@@ -77,6 +343,14 @@
+                 "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
+                 "pid": { "type": "integer", "description": "Target process ID." },
+                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
++                "document_identity_query": {
++                    "type": "object",
++                    "description": "Optional trusted-host identity check. Omit expected_document_url for application identity only; provide it for a private document identity check. The URL is compared natively and never included in the response.",
++                    "properties": {
++                        "expected_document_url": { "type": "string", "minLength": 8, "maxLength": 8192 }
++                    },
++                    "additionalProperties": false
++                },
+                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
+                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                 "include_screenshot": {
+@@ -818,6 +1092,392 @@
+     }
+ }
+ 
++/// Create an internal, exact-window document identity proof. This is purposely
++/// not part of the normal AX element list: its URL is sensitive and callers
++/// must consume it inside the native adapter before constructing model context.
++fn document_identity_proof(
++    pid: i32,
++    window_id: u32,
++    snapshot_id: &str,
++    expected_document_url: Option<&str>,
++) -> Option<Value> {
++    use crate::ax::bindings::{
++        copy_attribute_names_checked, copy_ax_document_checked, copy_ax_edited_checked,
++        copy_element_array_attr_checked, copy_string_attr_checked, kAXErrorSuccess,
++        AXDocumentValue, AXUIElementCreateApplication, AXUIElementGetPid, CheckedAxValue,
++    };
++    use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
++
++    let process_start = crate::ax::enablement::process_start_stamp(pid)?;
++    let expected_bundle_id = "com.apple.TextEdit";
++    let application_identity = crate::apps::document_app_identity(pid, expected_bundle_id)?;
++    let expected_process_start = serde_json::json!({
++        "seconds": process_start.0,
++        "microseconds": process_start.1,
++    });
++    if application_identity.get("target_process_start") != Some(&expected_process_start)
++        || !crate::apps::document_app_identity_is_exact(
++            &application_identity,
++            pid,
++            expected_bundle_id,
++        )
++    {
++        return None;
++    }
++    if crate::apps::frontmost_pid() != Some(pid)
++        || crate::ax::bindings::focused_window_id_of_pid(pid) != Some(window_id)
++        || crate::windows::resolve_window_owner(pid, window_id)
++            != crate::windows::WindowOwner::SamePid
++    {
++        return None;
++    }
++    let bounds = crate::windows::window_bounds_by_id(window_id)?;
++    let window_info = crate::windows::window_info_by_id(window_id)?;
++    if !window_info.is_on_screen || !same_bounds(&bounds, &window_info.bounds) {
++        return None;
++    }
++
++    unsafe {
++        let app = AXUIElementCreateApplication(pid);
++        if app.is_null() {
++            return None;
++        }
++        let windows = match copy_element_array_attr_checked(app, "AXWindows") {
++            Ok(windows) => windows,
++            Err(_) => {
++                CFRelease(app as CFTypeRef);
++                return None;
++            }
++        };
++        let mut target_windows = Vec::new();
++        let mut domain_rows = Vec::new();
++        let mut domain_complete = true;
++        let mut matching_document_windows = Vec::new();
++        let mut observed_window_ids = std::collections::HashSet::new();
++        let mut roles_read = true;
++        for candidate in &windows {
++            match copy_string_attr_checked(*candidate, "AXRole") {
++                Ok(role) if role == "AXWindow" => {
++                    let mut candidate_pid = 0;
++                    if crate::ax::bindings::AXUIElementGetPid(*candidate, &mut candidate_pid)
++                        != kAXErrorSuccess
++                        || candidate_pid != pid
++                    {
++                        domain_complete = false;
++                    }
++                    let Some(candidate_id) = crate::ax::bindings::ax_get_window_id(*candidate)
++                    else {
++                        domain_complete = false;
++                        continue;
++                    };
++                    if !observed_window_ids.insert(candidate_id) {
++                        domain_complete = false;
++                    }
++                    if candidate_id == window_id {
++                        target_windows.push(*candidate);
++                    }
++                    let document_read = copy_ax_document_checked(*candidate);
++                    let row = match document_read {
++                        CheckedAxValue::Value(AXDocumentValue::CFUrl(value)) => {
++                            let matches =
++                                expected_document_url.is_some_and(|expected| value == expected);
++                            if matches {
++                                matching_document_windows.push(candidate_id);
++                            }
++                            serde_json::json!({
++                                "window_id": candidate_id,
++                                "role": "AXWindow",
++                                "document": {"status":"ok", "type":"cf_url", "matches_expected":matches},
++                            })
++                        }
++                        CheckedAxValue::Value(AXDocumentValue::CFString(value)) => {
++                            let matches =
++                                expected_document_url.is_some_and(|expected| value == expected);
++                            if matches {
++                                matching_document_windows.push(candidate_id);
++                            }
++                            serde_json::json!({
++                                "window_id": candidate_id,
++                                "role": "AXWindow",
++                                "document": {"status":"ok", "type":"cf_string", "matches_expected":matches},
++                            })
++                        }
++                        CheckedAxValue::Missing => serde_json::json!({
++                            "window_id": candidate_id,
++                            "role": "AXWindow",
++                            "document": {"status":"missing"},
++                        }),
++                        CheckedAxValue::Unsupported(error) => {
++                            match copy_attribute_names_checked(*candidate) {
++                                Ok(names) if !names.iter().any(|name| name == "AXDocument") => {
++                                    serde_json::json!({
++                                        "window_id": candidate_id,
++                                        "role": "AXWindow",
++                                        "document": {"status":"absent", "ax_error":error},
++                                    })
++                                }
++                                _ => {
++                                    domain_complete = false;
++                                    serde_json::json!({
++                                        "window_id": candidate_id,
++                                        "role": "AXWindow",
++                                        "document": {"status":"unknown"},
++                                    })
++                                }
++                            }
++                        }
++                        CheckedAxValue::ReadError(_) | CheckedAxValue::WrongType(_) => {
++                            domain_complete = false;
++                            serde_json::json!({
++                                "window_id": candidate_id,
++                                "role": "AXWindow",
++                                "document": {"status":"unknown"},
++                            })
++                        }
++                    };
++                    domain_rows.push(row);
++                }
++                Ok(role) if !role.trim().is_empty() => domain_complete = false,
++                _ => roles_read = false,
++            }
++        }
++        if !roles_read || target_windows.len() != 1 {
++            for candidate in windows {
++                CFRelease(candidate as CFTypeRef);
++            }
++            CFRelease(app as CFTypeRef);
++            return None;
++        }
++
++        let target = target_windows[0];
++        let mut target_pid = 0;
++        let target_pid_ok =
++            AXUIElementGetPid(target, &mut target_pid) == kAXErrorSuccess && target_pid == pid;
++        let target_frame = crate::ax::bindings::element_screen_rect(target);
++        if !target_pid_ok
++            || target_frame
++                .is_none_or(|frame| frame != [bounds.x, bounds.y, bounds.width, bounds.height])
++        {
++            for candidate in windows {
++                CFRelease(candidate as CFTypeRef);
++            }
++            CFRelease(app as CFTypeRef);
++            return None;
++        }
++
++        let document = copy_ax_document_checked(target);
++        let window_edited = copy_ax_edited_checked(target);
++        let close_button = copy_element_attr_checked(target, "AXCloseButton");
++        let mut close_button_evidence = checked_element_read_json(&close_button);
++        let mut edited = serde_json::json!({ "status": "unverified" });
++        let mut button_edited_read = None;
++        if let CheckedElementRead::Value(button) = &close_button {
++            let mut button_pid = 0;
++            let button_pid_ok =
++                AXUIElementGetPid(*button, &mut button_pid) == kAXErrorSuccess && button_pid == pid;
++            let role = copy_string_attr_checked(*button, "AXRole").ok();
++            let subrole = copy_string_attr_checked(*button, "AXSubrole").ok();
++            let ax_window = copy_element_attr_checked(*button, "AXWindow");
++            let ax_window_id = if let CheckedElementRead::Value(element) = ax_window {
++                let id = crate::ax::bindings::ax_get_window_id(element);
++                let same_element = CFEqual(element as CFTypeRef, target as CFTypeRef) != 0;
++                CFRelease(element as CFTypeRef);
++                if same_element && id == Some(window_id) {
++                    id
++                } else {
++                    None
++                }
++            } else {
++                None
++            };
++            let button_id = crate::ax::bindings::ax_get_window_id(*button);
++            let relation_verified = button_pid_ok
++                && role.as_deref() == Some("AXButton")
++                && subrole.as_deref() == Some("AXCloseButton")
++                && button_id == Some(window_id)
++                && ax_window_id == Some(window_id);
++            close_button_evidence = serde_json::json!({
++                "status": if relation_verified { "verified" } else { "unverified" },
++                "role": role,
++                "subrole": subrole,
++                "pid": button_pid,
++                "window_id": button_id,
++                "ax_window_id": ax_window_id,
++                "ax_window_matches_target": ax_window_id == Some(window_id),
++            });
++            if relation_verified {
++                let read = copy_ax_edited_checked(*button);
++                edited = checked_ax_edited_json(&read);
++                button_edited_read = Some(read);
++            }
++        }
++
++        // Re-read all authority-bearing identity and document facts after the
++        // attributes above. A stale or moving target cannot produce a proof.
++        let document_tail = copy_ax_document_checked(target);
++        let fresh_close_button = copy_element_attr_checked(target, "AXCloseButton");
++        let (close_button_identity_tail_ok, edited_tail) = match (&close_button, fresh_close_button)
++        {
++            (CheckedElementRead::Value(button), CheckedElementRead::Value(fresh)) => {
++                let same = CFEqual(fresh as CFTypeRef, *button as CFTypeRef) != 0
++                    && crate::ax::bindings::ax_get_window_id(fresh) == Some(window_id)
++                    && copy_string_attr_checked(fresh, "AXRole")
++                        .is_ok_and(|value| value == "AXButton")
++                    && copy_string_attr_checked(fresh, "AXSubrole")
++                        .is_ok_and(|value| value == "AXCloseButton")
++                    && match copy_element_attr_checked(fresh, "AXWindow") {
++                        CheckedElementRead::Value(ax_window) => {
++                            let matches = CFEqual(ax_window as CFTypeRef, target as CFTypeRef) != 0
++                                && crate::ax::bindings::ax_get_window_id(ax_window)
++                                    == Some(window_id);
++                            CFRelease(ax_window as CFTypeRef);
++                            matches
++                        }
++                        other => {
++                            if let CheckedElementRead::Value(ax_window) = other {
++                                CFRelease(ax_window as CFTypeRef);
++                            }
++                            false
++                        }
++                    };
++                CFRelease(fresh as CFTypeRef);
++                let tail = same.then(|| copy_ax_edited_checked(*button));
++                (same, tail)
++            }
++            (CheckedElementRead::Missing, CheckedElementRead::Missing)
++            | (CheckedElementRead::Unsupported(_), CheckedElementRead::Unsupported(_)) => {
++                (true, None)
++            }
++            (CheckedElementRead::ReadError(left), CheckedElementRead::ReadError(right))
++                if left == &right =>
++            {
++                (true, None)
++            }
++            (CheckedElementRead::WrongType(left), CheckedElementRead::WrongType(right))
++                if left == &right =>
++            {
++                (true, None)
++            }
++            (_, other) => {
++                if let CheckedElementRead::Value(fresh) = other {
++                    CFRelease(fresh as CFTypeRef);
++                }
++                (false, None)
++            }
++        };
++        if let CheckedElementRead::Value(button) = &close_button {
++            CFRelease(*button as CFTypeRef);
++        }
++        let tail_domain = read_document_domain_projection(app, pid, expected_document_url);
++        let application_domain_stable = tail_domain.as_ref().is_some_and(|(rows, _, complete)| {
++            domain_complete && *complete && rows == &domain_rows
++        });
++        let document_domain_stable =
++            tail_domain
++                .as_ref()
++                .is_some_and(|(rows, matching, complete)| {
++                    stable_unique_document_domain(
++                        domain_complete,
++                        &domain_rows,
++                        &matching_document_windows,
++                        *complete,
++                        rows,
++                        matching,
++                        window_id,
++                    )
++                });
++        let tail_bounds = crate::windows::window_bounds_by_id(window_id);
++        let tail_frame = crate::ax::bindings::element_screen_rect(target);
++        let mut tail_pid = 0;
++        let tail_pid_ok =
++            AXUIElementGetPid(target, &mut tail_pid) == kAXErrorSuccess && tail_pid == pid;
++        let application_identity_tail = crate::apps::document_app_identity(pid, expected_bundle_id);
++        let application_identity_stable = crate::apps::document_app_identity_is_stable(
++            &application_identity,
++            application_identity_tail.as_ref(),
++            pid,
++            expected_bundle_id,
++        );
++        let identity_tail_ok = application_identity_stable
++            && application_domain_stable
++            && crate::ax::enablement::process_start_stamp(pid) == Some(process_start)
++            && tail_pid_ok
++            && crate::ax::bindings::ax_get_window_id(target) == Some(window_id)
++            && crate::windows::resolve_window_owner(pid, window_id)
++                == crate::windows::WindowOwner::SamePid
++            && tail_bounds
++                .as_ref()
++                .is_some_and(|current| same_bounds(&bounds, current))
++            && tail_frame
++                .is_some_and(|frame| frame == [bounds.x, bounds.y, bounds.width, bounds.height])
++            && crate::apps::frontmost_pid() == Some(pid)
++            && crate::ax::bindings::focused_window_id_of_pid(pid) == Some(window_id);
++        let document_stable = document == document_tail;
++        let edited_stable = match (button_edited_read.as_ref(), edited_tail.as_ref()) {
++            (Some(before), Some(after)) => before == after,
++            (None, None) => true,
++            _ => false,
++        };
++        let core_verified = identity_tail_ok
++            && document_domain_stable
++            && document_stable
++            && close_button_identity_tail_ok
++            && edited_stable;
++        let application_identity_payload = serde_json::json!({
++            "status": if identity_tail_ok { "verified" } else { "unknown" },
++            "target": {
++                "pid": pid,
++                "window_id": window_id,
++                "process_start": application_identity["target_process_start"],
++                "bundle_id": application_identity["target_bundle_id"],
++                "executable_url": application_identity["target_executable_url"],
++            },
++            "instances": application_identity["instances"],
++        });
++        let payload = serde_json::json!({
++            "version": "macos-document-identity-v1",
++            "status": if core_verified { "identity_verified" } else { "unstable" },
++            "snapshot_id": snapshot_id,
++            "target": {
++                "pid": pid,
++                "window_id": window_id,
++                "process_start": { "seconds": process_start.0, "microseconds": process_start.1 },
++            },
++            "application_identity": application_identity_payload,
++            "window": {
++                "role": "AXWindow",
++                "pid": target_pid,
++                "window_id": window_id,
++                "owner_pid": pid,
++                "bounds": { "x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height },
++                "ax_frame": target_frame,
++            },
++            "frontmost_pid": crate::apps::frontmost_pid(),
++            "focused_window_id": crate::ax::bindings::focused_window_id_of_pid(pid),
++            "document": checked_ax_document_json(&document, expected_document_url),
++            "document_domain": {
++                "status": if domain_complete { "complete_for_ax_windows" } else { "unknown" },
++                "window_count": domain_rows.len(),
++                "matching_window_ids": matching_document_windows,
++                "windows": domain_rows,
++            },
++            "window_edited": checked_ax_edited_json(&window_edited),
++            "edited": {
++                "source": "ax_close_button",
++                "close_button": close_button_evidence,
++                "value": edited,
++            },
++            "tail_revalidated": core_verified,
++        });
++
++        for candidate in windows {
++            CFRelease(candidate as CFTypeRef);
++        }
++        CFRelease(app as CFTypeRef);
++        identity_tail_ok.then_some(payload)
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ fn build_focus_proof_payload(
+     pid: i32,
+@@ -897,6 +1557,15 @@
+             Ok(v) => v,
+             Err(e) => return e,
+         };
++        let document_identity_query = match parse_document_identity_query(&args) {
++            Ok(value) => value,
++            Err(message) => {
++                return ToolResult::error(message).with_structured(serde_json::json!({
++                    "code": "invalid_arguments",
++                    "tool": "get_window_state",
++                }));
++            }
++        };
+ 
+         // Issue #2237: pre-flight the requested window against WindowServer
+         // BEFORE the (up to 20 s) AX walk. An id that no window carries, or
+@@ -916,13 +1585,46 @@
+                 Err(e) => {
+                     return ToolResult::error(format!(
+                         "window ownership lookup for window_id {window_id} failed: {e}"
+-                    ))
++                    ));
+                 }
+             };
+             if let Some(scope) = crate::ax::window_scope::scope_from_owner(&owner) {
+                 if let Some(refusal) = window_scope_refusal(pid, window_id, &scope) {
+                     return refusal;
+                 }
++            }
++        }
++
++        // This trusted-host route is proof-only. It returns before the normal
++        // tree/screenshot path can register a replacement element snapshot,
++        // preserving refs from the preceding observation.
++        let observation_only = args.get("_observation_only").and_then(Value::as_bool) == Some(true);
++        if !observation_only {
++            if let Some(expected_url) = document_identity_query {
++                let proof_snapshot_id = format!("document-proof:{}", uuid::Uuid::new_v4());
++                let proof_id_for_work = proof_snapshot_id.clone();
++                let proof = tokio::task::spawn_blocking(move || {
++                    document_identity_proof(
++                        pid,
++                        window_id,
++                        &proof_id_for_work,
++                        expected_url.as_deref(),
++                    )
++                })
++                .await
++                .ok()
++                .flatten();
++                return match proof {
++                    Some(proof) => ToolResult::text("Document identity proof available")
++                        .with_structured(serde_json::json!({
++                            "_private_document_proof": proof,
++                        })),
++                    None => ToolResult::error("Document identity proof is unavailable")
++                        .with_structured(serde_json::json!({
++                            "code": "document_identity_unavailable",
++                            "snapshot_id": proof_snapshot_id,
++                        })),
++                };
+             }
+         }
+ 
+@@ -962,10 +1664,6 @@
+         // Internal direct-tool mode used by verify_state. Registry ingress
+         // strips underscore-prefixed arguments before public dispatch; only
+         // a trusted direct in-process invocation can enable this mode.
+-        let observation_only = args
+-            .get("_observation_only")
+-            .and_then(|value| value.as_bool())
+-            == Some(true);
+         // Optional caps — when omitted, fall back to the defaults baked into
+         // the AX walker (#22865). minimum:1 keyed in the schema, but defend
+         // against 0 here as well so a misbehaving client can't disable the
+@@ -1727,6 +2425,258 @@
+     }
+ 
+     #[test]
++    fn private_document_projection_preserves_typed_url_and_never_coerces_edited() {
++        use crate::ax::bindings::{AXDocumentValue, CheckedAxValue};
++
++        let url = "file:///tmp/A%20B%20%E4%B8%AD.txt".to_owned();
++        assert_eq!(
++            checked_ax_document_json(
++                &CheckedAxValue::Value(AXDocumentValue::CFString(url.clone())),
++                Some(&url),
++            ),
++            serde_json::json!({"status":"ok", "type":"cf_string", "matches_expected":true})
++        );
++        assert_eq!(
++            checked_ax_document_json(
++                &CheckedAxValue::Value(AXDocumentValue::CFUrl(url.clone())),
++                Some("file:///tmp/A B %E4%B8%AD.txt"),
++            )["matches_expected"],
++            false,
++            "the host comparison is exact and does not decode/normalize percent escapes"
++        );
++        assert_eq!(
++            checked_ax_document_json(
++                &CheckedAxValue::Value(AXDocumentValue::CFUrl(url.clone())),
++                Some(&url),
++            )["matches_expected"],
++            true
++        );
++        assert!(
++            checked_ax_document_json(&CheckedAxValue::Value(AXDocumentValue::CFString(url)), None)
++                .get("value")
++                .is_none(),
++            "private proof rows must never serialize any actual document URL"
++        );
++
++        assert_eq!(
++            checked_ax_edited_json(&CheckedAxValue::Value(false)),
++            serde_json::json!({"status":"ok", "type":"cf_boolean", "value":false})
++        );
++        assert_eq!(
++            checked_ax_edited_json(&CheckedAxValue::Unsupported(-25205))["status"],
++            "unsupported"
++        );
++        assert_eq!(
++            checked_ax_edited_json(&CheckedAxValue::WrongType(22))["status"],
++            "wrong_type"
++        );
++        assert_eq!(
++            checked_ax_edited_json(&CheckedAxValue::Missing)["status"],
++            "missing"
++        );
++        assert_eq!(
++            checked_ax_document_json(&CheckedAxValue::ReadError(-25200), None)["status"],
++            "read_error"
++        );
++        assert_eq!(
++            checked_element_read_json(&CheckedElementRead::Unsupported(-25205))["status"],
++            "unsupported"
++        );
++        assert_eq!(
++            checked_element_read_json(&CheckedElementRead::WrongType(7))["status"],
++            "wrong_type"
++        );
++    }
++
++    #[test]
++    fn private_document_domain_requires_one_exact_complete_axwindows_match() {
++        assert!(exact_unique_document_match(true, &[17753], 17753));
++        assert!(!exact_unique_document_match(false, &[17753], 17753));
++        assert!(!exact_unique_document_match(true, &[], 17753));
++        assert!(!exact_unique_document_match(true, &[17753, 17753], 17753));
++        assert!(!exact_unique_document_match(true, &[17742], 17753));
++    }
++
++    #[test]
++    fn document_domain_tail_must_be_the_same_complete_unique_domain() {
++        let rows = vec![serde_json::json!({
++            "window_id": 17753,
++            "role": "AXWindow",
++            "document": {"status": "ok", "type": "cf_url", "matches_expected": true}
++        })];
++        assert!(stable_unique_document_domain(
++            true,
++            &rows,
++            &[17753],
++            true,
++            &rows,
++            &[17753],
++            17753
++        ));
++        let extra_window = vec![
++            rows[0].clone(),
++            serde_json::json!({
++                "window_id": 17754,
++                "role": "AXWindow",
++                "document": {"status": "absent"}
++            }),
++        ];
++        assert!(!stable_unique_document_domain(
++            true,
++            &rows,
++            &[17753],
++            true,
++            &extra_window,
++            &[17753],
++            17753
++        ));
++        assert!(!stable_unique_document_domain(
++            true,
++            &rows,
++            &[17753],
++            false,
++            &rows,
++            &[17753],
++            17753
++        ));
++        let changed = vec![serde_json::json!({
++            "window_id": 17753,
++            "role": "AXWindow",
++            "document": {"status": "unknown"}
++        })];
++        assert!(!stable_unique_document_domain(
++            true,
++            &rows,
++            &[17753],
++            true,
++            &changed,
++            &[],
++            17753
++        ));
++        assert!(!stable_unique_document_domain(
++            true,
++            &rows,
++            &[17753],
++            true,
++            &rows,
++            &[17753, 17754],
++            17753
++        ));
++    }
++
++    #[test]
++    fn formal_document_query_is_schema_declared_strict_and_path_free_in_proof() {
++        let schema = def();
++        assert_eq!(
++            schema.input_schema["properties"]["document_identity_query"]["type"],
++            "object"
++        );
++        assert_eq!(
++            schema.input_schema["properties"]["document_identity_query"]["required"],
++            Value::Null,
++            "application-only query must be valid without an expected document URL"
++        );
++        let url = "file:///Users/example/Private%20Folder/note.rtf";
++        let mut public_args = serde_json::json!({
++            "pid": 22394,
++            "window_id": 17753,
++            "document_identity_query": {"expected_document_url": url},
++            "_untrusted_private_marker": true,
++        });
++        cua_driver_core::tool_args::sanitize_reserved_args(&mut public_args);
++        assert!(public_args.get("_untrusted_private_marker").is_none());
++        assert_eq!(
++            parse_document_identity_query(&public_args)
++                .unwrap()
++                .as_ref()
++                .and_then(Option::as_deref),
++            Some(url)
++        );
++        assert_eq!(
++            parse_document_identity_query(&serde_json::json!({
++                "document_identity_query": {}
++            }))
++            .unwrap(),
++            Some(None),
++            "empty formal query requests only application identity"
++        );
++        assert_eq!(
++            parse_document_identity_query(&serde_json::json!({})).unwrap(),
++            None,
++            "omitting the query leaves the normal tool path unchanged"
++        );
++        assert!(parse_document_identity_query(&serde_json::json!({
++            "document_identity_query": {"expected_document_url": url, "extra": true}
++        }))
++        .is_err());
++        assert!(parse_document_identity_query(&serde_json::json!({
++            "document_identity_query": {"expected_document_url": "https://example.invalid/"}
++        }))
++        .is_err());
++        let projection = checked_ax_document_json(
++            &crate::ax::bindings::CheckedAxValue::Value(
++                crate::ax::bindings::AXDocumentValue::CFUrl(url.to_owned()),
++            ),
++            Some(url),
++        );
++        assert_eq!(projection["matches_expected"], true);
++        assert!(!projection.to_string().contains("Private%20Folder"));
++    }
++
++    #[tokio::test]
++    async fn public_registry_dispatch_delivers_formal_query_to_native_parser() {
++        use std::time::Duration;
++
++        let ceiling =
++            cua_driver_core::session_authorization::SessionModeCeiling::for_trusted_sessions(
++                [cua_driver_core::authorization::PermissionMode::Standard],
++                false,
++                Duration::from_secs(60),
++                Duration::from_secs(30),
++            )
++            .expect("standard test ceiling");
++        let context =
++            cua_driver_core::session_authorization::SessionAuthorizationRegistry::with_ceiling(
++                ceiling,
++            )
++            .compatibility_context(
++                cua_driver_core::authorization::PermissionMode::Standard,
++                None,
++            )
++            .expect("standard test context");
++        let mut registry = cua_driver_core::tool::ToolRegistry::new();
++        registry.register(Box::new(GetWindowStateTool::new(Arc::new(
++            super::ToolState::default(),
++        ))));
++
++        let result = registry
++            .invoke_with_context(
++                "get_window_state",
++                serde_json::json!({
++                    "pid": 22394,
++                    "window_id": 17753,
++                    "document_identity_query": {
++                        "expected_document_url": "file:///private/document.rtf",
++                        "unexpected": true
++                    },
++                    "_untrusted_private_marker": true
++                }),
++                context,
++            )
++            .await;
++        assert_eq!(result.is_error, Some(true));
++        assert_eq!(
++            result
++                .structured_content
++                .as_ref()
++                .and_then(|value| value.get("code"))
++                .and_then(Value::as_str),
++            Some("invalid_arguments"),
++            "formal query must survive public registry ingress and reach the native handler parser"
++        );
++    }
++
++    #[test]
+     fn stale_window_id_is_a_structured_not_found() {
+         let s = structured(
+             window_scope_refusal(800, 67340, &WindowScope::NotFound).expect("must refuse"),

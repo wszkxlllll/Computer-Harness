@@ -531,13 +531,13 @@ async function runLive(options) {
     await saveManifest(manifestPath, manifest);
 
     const initialObservation = await observeWithoutPersistingScreenshot(computer, session, "initial", audit, signal, manifest, manifestPath, session.viewport);
-    let optionsBefore = await computer.listWindows(session, signal);
+    let optionsBefore = (await computer.listWindows(session, signal)).options;
     if (optionsBefore.length !== 3) throw new ProbeFailure("AUTHORIZED_OPTION_COUNT_MISMATCH", "Expected exactly the three host-authorized test windows.");
     const initialOption = selectUniqueWindowOption(optionsBefore, { appName: options.initial.appName, title: options.initial.title, isCurrent: true }, "initial");
     const firstDestination = selectUniqueWindowOption(optionsBefore, { appName: options.destination.appName, title: options.destination.title, isCurrent: false }, "destination");
     selectUniqueWindowOption(optionsBefore, { appName: options.closeFixture.appName, title: options.closeFixture.title, isCurrent: false }, "close fixture");
 
-    optionsBefore = await computer.listWindows(session, signal);
+    optionsBefore = (await computer.listWindows(session, signal)).options;
     const freshDestination = selectUniqueWindowOption(optionsBefore, { appName: options.destination.appName, title: options.destination.title, isCurrent: false }, "refreshed destination");
     const activationCountBeforeStale = audit.activations.length;
     const staleRefreshReceipt = await computer.execute(session, {
@@ -570,7 +570,7 @@ async function runLive(options) {
     manifest.checks.destinationFreshCapture = "passed";
     await saveManifest(manifestPath, manifest);
 
-    let currentOptions = await computer.listWindows(session, signal);
+    let currentOptions = (await computer.listWindows(session, signal)).options;
     const returnOption = selectUniqueWindowOption(currentOptions, { appName: options.initial.appName, title: options.initial.title, isCurrent: false }, "return target");
     const returnStart = audit.activations.length;
     const returnReceipt = await computer.execute(session, {
@@ -586,7 +586,7 @@ async function runLive(options) {
     const sourceAgain = await observeWithoutPersistingScreenshot(computer, session, "initial-after-round-trip", audit, signal, manifest, manifestPath, session.viewport);
     manifest.switchSessions.push({ role: "initial-return", session: summarizeSession(session), observationId: sourceAgain.id });
     manifest.checks.nativeRoundTrip = "passed";
-    currentOptions = await computer.listWindows(session, signal);
+    currentOptions = (await computer.listWindows(session, signal)).options;
 
     const beforeResizeBounds = audit.lastBounds.get(identityKey(options.initial.target));
     if (!isPositiveRect(beforeResizeBounds)) throw new ProbeFailure("RESIZE_BASELINE_BOUNDS_MISSING", "No verified target bounds were observed before resize.");

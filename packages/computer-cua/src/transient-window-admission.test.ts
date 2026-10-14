@@ -80,6 +80,46 @@ describe("owned transient HWND stage-one admission", () => {
     });
   });
 
+  it("admits a cross-process child only from a complete Win32 exact-owner snapshot", () => {
+    const candidate: CuaWindowInfo = {
+      ...ownedChild,
+      target: { pid: 42, windowId: 202 },
+      ownerPid: parent.pid,
+      ownerWindowId: parent.windowId,
+    };
+    const completeWin32: CuaWindowInventory = {
+      ...inventory(baseWindow, candidate),
+      source: "win32_relationship_probe",
+      foregroundPid: parent.pid,
+      foregroundWindowId: parent.windowId,
+    };
+    expect(assess(candidate, completeWin32)).toEqual({ decision: "admitted" });
+    expect(assess(candidate, { ...completeWin32, complete: false })).toMatchObject({
+      decision: "rejected",
+      code: "WINDOW_SCOPE_REQUIRED",
+    });
+    expect(assess(candidate, { ...completeWin32, source: "cua_inventory" })).toMatchObject({
+      decision: "rejected",
+      code: "WINDOW_SCOPE_REQUIRED",
+    });
+  });
+
+  it("rejects a cross-process candidate without the parent's exact Win32 owner pair", () => {
+    const candidate: CuaWindowInfo = {
+      ...ownedChild,
+      target: { pid: 42, windowId: 202 },
+      ownerPid: 0,
+      ownerWindowId: 0,
+    };
+    const completeWin32: CuaWindowInventory = {
+      ...inventory(baseWindow, candidate),
+      source: "win32_relationship_probe",
+      foregroundPid: parent.pid,
+      foregroundWindowId: parent.windowId,
+    };
+    expect(assess(candidate, completeWin32)).toMatchObject({ decision: "rejected", code: "WINDOW_SCOPE_REQUIRED" });
+  });
+
   it("requires a complete inventory and complete pre-action baseline", () => {
     const partial = { ...inventory(baseWindow, ownedChild), complete: false };
     expect(assess(ownedChild, partial)).toMatchObject({ decision: "manual", code: "WINDOW_INVENTORY_UNKNOWN" });

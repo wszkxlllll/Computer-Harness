@@ -1,0 +1,11 @@
+# F086: Conservatively report the target after saved-document reopen
+
+The three same-version T2 business runs completed save, close and reopen, but their summaries still named the recovery blank as the final target. Reporting tracked the last explicit window handoff and did not invalidate it when `reopen_saved_document` began. The new window's public PID/CGID is not available through that event contract.
+
+The report now returns `finalComputerTarget: null` after a started reopen unless a newer confirmed handoff supplies a target. A matching refused receipt with exactly `DOCUMENT_REOPEN_NOT_READY` or `DOCUMENT_REOPEN_PREFLIGHT_FAILED` preserves the prior target: those two adapter branches explicitly precede launch. Generic refusal, partial execution and unresolved execution remain conservative unknown. Window-switch counts keep their existing meaning; reopen does not inflate them. No action, native guard, grant, target scope or task text changed.
+
+Sol independently ran the full app-runtime RunHandle test file: 44/44 passed (session 38569). The new case covers both explicit preflight codes, generic refusal, unresolved reopen and a newer handoff. `pnpm exec tsc -b` completed with exit 0 (session 41527); selected diff check passed. Sol also corrected the scenario fixture's explicit optional-property type after reviewing the author's first focused result.
+
+Root independently ran the focused case (1/1) and read-only `buildRunReport` replay over the actual v6, independent repeat and original variant trajectories (3/3). All recomputed targets are null; original runtime outcome, model summary, usage, metrics, businessResult `not_assessed` and trajectory SHA remain unchanged. The persisted historical summaries and business evidence were not overwritten. These are report regressions with zero Provider calls and no GUI actions; they do not rerun the three business tasks or upgrade their CLI experiment Guard-off scope to default layered/Web acceptance.
+
+Private receipts: `A07-private/sol-f086-report-independent-review.json` and `A07-private/root-f086-report-independent-review.json`. The next formal run must use the new source/dist pin; the three completed T2 runs remain attributed to frozen HEAD `95b8449`.

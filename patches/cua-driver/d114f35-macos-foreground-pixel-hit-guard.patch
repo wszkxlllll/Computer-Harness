@@ -1,0 +1,797 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs b/libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs
+index 21f0367..8a4ea1e 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs
+@@ -31,6 +31,7 @@
+ 
+ use std::collections::HashMap;
+ use std::ffi::c_void;
++use std::sync::atomic::{AtomicU32, Ordering};
+ use std::sync::{Mutex, OnceLock};
+ use std::time::{Duration, Instant};
+ 
+@@ -74,6 +75,17 @@ static CMD_TX: OnceLock<std::sync::mpsc::SyncSender<OverlayMsg>> = OnceLock::new
+ // Single-consumer slot; receiver is moved into run_on_main_thread().
+ static CMD_RX_CELL: Mutex<Option<std::sync::mpsc::Receiver<OverlayMsg>>> = Mutex::new(None);
+ static RENDER: Mutex<Option<RenderMap>> = Mutex::new(None);
++/// Exact WindowServer ID of this process's click-through overlay. The window
++/// is explicitly configured with `setIgnoresMouseEvents(true)` before this is
++/// published, so guarded pixel hit-testing may skip only this exact window.
++static OWNED_MOUSE_IGNORING_OVERLAY_WINDOW_ID: AtomicU32 = AtomicU32::new(0);
++
++pub(crate) fn owned_mouse_ignoring_overlay_window_id() -> Option<u32> {
++    match OWNED_MOUSE_IGNORING_OVERLAY_WINDOW_ID.load(Ordering::Acquire) {
++        0 => None,
++        window_id => Some(window_id),
++    }
++}
+ 
+ /// The keyed, insertion-ordered collection of owned cursors that the render
+ /// loop composites every frame. Insertion order = stable z-order (later keys
+@@ -678,6 +690,11 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
+ 
+     // ---- Show the window ----
+     let _: () = msg_send![win, orderFrontRegardless];
++    let overlay_window_number: isize = msg_send![win, windowNumber];
++    if overlay_window_number > 0 {
++        OWNED_MOUSE_IGNORING_OVERLAY_WINDOW_ID
++            .store(overlay_window_number as u32, Ordering::Release);
++    }
+ 
+     // ---- Render thread (60 fps) ----
+     let layer_ptr = layer as usize;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/mouse.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/mouse.rs
+index f3a2e3f..2c10485 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/mouse.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/mouse.rs
+@@ -43,7 +43,7 @@ pub fn click_at_xy(
+ /// (it lands on whatever is visually on top at the point) — exactly the
+ /// foreground, vision-driven model that complements the background contract.
+ pub fn click_at_xy_desktop(x: f64, y: f64, count: usize, button: &str) -> anyhow::Result<()> {
+-    click_at_xy_desktop_inner(x, y, count, button, &[], false)
++    click_at_xy_desktop_inner(x, y, count, button, &[], false, None)
+ }
+ 
+ /// Global HID click with physical modifier transitions. The caller must guard
+@@ -55,7 +55,7 @@ pub fn click_at_xy_desktop_with_modifiers(
+     button: &str,
+     modifiers: &[&str],
+ ) -> anyhow::Result<()> {
+-    click_at_xy_desktop_inner(x, y, count, button, modifiers, false)
++    click_at_xy_desktop_inner(x, y, count, button, modifiers, false, None)
+ }
+ 
+ /// Global HID modifier click that restores the user's hardware cursor after
+@@ -67,7 +67,7 @@ pub fn click_at_xy_desktop_with_modifiers_preserving_cursor(
+     button: &str,
+     modifiers: &[&str],
+ ) -> anyhow::Result<()> {
+-    click_at_xy_desktop_inner(x, y, count, button, modifiers, true)
++    click_at_xy_desktop_inner(x, y, count, button, modifiers, true, None)
+ }
+ 
+ fn click_at_xy_desktop_inner(
+@@ -77,6 +77,7 @@ fn click_at_xy_desktop_inner(
+     button: &str,
+     modifiers: &[&str],
+     preserve_cursor: bool,
++    mut before_dispatch: Option<&mut dyn FnMut() -> anyhow::Result<()>>,
+ ) -> anyhow::Result<()> {
+     use core_graphics::display::CGDisplay;
+     use core_graphics::event::CGEventTapLocation;
+@@ -114,13 +115,37 @@ fn click_at_xy_desktop_inner(
+     // cursor, and AppKit hit-tests some clicks against the actual cursor
+     // position, so without the warp the down/up can miss the target. Desktop
+     // scope is the foreground modality, so moving the visible cursor is expected.
+-    let _ = CGDisplay::warp_mouse_cursor_position(point);
++    if let Err(error) = CGDisplay::warp_mouse_cursor_position(point) {
++        if before_dispatch.is_some() {
++            if let Some(prior) = prior {
++                let _ = CGDisplay::warp_mouse_cursor_position(prior);
++                unsafe { CGAssociateMouseAndMouseCursorPosition(true) };
++            }
++            return Err(anyhow::anyhow!(
++                "could not move cursor to guarded click point: {error:?}"
++            ));
++        }
++    }
+     // Re-couple cursor + mouse-delta so the synthesized click hit-tests at the
+     // warped point, not the pre-warp one.
+     unsafe { CGAssociateMouseAndMouseCursorPosition(true) };
+     std::thread::sleep(std::time::Duration::from_millis(40));
+     let result = super::keyboard::with_global_modifier_keys(modifiers, |flags| {
++        if let Some(check) = before_dispatch.as_deref_mut() {
++            check()?;
++        }
+         for pair_index in 0..count.max(1) {
++            // On the guarded exact-window route, construct both halves before
++            // posting mouse-down so an allocation failure cannot strand a
++            // pressed button. Legacy routes retain their prior event timing.
++            let guarded_up = if before_dispatch.is_some() {
++                Some(
++                    CGEvent::new_mouse_event(source.clone(), up_ty, point, btn)
++                        .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?,
++                )
++            } else {
++                None
++            };
+             let down = CGEvent::new_mouse_event(source.clone(), down_ty, point, btn)
+                 .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(down) failed"))?;
+             down.set_flags(flags);
+@@ -130,8 +155,11 @@ fn click_at_xy_desktop_inner(
+             );
+             down.post(CGEventTapLocation::HID);
+             std::thread::sleep(std::time::Duration::from_millis(28));
+-            let up = CGEvent::new_mouse_event(source.clone(), up_ty, point, btn)
+-                .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?;
++            let up = match guarded_up {
++                Some(up) => up,
++                None => CGEvent::new_mouse_event(source.clone(), up_ty, point, btn)
++                    .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?,
++            };
+             up.set_flags(flags);
+             up.set_integer_value_field(
+                 core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
+@@ -145,8 +173,9 @@ fn click_at_xy_desktop_inner(
+         Ok(())
+     });
+ 
+-    // Let AppKit consume the up event before the pointer is restored. The
+-    // exact foreground guard remains active around this entire helper.
++    // Let AppKit consume the up event before restoring the pointer. On the
++    // guarded route, the callback was checked immediately before mouse-down,
++    // after the cursor warp and settle.
+     std::thread::sleep(std::time::Duration::from_millis(40));
+     if let Some(prior) = prior {
+         let _ = CGDisplay::warp_mouse_cursor_position(prior);
+@@ -213,7 +242,18 @@ pub fn scroll_wheel_desktop(
+ /// used only by approved, bounded setup flows after an accessibility element
+ /// has proven the exact target point and window.
+ pub fn click_at_xy_desktop_preserving_cursor(x: f64, y: f64) -> anyhow::Result<()> {
+-    click_at_xy_desktop_inner(x, y, 1, "left", &[], true)
++    click_at_xy_desktop_inner(x, y, 1, "left", &[], true, None)
++}
++
++/// Click a desktop point while preserving the cursor, running a final exact
++/// target check after the cursor warp/settle and immediately before mouse-down.
++/// A failed guard restores the cursor and emits no mouse button events.
++pub fn click_at_xy_desktop_preserving_cursor_with_guard(
++    x: f64,
++    y: f64,
++    mut before_dispatch: impl FnMut() -> anyhow::Result<()>,
++) -> anyhow::Result<()> {
++    click_at_xy_desktop_inner(x, y, 1, "left", &[], true, Some(&mut before_dispatch))
+ }
+ 
+ extern "C" {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+index 26b45ef..236a4f4 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+@@ -98,6 +98,57 @@ fn pixel_activation_policy(
+     }
+ }
+ 
++fn should_use_foreground_global_pixel_click(
++    foreground: bool,
++    has_window: bool,
++    button: &str,
++    count: usize,
++    has_modifiers: bool,
++) -> bool {
++    foreground && has_window && button == "left" && count == 1 && !has_modifiers
++}
++
++fn exact_foreground_target_matches(
++    target_pid: i32,
++    target_window_id: u32,
++    frontmost_pid: Option<i32>,
++    focused_window_id: Option<u32>,
++) -> bool {
++    frontmost_pid == Some(target_pid) && focused_window_id == Some(target_window_id)
++}
++
++fn same_px_frame(
++    initial: &super::px_frame::WindowPxFrame,
++    fresh: &super::px_frame::WindowPxFrame,
++) -> bool {
++    initial.scale == fresh.scale
++        && initial.bounds.x == fresh.bounds.x
++        && initial.bounds.y == fresh.bounds.y
++        && initial.bounds.width == fresh.bounds.width
++        && initial.bounds.height == fresh.bounds.height
++}
++
++fn window_local_point_inside_frame(x: f64, y: f64, width: f64, height: f64) -> bool {
++    x.is_finite()
++        && y.is_finite()
++        && width.is_finite()
++        && height.is_finite()
++        && width > 0.0
++        && height > 0.0
++        && x >= 0.0
++        && y >= 0.0
++        && x < width
++        && y < height
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum PixelDispatchPath {
++    ForegroundPid,
++    ForegroundHidActivation,
++    ForegroundGlobalHid,
++    BackgroundPid,
++}
++
+ /// Return the prior foreground pid that should be restored after a raw
+ /// background pixel click.
+ ///
+@@ -827,37 +878,57 @@ impl Tool for ClickTool {
+             //
+             // win_local_x/y: window-local logical-pixel coords needed for
+             // CGEventSetWindowLocation in the Chromium recipe.
+-            let (screen_x, screen_y, win_local_x, win_local_y) = if let Some(wid) = window_id {
+-                match super::px_frame::resolve_or_refuse(wid).await {
+-                    Ok(frame) => {
+-                        let (sx, sy, lx, ly) = frame.to_screen(cx, cy);
+-                        // A window-local point outside the live frame would
+-                        // dispatch onto whatever occupies that screen point —
+-                        // the same wrong-surface misclick class as #2237.
+-                        // Refuse in background, where the caller cannot see
+-                        // what is actually under the translated point.
+-                        if !delivery_mode.is_foreground()
+-                            && (lx < 0.0
+-                                || ly < 0.0
+-                                || lx > frame.bounds.width
+-                                || ly > frame.bounds.height)
+-                        {
+-                            return ToolResult::error(format!(
+-                                "click: window-local point ({lx:.1}, {ly:.1}) pt lies outside \
++            let (screen_x, screen_y, win_local_x, win_local_y, initial_px_frame) =
++                if let Some(wid) = window_id {
++                    match super::px_frame::resolve_or_refuse(wid).await {
++                        Ok(frame) => {
++                            let (sx, sy, lx, ly) = frame.to_screen(cx, cy);
++                            if should_use_foreground_global_pixel_click(
++                                delivery_mode.is_foreground(),
++                                true,
++                                &button_str,
++                                count,
++                                !modifiers.is_empty(),
++                            ) && !window_local_point_inside_frame(
++                                lx,
++                                ly,
++                                frame.bounds.width,
++                                frame.bounds.height,
++                            ) {
++                                return ToolResult::error(format!(
++                                    "click: window-local point ({lx:.1}, {ly:.1}) pt lies outside \
++                                     window {wid}'s {:.0}×{:.0} pt frame; foreground global HID \
++                                     refused to avoid clicking another surface.",
++                                    frame.bounds.width, frame.bounds.height
++                                ));
++                            }
++                            // A window-local point outside the live frame would
++                            // dispatch onto whatever occupies that screen point —
++                            // the same wrong-surface misclick class as #2237.
++                            // Refuse in background, where the caller cannot see
++                            // what is actually under the translated point.
++                            if !delivery_mode.is_foreground()
++                                && (lx < 0.0
++                                    || ly < 0.0
++                                    || lx > frame.bounds.width
++                                    || ly > frame.bounds.height)
++                            {
++                                return ToolResult::error(format!(
++                                    "click: window-local point ({lx:.1}, {ly:.1}) pt lies outside \
+                                  window {wid}'s {:.0}×{:.0} pt frame; background delivery \
+                                  refused. Re-read coordinates from a fresh get_window_state \
+                                  screenshot.",
+-                                frame.bounds.width, frame.bounds.height
+-                            ));
++                                    frame.bounds.width, frame.bounds.height
++                                ));
++                            }
++                            (sx, sy, lx, ly, Some(frame))
+                         }
+-                        (sx, sy, lx, ly)
++                        Err(refusal) => return refusal,
+                     }
+-                    Err(refusal) => return refusal,
+-                }
+-            } else {
+-                // No window_id → treat x,y as screen coordinates (legacy behaviour).
+-                (cx, cy, cx, cy)
+-            };
++                } else {
++                    // No window_id → treat x,y as screen coordinates (legacy behaviour).
++                    (cx, cy, cx, cy, None)
++                };
+ 
+             // ── Exact-target background gate (macOS background input v1) ──
+             // A window-addressed background pixel action targets coordinates,
+@@ -1034,10 +1105,21 @@ impl Tool for ClickTool {
+             );
+ 
+             let mods_owned = modifiers.clone();
+-            // Surface 5: route to the right/middle CGEvent primitives when
+-            // button != left. Left-button path stays on the existing Chromium-
+-            // routed `click_at_xy_with_window_local` for back-compat.
++            // Surface 5: route right/middle clicks through their CGEvent
++            // primitives. The exact foreground single-left pixel route uses
++            // guarded global HID because the PID-addressed event can miss
++            // native sheets even when the correct window is focused.
+             let button_kind = button_str.clone();
++            let use_guarded_global_pixel_click = should_use_foreground_global_pixel_click(
++                fg,
++                window_id.is_some(),
++                &button_kind,
++                count,
++                !modifiers.is_empty(),
++            );
++            let initial_px_frame = initial_px_frame.clone();
++            let pixel_capture_x = cx;
++            let pixel_capture_y = cy;
+             let result = focus_guard::with_focus_suppressed(
+                 if activation_policy == PixelActivationPolicy::SuppressTarget {
+                     Some(pid)
+@@ -1111,16 +1193,99 @@ impl Tool for ClickTool {
+                                     wid,
+                                     do_click,
+                                 )
+-                                .map(|_| true)
++                                .map(|_| PixelDispatchPath::ForegroundHidActivation)
++                            }
++                            (true, Some(wid), false)
++                                if use_guarded_global_pixel_click =>
++                            {
++                                let exact_focus = || {
++                                    exact_foreground_target_matches(
++                                        pid,
++                                        wid,
++                                        apps::frontmost_pid(),
++                                        crate::ax::bindings::focused_window_id_of_pid(pid),
++                                    ) && crate::windows::exact_window_is_top_at_point(
++                                        pid,
++                                        wid,
++                                        screen_x,
++                                        screen_y,
++                                        crate::cursor::overlay::owned_mouse_ignoring_overlay_window_id()
++                                            .map(|overlay_id| {
++                                                (std::process::id() as i32, overlay_id)
++                                            }),
++                                    )
++                                };
++                                if !exact_focus() {
++                                    anyhow::bail!(
++                                        "exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched"
++                                    );
++                                }
++                                let initial_frame = initial_px_frame.as_ref().ok_or_else(|| {
++                                    anyhow::anyhow!(
++                                        "exact foreground pixel click has no initial window frame; not dispatched"
++                                    )
++                                })?;
++                                let initial_screen_x = screen_x;
++                                let initial_screen_y = screen_y;
++                                let initial_local_x = win_local_x;
++                                let initial_local_y = win_local_y;
++                                let capture_x = pixel_capture_x;
++                                let capture_y = pixel_capture_y;
++                                crate::input::mouse::click_at_xy_desktop_preserving_cursor_with_guard(
++                                    screen_x,
++                                    screen_y,
++                                    || {
++                                        let fresh = super::px_frame::resolve_window_px_frame(wid)
++                                            .map_err(|error| anyhow::anyhow!(
++                                                "fresh exact target frame could not be verified after pointer settle: {error:?}"
++                                            ))?;
++                                        let fresh_bounds = crate::windows::window_bounds_by_id(wid)
++                                            .ok_or_else(|| anyhow::anyhow!(
++                                                "exact target window disappeared after pointer settle; no mouse button event was dispatched"
++                                            ))?;
++                                        if fresh_bounds.x != fresh.bounds.x
++                                            || fresh_bounds.y != fresh.bounds.y
++                                            || fresh_bounds.width != fresh.bounds.width
++                                            || fresh_bounds.height != fresh.bounds.height
++                                        {
++                                            anyhow::bail!(
++                                                "exact target moved during fresh frame capture; no mouse button event was dispatched"
++                                            );
++                                        }
++                                        let (fresh_screen_x, fresh_screen_y, fresh_local_x, fresh_local_y) =
++                                            fresh.to_screen(capture_x, capture_y);
++                                        if !same_px_frame(initial_frame, &fresh)
++                                            || fresh_screen_x != initial_screen_x
++                                            || fresh_screen_y != initial_screen_y
++                                            || fresh_local_x != initial_local_x
++                                            || fresh_local_y != initial_local_y
++                                        {
++                                            anyhow::bail!(
++                                                "exact target frame or local-to-screen mapping changed after pointer settle; no mouse button event was dispatched"
++                                            );
++                                        }
++                                        if !exact_focus() {
++                                            anyhow::bail!(
++                                                "exact foreground target lost focus or became obscured after pointer settle; no mouse button event was dispatched"
++                                            );
++                                        }
++                                        Ok(())
++                                    },
++                                )?;
++                                Ok(PixelDispatchPath::ForegroundGlobalHid)
+                             }
+                             (true, Some(wid), false) => {
+                                 crate::input::skylight::with_foreground_assist(
+                                     pid as libc::pid_t,
+                                     wid,
+                                     do_click,
+-                                )
++                                ).map(|fronted| if fronted {
++                                    PixelDispatchPath::ForegroundPid
++                                } else {
++                                    PixelDispatchPath::BackgroundPid
++                                })
+                             }
+-                            _ => do_click().map(|_| false),
++                            _ => do_click().map(|_| PixelDispatchPath::BackgroundPid),
+                         }
+                     })
+                     .await
+@@ -1159,17 +1324,31 @@ impl Tool for ClickTool {
+                 _ => "click",
+             };
+             match result {
+-                Ok(Ok(fronted)) => {
+-                    // `with_foreground_assist` returns `false` when the fronting SPIs
+-                    // were unavailable and it clicked WITHOUT activation — report the
+-                    // background path in that case so `path` reflects the rung that ran.
+-                    let (path, mode_label) = if fg && fronted {
+-                        ("cgevent_fg", "foreground CGEvent")
+-                    } else {
+-                        ("cgevent", "background CGEvent")
++                Ok(Ok(dispatch_path)) => {
++                    let (path, mode_label, target_label) = match dispatch_path {
++                        PixelDispatchPath::ForegroundPid => (
++                            "cgevent_fg",
++                            "foreground PID-addressed CGEvent",
++                            format!("to pid {pid}"),
++                        ),
++                        PixelDispatchPath::ForegroundHidActivation => (
++                            "cgevent_fg",
++                            "foreground activated HID event",
++                            "to the foreground surface".to_owned(),
++                        ),
++                        PixelDispatchPath::ForegroundGlobalHid => (
++                            "cgevent_fg",
++                            "foreground global HID after exact-window checks",
++                            "to the exact foreground window".to_owned(),
++                        ),
++                        PixelDispatchPath::BackgroundPid => (
++                            "cgevent",
++                            "background PID-addressed CGEvent",
++                            format!("to pid {pid}"),
++                        ),
+                     };
+                     ToolResult::text(format!(
+-                        "✅ Posted {button_label} to pid {pid} ({mode_label}; \
++                        "✅ Posted {button_label} {target_label} ({mode_label}; \
+                          not driver-verified — confirm via screenshot).{}",
+                         changes.result_suffix()
+                     ))
+@@ -1486,6 +1665,104 @@ fn map_action(action: &str) -> &'static str {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn foreground_window_left_click_uses_global_route_only_for_single_unmodified_left_click() {
++        assert!(should_use_foreground_global_pixel_click(
++            true, true, "left", 1, false
++        ));
++        assert!(!should_use_foreground_global_pixel_click(
++            false, true, "left", 1, false
++        ));
++        assert!(!should_use_foreground_global_pixel_click(
++            true, false, "left", 1, false
++        ));
++        assert!(!should_use_foreground_global_pixel_click(
++            true, true, "right", 1, false
++        ));
++        assert!(!should_use_foreground_global_pixel_click(
++            true, true, "middle", 1, false
++        ));
++        assert!(!should_use_foreground_global_pixel_click(
++            true, true, "left", 2, false
++        ));
++        assert!(!should_use_foreground_global_pixel_click(
++            true, true, "left", 1, true
++        ));
++    }
++
++    #[test]
++    fn foreground_window_pixel_route_requires_exact_pid_and_focused_window() {
++        assert!(exact_foreground_target_matches(
++            22394,
++            17590,
++            Some(22394),
++            Some(17590)
++        ));
++        assert!(!exact_foreground_target_matches(
++            22394,
++            17590,
++            Some(42),
++            Some(17590)
++        ));
++        assert!(!exact_foreground_target_matches(
++            22394,
++            17590,
++            Some(22394),
++            Some(16222)
++        ));
++        assert!(!exact_foreground_target_matches(
++            22394,
++            17590,
++            None,
++            Some(17590)
++        ));
++        assert!(!exact_foreground_target_matches(
++            22394,
++            17590,
++            Some(22394),
++            None
++        ));
++    }
++
++    #[test]
++    fn foreground_window_pixel_route_rejects_frame_or_scale_changes() {
++        let initial = super::super::px_frame::WindowPxFrame {
++            bounds: crate::windows::WindowBounds {
++                x: 123.0,
++                y: 456.0,
++                width: 700.0,
++                height: 500.0,
++            },
++            scale: 2.0,
++        };
++        assert!(same_px_frame(&initial, &initial));
++        let mut moved = initial.clone();
++        moved.bounds.x += 1.0;
++        assert!(!same_px_frame(&initial, &moved));
++        let mut resized = initial.clone();
++        resized.bounds.height += 1.0;
++        assert!(!same_px_frame(&initial, &resized));
++        let mut rescaled = initial.clone();
++        rescaled.scale = 1.0;
++        assert!(!same_px_frame(&initial, &rescaled));
++    }
++
++    #[test]
++    fn foreground_global_click_requires_finite_point_inside_window_bounds() {
++        assert!(window_local_point_inside_frame(0.0, 0.0, 100.0, 80.0));
++        assert!(window_local_point_inside_frame(99.999, 79.999, 100.0, 80.0));
++        assert!(!window_local_point_inside_frame(-0.001, 10.0, 100.0, 80.0));
++        assert!(!window_local_point_inside_frame(100.0, 10.0, 100.0, 80.0));
++        assert!(!window_local_point_inside_frame(10.0, 80.0, 100.0, 80.0));
++        assert!(!window_local_point_inside_frame(
++            f64::NAN,
++            10.0,
++            100.0,
++            80.0
++        ));
++        assert!(!window_local_point_inside_frame(10.0, 10.0, 0.0, 80.0));
++    }
++
+     /// Surface 5: schema must advertise the new `button` field with the three
+     /// canonical values and default to "left". Hermes / Codex / Claude Code
+     /// consumers branch on this enum being present.
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/windows.rs b/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
+index 64fdf26..25298f7 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
+@@ -94,10 +94,94 @@ pub(crate) fn visible_windows_with_space_snapshot() -> WindowEnumeration {
+ /// layer filter on enumeration and off identity lookup is what lets
+ /// `get_window_state` tell "no such window" apart from "exists, but is not a
+ /// layer-0 window" (issue #2237).
+-fn all_windows_any_layer() -> Vec<WindowInfo> {
++pub(crate) fn all_windows_any_layer() -> Vec<WindowInfo> {
+     enumerate_windows(kCGWindowListExcludeDesktopElements, LayerFilter::AnyLayer).windows
+ }
+ 
++/// Pure point hit-test over a WindowServer snapshot ordered by `z_index`.
++/// Only an exact, driver-owned, explicitly mouse-ignoring overlay is skipped.
++pub(crate) fn exact_window_is_top_at_point_in(
++    windows: &[WindowInfo],
++    target_pid: i32,
++    target_window_id: u32,
++    x: f64,
++    y: f64,
++    owned_mouse_ignoring_overlay: Option<(i32, u32)>,
++) -> bool {
++    if !x.is_finite() || !y.is_finite() {
++        return false;
++    }
++
++    let Some(target) = windows
++        .iter()
++        .find(|window| window.pid == target_pid && window.window_id == target_window_id)
++    else {
++        return false;
++    };
++    if !target.is_on_screen
++        || !bounds_are_usable(&target.bounds)
++        || !bounds_contain(&target.bounds, x, y)
++    {
++        return false;
++    }
++
++    for window in windows.iter().filter(|window| window.is_on_screen) {
++        if owned_mouse_ignoring_overlay.is_some_and(|(overlay_pid, overlay_id)| {
++            window.pid == overlay_pid && window.window_id == overlay_id
++        }) {
++            continue;
++        }
++        if window.window_id == target_window_id && window.pid == target_pid {
++            continue;
++        }
++        if window.z_index < target.z_index {
++            continue;
++        }
++        if !bounds_are_usable(&window.bounds) {
++            // A potentially-above on-screen row with unreadable geometry could
++            // cover the click point; do not infer it is absent.
++            return false;
++        }
++        if bounds_contain(&window.bounds, x, y) {
++            return false;
++        }
++    }
++
++    true
++}
++
++fn bounds_are_usable(bounds: &WindowBounds) -> bool {
++    bounds.x.is_finite()
++        && bounds.y.is_finite()
++        && bounds.width.is_finite()
++        && bounds.height.is_finite()
++        && bounds.width > 0.0
++        && bounds.height > 0.0
++}
++
++fn bounds_contain(bounds: &WindowBounds, x: f64, y: f64) -> bool {
++    x >= bounds.x && y >= bounds.y && x < bounds.x + bounds.width && y < bounds.y + bounds.height
++}
++
++/// Require the exact target to be the top WindowServer window at the point.
++/// Empty/failed enumeration is fail-closed.
++pub(crate) fn exact_window_is_top_at_point(
++    target_pid: i32,
++    target_window_id: u32,
++    x: f64,
++    y: f64,
++    owned_mouse_ignoring_overlay: Option<(i32, u32)>,
++) -> bool {
++    exact_window_is_top_at_point_in(
++        &all_windows_any_layer(),
++        target_pid,
++        target_window_id,
++        x,
++        y,
++        owned_mouse_ignoring_overlay,
++    )
++}
++
+ /// Which CGWindow layers an enumeration admits.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum LayerFilter {
+@@ -463,6 +547,110 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn guarded_pixel_hit_test_requires_exact_top_window_and_only_skips_owned_overlay() {
++        let mut target = window(10, 100, "Target");
++        target.bounds.y = 0.0;
++        target.z_index = 1;
++        let mut exact_overlay = window(20, 200, "Driver overlay");
++        exact_overlay.bounds.y = 0.0;
++        exact_overlay.z_index = 2;
++        let point = (50.0, 50.0);
++
++        assert!(exact_window_is_top_at_point_in(
++            &[target.clone(), exact_overlay.clone()],
++            100,
++            10,
++            point.0,
++            point.1,
++            Some((200, 20)),
++        ));
++
++        // A same-process sibling or any foreign window above the target blocks
++        // the global click; exact PID/window focus does not establish occlusion.
++        let mut same_pid_sibling = window(11, 100, "Target sibling");
++        same_pid_sibling.bounds.y = 0.0;
++        same_pid_sibling.z_index = 3;
++        assert!(!exact_window_is_top_at_point_in(
++            &[target.clone(), same_pid_sibling, exact_overlay.clone()],
++            100,
++            10,
++            point.0,
++            point.1,
++            Some((200, 20)),
++        ));
++
++        let mut foreign = window(30, 300, "Other app");
++        foreign.bounds.y = 0.0;
++        foreign.z_index = 4;
++        assert!(!exact_window_is_top_at_point_in(
++            &[target.clone(), foreign, exact_overlay.clone()],
++            100,
++            10,
++            point.0,
++            point.1,
++            Some((200, 20)),
++        ));
++
++        // Matching an overlay ID without matching the driver PID cannot exempt
++        // a covering window from the hit test.
++        assert!(!exact_window_is_top_at_point_in(
++            &[target.clone(), exact_overlay.clone()],
++            100,
++            10,
++            point.0,
++            point.1,
++            Some((999, 20)),
++        ));
++        assert!(!exact_window_is_top_at_point_in(
++            &[],
++            100,
++            10,
++            point.0,
++            point.1,
++            Some((200, 20)),
++        ));
++
++        for invalid_bounds in [
++            WindowBounds {
++                x: 0.0,
++                y: 0.0,
++                width: 0.0,
++                height: 100.0,
++            },
++            WindowBounds {
++                x: f64::NAN,
++                y: 0.0,
++                width: 100.0,
++                height: 100.0,
++            },
++        ] {
++            let mut unknown_onscreen = window(40, 400, "Unknown geometry");
++            unknown_onscreen.bounds = invalid_bounds;
++            unknown_onscreen.z_index = 5;
++            assert!(!exact_window_is_top_at_point_in(
++                &[target.clone(), unknown_onscreen],
++                100,
++                10,
++                point.0,
++                point.1,
++                None,
++            ));
++        }
++
++        let mut behind_target_unknown = window(41, 401, "Behind with unknown geometry");
++        behind_target_unknown.bounds.width = 0.0;
++        behind_target_unknown.z_index = 0;
++        assert!(exact_window_is_top_at_point_in(
++            &[behind_target_unknown, target],
++            100,
++            10,
++            point.0,
++            point.1,
++            None,
++        ));
++    }
++
+     #[test]
+     fn owner_resolves_same_pid() {
+         let windows = vec![window(42, 800, "TextEdit")];

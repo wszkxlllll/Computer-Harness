@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { performance } from "node:perf_hooks";
 import type { AssetId, JsonValue, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
-import { Qwen38FlashAdapter, type QwenHttpClient } from "./index.js";
+import { createDefaultComputerTools, windowSwitchTools } from "../../runtime/src/computer-tools.js";
+import { FetchQwenHttpClient, Qwen38FlashAdapter, type QwenHttpClient } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 2 };
@@ -33,10 +35,6 @@ class Client implements QwenHttpClient {
 function input(): ModelInput {
   const schemas: Record<string, JsonValue> = {
     click: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false },
-    type: { type: "object", properties: {
-      text: { type: "string", description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
-      elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Optional current UIA text-editor reference, used only for multiline full-value replacement. Expires when the observation or target window changes." },
-    }, required: ["text"], additionalProperties: false },
     keypress: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, maxItems: 1 } }, required: ["keys"], additionalProperties: false },
     hotkey: { type: "object", properties: { keys: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 } }, required: ["keys"], additionalProperties: false },
     scroll: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, direction: { type: "string" }, ticks: { type: "integer" } }, required: ["x", "y", "direction", "ticks"], additionalProperties: false },
@@ -51,6 +49,9 @@ function input(): ModelInput {
     ...(name === "drag" ? { coordinate: { fields: ["fromX", "fromY", "toX", "toY"] as const } } : {}),
     inputSchema: schemas[name]!,
   }));
+  const registeredType = createDefaultComputerTools().modelTools().find((tool) => tool.name === "type");
+  if (registeredType === undefined) throw new Error("shared type tool is missing");
+  tools.splice(1, 0, registeredType);
   tools.push(
     { name: "terminate", description: "finish", category: "control" as const, control: "finish" as const, inputSchema: { type: "object", properties: { status: { type: "string", enum: ["success", "failure"] }, text: { type: "string" } }, required: ["status", "text"], additionalProperties: false } },
     { name: "interact", description: "ask", category: "control" as const, control: "user_input_required" as const, inputSchema: { type: "object", properties: { text: { type: "string" } } } },
@@ -115,6 +116,78 @@ describe("Qwen3.8-Flash provider adapter", () => {
     mutableInput.tools = [];
     mutableInput.messages = [];
     await expect(adapter.generatePrepared(prepared, { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ name: "click", arguments: { x: 319.6, y: 299.5 } }] });
+  });
+
+  it("preserves the platform-specific hotkey tool contract on the Qwen wire", async () => {
+    const client = new Client(response("hotkey", { keys: ["CMD", "A"] }));
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" });
+    const modelInput = input();
+    const registeredHotkey = createDefaultComputerTools().modelTools().find((tool) => tool.name === "hotkey");
+    if (registeredHotkey === undefined) throw new Error("shared hotkey tool is missing");
+    modelInput.system = "Verified active computer platform: OS=macOS. For select-all use CMD+A.";
+    modelInput.tools = modelInput.tools.map((tool) => tool.name === "hotkey" ? registeredHotkey : tool);
+    await expect(adapter.generate(modelInput, { signal: new AbortController().signal })).resolves.toMatchObject({
+      type: "tool_calls",
+      calls: [{ name: "hotkey", arguments: { keys: ["CMD", "A"] } }],
+    });
+    const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
+    const hotkey = tools.find((tool) => tool.function.name === "hotkey");
+    expect(hotkey?.function.description).toContain("CMD");
+    expect(hotkey?.function.parameters).toMatchObject({ required: ["keys"], properties: { keys: { type: "array" } }, additionalProperties: false });
+    expect(client.body?.messages).toBeDefined();
+  });
+
+  it("projects the complete shared type guidance in strict_json while keeping native_tools as function tools", async () => {
+    const typeTool = createDefaultComputerTools().modelTools().find((tool) => tool.name === "type");
+    if (typeTool === undefined) throw new Error("shared type tool is missing");
+    const longCustomTool = { ...typeTool, name: "long_custom", description: "x".repeat(2_000) };
+    const expectedMacGuidance = "On macOS, omit elementRef and use the native focused-control typing route.";
+    const expectedEndGuidance = "Do not use elementRef for ordinary single-line typing.";
+
+    const strictClient = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-type", name: "type", arguments: { text: "first" } }] }) } }] });
+    await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: strictClient, thinking: "disabled", outputMode: "strict_json" })
+      .generate({ ...input(), tools: [typeTool, longCustomTool] }, { signal: new AbortController().signal });
+    const strictBody = strictClient.body!;
+    const strictSystem = String((strictBody.messages as Array<{ content?: unknown }>)[0]?.content);
+    expect(strictBody).toHaveProperty("response_format");
+    expect(strictBody).not.toHaveProperty("tools");
+    expect(strictSystem).toContain(expectedMacGuidance);
+    expect(strictSystem).toContain(expectedEndGuidance);
+    expect(strictSystem).toContain("x".repeat(180));
+    expect(strictSystem).not.toContain("x".repeat(181));
+
+    const nativeClient = new Client(response("type", { text: "first" }));
+    await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: nativeClient, thinking: "disabled", outputMode: "native_tools" })
+      .generate({ ...input(), tools: [typeTool, longCustomTool] }, { signal: new AbortController().signal });
+    const nativeBody = nativeClient.body!;
+    const nativeTools = nativeBody.tools as Array<{ function: { name: string; description: string } }>;
+    expect(nativeBody).not.toHaveProperty("response_format");
+    expect(nativeTools.find((tool) => tool.function.name === "type")?.function.description).toContain(expectedMacGuidance);
+    expect(nativeTools.find((tool) => tool.function.name === "type")?.function.description).toContain(expectedEndGuidance);
+
+  });
+
+  it.each(["default", "window-switch-opt-in"] as const)("keeps the strict catalog within budget for the real %s Registry tools", async (mode) => {
+    const registry = createDefaultComputerTools();
+    if (mode === "window-switch-opt-in") registry.registerMany(windowSwitchTools());
+    const tools = registry.modelTools("main");
+    const client = new Client({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ calls: [{ id: "strict-type", name: "type", arguments: { text: "first" } }] }) } }] });
+    const adapter = new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "strict_json" });
+    await adapter.generate({ ...input(), tools }, { signal: new AbortController().signal });
+    const messages = client.body?.messages as Array<{ content?: unknown }>;
+    const system = String(messages[0]?.content);
+    const catalogStart = system.indexOf("Available tools (semantic guidance; Runtime validates exact arguments):");
+    const catalogEnd = system.indexOf("\nStrict output envelope", catalogStart);
+    expect(catalogStart).toBeGreaterThanOrEqual(0);
+    expect(catalogEnd).toBeGreaterThan(catalogStart);
+    const catalog = system.slice(catalogStart, catalogEnd);
+    expect(catalog.length).toBeLessThanOrEqual(12_000);
+    expect(catalog).toContain("On macOS, omit elementRef and use the native focused-control typing route.");
+    expect(catalog).toContain("Do not use elementRef for ordinary single-line typing.");
+    expect(catalog.includes("list_windows(")).toBe(mode === "window-switch-opt-in");
+    expect(catalog.includes("switch_window(")).toBe(mode === "window-switch-opt-in");
+    expect(client.body).toHaveProperty("response_format");
+    expect(client.body).not.toHaveProperty("tools");
   });
 
   it("keeps the stable strict prefix separate from dynamic history, images, catalog, and payload identity", async () => {
@@ -241,11 +314,15 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(nativeTurn).toMatchObject({ type: "finish", summary: "Observed result", observationAssessment });
     expect(native.postCount).toBe(1);
     const systemText = String((native.body?.messages as Array<Record<string, unknown>>)[0]?.content);
-    expect(systemText).toContain("Optional ObservationAssessment");
+    expect(systemText).toContain("When a valid current assessment reference is supplied, include one observationAssessment object");
+    expect(systemText).toContain("do not confuse schema optionality with whether you should report");
+    expect(systemText).toContain("progress field is REQUIRED and must be an explicit choice");
+    expect(systemText).toContain("use null when this fresh screenshot confirms neither a meaningful user-requested subgoal result nor a concrete blocker");
+    expect(systemText).toContain("Null means no speech notice");
     expect(systemText).toContain("current screenshot");
     expect(systemText).toContain("one-turn delay");
     expect(systemText).toContain("not every step");
-    expect(systemText).toContain("progress.kind=blocked");
+    expect(systemText).toContain("use {kind: blocked, summary: ...} only for a concrete blocker");
     expect(systemText).not.toContain("observation-current");
     expect(JSON.stringify(native.body?.tools)).not.toContain("Sensitive account detail");
 
@@ -266,6 +343,14 @@ describe("Qwen3.8-Flash provider adapter", () => {
     const progressSchema = (assessmentSchema.properties as Record<string, unknown>).progress as Record<string, unknown>;
     const progressProperties = progressSchema.properties as Record<string, unknown>;
     expect((progressProperties.kind as Record<string, unknown>).enum).toEqual(["milestone", "blocked"]);
+  });
+
+  it("passes a source-linked finish reference report through the native terminate adapter", async () => {
+    const resultEvidence = { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "unknown", reason: "not_observed" }] };
+    const client = new Client(response("terminate", { status: "success", text: "Observed finish", resultEvidence }));
+    const turn = await new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: client, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal });
+    expect(turn).toMatchObject({ type: "finish", summary: "Observed finish", resultEvidence });
+    expect(client.postCount).toBe(1);
   });
 
   it("drops invalid optional assessments while preserving a valid tool call", async () => {
@@ -494,12 +579,13 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.reasoning_effort).toBe("low");
     expect(client.body?.preserve_thinking).toBe(true);
     expect(client.body?.parallel_tool_calls).toBe(false);
-    const tools = client.body?.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
+    const tools = client.body?.tools as Array<{ function: { name: string; description: string; parameters: Record<string, unknown> } }>;
     expect(tools[0]).toMatchObject({ function: { name: "click", parameters: { required: ["x", "y"], properties: { x: { maximum: 1000 }, y: { maximum: 1000 } } } } });
     expect(tools.find((tool) => tool.function.name === "type")).toMatchObject({ function: { parameters: { required: ["text"], properties: {
-      text: { description: "Text to type. Line breaks require a safely grounded multiline text editor on CUA." },
-      elementRef: { type: "string", minLength: 1, maxLength: 96 },
+      text: { description: expect.stringContaining("appends at its end regardless of caret or selection") },
+      elementRef: { type: "string", minLength: 1, maxLength: 96, description: expect.stringContaining("does not replace a selection") },
     } } } });
+    expect(tools.find((tool) => tool.function.name === "type")?.function.description).toContain("does not replace selected text");
     expect(tools.find((tool) => tool.function.name === "keypress")).toMatchObject({ function: { parameters: { required: ["keys"], properties: { keys: { maxItems: 1 } } } } });
   });
 
@@ -625,5 +711,123 @@ describe("Qwen3.8-Flash provider adapter", () => {
     expect(client.body?.preserve_thinking).toBe(false);
     const mixed = new Client({ choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [...calls, { id: "q38-control", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "success" }) } }] } }] });
     await expect(new Qwen38FlashAdapter({ apiKey: "key", assetReader: reader, httpClient: mixed, thinking: "disabled", outputMode: "native_tools" }).generate(input(), { signal: new AbortController().signal })).rejects.toMatchObject({ code: "QWEN_INVALID_TOOL_CALL" });
+  });
+});
+
+describe("FetchQwenHttpClient deadline and cancellation", () => {
+  const flush = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const invoke = (signal = new AbortController().signal, body: Record<string, unknown> = {}) =>
+    new FetchQwenHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid/no-network", body, {}, signal);
+
+  it("refuses pre-cancellation without dispatch, timer or signal listener", async () => {
+    vi.useFakeTimers(); const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController(); const reason = { fixture: "cancelled" }; controller.abort(reason);
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    try {
+      await expect(invoke(controller.signal)).rejects.toBe(reason);
+      expect(fetchMock).not.toHaveBeenCalled(); expect(add).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+    } finally { add.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it.each(["headers", "body"] as const)("settles timeout when %s ignores Abort forever", async (phase) => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => phase === "headers" ? new Promise<never>(() => {}) : { ok: true, status: 200, json: () => new Promise<never>(() => {}) });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = invoke().catch((error: unknown) => error); await flush(); await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+      expect(fetchMock).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it.each(["headers", "body"] as const)("does not accept late %s fulfillment or retry after timeout", async (phase) => {
+    vi.useFakeTimers(); let resolveLate: (value: unknown) => void = () => {};
+    const late = new Promise<unknown>(resolve => { resolveLate = resolve; });
+    const json = vi.fn(() => late);
+    vi.stubGlobal("fetch", vi.fn(async () => phase === "headers" ? late : { ok: true, status: 200, json }));
+    try {
+      const result = invoke().catch((error: unknown) => error); await flush(); await vi.advanceTimersByTimeAsync(10);
+      const failure = await result; expect(failure).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false });
+      resolveLate(phase === "headers" ? { ok: true, status: 200, json } : { late: true }); await flush();
+      expect(await result).toBe(failure); expect(fetch).toHaveBeenCalledTimes(1);
+      if (phase === "headers") expect(json).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it.each(["headers", "body"] as const)("preserves a Run reason while %s ignores Abort and later rejects", async (phase) => {
+    vi.useFakeTimers(); let rejectLate: (reason: unknown) => void = () => {};
+    const late = new Promise<unknown>((_resolve, reject) => { rejectLate = reject; });
+    vi.stubGlobal("fetch", vi.fn(async () => phase === "headers" ? late : { ok: true, status: 200, json: () => late }));
+    const controller = new AbortController(); const reason = { fixture: "user-cancelled" };
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    try {
+      const result = invoke(controller.signal).catch((error: unknown) => error); await flush(); controller.abort(reason);
+      expect(await result).toBe(reason); await vi.advanceTimersByTimeAsync(20);
+      rejectLate(new Error("ignored late failure")); await flush();
+      expect(await result).toBe(reason); expect(fetch).toHaveBeenCalledTimes(1);
+      expect(remove).toHaveBeenCalledWith("abort", expect.any(Function)); expect(vi.getTimerCount()).toBe(0);
+    } finally { remove.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("locks local timeout before a synchronous Run cancellation caused by the abort event", async () => {
+    vi.useFakeTimers(); const controller = new AbortController(); const reason = new Error("Run cancelled after local timeout");
+    vi.stubGlobal("fetch", vi.fn((_url: string, options: { signal: AbortSignal }) => {
+      options.signal.addEventListener("abort", () => controller.abort(reason), { once: true });
+      return new Promise<never>(() => {});
+    }));
+    try {
+      const result = invoke(controller.signal).catch((error: unknown) => error); await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("never dispatches when toJSON cancels or cancels then throws", async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    try {
+      for (const throwing of [false, true]) {
+        const controller = new AbortController(); const reason = new Error("serialization cancelled");
+        const body = { toJSON() { controller.abort(reason); if (throwing) throw new Error("later serializer failure"); return {}; } };
+        await expect(invoke(controller.signal, body)).rejects.toBe(reason);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each(["serialization", "headers", "body"] as const)("rejects a logical deadline in %s before timer delivery", async (phase) => {
+    vi.useFakeTimers(); let monotonic = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (phase === "headers") monotonic = 35;
+      return { ok: true, status: 200, json: async () => { if (phase === "body") monotonic = 35; return { late: true }; } };
+    }));
+    try {
+      const body = phase === "serialization" ? { toJSON() { monotonic = 35; return {}; } } : {};
+      await expect(invoke(new AbortController().signal, body)).rejects.toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+      expect(fetch).toHaveBeenCalledTimes(phase === "serialization" ? 0 : 1); expect(vi.getTimerCount()).toBe(0);
+    } finally { now.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("uses one deadline across headers and body and consumes a late body rejection", async () => {
+    vi.useFakeTimers(); let resolveHeaders: (value: unknown) => void = () => {};
+    let rejectBody: (reason: unknown) => void = () => {};
+    const headers = new Promise(resolve => { resolveHeaders = resolve; });
+    const body = new Promise((_resolve, reject) => { rejectBody = reject; });
+    vi.stubGlobal("fetch", vi.fn(() => headers));
+    try {
+      const result = invoke().catch((error: unknown) => error); await vi.advanceTimersByTimeAsync(7);
+      resolveHeaders({ ok: true, status: 200, json: () => body }); await flush(); await vi.advanceTimersByTimeAsync(3);
+      expect(await result).toMatchObject({ code: "QWEN_REQUEST_TIMEOUT", retryable: false });
+      rejectBody(new Error("late body parse failure")); await flush(); expect(fetch).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers(); }
+  });
+
+  it("preserves success and ordinary HTTP retry policy before expiry", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ complete: true }) })));
+    try {
+      await expect(invoke()).resolves.toEqual({ complete: true });
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
+      await expect(invoke()).rejects.toMatchObject({ code: "QWEN_HTTP_503", retryable: true, retryMode: "same_input" });
+    } finally { vi.unstubAllGlobals(); }
   });
 });

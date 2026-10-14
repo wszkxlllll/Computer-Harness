@@ -1,12 +1,21 @@
 # Computer Harness 文档索引
 
+2026-10-12 本地重新核对：[目录、源码与实际成果验证](./astra-local-directory-verification-2026-10-12.md)。当前e7bce7f；T2 CLI实验模式三轮已限定通过，旧F1–F4已修；正常Web/default Host、T1/T3及手机/部署出口分别保留。
+
 ## 使用、构建与许可
 
 [项目概览与手机体验说明](../README.md)注明公共 Demo Relay 尚未开放，并提供 Windows 本机 Host 启动前置、平台状态、安全边界和许可入口；[开发者上手](./getting-started.md)补充模型、CUA、OSWorld和排错步骤。项目许可见根目录[LICENSE](../LICENSE)，直接依赖与 CUA notices 见[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 ## 当前交接主线
 
-当前跨分支整合：[Mac 与 Runtime Surface 兼容审查](./macos-runtime-surface-integration-2026-10-03.md)。记录整合版本、冲突取舍、离线与 Windows 实机验收边界、推送及 main 合并结果。
+**当前修复与收尾入口**：[手机实机弹窗、输入回归与整改](./window-popup-regression-2026-10-04.md)。集中记录本轮源码收敛、完整任务结果、最终回归与部署状态。记事本写入保存已通过；WPS 保存、完整携程→记事本报告尚未通过，不能将局部探针作为完整任务放行依据。
+
+本轮独立审查：[弹窗恢复、候选刷新与输入合同审查](./popup-recovery-contract-review-2026-10-04.md)。记录代码范围、独立测试与未实测项；未知动作保留事实、不重放，恢复必须使用新观察。源码 GO 不等于真实任务成功。
+
+历史窄路径证据：[窗口与中途播报修复（2026-10-04 早期）](./window-and-progress-repair-results-2026-10-04.md)。保留记事本菜单返回、WPS 列窗切换和播报样本，不作为本轮完整任务验收。历史失败诊断见[携程→记事本轨迹](./travel-window-and-speech-diagnosis-2026-10-03.md)，用户已确认开始/取消有声音，缺的是中途播报，不是完全静音。
+
+main 与三平台跨窗口验收：[三平台进度同步（2026-10-03）](./platform-cross-window-status-2026-10-03.md)。PR #21 已合并；本轮已吸收 main 的队友改动，PR #22 修复源码四组 CI 全绿并发布隔离 Preview。macOS/Linux 跨窗口实机仍待验收；最新部署与完整任务分项以顶部收尾入口为准。
+队友 main 整合记录：[Mac 与 Runtime Surface 兼容审查](./macos-runtime-surface-integration-2026-10-03.md)。保留整合版本、冲突取舍、离线与 Windows 实机验收边界及 main 合并结果；本轮再整合后的状态以顶部收尾入口为准。
 
 A 线三聊天协作：[修复、实机测试与远端审查入口](./a-line-three-thread-coordination-2026-10-03.md)。聊天（8）负责修复、（10）负责实机测试、（6）负责远端代码更新和审查；当前共用同一 Git 分支，提交与运行版本切换须串行协调。
 
@@ -18,7 +27,7 @@ A 线当前总览：[2026-10-03 进度复核与优化方向](./a-line-progress-r
 
 Surface Registry 与 Windows transient-child 当前交接：[Surface Registry 队友交接](./surface-registry-team-handoff-2026-10-03.md)。集中记录稳定 ComputerSession/Surface 谱系、Windows relationship probe 与权威合并、menu/dialog/overlay 准入、多行自动 element binding、跨平台队友边界和细粒度 PR 切片。最终冻结源码定向 254/254、全量 105 文件/1271 tests 通过；Notepad menu bounded runner 的 `child_push`/`child_pop` 已实机通过，Open dialog 与 WPS 独立 dialog/menu 仍为 pending。
 
-多行文本输入可靠性与 Provider 验证：[多行输入修复与 Provider 验证记录](./multiline-type-implementation-results-2026-10-03.md)。Windows CUA 原始/Adapter 多行路径已通过受控 Notepad 验证；唯一一次 GLM Run 暴露 foreground keyboard 工具未进入 outbound catalog，尚未通过 Provider 端到端多行输入。文档记录真实边界、诊断误报修复和下一次受控验证命令。
+多行输入早期调查：[多行输入修复与 Provider 验证记录](./multiline-type-implementation-results-2026-10-03.md)。保留受控诊断和当时的 Provider 问题；最新记事本完整 GLM Run、非空追加语义及平台回归以本轮收尾入口为准。
 
 多行上游 Issue/PR 开展前的调研与候选方案见[历史计划](./cua-upstream-multiline-issue-pr-plan-2026-10-03.md)；其 main SHA、batching 候选和当时的“尚未实测”只代表记录时点，不是当前 PR 状态。
 
@@ -43,6 +52,8 @@ Surface Registry 与 Windows transient-child 当前交接：[Surface Registry �
 P1 助手回答偏好实施记录：[版本化 Run 快照与 Context 投影](./assistant-preferences-p1-implementation-2026-09-29.md)。代码闭环和离线合同测试已完成；真实模型行为与手机真机无障碍尚未验收。
 
 受控真实 API 验证：[ObservationAssessment 与助手偏好](./semantic-assessment-and-preferences-real-api-validation-2026-09-29.md)。GLM/Qwen 共发起四次合成请求；Qwen assessment 经 Monitor/Context 消费，GLM 简中偏好有单次正向样本，Qwen 个性化选择 `wait` 且 assessment 与 unchanged transition 冲突。终端汇总截断了部分逐项指标，报告明确保留该证据限制。
+
+ObservationAssessment wire schema 与 producer 指令实测：[GLM 真实 API 探针记录](./observation-assessment-live-probe-2026-10-04.md)。`progress` 现要求显式 object/null，解析器兼容旧缺字段响应；最终提示轮中 Notepad milestone 经 RunNoticeProjector/Scheduler 消费，Ctrip 正确结果图仍未返回外层 annotation。共 6 次受限真实请求；样本选择校正、隐私边界与尚未证实的物理播报详见报告。
 
 当前交付：[手机 App 式界面与审批修复](./mobile-accessible-ui-implementation-2026-09-26.md)。已按成熟 App 参考重做实际界面；756 项测试通过，最终小屏裁切已修复并重建。2026-09-27 已部署公网 Web、启动新版本机 Host 并验证配对注册；未完成手机读屏及真实任务验收。
 
@@ -103,6 +114,10 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 - [本地缺陷复现探针](./verification/audit-39ff27f9-local-probes.mjs)作为独立验证工具保留。
 
 ## 历史证据
+
+当前三线执行入口：[统一六批计划](./three-track-execution-plan-2026-10-06.md)、[隔离整合取舍](./three-track-integration-decisions-2026-10-06.md)、[预算与HTTP关联交付](./a-line-sync/fixes/F-20261006-002.md)。原A线独立队列停用，历史证据保留；新版离线通过不等于已经部署或实机通过。
+
+本轮本地冻结：[批次0/1部署单](./three-track-batch01-deployment-2026-10-06.md)。仅预算与请求关联候选离线放行，实机签收待测试方记录。
 
 - [2026-09-26 首页改版前存档](./history/2026-09-26-readme-before-refresh.md)：保留旧首页的参数与阶段记录，当前使用入口以根 README 和专题指南为准。
 - [2026-09-26 交接收敛归档与迁移索引](./history/2026-09-26-handoff-convergence/README.md)：记录旧阶段文档和一次性实验脚本的原路径、新路径、归档理由与恢复方式。

@@ -47,6 +47,38 @@ function fakeHandle(config: ResolvedRunConfig, outcome: RunOutcome): RunHandle {
 }
 
 describe("ApplicationSession", () => {
+  it("checks the final risk-guard selection while trusting injected Provider and Run factories", () => {
+    const credentials = { glmApiKey: "fixture-main-key" };
+    const layeredRisk = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-session"), riskModel: "qwen3.8-flash" },
+      dependencies: { credentials },
+    });
+    expect(() => layeredRisk.assertRunProviderConfiguration()).not.toThrow();
+    expect(() => layeredRisk.assertRunProviderConfiguration({ riskGuard: "off" })).not.toThrow();
+    expect(() => layeredRisk.assertRunProviderConfiguration({ riskGuard: "layered" })).toThrow(expect.objectContaining({
+      name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING",
+    }));
+
+    const sameModelRisk = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-same"), riskModel: "same" },
+      dependencies: { credentials },
+    });
+    expect(() => sameModelRisk.assertRunProviderConfiguration({ riskGuard: "layered" })).not.toThrow();
+
+    const customProvider = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-custom-provider"), riskGuard: "layered", riskModel: "qwen3.8-flash" },
+      dependencies: { credentials: {}, createProvider: vi.fn() },
+    });
+    expect(() => customProvider.assertRunProviderConfiguration()).not.toThrow();
+
+    const customRunFactory = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-custom-run"), riskGuard: "layered", riskModel: "qwen3.8-flash" },
+      dependencies: { credentials: {} },
+      createRun: vi.fn(async () => fakeHandle({ ...baseConfig("/tmp/provider-preflight-custom-run"), runId: "fixture-run" as RunId, goal: "fixture" }, "succeeded")),
+    });
+    expect(() => customRunFactory.assertRunProviderConfiguration()).not.toThrow();
+  });
+
   it("creates independent Run directories and does not inherit the prior Run", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-"));
     const owner = new InProcessEnvironmentOwner();
@@ -190,7 +222,7 @@ describe("ApplicationSession", () => {
     }
   });
 
-  it("keeps the environment blocked after an unknown external side effect", async () => {
+  it("preserves an unknown outcome but releases the environment after confirmed resource cleanup", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-"));
     const owner = new InProcessEnvironmentOwner();
     const createRun = vi.fn(async (config: ResolvedRunConfig) => fakeHandle(config, "outcome_unknown"));
@@ -198,8 +230,68 @@ describe("ApplicationSession", () => {
       const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
       await session.startRun("uncertain task");
       await session.waitForActiveRun();
+      expect(session.status).toBe("idle");
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "released" });
+      expect(session.inspectEnvironment()).toBeUndefined();
+
+      await session.startRun("fresh task; never replay the previous action");
+      await session.waitForActiveRun();
+      expect(createRun).toHaveBeenCalledTimes(2);
+      expect(session.history.map((run) => run.outcome)).toEqual(["outcome_unknown", "outcome_unknown"]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the environment blocked when an unknown Run has unresolved cleanup diagnostics", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-cleanup-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "outcome_unknown");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "outcome_unknown",
+        summary: { cleanupDiagnostics: [{ operation: "computer.close", message: "close timed out", status: "timed_out" }] },
+        snapshot: {} as never,
+        events: [],
+      }));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("uncertain task with unresolved cleanup");
+      await session.waitForActiveRun();
       expect(session.status).toBe("blocked");
-      await expect(session.startRun("do not reuse")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "pending_cleanup" });
+      await expect(session.startRun("must wait for cleanup recovery")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(createRun).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat missing or malformed cleanup diagnostics as confirmed cleanup", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-missing-cleanup-report-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "outcome_unknown");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "outcome_unknown",
+        summary: {},
+        snapshot: {} as never,
+        events: [],
+      }));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("uncertain task with an incomplete cleanup report");
+      await session.waitForActiveRun();
+      expect(session.status).toBe("blocked");
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "pending_cleanup" });
+      await expect(session.startRun("must wait for confirmed cleanup")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(createRun).toHaveBeenCalledTimes(1);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

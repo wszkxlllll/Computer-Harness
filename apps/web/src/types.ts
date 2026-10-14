@@ -31,17 +31,24 @@ export interface WindowTarget {
   token: string;
   appName?: string;
   title?: string;
+  previewRequired?: boolean;
+  relationship?: WindowCandidateRelationship;
 }
 
 export interface WindowTargetList {
   candidates: WindowTarget[];
   expiresAt: string;
+  omittedAmbiguousCount?: number;
+  nativeRecoveryProfile?: { profileId: string; label: string };
+  nativeWebDocumentProfile?: { profileId: string; label: string };
 }
 
 export type RunTarget =
   | { mode: "auto"; switchWindows?: boolean }
   | { mode: "desktop"; switchWindows?: boolean }
-  | { mode: "window"; targetToken: string; switchWindows?: boolean }
+  | { mode: "window"; targetToken: string; previewToken?: string; switchWindows?: boolean }
+  | { mode: "native-recovery"; profileId: string }
+  | { mode: "native-web-document"; profileId: string }
   | { mode: "browser"; url?: string; switchWindows?: boolean };
 
 export type ManagedBrowserProfileStatus = "unprepared" | "preparing" | "ready" | "in_use" | "relogin_required" | "cleanup_failed";
@@ -77,6 +84,7 @@ export interface PendingRequestBase {
   reason?: string;
   question?: string;
   reasonCode?: "foreground_mismatch" | "new_window_detected" | string;
+  omittedCandidateCount?: number;
   requiresVisualReview?: boolean;
   preview?: ApprovalActionPreview;
   candidates?: WindowCandidate[];
@@ -122,6 +130,10 @@ export interface ApprovalActionPreviewItem {
   points?: Array<{ x: number; y: number }>;
   keys?: string[];
   typedCharacterCount?: number;
+  groundingRef?: string;
+  optionText?: string;
+  optionCharacterCount?: number;
+  optionTextStatus?: "visible" | "redacted";
 }
 
 export interface WindowCandidate {
@@ -129,6 +141,24 @@ export interface WindowCandidate {
   appName?: string;
   title?: string;
   description?: string;
+  previewRequired?: boolean;
+  relationship?: WindowCandidateRelationship;
+}
+
+export type WindowCandidateRelationship =
+  | { kind: "owned_child"; rootRole?: "menu" | "popup" | "dialog"; parentAppName?: string; parentTitle?: string }
+  | { kind: "scoped_peer" };
+
+export interface WindowCandidatePreview {
+  previewToken: string;
+  appName?: string;
+  title?: string;
+  relationship?: WindowCandidateRelationship;
+  capturedAt: string;
+  expiresAt: string;
+  viewport: { width: number; height: number };
+  mediaType: "image/png";
+  dataBase64: string;
 }
 
 export interface RunSnapshot extends RunSummary {
@@ -145,7 +175,7 @@ export interface RemoteEvent {
   data?: Record<string, unknown>;
 }
 
-export type RunNoticeKind = "progress" | "approval" | "question" | "error" | "result";
+export type RunNoticeKind = "progress" | "approval" | "question" | "handoff" | "error" | "result";
 export type RunNoticeDelivery = "polite" | "interrupt";
 
 /** Minimal public notice projection carried inside an ordered `run.event`. */

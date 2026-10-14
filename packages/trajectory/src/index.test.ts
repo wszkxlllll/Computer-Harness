@@ -107,6 +107,16 @@ function runningEvents(): RuntimeEvent[] {
   ];
 }
 
+describe("F045 bound missing durable schema and replay", () => {
+  it("encodes/decodes/replays the request and rejects an ignore escape", () => {
+    const request = eventAt(6, { type: "computer.window.handoff.requested", sourceActionId: actionId, reasonCode: "bound_window_missing" });
+    const decoded = runtimeEventSchema.parse(JSON.parse(JSON.stringify(request))) as RuntimeEvent;
+    const waiting = reduceRuntimeEvents([...runningEvents(), decoded], runId);
+    expect(waiting.pendingWindowHandoff).toEqual({ sourceActionId: actionId, reasonCode: "bound_window_missing" });
+    expect(() => reduceRunEvent(waiting, eventAt(7, { type: "computer.window.handoff.ignored", sourceActionId: actionId }))).toThrow(/matching proactive/u);
+  });
+});
+
 describe("switch_window session receipt contract", () => {
   const switchedSession: ComputerSessionDescriptor = {
     ...session,
@@ -179,7 +189,7 @@ describe("switch_window session receipt contract", () => {
       type: "action.execution.completed",
       receipt: { actionId: clickActionId, status: "completed", sessionAfter: switchedSession },
     });
-    expect(() => reduceRuntimeEvents([...runningEvents(), clickStarted, clickWithAfter], runId)).toThrow(/only on a completed switch_window/u);
+    expect(() => reduceRuntimeEvents([...runningEvents(), clickStarted, clickWithAfter], runId)).toThrow(/only on a completed target transition receipt/u);
 
     const mismatchedAction = event(6, {
       type: "action.execution.completed",
@@ -198,6 +208,63 @@ describe("switch_window session receipt contract", () => {
       receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, id: "another-session" as ComputerSessionId } },
     });
     expect(() => reduceRuntimeEvents([...runningEvents(), switchStarted, wrongSession], runId)).toThrow(/active ComputerSession identity/u);
+  });
+
+  it("accepts sessionAfter only on a completed reopen_saved_document receipt", () => {
+    const reopenStarted = event(5, {
+      type: "action.execution.started",
+      action: { actionId, basedOn: observationId, kind: "reopen_saved_document" },
+    });
+    const missingAfter = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed" },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), reopenStarted, missingAfter], runId)).toThrow(/requires sessionAfter/u);
+
+    const completed = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: switchedSession },
+    });
+    const transition = reduceRuntimeEvents([...runningEvents(), reopenStarted, completed], runId);
+    expect(transition.computerSession).toEqual(switchedSession);
+    expect(transition.latestObservationId).toBeUndefined();
+    expect(transition.stepCount).toBe(1);
+
+    const fresh = event(7, {
+      type: "observation.created",
+      observation: {
+        id: "observation-after-reopen" as ObservationId,
+        runId,
+        computerSessionId: switchedSession.id,
+        surfaceRef: desktopSurfaceRef,
+        capturedAt: "2026-01-01T00:00:08.000Z",
+        viewport: switchedSession.viewport,
+        screenshot: { assetId: "asset-after-reopen" as AssetId, relativePath: "assets/reopened.png", mediaType: "image/png", byteLength: 1 },
+      },
+    });
+    expect(reduceRunEvent(transition, fresh).latestObservationId).toBe("observation-after-reopen");
+
+    const failedWithAfter = {
+      eventId: "reopen-failed-with-session-after" as EventId,
+      runId,
+      sequence: 7,
+      occurredAt: "2026-01-01T00:00:06.000Z",
+      type: "action.execution.failed" as const,
+      receipt: { actionId, status: "failed" as const, sessionAfter: switchedSession },
+    };
+    expect(runtimeEventSchema.safeParse(failedWithAfter).success).toBe(false);
+
+    const wrongBackend = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, backend: "other-backend" } },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), reopenStarted, wrongBackend], runId)).toThrow(/active ComputerSession backend/u);
+
+    const wrongSession = event(6, {
+      type: "action.execution.completed",
+      receipt: { actionId, status: "completed", sessionAfter: { ...switchedSession, id: "another-session" as ComputerSessionId } },
+    });
+    expect(() => reduceRuntimeEvents([...runningEvents(), reopenStarted, wrongSession], runId)).toThrow(/active ComputerSession identity/u);
   });
 });
 
@@ -579,6 +646,71 @@ describe("RunSnapshot reducer", () => {
       } }),
       event(7, { type: "computer.surface.transitioned", from: parent, to: invalidOverlay, reason: "child_push" }),
     ], runId)).toThrow(/transient child_push requires its exact adapter admission source/u);
+  });
+
+  it("records a verified sibling transient as a child push under the unchanged owner root", () => {
+    const parent: SurfaceRef = { surfaceId: "sibling-owner-root" as SurfaceId, generation: 1, kind: "native_window" };
+    const oldMenu: SurfaceRef = {
+      surfaceId: "sibling-old-menu" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: parent.surfaceId,
+      admissionSource: "owned_transient_window_root_proof",
+    };
+    const newDialog: SurfaceRef = {
+      surfaceId: "sibling-new-dialog" as SurfaceId,
+      generation: 1,
+      kind: "native_window",
+      parentSurfaceId: parent.surfaceId,
+      admissionSource: "win32_relationship_probe",
+    };
+    const prefix = [
+      ...runningEvents(),
+      event(5, { type: "computer.surface.transitioned", from: desktopSurfaceRef, to: parent, reason: "peer_switch" }),
+      event(6, { type: "observation.created", observation: {
+        id: "sibling-owner-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: parent,
+        capturedAt: "2026-01-01T00:00:01.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "sibling-owner-asset" as AssetId, relativePath: "assets/sibling-owner.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+      event(7, { type: "computer.surface.transitioned", from: parent, to: oldMenu, reason: "child_push" }),
+      event(8, { type: "observation.created", observation: {
+        id: "sibling-menu-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: oldMenu,
+        capturedAt: "2026-01-01T00:00:02.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "sibling-menu-asset" as AssetId, relativePath: "assets/sibling-menu.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+    ];
+    const events = [
+      ...prefix,
+      event(9, { type: "computer.surface.transitioned", from: oldMenu, to: newDialog, reason: "child_push" }),
+      event(10, { type: "observation.created", observation: {
+        id: "sibling-dialog-observation" as ObservationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: newDialog,
+        capturedAt: "2026-01-01T00:00:03.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "sibling-dialog-asset" as AssetId, relativePath: "assets/sibling-dialog.png", mediaType: "image/png", byteLength: 1 },
+      } }),
+    ];
+    expect(reduceRuntimeEvents(events, runId).activeSurfaceRef).toEqual(newDialog);
+
+    const unrelated: SurfaceRef = {
+      ...newDialog,
+      surfaceId: "sibling-unrelated-dialog" as SurfaceId,
+      parentSurfaceId: "different-owner-root" as SurfaceId,
+    };
+    expect(() => reduceRuntimeEvents([
+      ...prefix,
+      event(9, { type: "computer.surface.transitioned", from: oldMenu, to: unrelated, reason: "child_push" }),
+    ], runId)).toThrow(/child_push requires a direct active parent or a trusted sibling transient under the same parent/u);
   });
 
   it("binds Guard and approval evidence to the transient Surface admission source", () => {
@@ -1067,6 +1199,83 @@ describe("JsonlRunEventWriter", () => {
       expect.objectContaining({ type: "action.execution.started", action: selectAction }),
       expect.objectContaining({ type: "action.execution.failed", receipt: expect.objectContaining({ actionId: selectAction.actionId, status: "refused" }) }),
     ]));
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("round-trips strict native AXTextArea format metadata and rejects malformed shapes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-text-format-trajectory-"));
+    const filePath = join(directory, "trajectory.jsonl");
+    const writer = new JsonlRunEventWriter(filePath, runId);
+    const completeFormat = { source: "ax-cfstring-v1" as const, status: "complete" as const, utf8Bytes: 8, codePointCount: 3, lineFeedCount: 1, trailingLineFeedCount: 1, carriageReturnCount: 0 };
+    const eventData = {
+      runId,
+      type: "observation.created" as const,
+      observation: {
+        id: observationId,
+        runId,
+        computerSessionId: session.id,
+        surfaceRef: desktopSurfaceRef,
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        viewport: session.viewport,
+        screenshot: { assetId: "asset-text-format" as AssetId, relativePath: "assets/text-format.png", mediaType: "image/png" as const, byteLength: 1 },
+        authorizedSavedDocumentEvidence: {
+          source: "host-authorized-file-and-native-proof-v1" as const,
+          status: "verified_clean_current_document" as const,
+          observationId,
+          surfaceRef: desktopSurfaceRef,
+        },
+        grounding: {
+          version: "uia-catalog-v1" as const,
+          source: "uia" as const,
+          observationId,
+          computerSessionId: session.id,
+          surfaceRef: desktopSurfaceRef,
+          completeness: "complete" as const,
+          degraded: false,
+          maxElements: 16,
+          elements: [{ elementRef: "uia-textarea", role: "AXTextArea", source: "uia" as const, textFormat: completeFormat }],
+        },
+      },
+    };
+    await writer.append(eventData);
+    await writer.close();
+    const replayed = (await readRuntimeEvents(filePath))[0];
+    expect(replayed).toMatchObject({ type: "observation.created", observation: { grounding: { elements: [{ textFormat: completeFormat }] } } });
+    expect(replayed).toMatchObject({ type: "observation.created", observation: { authorizedSavedDocumentEvidence: {
+      source: "host-authorized-file-and-native-proof-v1", status: "verified_clean_current_document", observationId, surfaceRef: desktopSurfaceRef,
+    } } });
+    expect(replayed).toBeDefined();
+    if (replayed?.type !== "observation.created" || replayed.observation.grounding === undefined) throw new Error("round-trip observation missing grounding");
+    const base = structuredClone(replayed);
+    expect(runtimeEventSchema.safeParse(base).success).toBe(true);
+    const wrongEvidenceObservation = structuredClone(base);
+    if (wrongEvidenceObservation.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(wrongEvidenceObservation.observation.authorizedSavedDocumentEvidence!, { observationId: "other-observation" });
+    expect(runtimeEventSchema.safeParse(wrongEvidenceObservation).success).toBe(false);
+    const wrongEvidenceSurface = structuredClone(base);
+    if (wrongEvidenceSurface.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(wrongEvidenceSurface.observation.authorizedSavedDocumentEvidence!, { surfaceRef: domSurfaceRef });
+    expect(runtimeEventSchema.safeParse(wrongEvidenceSurface).success).toBe(false);
+    const unsupportedEvidenceSource = structuredClone(base);
+    if (unsupportedEvidenceSource.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(unsupportedEvidenceSource.observation.authorizedSavedDocumentEvidence!, { source: "model-asserted" });
+    expect(runtimeEventSchema.safeParse(unsupportedEvidenceSource).success).toBe(false);
+    const unsupportedEvidenceStatus = structuredClone(base);
+    if (unsupportedEvidenceStatus.type !== "observation.created") throw new Error("expected observation event");
+    Object.assign(unsupportedEvidenceStatus.observation.authorizedSavedDocumentEvidence!, { status: "saved-successfully" });
+    expect(runtimeEventSchema.safeParse(unsupportedEvidenceStatus).success).toBe(false);
+    const malformedCount = structuredClone(base);
+    Object.assign(malformedCount.observation.grounding!.elements[0]!, { textFormat: { ...completeFormat, utf8Bytes: 2 } });
+    expect(runtimeEventSchema.safeParse(malformedCount).success).toBe(false);
+    const wrongElement = structuredClone(base);
+    Object.assign(wrongElement.observation.grounding!.elements[0]!, { role: "AXTextField" });
+    expect(runtimeEventSchema.safeParse(wrongElement).success).toBe(false);
+    const webContent = structuredClone(base);
+    Object.assign(webContent.observation.grounding!.elements[0]!, { browserRegion: "content" });
+    expect(runtimeEventSchema.safeParse(webContent).success).toBe(false);
+    const malformedOverLimit = structuredClone(base);
+    Object.assign(malformedOverLimit.observation.grounding!.elements[0]!, { textFormat: { source: "ax-cfstring-v1", status: "over_limit", utf8Bytes: 16_385 } });
+    expect(runtimeEventSchema.safeParse(malformedOverLimit).success).toBe(false);
     await rm(directory, { recursive: true, force: true });
   });
 

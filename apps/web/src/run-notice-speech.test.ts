@@ -140,6 +140,75 @@ describe("browser RunNotice speech output", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
+  it("binds handoff speech to the current window request and cancels it when that request changes", async () => {
+    const { environment, utterances, cancel } = fakeEnvironment();
+    const sourceActionId = "action-window-handoff";
+    let current: PendingRequestBase | undefined = { requestId: sourceActionId, kind: "window_handoff" };
+    const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());
+    const handoff = notice({
+      noticeId: "window-handoff-notice",
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: sourceActionId,
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+
+    await controller.deliver(handoff, options(() => current));
+    expect(utterances.map((item) => item.text)).toEqual([handoff.text]);
+
+    const cancellationsBeforeResolution = cancel.mock.calls.length;
+    current = undefined;
+    controller.syncPendingRequest(current);
+    await Promise.resolve();
+    expect(cancel).toHaveBeenCalledTimes(cancellationsBeforeResolution + 1);
+  });
+
+  it("defers handoff speech until its matching pending window request is current", async () => {
+    const { environment, utterances } = fakeEnvironment();
+    const sourceActionId = "action-window-handoff-current";
+    const current: PendingRequestBase = { requestId: sourceActionId, kind: "window_handoff" };
+    const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());
+    const handoff = notice({
+      noticeId: "window-handoff-awaiting-snapshot",
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: sourceActionId,
+      feedSequence: 12,
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+
+    expect(await controller.deliver(handoff, { ...options(() => undefined), snapshotSequence: 11 })).toBe("deferred");
+    expect(utterances).toHaveLength(0);
+    expect(await controller.deliver(handoff, { ...options(() => current), snapshotSequence: 12 })).toBe("handled");
+    expect(utterances.map((item) => item.text)).toEqual([handoff.text]);
+  });
+
+  it("interrupts a pending handoff notice when the Run ends", async () => {
+    const { environment, utterances, cancel } = fakeEnvironment();
+    const current: PendingRequestBase = { requestId: "action-window-abort", kind: "window_handoff" };
+    const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());
+    const handoff = notice({
+      noticeId: "window-handoff-before-abort",
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: current.requestId,
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+    await controller.deliver(handoff, options(() => current));
+    const cancellationsBeforeResult = cancel.mock.calls.length;
+
+    await controller.deliver(notice({
+      noticeId: "cancelled-run-result",
+      kind: "result",
+      delivery: "interrupt",
+      eventSequence: 5,
+      text: "任务已取消。",
+    }), options(() => current));
+
+    expect(cancel).toHaveBeenCalledTimes(cancellationsBeforeResult + 1);
+    expect(utterances.map((item) => item.text)).toEqual([handoff.text, "任务已取消。"]);
+  });
+
   it("cancels active speech when the user starts text or voice input", async () => {
     const { environment, cancel } = fakeEnvironment();
     const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());

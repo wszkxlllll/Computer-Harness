@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { canIgnoreWindow } from "../command-contract";
+import { previewWindowHandoffCandidate } from "../api";
 import { ApprovalActionParameters, ApprovalActionPreview } from "./ApprovalActionPreview";
 import { ApprovalEvidencePanel } from "./ApprovalEvidencePanel";
-import type { PendingRequestBase, WindowCandidate } from "../types";
+import type { PendingRequestBase, WindowCandidate, WindowCandidatePreview } from "../types";
 import { VoiceInputControl } from "./VoiceInputControl";
 import { appendVoiceInputText } from "../voice-input-text";
 import type { VoiceAudioCaptureAdapter } from "@computer-harness/voice";
@@ -18,7 +19,7 @@ interface PendingRequestPanelProps {
   voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
   onApprove: (approved: boolean) => Promise<void>;
   onRespond: (text: string) => Promise<boolean>;
-  onChooseWindow: (candidate: WindowCandidate) => Promise<void>;
+  onChooseWindow: (candidate: WindowCandidate, previewToken?: string) => Promise<void>;
   onIgnoreNewWindow: () => Promise<void>;
   onEvidenceViewerOpened?: (requestId: string) => void;
   onEvidenceViewerClosed?: (requestId: string, evidenceReviewed: boolean) => void;
@@ -41,6 +42,23 @@ export function PendingRequestPanel({
   onEvidenceViewerClosed = () => undefined,
 }: PendingRequestPanelProps) {
   const [loadedEvidenceKey, setLoadedEvidenceKey] = useState<string>();
+  const [windowPreviews, setWindowPreviews] = useState<Map<string, WindowCandidatePreview>>(() => new Map());
+  const [windowPreviewErrors, setWindowPreviewErrors] = useState<Map<string, string>>(() => new Map());
+  const [loadedWindowPreviewTokens, setLoadedWindowPreviewTokens] = useState<Set<string>>(() => new Set());
+  const [windowPreviewDisplayErrors, setWindowPreviewDisplayErrors] = useState<Map<string, string>>(() => new Map());
+  const [windowPreviewLoadingToken, setWindowPreviewLoadingToken] = useState<string>();
+  const previewAbort = useRef<AbortController | undefined>(undefined);
+  const [currentTime, setCurrentTime] = useState(Date.now());
+  const handoffCandidates = request.kind === "window_handoff" ? request.candidates ?? [] : [];
+  const handoffCandidateKey = handoffCandidates.map((candidate) => candidate.token).join("\u0000");
+  const handoffLabelCounts = new Map<string, number>();
+  for (const candidate of handoffCandidates) {
+    const key = windowCandidateLabelKey(candidate);
+    handoffLabelCounts.set(key, (handoffLabelCounts.get(key) ?? 0) + 1);
+  }
+  const requiresCandidatePreview = (candidate: WindowCandidate): boolean =>
+    candidate.previewRequired === true || !candidate.appName?.trim() || !candidate.title?.trim() ||
+    (handoffLabelCounts.get(windowCandidateLabelKey(candidate)) ?? 0) > 1;
   const [announcement, setAnnouncement] = useState(`有一项待处理请求：${request.kind === "approval" ? "电脑请求你确认一项操作" : request.kind === "user_input" ? "电脑需要你补充信息" : "请选择电脑要继续使用的窗口"}。`);
   const announcedRequestIdentity = useRef(`${request.requestId}:${request.kind}`);
   const title = request.kind === "approval"
@@ -65,6 +83,83 @@ export function PendingRequestPanel({
       setAnnouncement(`当前请求已更新：${title}。请重新阅读后再决定。`);
     }
   }, [request.requestId, request.kind, title]);
+
+  useLayoutEffect(() => {
+    previewAbort.current?.abort();
+    previewAbort.current = undefined;
+    setWindowPreviews(new Map());
+    setWindowPreviewErrors(new Map());
+    setLoadedWindowPreviewTokens(new Set());
+    setWindowPreviewDisplayErrors(new Map());
+    setWindowPreviewLoadingToken(undefined);
+    return () => previewAbort.current?.abort();
+  }, [request.requestId, runId, handoffCandidateKey]);
+
+  useEffect(() => {
+    const nextExpiry = [...windowPreviews.values()]
+      .map((preview) => Date.parse(preview.expiresAt))
+      .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > Date.now())
+      .sort((left, right) => left - right)[0];
+    if (nextExpiry === undefined) return;
+    const timer = window.setTimeout(() => setCurrentTime(Date.now()), Math.max(1, nextExpiry - Date.now() + 1));
+    return () => window.clearTimeout(timer);
+  }, [windowPreviews, currentTime]);
+
+  async function previewCandidate(candidate: WindowCandidate) {
+    if (runId === undefined) {
+      setWindowPreviewErrors((current) => new Map(current).set(candidate.token, "无法确认这是当前任务的候选窗口，请刷新任务状态。"));
+      return;
+    }
+    previewAbort.current?.abort();
+    const controller = new AbortController();
+    previewAbort.current = controller;
+    const previousPreview = windowPreviews.get(candidate.token);
+    setWindowPreviews((current) => {
+      if (!current.has(candidate.token)) return current;
+      const next = new Map(current);
+      next.delete(candidate.token);
+      return next;
+    });
+    if (previousPreview !== undefined) {
+      setLoadedWindowPreviewTokens((current) => {
+        if (!current.has(previousPreview.previewToken)) return current;
+        const next = new Set(current);
+        next.delete(previousPreview.previewToken);
+        return next;
+      });
+      setWindowPreviewDisplayErrors((current) => {
+        if (!current.has(previousPreview.previewToken)) return current;
+        const next = new Map(current);
+        next.delete(previousPreview.previewToken);
+        return next;
+      });
+    }
+    setWindowPreviewLoadingToken(candidate.token);
+    setWindowPreviewErrors((current) => {
+      const next = new Map(current);
+      next.delete(candidate.token);
+      return next;
+    });
+    try {
+      const preview = await previewWindowHandoffCandidate(runId, request.requestId, candidate.token, controller.signal);
+      if (controller.signal.aborted || previewAbort.current !== controller) return;
+      setWindowPreviews((current) => new Map(current).set(candidate.token, preview));
+      setWindowPreviewDisplayErrors((current) => {
+        const next = new Map(current);
+        next.delete(preview.previewToken);
+        return next;
+      });
+    } catch (caught) {
+      if (controller.signal.aborted || previewAbort.current !== controller) return;
+      setWindowPreviewErrors((current) => new Map(current).set(candidate.token,
+        `${caught instanceof Error ? caught.message : "无法预览此窗口。"} 请在电脑上恢复目标窗口后刷新；仍无法区分时请停止任务，不要仅凭相同标题选择。`));
+    } finally {
+      if (previewAbort.current === controller) {
+        previewAbort.current = undefined;
+        setWindowPreviewLoadingToken(undefined);
+      }
+    }
+  }
 
   return (
     <section className="pending-panel" aria-labelledby="pending-title">
@@ -133,21 +228,78 @@ export function PendingRequestPanel({
 
       {request.kind === "window_handoff" && canChooseWindow && (
         <div className="window-choice-list" role="group" aria-label="可选择的窗口">
-          {(request.candidates ?? []).map((candidate) => (
-            <button
-              className="window-choice"
-              key={candidate.token}
-              type="button"
-              disabled={controlsDisabled}
-              onClick={() => void onChooseWindow(candidate)}
-            >
-              <span className="window-choice-app">{candidate.appName || "电脑上的窗口"}</span>
-              <span className="window-choice-title">{candidate.title || candidate.description || "窗口标题不可用"}</span>
-              <span className="window-choice-arrow" aria-hidden="true">→</span>
-            </button>
-          ))}
-          {(request.candidates ?? []).length === 0 && (
-            <p className="field-hint">电脑还没有可供选择的窗口，请等待更新或停止任务。</p>
+          {handoffCandidates.some(requiresCandidatePreview) && (
+            <p className="field-hint" role="status">标签重复或不完整的候选需要先看对应的真实画面。若截图不清楚或仍无法区分，请勿确认；在电脑恢复窗口后刷新，或停止任务。</p>
+          )}
+          {handoffCandidates.map((candidate) => {
+            const previewRequired = requiresCandidatePreview(candidate);
+            return previewRequired
+              ? <div className="window-choice-preview-item" key={candidate.token}>
+                <span className="window-choice-app">{candidate.appName || "电脑上的窗口"}</span>
+                <span className="window-choice-title">{candidate.title || candidate.description || "窗口标题不可用"}</span>
+                {candidate.relationship && <span className="window-choice-title">{windowRelationshipLabel(candidate.relationship)}</span>}
+                <button className="button button-secondary" type="button" disabled={controlsDisabled || windowPreviewLoadingToken !== undefined} onClick={() => void previewCandidate(candidate)}>
+                  {windowPreviewLoadingToken === candidate.token ? "正在读取此窗口…" : windowPreviews.has(candidate.token) ? "重新读取窗口预览" : "查看此窗口的真实画面"}
+                </button>
+                {windowPreviewLoadingToken === candidate.token && <p className="field-hint" role="status">正在读取这个精确候选，不会激活或操作它。</p>}
+                {windowPreviewErrors.get(candidate.token) && <p className="notice notice-warning" role="alert">{windowPreviewErrors.get(candidate.token)}</p>}
+                {(() => {
+                  const preview = windowPreviews.get(candidate.token);
+                  if (preview === undefined) return null;
+                  const previewValid = Date.parse(preview.expiresAt) > currentTime;
+                  const previewLoaded = loadedWindowPreviewTokens.has(preview.previewToken);
+                  const previewDisplayError = windowPreviewDisplayErrors.get(preview.previewToken);
+                  return <div className="window-choice-preview-block">
+                    <span className="window-choice-app">捕获时应用：{preview.appName || "应用名不可用"}</span>
+                    <span className="window-choice-title">捕获时标题：{preview.title || "窗口标题不可用"} · {formatCapturedAt(preview.capturedAt)}</span>
+                    <span className="window-choice-title">{preview.relationship ? windowRelationshipLabel(preview.relationship) : "捕获时关系未验证"}</span>
+                    <img
+                      src={`data:image/png;base64,${preview.dataBase64}`}
+                      alt={`${preview.appName ?? "未知应用"}：${preview.title ?? "未知窗口"} 的实时窗口预览`}
+                      onLoad={() => setLoadedWindowPreviewTokens((current) => new Set(current).add(preview.previewToken))}
+                      onError={() => {
+                        setLoadedWindowPreviewTokens((current) => {
+                          const next = new Set(current);
+                          next.delete(preview.previewToken);
+                          return next;
+                        });
+                        setWindowPreviewDisplayErrors((current) => new Map(current).set(preview.previewToken, "这张实时截图无法显示。请在电脑恢复目标窗口后刷新；仍看不清时请停止任务。"));
+                      }}
+                    />
+                    {previewDisplayError && <p className="notice notice-warning" role="alert">{previewDisplayError}</p>}
+                    <p className="field-hint">请确认截图中显示的窗口就是本次要继续使用的窗口。若画面不清楚或不一致，请勿确认；无法区分时请在电脑恢复窗口后刷新，或停止任务。</p>
+                    {previewValid && previewLoaded && previewDisplayError === undefined
+                      ? <button className="button button-primary button-large" type="button" disabled={controlsDisabled} onClick={() => void onChooseWindow(candidate, preview.previewToken)}>
+                        确认这个窗口并继续任务
+                      </button>
+                      : previewValid
+                        ? <p className="field-hint" role="status">实时截图成功显示后才能确认；截图看不清时不要选择。</p>
+                        : <p className="field-hint" role="status">此预览已过期。重新读取当前窗口后才能选择。</p>}
+                  </div>;
+                })()}
+              </div>
+              : <button
+                className="window-choice"
+                key={candidate.token}
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() => void onChooseWindow(candidate)}
+              >
+                <span className="window-choice-app">{candidate.appName || "电脑上的窗口"}</span>
+                <span className="window-choice-title">{candidate.title || candidate.description || "窗口标题不可用"}</span>
+                {candidate.relationship && <span className="window-choice-title">{windowRelationshipLabel(candidate.relationship)}</span>}
+                <span className="window-choice-arrow" aria-hidden="true">→</span>
+              </button>
+          })}
+          {handoffCandidates.length === 0 && (
+            <p className="field-hint">{request.omittedCandidateCount
+              ? `有 ${request.omittedCandidateCount} 个候选超出安全显示上限，未显示。请在电脑整理窗口后刷新；仍没有可辨认目标时请停止任务。`
+              : "电脑还没有可供选择的窗口，请等待更新或停止任务。"}</p>
+          )}
+          {(request.omittedCandidateCount ?? 0) > 0 && (
+            <p className="field-hint" role="status">
+              有 {request.omittedCandidateCount} 个候选超出安全显示上限，未显示。最近截图不是这些窗口的实时预览，不能用来确认它们。
+            </p>
           )}
           {canIgnoreWindow(request) && (
             <button className="button button-secondary button-large" type="button" disabled={controlsDisabled} onClick={() => void onIgnoreNewWindow()}>
@@ -162,6 +314,28 @@ export function PendingRequestPanel({
       {busy && <p className="quiet-note" role="status">正在等待电脑确认操作状态…</p>}
     </section>
   );
+}
+
+function windowRelationshipLabel(relationship: NonNullable<WindowCandidate["relationship"]>): string {
+  if (relationship.kind === "scoped_peer") return "电脑已授权的另一窗口";
+  const role = relationship.rootRole === "dialog" ? "对话框"
+    : relationship.rootRole === "menu" ? "菜单"
+      : relationship.rootRole === "popup" ? "弹出窗口"
+        : "所属子窗口";
+  const parent = [relationship.parentAppName, relationship.parentTitle].filter((value) => value?.trim()).join(" · ");
+  return parent ? `当前 ${parent} 的${role}` : `当前目标的${role}`;
+}
+
+function windowCandidateLabelKey(candidate: WindowCandidate): string {
+  const normalize = (value: string | undefined) => value?.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim() ?? "";
+  return `${normalize(candidate.appName)}\u0000${normalize(candidate.title)}`;
+}
+
+function formatCapturedAt(value: string): string {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? `电脑读取于 ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date)}`
+    : "读取时间未知";
 }
 
 function UserReplyForm({ busy, voiceCaptureAdapterFactory, onSubmit }: { busy: boolean; voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter; onSubmit: (text: string) => Promise<boolean> }) {

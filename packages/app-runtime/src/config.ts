@@ -1,6 +1,6 @@
 import type { HybridMemoryRecallService, MemoryEmbeddingProvider, MemoryRunModule, MemoryStore, MemoryToolMode } from "@computer-harness/memory";
 import type { PlanStore, PlanningRunModule } from "@computer-harness/planning";
-import type { RunAssistantPreferencesSnapshot, RunId, RunOutcome } from "@computer-harness/protocol";
+import type { RunAssistantPreferencesSnapshot, RunId, RunOutcome, SourceLinkedFinishContract } from "@computer-harness/protocol";
 import type {
   ActionPolicy,
   AssetReader,
@@ -23,6 +23,15 @@ import type { RunReport } from "./reporting.js";
 import type { RunEventFeed } from "./event-feed.js";
 
 export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash";
+export const DEFAULT_GLM_REQUEST_TIMEOUT_MS = 90_000;
+export const MIN_GLM_REQUEST_TIMEOUT_MS = 1_000;
+export const MAX_GLM_REQUEST_TIMEOUT_MS = 240_000;
+
+export function validateGlmRequestTimeoutMs(value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < MIN_GLM_REQUEST_TIMEOUT_MS || value > MAX_GLM_REQUEST_TIMEOUT_MS)) {
+    throw new Error(`GLM request timeout must be an integer from ${MIN_GLM_REQUEST_TIMEOUT_MS} to ${MAX_GLM_REQUEST_TIMEOUT_MS} milliseconds`);
+  }
+}
 export type AppRuntimeRiskModel = "off" | "same" | AppRuntimeModel;
 /** Explicit adapter identity for a Provider supplied by the application. */
 export interface ExternalProviderDescriptor {
@@ -67,8 +76,11 @@ export interface ResolvedRunConfig {
   contextMode: "raw" | "recent";
   contextMaxHistoryEvents: number;
   contextMaxInputTokens?: number;
+  contextMaxWireInputTokens?: number;
   /** Frozen, provider-neutral answer preferences for this Run only. */
   assistantPreferences?: RunAssistantPreferencesSnapshot;
+  /** Explicit finite output field contract; absent preserves ordinary free-form finish behavior. */
+  sourceLinkedFinish?: SourceLinkedFinishContract;
   riskProfile: "experiment" | "live-interactive";
   riskGuard: "off" | "layered";
   /** Defaults to off; DOM/hybrid require an explicit HTTP(S) URL or about:blank. */
@@ -77,6 +89,8 @@ export interface ResolvedRunConfig {
   windowHandoff?: "off" | "confirm-v1";
   /** Model-selected switching among already-open windows; off by default. */
   windowSwitch?: "off" | "opened-windows-v1";
+  /** Narrow Darwin recovery target for a completed close followed by a missing bound window. */
+  recoverBoundWindowMissing?: boolean;
   riskModel: AppRuntimeRiskModel;
   riskMaxModelRequests: number;
   riskTimeoutMs: number;

@@ -57,21 +57,40 @@ describe("RunController capability tool filtering", () => {
     let generation = 1;
     let requests = 0;
     const executed: string[] = [];
+    let windowListGeneration = 0;
+    let latestWindowOptions: Array<{ readonly surface: string; readonly windowRef: string; readonly isCurrent: boolean }> = [];
     const computer: Computer = {
       async open() { return firstSession; },
-      async listWindows() { return ["native", "managed"].map((windowRef) => ({ windowRef, isCurrent: target === windowRef })); },
+      async listWindows() {
+        windowListGeneration += 1;
+        latestWindowOptions = ["native", "managed"].map((surface) => ({
+          surface,
+          windowRef: `${surface}-${windowListGeneration}`,
+          isCurrent: target === surface,
+        }));
+        return {
+          options: latestWindowOptions.map((option) => ({ windowRef: option.windowRef, title: option.surface, isCurrent: option.isCurrent })),
+          truncated: false,
+          omittedCount: 0,
+        };
+      },
       async observe() {
         return { capturedAt: "2026-10-03T00:00:00Z", viewport,
           surfaceRef: { surfaceId: target as SurfaceId, generation, kind: target === "managed" ? browserKind : "native_window", ...(target === "managed" ? { parentSurfaceId: "browser-root" as SurfaceId } : {}) },
           screenshot: { mediaType: "image/png", data: new Uint8Array([target === "managed" ? 2 : 1]) } };
       },
       async execute(_session, action) {
-        executed.push(action.kind);
         if (action.kind === "switch_window") {
-          target = action.windowRef;
+          const listedOption = latestWindowOptions.find((option) => option.windowRef === action.windowRef);
+          if (listedOption === undefined || listedOption.isCurrent) {
+            return { actionId: action.actionId, status: "refused", driverCode: "WINDOW_TARGET_STALE" };
+          }
+          target = listedOption.surface;
           generation += 1;
+          executed.push(action.kind);
           return { actionId: action.actionId, status: "completed", sessionAfter: { ...firstSession, capabilities: { ...firstSession.capabilities, keyboard: true } } };
         }
+        executed.push(action.kind);
         return { actionId: action.actionId, status: "completed" };
       },
       async close() {},
@@ -90,8 +109,14 @@ describe("RunController capability tool filtering", () => {
         else expect(names).toContain("type");
         if (requests === 7) return { type: "finish", summary: "Checked native and managed tools." };
         const call = requests === 1 || requests === 4 ? { name: "list_windows", arguments: {} }
-          : requests === 2 || requests === 5 ? { name: "switch_window", arguments: { windowRef: requests === 2 ? "managed" : "native" } }
-          : { name: "click", arguments: { x: 0, y: 0 } };
+          : requests === 2 || requests === 5
+            ? (() => {
+                const destination = requests === 2 ? "managed" : "native";
+                const option = latestWindowOptions.find((candidate) => candidate.surface === destination && !candidate.isCurrent);
+                if (option === undefined) throw new Error(`no fresh listed window for ${destination}`);
+                return { name: "switch_window", arguments: { windowRef: option.windowRef } };
+              })()
+            : { name: "click", arguments: { x: 0, y: 0 } };
         return { type: "tool_calls", calls: [{ id: `call-${requests}` as never, ...call }] };
       } },
     });

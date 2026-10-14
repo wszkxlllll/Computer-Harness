@@ -15,8 +15,9 @@ import type {
   SurfaceRef,
   ToolCallId,
 } from "@computer-harness/protocol";
-import { createDefaultComputerTools, windowSwitchTools } from "@computer-harness/runtime";
+import { createDefaultComputerTools, createDefaultToolRegistry, windowSwitchTools } from "@computer-harness/runtime";
 import { DefaultContextCompiler, selectMemoryForContext } from "./index.js";
+import { formatWindowSwitchState } from "./projections.js";
 
 const runId = "run-context" as RunId;
 const sessionId = "session-context" as ComputerSessionId;
@@ -51,6 +52,50 @@ function observation(id: string) {
 }
 
 describe("DefaultContextCompiler", () => {
+  it("projects first-observed window metadata before same-label alternatives without implying ownership", () => {
+    const text = formatWindowSwitchState(undefined, {
+      options: [
+        { windowRef: "existing-save", appName: "Editor", title: "Save", isCurrent: false },
+        { windowRef: "new-save", appName: "Editor", title: "Save", isCurrent: false, firstObservedAfterAction: true, sourceActionId: "save-action" as ActionId },
+      ],
+      truncated: false,
+      omittedCount: 0,
+    }, undefined, viewport);
+    expect(text).toContain("windowRef=new-save [first observed after action=save-action; not proof of creation, ownership, foreground, or relation]");
+    expect(text).toContain("windowRef=existing-save");
+    expect(text?.indexOf("windowRef=new-save")).toBeLessThan(text?.indexOf("windowRef=existing-save") ?? -1);
+  });
+
+  it("keeps the system prefix stable while fully budgeting dynamic request guidance and retaining final-only tools", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultToolRegistry());
+    const goal = "complete all requested fields without guessing";
+    const compileWithBudget = (remaining: number) => compiler.compile({
+      runId,
+      goal,
+      recentEvents: [],
+      requestBudget: { remaining, limit: 3 },
+    }, new AbortController().signal);
+    const ordinary = await compileWithBudget(3);
+    const constrained = await compileWithBudget(2);
+    const final = await compileWithBudget(1);
+    expect(constrained.system).toBe(ordinary.system);
+    expect(constrained.messages[1]).toMatchObject({ role: "user", content: [{ type: "text", text: expect.stringContaining("Runtime request budget: Only 2 model requests remain including this one.") }] });
+    expect(constrained.contextBudget?.estimatedFixedTextTokens).toBe(Math.ceil([
+      constrained.system,
+      goal,
+      JSON.stringify(constrained.tools),
+      "",
+      "",
+      "",
+      "",
+      constrained.messages[1]?.content[0]?.type === "text" ? constrained.messages[1].content[0].text : "",
+    ].join("\n").length / 4));
+    expect(final.system).toBe(ordinary.system);
+    expect(final.tools.map((tool) => tool.name)).toEqual(["terminate"]);
+    expect(JSON.stringify(final.messages)).toContain("This is the final model request");
+    expect(JSON.stringify(final.messages)).toContain("complete user-facing result text");
+  });
+
   it("projects assistant ToolCall before its matching result and appends only the latest image", async () => {
     const first = observation("obs-1");
     const latest = observation("obs-2");
@@ -106,11 +151,70 @@ describe("DefaultContextCompiler", () => {
     const rawObservationText = rawObservationMessage?.content.filter((block) => block.type === "text").map((block) => block.text).join(" ") ?? "";
     expect(rawObservationText).toContain(`Observation ID ${first.id}`);
     expect(rawObservationText).toContain(`capturedAt ${first.capturedAt}`);
+    expect(rawObservationText).not.toContain("Host read-only observation");
     expect(recent.contextBudget?.trace?.projectedEventIds).toContain("event-2");
     expect(raw.contextBudget?.trace?.stablePrefixHash).toBe(recent.contextBudget?.trace?.stablePrefixHash);
     expect(raw.contextBudget?.trace?.historyEstimatedTokens).toBeGreaterThan(
       estimateEventTokens(raw.contextBudget?.trace?.selectedEventIds.flatMap((eventId) => events.filter((item) => item.eventId === eventId)) ?? []),
     );
+  });
+
+  it("projects only exact current Host file evidence and describes its limits", async () => {
+    const latest = {
+      ...observation("authorized-document-current"),
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status: "verified_clean_current_document" as const,
+        observationId: "authorized-document-current" as ObservationId,
+        surfaceRef: desktopSurfaceRef,
+      },
+    };
+    const events = [event(0, { type: "observation.created", observation: latest })];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const input = await compiler.compile({ runId, goal: "inspect the current document", recentEvents: events, latestObservation: latest }, new AbortController().signal);
+    const observationMessage = input.messages.find((message) => message.content.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId));
+    const text = observationMessage?.content.filter((block) => block.type === "text").map((block) => block.text).join("\n") ?? "";
+    expect(text).toContain("Host read-only observation");
+    expect(text).toContain("bound to the Host-authorized output file");
+    expect(text).toContain("not file contents, bytes, line endings, or task success");
+    expect(text).not.toMatch(/file:\/\/|authorized-output\.txt|Host-authorized one-run document/u);
+
+    await expect(compiler.compile({
+      runId,
+      goal: "inspect the current document",
+      recentEvents: events,
+      latestObservation: { ...latest, authorizedSavedDocumentEvidence: { ...latest.authorizedSavedDocumentEvidence, observationId: "other-observation" as ObservationId } },
+    }, new AbortController().signal)).rejects.toThrow(/exact current Observation and Surface/u);
+
+    const absent = {
+      ...observation("authorized-document-absent"),
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status: "authorized_file_absent" as const,
+        observationId: "authorized-document-absent" as ObservationId,
+        surfaceRef: desktopSurfaceRef,
+      },
+    };
+    const absentInput = await compiler.compile({
+      runId, goal: "inspect the current document", recentEvents: [event(1, { type: "observation.created", observation: absent })], latestObservation: absent,
+    }, new AbortController().signal);
+    expect(JSON.stringify(absentInput.messages)).toContain("exact Host-authorized output file was absent at this observation");
+    expect(JSON.stringify(absentInput.messages)).not.toContain("authorized-document-absent.txt");
+
+    const unverified = {
+      ...observation("authorized-document-unverified"),
+      authorizedSavedDocumentEvidence: {
+        source: "host-authorized-file-and-native-proof-v1" as const,
+        status: "unverified" as const,
+        observationId: "authorized-document-unverified" as ObservationId,
+        surfaceRef: desktopSurfaceRef,
+      },
+    };
+    const unverifiedInput = await compiler.compile({
+      runId, goal: "inspect the current document", recentEvents: [event(2, { type: "observation.created", observation: unverified })], latestObservation: unverified,
+    }, new AbortController().signal);
+    expect(JSON.stringify(unverifiedInput.messages)).toContain("could not be verified at this observation");
+    expect(JSON.stringify(unverifiedInput.messages)).not.toMatch(/file:\/\/|private-output|secret-path/u);
   });
 
   it("keeps current Observation/action assessment IDs in the dynamic observation message", async () => {
@@ -179,6 +283,18 @@ describe("DefaultContextCompiler", () => {
       }),
     ]);
     expect(JSON.stringify(exact.messages)).toContain("Runtime Monitor transition for this exact action/Observation: changed");
+    const unchanged = await compileEvents([
+      event(7, {
+        type: "monitor.transition", actionId, postObservationId: latest.id,
+        sourceActionEventId: "event-2" as EventId, sourceObservationEventId: "event-3" as EventId, transition: "unchanged",
+      }),
+    ]);
+    const unchangedText = JSON.stringify(unchanged.messages);
+    expect(unchangedText).toContain("Runtime Monitor transition for this exact action/Observation: unchanged");
+    expect(unchangedText).toContain("progress field is REQUIRED: choose explicit null");
+    expect(unchangedText).toContain("choose kind=milestone");
+    expect(unchangedText).toContain("Base the choice on screenshot semantics, not on actionOutcome or Monitor transition");
+    expect(unchangedText).toContain("even when the whole Goal has later steps");
     expect(exact.contextBudget?.trace?.stablePrefixHash).toBe(input.contextBudget?.trace?.stablePrefixHash);
     expect(mismatched.contextBudget?.trace?.stablePrefixHash).toBe(input.contextBudget?.trace?.stablePrefixHash);
   });
@@ -253,6 +369,38 @@ describe("DefaultContextCompiler", () => {
     expect(input.contextBudget?.trace?.grounding).toMatchObject({ present: true, projected: true, completeness: "partial", candidateElementCount: 1, projectedElementCount: 1 });
     expect(input.contextBudget?.estimatedGroundingTokens).toBeGreaterThan(0);
     expect(input.contextBudget?.groundingIncluded).toBe(true);
+  });
+
+  it("projects AXTextArea format counters without claiming file verification", async () => {
+    const latest = {
+      ...observation("obs-text-format"),
+      grounding: {
+        version: "uia-catalog-v1" as const,
+        source: "uia" as const,
+        observationId: "obs-text-format" as ObservationId,
+        computerSessionId: sessionId,
+        surfaceRef: desktopSurfaceRef,
+        completeness: "complete" as const,
+        degraded: false,
+        maxElements: 16,
+        elements: [{
+          elementRef: "uia-textarea",
+          role: "AXTextArea",
+          source: "uia" as const,
+          textFormat: { source: "ax-cfstring-v1" as const, status: "complete" as const, utf8Bytes: 8, codePointCount: 3, lineFeedCount: 1, trailingLineFeedCount: 1, carriageReturnCount: 0 },
+        }],
+      },
+    };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId,
+      goal: "inspect the document format",
+      recentEvents: [event(0, { type: "observation.created", observation: latest })],
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const grounding = input.messages.find((message) => message.content.some((block) => block.type === "text" && block.text.includes("textFormat=ax-cfstring-v1")));
+    const projected = grounding?.content[0]?.type === "text" ? grounding.content[0].text : "";
+    expect(projected).toContain("bytes=8 codePoints=3 LF=1 trailingLF=1 CR=0");
+    expect(projected).toContain("AX CFString format only; not file verification");
   });
 
   it("projects hybrid provenance and recovery trace through the same catalog", async () => {
@@ -589,6 +737,7 @@ describe("DefaultContextCompiler", () => {
     expect(batch.system).toContain("relatedTaskIds");
     expect(batch.system).toContain("same-turn writes alongside GUI");
     expect(batch.system).toContain("state writes");
+    expect(batch.system).not.toContain("OS=");
     expect(batch.system).toContain("click→type");
     expect(batch.system).toContain("hotkey with exact keys [CTRL, A]");
     expect(batch.system).toContain("click_element and CMD/Meta+A are not supported in batches");
@@ -597,6 +746,41 @@ describe("DefaultContextCompiler", () => {
     expect(batch.system).toContain("Call it immediately before the first GUI click");
     expect(batch.system).toContain("Do not create one for a simple one-click screen or every click");
     expect(batch.system).toContain("never use it for type/keypress/scroll/drag/wait");
+    const macBatch = await compiler.compile({
+      runId,
+      goal: "replace text on macOS",
+      recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }],
+      computerSession: {
+        id: sessionId,
+        backend: "cua-driver-daemon",
+        platform: "darwin",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: "2026-08-30T00:00:00.000Z",
+      },
+      features: { planning: "off", memory: "off", batching: "same-control-input-v1" },
+    }, new AbortController().signal);
+    expect(macBatch.system).toContain("OS=macOS");
+    expect(macBatch.system).toContain("hotkey with exact keys [CMD, A] (or [META, A]");
+    expect(macBatch.system).toContain("CTRL+A are not supported in batches");
+    expect(macBatch.system).not.toContain("hotkey with exact keys [CTRL, A]");
+    const linuxBatch = await compiler.compile({
+      runId,
+      goal: "replace text on Linux",
+      recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }],
+      computerSession: {
+        id: sessionId,
+        backend: "cua-driver-daemon",
+        platform: "linux",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: "2026-08-30T00:00:00.000Z",
+      },
+      features: { planning: "off", memory: "off", batching: "same-control-input-v1" },
+    }, new AbortController().signal);
+    expect(linuxBatch.system).toContain("OS=Linux");
+    expect(linuxBatch.system).toContain("hotkey with exact keys [CTRL, A]");
+    expect(linuxBatch.system).toContain("CMD/Meta+A are not supported in batches");
     const planningOnly = await compiler.compile({ runId, goal: "planning only", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "off", batching: "same-control-input-v1" } }, new AbortController().signal);
     expect(planningOnly.system).toContain("same ModelTurn as the first GUI action");
     expect(planningOnly.system).toContain("do not copy the original Goal");

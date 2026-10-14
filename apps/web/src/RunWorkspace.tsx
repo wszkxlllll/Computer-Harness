@@ -207,7 +207,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
               {snapshot.target?.provenance === "selected_target" && <small>窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。</small>}
             </p>
           )}
-          {snapshot.error && <p className="notice notice-error" role="alert">{snapshot.error}</p>}
+          {snapshot.error && !(isTerminal && snapshot.outcome && !snapshot.reply?.trim()) && <p className="notice notice-error" role="alert">{snapshot.error}</p>}
         </section>
 
         {commands.notice && <div className={`notice notice-${commands.notice.tone}`} role="status" aria-live="polite">{commands.notice.text}</div>}
@@ -250,7 +250,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
 
         {canCorrect && <CorrectionForm disabled={commands.busyCommand !== undefined} onSubmit={commands.correct} />}
 
-        <ResultPanel reply={snapshot.reply} outcome={snapshot.outcome} />
+        <ResultPanel reply={snapshot.reply} outcome={snapshot.outcome} error={snapshot.error} />
         {!(pending?.kind === "approval" && (pending.requiresVisualReview !== false || (pending.preview?.actions?.length ?? 0) > 0)) && (
           <ScreenshotPanel
             runId={runId}

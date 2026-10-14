@@ -1,13 +1,19 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { BoundWindowMissingError } from "@computer-harness/protocol";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
+import type { ToolResult } from "./cua-sdk-contract.js";
 import type {
   ActionIntent,
   ActionReceipt,
+  AuthorizedSavedDocumentEvidence,
   ComputerSessionDescriptor,
   ComputerWindowCandidate,
+  ComputerWindowCandidateRelationship,
   ComputerWindowOption,
+  ComputerWindowList,
   GroundingCatalog,
   GroundingBrowserRegion,
   GroundingElement,
@@ -60,6 +66,7 @@ import {
   validateWindowTarget,
   windowActionTarget,
   type CuaWindowBinding,
+  type CuaWindowCapture,
   type CuaWindowGeometry,
   type CuaWindowInventory,
   type CuaWindowInfo,
@@ -68,11 +75,16 @@ import {
   WindowContractError,
 } from "./window-contract.js";
 import { assessOwnedTransientWindowAdmission } from "./transient-window-admission.js";
-import type { WindowRelationshipProbe } from "./window-relationship-probe.js";
+import { mergeWindowRelationshipInventory, type WindowRelationshipProbe } from "./window-relationship-probe.js";
 import { projectExactWindowRoot as exactWindowRoot } from "./window-root-projection.js";
+import {
+  isRelevantManualWindowCandidate,
+  projectSelectableWindowCandidates,
+} from "./window-candidate-projection.js";
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
 const CLEANUP_POLL_INTERVAL_MS = 50;
+const TRANSIENT_RECOVERY_RECHECK_DELAYS_MS = [300, 300, 300] as const;
 function hasLineBreak(text: string): boolean {
   return /[\r\n\u0085\u2028\u2029]/u.test(text);
 }
@@ -83,6 +95,21 @@ function normalizeLogicalLineEndings(text: string): string {
 
 function windowIdentityKey(target: { readonly pid: number; readonly windowId: number }): string {
   return `${target.pid}:${target.windowId}`;
+}
+
+function actionPrimitiveFingerprint(action: ActionIntent): string {
+  const primitive = { ...action } as Record<string, unknown>;
+  delete primitive.actionId;
+  delete primitive.basedOn;
+  return createHash("sha256").update(stableActionValue(primitive)).digest("hex");
+}
+
+function stableActionValue(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableActionValue).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).filter((key) => record[key] !== undefined).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableActionValue(record[key])}`).join(",")}}`;
 }
 
 function sameSurfaceRef(left: SurfaceRef | undefined, right: SurfaceRef | undefined): boolean {
@@ -105,10 +132,335 @@ function positiveWindowId(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value && typeof (value as NodeJS.ErrnoException).code === "string";
+}
+
+function processStart(value: unknown): { seconds: number; microseconds: number } | undefined {
+  const record = parseStructuredRecord(value);
+  return record !== undefined && Number.isSafeInteger(record.seconds) && Number.isSafeInteger(record.microseconds) &&
+    (record.seconds as number) >= 0 && (record.microseconds as number) >= 0
+    ? { seconds: record.seconds as number, microseconds: record.microseconds as number }
+    : undefined;
+}
+
+async function fileIdentityPin(path: string): Promise<FileIdentityPin> {
+  const info = await lstat(path, { bigint: true });
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error("the Host-granted output must be a regular non-symlink file");
+  return {
+    dev: info.dev.toString(), ino: info.ino.toString(), size: info.size.toString(),
+    mtimeNs: info.mtimeNs.toString(), ctimeNs: info.ctimeNs.toString(),
+  };
+}
+
+type AuthorizedOutputFileIdentityRead =
+  | { readonly status: "present"; readonly identity: FileIdentityPin }
+  | { readonly status: "absent" }
+  | { readonly status: "unverified" };
+
+/** @internal The reader parameter keeps ENOENT distinct from every other IO failure. */
+export async function inspectAuthorizedOutputFileIdentity(
+  path: string,
+  readIdentity: (path: string) => Promise<FileIdentityPin> = fileIdentityPin,
+): Promise<AuthorizedOutputFileIdentityRead> {
+  try {
+    return { status: "present", identity: await readIdentity(path) };
+  } catch (error) {
+    return isNodeError(error) && error.code === "ENOENT" ? { status: "absent" } : { status: "unverified" };
+  }
+}
+
+function sameFileIdentity(left: FileIdentityPin, right: FileIdentityPin): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function samePostLaunchFileIdentity(left: FileIdentityPin, right: FileIdentityPin): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs;
+}
+
+function parseDocumentIdentityProof(
+  result: { readonly isError?: boolean; readonly structuredJson?: string },
+  target: CuaWindowTarget,
+  bounds: CuaWindowGeometry,
+  expectedExecutableUrl: string,
+  expectedDocumentUrl?: string,
+): { readonly identity: VerifiedApplicationIdentity; readonly snapshotId: string; readonly cleanDocument: boolean } | undefined {
+  if (result.isError === true) return undefined;
+  const state = parseStructuredRecord(result.structuredJson);
+  const proof = parseStructuredRecord(state?._private_document_proof);
+  const app = parseStructuredRecord(proof?.application_identity);
+  const topTarget = parseStructuredRecord(proof?.target);
+  const appTarget = parseStructuredRecord(app?.target);
+  const window = parseStructuredRecord(proof?.window);
+  const windowBounds = parseGroundingFrame(window?.bounds);
+  const appStart = processStart(appTarget?.process_start);
+  const topStart = processStart(topTarget?.process_start);
+  if (proof?.version !== "macos-document-identity-v1" || typeof proof.snapshot_id !== "string" || proof.snapshot_id.length === 0 ||
+      app?.status !== "verified" || topTarget?.pid !== target.pid || topTarget.window_id !== target.windowId ||
+      appTarget?.pid !== target.pid || appTarget.window_id !== target.windowId ||
+      appTarget.bundle_id !== "com.apple.TextEdit" || appTarget.executable_url !== expectedExecutableUrl ||
+      appStart === undefined || topStart === undefined || appStart.seconds !== topStart.seconds || appStart.microseconds !== topStart.microseconds ||
+      !Array.isArray(app.instances) || app.instances.length !== 1 || !isRecord(app.instances[0])) return undefined;
+  const instance = app.instances[0];
+  const instanceStart = processStart(instance.process_start);
+  if (instance.pid !== target.pid || instance.bundle_id !== "com.apple.TextEdit" || instance.executable_url !== expectedExecutableUrl ||
+      instanceStart === undefined || instanceStart.seconds !== appStart.seconds || instanceStart.microseconds !== appStart.microseconds ||
+      proof.frontmost_pid !== target.pid || proof.focused_window_id !== target.windowId ||
+      window?.role !== "AXWindow" || window.pid !== target.pid || window.window_id !== target.windowId ||
+      window.owner_pid !== target.pid || windowBounds === undefined || !sameWindowGeometry(windowBounds, bounds)) return undefined;
+  const identity: VerifiedApplicationIdentity = {
+    pid: target.pid, windowId: target.windowId, processStart: appStart,
+    bundleId: "com.apple.TextEdit", executableUrl: expectedExecutableUrl,
+  };
+  if (expectedDocumentUrl === undefined) {
+    return { identity, snapshotId: proof.snapshot_id, cleanDocument: false };
+  }
+  if (proof.status !== "identity_verified" || proof.tail_revalidated !== true) return undefined;
+  const document = parseStructuredRecord(proof.document);
+  const domain = parseStructuredRecord(proof.document_domain);
+  const edited = parseStructuredRecord(proof.edited);
+  const closeButton = parseStructuredRecord(edited?.close_button);
+  const editedValue = parseStructuredRecord(edited?.value);
+  if (document?.status !== "ok" || document.type !== "cf_url" && document.type !== "cf_string" ||
+      document.matches_expected !== true || domain?.status !== "complete_for_ax_windows" ||
+      !Array.isArray(domain.matching_window_ids) || domain.matching_window_ids.length !== 1 || domain.matching_window_ids[0] !== target.windowId ||
+      edited?.source !== "ax_close_button" || closeButton?.status !== "verified" || closeButton.role !== "AXButton" ||
+      closeButton.subrole !== "AXCloseButton" || closeButton.pid !== target.pid || closeButton.window_id !== target.windowId ||
+      closeButton.ax_window_id !== target.windowId || closeButton.ax_window_matches_target !== true ||
+      editedValue?.status !== "ok" || editedValue.type !== "cf_boolean" || editedValue.value !== false) return undefined;
+  return { identity, snapshotId: proof.snapshot_id, cleanDocument: true };
+}
+
+function sameApplicationIdentity(left: VerifiedApplicationIdentity, right: VerifiedApplicationIdentity): boolean {
+  return sameApplicationProcess(left, right) && left.windowId === right.windowId;
+}
+
+function sameApplicationProcess(left: VerifiedApplicationIdentity, right: VerifiedApplicationIdentity): boolean {
+  return left.pid === right.pid &&
+    left.processStart.seconds === right.processStart.seconds && left.processStart.microseconds === right.processStart.microseconds &&
+    left.bundleId === right.bundleId && left.executableUrl === right.executableUrl;
+}
+
+async function prepareReopenSavedDocumentGrant(grant: ReopenSavedDocumentGrant): Promise<{
+  readonly path: string;
+  readonly fileUrl: string;
+  readonly canonicalExecutableUrl: string;
+  readonly parentIdentity: { readonly dev: string; readonly ino: string };
+}> {
+  if (!isAbsolute(grant.path) || grant.path.includes("\0") || resolve(grant.path) !== grant.path || basename(grant.path).length === 0) {
+    throw new Error("saved-document grant path must be one canonical absolute file path");
+  }
+  const parent = dirname(grant.path);
+  const canonicalParent = await realpath(parent);
+  if (canonicalParent !== parent) throw new Error("saved-document grant parent must already be canonical");
+  const parentInfo = await lstat(parent, { bigint: true });
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) throw new Error("saved-document grant parent must be a real directory");
+  try {
+    await lstat(grant.path);
+    throw new Error("saved-document grant must name an output file that is absent at Run open");
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+  let executablePath: string;
+  try {
+    const url = new URL(grant.expectedExecutableUrl);
+    if (url.protocol !== "file:" || url.hostname !== "" || url.search !== "" || url.hash !== "" || url.href !== grant.expectedExecutableUrl) {
+      throw new Error("invalid file URL");
+    }
+    executablePath = fileURLToPath(url);
+  } catch {
+    throw new Error("saved-document grant requires a canonical TextEdit executable file URL");
+  }
+  const canonicalExecutableUrl = pathToFileURL(await realpath(executablePath)).href;
+  if (canonicalExecutableUrl !== grant.expectedExecutableUrl) throw new Error("saved-document executable identity is not canonical");
+  return {
+    path: grant.path,
+    fileUrl: pathToFileURL(grant.path).href,
+    canonicalExecutableUrl,
+    parentIdentity: { dev: parentInfo.dev.toString(), ino: parentInfo.ino.toString() },
+  };
+}
+
+async function authorizedOutputParentIsPinned(state: PrivateReopenSavedDocumentState): Promise<boolean> {
+  const parent = dirname(state.path);
+  if (await realpath(parent) !== parent) return false;
+  const info = await lstat(parent, { bigint: true });
+  return info.isDirectory() && !info.isSymbolicLink() &&
+    info.dev.toString() === state.parentIdentity.dev && info.ino.toString() === state.parentIdentity.ino;
+}
+
+async function queryDocumentIdentity(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  bounds: CuaWindowGeometry,
+  expectedExecutableUrl: string,
+  signal: AbortSignal,
+  expectedDocumentUrl?: string,
+): Promise<{ readonly identity: VerifiedApplicationIdentity; readonly snapshotId: string; readonly cleanDocument: boolean } | undefined> {
+  const result = await readDocumentIdentityResult(driver, session, target, signal, expectedDocumentUrl);
+  return parseDocumentIdentityProof(result, target, bounds, expectedExecutableUrl, expectedDocumentUrl);
+}
+
+async function readDocumentIdentityResult(
+  driver: CuaDriverLike,
+  session: string,
+  target: CuaWindowTarget,
+  signal: AbortSignal,
+  expectedDocumentUrl?: string,
+) {
+  const result = await callTool(driver, "get_window_state", {
+    pid: target.pid,
+    window_id: target.windowId,
+    include_screenshot: false,
+    max_depth: 0,
+    max_elements: 0,
+    document_identity_query: expectedDocumentUrl === undefined ? {} : { expected_document_url: expectedDocumentUrl },
+    session,
+  }, signal);
+  return result;
+}
+
+function hasExplicitApplicationIdentityConflict(
+  result: { readonly isError?: boolean; readonly structuredJson?: string },
+  target: CuaWindowTarget,
+  expectedExecutableUrl: string,
+  expectedIdentity: VerifiedApplicationIdentity,
+): boolean {
+  if (result.isError === true) return false;
+  const state = parseStructuredRecord(result.structuredJson);
+  const proof = parseStructuredRecord(state?._private_document_proof);
+  const app = parseStructuredRecord(proof?.application_identity);
+  if (proof?.version !== "macos-document-identity-v1" || app?.status !== "verified") return false;
+  const appTarget = parseStructuredRecord(app.target);
+  const appStart = processStart(appTarget?.process_start);
+  if (typeof appTarget?.pid !== "number" || appTarget.window_id !== target.windowId ||
+      typeof appTarget.bundle_id !== "string" || typeof appTarget.executable_url !== "string" || appStart === undefined) return false;
+  if (appTarget.pid !== expectedIdentity.pid || appTarget.bundle_id !== expectedIdentity.bundleId ||
+      appTarget.executable_url !== expectedExecutableUrl || appStart.seconds !== expectedIdentity.processStart.seconds ||
+      appStart.microseconds !== expectedIdentity.processStart.microseconds) return true;
+  if (!Array.isArray(app.instances) || app.instances.length !== 1 || !isRecord(app.instances[0])) return true;
+  const instance = app.instances[0];
+  const instanceStart = processStart(instance.process_start);
+  if (typeof instance.pid !== "number" || typeof instance.bundle_id !== "string" ||
+      typeof instance.executable_url !== "string" || instanceStart === undefined) return false;
+  return instance.pid !== expectedIdentity.pid || instance.bundle_id !== expectedIdentity.bundleId ||
+    instance.executable_url !== expectedExecutableUrl || instanceStart.seconds !== expectedIdentity.processStart.seconds ||
+    instanceStart.microseconds !== expectedIdentity.processStart.microseconds;
+}
+
 type OverlayVerification =
   | { readonly status: "present"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "overlay" }> }
   | { readonly status: "absent" }
   | { readonly status: "unknown"; readonly reason: string; readonly candidateObserved: boolean };
+
+type TransientRootVerification =
+  | { readonly status: "verified"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }> }
+  | { readonly status: "unavailable"; readonly rootRole?: "menu" | "popup" | "dialog" | "window"; readonly queryFailed?: boolean }
+  | { readonly status: "contradictory"; readonly reason: string };
+
+type MacAttachedSheetState =
+  | { readonly status: "sheet"; readonly evidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }> }
+  | { readonly status: "geometry_unstable" }
+  | { readonly status: "none" }
+  | { readonly status: "unknown"; readonly reason: string };
+
+async function readMacAttachedSheetState(
+  driver: CuaDriverLike,
+  session: string,
+  parent: CuaWindowBinding,
+  candidate: CuaWindowInfo | undefined,
+  signal: AbortSignal,
+  expectedAxParent?: CuaWindowTarget,
+): Promise<MacAttachedSheetState> {
+  const result = await callTool(driver, "get_window_state", {
+    pid: parent.target.pid,
+    window_id: parent.target.windowId,
+    include_screenshot: false,
+    max_depth: 8,
+    max_elements: 64,
+    session,
+  }, signal);
+  if (result.isError) return { status: "unknown", reason: "native parent AX proof query failed" };
+  const state = parseStructuredRecord(result.structuredJson);
+  if (state === undefined || hasExplicitIdentityMismatch(state, parent.target)) {
+    return { status: "unknown", reason: "native parent AX proof has no exact target identity" };
+  }
+  const proof = parseStructuredRecord(state.attached_sheet_proof);
+  // A degraded catalog can still carry a separately captured, exact AX
+  // relationship proof. In that case its relation snapshot is authoritative;
+  // the catalog snapshot may describe a different (partial) tree.
+  const proofSnapshotId = state.degraded === true
+    ? state.attached_sheet_snapshot_id
+    : state.snapshot_id;
+  const relationOnlyDegraded = state.degraded === true && state.elements_complete === false &&
+    typeof state.attached_sheet_snapshot_id === "string" &&
+    state.attached_sheet_snapshot_id === proof?.snapshot_id && result.degraded === true;
+  if ((result.degraded || state.degraded === true) && !relationOnlyDegraded) {
+    return { status: "unknown", reason: "degraded AX catalog has no exact attached-sheet-only snapshot proof" };
+  }
+  const parentBounds = parseStructuredRecord(proof?.parent_bounds);
+  const snapshotId = proofSnapshotId;
+  const identityOk = proof?.version === "macos-attached-sheet-v1" &&
+    typeof snapshotId === "string" && snapshotId.length > 0 && proof.snapshot_id === snapshotId &&
+    proof.pid === parent.target.pid && proof.parent_window_id === parent.target.windowId &&
+    proof.parent_owner_pid === parent.target.pid && proof.frontmost_pid === parent.target.pid &&
+    proof.direct_children_status === "success" && Number.isSafeInteger(proof.direct_child_count) &&
+    (proof.direct_child_count as number) >= 0 &&
+    (proof.parent_role === "AXWindow" || proof.parent_role === "AXSheet") &&
+    (proof.parent_role !== "AXSheet" || proof.parent_ax_parent_verified === true &&
+      expectedAxParent !== undefined && proof.parent_ax_parent_window_id === expectedAxParent.windowId) &&
+    Number.isFinite(parentBounds?.x) && Number.isFinite(parentBounds?.y) &&
+    Number.isFinite(parentBounds?.width) && Number.isFinite(parentBounds?.height) &&
+    sameWindowGeometry(parent.bounds, {
+      x: parentBounds!.x as number, y: parentBounds!.y as number,
+      width: parentBounds!.width as number, height: parentBounds!.height as number,
+    });
+  if (!identityOk) return { status: "unknown", reason: "native parent AX proof is stale, incomplete, or bound to different geometry" };
+  if (proof!.status === "none") {
+    return proof!.focused_window_id === parent.target.windowId && proof!.sheet === undefined
+      ? { status: "none" }
+      : { status: "unknown", reason: "native no-sheet proof does not show the exact parent focused" };
+  }
+  const sheet = parseStructuredRecord(proof!.sheet);
+  const bounds = parseStructuredRecord(sheet?.bounds);
+  if (proof!.status !== "sheet" || sheet?.role !== "AXSheet" || sheet.ax_parent_verified !== true ||
+      sheet.pid !== parent.target.pid || sheet.owner_pid !== parent.target.pid ||
+      sheet.ax_parent_pid !== parent.target.pid || sheet.ax_parent_window_id !== parent.target.windowId ||
+      !Number.isSafeInteger(sheet.window_id) || (sheet.window_id as number) <= 0 ||
+      sheet.window_id === parent.target.windowId || (proof!.direct_child_count as number) < 1 ||
+      proof!.focused_window_id !== sheet.window_id || candidate === undefined ||
+      candidate.target.pid !== sheet.pid || candidate.target.windowId !== sheet.window_id ||
+      candidate.isOnScreen !== true || candidate.minimized === true ||
+      !Number.isFinite(bounds?.x) || !Number.isFinite(bounds?.y) ||
+      !Number.isFinite(bounds?.width) || !Number.isFinite(bounds?.height) ||
+      (bounds!.width as number) <= 0 || (bounds!.height as number) <= 0 ||
+      !Number.isFinite(candidate.bounds.width) || !Number.isFinite(candidate.bounds.height) ||
+      candidate.bounds.width <= 0 || candidate.bounds.height <= 0) {
+    return { status: "unknown", reason: "native AXSheet proof does not exactly match the unique fresh surfaced candidate" };
+  }
+  if (!sameWindowGeometry(candidate.bounds, {
+    x: bounds!.x as number, y: bounds!.y as number,
+    width: bounds!.width as number, height: bounds!.height as number,
+  })) return { status: "geometry_unstable" };
+  return { status: "sheet", evidence: {
+    kind: "native_window",
+    nativeWindow: asNativeWindowIdentity(candidate.target),
+    owner: asNativeWindowIdentity(parent.target),
+    rootRole: "dialog",
+    visible: true,
+    rootSemanticsVerified: true,
+    interactionPolicy: "modal",
+    frontmostEvidence: "exact_foreground",
+    admissionSource: "macos_attached_sheet_proof",
+  } };
+}
+
+type UnknownTransientReplacementAttempt =
+  | { readonly decision: "recovered"; readonly surfaceRef: SurfaceRef }
+  | { readonly decision: "retry" }
+  | { readonly decision: "stop" };
 
 const TRUSTED_MENU_WINDOW_CLASSES = new Set(["#32768"]);
 
@@ -127,33 +479,32 @@ async function verifyTransientNativeChildRoot(
   baselineComplete: boolean,
   allowExactStateProof: boolean,
   signal: AbortSignal,
-): Promise<TransientChildEvidence | undefined> {
+): Promise<TransientRootVerification> {
   if (windowIdentityKey(candidate.target) === windowIdentityKey(owner) ||
       candidate.isOnScreen !== true || candidate.minimized === true ||
       candidate.ownerPid !== owner.pid || candidate.ownerWindowId !== owner.windowId) {
-    return undefined;
+    return { status: "unavailable" };
   }
 
   const admissionSource = inventory.source === "win32_relationship_probe"
     ? "win32_relationship_probe" as const
     : "owned_transient_window_root_proof" as const;
   const policyEvidence = (rootRole: "menu" | "popup" | "dialog"): "exact_foreground" | "unique_owned_stack" | undefined => {
-    if (rootRole === "dialog") {
-      return inventory.foregroundPid === candidate.target.pid &&
-        inventory.foregroundWindowId === candidate.target.windowId
-        ? "exact_foreground"
-        : undefined;
+    if (inventory.foregroundPid === candidate.target.pid && inventory.foregroundWindowId === candidate.target.windowId) {
+      return "exact_foreground";
     }
-    return hasUniqueOwnedMenuStack(inventory, owner, candidate, baselineComplete)
-      ? "unique_owned_stack"
-      : undefined;
+    const uniqueOwnedStack = hasUniqueOwnedMenuStack(inventory, owner, candidate, baselineComplete);
+    if (uniqueOwnedStack && (rootRole !== "dialog" || inventory.source === "win32_relationship_probe")) {
+      return "unique_owned_stack";
+    }
+    return undefined;
   };
 
   const classRole = trustedWindowClassRootRole(candidate.windowClass);
   if (classRole !== undefined) {
     const frontmostEvidence = policyEvidence(classRole);
-    if (frontmostEvidence === undefined) return undefined;
-    return {
+    if (frontmostEvidence === undefined) return { status: "unavailable", rootRole: classRole };
+    return { status: "verified", evidence: {
       kind: "native_window",
       nativeWindow: asNativeWindowIdentity(candidate.target),
       owner: asNativeWindowIdentity(owner),
@@ -163,9 +514,9 @@ async function verifyTransientNativeChildRoot(
       interactionPolicy: "modal",
       frontmostEvidence,
       admissionSource,
-    };
+    } };
   }
-  if (!allowExactStateProof) return undefined;
+  if (!allowExactStateProof) return { status: "unavailable" };
 
   // Stage one owner/visibility/freshness evidence comes from the merged
   // inventory. Stage two reads only this exact candidate HWND, never a global
@@ -178,13 +529,19 @@ async function verifyTransientNativeChildRoot(
     max_elements: 64,
     session,
   }, signal);
-  if (stateResult.isError || stateResult.degraded) return undefined;
+  if (stateResult.isError || stateResult.degraded) return { status: "unavailable", queryFailed: true };
   const state = parseStructuredRecord(stateResult.structuredJson);
+  if (hasExplicitIdentityMismatch(state, candidate.target)) {
+    return { status: "contradictory", reason: "exact child state reported a different PID/HWND" };
+  }
   const root = exactWindowRoot(state, candidate.target);
-  if (root === undefined || root.role === "window") return undefined;
+  // Generic Window is common for native dialogs and modern menu bridges.
+  // It adds no root-role proof, but does not contradict exact Win32 ownership.
+  if (root === undefined) return { status: "unavailable" };
+  if (root.role === "window") return { status: "unavailable", rootRole: root.role };
   const frontmostEvidence = policyEvidence(root.role);
-  if (frontmostEvidence === undefined) return undefined;
-  return {
+  if (frontmostEvidence === undefined) return { status: "unavailable", rootRole: root.role };
+  return { status: "verified", evidence: {
     kind: "native_window",
     nativeWindow: asNativeWindowIdentity(candidate.target),
     owner: asNativeWindowIdentity(owner),
@@ -194,7 +551,25 @@ async function verifyTransientNativeChildRoot(
     interactionPolicy: "modal",
     frontmostEvidence,
     admissionSource,
-  };
+  } };
+}
+
+function hasExplicitIdentityMismatch(state: Record<string, unknown> | undefined, target: CuaWindowTarget): boolean {
+  if (state === undefined) return false;
+  const pairs = [
+    { keys: ["pid", "window_pid", "windowPid"], expected: target.pid },
+    { keys: ["window_id", "windowId"], expected: target.windowId },
+  ];
+  for (const { keys, expected } of pairs) {
+    for (const key of keys) {
+      if (Object.hasOwn(state, key) && Number.isSafeInteger(state[key]) && state[key] !== expected) return true;
+    }
+  }
+  for (const key of ["root_surface", "rootSurface"]) {
+    const root = parseStructuredRecord(state[key]);
+    if (root !== undefined && hasExplicitIdentityMismatch(root, target)) return true;
+  }
+  return false;
 }
 
 function trustedWindowClassRootRole(windowClass: string | undefined): "menu" | "dialog" | undefined {
@@ -218,6 +593,116 @@ function hasUniqueOwnedMenuStack(
     baselineComplete,
     parentSurfaceCurrent: true,
   }).decision === "admitted";
+}
+
+/**
+ * The exact-child UIA query below is private transient-surface evidence, not a
+ * UIA grounding/catalog feature exposed to the model. Require a complete,
+ * untruncated Win32 relationship snapshot before spending that bounded read.
+ */
+function canVerifyExactTransientRoot(inventory: CuaWindowInventory): boolean {
+  return inventory.source === "win32_relationship_probe" && inventory.complete && inventory.truncated !== true;
+}
+
+function win32RelationshipChildEvidence(
+  owner: CuaWindowTarget,
+  candidate: CuaWindowInfo,
+  inventory: CuaWindowInventory,
+): Extract<TransientChildEvidence, { readonly kind: "native_window" }> | undefined {
+  if (inventory.source !== "win32_relationship_probe" || candidate.isOnScreen !== true || candidate.minimized === true ||
+      candidate.ownerPid !== owner.pid || candidate.ownerWindowId !== owner.windowId) return undefined;
+  const exactForeground = inventory.foregroundPid === candidate.target.pid &&
+    inventory.foregroundWindowId === candidate.target.windowId;
+  // Owner/z-order alone does not make an arbitrary auxiliary HWND modal.
+  // Native menu/dialog class evidence and explicit UIA root roles are handled
+  // by verifyTransientNativeChildRoot; the relationship-only fast path is
+  // reserved for an exact child that actually owns the foreground.
+  if (!exactForeground) return undefined;
+  const evidenceKind = "exact_foreground";
+  return {
+    kind: "native_window",
+    nativeWindow: asNativeWindowIdentity(candidate.target),
+    owner: asNativeWindowIdentity(owner),
+    visible: true,
+    interactionPolicy: "modal",
+    relationshipProof: evidenceKind,
+    frontmostEvidence: evidenceKind,
+    admissionSource: "win32_relationship_probe",
+  };
+}
+
+function hasExactOwnedAuxiliaryStackEvidence(
+  owner: CuaWindowTarget,
+  candidate: CuaWindowInfo,
+  inventory: CuaWindowInventory,
+): boolean {
+  const exactOwner = candidate.ownerPid === owner.pid && candidate.ownerWindowId === owner.windowId;
+  const trustedCrossProcessOwner = candidate.target.pid !== owner.pid && inventory.source === "win32_relationship_probe" &&
+    inventory.complete && inventory.truncated !== true && exactOwner;
+  if (!inventory.complete || inventory.truncated === true ||
+      inventory.foregroundPid !== owner.pid || inventory.foregroundWindowId !== owner.windowId ||
+      candidate.target.pid !== owner.pid && !trustedCrossProcessOwner ||
+      candidate.isOnScreen !== true || candidate.minimized === true || !exactOwner || candidate.zIndex === undefined) {
+    return false;
+  }
+  const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(owner));
+  const candidateRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target));
+  return parentRows.length === 1 && candidateRows.length === 1 && parentRows[0]!.isOnScreen === true &&
+    parentRows[0]!.minimized !== true && parentRows[0]!.zIndex !== undefined &&
+    candidate.zIndex > parentRows[0]!.zIndex!;
+}
+
+function windowCandidateRelationship(
+  candidate: CuaWindowInfo,
+  owner: CuaWindowTarget,
+  inventory: CuaWindowInventory,
+  hostScoped: boolean,
+): ComputerWindowCandidateRelationship | undefined {
+  const exactOwner = candidate.ownerPid === owner.pid && candidate.ownerWindowId === owner.windowId;
+  const trustedCrossProcessOwner = candidate.target.pid === owner.pid ||
+    inventory.source === "win32_relationship_probe" && inventory.complete && inventory.truncated !== true;
+  if (exactOwner && trustedCrossProcessOwner) {
+    const rootRole = trustedWindowClassRootRole(candidate.windowClass);
+    return {
+      kind: "owned_child",
+      owner: { pid: owner.pid, windowId: owner.windowId },
+      ...(rootRole === undefined ? {} : { rootRole }),
+    };
+  }
+  return hostScoped && !exactOwner ? { kind: "scoped_peer" } : undefined;
+}
+
+function win32OwnedChildEvidence(
+  owner: CuaWindowTarget,
+  candidate: CuaWindowInfo,
+  inventory: CuaWindowInventory,
+  parentSurfaceCurrent: boolean,
+): Extract<TransientChildEvidence, { readonly kind: "native_window" }> | undefined {
+  if (inventory.source !== "win32_relationship_probe") return undefined;
+  const stageOne = assessOwnedTransientWindowAdmission({
+    parent: owner,
+    candidate,
+    inventory,
+    surfacedWindowCount: 1,
+    baselineComplete: inventory.complete,
+    baselineTruncated: inventory.truncated === true,
+    parentSurfaceCurrent,
+  });
+  if (stageOne.decision !== "admitted") return undefined;
+  const exactForeground = inventory.foregroundPid === candidate.target.pid &&
+    inventory.foregroundWindowId === candidate.target.windowId;
+  if (!exactForeground) return undefined;
+  const relationshipProof = "exact_foreground" as const;
+  return {
+    kind: "native_window",
+    nativeWindow: asNativeWindowIdentity(candidate.target),
+    owner: asNativeWindowIdentity(owner),
+    visible: true,
+    interactionPolicy: "modal",
+    relationshipProof,
+    frontmostEvidence: relationshipProof,
+    admissionSource: "win32_relationship_probe",
+  };
 }
 
 /** Read an explicit same-HWND overlay root; ordinary descendant MenuItems do not qualify. */
@@ -482,12 +967,21 @@ function targetAllowedByHostScope(
   return allowedTargets === undefined || allowedTargets.some((allowed) => windowIdentityKey(allowed) === windowIdentityKey(target));
 }
 
-function windowRefusalCode(code: string | undefined, message: string): string {
+function samePinnedRecoveryIdentity(pinned: CuaWindowInfo, fresh: CuaWindowInfo): boolean {
+  return windowIdentityKey(pinned.target) === windowIdentityKey(fresh.target) &&
+    pinned.bounds.x === fresh.bounds.x && pinned.bounds.y === fresh.bounds.y &&
+    pinned.bounds.width === fresh.bounds.width && pinned.bounds.height === fresh.bounds.height &&
+    pinned.appName === fresh.appName && pinned.title === fresh.title &&
+    pinned.ownerPid === fresh.ownerPid && pinned.ownerWindowId === fresh.ownerWindowId &&
+    pinned.windowClass === fresh.windowClass;
+}
+
+function windowRefusalCode(code: string | undefined, message: string, structuredNoInputEvidence = false): string {
   // CUA 0.22.2 reports the exact-HWND foreground refusal in Tool text rather
   // than a dedicated error code. Require explicit evidence that it sent no
   // input; the prefix alone is not enough to make an action retry-safe.
   const foregroundRefusal = /^foreground_unavailable:/iu.test(message);
-  const noInputEvidence = hasExplicitNoInputEvidence(message);
+  const noInputEvidence = hasExplicitNoInputEvidence(message) || structuredNoInputEvidence;
   if (foregroundRefusal || code === "WINDOW_FOREGROUND_MISMATCH") {
     return noInputEvidence ? "WINDOW_FOREGROUND_MISMATCH" : "CUA_TOOL_REFUSED";
   }
@@ -538,6 +1032,50 @@ export type CuaWindowDeliveryMode = "background" | "foreground";
 export type CuaGroundingMode = "off" | "uia-catalog-v1" | "dom-catalog-v1" | "hybrid-catalog-v1";
 export type CuaWindowSwitchMode = "off" | "opened-windows-v1";
 
+export interface ReopenSavedDocumentGrant {
+  /** One Host-selected absolute path; never sent to the model. */
+  readonly path: string;
+  /** Canonical executable URL frozen by the Host for com.apple.TextEdit. */
+  readonly expectedExecutableUrl: string;
+}
+
+interface FileIdentityPin {
+  readonly dev: string;
+  readonly ino: string;
+  readonly size: string;
+  readonly mtimeNs: string;
+  readonly ctimeNs: string;
+}
+
+interface VerifiedApplicationIdentity {
+  readonly pid: number;
+  readonly windowId: number;
+  readonly processStart: { readonly seconds: number; readonly microseconds: number };
+  readonly bundleId: "com.apple.TextEdit";
+  readonly executableUrl: string;
+}
+
+interface VerifiedDocumentIdentity {
+  readonly snapshotId: string;
+  readonly observationId: ObservationId;
+  readonly identity: VerifiedApplicationIdentity;
+  readonly fileUrl: string;
+  readonly windowGeometry: CuaWindowGeometry;
+  readonly fileIdentity: FileIdentityPin;
+}
+
+interface PrivateReopenSavedDocumentState {
+  readonly path: string;
+  readonly fileUrl: string;
+  readonly canonicalExecutableUrl: string;
+  readonly parentIdentity: { readonly dev: string; readonly ino: string };
+  readonly primaryIdentity: VerifiedApplicationIdentity;
+  savedDocument?: VerifiedDocumentIdentity;
+  closedSourceActionId?: ActionIntent["actionId"];
+  recoveryReady: boolean;
+  attempted: boolean;
+}
+
 // Keep the adapter side bounded but larger than the model-facing hot set. The
 // Runtime selector narrows this to at most 16 before Observation persistence;
 // the private ref map still retains every safe candidate here for the current
@@ -545,6 +1083,7 @@ export type CuaWindowSwitchMode = "off" | "opened-windows-v1";
 // the hard element cap prevents an unbounded UIA tree from entering Runtime.
 const GROUNDING_MAX_ELEMENTS = 256;
 const GROUNDING_QUERY_MAX_ELEMENTS = 256;
+const MULTILINE_GROUNDING_QUERY_TIMEOUT_MS = 2_500;
 
 export interface CuaDriverComputerOptions {
   /** Explicit daemon endpoint. The adapter never falls back to embedded CUA. */
@@ -573,6 +1112,17 @@ export interface CuaDriverComputerOptions {
    * When set, returning to the Run-owned browser also requires its HWND here.
    */
   windowSwitchAllowedTargets?: readonly CuaWindowTarget[];
+  /** Exact Host-prepared recovery window, restricted to the opt-in missing-bound recovery flow. */
+  recoveryWindowTarget?: CuaWindowTarget;
+  recoverBoundWindowMissing?: boolean;
+  /** Explicit one-file reopen grant; Darwin native-window Runs only. */
+  reopenSavedDocumentGrant?: ReopenSavedDocumentGrant;
+  /** Host-issued capability joining one ephemeral Browser target to one exact native recovery pair. */
+  hybridNativeWebDocumentCapability?: {
+    readonly managedBrowserTarget: ManagedBrowserTarget;
+    readonly primaryTarget: CuaWindowTarget;
+    readonly recoveryTarget: CuaWindowTarget;
+  };
   /** Injected host-only read-only relationship evidence; absent/failed means manual transient handling. */
   windowRelationshipProbe?: WindowRelationshipProbe;
   /** Host-supplied managed-browser transport; never discovered by this adapter. */
@@ -581,7 +1131,7 @@ export interface CuaDriverComputerOptions {
   cleanupWaitMs?: number;
   /** Test seam; production uses CuaDriver.connect. */
   driverFactory?: CuaDriverFactory;
-  /** Test seam for the pinned platform coordinate contract; defaults to process.platform. */
+  /** Controlled platform override for this session; otherwise use valid driver health, then the host platform. */
   platform?: NodeJS.Platform;
   /** Test seam for capture retry timing; production uses bounded real delays. */
   windowCaptureRetry?: WindowCaptureRetryOptions;
@@ -590,7 +1140,9 @@ export interface CuaDriverComputerOptions {
 interface PrivateSession {
   label: string;
   driver: CuaDriverLike;
-  platform?: "win32" | "darwin" | "linux";
+  platform: CuaPlatform;
+  /** Bounded health/config evidence retained privately for session diagnostics. */
+  platformResolution: PlatformResolution;
   descriptor: ComputerSessionDescriptor;
   active: boolean;
   surfaceRegistry: SurfaceRegistryState;
@@ -602,20 +1154,35 @@ interface PrivateSession {
   visibleWindowBaseline: ReadonlySet<string> | undefined;
   /** Fresh inventory immediately before an opted-in foreground GUI action. */
   preActionWindowBaseline: {
+    readonly actionId: ActionIntent["actionId"];
+    readonly sourceObservationId: ObservationId;
+    readonly closeShortcut: boolean;
+    completed: boolean;
     readonly targetKeys: ReadonlySet<string>;
     readonly complete: boolean;
     readonly truncated: boolean;
     readonly parentSurfaceRef: SurfaceRef;
     readonly parentBinding: CuaWindowBinding;
   } | undefined;
+  missingParent?: {
+    readonly sourceActionId: ActionIntent["actionId"];
+    readonly reason: "bound_window_missing";
+    candidates: Map<string, ComputerWindowCandidate>;
+    epoch: number;
+    confirming: boolean;
+  };
   /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
   newlySurfacedWindowKeys: ReadonlySet<string>;
+  /** Visible identities observed after a completed action; model inventory annotation only. */
+  firstObservedAfterActionWindows: { readonly actionId: ActionIntent["actionId"]; readonly targetKeys: ReadonlySet<string> } | undefined;
   /** Candidate snapshot produced by the immediately preceding list call. */
   newHandoffCandidates: readonly ComputerWindowCandidate[];
   /** Exact HWND reported by CUA as foreground for the current no-input refusal. */
   foregroundMismatchWindowId: number | undefined;
   /** True only when the last completed action produced a pre/post inventory diff. */
   proactiveHandoffCandidatesReady: boolean;
+  recoveryWindowIdentity?: CuaWindowInfo;
+  reopenSavedDocument?: PrivateReopenSavedDocumentState;
   /** Adapter-private active managed tab; never serialized to Runtime. */
   browserTarget?: ManagedBrowserTarget;
   /** Run-owned managed target survives switching to native windows. */
@@ -624,6 +1191,44 @@ interface PrivateSession {
   windowRefs: Map<string, SurfaceRef>;
   /** SurfaceRegistry mutation reason attached to the next successful capture. */
   pendingSurfaceTransitionReason?: SurfaceTransitionReason;
+  /** Exact root already checked for an existing owned transient during observe. */
+  lastInspectedExistingTransientRootRef?: SurfaceRef;
+  /** Short-lived guard against replaying the same GUI primitive after an unknown foreground outcome. */
+  unknownActionReplayGuard?: {
+    readonly surfaceRef: SurfaceRef;
+    readonly primitiveFingerprints: Set<string>;
+    alternativeActionCompleted: boolean;
+  };
+  /** Set only while the current unknown action's post-dispatch native diff is being verified. */
+  unknownActionReconciliationPending?: boolean;
+  /** Exact active root re-confirmed by the most recent unknown-action diff. */
+  unknownActionReconfirmedSurfaceRef?: SurfaceRef;
+}
+
+type CuaPlatform = "win32" | "darwin" | "linux";
+interface PlatformHealthEvidence {
+  readonly status: "valid" | "unavailable" | "degraded" | "invalid";
+  readonly reportedPlatform?: CuaPlatform;
+  readonly schemaVersion?: string;
+  readonly driverVersion?: string;
+}
+interface PlatformResolution {
+  readonly effective: CuaPlatform;
+  readonly source: "configured" | "health" | "host";
+  readonly configured?: CuaPlatform;
+  readonly health: PlatformHealthEvidence;
+  readonly conflict: boolean;
+}
+
+/** Resolve platform-specific capture behavior from the explicit override, the
+ * detected CUA session, then the host fallback. `hostPlatform` supports stable
+ * unit coverage without mutating process.platform. */
+export function resolveCapturePlatform(
+  configuredPlatform: NodeJS.Platform | undefined,
+  sessionPlatform: NodeJS.Platform | undefined,
+  hostPlatform: NodeJS.Platform = process.platform,
+): NodeJS.Platform {
+  return configuredPlatform ?? sessionPlatform ?? hostPlatform;
 }
 
 interface PendingDriverCleanup {
@@ -662,6 +1267,8 @@ interface PrivateGrounding {
   readonly contentRect?: DomGroundingContentRect;
   /** Completeness of the DOM producer, independently of the UIA catalog. */
   readonly domComplete?: boolean;
+  /** Independent macOS AX focus attestation; never projected as an ordinary catalog row. */
+  readonly focusProof?: PrivateGroundingElement;
   readonly elements: ReadonlyMap<string, PrivateGroundingElement>;
 }
 
@@ -681,8 +1288,6 @@ interface PrivateGroundingElement {
   readonly geometry?: CuaWindowGeometry;
   /** Stable private identity; excludes element token and editable value. */
   readonly uiaIdentityFingerprint?: string;
-  /** Private Observation-bound fact: the pre-action UIA value was absent or empty. */
-  readonly preValueEmpty?: boolean;
   /** Raw UIA token and snapshot are never projected to Runtime or Providers. */
   readonly uiaTarget?: { readonly pid: number; readonly windowId: number; readonly elementToken: string; readonly snapshotId?: string };
 }
@@ -698,6 +1303,7 @@ interface DriverErrorDetails {
   message: string;
   tag?: string;
   errorCode?: string;
+  structuredJson?: string;
 }
 
 export class CuaDriverComputer implements Computer {
@@ -738,6 +1344,48 @@ export class CuaDriverComputer implements Computer {
     }
     if (this.options.windowTarget !== undefined) validateWindowTarget(this.options.windowTarget);
     for (const target of this.options.windowSwitchAllowedTargets ?? []) validateWindowTarget(target);
+    if (this.options.recoveryWindowTarget !== undefined) validateWindowTarget(this.options.recoveryWindowTarget);
+    const hybridCapability = this.options.hybridNativeWebDocumentCapability;
+    if (hybridCapability !== undefined && (this.options.browserTarget === undefined ||
+        this.options.recoverBoundWindowMissing !== true || this.options.reopenSavedDocumentGrant === undefined ||
+        this.options.grounding !== "hybrid-catalog-v1" || this.options.windowTarget === undefined ||
+        windowIdentityKey(hybridCapability.primaryTarget) !== windowIdentityKey(this.options.windowTarget) ||
+        this.options.recoveryWindowTarget === undefined ||
+        windowIdentityKey(hybridCapability.recoveryTarget) !== windowIdentityKey(this.options.recoveryWindowTarget) ||
+        this.options.browserTarget.profileId !== hybridCapability.managedBrowserTarget.profileId ||
+        this.options.browserTarget.tabId !== hybridCapability.managedBrowserTarget.tabId ||
+        this.options.browserTarget.generation !== hybridCapability.managedBrowserTarget.generation ||
+        windowIdentityKey(this.options.browserTarget.windowTarget) !== windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget) ||
+        windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget) === windowIdentityKey(this.options.windowTarget) ||
+        windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget) === windowIdentityKey(this.options.recoveryWindowTarget) ||
+        this.options.windowSwitchAllowedTargets?.length !== 2 ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(hybridCapability.primaryTarget)) ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(hybridCapability.recoveryTarget)))) {
+      throw new Error("hybrid native-web-document capability must exactly bind one managed Browser and the Host native recovery pair");
+    }
+    if (this.options.recoverBoundWindowMissing === true && (this.options.windowSwitch !== "opened-windows-v1" ||
+        this.options.windowTarget === undefined || this.options.recoveryWindowTarget === undefined ||
+        (this.options.browserTarget !== undefined && hybridCapability === undefined) ||
+        (this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") && hybridCapability === undefined ||
+        this.options.windowSwitchAllowedTargets?.length !== 2 ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(this.options.windowTarget!)) ||
+        !this.options.windowSwitchAllowedTargets.some((target) => windowIdentityKey(target) === windowIdentityKey(this.options.recoveryWindowTarget!)) ||
+        windowIdentityKey(this.options.windowTarget) === windowIdentityKey(this.options.recoveryWindowTarget) ||
+        !targetAllowedByHostScope(this.options.windowTarget, this.options.windowSwitchAllowedTargets) ||
+        !targetAllowedByHostScope(this.options.recoveryWindowTarget, this.options.windowSwitchAllowedTargets))) {
+      throw new Error("bound-window recovery requires distinct exact primary/recovery targets, window switching, and Host authorization for both");
+    }
+    if (this.options.recoverBoundWindowMissing !== true && this.options.recoveryWindowTarget !== undefined) {
+      throw new Error("recoveryWindowTarget requires recoverBoundWindowMissing opt-in");
+    }
+    if (this.options.reopenSavedDocumentGrant !== undefined &&
+        (this.options.recoverBoundWindowMissing !== true ||
+         this.options.windowDeliveryMode !== "foreground" || this.options.windowTarget === undefined ||
+         this.options.recoveryWindowTarget === undefined || this.options.windowTarget.pid !== this.options.recoveryWindowTarget.pid ||
+         (this.options.browserTarget !== undefined && hybridCapability === undefined) ||
+         (this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1") && hybridCapability === undefined)) {
+      throw new Error("saved-document reopen requires a Darwin foreground native recovery Run for one exact TextEdit process");
+    }
     if (this.options.grounding !== undefined && !["off", "uia-catalog-v1", "dom-catalog-v1", "hybrid-catalog-v1"].includes(this.options.grounding)) {
       throw new Error("grounding must be off, uia-catalog-v1, dom-catalog-v1 or hybrid-catalog-v1");
     }
@@ -750,8 +1398,10 @@ export class CuaDriverComputer implements Computer {
       const browserIsInitialTarget = this.options.windowTarget !== undefined &&
         this.options.browserTarget.windowTarget.pid === this.options.windowTarget.pid &&
         this.options.browserTarget.windowTarget.windowId === this.options.windowTarget.windowId;
+      const browserHasHybridGrant = hybridCapability !== undefined &&
+        windowIdentityKey(this.options.browserTarget.windowTarget) === windowIdentityKey(hybridCapability.managedBrowserTarget.windowTarget);
       if (!browserIsInitialTarget && (this.options.windowSwitch !== "opened-windows-v1" ||
-          !targetAllowedByHostScope(this.options.browserTarget.windowTarget, this.options.windowSwitchAllowedTargets))) {
+          (!targetAllowedByHostScope(this.options.browserTarget.windowTarget, this.options.windowSwitchAllowedTargets) && !browserHasHybridGrant))) {
         throw new DomGroundingUnavailableError("a managed browser target distinct from the initial binding requires cross-window opt-in and Host authorization");
       }
       if (this.options.domGroundingTransport === undefined) {
@@ -780,11 +1430,30 @@ export class CuaDriverComputer implements Computer {
     try {
       await driver.startSession(sdkModule.StartSessionInput.new({ session: label }), { signal });
       sessionStarted = true;
-      const platform = await detectCuaPlatform(driver, signal);
+      const healthEvidence = await detectCuaPlatform(driver, signal);
+      // Resolve once so Runtime mapping and every CUA route share the same
+      // platform even when health is unavailable or disagrees with Host config.
+      const platformResolution = resolveSessionPlatform(this.options.platform, healthEvidence, process.platform);
+      const platform = platformResolution.effective;
       let viewport: Viewport;
       let windowBinding: CuaWindowBinding | undefined;
       let surfaceRegistry = createSurfaceRegistry(label);
       const windowBindings = new Map<string, CuaWindowBinding>();
+      let recoveryWindowIdentity: CuaWindowInfo | undefined;
+      const reopenGrant = this.options.reopenSavedDocumentGrant === undefined
+        ? undefined
+        : await prepareReopenSavedDocumentGrant(this.options.reopenSavedDocumentGrant);
+      let reopenSavedDocument: PrivateReopenSavedDocumentState | undefined;
+      if (this.options.recoverBoundWindowMissing === true) {
+        if (platform !== "darwin") throw new Error("bound-window recovery is currently supported only on Darwin");
+        const inventory = await listWindowInventory(driver, label, signal, undefined, true, this.options.windowRelationshipProbe, platform);
+        if (inventory.truncated === true) throw new Error("recovery target identity could not be pinned from a truncated fresh inventory");
+        const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(this.options.recoveryWindowTarget!));
+        if (matches.length !== 1 || matches[0]!.isOnScreen !== true || matches[0]!.minimized === true) {
+          throw new Error("Host-prepared recovery target was not uniquely visible at Run open");
+        }
+        recoveryWindowIdentity = matches[0];
+      }
       if (this.options.windowTarget === undefined) {
         const size = await callTool(driver, "get_screen_size", { session: label }, signal);
         const dimensions = readStructuredDimensions(size);
@@ -803,9 +1472,24 @@ export class CuaDriverComputer implements Computer {
         }
         // Capture once during open so the public session viewport describes the
         // actual image coordinates. No outer-frame correction is hard-coded.
-        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, this.options.platform ?? platform ?? process.platform);
+        const capture = await captureWindowWithRetry(driver, label, this.options.windowTarget, signal, this.options.windowCaptureRetry, platform);
         windowBinding = capture.binding;
         viewport = capture.viewport;
+        if (reopenGrant !== undefined) {
+          if (platform !== "darwin") throw new Error("saved-document reopen is currently supported only on Darwin");
+          const appProof = await queryDocumentIdentity(driver, label, capture.binding.target, capture.binding.bounds,
+            reopenGrant.canonicalExecutableUrl, signal);
+          if (appProof === undefined || appProof.identity.pid !== this.options.windowTarget.pid ||
+              appProof.identity.windowId !== this.options.windowTarget.windowId) {
+            throw new Error("Host-granted TextEdit process identity could not be uniquely verified at Run open");
+          }
+          reopenSavedDocument = {
+            ...reopenGrant,
+            primaryIdentity: appProof.identity,
+            recoveryReady: false,
+            attempted: false,
+          };
+        }
         const peer = registerNativePeer(surfaceRegistry, asNativeWindowIdentity(capture.binding.target));
         if (peer.decision !== "applied") throw new Error(`CUA initial native Surface could not be registered: ${peer.reason}`);
         const active = activatePeer(peer.state, peer.value, {
@@ -824,6 +1508,7 @@ export class CuaDriverComputer implements Computer {
       const descriptor: ComputerSessionDescriptor = {
         id: label as ComputerSessionDescriptor["id"],
         backend: "cua-driver-daemon",
+        ...(platform === undefined ? {} : { platform }),
         viewport,
         // The explicit window route uses the driver's targeted delivery for
         // the verified input primitives below. It never falls back to the
@@ -844,7 +1529,8 @@ export class CuaDriverComputer implements Computer {
       this.session = {
         label,
         driver,
-        ...(platform === undefined ? {} : { platform }),
+        platform,
+        platformResolution,
         descriptor,
         active: true,
         surfaceRegistry,
@@ -853,9 +1539,12 @@ export class CuaDriverComputer implements Computer {
         visibleWindowBaseline: undefined,
         preActionWindowBaseline: undefined,
         newlySurfacedWindowKeys: new Set(),
+        firstObservedAfterActionWindows: undefined,
         newHandoffCandidates: [],
         foregroundMismatchWindowId: undefined,
         proactiveHandoffCandidatesReady: false,
+        ...(recoveryWindowIdentity === undefined ? {} : { recoveryWindowIdentity }),
+        ...(reopenSavedDocument === undefined ? {} : { reopenSavedDocument }),
         ...(this.options.browserTarget === undefined ? {} : {
           ...(browserIsInitialTarget ? { browserTarget: this.options.browserTarget! } : {}),
           managedBrowserTarget: this.options.browserTarget,
@@ -879,6 +1568,7 @@ export class CuaDriverComputer implements Computer {
   ): Promise<ObservationCapture> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
+    if (current.missingParent !== undefined) throw new BoundWindowMissingError(current.missingParent.sourceActionId);
     if (activeSurfaceUnavailable(current)) {
       throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session"), "observe");
     }
@@ -934,14 +1624,84 @@ export class CuaDriverComputer implements Computer {
       throw normalizeDriverError(new WindowContractError("SURFACE_UNKNOWN", "active Surface has no executable identity"), "observe");
     }
     await this.reconcileActiveTransientChild(current, signal);
+    const captureAfterExistingTransient = await this.admitExistingOwnedTransientChild(current, signal);
     const captureBinding = activeWindowBinding(current);
     if (captureBinding === undefined) {
       throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "active Surface has no verified native capture binding"), "observe");
     }
     {
       try {
-        const capture = await captureWindowWithRetry(current.driver, current.label, captureBinding.target, signal, this.options.windowCaptureRetry, this.options.platform ?? current.platform ?? process.platform);
+        const capture = captureAfterExistingTransient ?? await captureWindowWithRetry(
+          current.driver,
+          current.label,
+          captureBinding.target,
+          signal,
+          this.options.windowCaptureRetry,
+          current.platform,
+        );
         const liveBinding = capture.binding;
+        const reopenState = current.reopenSavedDocument;
+        let authorizedSavedDocumentEvidenceStatus: AuthorizedSavedDocumentEvidence["status"] | undefined;
+        if (reopenState !== undefined && current.platform === "darwin" &&
+            windowIdentityKey(liveBinding.target) === windowIdentityKey(this.options.windowTarget!)) {
+          authorizedSavedDocumentEvidenceStatus = "unverified";
+          delete reopenState.savedDocument;
+          try {
+            signal.throwIfAborted();
+            if (!(await authorizedOutputParentIsPinned(reopenState))) throw new Error("authorized output parent changed");
+            const fileState = await inspectAuthorizedOutputFileIdentity(reopenState.path);
+            if (fileState.status === "unverified") throw new Error("authorized output file state could not be verified");
+            const beforeFileIdentity = fileState.status === "present" ? fileState.identity : undefined;
+            const fileWasAbsent = fileState.status === "absent";
+            const documentProof = await queryDocumentIdentity(
+              current.driver,
+              current.label,
+              liveBinding.target,
+              liveBinding.bounds,
+              reopenState.canonicalExecutableUrl,
+              signal,
+              fileWasAbsent ? undefined : reopenState.fileUrl,
+            );
+            signal.throwIfAborted();
+            const parentStillPinned = await authorizedOutputParentIsPinned(reopenState);
+            if (!parentStillPinned || documentProof === undefined ||
+                !sameApplicationIdentity(documentProof.identity, reopenState.primaryIdentity)) {
+              throw new Error("authorized document or parent proof was not stable");
+            }
+            if (fileWasAbsent) {
+              let remainsAbsent = false;
+              try {
+                await lstat(reopenState.path, { bigint: true });
+              } catch (error) {
+                if (isNodeError(error) && error.code === "ENOENT") remainsAbsent = true;
+                else throw error;
+              }
+              if (!remainsAbsent) throw new Error("authorized file appeared during observation");
+              authorizedSavedDocumentEvidenceStatus = "authorized_file_absent";
+            } else {
+              const afterFileIdentity = await fileIdentityPin(reopenState.path);
+              if (beforeFileIdentity === undefined || !sameFileIdentity(beforeFileIdentity, afterFileIdentity) ||
+                  documentProof.cleanDocument !== true) {
+                throw new Error("authorized file/document binding changed during observation");
+              }
+              reopenState.savedDocument = {
+                snapshotId: documentProof.snapshotId,
+                observationId,
+                identity: documentProof.identity,
+                fileUrl: reopenState.fileUrl,
+                windowGeometry: { ...liveBinding.bounds },
+                fileIdentity: afterFileIdentity,
+              };
+              authorizedSavedDocumentEvidenceStatus = "verified_clean_current_document";
+            }
+          } catch (error) {
+            if (signal.aborted) throw error;
+            // A private file/document proof failure only withholds the
+            // one-shot reopen grant; it never changes the normal observation.
+            delete reopenState.savedDocument;
+            authorizedSavedDocumentEvidenceStatus = "unverified";
+          }
+        }
         const previousBinding = current.windowBindings.get(windowIdentityKey(liveBinding.target));
         if (previousBinding !== undefined && !sameWindowGeometry(previousBinding.bounds, liveBinding.bounds)) {
           const geometrySurface = surfaceRefForWindow(current, liveBinding.target);
@@ -998,6 +1758,7 @@ export class CuaDriverComputer implements Computer {
           this.options.domGroundingTransport,
           signal,
           current.initialObservationPending,
+          current.platform === "darwin",
         );
         const observedBrowserTarget = grounding?.browserTarget ?? activeBrowserTarget;
         const includeDomSurface = grounding?.browserTarget !== undefined &&
@@ -1020,6 +1781,12 @@ export class CuaDriverComputer implements Computer {
                 : "peer_switch";
           noteSurfaceTransition(current, reason);
           this.clearSurfaceLineageObservationState(current, activeRefBeforeSync);
+        }
+        const unknownActionReplayGuard = current.unknownActionReplayGuard;
+        if (unknownActionReplayGuard !== undefined &&
+            (!sameSurfaceRef(unknownActionReplayGuard.surfaceRef, surfaceRef) ||
+              unknownActionReplayGuard.alternativeActionCompleted)) {
+          delete current.unknownActionReplayGuard;
         }
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
@@ -1059,6 +1826,14 @@ export class CuaDriverComputer implements Computer {
           ...(surfaceTransitionReason === undefined ? {} : { surfaceTransitionReason }),
           screenshot: { mediaType: "image/png", data: capture.data },
           ...(boundGrounding === undefined ? {} : { grounding: boundGrounding }),
+          ...(authorizedSavedDocumentEvidenceStatus === undefined ? {} : {
+            authorizedSavedDocumentEvidence: {
+              source: "host-authorized-file-and-native-proof-v1",
+              status: authorizedSavedDocumentEvidenceStatus,
+              observationId,
+              surfaceRef,
+            },
+          }),
         };
       } catch (error) {
         const details = driverErrorDetails(error);
@@ -1077,14 +1852,14 @@ export class CuaDriverComputer implements Computer {
     }
   }
 
-  private async reconcileActiveTransientChild(current: PrivateSession, signal: AbortSignal): Promise<void> {
+  private async reconcileActiveTransientChild(current: PrivateSession, signal: AbortSignal): Promise<SurfaceRef | undefined> {
     signal.throwIfAborted();
     const ref = current.surfaceRegistry.activeSurface;
     if (ref === undefined || !isExecutableSurfaceRef(current.surfaceRegistry, ref)) {
       throw new WindowContractError("SURFACE_UNKNOWN", "active Surface is not executable");
     }
     const child = current.surfaceRegistry.surfaces.get(ref.surfaceId);
-    if (child?.parentSurfaceId === undefined || (child.kind !== "overlay" && child.kind !== "native_window")) return;
+    if (child?.parentSurfaceId === undefined || (child.kind !== "overlay" && child.kind !== "native_window")) return undefined;
     const parent = current.surfaceRegistry.surfaces.get(child.parentSurfaceId);
     const parentRef = parent === undefined ? undefined : currentSurfaceRef(current.surfaceRegistry, parent.surfaceId);
     const parentNative = parentRef === undefined ? undefined : resolveNativeWindow(current.surfaceRegistry, parentRef);
@@ -1092,6 +1867,137 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "transient Surface parent identity is unavailable");
     }
     const parentTarget = asCuaWindowTarget(parentNative);
+    if (child.kind === "native_window" && child.admissionSource === "macos_attached_sheet_proof") {
+      if (current.platform !== "darwin" || this.options.windowDeliveryMode !== "foreground" ||
+          this.options.windowSwitch !== "opened-windows-v1" || !isCurrentSurfaceRef(current.surfaceRegistry, parentRef)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS attached-sheet lifecycle lost its authorized current parent context");
+      }
+      const [inventory, parentBinding] = await Promise.all([
+        listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe),
+        discoverWindow(current.driver, current.label, parentTarget, signal),
+      ]);
+      const storedParentBinding = current.windowBindings.get(windowIdentityKey(parentTarget));
+      if (storedParentBinding === undefined || !sameWindowGeometry(parentBinding.bounds, storedParentBinding.bounds)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact parent window geometry changed during attached-sheet reconciliation");
+      }
+      const childTarget = asCuaWindowTarget(child.nativeWindow);
+      const childRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+      if (childRows.length > 1) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "multiple inventory rows match the admitted macOS attached child");
+      }
+      const candidate = childRows.length === 1 ? childRows[0] : undefined;
+      const grandparent = parent.parentSurfaceId === undefined ? undefined : current.surfaceRegistry.surfaces.get(parent.parentSurfaceId);
+      const grandparentRef = grandparent === undefined ? undefined : currentSurfaceRef(current.surfaceRegistry, grandparent.surfaceId);
+      const grandparentNative = grandparentRef === undefined ? undefined : resolveNativeWindow(current.surfaceRegistry, grandparentRef);
+      const attached = await readMacAttachedSheetState(
+        current.driver, current.label, parentBinding, candidate, signal,
+        parent.kind === "native_window" && parent.admissionSource === "macos_attached_sheet_proof" && grandparentNative !== undefined
+          ? asCuaWindowTarget(grandparentNative)
+          : undefined,
+      );
+      if (attached.status === "sheet") {
+        if (windowIdentityKey(asCuaWindowTarget(attached.evidence.nativeWindow)) !== windowIdentityKey(childTarget)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "a different or replacement AXSheet is active; the current child is retained for manual handling");
+        }
+        return undefined;
+      }
+      if (attached.status !== "none") {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", attached.status === "unknown" ? attached.reason : "attached-sheet state is unknown");
+      }
+      const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+      const parentVisible = parentRows.length === 1 && parentRows[0]!.isOnScreen === true && parentRows[0]!.minimized !== true;
+      const hasAnotherVisibleOwnedWindow = (rows: readonly CuaWindowInfo[]): boolean => rows.some((window) =>
+        windowIdentityKey(window.target) !== windowIdentityKey(parentTarget) &&
+        windowIdentityKey(window.target) !== windowIdentityKey(childTarget) &&
+        window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
+        window.isOnScreen === true && window.minimized !== true);
+      if (!parentVisible || hasAnotherVisibleOwnedWindow(inventory.windows)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "fresh no-sheet AX proof did not coincide with an absent child and visible exact parent");
+      }
+      if (candidate !== undefined) {
+        const storedChildBinding = current.windowBindings.get(windowIdentityKey(childTarget));
+        const exactHiddenChild = candidate.isOnScreen === false && candidate.minimized !== true &&
+          (candidate.ownerPid === undefined || candidate.ownerPid === parentTarget.pid) &&
+          (candidate.ownerWindowId === undefined || candidate.ownerWindowId === parentTarget.windowId) &&
+          storedChildBinding !== undefined && sameWindowGeometry(candidate.bounds, storedChildBinding.bounds);
+        if (!exactHiddenChild || inventory.truncated === true) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the admitted child remains visible, ambiguous, or lacks exact hidden-window geometry evidence");
+        }
+
+        const initialRef = { ...ref };
+        const initialParentRef = { ...parentRef };
+        const initialRootRef = grandparentRef === undefined ? undefined : { ...grandparentRef };
+        const initialParentGeometry = { ...parentBinding.bounds };
+        const stillSameStack = (): boolean => {
+          const activeNow = current.surfaceRegistry.activeSurface;
+          const activeChild = current.surfaceRegistry.surfaces.get(initialRef.surfaceId);
+          const parentNow = current.surfaceRegistry.surfaces.get(initialParentRef.surfaceId);
+          const rootNow = initialRootRef === undefined
+            ? undefined
+            : current.surfaceRegistry.surfaces.get(initialRootRef.surfaceId);
+          return this.session === current && current.active &&
+            sameSurfaceRef(initialRef, activeNow) && isCurrentSurfaceRef(current.surfaceRegistry, initialRef) &&
+            isExecutableSurfaceRef(current.surfaceRegistry, initialRef) &&
+            sameSurfaceRef(initialParentRef, currentSurfaceRef(current.surfaceRegistry, initialParentRef.surfaceId)) &&
+            isCurrentSurfaceRef(current.surfaceRegistry, initialParentRef) && parentNow !== undefined &&
+            activeChild?.kind === "native_window" && activeChild.admissionSource === "macos_attached_sheet_proof" &&
+            activeChild.parentSurfaceId === initialParentRef.surfaceId &&
+            (initialRootRef === undefined
+              ? parentNow.parentSurfaceId === undefined
+              : parentNow.parentSurfaceId === initialRootRef.surfaceId && rootNow !== undefined &&
+                sameSurfaceRef(initialRootRef, currentSurfaceRef(current.surfaceRegistry, initialRootRef.surfaceId)) &&
+                isCurrentSurfaceRef(current.surfaceRegistry, initialRootRef));
+        };
+
+        await waitWithAbort(80, signal);
+        signal.throwIfAborted();
+        if (!stillSameStack()) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the attached-sheet stack changed during the bounded hidden-child recheck");
+        }
+        const [retryInventory, retryParentBinding] = await Promise.all([
+          listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe),
+          discoverWindow(current.driver, current.label, parentTarget, signal),
+        ]);
+        const retryChildRows = retryInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+        const retryParentRows = retryInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+        const retryCandidate = retryChildRows.length === 1 ? retryChildRows[0] : undefined;
+        const retryParentRow = retryParentRows.length === 1 ? retryParentRows[0] : undefined;
+        if (!stillSameStack() || windowIdentityKey(retryParentBinding.target) !== windowIdentityKey(parentTarget) ||
+            retryInventory.truncated === true || retryChildRows.length !== 1 ||
+            retryParentRows.length !== 1 || retryCandidate === undefined || retryCandidate.isOnScreen !== false ||
+            retryCandidate.minimized === true ||
+            (retryCandidate.ownerPid !== undefined && retryCandidate.ownerPid !== parentTarget.pid) ||
+            (retryCandidate.ownerWindowId !== undefined && retryCandidate.ownerWindowId !== parentTarget.windowId) ||
+            !sameWindowGeometry(retryCandidate.bounds, storedChildBinding!.bounds) ||
+            retryParentRow?.isOnScreen !== true || retryParentRow.minimized === true ||
+            hasAnotherVisibleOwnedWindow(retryInventory.windows) || !sameWindowGeometry(retryParentBinding.bounds, initialParentGeometry) ||
+            !sameWindowGeometry(retryParentBinding.bounds, storedParentBinding.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact hidden child, parent, or stack changed during the bounded recheck");
+        }
+        const retryAttached = await readMacAttachedSheetState(
+          current.driver, current.label, retryParentBinding, retryCandidate, signal,
+          parent.kind === "native_window" && parent.admissionSource === "macos_attached_sheet_proof" && grandparentNative !== undefined
+            ? asCuaWindowTarget(grandparentNative)
+            : undefined,
+        );
+        if (retryAttached.status !== "none" || !stillSameStack() ||
+            !sameWindowGeometry(retryParentBinding.bounds, storedParentBinding.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", retryAttached.status === "unknown"
+            ? retryAttached.reason
+            : "a fresh exact no-sheet proof did not remain stable through the bounded recheck");
+        }
+        signal.throwIfAborted();
+        const currentParentBinding = current.windowBindings.get(windowIdentityKey(parentTarget));
+        const currentChildBinding = current.windowBindings.get(windowIdentityKey(childTarget));
+        if (!stillSameStack() || currentParentBinding === undefined || currentChildBinding === undefined ||
+            !sameWindowGeometry(currentParentBinding.bounds, initialParentGeometry) ||
+            !sameWindowGeometry(currentChildBinding.bounds, storedChildBinding.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact attached-sheet binding changed before the verified pop");
+        }
+      }
+      this.commitVerifiedChildPop(current, ref, parent.surfaceId, parentBinding);
+      return undefined;
+    }
     let childAbsent = false;
     if (child.kind === "overlay") {
       const verification = await verifySameHwndOverlay(current.driver, current.label, parentTarget, signal);
@@ -1101,13 +2007,34 @@ export class CuaDriverComputer implements Computer {
       childAbsent = verification.status === "absent";
     } else {
       const childTarget = asCuaWindowTarget(child.nativeWindow);
-      const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
-      const candidate = inventory.windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+      let inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+      let candidate = inventory.windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
       // Menus can retain their native HWND after ESC. A complete snapshot can
       // prove that the admitted interaction Surface is gone without claiming
       // that the OS destroyed the HWND. Never reuse Stage1 on this hidden row.
-      const hiddenChild = candidate?.isOnScreen === false && candidate.minimized === false &&
+      let hiddenChild = candidate?.isOnScreen === false && candidate.minimized === false &&
         candidate.ownerPid === parentTarget.pid && candidate.ownerWindowId === parentTarget.windowId;
+      const hasVisibleOwnedSibling = (): boolean => inventory.source === "win32_relationship_probe" && inventory.complete &&
+        inventory.windows.some((window) => windowIdentityKey(window.target) !== windowIdentityKey(childTarget) &&
+          windowIdentityKey(window.target) !== windowIdentityKey(parentTarget) &&
+          window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
+          window.isOnScreen === true && window.minimized !== true &&
+          (candidate?.isOnScreen !== true || candidate.zIndex === undefined || window.zIndex === undefined ||
+            window.zIndex >= candidate.zIndex));
+      if (candidate?.isOnScreen === true && candidate.minimized !== true && hasVisibleOwnedSibling()) {
+        // A completed menu action can asynchronously replace its menu HWND
+        // with a sibling dialog. Wait briefly for the old child to become
+        // explicitly hidden before classifying and capturing that sibling.
+        for (const delayMs of TRANSIENT_RECOVERY_RECHECK_DELAYS_MS) {
+          await this.waitForTransientRecoveryRecheck(delayMs, signal);
+          inventory = await this.readCompleteWin32Inventory(current, signal);
+          const childRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+          candidate = childRows.length === 1 ? childRows[0] : undefined;
+          hiddenChild = candidate?.isOnScreen === false && candidate.minimized === false &&
+            candidate.ownerPid === parentTarget.pid && candidate.ownerWindowId === parentTarget.windowId;
+          if (candidate === undefined || hiddenChild || !hasVisibleOwnedSibling()) break;
+        }
+      }
       if (candidate === undefined || hiddenChild) {
         if (!inventory.complete) {
           throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "incomplete inventory cannot prove that the transient HWND disappeared; child state is retained for manual handling");
@@ -1120,9 +2047,14 @@ export class CuaDriverComputer implements Computer {
           windowIdentityKey(window.target) !== windowIdentityKey(childTarget) &&
           (window.target.windowId === childTarget.windowId ||
             window.target.pid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
-            (window.ownerPid === undefined || window.ownerPid === parentTarget.pid) && window.isOnScreen !== false));
+              (window.ownerPid === undefined || window.ownerPid === parentTarget.pid) && window.isOnScreen !== false ||
+            inventory.source === "win32_relationship_probe" && inventory.complete &&
+              window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
+              window.isOnScreen !== false));
         if (replacement) {
-          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "a replacement owned HWND prevents proving that the interaction Surface closed; child state is retained for manual handling");
+          const reconciled = await this.reconcileOwnedTransientChildReplacement(current, ref, inventory, signal);
+          if (reconciled.decision === "recovered") return reconciled.surfaceRef;
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "a replacement owned HWND did not pass exact root, capture, and fresh owner/stack verification; child state is retained for manual handling");
         }
         childAbsent = true;
       } else {
@@ -1140,15 +2072,24 @@ export class CuaDriverComputer implements Computer {
           if (stageOne.decision !== "admitted") {
             throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", stageOne.reason);
           }
-          evidence = await verifyTransientNativeChildRoot(
+          const root = await verifyTransientNativeChildRoot(
             current.driver, current.label, parentTarget, candidate, inventory, inventory.complete,
-            this.options.grounding === "uia-catalog-v1" || this.options.grounding === "hybrid-catalog-v1", signal,
+            canVerifyExactTransientRoot(inventory), signal,
           );
+          if (root.status === "verified") evidence = root.evidence;
+          else if (root.status === "unavailable") evidence = win32RelationshipChildEvidence(parentTarget, candidate, inventory);
+          else throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", root.reason);
         } catch (error) {
           signal.throwIfAborted();
           if (error instanceof WindowContractError) throw error;
-          if (driverErrorDetails(error).tag === "Transport") current.active = false;
-          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "transient HWND owner/root proof errored; child state is retained for manual handling");
+          if (driverErrorDetails(error).tag === "Transport") {
+            current.active = false;
+            throw error;
+          }
+          evidence = win32RelationshipChildEvidence(parentTarget, candidate, inventory);
+          if (evidence === undefined) {
+            throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "exact UIA root query failed and fresh Win32 owner/foreground/stack evidence was insufficient; child state is retained for manual handling");
+          }
         }
         if (evidence === undefined || evidence.kind !== "native_window") {
           throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "transient HWND lost exact owner, root-role, or frontmost evidence; child state is retained for manual handling");
@@ -1165,13 +2106,227 @@ export class CuaDriverComputer implements Computer {
         current.windowBindings.set(windowIdentityKey(candidate.target), { target: candidate.target, bounds: candidate.bounds });
       }
     }
-    if (!childAbsent) return;
+    if (!childAbsent) return undefined;
 
     const parentBinding = await discoverWindow(current.driver, current.label, parentTarget, signal);
-    const freshParentRef = currentSurfaceRef(current.surfaceRegistry, parent.surfaceId);
-    if (freshParentRef === undefined) throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "parent Surface generation changed during pop verification");
-    const popped = popChild(current.surfaceRegistry, ref, {
-      parent: freshParentRef,
+    this.commitVerifiedChildPop(current, ref, parent.surfaceId, parentBinding);
+    return undefined;
+  }
+
+  /**
+   * A native popup can already exist before the Run's first parent observation,
+   * so no post-action window diff is available to admit it. Inspect only the
+   * exact active Windows foreground root, and push only after a complete
+   * Win32-owned stack, a positive exact Menu/Popup/Dialog root, one successful
+   * child capture, and a fresh same-source revalidation.
+   */
+  private async admitExistingOwnedTransientChild(
+    current: PrivateSession,
+    signal: AbortSignal,
+  ): Promise<CuaWindowCapture | undefined> {
+    const parentRef = current.surfaceRegistry.activeSurface;
+    if (current.platform !== "win32" || this.options.windowDeliveryMode !== "foreground" ||
+        parentRef === undefined || !isExecutableSurfaceRef(current.surfaceRegistry, parentRef) ||
+        sameSurfaceRef(current.lastInspectedExistingTransientRootRef, parentRef)) return undefined;
+    const parentSurface = current.surfaceRegistry.surfaces.get(parentRef.surfaceId);
+    if (parentSurface?.kind !== "native_window" || parentSurface.parentSurfaceId !== undefined) return undefined;
+    const parentBinding = activeWindowBinding(current);
+    if (parentBinding === undefined) return undefined;
+
+    let inventory: CuaWindowInventory;
+    try {
+      inventory = await this.readCompleteWin32Inventory(current, signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") {
+        current.active = false;
+        throw error;
+      }
+      // An incomplete or unavailable snapshot does not prove that no child
+      // exists, and must not permanently suppress a later complete check.
+      return undefined;
+    }
+    if (!sameSurfaceRef(parentRef, current.surfaceRegistry.activeSurface) ||
+        !isCurrentSurfaceRef(current.surfaceRegistry, parentRef) ||
+        !isExecutableSurfaceRef(current.surfaceRegistry, parentRef)) return undefined;
+
+    const parentRows = inventory.windows.filter((window) =>
+      windowIdentityKey(window.target) === windowIdentityKey(parentBinding.target));
+    if (parentRows.length !== 1) return undefined;
+    const parentRow = parentRows[0]!;
+    if (parentRow.isOnScreen !== true || parentRow.minimized === true ||
+        !sameWindowGeometry(parentRow.bounds, parentBinding.bounds)) return undefined;
+
+    const exactOwnedVisible = inventory.windows.filter((window) =>
+      windowIdentityKey(window.target) !== windowIdentityKey(parentBinding.target) &&
+      window.ownerPid === parentBinding.target.pid && window.ownerWindowId === parentBinding.target.windowId &&
+      window.isOnScreen === true && window.minimized !== true);
+    const stageOneCandidates = exactOwnedVisible.filter((candidate) => assessOwnedTransientWindowAdmission({
+      parent: parentBinding.target,
+      candidate,
+      inventory,
+      surfacedWindowCount: 1,
+      baselineComplete: inventory.complete,
+      baselineTruncated: inventory.truncated === true,
+      parentSurfaceCurrent: isCurrentSurfaceRef(current.surfaceRegistry, parentRef),
+    }).decision === "admitted");
+    if (stageOneCandidates.length !== 1) {
+      this.markExistingTransientRootInspected(current, parentRef);
+      return undefined;
+    }
+
+    const candidate = stageOneCandidates[0]!;
+    let root: TransientRootVerification;
+    try {
+      root = await verifyTransientNativeChildRoot(
+        current.driver,
+        current.label,
+        parentBinding.target,
+        candidate,
+        inventory,
+        true,
+        canVerifyExactTransientRoot(inventory),
+        signal,
+      );
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") current.active = false;
+      if (driverErrorDetails(error).tag === "Transport") throw error;
+      // UIA is not a universal requirement for every application's child
+      // HWND. A failed exact-root read is weak evidence only; the fresh native
+      // foreground relationship below may still independently prove an
+      // interactive child, otherwise the verified parent remains usable.
+      root = { status: "unavailable", queryFailed: true };
+    }
+    if (root.status === "contradictory") {
+      throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", `${root.reason}; confirm or close the owned transient before continuing`);
+    }
+    if (root.status === "unavailable" && root.queryFailed !== true && root.rootRole === "window" &&
+        hasExactOwnedAuxiliaryStackEvidence(parentBinding.target, candidate, inventory)) {
+      this.markExistingTransientRootInspected(current, parentRef);
+      return undefined;
+    }
+    let childEvidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }>;
+    const requiresFreshForegroundProof = root.status === "unavailable";
+    if (root.status === "verified") {
+      childEvidence = root.evidence;
+    } else {
+      // Exact owner/z-order alone is not proof of a blocking child. Keep the
+      // already-verified parent active unless Win32 independently confirms
+      // that this exact owned HWND is actually foreground. This avoids both
+      // false modal locks and app/class/title heuristics.
+      const relationshipEvidence = win32RelationshipChildEvidence(parentBinding.target, candidate, inventory);
+      if (relationshipEvidence === undefined) {
+        this.markExistingTransientRootInspected(current, parentRef);
+        return undefined;
+      }
+      childEvidence = relationshipEvidence;
+    }
+
+    let capture: CuaWindowCapture;
+    try {
+      capture = await captureWindowWithRetry(
+        current.driver,
+        current.label,
+        candidate.target,
+        signal,
+        this.options.windowCaptureRetry,
+          current.platform,
+      );
+      signal.throwIfAborted();
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") current.active = false;
+      throw new WindowContractError(
+        "TRANSIENT_SURFACE_UNKNOWN",
+        "an interactive owned transient was verified, but its exact window capture failed; confirm or close it before continuing",
+      );
+    }
+
+    let freshInventory: CuaWindowInventory;
+    try {
+      freshInventory = await this.readCompleteWin32Inventory(current, signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") current.active = false;
+      throw new WindowContractError(
+        "TRANSIENT_SURFACE_UNKNOWN",
+        "an interactive owned transient was verified and captured, but fresh Win32 revalidation failed; confirm or close it before continuing",
+      );
+    }
+    const freshParentRows = freshInventory.windows.filter((window) =>
+      windowIdentityKey(window.target) === windowIdentityKey(parentBinding.target));
+    const freshCandidateRows = freshInventory.windows.filter((window) =>
+      windowIdentityKey(window.target) === windowIdentityKey(candidate.target));
+    const freshParent = freshParentRows[0];
+    const freshCandidate = freshCandidateRows[0];
+    const stillCurrent = sameSurfaceRef(parentRef, current.surfaceRegistry.activeSurface) &&
+      isCurrentSurfaceRef(current.surfaceRegistry, parentRef) &&
+      isExecutableSurfaceRef(current.surfaceRegistry, parentRef);
+    const freshStageOne = freshCandidate === undefined ? undefined : assessOwnedTransientWindowAdmission({
+      parent: parentBinding.target,
+      candidate: freshCandidate,
+      inventory: freshInventory,
+      surfacedWindowCount: 1,
+      baselineComplete: freshInventory.complete,
+      baselineTruncated: freshInventory.truncated === true,
+      parentSurfaceCurrent: stillCurrent,
+    });
+    const freshForegroundEvidence = requiresFreshForegroundProof && freshCandidate !== undefined
+      ? win32RelationshipChildEvidence(parentBinding.target, freshCandidate, freshInventory)
+      : undefined;
+    if (!stillCurrent || freshParentRows.length !== 1 || freshCandidateRows.length !== 1 ||
+        freshParent?.isOnScreen !== true || freshParent.minimized === true ||
+        !sameWindowGeometry(freshParent.bounds, parentBinding.bounds) ||
+        freshCandidate?.isOnScreen !== true || freshCandidate.minimized === true ||
+        freshCandidate.ownerPid !== parentBinding.target.pid ||
+        freshCandidate.ownerWindowId !== parentBinding.target.windowId ||
+        !sameWindowGeometry(freshCandidate.bounds, capture.binding.bounds) ||
+        freshStageOne?.decision !== "admitted" ||
+        (requiresFreshForegroundProof && freshForegroundEvidence === undefined)) {
+      throw new WindowContractError(
+        "TRANSIENT_SURFACE_UNKNOWN",
+        "an interactive owned transient changed or became ambiguous during capture; confirm or close it before continuing",
+      );
+    }
+
+    const pushed = pushChild(current.surfaceRegistry, parentRef, childEvidence);
+    if (pushed.decision !== "applied") {
+      throw new WindowContractError(
+        "TRANSIENT_SURFACE_UNKNOWN",
+        `${pushed.reason}; confirm or close the owned transient before continuing`,
+      );
+    }
+    current.surfaceRegistry = pushed.state;
+    current.windowBindings.set(windowIdentityKey(capture.binding.target), capture.binding);
+    current.windowRefs.clear();
+    this.clearTargetObservationState(current, parentRef);
+    delete current.lastInspectedExistingTransientRootRef;
+    // This successful root transition is the observation's primary fact even
+    // if an earlier geometry check queued a less specific transition reason.
+    current.pendingSurfaceTransitionReason = "child_push";
+    return capture;
+  }
+
+  private markExistingTransientRootInspected(current: PrivateSession, ref: SurfaceRef): void {
+    if (isCurrentSurfaceRef(current.surfaceRegistry, ref)) {
+      current.lastInspectedExistingTransientRootRef = { ...ref };
+    }
+  }
+
+  private commitVerifiedChildPop(
+    current: PrivateSession,
+    childRef: SurfaceRef,
+    parentSurfaceId: SurfaceRef["surfaceId"],
+    parentBinding: CuaWindowBinding,
+  ): SurfaceRef {
+    const child = current.surfaceRegistry.surfaces.get(childRef.surfaceId);
+    const parentRef = currentSurfaceRef(current.surfaceRegistry, parentSurfaceId);
+    if (child === undefined || parentRef === undefined) {
+      throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact child or parent Surface is unavailable for pop");
+    }
+    const popped = popChild(current.surfaceRegistry, childRef, {
+      parent: parentRef,
       parentRevalidated: true,
       childAbsent: true,
     });
@@ -1180,19 +2335,429 @@ export class CuaDriverComputer implements Computer {
     }
     current.surfaceRegistry = popped.state;
     noteSurfaceTransition(current, "child_pop");
+    delete current.lastInspectedExistingTransientRootRef;
     current.windowRefs.clear();
-    this.clearTargetObservationState(current, ref, freshParentRef);
+    this.clearTargetObservationState(current, childRef, parentRef);
     current.windowBindings.set(windowIdentityKey(parentBinding.target), parentBinding);
     if (child.kind === "native_window") current.windowBindings.delete(windowIdentityKey(asCuaWindowTarget(child.nativeWindow)));
+    return popped.value;
+  }
+
+  private async readCompleteWin32Inventory(current: PrivateSession, signal: AbortSignal): Promise<CuaWindowInventory> {
+    const probe = this.options.windowRelationshipProbe;
+    if (probe === undefined) {
+      throw new WindowContractError("WINDOW_INVENTORY_UNKNOWN", "safe transient recovery requires a Win32 relationship probe");
+    }
+    const cua = await listWindowInventory(current.driver, current.label, signal, undefined, false);
+    signal.throwIfAborted();
+    const snapshot = await probe.read(signal);
+    signal.throwIfAborted();
+    const inventory = mergeWindowRelationshipInventory(cua, snapshot, false);
+    if (inventory.source !== "win32_relationship_probe" || !inventory.complete || inventory.truncated === true) {
+      throw new WindowContractError("WINDOW_INVENTORY_UNKNOWN", "safe transient recovery requires one complete, untruncated Win32 snapshot");
+    }
+    return inventory;
+  }
+
+  private async waitForTransientRecoveryRecheck(delayMs: number, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const testDelay = this.options.windowCaptureRetry?.delay;
+    if (testDelay === undefined) await waitWithAbort(delayMs, signal);
+    else await testDelay(delayMs, signal);
+    signal.throwIfAborted();
+  }
+
+  private restoredParentFromCompleteInventory(
+    current: PrivateSession,
+    childRef: SurfaceRef,
+    inventory: CuaWindowInventory,
+  ): { readonly parentSurfaceId: SurfaceRef["surfaceId"]; readonly parentTarget: CuaWindowTarget; readonly parentBounds: CuaWindowGeometry } | undefined {
+    if (inventory.source !== "win32_relationship_probe" || !inventory.complete || inventory.truncated === true ||
+        !sameSurfaceRef(childRef, current.surfaceRegistry.activeSurface)) return undefined;
+    const child = current.surfaceRegistry.surfaces.get(childRef.surfaceId);
+    if (child?.kind !== "native_window" || child.parentSurfaceId === undefined) return undefined;
+    const parent = current.surfaceRegistry.surfaces.get(child.parentSurfaceId);
+    if (parent?.kind !== "native_window" || parent.status === "closed" || parent.status === "unknown") return undefined;
+    const parentTarget = asCuaWindowTarget(parent.nativeWindow);
+    const childTarget = asCuaWindowTarget(child.nativeWindow);
+    const parentBinding = current.windowBindings.get(windowIdentityKey(parentTarget));
+    if (parentBinding === undefined) return undefined;
+    const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+    const childRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
+    if (parentRows.length !== 1 || childRows.length > 1) return undefined;
+    const parentRow = parentRows[0]!;
+    if (parentRow.isOnScreen !== true || parentRow.minimized === true ||
+        inventory.foregroundPid !== parentTarget.pid || inventory.foregroundWindowId !== parentTarget.windowId ||
+        !sameWindowGeometry(parentRow.bounds, parentBinding.bounds)) return undefined;
+    const childRow = childRows[0];
+    if (childRow !== undefined && (childRow.isOnScreen !== false || childRow.minimized !== false ||
+        childRow.ownerPid !== parentTarget.pid || childRow.ownerWindowId !== parentTarget.windowId)) return undefined;
+    const replacement = inventory.windows.some((window) => {
+      if (windowIdentityKey(window.target) === windowIdentityKey(childTarget)) return false;
+      if (window.target.windowId === childTarget.windowId) return true;
+      return window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
+        window.isOnScreen !== false && window.minimized !== true;
+    });
+    return replacement ? undefined : { parentSurfaceId: parent.surfaceId, parentTarget, parentBounds: parentRow.bounds };
+  }
+
+  private async recoverClosedTransientChild(
+    current: PrivateSession,
+      childRef: SurfaceRef,
+      signal: AbortSignal,
+      suppliedInventory?: CuaWindowInventory,
+  ): Promise<SurfaceRef | undefined> {
+    const firstInventory = suppliedInventory ?? await this.readCompleteWin32Inventory(current, signal);
+    const firstProof = this.restoredParentFromCompleteInventory(current, childRef, firstInventory);
+    if (firstProof === undefined) return undefined;
+    const firstParentCapture = await captureWindowWithRetry(
+      current.driver,
+      current.label,
+      firstProof.parentTarget,
+      signal,
+      this.options.windowCaptureRetry,
+      current.platform,
+    );
+    if (!sameWindowGeometry(firstParentCapture.binding.bounds, firstProof.parentBounds)) return undefined;
+    const currentInventory = await this.readCompleteWin32Inventory(current, signal);
+    const currentProof = this.restoredParentFromCompleteInventory(current, childRef, currentInventory);
+    if (currentProof === undefined || currentProof.parentSurfaceId !== firstProof.parentSurfaceId ||
+        windowIdentityKey(currentProof.parentTarget) !== windowIdentityKey(firstProof.parentTarget) ||
+        !sameWindowGeometry(firstParentCapture.binding.bounds, currentProof.parentBounds)) return undefined;
+    return this.commitVerifiedChildPop(current, childRef, currentProof.parentSurfaceId, firstParentCapture.binding);
+  }
+
+  private async recoverUnknownTransientActionReceipt(
+    current: PrivateSession,
+    action: ActionIntent,
+    childRef: SurfaceRef,
+    signal: AbortSignal,
+  ): Promise<ActionReceipt | undefined> {
+    try {
+      for (let attempt = 0; attempt <= TRANSIENT_RECOVERY_RECHECK_DELAYS_MS.length; attempt += 1) {
+        signal.throwIfAborted();
+        let inventory: CuaWindowInventory;
+        try {
+          inventory = await this.readCompleteWin32Inventory(current, signal);
+        } catch (error) {
+          signal.throwIfAborted();
+          if (driverErrorDetails(error).tag === "Transport") {
+            current.active = false;
+            throw error;
+          }
+          return undefined;
+        }
+
+        const replacement = await this.reconcileOwnedTransientChildReplacement(current, childRef, inventory, signal);
+        if (replacement.decision === "recovered") {
+          this.rememberUnknownActionPrimitive(current, action, childRef);
+          return {
+            actionId: action.actionId,
+            status: "partial",
+            driverCode: "CUA_TRANSIENT_ACTION_OUTCOME_UNKNOWN",
+            message: "The action outcome is unknown. A different exact-owned transient Surface was freshly verified and captured; do not repeat the action, and make a new decision from the current dialog.",
+            safeRecovery: { kind: "transient_owned_surface_reconciled", surfaceRef: replacement.surfaceRef },
+          };
+        }
+        // A hidden menu can precede its owned dialog by a short asynchronous
+        // gap. Prefer bounded sibling checks before taking the legacy parent
+        // route, so an empty intermediate inventory cannot outrun the modal.
+        if (replacement.decision === "stop" || attempt >= TRANSIENT_RECOVERY_RECHECK_DELAYS_MS.length) {
+          const restoredParent = await this.recoverClosedTransientChild(current, childRef, signal, inventory);
+          if (restoredParent === undefined) return undefined;
+          this.rememberUnknownActionPrimitive(current, action, childRef);
+          return {
+            actionId: action.actionId,
+            status: "partial",
+            driverCode: "CUA_TRANSIENT_ACTION_OUTCOME_UNKNOWN",
+            message: "The action outcome is unknown. The transient window closed and its exact parent was freshly captured. Do not repeat this action; inspect the refreshed screen and choose the next step.",
+            safeRecovery: { kind: "transient_parent_restored", surfaceRef: restoredParent },
+          };
+        }
+        await this.waitForTransientRecoveryRecheck(TRANSIENT_RECOVERY_RECHECK_DELAYS_MS[attempt]!, signal);
+      }
+      return undefined;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") current.active = false;
+      if (driverErrorDetails(error).tag === "Transport") throw error;
+      return undefined;
+    }
+  }
+
+  private async reconfirmNativeSurfaceAfterUnknownAction(
+    current: PrivateSession,
+    expectedSurfaceRef: SurfaceRef,
+    signal: AbortSignal,
+  ): Promise<SurfaceRef | undefined> {
+    if (current.platform !== "win32" || this.options.windowDeliveryMode !== "foreground" ||
+        expectedSurfaceRef.kind !== "native_window" || current.preActionWindowBaseline === undefined) return undefined;
+    current.unknownActionReconciliationPending = true;
+    delete current.unknownActionReconfirmedSurfaceRef;
+    try {
+      const candidates = await this.detectNewWindowHandoffCandidates(current.descriptor, signal);
+      if (candidates.length !== 0) return undefined;
+      const confirmed = current.unknownActionReconfirmedSurfaceRef;
+      return confirmed !== undefined && sameSurfaceRef(confirmed, expectedSurfaceRef)
+        ? confirmed
+        : undefined;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") current.active = false;
+      return undefined;
+    } finally {
+      current.unknownActionReconciliationPending = false;
+      delete current.unknownActionReconfirmedSurfaceRef;
+    }
+  }
+
+  private async unknownForegroundActionReceipt(
+    current: PrivateSession,
+    action: ActionIntent,
+    actionSurfaceRef: SurfaceRef,
+    signal: AbortSignal,
+  ): Promise<ActionReceipt> {
+    const safeSurfaceRef = await this.reconfirmNativeSurfaceAfterUnknownAction(current, actionSurfaceRef, signal);
+    this.rememberUnknownActionPrimitive(current, action, actionSurfaceRef);
+    return {
+      actionId: action.actionId,
+      status: "partial",
+      driverCode: "ACTION_OUTCOME_UNKNOWN",
+      message: "CUA could not confirm the foreground after dispatch; input may have been sent. The action outcome is unknown. Do not repeat this action; inspect a fresh screen and choose a different GUI action.",
+      ...(safeSurfaceRef === undefined
+        ? {}
+        : { safeRecovery: { kind: "native_surface_reconfirmed" as const, surfaceRef: safeSurfaceRef } }),
+    };
+  }
+
+  private rememberUnknownActionPrimitive(current: PrivateSession, action: ActionIntent, surfaceRef: SurfaceRef): void {
+    const primitiveFingerprint = actionPrimitiveFingerprint(action);
+    const activeGuard = current.unknownActionReplayGuard;
+    if (activeGuard !== undefined && sameSurfaceRef(activeGuard.surfaceRef, surfaceRef)) {
+      activeGuard.primitiveFingerprints.add(primitiveFingerprint);
+      activeGuard.alternativeActionCompleted = false;
+      return;
+    }
+    current.unknownActionReplayGuard = {
+      surfaceRef: { ...surfaceRef },
+      primitiveFingerprints: new Set([primitiveFingerprint]),
+      alternativeActionCompleted: false,
+    };
+  }
+
+  /**
+   * Reconcile an unknown child action only when the previous exact-owned child
+   * is proven hidden/absent and one new same-owner native transient is the
+   * unique highest owned window with a positive Menu/Popup/Dialog root. The
+   * click itself is never replayed.
+   */
+  private async reconcileOwnedTransientChildReplacement(
+    current: PrivateSession,
+    oldChildRef: SurfaceRef,
+    inventory: CuaWindowInventory,
+    signal: AbortSignal,
+  ): Promise<UnknownTransientReplacementAttempt> {
+    if (current.platform !== "win32" || this.options.windowDeliveryMode !== "foreground" ||
+        inventory.source !== "win32_relationship_probe" || !inventory.complete || inventory.truncated === true ||
+        !sameSurfaceRef(oldChildRef, current.surfaceRegistry.activeSurface) ||
+        !isExecutableSurfaceRef(current.surfaceRegistry, oldChildRef)) return { decision: "stop" };
+    const oldChild = current.surfaceRegistry.surfaces.get(oldChildRef.surfaceId);
+    if (oldChild?.kind !== "native_window" || oldChild.parentSurfaceId === undefined) return { decision: "stop" };
+    const parent = current.surfaceRegistry.surfaces.get(oldChild.parentSurfaceId);
+    const parentRef = currentSurfaceRef(current.surfaceRegistry, oldChild.parentSurfaceId);
+    if (parent?.kind !== "native_window" || parentRef === undefined || parent.status === "closed" || parent.status === "unknown") {
+      return { decision: "stop" };
+    }
+    const parentTarget = asCuaWindowTarget(parent.nativeWindow);
+    const oldChildTarget = asCuaWindowTarget(oldChild.nativeWindow);
+    const parentBinding = current.windowBindings.get(windowIdentityKey(parentTarget));
+    if (parentBinding === undefined) return { decision: "stop" };
+
+    const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+    const oldChildRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(oldChildTarget));
+    if (parentRows.length !== 1 || oldChildRows.length > 1) return { decision: "retry" };
+    const parentRow = parentRows[0]!;
+    if (parentRow.isOnScreen !== true || parentRow.minimized === true ||
+        !sameWindowGeometry(parentRow.bounds, parentBinding.bounds)) return { decision: "retry" };
+    const oldChildRow = oldChildRows[0];
+    if (oldChildRow !== undefined && oldChildRow.isOnScreen === true && oldChildRow.minimized !== true) {
+      // This is the expected asynchronous transition after some native menu
+      // commands. Wait for fresh read-only evidence; never resend the click.
+      return { decision: "retry" };
+    }
+    if (oldChildRow !== undefined && (oldChildRow.isOnScreen !== false || oldChildRow.minimized !== false ||
+        oldChildRow.ownerPid !== parentTarget.pid || oldChildRow.ownerWindowId !== parentTarget.windowId)) {
+      return { decision: "stop" };
+    }
+
+    const ownedVisible = inventory.windows.filter((window) =>
+      windowIdentityKey(window.target) !== windowIdentityKey(parentTarget) &&
+      windowIdentityKey(window.target) !== windowIdentityKey(oldChildTarget) &&
+      window.ownerPid === parentTarget.pid && window.ownerWindowId === parentTarget.windowId &&
+      window.isOnScreen === true && window.minimized !== true);
+    if (ownedVisible.length === 0) return { decision: "retry" };
+    const candidates = ownedVisible.filter((candidate) => assessOwnedTransientWindowAdmission({
+      parent: parentTarget,
+      candidate,
+      inventory,
+      surfacedWindowCount: 1,
+      baselineComplete: true,
+      baselineTruncated: false,
+      parentSurfaceCurrent: isCurrentSurfaceRef(current.surfaceRegistry, parentRef),
+    }).decision === "admitted");
+    if (candidates.length !== 1) return { decision: "stop" };
+    const candidate = candidates[0]!;
+    const foregroundIsInOwnerPair =
+      inventory.foregroundPid === parentTarget.pid && inventory.foregroundWindowId === parentTarget.windowId ||
+      inventory.foregroundPid === candidate.target.pid && inventory.foregroundWindowId === candidate.target.windowId;
+    if (!foregroundIsInOwnerPair) return { decision: "stop" };
+
+    let root: TransientRootVerification;
+    try {
+      root = await verifyTransientNativeChildRoot(
+        current.driver, current.label, parentTarget, candidate, inventory, true,
+        canVerifyExactTransientRoot(inventory), signal,
+      );
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") {
+        current.active = false;
+        throw error;
+      }
+      return { decision: "stop" };
+    }
+    if (root.status !== "verified") return { decision: "stop" };
+
+    let capture: CuaWindowCapture;
+    try {
+      capture = await captureWindowWithRetry(
+        current.driver,
+        current.label,
+        candidate.target,
+        signal,
+        this.options.windowCaptureRetry,
+      current.platform,
+      );
+      signal.throwIfAborted();
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") {
+        current.active = false;
+        throw error;
+      }
+      return { decision: "stop" };
+    }
+
+    let freshInventory: CuaWindowInventory;
+    try {
+      freshInventory = await this.readCompleteWin32Inventory(current, signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") {
+        current.active = false;
+        throw error;
+      }
+      return { decision: "retry" };
+    }
+    const freshParentRows = freshInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+    const freshOldChildRows = freshInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(oldChildTarget));
+    const freshCandidateRows = freshInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target));
+    const freshParent = freshParentRows[0];
+    const freshOldChild = freshOldChildRows[0];
+    const freshCandidate = freshCandidateRows[0];
+    const oldChildStillHidden = freshOldChildRows.length === 0 || freshOldChild !== undefined &&
+      freshOldChild.isOnScreen === false && freshOldChild.minimized === false &&
+      freshOldChild.ownerPid === parentTarget.pid && freshOldChild.ownerWindowId === parentTarget.windowId;
+    const stillCurrent = sameSurfaceRef(oldChildRef, current.surfaceRegistry.activeSurface) &&
+      isCurrentSurfaceRef(current.surfaceRegistry, oldChildRef) && isExecutableSurfaceRef(current.surfaceRegistry, oldChildRef) &&
+      isCurrentSurfaceRef(current.surfaceRegistry, parentRef);
+    const freshForegroundInOwnerPair =
+      freshInventory.foregroundPid === parentTarget.pid && freshInventory.foregroundWindowId === parentTarget.windowId ||
+      freshInventory.foregroundPid === candidate.target.pid && freshInventory.foregroundWindowId === candidate.target.windowId;
+    const freshStageOne = freshCandidate === undefined ? undefined : assessOwnedTransientWindowAdmission({
+      parent: parentTarget,
+      candidate: freshCandidate,
+      inventory: freshInventory,
+      surfacedWindowCount: 1,
+      baselineComplete: freshInventory.complete,
+      baselineTruncated: freshInventory.truncated === true,
+      parentSurfaceCurrent: isCurrentSurfaceRef(current.surfaceRegistry, parentRef),
+    });
+    if (!stillCurrent || freshInventory.source !== "win32_relationship_probe" || !freshInventory.complete ||
+        freshInventory.truncated === true || !freshForegroundInOwnerPair || !oldChildStillHidden ||
+        freshParentRows.length !== 1 || freshParent?.isOnScreen !== true || freshParent.minimized === true ||
+        !sameWindowGeometry(freshParent.bounds, parentBinding.bounds) || freshCandidateRows.length !== 1 ||
+        freshCandidate?.isOnScreen !== true || freshCandidate.minimized === true ||
+        freshCandidate.ownerPid !== parentTarget.pid || freshCandidate.ownerWindowId !== parentTarget.windowId ||
+        !sameWindowGeometry(freshCandidate.bounds, capture.binding.bounds) || freshStageOne?.decision !== "admitted") {
+      return { decision: "retry" };
+    }
+    let freshRoot: TransientRootVerification;
+    try {
+      freshRoot = await verifyTransientNativeChildRoot(
+        current.driver, current.label, parentTarget, freshCandidate, freshInventory, true,
+        canVerifyExactTransientRoot(freshInventory), signal,
+      );
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") {
+        current.active = false;
+        throw error;
+      }
+      return { decision: "stop" };
+    }
+    if (freshRoot.status !== "verified") return { decision: "stop" };
+
+    signal.throwIfAborted();
+    const parentBindingFresh = { target: parentTarget, bounds: freshParent!.bounds };
+    this.commitVerifiedChildPop(current, oldChildRef, parent.surfaceId, parentBindingFresh);
+    const activeParentRef = current.surfaceRegistry.activeSurface;
+    if (activeParentRef === undefined || activeParentRef.surfaceId !== parent.surfaceId ||
+        !isExecutableSurfaceRef(current.surfaceRegistry, activeParentRef)) {
+      throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the verified parent was not active after popping the closed child");
+    }
+    const pushed = pushChild(current.surfaceRegistry, activeParentRef, freshRoot.evidence);
+    if (pushed.decision !== "applied") {
+      throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", `${pushed.reason}; the verified replacement transient was not activated`);
+    }
+    current.surfaceRegistry = pushed.state;
+    current.windowBindings.set(windowIdentityKey(capture.binding.target), capture.binding);
+    current.windowRefs.clear();
+    delete current.lastInspectedExistingTransientRootRef;
+    // Runtime sees the recovered sibling as the current modal decision surface;
+    // the old action remains partial/unknown and is never replayed.
+    current.pendingSurfaceTransitionReason = "child_push";
+    return { decision: "recovered", surfaceRef: pushed.value };
+  }
+
+  private async restoreTransientParentAfterExplicitNoInput(
+    current: PrivateSession,
+    childRef: SurfaceRef,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      return (await this.recoverClosedTransientChild(current, childRef, signal)) !== undefined;
+    } catch (error) {
+      if (driverErrorDetails(error).tag === "Transport") current.active = false;
+      return false;
+    }
   }
 
   public async listWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
     const current = this.requireSession(session);
+    const missing = current.missingParent;
+    if (missing?.confirming) throw new Error("window handoff confirmation is in flight");
+    const epoch = missing === undefined ? undefined : ++missing.epoch;
+    // Invalidate before I/O, including failed/aborted refreshes.
+    missing?.candidates.clear();
     current.windowRefs.clear();
     if (!this.canUseManualWindowHandoff(current)) {
       throw new Error("window handoff is available only for an explicitly bound native window");
     }
-    const windows = await listWindowTargets(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+    const windows = inventory.windows;
+    const binding = activeWindowBinding(current);
+    if (binding === undefined) throw new Error("window handoff requires the exact active native-window binding");
     const unauthorizedForeground = current.foregroundMismatchWindowId === undefined
       ? undefined
       : windows.find((window) => window.target.windowId === current.foregroundMismatchWindowId &&
@@ -1200,15 +2765,51 @@ export class CuaDriverComputer implements Computer {
     if (unauthorizedForeground !== undefined) {
       throw new WindowContractError("WINDOW_SCOPE_REQUIRED", "the foreground window is outside the host-authorized window scope");
     }
-    const candidates = windows
-      .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets))
+    const candidatePool = windows
+      .filter((window) => windowIdentityKey(window.target) !== windowIdentityKey(binding.target))
+      .filter((window) => this.options.hybridNativeWebDocumentCapability === undefined ||
+        (missing?.reason === "bound_window_missing"
+          ? windowIdentityKey(window.target) === windowIdentityKey(this.options.hybridNativeWebDocumentCapability.recoveryTarget)
+          : windowIdentityKey(window.target) !== windowIdentityKey(this.options.hybridNativeWebDocumentCapability.recoveryTarget)))
+      .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets) ||
+        window.ownerPid === binding.target.pid && window.ownerWindowId === binding.target.windowId)
       .filter((window) => !isRegisteredChildWindow(current, window.target))
-      .map((window) => ({
+      .filter((window) => isRelevantManualWindowCandidate(
+        window,
+        binding.target,
+        current.foregroundMismatchWindowId === undefined
+          ? undefined
+          : { pid: binding.target.pid, windowId: current.foregroundMismatchWindowId },
+        this.options.windowSwitchAllowedTargets,
+        current.platform,
+      ));
+    const recoveryIdentity = missing?.reason === "bound_window_missing" ? current.recoveryWindowIdentity : undefined;
+    const eligiblePool = recoveryIdentity === undefined ? candidatePool : candidatePool.filter((window) => samePinnedRecoveryIdentity(recoveryIdentity, window));
+    const candidates: ComputerWindowCandidate[] = projectSelectableWindowCandidates(eligiblePool, binding.target, current.platform, undefined, undefined, true).windows
+      .map((window) => {
+        const relationship = windowCandidateRelationship(
+          window,
+          binding.target,
+          inventory,
+          targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets),
+        );
+        return {
         pid: window.target.pid,
         windowId: window.target.windowId,
         ...(window.appName === undefined ? {} : { appName: window.appName }),
         ...(window.title === undefined ? {} : { title: window.title }),
-      }));
+        ...(relationship === undefined ? {} : { relationship }),
+        };
+      });
+    signal.throwIfAborted();
+    if (missing !== undefined) {
+      if (current.missingParent !== missing || missing.epoch !== epoch || missing.confirming) throw new Error("window handoff boundary changed during refresh");
+      return candidates.map((candidate) => {
+        const issued = { ...candidate, handoffToken: randomUUID() };
+        missing.candidates.set(issued.handoffToken, issued);
+        return issued;
+      });
+    }
     const newlySurfacedKeys = new Set(current.newlySurfacedWindowKeys);
     if (current.visibleWindowBaseline !== undefined) {
       for (const window of windows) {
@@ -1216,8 +2817,9 @@ export class CuaDriverComputer implements Computer {
         if (!current.visibleWindowBaseline.has(key)) newlySurfacedKeys.add(key);
       }
     }
+    current.newlySurfacedWindowKeys = newlySurfacedKeys;
     current.newHandoffCandidates = candidates.filter((candidate) => newlySurfacedKeys.has(windowIdentityKey(candidate)));
-    return candidates;
+    return current.proactiveHandoffCandidatesReady ? current.newHandoffCandidates : candidates;
   }
 
   /**
@@ -1225,9 +2827,11 @@ export class CuaDriverComputer implements Computer {
    * filter, using opaque per-Run refs. Dispatch still rechecks the exact
    * native identity and captures the selected target fresh.
    */
-  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowOption[]> {
+  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<ComputerWindowList> {
     const current = this.requireSession(session);
     current.windowRefs.clear();
+    const previousFirstObservedAfterAction = current.firstObservedAfterActionWindows;
+    current.firstObservedAfterActionWindows = undefined;
     if (this.options.windowSwitch !== "opened-windows-v1") {
       throw new WindowContractError("WINDOW_SWITCH_DISABLED", "cross-window switching is not enabled for this Run");
     }
@@ -1237,15 +2841,48 @@ export class CuaDriverComputer implements Computer {
     signal.throwIfAborted();
     const inventory = await listWindowTargets(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
     signal.throwIfAborted();
+    const actionBaseline = current.preActionWindowBaseline;
+    const activeBinding = activeWindowBinding(current);
+    const baselineStillBound = actionBaseline !== undefined && activeBinding !== undefined &&
+      sameSurfaceRef(current.surfaceRegistry.activeSurface, actionBaseline.parentSurfaceRef) &&
+      isCurrentSurfaceRef(current.surfaceRegistry, actionBaseline.parentSurfaceRef) &&
+      isExecutableSurfaceRef(current.surfaceRegistry, actionBaseline.parentSurfaceRef) &&
+      windowIdentityKey(activeBinding.target) === windowIdentityKey(actionBaseline.parentBinding.target);
+    if (actionBaseline?.completed === true && baselineStillBound) {
+      const firstObservedAfterActionKeys = inventory
+        .filter((window) => window.isOnScreen === true && !actionBaseline.targetKeys.has(windowIdentityKey(window.target)))
+        .map((window) => windowIdentityKey(window.target));
+      current.firstObservedAfterActionWindows = firstObservedAfterActionKeys.length > 0
+        ? { actionId: actionBaseline.actionId, targetKeys: new Set(firstObservedAfterActionKeys) }
+        : undefined;
+    } else if (actionBaseline === undefined && previousFirstObservedAfterAction !== undefined) {
+      const visibleKeys = new Set(inventory
+        .filter((window) => window.isOnScreen === true && previousFirstObservedAfterAction.targetKeys.has(windowIdentityKey(window.target)))
+        .map((window) => windowIdentityKey(window.target)));
+      current.firstObservedAfterActionWindows = visibleKeys.size > 0
+        ? { actionId: previousFirstObservedAfterAction.actionId, targetKeys: visibleKeys }
+        : undefined;
+    } else {
+      current.firstObservedAfterActionWindows = undefined;
+    }
     const boundPeer = activePeerTarget(current);
     if (boundPeer !== undefined && !inventory.some((window) => windowIdentityKey(window.target) === windowIdentityKey(boundPeer))) {
       const activeRef = current.surfaceRegistry.activeSurface;
-      if (activeRef !== undefined) {
-        const invalidated = markSurfaceUnknown(current.surfaceRegistry, activeRef);
-        if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
+      const preserveForFormalDetection = this.options.recoverBoundWindowMissing === true &&
+        this.options.windowSwitch === "opened-windows-v1" &&
+        this.options.windowDeliveryMode === "foreground" &&
+        current.platform === "darwin" &&
+        actionBaseline?.completed === true && baselineStillBound &&
+        actionBaseline.parentSurfaceRef.parentSurfaceId === undefined &&
+        this.canUseManualWindowHandoff(current);
+      if (!preserveForFormalDetection) {
+        if (activeRef !== undefined) {
+          const invalidated = markSurfaceUnknown(current.surfaceRegistry, activeRef);
+          if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
+        }
+        current.windowRefs.clear();
+        this.clearTargetObservationState(current, activeRef);
       }
-      current.windowRefs.clear();
-      this.clearTargetObservationState(current, activeRef);
       throw new WindowContractError("WINDOW_TARGET_NOT_FOUND", "current bound window is missing from the opened-window inventory");
     }
     const childWindowKeys = new Set([...current.surfaceRegistry.surfaces.values()]
@@ -1253,10 +2890,11 @@ export class CuaDriverComputer implements Computer {
         surface.kind === "native_window" && surface.parentSurfaceId !== undefined && surface.status !== "closed")
       .map((surface) => windowIdentityKey(asCuaWindowTarget(surface.nativeWindow))));
     const windows = inventory
-      .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets))
+      .filter((window) => this.isTargetSwitchAllowed(window.target))
       .filter((window) => !childWindowKeys.has(windowIdentityKey(window.target)));
     const currentKey = boundPeer === undefined ? undefined : windowIdentityKey(boundPeer);
-    return windows.map((window) => {
+    const projected = projectSelectableWindowCandidates(windows, boundPeer, current.platform);
+    const options = projected.windows.map((window) => {
       const peer = registerNativePeer(current.surfaceRegistry, asNativeWindowIdentity(window.target));
       if (peer.decision !== "applied") return undefined;
       current.surfaceRegistry = peer.state;
@@ -1267,13 +2905,24 @@ export class CuaDriverComputer implements Computer {
         ...(window.appName === undefined ? {} : { appName: window.appName }),
         ...(window.title === undefined ? {} : { title: window.title }),
         isCurrent: currentKey === windowIdentityKey(window.target),
+        ...(window.isOnScreen === true && current.firstObservedAfterActionWindows?.targetKeys.has(windowIdentityKey(window.target)) === true
+          ? { firstObservedAfterAction: true, sourceActionId: current.firstObservedAfterActionWindows.actionId }
+          : {}),
       };
     }).filter((window): window is ComputerWindowOption => window !== undefined);
+    const registrationOmissions = projected.windows.length - options.length;
+    const omittedCount = projected.omittedCount + registrationOmissions;
+    return {
+      options,
+      truncated: omittedCount > 0,
+      omittedCount,
+    };
   }
 
   public async listNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
+    if (current.missingParent !== undefined) return []; // Missing is not proven-new or auto-selectable.
     if (current.proactiveHandoffCandidatesReady) return current.newHandoffCandidates;
     const foregroundWindowId = current.foregroundMismatchWindowId;
     if (foregroundWindowId === undefined) return [];
@@ -1282,12 +2931,163 @@ export class CuaDriverComputer implements Computer {
 
   public async detectNewWindowHandoffCandidates(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowCandidate[]> {
     const current = this.requireSession(session);
+    current.firstObservedAfterActionWindows = undefined;
+    signal.throwIfAborted();
+    if (current.missingParent !== undefined) throw new BoundWindowMissingError(current.missingParent.sourceActionId);
+    const confirmingUnknownAction = current.unknownActionReconciliationPending === true;
+    delete current.unknownActionReconfirmedSurfaceRef;
     const baseline = current.preActionWindowBaseline;
     const activeBeforeReconcile = current.surfaceRegistry.activeSurface;
     // Consume the one-shot pre-action authorization before any asynchronous
     // reconciliation or inventory/proof call; uncertain outcomes are not replayable.
     current.preActionWindowBaseline = undefined;
-    await this.reconcileActiveTransientChild(current, signal);
+    // A key chord can open a second macOS sheet while the first verified sheet
+    // is active. Reconcile that exact completed handoff before asking the
+    // parent->first-sheet proof to pop: focus may already have moved to the new
+    // direct child, so treating the old edge as absent would lose the stack.
+    const activeSurface = activeBeforeReconcile === undefined
+      ? undefined
+      : current.surfaceRegistry.surfaces.get(activeBeforeReconcile.surfaceId);
+    if (activeBeforeReconcile !== undefined && baseline?.completed === true && activeSurface?.kind === "native_window" &&
+        activeSurface.admissionSource === "macos_attached_sheet_proof" &&
+        activeSurface.parentSurfaceId !== undefined &&
+        sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
+        current.platform === "darwin" && this.options.windowDeliveryMode === "foreground" &&
+        this.options.windowSwitch === "opened-windows-v1" && baseline.truncated !== true &&
+        isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+        isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile)) {
+      const activeBinding = activeWindowBinding(current);
+      const rootSurface = current.surfaceRegistry.surfaces.get(activeSurface.parentSurfaceId);
+      const rootRef = rootSurface === undefined
+        ? undefined
+        : currentSurfaceRef(current.surfaceRegistry, rootSurface.surfaceId);
+      const rootNative = rootRef === undefined ? undefined : resolveNativeWindow(current.surfaceRegistry, rootRef);
+      if (activeBinding === undefined || rootRef === undefined || rootNative === undefined ||
+          windowIdentityKey(activeBinding.target) !== windowIdentityKey(baseline.parentBinding.target)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet has no exact active parent binding");
+      }
+      let nestedInventory = await listWindowInventory(
+        current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe,
+      );
+      if (nestedInventory.truncated === true) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet candidate inventory is truncated");
+      }
+      const newRows = nestedInventory.windows.filter((window) =>
+        !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+      let nestedCandidate = newRows.length === 1 && newRows[0]!.target.pid === activeBinding.target.pid
+        ? newRows[0]
+        : undefined;
+      if (nestedCandidate !== undefined) {
+        let freshParent = await discoverWindow(current.driver, current.label, activeBinding.target, signal);
+        const storedParent = current.windowBindings.get(windowIdentityKey(activeBinding.target));
+        if (storedParent === undefined || !sameWindowGeometry(freshParent.bounds, storedParent.bounds)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet parent geometry changed");
+        }
+        let attached = await readMacAttachedSheetState(
+          current.driver, current.label, freshParent, nestedCandidate, signal, asCuaWindowTarget(rootNative),
+        );
+        if (attached.status === "geometry_unstable") {
+          // Only an otherwise fully verified, exact nested sheet may receive
+          // one bounded geometry-only reread. Do not replay the action or use
+          // the old AX proof after the wait.
+          await waitWithAbort(80, signal);
+          const activeNow = current.surfaceRegistry.activeSurface;
+          const activeSurfaceNow = activeNow === undefined ? undefined : current.surfaceRegistry.surfaces.get(activeNow.surfaceId);
+          const rootNow = activeSurfaceNow?.parentSurfaceId === rootRef.surfaceId
+            ? current.surfaceRegistry.surfaces.get(rootRef.surfaceId)
+            : undefined;
+          const rootBinding = current.windowBindings.get(windowIdentityKey(asCuaWindowTarget(rootNative)));
+          const parentStillCurrent = sameSurfaceRef(activeBeforeReconcile, activeNow) &&
+            sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
+            isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+            isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+            activeSurfaceNow?.kind === "native_window" &&
+            activeSurfaceNow.admissionSource === "macos_attached_sheet_proof" &&
+            activeSurfaceNow.parentSurfaceId === rootRef.surfaceId && rootNow !== undefined &&
+            isCurrentSurfaceRef(current.surfaceRegistry, rootRef) &&
+            windowIdentityKey(activeWindowBinding(current)?.target ?? { pid: 0, windowId: 0 }) ===
+              windowIdentityKey(baseline.parentBinding.target) &&
+            windowIdentityKey(activeBinding.target) === windowIdentityKey(baseline.parentBinding.target) &&
+            rootBinding !== undefined && windowIdentityKey(rootBinding.target) === windowIdentityKey(asCuaWindowTarget(rootNative));
+          if (parentStillCurrent) {
+            try {
+              const retryInventory = await listWindowInventory(
+                current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe,
+              );
+              const retryRows = retryInventory.windows.filter((window) =>
+                !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+              const retryCandidate = retryInventory.truncated !== true && retryRows.length === 1
+                ? retryRows[0]
+                : undefined;
+              if (retryCandidate !== undefined &&
+                  windowIdentityKey(retryCandidate.target) === windowIdentityKey(nestedCandidate.target) &&
+                  retryCandidate.target.pid === activeBinding.target.pid &&
+                  retryCandidate.target.windowId === nestedCandidate.target.windowId &&
+                  sameSurfaceRef(activeBeforeReconcile, current.surfaceRegistry.activeSurface) &&
+                  isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                  isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile)) {
+                const retryParent = await discoverWindow(current.driver, current.label, activeBinding.target, signal);
+                if (sameWindowGeometry(retryParent.bounds, freshParent.bounds) &&
+                    sameWindowGeometry(retryParent.bounds, storedParent.bounds) &&
+                    sameSurfaceRef(activeBeforeReconcile, current.surfaceRegistry.activeSurface) &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                    isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile)) {
+                  const retryAttached = await readMacAttachedSheetState(
+                    current.driver, current.label, retryParent, retryCandidate, signal, asCuaWindowTarget(rootNative),
+                  );
+                  const stackStillCurrent = baseline.completed === true &&
+                    sameSurfaceRef(activeBeforeReconcile, current.surfaceRegistry.activeSurface) &&
+                    sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                    isExecutableSurfaceRef(current.surfaceRegistry, activeBeforeReconcile) &&
+                    current.surfaceRegistry.surfaces.get(activeBeforeReconcile.surfaceId)?.parentSurfaceId === rootRef.surfaceId &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, rootRef) &&
+                    windowIdentityKey(activeWindowBinding(current)?.target ?? { pid: 0, windowId: 0 }) ===
+                      windowIdentityKey(baseline.parentBinding.target) &&
+                    windowIdentityKey(retryCandidate.target) === windowIdentityKey(nestedCandidate.target) &&
+                    retryInventory.truncated !== true;
+                  if (retryAttached.status === "sheet" && stackStillCurrent) {
+                    nestedInventory = retryInventory;
+                    nestedCandidate = retryCandidate;
+                    freshParent = retryParent;
+                    attached = retryAttached;
+                  }
+                }
+              }
+            } catch (error) {
+              signal.throwIfAborted();
+              if (driverErrorDetails(error).tag === "Transport") {
+                current.active = false;
+                throw error;
+              }
+              // A failed fresh read cannot authorize stale geometry.
+            }
+          }
+        }
+        if (attached.status !== "sheet") {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", attached.status === "unknown"
+            ? attached.reason
+            : "completed nested-sheet action has no exact direct AXSheet proof");
+        }
+        const nestedTarget = asCuaWindowTarget(attached.evidence.nativeWindow);
+        if (windowIdentityKey(nestedTarget) !== windowIdentityKey(nestedCandidate.target)) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested AXSheet proof does not match the unique fresh candidate");
+        }
+        const pushed = pushChild(current.surfaceRegistry, activeBeforeReconcile, attached.evidence);
+        if (pushed.decision !== "applied") {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", pushed.reason ?? "nested AXSheet admission was refused");
+        }
+        current.surfaceRegistry = pushed.state;
+        current.windowBindings.set(windowIdentityKey(nestedTarget), { target: nestedTarget, bounds: nestedCandidate.bounds });
+        noteSurfaceTransition(current, "child_push");
+        current.windowRefs.clear();
+        this.clearTargetObservationState(current, activeBeforeReconcile);
+        current.firstObservedAfterActionWindows = { actionId: baseline.actionId, targetKeys: new Set([windowIdentityKey(nestedTarget)]) };
+        return [];
+      }
+    }
+    const reconciledSibling = await this.reconcileActiveTransientChild(current, signal);
+    if (reconciledSibling !== undefined) return [];
     if (baseline !== undefined && sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
         baseline.parentSurfaceRef.parentSurfaceId !== undefined &&
         current.surfaceRegistry.activeSurface?.surfaceId === baseline.parentSurfaceRef.parentSurfaceId &&
@@ -1300,7 +3100,12 @@ export class CuaDriverComputer implements Computer {
     current.newHandoffCandidates = [];
     current.newlySurfacedWindowKeys = new Set();
     const ownerBinding = activeWindowBinding(current);
-    if (baseline === undefined || ownerBinding === undefined || this.options.windowDeliveryMode !== "foreground") return [];
+    if (baseline === undefined || ownerBinding === undefined || this.options.windowDeliveryMode !== "foreground") {
+      if (confirmingUnknownAction) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "unknown action has no complete pre-action native baseline for safe foreground reconciliation");
+      }
+      return [];
+    }
     const ownerTarget = ownerBinding.target;
     if (!sameSurfaceRef(baseline.parentSurfaceRef, current.surfaceRegistry.activeSurface) ||
         !isCurrentSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef) ||
@@ -1308,7 +3113,35 @@ export class CuaDriverComputer implements Computer {
         windowIdentityKey(ownerTarget) !== windowIdentityKey(baseline.parentBinding.target)) {
       throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the pre-action parent Surface generation or exact binding is no longer active");
     }
-    const freshParentBinding = await discoverWindow(current.driver, current.label, baseline.parentBinding.target, signal);
+    let freshParentBinding: CuaWindowBinding;
+    try {
+      freshParentBinding = await discoverWindow(current.driver, current.label, baseline.parentBinding.target, signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      // No other discover/reconcile/unknown-action path is a recovery permit.
+      if (!(error instanceof WindowContractError) || error.code !== "WINDOW_TARGET_NOT_FOUND" ||
+          !baseline.completed || confirmingUnknownAction || baseline.parentSurfaceRef.parentSurfaceId !== undefined ||
+          !this.canUseManualWindowHandoff(current)) throw error;
+      current.missingParent = { sourceActionId: baseline.actionId, reason: "bound_window_missing", candidates: new Map(), epoch: 0, confirming: false };
+      const reopenState = current.reopenSavedDocument;
+      const saved = reopenState?.savedDocument;
+      if (reopenState !== undefined && saved !== undefined && baseline.sourceObservationId === saved.observationId &&
+          baseline.closeShortcut &&
+          saved.identity.windowId === baseline.parentBinding.target.windowId &&
+          reopenState.closedSourceActionId === undefined) {
+        try {
+          const currentFileIdentity = await fileIdentityPin(reopenState.path);
+          if (sameFileIdentity(currentFileIdentity, saved.fileIdentity)) {
+            reopenState.closedSourceActionId = baseline.actionId;
+          }
+        } catch {
+          // A missing source window is not a saved-document reopen permit
+          // unless the Host-pinned output is still the exact clean file.
+        }
+      }
+      this.clearTargetObservationState(current, baseline.parentSurfaceRef);
+      throw new BoundWindowMissingError(baseline.actionId);
+    }
     if (!sameWindowGeometry(freshParentBinding.bounds, baseline.parentBinding.bounds)) {
       const advanced = advanceSurfaceGeneration(current.surfaceRegistry, baseline.parentSurfaceRef);
       if (advanced.decision === "applied") {
@@ -1328,19 +3161,31 @@ export class CuaDriverComputer implements Computer {
       signal.throwIfAborted();
       const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
       signal.throwIfAborted();
-      const surfaced = inventory.windows.filter((window) => !baseline.targetKeys.has(windowIdentityKey(window.target)));
+      const rawSurfaced = inventory.windows.filter((window) => !baseline.targetKeys.has(windowIdentityKey(window.target)));
+      const surfaced = projectSelectableWindowCandidates(rawSurfaced, baseline.parentBinding.target, current.platform, undefined, (window) =>
+        {
+          const exactForeground = inventory.foregroundPid === window.target.pid &&
+            inventory.foregroundWindowId === window.target.windowId;
+          const exactOwner = window.ownerPid === baseline.parentBinding.target.pid &&
+            window.ownerWindowId === baseline.parentBinding.target.windowId;
+          if (!baseline.complete || baseline.truncated) return exactForeground && exactOwner;
+          const isHostAllowedPeer = targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets);
+          return exactOwner || isHostAllowedPeer && isRelevantManualWindowCandidate(
+            window,
+            baseline.parentBinding.target,
+            exactForeground ? { pid: inventory.foregroundPid!, windowId: inventory.foregroundWindowId! } : undefined,
+            this.options.windowSwitchAllowedTargets,
+            current.platform,
+          );
+        }, true).windows;
       // Peer authorization must not bypass owned-child classification. A
-      // partial exact-owner match (or trusted transient class with no owner)
-      // stays unknown, never a peer fallback. Same PID alone is not ownership.
+      // complete Win32 exact-owner row may be an auxiliary HWND in another
+      // process (for example a floating WPS toolbar); PID equality is not the
+      // owner relation. Missing/partial owner evidence remains manual.
       const potentialChildren = surfaced.filter((window) =>
-        window.target.pid === baseline.parentBinding.target.pid &&
-        (window.ownerPid === undefined || window.ownerPid === baseline.parentBinding.target.pid) &&
-        (window.ownerWindowId === undefined || window.ownerWindowId === baseline.parentBinding.target.windowId) &&
-        (window.ownerPid === baseline.parentBinding.target.pid ||
-          window.ownerWindowId === baseline.parentBinding.target.windowId ||
-          trustedWindowClassRootRole(window.windowClass) !== undefined));
-      if (potentialChildren.length > 0) {
-        const candidate = potentialChildren[0]!;
+        window.ownerPid === baseline.parentBinding.target.pid &&
+        window.ownerWindowId === baseline.parentBinding.target.windowId);
+      const admittedPotentialChildren = potentialChildren.filter((candidate) => {
         const parentSurfaceCurrent = sameSurfaceRef(baseline.parentSurfaceRef, current.surfaceRegistry.activeSurface) &&
           isCurrentSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef) &&
           isExecutableSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef) &&
@@ -1349,43 +3194,87 @@ export class CuaDriverComputer implements Computer {
           parent: baseline.parentBinding.target,
           candidate,
           inventory,
-          surfacedWindowCount: surfaced.length,
+          // Unrelated foreground peers and hidden/background helper rows are
+          // not part of the exact owner's transient stack. Stage one and the
+          // unique-highest proof below classify the exact child itself.
+          surfacedWindowCount: 1,
           baselineComplete: baseline.complete,
           baselineTruncated: baseline.truncated,
           parentSurfaceCurrent,
         });
-        if (stageOne.decision !== "admitted") {
-          throw new WindowContractError(stageOne.code, stageOne.reason);
-        }
-        return { surfaced, complete: inventory.complete, sourceInventory: inventory, potentialOwnedTransientChild: candidate };
-      }
-      if (surfaced.some((window) => !targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets))) {
-        throw new WindowContractError("WINDOW_SCOPE_REQUIRED", "newly surfaced windows are outside the host-authorized target scope");
+        return stageOne.decision === "admitted";
+      });
+      if (admittedPotentialChildren.length === 1) {
+        return {
+          surfaced,
+          complete: inventory.complete,
+          sourceInventory: inventory,
+          potentialOwnedTransientChild: admittedPotentialChildren[0]!,
+        };
       }
       return { surfaced, complete: inventory.complete, sourceInventory: inventory };
     };
-    let inventory = await readDiff();
-    // Some native dialogs appear just after the initiating tool returns. One
-    // short abort-aware poll catches that case without a long pause or retry.
-    if (inventory.surfaced.length === 0 && inventory.complete && baseline.complete) {
-      await waitWithAbort(80, signal);
+    let inventory: Awaited<ReturnType<typeof readDiff>>;
+    try {
       inventory = await readDiff();
+    } catch (error) {
+      signal.throwIfAborted();
+      if (driverErrorDetails(error).tag === "Transport") current.active = false;
+      current.newHandoffCandidates = [];
+      current.newlySurfacedWindowKeys = new Set();
+      current.proactiveHandoffCandidatesReady = false;
+      if (confirmingUnknownAction) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "post-action native foreground diff could not be verified");
+      }
+      return [];
+    }
+    // Some native dialogs appear just after the initiating tool returns. One
+    // short abort-aware read refreshes the post-action view. An incomplete
+    // result never proves absence; Runtime still captures the exact active
+    // target below before another model turn.
+    if (inventory.surfaced.length === 0 && baseline.complete) {
+      await waitWithAbort(80, signal);
+      try {
+        inventory = await readDiff();
+      } catch (error) {
+        signal.throwIfAborted();
+        if (driverErrorDetails(error).tag === "Transport") current.active = false;
+        current.newHandoffCandidates = [];
+        current.newlySurfacedWindowKeys = new Set();
+        current.proactiveHandoffCandidatesReady = false;
+        if (confirmingUnknownAction) {
+          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "post-action native foreground recheck could not be verified");
+        }
+        return [];
+      }
+    }
+    const transientOwner = activePeerTarget(current);
+    const activeWindowRow = inventory.sourceInventory.windows.find((window) =>
+      windowIdentityKey(window.target) === windowIdentityKey(ownerBinding.target));
+    const hasOwnedSiblingUnderTransientOwner = inventory.complete && transientOwner !== undefined &&
+      inventory.sourceInventory.windows.some((window) =>
+        windowIdentityKey(window.target) !== windowIdentityKey(ownerBinding.target) &&
+        window.ownerPid === transientOwner.pid && window.ownerWindowId === transientOwner.windowId &&
+        window.isOnScreen === true && window.minimized !== true &&
+        (activeWindowRow?.isOnScreen !== true || activeWindowRow.zIndex === undefined || window.zIndex === undefined ||
+          window.zIndex >= activeWindowRow.zIndex));
+    if (hasOwnedSiblingUnderTransientOwner) {
+      const reconciled = await this.reconcileActiveTransientChild(current, signal);
+      if (reconciled !== undefined) return [];
     }
     const surfaced = inventory.surfaced;
+    const firstObservedAfterActionKeys = inventory.sourceInventory.windows
+      .filter((window) => window.isOnScreen === true && !baseline.targetKeys.has(windowIdentityKey(window.target)))
+      .map((window) => windowIdentityKey(window.target));
+    current.firstObservedAfterActionWindows = firstObservedAfterActionKeys.length > 0
+      ? { actionId: baseline.actionId, targetKeys: new Set(firstObservedAfterActionKeys) }
+      : undefined;
     const exactInventoryForAutoPush = baseline.complete && inventory.complete;
-    if (!exactInventoryForAutoPush && surfaced.length === 0) {
-      throw new WindowContractError("WINDOW_INVENTORY_UNKNOWN", "window inventory was incomplete or truncated; popup state requires manual handling");
-    }
     let pushedChild = false;
     const supportsTransientUia = this.options.grounding === "uia-catalog-v1" || this.options.grounding === "hybrid-catalog-v1";
-    const provisionalCandidate = inventory.potentialOwnedTransientChild;
-    const provisionalClassRoot = trustedWindowClassRootRole(provisionalCandidate?.windowClass);
-    const canProveWithoutUia = provisionalClassRoot === "dialog" ||
-      provisionalClassRoot === "menu" && inventory.complete && baseline.complete;
-    if (provisionalCandidate !== undefined && !supportsTransientUia && !canProveWithoutUia) {
-      throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "owned transient child has no trusted root proof; candidate is withheld from the peer picker");
-    }
+    const provisionalCandidate = current.platform === "darwin" ? undefined : inventory.potentialOwnedTransientChild;
     const parentRef = current.surfaceRegistry.activeSurface;
+    let nonBlockingAuxiliaryKey: string | undefined;
     if (exactInventoryForAutoPush && supportsTransientUia && parentRef !== undefined && surfaced.length === 0) {
       const overlayVerification = await verifySameHwndOverlay(current.driver, current.label, ownerTarget, signal);
       if (overlayVerification.status === "unknown" && overlayVerification.candidateObserved) {
@@ -1404,43 +3293,145 @@ export class CuaDriverComputer implements Computer {
         }
       }
     }
-    if (!pushedChild && (supportsTransientUia || canProveWithoutUia) && surfaced.length === 1 && parentRef !== undefined && provisionalCandidate !== undefined) {
-      const candidate = surfaced[0]!;
+    if (!pushedChild && current.platform === "darwin" && this.options.windowSwitch === "opened-windows-v1" &&
+        this.options.windowDeliveryMode === "foreground" && parentRef !== undefined &&
+        baseline.truncated !== true && inventory.sourceInventory.truncated !== true &&
+        sameSurfaceRef(parentRef, baseline.parentSurfaceRef) && isCurrentSurfaceRef(current.surfaceRegistry, parentRef) &&
+        isExecutableSurfaceRef(current.surfaceRegistry, parentRef)) {
+      const rawFreshRows = inventory.sourceInventory.windows.filter((window) =>
+        !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+      const exactInventoryRow = rawFreshRows.length === 1 ? rawFreshRows[0] : undefined;
+      if (exactInventoryRow !== undefined && exactInventoryRow.target.pid === ownerTarget.pid &&
+          exactInventoryRow.target.windowId !== ownerTarget.windowId) {
+        let candidate = exactInventoryRow;
+        let attached = await readMacAttachedSheetState(current.driver, current.label, freshParentBinding, exactInventoryRow, signal);
+        if (attached.status === "geometry_unstable") {
+          // AX and WindowServer can publish the same native sheet at slightly
+          // different positions while the system panel is settling. Retry one
+          // bounded, read-only cycle; never repeat the action or reuse proof.
+          await waitWithAbort(80, signal);
+          const parentStillCurrent = sameSurfaceRef(parentRef, current.surfaceRegistry.activeSurface) &&
+            sameSurfaceRef(parentRef, baseline.parentSurfaceRef) &&
+            isCurrentSurfaceRef(current.surfaceRegistry, parentRef) &&
+            isExecutableSurfaceRef(current.surfaceRegistry, parentRef) &&
+            windowIdentityKey(activeWindowBinding(current)?.target ?? { pid: 0, windowId: 0 }) ===
+              windowIdentityKey(baseline.parentBinding.target);
+          if (parentStillCurrent) {
+            try {
+              const retryParentBinding = await discoverWindow(current.driver, current.label, baseline.parentBinding.target, signal);
+              if (sameWindowGeometry(retryParentBinding.bounds, baseline.parentBinding.bounds)) {
+                const retryInventory = await readDiff();
+                const retryRows = retryInventory.sourceInventory.windows.filter((window) =>
+                  !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+                const retryCandidate = retryRows.length === 1 ? retryRows[0] : undefined;
+                if (retryCandidate !== undefined &&
+                    windowIdentityKey(retryCandidate.target) === windowIdentityKey(candidate.target) &&
+                    retryCandidate.target.pid === ownerTarget.pid && retryInventory.sourceInventory.truncated !== true &&
+                    sameSurfaceRef(parentRef, current.surfaceRegistry.activeSurface) &&
+                    isCurrentSurfaceRef(current.surfaceRegistry, parentRef) && isExecutableSurfaceRef(current.surfaceRegistry, parentRef)) {
+                  const retryAttached = await readMacAttachedSheetState(
+                    current.driver, current.label, retryParentBinding, retryCandidate, signal,
+                  );
+                  if (retryAttached.status === "sheet") {
+                    freshParentBinding = retryParentBinding;
+                    inventory = retryInventory;
+                    candidate = retryCandidate;
+                    attached = retryAttached;
+                  }
+                }
+              }
+            } catch (error) {
+              signal.throwIfAborted();
+              if (driverErrorDetails(error).tag === "Transport") {
+                current.active = false;
+                throw error;
+              }
+              // A failed fresh read cannot authorize the old geometry.
+            }
+          }
+        }
+        if (attached.status === "sheet") {
+          const proofInventory: CuaWindowInventory = {
+            windows: inventory.sourceInventory.windows.map((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target)
+              ? { ...window, ownerPid: ownerTarget.pid, ownerWindowId: ownerTarget.windowId }
+              : window),
+            complete: false,
+            completeAttestation: "negative",
+            ...(inventory.sourceInventory.truncated === undefined ? {} : { truncated: inventory.sourceInventory.truncated }),
+            ...(inventory.sourceInventory.source === undefined ? {} : { source: inventory.sourceInventory.source }),
+            foregroundPid: candidate.target.pid,
+            foregroundWindowId: candidate.target.windowId,
+          };
+          const enrichedCandidate = {
+            ...candidate,
+            ownerPid: ownerTarget.pid,
+            ownerWindowId: ownerTarget.windowId,
+          };
+          const stageOne = assessOwnedTransientWindowAdmission({
+            parent: ownerTarget,
+            candidate: enrichedCandidate,
+            inventory: proofInventory,
+            surfacedWindowCount: rawFreshRows.length,
+            baselineComplete: false,
+            baselineTruncated: false,
+            parentSurfaceCurrent: true,
+          });
+          if (stageOne.decision === "admitted") {
+            const pushed = pushChild(current.surfaceRegistry, parentRef, attached.evidence);
+            if (pushed.decision === "applied") {
+              current.surfaceRegistry = pushed.state;
+              noteSurfaceTransition(current, "child_push");
+              pushedChild = true;
+              current.windowBindings.set(windowIdentityKey(enrichedCandidate.target), {
+                target: enrichedCandidate.target,
+                bounds: enrichedCandidate.bounds,
+              });
+              current.windowRefs.clear();
+              this.clearTargetObservationState(current, parentRef);
+            } else if (pushed.decision === "manual") {
+              throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", pushed.reason);
+            }
+          }
+        }
+      }
+    }
+    if (!pushedChild && parentRef !== undefined && provisionalCandidate !== undefined) {
+      const candidate = provisionalCandidate;
       const stageOne = assessOwnedTransientWindowAdmission({
         parent: ownerTarget,
         candidate,
         inventory: inventory.sourceInventory,
-        surfacedWindowCount: surfaced.length,
+        surfacedWindowCount: 1,
         baselineComplete: baseline.complete,
         baselineTruncated: baseline.truncated,
         parentSurfaceCurrent: sameSurfaceRef(baseline.parentSurfaceRef, current.surfaceRegistry.activeSurface) &&
           isCurrentSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef) &&
           isExecutableSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef),
       });
-      if (stageOne.decision !== "admitted") {
-        if (inventory.potentialOwnedTransientChild !== undefined) {
-          throw new WindowContractError(stageOne.code, `${stageOne.reason}; candidate is withheld from the peer picker`);
-        }
-      }
       let evidence: TransientChildEvidence | undefined;
+      let rootVerification: TransientRootVerification | undefined;
       if (stageOne.decision === "admitted") {
         try {
-          evidence = await verifyTransientNativeChildRoot(
+          rootVerification = await verifyTransientNativeChildRoot(
             current.driver, current.label, ownerTarget, candidate, inventory.sourceInventory, baseline.complete,
-            supportsTransientUia, signal,
+            canVerifyExactTransientRoot(inventory.sourceInventory), signal,
           );
+          if (rootVerification.status === "verified") {
+            evidence = rootVerification.evidence;
+          } else if (rootVerification.status === "unavailable") {
+            evidence = win32RelationshipChildEvidence(ownerTarget, candidate, inventory.sourceInventory);
+          }
         } catch (error) {
           signal.throwIfAborted();
-          if (driverErrorDetails(error).tag === "Transport") current.active = false;
-          if (inventory.potentialOwnedTransientChild !== undefined) {
-            throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "owned transient child root proof errored; candidate is withheld from the peer picker");
+          if (driverErrorDetails(error).tag === "Transport") {
+            current.active = false;
+            throw error;
           }
-          throw error;
+          // The action receipt is already known. Optional UIA failure does
+          // not erase the exact Win32 owner/foreground relationship proof.
+          rootVerification = { status: "unavailable", queryFailed: true };
+          evidence = win32RelationshipChildEvidence(ownerTarget, candidate, inventory.sourceInventory);
         }
-      }
-      if (inventory.potentialOwnedTransientChild !== undefined &&
-          (evidence === undefined || evidence.kind !== "native_window")) {
-        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "owned transient child root proof failed or was incomplete; candidate is withheld from the peer picker");
       }
       if (evidence !== undefined) {
         const pushed = pushChild(current.surfaceRegistry, parentRef, evidence);
@@ -1454,25 +3445,54 @@ export class CuaDriverComputer implements Computer {
             current.windowBindings.set(windowIdentityKey(candidate.target), { target: candidate.target, bounds: candidate.bounds });
           }
         } else if (pushed.decision === "manual") {
-          if (inventory.potentialOwnedTransientChild !== undefined) {
-            throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", `${pushed.reason}; candidate is withheld from the peer picker`);
-          }
-          // An in-scope, non-child candidate may still use the ordinary Host-confirmed picker.
-        } else if (inventory.potentialOwnedTransientChild !== undefined) {
-          throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", `${pushed.reason}; candidate is withheld from the peer picker`);
+          // Keep the Run alive and route the exact candidate through the
+          // existing explicit Host picker when child admission is ambiguous.
         }
+      } else if (stageOne.decision === "admitted" && rootVerification?.status === "unavailable" && rootVerification.queryFailed !== true &&
+          rootVerification.rootRole === "window" &&
+          hasExactOwnedAuxiliaryStackEvidence(ownerTarget, candidate, inventory.sourceInventory)) {
+        // A non-modal owned helper (for example a floating selection toolbar)
+        // may sit above the parent without taking foreground. Keep the parent
+        // Surface active and continue with a fresh parent observation; do not
+        // push a modal child or interrupt the Run for Host handoff.
+        nonBlockingAuxiliaryKey = windowIdentityKey(candidate.target);
+        this.markExistingTransientRootInspected(current, parentRef);
       }
     }
-    const handoffWindows = pushedChild ? [] : surfaced;
+    const handoffWindows = pushedChild ? [] : surfaced
+      .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets) ||
+        window.ownerPid === ownerTarget.pid && window.ownerWindowId === ownerTarget.windowId)
+      .filter((window) => windowIdentityKey(window.target) !== nonBlockingAuxiliaryKey);
     const candidates = handoffWindows.map((window) => ({
-      pid: window.target.pid,
-      windowId: window.target.windowId,
-      ...(window.appName === undefined ? {} : { appName: window.appName }),
-      ...(window.title === undefined ? {} : { title: window.title }),
-    }));
+        pid: window.target.pid,
+        windowId: window.target.windowId,
+        ...(window.appName === undefined ? {} : { appName: window.appName }),
+        ...(window.title === undefined ? {} : { title: window.title }),
+      }));
     current.newHandoffCandidates = candidates;
     current.newlySurfacedWindowKeys = new Set(candidates.map(windowIdentityKey));
     current.proactiveHandoffCandidatesReady = candidates.length > 0;
+    if (confirmingUnknownAction && candidates.length === 0) {
+      const activeRef = current.surfaceRegistry.activeSurface;
+      const exactParentRows = inventory.sourceInventory.windows.filter((window) =>
+        windowIdentityKey(window.target) === windowIdentityKey(ownerTarget));
+      const exactParent = exactParentRows[0];
+      if (inventory.sourceInventory.source !== "win32_relationship_probe" ||
+          !inventory.sourceInventory.complete || inventory.sourceInventory.truncated === true ||
+          !baseline.complete || baseline.truncated || activeRef === undefined ||
+          !sameSurfaceRef(activeRef, baseline.parentSurfaceRef) ||
+          !isCurrentSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef) ||
+          !isExecutableSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef) ||
+          windowIdentityKey(ownerBinding.target) !== windowIdentityKey(baseline.parentBinding.target) ||
+          exactParentRows.length !== 1 || exactParent?.isOnScreen !== true || exactParent.minimized === true ||
+          !sameWindowGeometry(exactParent.bounds, baseline.parentBinding.bounds) ||
+          !sameWindowGeometry(exactParent.bounds, freshParentBinding.bounds) ||
+          inventory.sourceInventory.foregroundPid !== ownerTarget.pid ||
+          inventory.sourceInventory.foregroundWindowId !== ownerTarget.windowId) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the original exact native Surface was not freshly confirmed as the stable foreground");
+      }
+      current.unknownActionReconfirmedSurfaceRef = { ...activeRef };
+    }
     return candidates;
   }
 
@@ -1483,16 +3503,94 @@ export class CuaDriverComputer implements Computer {
       throw new Error("window handoff is available only for an explicitly bound native window");
     }
     validateWindowTarget(candidate);
+    const missing = current.missingParent;
+    if (missing?.reason !== "bound_window_missing" && this.options.hybridNativeWebDocumentCapability !== undefined &&
+        windowIdentityKey(candidate) === windowIdentityKey(this.options.hybridNativeWebDocumentCapability.recoveryTarget)) {
+      throw new WindowContractError("WINDOW_HANDOFF_STALE", "the Host recovery blank is available only after the exact saved-document close boundary");
+    }
+    if (missing !== undefined) {
+      const issued = candidate.handoffToken === undefined ? undefined : missing.candidates.get(candidate.handoffToken);
+      if (missing.confirming || issued === undefined || issued.pid !== candidate.pid || issued.windowId !== candidate.windowId ||
+          issued.title !== candidate.title || issued.appName !== candidate.appName ||
+          !targetAllowedByHostScope(candidate, this.options.windowSwitchAllowedTargets)) {
+        throw new WindowContractError("WINDOW_HANDOFF_STALE", "missing-window candidate requires its current refresh token and exact host scope");
+      }
+      // Explicit Host confirmation grants only this exact selected peer, not
+      // the undefined broad inventory scope or an old-parent child bypass.
+      missing.confirming = true; // Serialize refresh/confirm before the first await or side effect.
+      try {
+      if (this.options.recoverBoundWindowMissing === true && missing.reason === "bound_window_missing") {
+        const pinned = current.recoveryWindowIdentity;
+        const freshInventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+        const freshMatches = freshInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate));
+        if (pinned === undefined || freshInventory.truncated === true || freshMatches.length !== 1 ||
+            !samePinnedRecoveryIdentity(pinned, freshMatches[0]!)) {
+          throw new WindowContractError("WINDOW_HANDOFF_STALE", "Host-pinned recovery window identity changed after listing; no activation was attempted");
+        }
+      }
+      const result = await this.transitionWindow(current, candidate, signal, {
+        onScreenOnly: true, staleCode: "WINDOW_HANDOFF_STALE", authorizedTargets: [{ pid: candidate.pid, windowId: candidate.windowId }],
+        missingPermit: { boundary: missing, epoch: missing.epoch, issued },
+        ...(issued.appName === undefined ? {} : { expectedAppName: issued.appName }),
+        ...(issued.title === undefined ? {} : { expectedTitle: issued.title }),
+      });
+      signal.throwIfAborted();
+      if (current.missingParent !== missing || missing.candidates.get(candidate.handoffToken!) !== issued) {
+        throw new WindowContractError("WINDOW_HANDOFF_STALE", "missing-window confirmation expired during transition");
+      }
+      const reopenState = current.reopenSavedDocument;
+      if (reopenState !== undefined && missing.reason === "bound_window_missing" &&
+          missing.sourceActionId === reopenState.closedSourceActionId && reopenState.savedDocument !== undefined &&
+          windowIdentityKey(candidate) === windowIdentityKey(this.options.recoveryWindowTarget!)) {
+        const recoveryBinding = activeWindowBinding(current);
+        const recoveryProof = recoveryBinding === undefined
+          ? undefined
+          : await queryDocumentIdentity(current.driver, current.label, recoveryBinding.target, recoveryBinding.bounds,
+            reopenState.canonicalExecutableUrl, signal);
+        if (recoveryProof === undefined || !sameApplicationProcess(recoveryProof.identity, reopenState.primaryIdentity)) {
+          throw new WindowContractError("WINDOW_HANDOFF_STALE", "recovery blank is not in the pinned TextEdit process");
+        }
+        reopenState.recoveryReady = true;
+      }
+      delete current.missingParent;
+      return result;
+      } finally { missing.confirming = false; }
+    }
     if (binding.target.pid === candidate.pid && binding.target.windowId === candidate.windowId) {
       throw new Error("window handoff target must differ from the current window");
+    }
+    const isNewlySurfacedForCurrentAction = current.newlySurfacedWindowKeys.has(windowIdentityKey(candidate));
+    let authorizedTargets = this.options.windowSwitchAllowedTargets;
+    let expectedOwner: CuaWindowTarget | undefined;
+    if (!targetAllowedByHostScope(candidate, authorizedTargets)) {
+      // A user-confirmed exact-owned child is part of the current parent's
+      // interaction scope. Recheck the live parent and the child's exact
+      // owner/visibility before temporarily authorizing only this HWND.
+      const activeRef = current.surfaceRegistry.activeSurface;
+      if (activeRef?.parentSurfaceId !== undefined) {
+        throw new WindowContractError("WINDOW_SWITCH_UNAUTHORIZED", "an owned child cannot be selected while another modal child is active");
+      }
+      const freshParent = await discoverWindow(current.driver, current.label, binding.target, signal);
+      if (!sameWindowGeometry(freshParent.bounds, binding.bounds)) {
+        throw new WindowContractError("WINDOW_HANDOFF_STALE", "the current parent geometry changed before the owned-child selection");
+      }
+      const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+      const ownedRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate));
+      if (ownedRows.length !== 1 || ownedRows[0]!.ownerPid !== binding.target.pid ||
+          ownedRows[0]!.ownerWindowId !== binding.target.windowId || ownedRows[0]!.isOnScreen !== true ||
+          ownedRows[0]!.minimized === true) {
+        throw new WindowContractError("WINDOW_SWITCH_UNAUTHORIZED", "the selected window is not a fresh visible exact-owned child of the current target");
+      }
+      authorizedTargets = [...(authorizedTargets ?? []), { pid: candidate.pid, windowId: candidate.windowId }];
+      expectedOwner = { pid: binding.target.pid, windowId: binding.target.windowId };
     }
     return this.transitionWindow(current, candidate, signal, {
       onScreenOnly: true,
       staleCode: "WINDOW_HANDOFF_STALE",
       staleMessage: "window handoff candidate changed before confirmation",
-      ...(this.options.windowSwitchAllowedTargets === undefined
-        ? {}
-        : { authorizedTargets: this.options.windowSwitchAllowedTargets }),
+      ...(authorizedTargets === undefined ? {} : { authorizedTargets }),
+      ...(expectedOwner === undefined ? {} : { expectedOwner }),
+      ...(isNewlySurfacedForCurrentAction ? { classifyOwnedChild: true } : {}),
       ...(candidate.appName === undefined ? {} : { expectedAppName: candidate.appName }),
       ...(candidate.title === undefined ? {} : { expectedTitle: candidate.title }),
     });
@@ -1513,8 +3611,11 @@ export class CuaDriverComputer implements Computer {
       readonly staleMessage?: string;
       readonly expectedAppName?: string;
       readonly expectedTitle?: string;
+      readonly expectedOwner?: CuaWindowTarget;
+      readonly classifyOwnedChild?: boolean;
       readonly authorizedTargets?: readonly CuaWindowTarget[];
       readonly selectedSurfaceRef?: SurfaceRef;
+      readonly missingPermit?: { readonly boundary: NonNullable<PrivateSession["missingParent"]>; readonly epoch: number; readonly issued: ComputerWindowCandidate };
     },
   ): Promise<ComputerSessionDescriptor> {
     validateWindowTarget(target);
@@ -1522,6 +3623,20 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError("WINDOW_SWITCH_UNAUTHORIZED", "selected window is outside the host-authorized window scope");
     }
     const activeRefBefore = current.surfaceRegistry.activeSurface;
+    const assertTransitionCurrent = (): void => {
+      const permit = options.missingPermit;
+      if (permit === undefined) return; // Do not narrow historical non-missing recovery paths.
+      signal.throwIfAborted();
+      if (this.session !== current || !current.active || activeRefBefore === undefined ||
+          !sameSurfaceRef(activeRefBefore, current.surfaceRegistry.activeSurface) ||
+          !isExecutableSurfaceRef(current.surfaceRegistry, activeRefBefore)) {
+        throw new WindowContractError(options.staleCode, "target transition session or Surface is no longer current");
+      }
+      if (current.missingParent !== permit.boundary || !permit.boundary.confirming ||
+          permit.boundary.epoch !== permit.epoch || permit.boundary.candidates.get(permit.issued.handoffToken!) !== permit.issued) {
+        throw new WindowContractError(options.staleCode, "missing-window confirmation is no longer current");
+      }
+    };
     const activeBefore = activeSurface(current);
     if (activeBefore?.parentSurfaceId !== undefined &&
         (activeBefore.kind === "overlay" || activeBefore.kind === "native_window")) {
@@ -1531,7 +3646,13 @@ export class CuaDriverComputer implements Computer {
     const selectedIsCurrent = activePeerTarget(current) !== undefined &&
       windowIdentityKey(activePeerTarget(current)!) === windowIdentityKey(target);
     signal.throwIfAborted();
-    const windows = await listWindowTargets(current.driver, current.label, signal, undefined, options.onScreenOnly, this.options.windowRelationshipProbe);
+    const transitionInventory = options.expectedOwner === undefined && options.classifyOwnedChild !== true
+      ? undefined
+      : await listWindowInventory(current.driver, current.label, signal, undefined, options.onScreenOnly, this.options.windowRelationshipProbe);
+    const windows = transitionInventory?.windows ?? await listWindowTargets(
+      current.driver, current.label, signal, undefined, options.onScreenOnly, this.options.windowRelationshipProbe,
+    );
+    assertTransitionCurrent();
     const fresh = windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
     if (fresh === undefined && selectedIsCurrent) {
       if (activeRefBefore !== undefined) {
@@ -1547,13 +3668,57 @@ export class CuaDriverComputer implements Computer {
         options.expectedTitle !== undefined && options.expectedTitle !== fresh.title) {
       throw new WindowContractError(options.staleCode, options.staleMessage ?? "selected window identity changed before target transition");
     }
+    if (options.expectedOwner !== undefined) {
+      const ownerRows = windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(options.expectedOwner!));
+      const childRows = windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+      const parentBinding = activeWindowBinding(current);
+      const exactForeground = transitionInventory?.foregroundPid === target.pid &&
+        transitionInventory.foregroundWindowId === target.windowId;
+      if (transitionInventory === undefined || ownerRows.length !== 1 || childRows.length !== 1 || parentBinding === undefined ||
+          !sameWindowGeometry(ownerRows[0]!.bounds, parentBinding.bounds) || ownerRows[0]!.isOnScreen !== true ||
+          ownerRows[0]!.minimized === true || childRows[0]!.ownerPid !== options.expectedOwner.pid ||
+          childRows[0]!.ownerWindowId !== options.expectedOwner.windowId || childRows[0]!.isOnScreen !== true ||
+          childRows[0]!.minimized === true || (!transitionInventory.complete && !exactForeground)) {
+        throw new WindowContractError(options.staleCode, "fresh inventory no longer proves the current parent geometry and exact visible child owner relationship");
+      }
+    }
+    let confirmedChildEvidence: Extract<TransientChildEvidence, { readonly kind: "native_window" }> | undefined;
+    if (options.classifyOwnedChild === true && transitionInventory !== undefined && activeRefBefore !== undefined &&
+        activeBefore?.kind === "native_window" && activeBefore.parentSurfaceId === undefined && activeBindingBefore !== undefined) {
+      const owner = activeBindingBefore.target;
+      const ownerRows = transitionInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(owner));
+      const childRows = transitionInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+      const child = childRows.length === 1 ? childRows[0] : undefined;
+      const exactForeground = transitionInventory.foregroundPid === target.pid && transitionInventory.foregroundWindowId === target.windowId;
+      const trustedCrossProcessOwner = target.pid === owner.pid ||
+        transitionInventory.source === "win32_relationship_probe" && transitionInventory.complete && transitionInventory.truncated !== true;
+      if (ownerRows.length === 1 && child !== undefined && sameWindowGeometry(ownerRows[0]!.bounds, activeBindingBefore.bounds) &&
+          child.ownerPid === owner.pid && child.ownerWindowId === owner.windowId && child.isOnScreen === true &&
+          child.minimized !== true && exactForeground && trustedCrossProcessOwner) {
+        confirmedChildEvidence = win32OwnedChildEvidence(owner, child, transitionInventory, isCurrentSurfaceRef(current.surfaceRegistry, activeRefBefore));
+        if (confirmedChildEvidence === undefined) {
+          const root = await verifyTransientNativeChildRoot(
+            current.driver,
+            current.label,
+            owner,
+            child,
+            transitionInventory,
+            transitionInventory.complete,
+            canVerifyExactTransientRoot(transitionInventory),
+            signal,
+          );
+          if (root.status === "verified") confirmedChildEvidence = root.evidence;
+        }
+      }
+    }
     if (selectedIsCurrent) {
       throw new WindowContractError("WINDOW_ALREADY_CURRENT", "selected window is already the current target");
     }
     current.windowRefs.clear();
 
+    assertTransitionCurrent();
     let targetSurfaceRef = options.selectedSurfaceRef;
-    if (targetSurfaceRef === undefined) {
+    if (targetSurfaceRef === undefined && confirmedChildEvidence === undefined) {
       const registered = registerNativePeer(current.surfaceRegistry, asNativeWindowIdentity(target));
       if (registered.decision !== "applied") {
         throw new WindowContractError(options.staleCode, registered.reason);
@@ -1561,29 +3726,32 @@ export class CuaDriverComputer implements Computer {
       current.surfaceRegistry = registered.state;
       targetSurfaceRef = registered.value;
     }
-    if (!isCurrentSurfaceRef(current.surfaceRegistry, targetSurfaceRef)) {
+    if (targetSurfaceRef !== undefined && !isCurrentSurfaceRef(current.surfaceRegistry, targetSurfaceRef)) {
       throw new WindowContractError(options.staleCode, options.staleMessage ?? "selected Surface generation changed before target transition");
     }
 
     let activationAttempted = false;
     if (this.options.windowDeliveryMode === "foreground") {
-      signal.throwIfAborted();
+      assertTransitionCurrent();
       activationAttempted = true;
       try {
         await bringWindowToFrontOnce(current.driver, current.label, target, signal);
       } catch (error) {
-        this.invalidateUnknownTargetTransition(current, activeRefBefore, targetSurfaceRef);
+        if (targetSurfaceRef === undefined) this.invalidateUnknownTargetTransition(current, activeRefBefore, undefined);
+        else this.invalidateUnknownTargetTransition(current, activeRefBefore, targetSurfaceRef);
         throw error;
       }
     }
 
     let capture: Awaited<ReturnType<typeof captureWindowWithRetry>>;
     try {
-      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, this.options.platform ?? current.platform ?? process.platform);
-      signal.throwIfAborted();
+      assertTransitionCurrent();
+      capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.options.windowCaptureRetry, current.platform);
+      assertTransitionCurrent();
     } catch (error) {
       if (activationAttempted) {
-        this.invalidateUnknownTargetTransition(current, activeRefBefore, targetSurfaceRef);
+        if (targetSurfaceRef === undefined) this.invalidateUnknownTargetTransition(current, activeRefBefore, undefined);
+        else this.invalidateUnknownTargetTransition(current, activeRefBefore, targetSurfaceRef);
       }
       throw error;
     }
@@ -1591,16 +3759,26 @@ export class CuaDriverComputer implements Computer {
     // Activation may change foreground focus, but sends no application content
     // input. Commit only after a fresh exact capture, with the new viewport and
     // no references from the old UI.
-    const advanced = advanceSurfaceGeneration(current.surfaceRegistry, targetSurfaceRef);
-    if (advanced.decision !== "applied") throw new WindowContractError(options.staleCode, advanced.reason);
-    const activated = activatePeer(advanced.state, advanced.value, {
-      nativeWindow: asNativeWindowIdentity(capture.binding.target),
-      identityVerified: true,
-      captureVerified: true,
-    });
-    if (activated.decision !== "applied") throw new WindowContractError(options.staleCode, activated.reason);
-    current.surfaceRegistry = activated.state;
-    noteSurfaceTransition(current, "peer_switch");
+    if (confirmedChildEvidence !== undefined && activeRefBefore !== undefined) {
+      const pushed = pushChild(current.surfaceRegistry, activeRefBefore, confirmedChildEvidence);
+      if (pushed.decision !== "applied") throw new WindowContractError(options.staleCode, pushed.reason);
+      current.surfaceRegistry = pushed.state;
+      targetSurfaceRef = pushed.value;
+      noteSurfaceTransition(current, "child_push");
+    } else {
+      if (targetSurfaceRef === undefined) throw new WindowContractError(options.staleCode, "selected Surface could not be registered");
+      const advanced = advanceSurfaceGeneration(current.surfaceRegistry, targetSurfaceRef);
+      if (advanced.decision !== "applied") throw new WindowContractError(options.staleCode, advanced.reason);
+      const activated = activatePeer(advanced.state, advanced.value, {
+        nativeWindow: asNativeWindowIdentity(capture.binding.target),
+        identityVerified: true,
+        captureVerified: true,
+      });
+      if (activated.decision !== "applied") throw new WindowContractError(options.staleCode, activated.reason);
+      current.surfaceRegistry = activated.state;
+      targetSurfaceRef = activated.value;
+      noteSurfaceTransition(current, "peer_switch");
+    }
     current.windowBindings.set(windowIdentityKey(capture.binding.target), capture.binding);
     if (managedBrowserTargetForBinding(current, capture.binding) && current.managedBrowserTarget !== undefined) {
       current.browserTarget = current.managedBrowserTarget;
@@ -1624,13 +3802,13 @@ export class CuaDriverComputer implements Computer {
   private invalidateUnknownTargetTransition(
     current: PrivateSession,
     previous: SurfaceRef | undefined,
-    target: SurfaceRef,
+    target: SurfaceRef | undefined,
   ): void {
     if (previous !== undefined && isCurrentSurfaceRef(current.surfaceRegistry, previous)) {
       const invalidated = markSurfaceUnknown(current.surfaceRegistry, previous);
       if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
     }
-    if (isCurrentSurfaceRef(current.surfaceRegistry, target)) {
+    if (target !== undefined && isCurrentSurfaceRef(current.surfaceRegistry, target)) {
       const invalidated = markSurfaceUnknown(current.surfaceRegistry, target);
       if (invalidated.decision === "applied") current.surfaceRegistry = invalidated.state;
     }
@@ -1656,6 +3834,7 @@ export class CuaDriverComputer implements Computer {
     this.latestObservationId = undefined;
     current.visibleWindowBaseline = undefined;
     current.preActionWindowBaseline = undefined;
+    current.firstObservedAfterActionWindows = undefined;
     current.newlySurfacedWindowKeys = new Set();
     current.newHandoffCandidates = [];
     current.foregroundMismatchWindowId = undefined;
@@ -1715,7 +3894,9 @@ export class CuaDriverComputer implements Computer {
         selectedSurfaceRef: selectedRef,
         ...(this.options.windowSwitchAllowedTargets === undefined
           ? {}
-          : { authorizedTargets: this.options.windowSwitchAllowedTargets }),
+          : { authorizedTargets: this.hasHybridCapability()
+            ? [...this.options.windowSwitchAllowedTargets, this.options.hybridNativeWebDocumentCapability!.managedBrowserTarget.windowTarget]
+            : this.options.windowSwitchAllowedTargets }),
       });
       return { actionId: action.actionId, status: "completed", sessionAfter };
     } catch (error) {
@@ -1731,6 +3912,167 @@ export class CuaDriverComputer implements Computer {
     }
   }
 
+  private hasHybridCapability(): boolean {
+    return this.options.hybridNativeWebDocumentCapability !== undefined;
+  }
+
+  private isTargetSwitchAllowed(target: CuaWindowTarget): boolean {
+    const hybrid = this.options.hybridNativeWebDocumentCapability;
+    if (hybrid !== undefined && windowIdentityKey(target) === windowIdentityKey(hybrid.recoveryTarget)) return false;
+    return targetAllowedByHostScope(target, this.options.windowSwitchAllowedTargets) ||
+      (hybrid !== undefined && windowIdentityKey(target) === windowIdentityKey(hybrid.managedBrowserTarget.windowTarget));
+  }
+
+  private async executeReopenSavedDocument(
+    current: PrivateSession,
+    action: Extract<ActionIntent, { readonly kind: "reopen_saved_document" }>,
+    observation: PrivateObservation,
+    signal: AbortSignal,
+  ): Promise<ActionReceipt> {
+    const state = current.reopenSavedDocument;
+    const saved = state?.savedDocument;
+    const recoveryTarget = this.options.recoveryWindowTarget;
+    const activeBinding = activeWindowBinding(current);
+    if (state === undefined || saved === undefined || recoveryTarget === undefined || !state.recoveryReady || state.attempted ||
+        state.closedSourceActionId === undefined ||
+        activeBinding === undefined || windowIdentityKey(activeBinding.target) !== windowIdentityKey(recoveryTarget) ||
+        observation.geometry === undefined || !sameWindowGeometry(observation.geometry, activeBinding.bounds)) {
+      return refused(action.actionId, "DOCUMENT_REOPEN_NOT_READY", "the saved document is not ready for the one-shot Host-authorized reopen");
+    }
+
+    // Failures here precede dispatch, so the single-use capability remains
+    // available for a fresh, corrected action.
+    try {
+      const parentInfo = await lstat(dirname(state.path), { bigint: true });
+      const currentFile = await fileIdentityPin(state.path);
+      const currentBinding = await discoverWindow(current.driver, current.label, recoveryTarget, signal);
+      const appProof = await queryDocumentIdentity(current.driver, current.label, currentBinding.target, currentBinding.bounds,
+        state.canonicalExecutableUrl, signal);
+      if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() ||
+          parentInfo.dev.toString() !== state.parentIdentity.dev || parentInfo.ino.toString() !== state.parentIdentity.ino ||
+          !sameFileIdentity(currentFile, saved.fileIdentity) ||
+          !sameWindowGeometry(currentBinding.bounds, activeBinding.bounds) || appProof === undefined ||
+          !sameApplicationProcess(appProof.identity, state.primaryIdentity)) {
+        return refused(action.actionId, "DOCUMENT_REOPEN_PREFLIGHT_FAILED", "the exact saved file or recovery window could not be reverified; no launch was attempted");
+      }
+    } catch {
+      signal.throwIfAborted();
+      return refused(action.actionId, "DOCUMENT_REOPEN_PREFLIGHT_FAILED", "the exact saved file or recovery window could not be reverified; no launch was attempted");
+    }
+
+    // Consume immediately before dispatch. Anything after this point is a
+    // verified completion or an unknown outcome; never launch a second time.
+    state.attempted = true;
+    state.recoveryReady = false;
+    let launched: Awaited<ReturnType<typeof callTool>>;
+    try {
+      launched = await callTool(current.driver, "launch_app", {
+        session: current.label,
+        bundle_id: "com.apple.TextEdit",
+        urls: [state.fileUrl],
+      }, signal);
+    } catch {
+      signal.throwIfAborted();
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+    if (launched.isError) {
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+    const launchValue = parseStructuredRecord(launched.structuredJson);
+    if (launchValue?.pid !== state.primaryIdentity.pid) {
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+
+    try {
+      const verificationSignal = AbortSignal.any([signal, AbortSignal.timeout(1_500)]);
+      const verificationAttempts = 8;
+      let reopened: CuaWindowInfo | undefined;
+      for (let attempt = 0; attempt < verificationAttempts; attempt += 1) {
+        verificationSignal.throwIfAborted();
+        if (!samePostLaunchFileIdentity(await fileIdentityPin(state.path), saved.fileIdentity)) throw new Error("file identity changed");
+        verificationSignal.throwIfAborted();
+        const inventory = await listWindowInventory(current.driver, current.label, verificationSignal, state.primaryIdentity.pid, true,
+          this.options.windowRelationshipProbe, "darwin");
+        verificationSignal.throwIfAborted();
+        if (inventory.truncated === true) throw new Error("document verification inventory was truncated");
+        const matches: CuaWindowInfo[] = [];
+        for (const info of inventory.windows) {
+          if (info.target.pid !== state.primaryIdentity.pid || info.isOnScreen !== true || info.minimized === true) continue;
+          const appResult = await readDocumentIdentityResult(current.driver, current.label, info.target, verificationSignal);
+          verificationSignal.throwIfAborted();
+          const appProof = parseDocumentIdentityProof(appResult, info.target, info.bounds, state.canonicalExecutableUrl);
+          if (appProof === undefined) {
+            if (hasExplicitApplicationIdentityConflict(appResult, info.target, state.canonicalExecutableUrl, state.primaryIdentity)) {
+              throw new Error("TextEdit application identity changed during document verification");
+            }
+            continue;
+          }
+          if (!sameApplicationProcess(appProof.identity, state.primaryIdentity)) {
+            throw new Error("TextEdit application identity changed during document verification");
+          }
+          const documentResult = await readDocumentIdentityResult(current.driver, current.label, info.target, verificationSignal, state.fileUrl);
+          verificationSignal.throwIfAborted();
+          const proof = parseDocumentIdentityProof(documentResult, info.target, info.bounds, state.canonicalExecutableUrl, state.fileUrl);
+          if (proof?.cleanDocument === true && sameApplicationProcess(proof.identity, state.primaryIdentity)) matches.push(info);
+        }
+        if (matches.length > 1) throw new Error("saved document matched multiple TextEdit windows");
+        if (matches.length === 1) {
+          reopened = matches[0]!;
+          break;
+        }
+        if (attempt + 1 < verificationAttempts) await delayWithAbort(100, verificationSignal);
+      }
+      if (reopened === undefined) throw new Error("saved document was not verified before the bounded launch-settle deadline");
+      verificationSignal.throwIfAborted();
+      if (!samePostLaunchFileIdentity(await fileIdentityPin(state.path), saved.fileIdentity)) throw new Error("file identity changed");
+      verificationSignal.throwIfAborted();
+      const target = reopened.target;
+      let sessionAfter: ComputerSessionDescriptor;
+      if (windowIdentityKey(target) !== windowIdentityKey(activeBinding.target)) {
+        sessionAfter = await this.transitionWindow(current, target, signal, {
+          onScreenOnly: true,
+          staleCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN",
+          staleMessage: "saved document identity changed before the verified transition",
+          authorizedTargets: [{ pid: target.pid, windowId: target.windowId }],
+          ...(reopened.appName === undefined ? {} : { expectedAppName: reopened.appName }),
+          ...(reopened.title === undefined ? {} : { expectedTitle: reopened.title }),
+        });
+      } else {
+        const capture = await captureWindowWithRetry(current.driver, current.label, target, signal,
+          this.options.windowCaptureRetry, current.platform);
+        const oldRef = current.surfaceRegistry.activeSurface;
+        if (oldRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, oldRef)) throw new Error("recovery Surface changed after document launch");
+        const advanced = advanceSurfaceGeneration(current.surfaceRegistry, oldRef);
+        if (advanced.decision !== "applied") throw new Error("recovery Surface generation could not advance");
+        const activated = activatePeer(advanced.state, advanced.value, {
+          nativeWindow: asNativeWindowIdentity(target), identityVerified: true, captureVerified: true,
+        });
+        if (activated.decision !== "applied") throw new Error("reopened document Surface could not be activated");
+        current.surfaceRegistry = activated.state;
+        current.windowBindings.set(windowIdentityKey(capture.binding.target), capture.binding);
+        current.descriptor = { ...current.descriptor, viewport: capture.viewport };
+        noteSurfaceTransition(current, "peer_switch");
+        this.clearTargetObservationState(current, oldRef, activated.value);
+        sessionAfter = current.descriptor;
+      }
+      const finalBinding = activeWindowBinding(current);
+      const finalProof = finalBinding === undefined
+        ? undefined
+        : await queryDocumentIdentity(current.driver, current.label, finalBinding.target, finalBinding.bounds,
+          state.canonicalExecutableUrl, signal, state.fileUrl);
+      if (finalProof?.cleanDocument !== true || !sameApplicationProcess(finalProof.identity, state.primaryIdentity) ||
+          !samePostLaunchFileIdentity(await fileIdentityPin(state.path), saved.fileIdentity)) {
+        throw new Error("saved document changed after transition");
+      }
+      delete state.savedDocument;
+      return { actionId: action.actionId, status: "completed", sessionAfter,
+        message: "The Host-authorized saved document was reopened and its exact TextEdit window was captured." };
+    } catch {
+      signal.throwIfAborted();
+      return { actionId: action.actionId, status: "partial", driverCode: "DOCUMENT_REOPEN_OUTCOME_UNKNOWN", message: "TextEdit launch was attempted but the saved document could not be verified; do not retry" };
+    }
+  }
+
   public async execute(
     session: ComputerSessionDescriptor,
     action: ActionIntent,
@@ -1738,6 +4080,8 @@ export class CuaDriverComputer implements Computer {
     options?: ComputerExecuteOptions,
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
+    current.firstObservedAfterActionWindows = undefined;
+    if (current.missingParent !== undefined) return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "missing bound window awaits explicit handoff; no input was sent");
     current.foregroundMismatchWindowId = undefined;
     current.preActionWindowBaseline = undefined;
     current.proactiveHandoffCandidatesReady = false;
@@ -1755,7 +4099,7 @@ export class CuaDriverComputer implements Computer {
       if (executionObservationId !== this.latestObservationId) {
         return refused(action.actionId, "STALE_OBSERVATION", `action executes against stale observation ${String(executionObservationId)}`);
       }
-      if ((this.options.platform ?? current.platform ?? process.platform) === "darwin" && activeWindowBinding(current) !== undefined
+      if (current.platform === "darwin" && activeWindowBinding(current) !== undefined
         && ["click", "double_click", "right_click", "scroll", "drag"].includes(action.kind)) {
         const executionViewport = this.observations.get(String(executionObservationId))?.viewport;
         if (executionViewport === undefined || executionViewport.width !== decisionObservation.viewport.width || executionViewport.height !== decisionObservation.viewport.height || executionViewport.coordinateSpace !== decisionObservation.viewport.coordinateSpace) {
@@ -1771,16 +4115,22 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "SURFACE_REF_STALE", "action Observation is not bound to the current active Surface generation");
       }
     }
-    const shortcutPlatform = this.options.platform ?? current.platform ?? process.platform;
+    const shortcutPlatform = current.platform;
     const locationBarShortcut = isBrowserShortcut(action, "L", shortcutPlatform);
     const selectAllShortcut = isBrowserShortcut(action, "A", shortcutPlatform);
     if (action.kind !== "wait" && action.kind !== "type" && !selectAllShortcut) this.browserChromeInput = undefined;
     if (action.kind === "wait") {
+      delete current.lastInspectedExistingTransientRootRef;
       await waitWithAbort(action.durationMs, signal);
       return { actionId: action.actionId, status: "completed" };
     }
     if (action.kind === "switch_window") {
+      delete current.lastInspectedExistingTransientRootRef;
       return this.executeWindowSwitch(current, action, signal);
+    }
+    if (action.kind === "reopen_saved_document") {
+      delete current.lastInspectedExistingTransientRootRef;
+      return this.executeReopenSavedDocument(current, action, decisionObservation!, signal);
     }
     try {
       await this.reconcileActiveTransientChild(current, signal);
@@ -1800,6 +4150,21 @@ export class CuaDriverComputer implements Computer {
         ? "TRANSIENT_SURFACE_STALE"
         : "SURFACE_REF_STALE";
       return refused(action.actionId, code, "the active Surface changed after the action Observation; observe again");
+    }
+    const replayGuard = current.unknownActionReplayGuard;
+    let alternativePrimitiveForUnknownAction: string | undefined;
+    if (replayGuard !== undefined && !sameSurfaceRef(replayGuard.surfaceRef, activeRefAfterReconcile)) {
+      delete current.unknownActionReplayGuard;
+    } else if (replayGuard !== undefined) {
+      const primitiveFingerprint = actionPrimitiveFingerprint(action);
+      if (replayGuard.primitiveFingerprints.has(primitiveFingerprint)) {
+        return refused(
+          action.actionId,
+          "ACTION_OUTCOME_UNKNOWN_RETRY_BLOCKED",
+          "the same GUI action already had an unknown outcome; choose a different action and re-observe before trying it again",
+        );
+      }
+      alternativePrimitiveForUnknownAction = primitiveFingerprint;
     }
     let actionWindowBinding = activeWindowBinding(current);
     if (actionWindowBinding !== undefined) {
@@ -1860,7 +4225,7 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
       }
     }
-    const isMultilineType = action.kind === "type" && hasLineBreak(action.text);
+    const isMultilineType = current.platform === "win32" && action.kind === "type" && hasLineBreak(action.text);
     if (action.kind === "select_option") {
     const privateGrounding = this.groundings.get(String(action.basedOn));
     const resolved = privateGrounding?.elements.get(action.groundingRef);
@@ -1933,6 +4298,10 @@ export class CuaDriverComputer implements Computer {
           return refused(action.actionId, "SELECT_OPTION_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before selecting");
         }
         if (result.status === "completed") {
+          if (alternativePrimitiveForUnknownAction !== undefined && current.unknownActionReplayGuard !== undefined &&
+              decisionObservation !== undefined && sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
+            current.unknownActionReplayGuard.alternativeActionCompleted = true;
+          }
           return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
         }
         if (result.status === "refused") {
@@ -2037,6 +4406,10 @@ export class CuaDriverComputer implements Computer {
           return refused(action.actionId, "DOM_CLICK_GENERATION_MISMATCH", "managed-browser tab or page generation changed; observe again before clicking");
         }
         if (result.status === "completed") {
+          if (alternativePrimitiveForUnknownAction !== undefined && current.unknownActionReplayGuard !== undefined &&
+              decisionObservation !== undefined && sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
+            current.unknownActionReplayGuard.alternativeActionCompleted = true;
+          }
           return { actionId: action.actionId, status: "completed", ...(result.message === undefined ? {} : { message: result.message }) };
         }
         if (result.status === "refused") {
@@ -2103,7 +4476,7 @@ export class CuaDriverComputer implements Computer {
       }
     }
     let requestAction = action;
-    if (action.groundingRef !== undefined && !(action.kind === "type" && hasLineBreak(action.text))) {
+    if (action.groundingRef !== undefined && !isMultilineType) {
       if (action.kind !== "click") {
         return refused(action.actionId, "GROUNDING_ACTION_UNSUPPORTED", "grounding references are only valid for click actions");
       }
@@ -2133,7 +4506,7 @@ export class CuaDriverComputer implements Computer {
           actionWindowBinding,
           this.options.windowDeliveryMode,
           decisionObservation?.viewport,
-          this.options.platform ?? current.platform ?? process.platform,
+          current.platform,
         );
       }
     } catch (error) {
@@ -2157,12 +4530,19 @@ export class CuaDriverComputer implements Computer {
           return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "bound target was missing from visible-window inventory; no input was sent");
         }
         current.preActionWindowBaseline = {
+          actionId: action.actionId,
+          sourceObservationId: action.basedOn,
+          closeShortcut: action.kind === "keypress" && action.keys.length === 2 &&
+            action.keys.some((key) => key.toUpperCase() === "W") &&
+            action.keys.some((key) => key.toUpperCase() === "CMD" || key.toUpperCase() === "META"),
+          completed: false,
           targetKeys: visibleKeys,
           complete: visibleInventory.complete,
           truncated: visibleInventory.truncated === true,
           parentSurfaceRef: { ...parentSurfaceRef },
           parentBinding: { target: { ...currentWindowBinding.target }, bounds: { ...currentWindowBinding.bounds } },
         };
+        current.firstObservedAfterActionWindows = undefined;
         current.visibleWindowBaseline = visibleKeys;
         current.newlySurfacedWindowKeys = new Set();
         current.newHandoffCandidates = [];
@@ -2171,13 +4551,20 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "visible-window inventory failed before action; no input was sent");
       }
     }
-    if (action.kind === "type" && hasLineBreak(action.text)) {
-      // Multiline uses the same fresh pre-action inventory baseline as every
-      // opted-in foreground action. Its completed receipt returns through the
-      // normal Runtime post-action handoff diff before the next observation.
-      return this.executeMultilineType(current, session, action, decisionObservation, actionWindowBinding, signal);
+    if (isMultilineType) {
+      // Preserve normal Surface/window preflight, then fail closed in the
+      // Windows UIA route before any input primitive is dispatched.
+      const receipt = await this.executeMultilineType(current, session, action, decisionObservation, actionWindowBinding, signal);
+      if (receipt.status === "completed" && current.preActionWindowBaseline?.actionId === action.actionId) current.preActionWindowBaseline.completed = true;
+      if (receipt.status === "completed" && alternativePrimitiveForUnknownAction !== undefined &&
+          current.unknownActionReplayGuard !== undefined && decisionObservation !== undefined &&
+          sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
+        current.unknownActionReplayGuard.alternativeActionCompleted = true;
+      }
+      return receipt;
     }
     if (request === undefined) throw new Error("CUA action request was not constructed");
+    delete current.lastInspectedExistingTransientRootRef;
     try {
       // Tab is permitted only after the old target's focus gate above. Drop its
       // binding before dispatch; a fresh observation and verifyFocus must prove
@@ -2189,11 +4576,37 @@ export class CuaDriverComputer implements Computer {
       if (action.kind === "type" && browserTarget !== undefined) this.browserChromeInput = undefined;
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
-        const driverCode = windowRefusalCode(result.errorCode, result.text);
+        const driverCode = windowRefusalCode(result.errorCode, result.text, resultProvesNoInput(result));
+        if (decisionObservation !== undefined && isTransientSurface(current, decisionObservation.surfaceRef) &&
+            driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
+            await this.restoreTransientParentAfterExplicitNoInput(current, decisionObservation.surfaceRef, signal)) {
+          return refused(
+            action.actionId,
+            "WINDOW_FOREGROUND_REFUSED_PARENT_RESTORED",
+            "The driver confirmed that no input was sent. The transient window closed and its exact parent was freshly captured. Inspect the refreshed screen and choose the next step.",
+          );
+        }
         if (decisionObservation !== undefined && isTransientSurface(current, decisionObservation.surfaceRef) &&
             driverCode === "CUA_TOOL_REFUSED" && isAmbiguousForegroundResult(result.text)) {
+          const recoveredReceipt = await this.recoverUnknownTransientActionReceipt(
+            current,
+            action,
+            decisionObservation.surfaceRef,
+            signal,
+          );
+          if (recoveredReceipt !== undefined) return recoveredReceipt;
           this.clearTargetObservationState(current, decisionObservation.surfaceRef);
           throw new Error("CUA changed foreground while dispatching the action and did not confirm that input was withheld; action outcome is unknown");
+        }
+        if (decisionObservation !== undefined && driverCode === "CUA_TOOL_REFUSED" &&
+            isAmbiguousForegroundResult(result.text)) {
+          // CUA 0.22.2 emits this form after the foreground click's SendInput
+          // dispatch and post-action foreground check. It is not proof that
+          // input was withheld. Invalidate the old Observation while retaining
+          // the one-shot pre-action inventory for a fresh, read-only recovery
+          // or Host handoff; never report a retry-safe refusal here.
+          this.invalidateObservationAfterAction(current);
+          return await this.unknownForegroundActionReceipt(current, action, decisionObservation.surfaceRef, signal);
         }
         if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
           current.foregroundMismatchWindowId = parseActualForegroundWindowId(result.text);
@@ -2213,12 +4626,16 @@ export class CuaDriverComputer implements Computer {
           ...(fingerprint === undefined ? {} : { fingerprint }),
           invalidated: fingerprint === undefined,
         };
-      }
-      else if (action.kind === "click") this.browserChromeInput = undefined;
+      } else if (action.kind === "click") this.browserChromeInput = undefined;
       else if (action.kind === "keypress" && !selectAllShortcut) this.browserChromeInput = undefined;
+      if (alternativePrimitiveForUnknownAction !== undefined && current.unknownActionReplayGuard !== undefined &&
+          decisionObservation !== undefined && sameSurfaceRef(current.unknownActionReplayGuard.surfaceRef, decisionObservation.surfaceRef)) {
+        current.unknownActionReplayGuard.alternativeActionCompleted = true;
+      }
       const diagnostic = currentWindowBinding !== undefined && ["click", "scroll", "drag"].includes(action.kind)
         ? `cua-window-pixels source=${decisionObservation?.captureSource ?? "unknown"} viewport=${decisionObservation?.viewport.width}x${decisionObservation?.viewport.height} bounds=${currentWindowBinding.bounds.width}x${currentWindowBinding.bounds.height} target=${currentWindowBinding.target.pid}/${currentWindowBinding.target.windowId} delivery=${this.options.windowDeliveryMode ?? "background"} point=${JSON.stringify(Object.fromEntries(Object.entries(request.arguments).filter(([key]) => ["x", "y", "from_x", "from_y", "to_x", "to_y"].includes(key))))}`
         : undefined;
+      if (current.preActionWindowBaseline?.actionId === action.actionId) current.preActionWindowBaseline.completed = true;
       return { actionId: action.actionId, status: "completed", ...((result.text || diagnostic) ? { message: [result.text, diagnostic].filter(Boolean).join("; ") } : {}) };
     } catch (error) {
       const details = driverErrorDetails(error);
@@ -2230,11 +4647,36 @@ export class CuaDriverComputer implements Computer {
       // records the unresolved action as outcome_unknown. Only explicit
       // structured Tool errors are safe to classify as a refusal.
       if (details.tag === "Tool") {
-        const driverCode = windowRefusalCode(details.errorCode, details.message);
+        const structuredNoInput = resultProvesNoInput({
+          text: details.message,
+          ...(details.structuredJson === undefined ? {} : { structuredJson: details.structuredJson }),
+        });
+        const driverCode = windowRefusalCode(details.errorCode, details.message, structuredNoInput);
+        if (decisionObservation !== undefined && isTransientSurface(current, decisionObservation.surfaceRef) &&
+            driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
+            await this.restoreTransientParentAfterExplicitNoInput(current, decisionObservation.surfaceRef, signal)) {
+          return refused(
+            action.actionId,
+            "WINDOW_FOREGROUND_REFUSED_PARENT_RESTORED",
+            "The driver confirmed that no input was sent. The transient window closed and its exact parent was freshly captured. Inspect the refreshed screen and choose the next step.",
+          );
+        }
         if (decisionObservation !== undefined && isTransientSurface(current, decisionObservation.surfaceRef) &&
             driverCode === "CUA_TOOL_REFUSED" && isAmbiguousForegroundResult(details.message)) {
+          const recoveredReceipt = await this.recoverUnknownTransientActionReceipt(
+            current,
+            action,
+            decisionObservation.surfaceRef,
+            signal,
+          );
+          if (recoveredReceipt !== undefined) return recoveredReceipt;
           this.clearTargetObservationState(current, decisionObservation.surfaceRef);
           throw normalizeDriverError(new Error("CUA changed foreground while dispatching the action and did not confirm that input was withheld; action outcome is unknown"), "execute");
+        }
+        if (decisionObservation !== undefined && driverCode === "CUA_TOOL_REFUSED" &&
+            isAmbiguousForegroundResult(details.message)) {
+          this.invalidateObservationAfterAction(current);
+          return await this.unknownForegroundActionReceipt(current, action, decisionObservation.surfaceRef, signal);
         }
         if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
           current.foregroundMismatchWindowId = parseActualForegroundWindowId(details.message);
@@ -2258,10 +4700,12 @@ export class CuaDriverComputer implements Computer {
     if (binding === undefined || transport === undefined || !managedBrowserTargetForBinding(current, binding) ||
         windowIdentityKey(binding.target) !== windowIdentityKey(browserTarget.windowTarget)) return undefined;
     try {
-      const uia = await readGroundingCatalog(current.driver, current.label, binding, viewport, observationId, session.id, signal, true);
-      if (uia.catalog.degraded || uia.catalog.completeness !== "complete" || uia.contentRect === undefined) return undefined;
+      const uia = await readGroundingCatalog(current.driver, current.label, binding, viewport, observationId, session.id, signal, true, current.platform === "darwin");
+      if (uia.catalog.degraded || uia.contentRect === undefined) return undefined;
       const focused = [...uia.elements.values()].filter((item) => item.element.state?.focused === true);
-      const candidate = focused.length === 1 ? focused[0] : undefined;
+      const candidate = uia.catalog.completeness === "complete"
+        ? focused.length === 1 ? focused[0] : undefined
+        : current.platform === "darwin" ? uia.focusProof : undefined;
       if (candidate?.uiaIdentityFingerprint === undefined || !isAddressBarElement(candidate.element)) return undefined;
       const dom = await transport.collect({ observationId, computerSessionId: session.id, viewport, browserTarget }, signal);
       if (dom.complete !== true || dom.degraded === true || dom.tabId !== browserTarget.tabId || dom.generation !== browserTarget.generation ||
@@ -2281,14 +4725,61 @@ export class CuaDriverComputer implements Computer {
     actionWindowBinding: CuaWindowBinding | undefined,
     signal: AbortSignal,
   ): Promise<ActionReceipt> {
-    if (current.platform !== "win32") {
-      return refused(action.actionId, "MULTILINE_PLATFORM_UNSUPPORTED", "multiline UIA input is enabled only for the verified Windows CUA driver route");
-    }
     if (action.basedOn !== this.latestObservationId) {
       this.clearTargetObservationState(current, decisionObservation?.surfaceRef);
       return refused(action.actionId, "MULTILINE_OBSERVATION_STALE", "multiline input requires the latest observation; observe again before typing");
     }
-    const grounding = this.groundings.get(String(action.basedOn));
+    let grounding = this.groundings.get(String(action.basedOn));
+    if (grounding === undefined) {
+      // `grounding: off` deliberately suppresses public Observation catalogs,
+      // but Windows multiline typing still needs the same private UIA
+      // identity/read-back proof as the opt-in catalog route. Resolve it only
+      // for this exact action target and keep the result local: it is not an
+      // Observation capability or a reusable element reference.
+      if (action.groundingRef !== undefined) {
+        return refused(action.actionId, "MULTILINE_GROUNDING_REF_STALE", "no UIA element reference was published for this observation; observe with grounding enabled to select an explicit target");
+      }
+      if (decisionObservation === undefined || actionWindowBinding === undefined ||
+          decisionObservation.geometry === undefined || String(current.descriptor.id) !== String(session.id) ||
+          decisionObservation.sessionId !== String(session.id)) {
+        return refused(action.actionId, "MULTILINE_GROUNDING_UNAVAILABLE", "multiline input requires an exact current window and Computer session");
+      }
+      signal.throwIfAborted();
+      const privateCatalog = await readMultilinePrivateGroundingCatalog(
+        current.driver,
+        current.label,
+        actionWindowBinding,
+        decisionObservation.viewport,
+        action.basedOn,
+        session.id,
+        signal,
+        current.platform === "darwin",
+      );
+      signal.throwIfAborted();
+
+      // The query is asynchronous. Do not bind its tokens to an Observation
+      // that was superseded or whose active Surface/window changed meanwhile.
+      const latestObservation = this.observations.get(String(action.basedOn));
+      const activeRef = current.surfaceRegistry.activeSurface;
+      const liveBinding = activeWindowBinding(current);
+      if (this.latestObservationId !== action.basedOn || latestObservation !== decisionObservation ||
+          activeRef === undefined || activeRef.surfaceId !== decisionObservation.surfaceRef.surfaceId ||
+          activeRef.generation !== decisionObservation.surfaceRef.generation ||
+          activeRef.parentSurfaceId !== decisionObservation.surfaceRef.parentSurfaceId ||
+          activeRef.admissionSource !== decisionObservation.surfaceRef.admissionSource ||
+          !isExecutableSurfaceRef(current.surfaceRegistry, decisionObservation.surfaceRef) ||
+          liveBinding === undefined || windowIdentityKey(liveBinding.target) !== windowIdentityKey(actionWindowBinding.target) ||
+          !sameWindowGeometry(liveBinding.bounds, actionWindowBinding.bounds) ||
+          !sameWindowGeometry(actionWindowBinding.bounds, decisionObservation.geometry)) {
+        return refused(action.actionId, "MULTILINE_GROUNDING_STALE", "the active observation, Surface, or exact window changed during private UIA resolution; observe again");
+      }
+      grounding = {
+        ...privateCatalog,
+        catalog: { ...privateCatalog.catalog, surfaceRef: decisionObservation.surfaceRef },
+        surfaceRef: decisionObservation.surfaceRef,
+        windowBinding: actionWindowBinding,
+      };
+    }
     if (grounding === undefined || String(grounding.catalog.observationId) !== String(action.basedOn) ||
         String(grounding.catalog.computerSessionId) !== String(session.id) ||
         decisionObservation?.surfaceRef.surfaceId !== grounding.surfaceRef?.surfaceId ||
@@ -2346,9 +4837,6 @@ export class CuaDriverComputer implements Computer {
     }
     const target = resolved.uiaTarget;
     const targetFingerprint = resolved.uiaIdentityFingerprint;
-    if (resolved.preValueEmpty !== true) {
-      return refused(action.actionId, "MULTILINE_TYPE_INSERTION_UNSUPPORTED", "multiline UIA typing only replaces a currently empty or value-unavailable text surface; non-empty targets are refused");
-    }
     if (target === undefined || target.snapshotId === undefined || targetFingerprint === undefined) {
       return refused(action.actionId, "MULTILINE_TARGET_IDENTITY_UNAVAILABLE", "the current UIA element is missing a private target identity or fresh driver token; no text was sent");
     }
@@ -2369,7 +4857,20 @@ export class CuaDriverComputer implements Computer {
       return refused(action.actionId, "MULTILINE_SEPARATOR_UNSUPPORTED", "multiline UIA input supports CR/LF line endings only; no text was sent");
     }
 
+    // CUA 0.22.2's Windows UIA multiline writer may substitute an unreadable
+    // old value with an empty string before SetValue. Until a trustworthy
+    // no-write failure signal exists, never dispatch this element-token route.
+    // This is a refusal before any input primitive; do not fall back to keys.
+    if (current.platform === "win32") {
+      return refused(
+        action.actionId,
+        "WINDOWS_UIA_MULTILINE_DISABLED",
+        "Windows UIA multiline input is disabled until the driver can prove old-value reads before writing; no text was sent",
+      );
+    }
+
     signal.throwIfAborted();
+    delete current.lastInspectedExistingTransientRootRef;
     try {
       const driverText = normalizeLogicalLineEndings(action.text).replace(/\n/gu, "\r");
       const result = await callTool(current.driver, "type_text", {
@@ -2526,7 +5027,7 @@ function isBrowserShortcut(action: ActionIntent, key: string, platform: NodeJS.P
 }
 
 function actionRequest(
-  action: Exclude<ActionIntent, { kind: "wait" } | SwitchWindowAction>,
+  action: Exclude<ActionIntent, { kind: "wait" } | SwitchWindowAction | { kind: "reopen_saved_document" }>,
   session: string,
   windowBinding?: CuaWindowBinding,
   configuredDeliveryMode?: CuaWindowDeliveryMode,
@@ -2547,10 +5048,23 @@ function actionRequest(
       return { name: "click", arguments: { session, target, ...point(action.point), button: "right", delivery_mode: deliveryMode } };
     case "type":
       return { name: "type_text", arguments: { session, target, text: action.text, delivery_mode: deliveryMode } };
-    case "keypress":
-      return action.keys.length === 1
-        ? { name: "press_key", arguments: { session, target, key: action.keys[0], delivery_mode: deliveryMode } }
-        : { name: "hotkey", arguments: { session, target, keys: action.keys, delivery_mode: deliveryMode } };
+    case "keypress": {
+      if (action.keys.length === 1) {
+        return { name: "press_key", arguments: { session, target, key: action.keys[0], delivery_mode: deliveryMode } };
+      }
+      const foregroundChord = platform === "win32" && windowBinding !== undefined && deliveryMode === "foreground"
+        ? foregroundPressKeyChord(action.keys)
+        : undefined;
+      return foregroundChord === undefined
+        ? { name: "hotkey", arguments: { session, target, keys: action.keys, delivery_mode: deliveryMode } }
+        : { name: "press_key", arguments: {
+            session,
+            target,
+            key: foregroundChord.key,
+            modifiers: foregroundChord.modifiers,
+            delivery_mode: deliveryMode,
+          } };
+    }
     case "scroll":
       return { name: "scroll", arguments: { session, target, ...point(action.point), direction: action.direction, by: "line", amount: action.ticks, delivery_mode: deliveryMode } };
     case "drag": {
@@ -2583,9 +5097,10 @@ async function readWindowGrounding(
   domTransport: DomGroundingTransport | undefined,
   signal: AbortSignal,
   allowInitialHybridResampling = false,
+  allowMacTextFormat = false,
 ): Promise<PrivateGrounding | undefined> {
   if (mode === undefined || mode === "off") return undefined;
-  if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, false);
+  if (mode === "uia-catalog-v1") return readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, false, allowMacTextFormat);
   if (mode === "dom-catalog-v1") {
     if (browserTarget === undefined || domTransport === undefined) return undefined;
     // DOM-only has no trusted producer for the browser content origin. Keep
@@ -2594,7 +5109,7 @@ async function readWindowGrounding(
     return emptyDomGrounding(observationId, computerSessionId);
   }
   let uia = mode === "hybrid-catalog-v1"
-    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, browserTarget !== undefined)
+    ? await readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, signal, browserTarget !== undefined, allowMacTextFormat)
     : undefined;
   // Browser accessibility trees can expose toolbar nodes before the Document
   // / AXWebArea record is ready. Retry only the trusted UIA producer within a
@@ -2623,7 +5138,7 @@ async function readWindowGrounding(
             resolve({ timedOut: true });
           }, remainingMs);
         });
-        const retryPromise = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, retrySignal, true)
+        const retryPromise = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, retrySignal, true, allowMacTextFormat)
           .then((value) => ({ value }), (error: unknown) => ({ error }));
         const abortPromise = new Promise<never>((_resolve, reject) => {
           onAbort = () => reject(signal.reason ?? new Error("hybrid grounding retry aborted"));
@@ -2654,6 +5169,77 @@ async function readWindowGrounding(
   if (uia === undefined) return dom;
   if (dom === undefined) return uia;
   return mergeGroundings(uia, dom, observationId, computerSessionId);
+}
+
+/** A bounded read-only UIA lookup used only while resolving a Windows multiline action. */
+async function readMultilinePrivateGroundingCatalog(
+  driver: CuaDriverLike,
+  session: string,
+  binding: CuaWindowBinding,
+  viewport: Viewport,
+  observationId: ObservationId,
+  computerSessionId: ComputerSessionDescriptor["id"],
+  signal: AbortSignal,
+  allowMacTextFormat: boolean,
+): Promise<PrivateGrounding> {
+  signal.throwIfAborted();
+  const timeoutController = new AbortController();
+  const timeoutReason = new Error("private multiline UIA lookup exceeded its read deadline");
+  const querySignal = AbortSignal.any([signal, timeoutController.signal]);
+  const unavailable = (): PrivateGrounding => ({
+    catalog: {
+      version: "uia-catalog-v1",
+      source: "uia",
+      observationId,
+      computerSessionId,
+      completeness: "unknown",
+      degraded: true,
+      maxElements: GROUNDING_MAX_ELEMENTS,
+      elements: [],
+    },
+    elements: new Map(),
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const query = readGroundingCatalog(driver, session, binding, viewport, observationId, computerSessionId, querySignal, false, allowMacTextFormat)
+    .then((grounding) => ({ kind: "grounding" as const, grounding }), (error: unknown) => ({ kind: "error" as const, error }));
+  const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
+    timer = setTimeout(() => {
+      timeoutController.abort(timeoutReason);
+      resolve({ kind: "timeout" });
+    }, MULTILINE_GROUNDING_QUERY_TIMEOUT_MS);
+  });
+  const aborted = new Promise<{ kind: "aborted" }>((resolve) => {
+    if (signal.aborted) {
+      resolve({ kind: "aborted" });
+      return;
+    }
+    onAbort = () => resolve({ kind: "aborted" });
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  try {
+    const result = await Promise.race([query, timeout, aborted]);
+    if (result.kind === "aborted") {
+      signal.throwIfAborted();
+      return unavailable();
+    }
+    signal.throwIfAborted();
+    if (result.kind === "timeout" || timeoutController.signal.aborted) {
+      // The query is read-only and precedes any text dispatch. A timeout is a
+      // fail-closed refusal, never an unknown input outcome.
+      return unavailable();
+    }
+    if (result.kind === "error") {
+      signal.throwIfAborted();
+      throw result.error;
+    }
+    signal.throwIfAborted();
+    return result.grounding;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 async function readDomGroundingCatalog(
@@ -2861,6 +5447,7 @@ async function readGroundingCatalog(
   computerSessionId: ComputerSessionDescriptor["id"],
   signal: AbortSignal,
   managedBrowserHybrid: boolean,
+  allowMacTextFormat: boolean,
 ): Promise<PrivateGrounding> {
   const empty = (completeness: "partial" | "unknown", degraded: boolean): PrivateGrounding => ({
     catalog: {
@@ -2892,21 +5479,24 @@ async function readGroundingCatalog(
   }
   if (result.isError === true) return empty("unknown", true);
   const structured = parseStructuredRecord(result.structuredJson);
+  if (hasExplicitIdentityMismatch(structured, binding.target)) return empty("unknown", true);
   const rawElements = structured?.elements;
   if (!Array.isArray(rawElements)) return empty("unknown", true);
   const snapshotId = safeCuaSnapshotId(structured?.snapshot_id ?? structured?.snapshotId);
-  const parsed = rawElements.flatMap((value, index) => parseGroundingCandidate(value, index, binding, viewport, snapshotId));
+  const parsed = rawElements.flatMap((value, index) => parseGroundingCandidate(value, index, binding, viewport, snapshotId, allowMacTextFormat));
   parsed.sort((left, right) => left.priority - right.priority || left.sortKey.localeCompare(right.sortKey));
   const selected = parsed.slice(0, GROUNDING_MAX_ELEMENTS);
   const selectedRecords = selected.map((candidate) => ({
     element: candidate.element,
     point: candidate.point,
-    preValueEmpty: candidate.preValueEmpty,
     ...(candidate.uiaIdentityFingerprint === undefined ? {} : { uiaIdentityFingerprint: candidate.uiaIdentityFingerprint }),
     ...(candidate.elementToken === undefined ? {} : { elementToken: candidate.elementToken }),
     ...(candidate.snapshotId === undefined ? {} : { snapshotId: candidate.snapshotId }),
   }));
   const contentRect = trustedContentRectFromUia(selectedRecords.map((candidate) => candidate.element), viewport);
+  const focusProof = managedBrowserHybrid && contentRect !== undefined
+    ? parseMacFocusedElementProof(structured, binding, viewport, snapshotId, contentRect)
+    : undefined;
   const annotatedRecords = managedBrowserHybrid && contentRect !== undefined
     ? selectedRecords.map((candidate) => ({
       ...candidate,
@@ -2930,7 +5520,6 @@ async function readGroundingCatalog(
       element,
       point: candidate.point,
       geometry: binding.bounds,
-      preValueEmpty: candidate.preValueEmpty,
       ...(candidate.uiaIdentityFingerprint === undefined ? {} : { uiaIdentityFingerprint: candidate.uiaIdentityFingerprint }),
       ...(candidate.elementToken === undefined ? {} : {
         uiaTarget: {
@@ -2958,7 +5547,74 @@ async function readGroundingCatalog(
       elements: publicElements,
     },
     ...(contentRect === undefined ? {} : { contentRect }),
+    ...(focusProof === undefined ? {} : { focusProof }),
     elements,
+  };
+}
+
+function parseMacFocusedElementProof(
+  structured: Record<string, unknown> | undefined,
+  binding: CuaWindowBinding,
+  viewport: Viewport,
+  snapshotId: string | undefined,
+  contentRect: DomGroundingContentRect,
+): PrivateGroundingElement | undefined {
+  const proof = parseStructuredRecord(structured?.focus_proof);
+  const focused = parseStructuredRecord(proof?.focused_element);
+  const bounds = parseGroundingFrame(proof?.window_bounds);
+  const frame = parseGroundingFrame(focused?.frame);
+  if (proof?.version !== "macos-focused-element-v1"
+      || proof.coordinate_space !== "macos-screen-points"
+      || snapshotId === undefined
+      || safeCuaSnapshotId(proof.snapshot_id) !== snapshotId
+      || proof.pid !== binding.target.pid
+      || proof.window_id !== binding.target.windowId
+      || proof.frontmost_pid !== binding.target.pid
+      || proof.focused_window_id !== binding.target.windowId
+      || focused?.focused !== true
+      || focused.enabled !== true
+      || focused.editable !== true
+      || focused.ancestry_verified !== true
+      || bounds === undefined
+      || !sameWindowGeometry(bounds, binding.bounds)
+      || frame === undefined
+      || frame.x < bounds.x || frame.y < bounds.y
+      || frame.x + frame.width > bounds.x + bounds.width
+      || frame.y + frame.height > bounds.y + bounds.height) return undefined;
+
+  const role = boundedGroundingLabel(focused.role, 64);
+  const name = boundedGroundingLabel(focused.name, 160);
+  if (role === undefined || name === undefined) return undefined;
+  const nativeLocal = {
+    x: frame.x - bounds.x,
+    y: frame.y - bounds.y,
+    width: frame.width,
+    height: frame.height,
+  };
+  const projected = {
+    x: nativeLocal.x * viewport.width / bounds.width,
+    y: nativeLocal.y * viewport.height / bounds.height,
+    width: nativeLocal.width * viewport.width / bounds.width,
+    height: nativeLocal.height * viewport.height / bounds.height,
+    coordinateSpace: "physical" as const,
+  };
+  if (!validGroundingRect(projected, viewport)) return undefined;
+  const element: GroundingElement = {
+    elementRef: "uia-native-focus-proof",
+    role,
+    name,
+    bbox: projected,
+    state: { enabled: true, editable: true, focused: true },
+    source: "uia",
+    browserRegion: classifyUiaBrowserRegion({ bbox: projected }, contentRect, viewport),
+  };
+  const uiaIdentityFingerprint = makeUiaTargetFingerprint(element, binding);
+  if (uiaIdentityFingerprint === undefined) return undefined;
+  return {
+    element,
+    point: { x: projected.x + projected.width / 2, y: projected.y + projected.height / 2 },
+    geometry: binding.bounds,
+    uiaIdentityFingerprint,
   };
 }
 
@@ -3079,7 +5735,6 @@ interface GroundingCandidate {
   readonly point: { readonly x: number; readonly y: number };
   readonly priority: number;
   readonly sortKey: string;
-  readonly preValueEmpty: boolean;
   readonly uiaIdentityFingerprint?: string;
   readonly elementToken?: string;
   readonly snapshotId?: string;
@@ -3091,6 +5746,7 @@ function parseGroundingCandidate(
   binding: CuaWindowBinding,
   viewport: Viewport,
   snapshotId?: string,
+  allowMacTextFormat = false,
 ): GroundingCandidate[] {
   const item = parseStructuredRecord(value);
   if (item === undefined) return [];
@@ -3119,7 +5775,9 @@ function parseGroundingCandidate(
   const name = boundedGroundingLabel(item.name ?? item.label ?? item.title, 160);
   const description = boundedGroundingLabel(item.description ?? item.help_text, 240);
   const state = groundingState(item);
-  const preValueEmpty = item.value === undefined || item.value === null || (typeof item.value === "string" && item.value.length === 0);
+  const textFormat = allowMacTextFormat && item.in_web_content !== true && item.browserRegion !== "content" && role === "AXTextArea"
+    ? parseGroundingTextFormat(item.text_format)
+    : undefined;
   const elementToken = boundedGroundingToken(item.element_token ?? item.elementToken);
   const itemSnapshotId = safeCuaSnapshotId(item.snapshot_id ?? item.snapshotId) ?? snapshotId;
   const element: Omit<GroundingElement, "elementRef"> = {
@@ -3129,6 +5787,7 @@ function parseGroundingCandidate(
     bbox: { ...clipped, coordinateSpace: "physical" },
     ...(state === undefined ? {} : { state }),
     source: "uia",
+    ...(textFormat === undefined ? {} : { textFormat }),
   };
   const uiaIdentityFingerprint = element.source === "uia"
     ? makeUiaTargetFingerprint(element, binding)
@@ -3148,7 +5807,6 @@ function parseGroundingCandidate(
     point,
     priority,
     sortKey: `${role}\u0000${name ?? ""}\u0000${index.toString().padStart(8, "0")}`,
-    preValueEmpty,
     ...(uiaIdentityFingerprint === undefined ? {} : { uiaIdentityFingerprint }),
     ...(elementToken === undefined ? {} : { elementToken }),
     ...(itemSnapshotId === undefined ? {} : { snapshotId: itemSnapshotId }),
@@ -3199,6 +5857,34 @@ function groundingState(item: Record<string, unknown>): GroundingElement["state"
     ...(selected === undefined ? {} : { selected }),
     ...(valuePresent ? { valuePresent: true } : {}),
   };
+}
+
+function parseGroundingTextFormat(value: unknown): GroundingElement["textFormat"] | undefined {
+  const item = parseStructuredRecord(value);
+  if (item === undefined || item.source !== "ax-cfstring-v1") return undefined;
+  const keys = Object.keys(item).sort();
+  if (item.status === "over_limit") {
+    return keys.length === 2 && keys[0] === "source" && keys[1] === "status"
+      ? { source: "ax-cfstring-v1", status: "over_limit" }
+      : undefined;
+  }
+  const expectedKeys = ["carriage_return_count", "code_point_count", "line_feed_count", "source", "status", "trailing_line_feed_count", "utf8_bytes"];
+  if (item.status !== "complete" || keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) return undefined;
+  const utf8Bytes = boundedFormatCount(item.utf8_bytes, 16_384);
+  const codePointCount = boundedFormatCount(item.code_point_count, 16_384);
+  const lineFeedCount = boundedFormatCount(item.line_feed_count, 16_384);
+  const trailingLineFeedCount = boundedFormatCount(item.trailing_line_feed_count, 16_384);
+  const carriageReturnCount = boundedFormatCount(item.carriage_return_count, 16_384);
+  if (utf8Bytes === undefined || codePointCount === undefined || lineFeedCount === undefined ||
+      trailingLineFeedCount === undefined || carriageReturnCount === undefined ||
+      utf8Bytes < codePointCount || utf8Bytes > 4 * codePointCount ||
+      lineFeedCount > codePointCount || trailingLineFeedCount > lineFeedCount ||
+      lineFeedCount + carriageReturnCount > codePointCount) return undefined;
+  return { source: "ax-cfstring-v1", status: "complete", utf8Bytes, codePointCount, lineFeedCount, trailingLineFeedCount, carriageReturnCount };
+}
+
+function boundedFormatCount(value: unknown, maximum: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : undefined;
 }
 
 function parseGroundingFrame(value: unknown): CuaWindowGeometry | undefined {
@@ -3261,18 +5947,99 @@ function parseStructuredRecord(value: unknown): Record<string, unknown> | undefi
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-async function detectCuaPlatform(driver: CuaDriverLike, signal: AbortSignal): Promise<"win32" | "darwin" | "linux" | undefined> {
+async function detectCuaPlatform(driver: CuaDriverLike, signal: AbortSignal): Promise<PlatformHealthEvidence> {
+  let result: ToolResult;
   try {
-    const result = await callTool(driver, "health_report", {}, signal);
-    if (result.isError || result.degraded) return undefined;
-    const report = parseStructuredRecord(result.structuredJson);
-    if (report?.schema_version !== "1" || report.driver_version !== cuaSdkVersionForPlatform()) return undefined;
-    return report.platform === "win32" || report.platform === "darwin" || report.platform === "linux"
-      ? report.platform
-      : undefined;
+    result = await callTool(driver, "health_report", {}, signal);
   } catch (error) {
     if (signal.aborted) signal.throwIfAborted();
-    return undefined;
+    return { status: "unavailable" };
+  }
+  if (result.isError) return { status: "unavailable" };
+  const report = parseStructuredRecord(result.structuredJson);
+  const reportedPlatform = isCuaPlatform(report?.platform) ? report.platform : undefined;
+  const schemaVersion = typeof report?.schema_version === "string" ? report.schema_version.slice(0, 64) : undefined;
+  const driverVersion = typeof report?.driver_version === "string" ? report.driver_version.slice(0, 128) : undefined;
+  const metadata = {
+    ...(reportedPlatform === undefined ? {} : { reportedPlatform }),
+    ...(schemaVersion === undefined ? {} : { schemaVersion }),
+    ...(driverVersion === undefined ? {} : { driverVersion }),
+  };
+  if (result.degraded) return { status: "degraded", ...metadata };
+  if (report?.schema_version !== "1" || reportedPlatform === undefined ||
+      report.driver_version !== cuaSdkVersionForPlatform(reportedPlatform)) return { status: "invalid", ...metadata };
+  return { status: "valid", ...metadata };
+}
+
+function resolveSessionPlatform(
+  configuredPlatform: NodeJS.Platform | undefined,
+  health: PlatformHealthEvidence,
+  hostPlatform: NodeJS.Platform,
+): PlatformResolution {
+  if (configuredPlatform !== undefined && !isCuaPlatform(configuredPlatform)) {
+    throw new Error(`unsupported configured CUA platform ${configuredPlatform}`);
+  }
+  const configured = configuredPlatform as CuaPlatform | undefined;
+  const healthPlatform = health.status === "valid" ? health.reportedPlatform : undefined;
+  const hostFallback = isCuaPlatform(hostPlatform) ? hostPlatform : undefined;
+  const effective = configured ?? healthPlatform ?? hostFallback;
+  if (effective === undefined) throw new Error(`unsupported host CUA platform ${hostPlatform}`);
+  return {
+    effective,
+    source: configured !== undefined ? "configured" : healthPlatform !== undefined ? "health" : "host",
+    ...(configured === undefined ? {} : { configured }),
+    health,
+    conflict: configured !== undefined && healthPlatform !== undefined && configured !== healthPlatform,
+  };
+}
+
+function isCuaPlatform(value: unknown): value is CuaPlatform {
+  return value === "win32" || value === "darwin" || value === "linux";
+}
+
+/**
+ * Windows foreground press_key has a SendInput chord path; hotkey on modern
+ * XAML targets instead tries UIA Accelerator matching. Convert only an
+ * unambiguous one-base-key chord with known native modifiers. Background,
+ * desktop, non-Windows, and multi-base actions retain the existing hotkey path.
+ */
+function foregroundPressKeyChord(keys: readonly string[]): { key: string; modifiers: string[] } | undefined {
+  const modifiers: string[] = [];
+  const baseKeys: string[] = [];
+  const seenModifiers = new Set<string>();
+  for (const key of keys) {
+    const modifier = canonicalPressKeyModifier(key);
+    if (modifier === undefined) {
+      baseKeys.push(key);
+      continue;
+    }
+    if (seenModifiers.has(modifier)) return undefined;
+    seenModifiers.add(modifier);
+    modifiers.push(modifier);
+  }
+  if (modifiers.length === 0 || baseKeys.length !== 1) return undefined;
+  return { key: baseKeys[0]!, modifiers };
+}
+
+function canonicalPressKeyModifier(key: string): string | undefined {
+  switch (key.toLowerCase()) {
+    case "ctrl":
+    case "control":
+      return "ctrl";
+    case "shift":
+      return "shift";
+    case "alt":
+    case "menu":
+    case "option":
+      return "alt";
+    case "win":
+    case "windows":
+    case "meta":
+    case "cmd":
+    case "command":
+      return "win";
+    default:
+      return undefined;
   }
 }
 
@@ -3397,6 +6164,8 @@ function driverErrorDetails(error: unknown): DriverErrorDetails {
     message: innerMessage,
     ...(typeof record.tag === "string" ? { tag: record.tag } : {}),
     ...(typeof inner?.errorCode === "string" ? { errorCode: inner.errorCode } : {}),
+    ...(typeof record.structuredJson === "string" ? { structuredJson: record.structuredJson } :
+      typeof inner?.structuredJson === "string" ? { structuredJson: inner.structuredJson } : {}),
   };
 }
 
@@ -3478,6 +6247,22 @@ async function awaitWithDeadline<T>(work: () => Promise<T>, deadline: number, op
 
 function delay(durationMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+function delayWithAbort(durationMs: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, durationMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("operation aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  }).then(() => signal.throwIfAborted());
 }
 
 async function waitForCleanupPoll(deadline: number): Promise<void> {

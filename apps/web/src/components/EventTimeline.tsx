@@ -69,7 +69,7 @@ function progressLabel(data: Record<string, unknown> | undefined): string {
   if (phase === "model") {
     if (status === "started") return "模型正在分析当前画面";
     if (status === "completed") return "模型已完成一次判断";
-    if (status === "failed") return data?.retryable === true ? "模型请求失败，系统正在处理" : "模型请求失败，任务可能结束";
+    if (status === "failed") return "模型请求失败，请查看任务当前状态";
   }
   if (phase === "action") {
     if (status === "proposed") return "电脑准备执行下一步操作";

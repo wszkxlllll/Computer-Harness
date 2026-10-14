@@ -97,7 +97,7 @@ API Key 继续保存在仓库根目录、被 Git 忽略的 `.env` 中。Node、C
 
 ## Jev 辅助选窗（可选）
 
-当前默认 `local` 是本地选窗；Jev 是独立的文本候选选择服务，不替代 GLM/Qwen，不直接执行点击，也不授予 DOM 权限。该入口仅用于 CUA TUI，手机 Host 不会因为设置这些字段就启用 Jev。
+当前默认 `local` 是本地选窗；Jev 是独立的文本候选选择服务，不替代 GLM/Qwen，不直接执行点击，也不授予 DOM 权限。CLI TUI 通过下列显式 CLI 选项启用；手机 Host 默认仍为本地匹配，只有 Host 进程显式设置 `HARNESS_WINDOW_SELECTOR=jev` 才会启用初始目标建议，并且必须配置 `TYPESAFE_API_KEY`。
 
 1. 检查 `.harness.local.psd1` 的 `EnvFile`。`EnvFile = '.env'` 表示读取仓库根目录 `.env`；如果指向其他私有文件，就编辑那个文件。不需要在每个 PowerShell 中重复设置环境变量。
 2. 在该文件添加 `TYPESAFE_API_KEY=your_typesafe_key`，保留已有主模型配置。GLM 使用 `ZHIPUAI_API_KEY`；Qwen 使用 `DASHSCOPE_API_KEY` 及所需 endpoint 配置。两种服务密钥不能互相替代。不要覆盖已有 `.env` 或将密钥写进命令行。
@@ -118,7 +118,9 @@ ShareWindowTitles = $true
 
 随后仍使用 `.\scripts\harness.ps1 start -Grounding auto`。这些字段是启动时配置，不是运行中热切换；修改后重启 TUI。
 
-启动后应看到 `Jev enabled` 提示。输入目标后按 Enter，选中候选还会重新核验窗口身份；不确定、请求失败、候选过多或目标变化时进入手选，不静默改为整桌面。显式手选目标优先，因此不是每次任务都必然请求 Jev。窗口交接仍受 Host 安全条件与人工确认约束。
+启动 CLI TUI 后应看到 `Jev enabled` 提示。若要为手机 Host 显式开启，请在启动 Host 的同一进程环境设 `HARNESS_WINDOW_SELECTOR=jev`；Host 从既有 env 文件/进程环境读取 `TYPESAFE_API_KEY`，不要把密钥放进命令行，也不要输出密钥。Host 本地唯一匹配优先；只有本地无匹配或歧义才将 goal 和有界候选的应用名/标题发给 TypeSafe。初始建议最低门槛为候选概率 `0.85`、confidence `0.80`、领先 margin `0.30`；交接建议仍是 `0.95/0.90/0.50` 且不会自动确认新窗口。
+
+这些 API 分数只是服务返回的排序信号，不是经校准的正确率或任务成功概率，也不是执行输入的授权。候选仍须来自本次枚举并通过精确 PID/HWND、应用身份和新鲜可见性核验；唯一约束应用名时先过滤候选；重复 app/title 标识不供盲选。模型弃权、响应错误、候选不唯一或窗口身份变化都会回到手选，不静默改为桌面。窗口交接仍受 Host 安全条件与人工确认约束。
 
 | 情况 | 检查方式 |
 | --- | --- |

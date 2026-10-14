@@ -18,6 +18,17 @@ export function selectHistoryEvents(events: readonly RuntimeEvent[], mode: "raw"
   }
   return events.filter((event) => selected.has(event.sequence));
 }
+
+/** Keep the turn that caused the most recent dispatched GUI action intact. */
+export function latestGuiHistoryGroup(events: readonly RuntimeEvent[]): RuntimeEvent[] {
+  const execution = [...events].reverse().find((event) => event.type === "action.execution.started" && event.action.kind !== "wait");
+  if (execution?.type !== "action.execution.started") return [];
+  const proposed = events.find((event) => event.type === "action.proposed" && event.action.actionId === execution.action.actionId);
+  if (proposed?.type !== "action.proposed") return [];
+  const response = events.find((event) => event.type === "model.response.received" && event.turn.type === "tool_calls" && event.turn.calls.some((call) => call.id === proposed.callId));
+  if (response?.type !== "model.response.received" || response.turn.type !== "tool_calls") return [];
+  return [response, ...historyEventsForCalls(events, response.turn.calls.map((call) => call.id))];
+}
 export function findOldestEvictableHistoryGroup(events: readonly RuntimeEvent[]): RuntimeEvent[] {
   for (const event of events) {
     if (event.type === "user.input.received") continue;

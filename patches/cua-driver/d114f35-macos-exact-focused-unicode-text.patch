@@ -1,0 +1,197 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs
+index 49f8eca..a8cc0e4 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs
+@@ -378,7 +378,7 @@ impl Tool for TypeTextTool {
+             "type_text.AXSelectedText",
+             || async move {
+                 tokio::task::spawn_blocking(move || {
+-                    type_text_blocking(
++                    type_text_blocking_with_exact_foreground_global_hid(
+                         pid,
+                         &text_clone,
+                         element_ptr,
+@@ -387,6 +387,13 @@ impl Tool for TypeTextTool {
+                         delivery_mode,
+                         window_id,
+                         blocking_policy,
++                        should_use_exact_foreground_global_hid(
++                            delivery_mode,
++                            window_id,
++                            element_ptr.is_some(),
++                            px.is_some(),
++                            py.is_some(),
++                        ),
+                     )
+                 })
+                 .await
+@@ -853,6 +860,29 @@ fn foreground_settle_ms(pid: i32, frontmost_pid: Option<i32>) -> u64 {
+     }
+ }
+ 
++fn should_use_exact_foreground_global_hid(
++    delivery_mode: super::DeliveryMode,
++    window_id: Option<u32>,
++    has_element: bool,
++    has_pixel_x: bool,
++    has_pixel_y: bool,
++) -> bool {
++    delivery_mode.is_foreground()
++        && window_id.is_some()
++        && !has_element
++        && !has_pixel_x
++        && !has_pixel_y
++}
++
++fn exact_foreground_target_matches(
++    target_pid: i32,
++    target_window_id: u32,
++    frontmost_pid: Option<i32>,
++    focused_window_id: Option<u32>,
++) -> bool {
++    frontmost_pid == Some(target_pid) && focused_window_id == Some(target_window_id)
++}
++
+ /// Read-back verification for a keystroke rung: did the typed text actually land?
+ ///
+ /// `before`/`after` are `AXValue` read from the target field before and after
+@@ -1102,6 +1132,7 @@ fn await_typed_delivery(
+ /// Returns `(detail, path, verified)`. `verified` is `true` only when a
+ /// read-back positively confirmed the text; `false` means the agent must
+ /// confirm via screenshot (and, for background, can escalate to foreground).
++#[cfg(test)]
+ fn type_text_blocking(
+     pid: i32,
+     text: &str,
+@@ -1111,6 +1142,30 @@ fn type_text_blocking(
+     delivery_mode: super::DeliveryMode,
+     window_id: Option<u32>,
+     keyboard_policy: BackgroundKeyboardPolicy,
++) -> anyhow::Result<TypeTextDelivery> {
++    type_text_blocking_with_exact_foreground_global_hid(
++        pid,
++        text,
++        element_ptr_and_idx,
++        delay_ms,
++        is_terminal_target,
++        delivery_mode,
++        window_id,
++        keyboard_policy,
++        false,
++    )
++}
++
++fn type_text_blocking_with_exact_foreground_global_hid(
++    pid: i32,
++    text: &str,
++    element_ptr_and_idx: Option<(usize, Option<usize>)>,
++    delay_ms: u64,
++    is_terminal_target: bool,
++    delivery_mode: super::DeliveryMode,
++    window_id: Option<u32>,
++    keyboard_policy: BackgroundKeyboardPolicy,
++    exact_foreground_global_hid: bool,
+ ) -> anyhow::Result<TypeTextDelivery> {
+     // Original field value before any rung drives read-back verification only.
+     // An unreadable value is not evidence that the field is empty — and for a
+@@ -1182,6 +1237,43 @@ fn type_text_blocking(
+                 )?;
+                 ((false, None), true)
+             }
++            Some(wid) if exact_foreground_global_hid && element_ptr_and_idx.is_none() => {
++                // A native attached sheet can own the exact focused editor
++                // while AX's PID-routed Unicode events acknowledge without
++                // changing its value. Use the global Unicode queue only for
++                // this explicit foreground, exact-window, no-element/no-pixel
++                // route. This route never activates a window: both checks
++                // must prove the target is already the exact foreground and
++                // focused window, including after the settle interval.
++                let exact_focus = || {
++                    exact_foreground_target_matches(
++                        pid,
++                        wid,
++                        apps::frontmost_pid(),
++                        crate::ax::bindings::focused_window_id_of_pid(pid),
++                    )
++                };
++                if !exact_focus() {
++                    anyhow::bail!(
++                        "exact foreground target is not currently focused; no text was dispatched"
++                    );
++                }
++                if foreground_settle_ms > 0 {
++                    std::thread::sleep(std::time::Duration::from_millis(foreground_settle_ms));
++                }
++                if !exact_focus() {
++                    anyhow::bail!(
++                        "exact foreground target changed during settle; no text was dispatched"
++                    );
++                }
++                crate::input::keyboard::type_text_global(text, delay_ms)?;
++                let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
++                let typed_delivery =
++                    await_typed_delivery(before.as_deref(), text, deadline, || {
++                        read_axvalue_bound(pid, element_ptr_and_idx, window_id)
++                    });
++                (typed_delivery, true)
++            }
+             Some(wid) => {
+                 // Front → type → restore. The closure returns the read-back
+                 // result; with_foreground_assist returns whether it actually
+@@ -1637,6 +1729,56 @@ mod tests {
+         assert_eq!(foreground_settle_ms(42, None), 200);
+     }
+ 
++    #[test]
++    fn global_unicode_foreground_route_requires_exact_window_without_element_or_pixel() {
++        use super::super::DeliveryMode;
++
++        assert!(should_use_exact_foreground_global_hid(
++            DeliveryMode::Foreground,
++            Some(16436),
++            false,
++            false,
++            false,
++        ));
++        for (mode, window, has_element, pixel_x, pixel_y) in [
++            (DeliveryMode::Background, Some(16436), false, false, false),
++            (DeliveryMode::Foreground, None, false, false, false),
++            (DeliveryMode::Foreground, Some(16436), true, false, false),
++            (DeliveryMode::Foreground, Some(16436), false, true, false),
++            (DeliveryMode::Foreground, Some(16436), false, false, true),
++            (DeliveryMode::Foreground, Some(16436), false, true, true),
++        ] {
++            assert!(!should_use_exact_foreground_global_hid(
++                mode,
++                window,
++                has_element,
++                pixel_x,
++                pixel_y,
++            ));
++        }
++    }
++
++    #[test]
++    fn exact_foreground_hid_route_requires_matching_frontmost_and_focused_window() {
++        assert!(exact_foreground_target_matches(
++            22394,
++            16436,
++            Some(22394),
++            Some(16436)
++        ));
++        for (frontmost, focused) in [
++            (None, Some(16436)),
++            (Some(7), Some(16436)),
++            (Some(22394), None),
++            (Some(22394), Some(16437)),
++            (None, None),
++        ] {
++            assert!(!exact_foreground_target_matches(
++                22394, 16436, frontmost, focused
++            ));
++        }
++    }
++
+     #[test]
+     fn screen_sharing_text_fails_closed_without_foreground_window() {
+         for (foreground, window_id) in [(false, None), (false, Some(7)), (true, None)] {

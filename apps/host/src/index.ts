@@ -16,10 +16,14 @@ import {
 import { HostRelayConnector } from "@computer-harness/relay-connector";
 import type { RunModel } from "@computer-harness/app-runtime";
 import { createHostServer } from "./server.js";
-import { parseGlmOutputBudget } from "./glm-output-budget.js";
+import { glmReasoningEffort, parseGlmInputBudgets, parseGlmOutputBudget, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 import { ManagedBrowserProfileService } from "./managed-browser-profile-service.js";
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
+import { resolveHostWindowSelector } from "./window-selection-config.js";
+import { resolveNativeRecoveryProfileConfig } from "./native-recovery-profile-config.js";
+import { resolveNativeWebDocumentProfileConfig } from "./native-web-document-profile-config.js";
+import { resolveHostSourceLinkedFinishContract } from "./source-linked-finish-config.js";
 
 interface HostArguments {
   envFile: string;
@@ -47,7 +51,10 @@ async function main(): Promise<void> {
   const outputDir = resolve(args.output);
   const managedBrowserProfile = resolveManagedBrowserProfileConfig();
   const config = createSessionConfig(args, outputDir, managedBrowserProfile);
-  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} requestTimeoutMs=90000\n`);
+  const windowSelector = resolveHostWindowSelector(process.env);
+  const nativeRecoveryProfile = resolveNativeRecoveryProfileConfig();
+  const nativeWebDocumentProfile = resolveNativeWebDocumentProfileConfig();
+  if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=${config.glmRequestTimeoutMs} requestTimeoutSource=${process.env.GLM_REQUEST_TIMEOUT_MS === undefined ? "default" : "environment"} endpointSource=${config.glmEndpoint === undefined ? "default" : "environment"}\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -89,6 +96,9 @@ async function main(): Promise<void> {
     runNotices: { enabled: true, dynamicContentEnabled: true },
     managedBrowserProfile,
     managedBrowserProfileCoordinator: managedBrowserProfileService,
+    ...(nativeRecoveryProfile === undefined ? {} : { nativeRecoveryProfile }),
+    ...(nativeWebDocumentProfile === undefined ? {} : { nativeWebDocumentProfile }),
+    ...(windowSelector === undefined ? {} : { windowSelector }),
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
   });
@@ -177,6 +187,7 @@ function parseArguments(argv: readonly string[]): HostArguments {
     const item = argv[index]!;
     if (item === "--help" || item === "-h") {
       process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
+      process.stdout.write("Optional Run result contract: HARNESS_SOURCE_LINKED_FINISH_CONTRACT may contain a bounded source-linked-finish-v1 JSON field contract.\n");
       process.exit(0);
     }
     if (!item.startsWith("--")) throw new Error("Host arguments must use named options.");
@@ -230,8 +241,10 @@ function createSessionConfig(
   const qwenModel = args.model === "qwen3.8-flash";
   const baseUrl = process.env.DASHSCOPE_BASE_URL ?? process.env.DASHSCOPE_ENDPOINT;
   const glmEndpoint = process.env.GLM_BASE_URL;
+  const sourceLinkedFinish = resolveHostSourceLinkedFinishContract();
   return {
     model,
+    ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }),
     computer: {
       kind: "cua",
       socketPath: args.socket,
@@ -250,7 +263,7 @@ function createSessionConfig(
     batching: "same-control-input-v1",
     contextMode: "recent",
     contextMaxHistoryEvents: 32,
-    contextMaxInputTokens: 8_000,
+    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : parseGlmInputBudgets(process.env.GLM_MAX_INPUT_TOKENS, process.env.GLM_MAX_WIRE_INPUT_TOKENS)),
     riskProfile: "live-interactive",
     riskGuard: "layered",
     riskModel: "same",
@@ -263,9 +276,7 @@ function createSessionConfig(
     windowHandoff: "confirm-v1",
     glmThinking: readGlmThinking(process.env.GLM_THINKING),
     glmMaxOutputTokens: args.glmMaxOutputTokens,
-    // GLM can take longer on image-heavy turns; allow one bounded 90-second
-    // response window while keeping the runtime's single retry finite.
-    glmRequestTimeoutMs: 90_000,
+    glmRequestTimeoutMs: parseGlmRequestTimeoutMs(process.env.GLM_REQUEST_TIMEOUT_MS),
     ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(process.env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: process.env.DASHSCOPE_WORKSPACE_ID }),
@@ -288,12 +299,6 @@ function readProviderCredentials(): ProviderCredentials {
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
-}
-
-function readGlmThinking(value: string | undefined): "enabled" | "low" | "high" | "max" {
-  return value === "enabled" || value === "low" || value === "high" || value === "max"
-    ? value
-    : "enabled";
 }
 
 async function loadEnvFile(path: string): Promise<void> {

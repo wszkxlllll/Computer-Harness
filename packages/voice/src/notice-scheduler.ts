@@ -118,14 +118,14 @@ export class RunNoticeScheduler {
   }
 
   /**
-   * Approval/question notices require current Host request IDs at consumption
+   * Approval/question/handoff notices require current Host request IDs at consumption
    * time. With no matching pending request they are discarded without speech.
    */
   public takeNext(currentPendingRequestIds: ReadonlySet<string> = new Set()): RunNotice | undefined {
     while (this.queue.length > 0) {
       const next = this.queue.shift()!;
       if (next.generation !== this.generation || next.notice.runId !== this.activeRunId) continue;
-      if ((next.notice.kind === "approval" || next.notice.kind === "question") &&
+      if ((next.notice.kind === "approval" || next.notice.kind === "question" || next.notice.kind === "handoff") &&
           (next.notice.pendingRequestId === undefined || !currentPendingRequestIds.has(next.notice.pendingRequestId))) continue;
       return structuredClone(next.notice);
     }
