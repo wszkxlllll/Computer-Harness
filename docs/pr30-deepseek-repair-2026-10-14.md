@@ -2,7 +2,7 @@
 
 ## 范围与当前状态
 
-用户于2026-10-14授权开始修复。Luna max实施，Sol medium审查；本轮在独立分支 `codex/pr30-deepseek-repair-20261014` 工作，不覆盖原PR30、运行中的Host或Preview。
+用户于2026-10-14授权开始修复。Luna max实施，Sol medium审查；先在独立分支 `codex/pr30-deepseek-repair-20261014` 验收，再按用户要求接回原PR30。不替换运行中的Host或Preview。
 
 基底为main `a2757d6`，按来源保留作者移入PR30的 `da6ea55`、`f477f0f`，对应 `246fbf3`、`0be23ca`，提交含cherry-pick来源。冲突保留main凭据脱敏断言；合并不代表已完成验收。依赖通过frozen/offline安装，184项均复用缓存，无锁文件或驱动升级。
 
@@ -62,4 +62,8 @@ DeepSeek临时网络错误及HTTP 429/5xx由现有Runtime进行有预算的 `sam
 
 可以推进DeepSeek修复的代码集成审查及受控实验；不能宣称DeepSeek的Plan+Memory+Batch同轮输出稳定。同构Context静态检查已完成，下一步建议先隔离测单独Batch，再与Plan/Memory同轮组合比较，并允许观察真实下一轮是否自然继续。对照须保留原失败，记录完整脱敏文本及调用结构；不为凑成功自动补动作、放宽未知引用或重放副作用，也不改变GLM/Qwen策略。本批严格按预定8次结束，没有无界追加请求。
 
-上述测试不是业务任务成功率，也没有验证本轮真实桌面输入、macOS或手机体验。用户确认可以先推送独立修复分支，DeepSeek组合稳定性留待后续优化；不修改原PR30、不合并main、不替换Preview或重启Host。
+上述测试不是业务任务成功率，也没有验证本轮真实桌面输入、macOS或手机体验。用户确认先推送，并明确接回PR30，DeepSeek组合稳定性留待后续优化。不合并main、不替换Preview或重启Host。
+
+## PR30对接
+
+PR30原head为 `member-c/m01-registered-click-20261014` 的 `f477f0f`。将其原始提交历史合入已验收修复分支，保留原作者；冲突采用已验收版本，合并后业务源码与 `d63c6fb` 完全一致，不因重复移入而恢复旧缺陷。随后非强制推送回PR30原head，目标基底改为main，避免继续挂在已合并的旧Preview分支下。独立修复分支保留备查，PR30作为后续审查入口；远端CI结果另行确认，不以本地测试代替。
