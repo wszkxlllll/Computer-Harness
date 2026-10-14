@@ -4,6 +4,7 @@ import { createServer as createHttpServer } from "node:http";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createFixtureComputer, waitForFixtureModelStart } from "./relay-synthetic-smoke-fixtures.mjs";
 
 const HELP = `Usage:
   node scripts/relay-synthetic-smoke.mjs --help
@@ -35,11 +36,6 @@ const OPERATION_TIMEOUT_MS = 35_000;
 const MAX_JSON_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ASSET_RESPONSE_BYTES = 8 * 1024 * 1024;
 const FIXTURE_REPLY = "Synthetic Relay smoke completed entirely with fixture adapters.";
-const FIXTURE_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=",
-  "base64",
-);
-
 let currentStage = "startup";
 let currentHttpStatus;
 
@@ -145,40 +141,6 @@ function createGate() {
   let release;
   const promise = new Promise((resolve) => { release = resolve; });
   return { promise, release };
-}
-
-function waitWithTimeout(promise, timeoutMs, stage) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new SmokeFailure(stage)), timeoutMs);
-    Promise.resolve(promise).then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error) => { clearTimeout(timer); reject(error); },
-    );
-  });
-}
-
-function fixtureComputer(viewport) {
-  const computerSession = {
-    id: "synthetic-relay-smoke-session",
-    backend: "synthetic-fixture",
-    viewport,
-    capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
-    openedAt: new Date().toISOString(),
-  };
-  let observationCount = 0;
-  return {
-    async open() { return computerSession; },
-    async observe() {
-      observationCount += 1;
-      return {
-        capturedAt: new Date().toISOString(),
-        viewport,
-        screenshot: { mediaType: "image/png", data: new Uint8Array(FIXTURE_PNG) },
-      };
-    },
-    async execute() { return { status: "completed" }; },
-    async close() {},
-  };
 }
 
 function fixtureProvider(gate, markStarted, incrementCallCount) {
@@ -338,8 +300,10 @@ async function smokePairRunAndRevoke({ relayOrigin, hostId, credential, allowIns
   const { createHostServer } = hostModule;
   const outputDir = await mkdtemp(join(tmpdir(), "harness-relay-synthetic-smoke-"));
   const modelGate = createGate();
-  let markModelStarted;
-  const modelStarted = new Promise((resolve) => { markModelStarted = resolve; });
+  let modelHasStarted = false;
+  let resolveModelStarted;
+  const modelStarted = new Promise((resolve) => { resolveModelStarted = resolve; });
+  const markModelStarted = () => { modelHasStarted = true; resolveModelStarted(); };
   let modelCalls = 0;
   let session;
   let host;
@@ -392,7 +356,7 @@ async function smokePairRunAndRevoke({ relayOrigin, hostId, credential, allowIns
       },
       dependencies: {
         createProvider: () => fixtureProvider(modelGate, markModelStarted, () => ++modelCalls),
-        createComputer: async () => fixtureComputer(viewport),
+        createComputer: async () => createFixtureComputer(viewport),
       },
     });
     const api = new ApplicationRemoteRunApi({
@@ -540,7 +504,15 @@ async function smokePairRunAndRevoke({ relayOrigin, hostId, credential, allowIns
     const runId = start.runId;
 
     currentStage = "fixture-model-start";
-    await waitWithTimeout(modelStarted, 10_000, currentStage);
+    const modelStart = await waitForFixtureModelStart({
+      readSnapshot: ({ signal }) => getRunSnapshot(relayOrigin, runId, relayCookie, signal),
+      hasStarted: () => modelHasStarted,
+      started: modelStarted,
+    });
+    if (modelStart.kind === "terminal") {
+      throw new SmokeFailure(currentStage, undefined, `terminal_before_model_start_${modelStart.outcome}`);
+    }
+    if (modelStart.kind === "timeout") throw new SmokeFailure(currentStage, undefined, "model_start_timeout");
     const running = await getRunSnapshot(relayOrigin, runId, relayCookie);
     if (running.status !== "running") throw new SmokeFailure(currentStage);
     currentStage = "fixture-pause-request";
@@ -701,9 +673,10 @@ async function smokePairRunAndRevoke({ relayOrigin, hostId, credential, allowIns
   }
 }
 
-async function getRunSnapshot(relayOrigin, runId, cookie) {
+async function getRunSnapshot(relayOrigin, runId, cookie, signal) {
   const response = await fetchResponse(`${relayOrigin}/api/runs/${encodeURIComponent(runId)}`, {
     headers: makeHeaders({ origin: relayOrigin, cookie }),
+    ...(signal === undefined ? {} : { signal }),
   });
   return readJson(response, 200);
 }
