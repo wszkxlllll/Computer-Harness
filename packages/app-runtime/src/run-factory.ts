@@ -33,9 +33,15 @@ import { assertBuiltInProviderCredentials, createProvider } from "./providers.js
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import { selectOperationGuidance } from "./operation-guidance.js";
-import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunCloseConfirmation, type RunDependencies, type RunHandle } from "./config.js";
+import { DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunCloseConfirmation, type RunDependencies, type RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
+  if (typeof input.model === "string" && !["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash"].includes(input.model)) {
+    throw new Error(`unsupported Provider model '${input.model}'`);
+  }
+  if (!["off", "same", "glm-5.3-flash", "qwen3.8-flash", "deepseek-flash"].includes(input.riskModel)) {
+    throw new Error(`unsupported risk Provider model '${input.riskModel}'`);
+  }
   const sourceLinkedFinish = validateSourceLinkedFinishContract(input.sourceLinkedFinish);
   const computerRecoveryOptIn = input.computer.kind === "cua" && input.computer.recoverBoundWindowMissing === true;
   if (input.recoverBoundWindowMissing === true !== computerRecoveryOptIn) {
@@ -83,6 +89,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   }
   if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) throw new Error("Context text budget must not exceed wire budget");
   if (input.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(input.glmRequestTimeoutMs);
+  if (input.model === "deepseek-flash" || (input.riskGuard === "layered" && input.riskModel === "deepseek-flash")) {
+    validateDeepseekRequestTimeoutMs(input.deepseekRequestTimeoutMs);
+    validateDeepseekMaxOutputTokens(input.deepseekMaxOutputTokens);
+  }
   const runId = input.runId ?? generatedRunId();
   const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
@@ -302,6 +312,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       policy: dependencies.createPolicy?.(factoryConfig) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
       ...(dependencies.createProvider === undefined && config.model === "glm-5.3-flash" ? {
         providerAttemptReserveMs: config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS,
+      } : {}),
+      ...(dependencies.createProvider === undefined && config.model === "deepseek-flash" ? {
+        providerAttemptReserveMs: config.deepseekRequestTimeoutMs ?? DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS,
       } : {}),
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,

@@ -104,6 +104,10 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 | Qwen key | `DASHSCOPE_API_KEY` | Qwen3.8-Flash |
 | Qwen endpoint | `DASHSCOPE_BASE_URL` | 别名：`DASHSCOPE_ENDPOINT` |
 | Qwen workspace | `DASHSCOPE_WORKSPACE_ID` | 可选；用于生成 workspace endpoint |
+| DeepSeek key | `DEEPSEEK_API_KEY` | `deepseek-flash`；仅从本机环境注入，不放在命令行或公共响应里 |
+| DeepSeek endpoint | `DEEPSEEK_BASE_URL` | 可选；默认 `https://api.deepseek.com/chat/completions` |
+| DeepSeek request timeout | `DEEPSEEK_REQUEST_TIMEOUT_MS` | 单请求默认 `90000`，可设置为 `1000`–`240000` 毫秒 |
+| DeepSeek output budget | `DEEPSEEK_MAX_OUTPUT_TOKENS` | 默认 `4096`，可设置为 `1`–`131072` token；服务端也可能施加更低限制 |
 | Memory embedding key | `MEMORY_EMBEDDING_API_KEY` | Hybrid Memory 专用 key；不要复用聊天模型 key |
 | Jev window selector | `TYPESAFE_API_KEY` | 仅显式启用 CUA TUI Jev 选窗时需要；还需允许分享窗口标题，见[配置步骤](./local-launcher.md#jev-辅助选窗可选) |
 | OSWorld Bridge | `OSWORLD_BRIDGE_TOKEN` | 可选 loopback Bridge token，不进轨迹 |
@@ -114,7 +118,13 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 node apps/cli/dist/index.js --goal "describe the current screen" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
 ```
 
-Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
+需要单独选择 DeepSeek 时，可从仓库根目录启动新 Run：
+
+```text
+node apps/cli/dist/index.js --goal "describe the current screen" --model deepseek-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-deepseek" --env-file ".env"
+```
+
+DeepSeek key 留在本机环境；模型在 Run 内固定，不会自动切换 Provider 或重放动作。Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
 
 路径提示：直接从仓库根目录执行 `node apps/cli/dist/index.js` 时，`--env-file ".env"` 指向根目录；通过 `pnpm --filter @computer-harness/cli start` 启动时，工作目录是 `apps/cli`，请传根目录 `.env` 的绝对路径或 `..\..\.env`。
 
